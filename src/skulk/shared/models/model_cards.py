@@ -89,6 +89,9 @@ _installed_card_mutation_versions: dict[ModelId, int] = {}
 _registry_advisories: tuple[RegistryAdvisory, ...] = ()
 _registry_engine_support: tuple[RegistryEngineSupportClaim, ...] = ()
 _registry_current_cards: dict[ModelId, "ModelCard"] = {}
+_POSITIVE_REGISTRY_CAPABILITY_STATUSES: Final[frozenset[str]] = frozenset(
+    {"claimed", "observed", "complete"}
+)
 _registry_refresh_lock = asyncio.Lock()
 _last_registry_refresh = 0.0
 _card_cache_dirty = False
@@ -135,8 +138,7 @@ def registry_model_cards(catalog: RegistryCatalog) -> list["ModelCard"]:
             )
         if payload.get("quantization") != envelope.artifact.quantization:
             raise ValueError(
-                "registry envelope quantization disagrees with card "
-                f"{envelope.card_id}"
+                f"registry envelope quantization disagrees with card {envelope.card_id}"
             )
         metadata = catalog.card_metadata.get(envelope.card_id)
         if metadata is None:
@@ -166,9 +168,9 @@ def registry_model_cards(catalog: RegistryCatalog) -> list["ModelCard"]:
 async def _load_cards_from_registry() -> bool:
     """Refresh a complete registry snapshot and report whether it is authoritative."""
     global _registry_advisories, _registry_engine_support  # noqa: PLW0603
-    _registry_current_cards.clear()
-    _registry_engine_support = ()
     if not _registry_enabled():
+        _registry_current_cards.clear()
+        _registry_engine_support = ()
         if SKULK_OFFLINE and os.environ.get("SKULK_TESTS") != "1":
             try:
                 support = await to_thread.run_sync(
@@ -191,6 +193,8 @@ async def _load_cards_from_registry() -> bool:
         logger.warning(
             f"signed model registry unavailable ({error}); using bundled model cards"
         )
+        _registry_current_cards.clear()
+        _registry_engine_support = ()
         for model_id, card in tuple(_card_cache.items()):
             if card.registry_card_id is not None and not card.is_custom:
                 del _card_cache[model_id]
@@ -202,16 +206,20 @@ async def _load_cards_from_registry() -> bool:
         )
     except Exception as error:  # noqa: BLE001 - warning channel fallback
         logger.warning(f"signed model advisories unavailable ({error})")
+    refreshed_engine_support: tuple[RegistryEngineSupportClaim, ...] = ()
     try:
         support = await to_thread.run_sync(_registry_client.load_engine_support)
-        _registry_engine_support = support.active_claims()
+        refreshed_engine_support = support.active_claims()
     except Exception as error:  # noqa: BLE001 - additive compatibility fallback
         logger.warning(f"signed engine support unavailable ({error})")
     for model_id, card in tuple(_card_cache.items()):
         if not card.is_custom:
             del _card_cache[model_id]
+    refreshed_current_cards = {card.model_id: card for card in cards}
+    _registry_current_cards.clear()
+    _registry_current_cards.update(refreshed_current_cards)
+    _registry_engine_support = refreshed_engine_support
     for card in cards:
-        _registry_current_cards[card.model_id] = card
         existing = _card_cache.get(card.model_id)
         if existing is None or not existing.is_custom:
             _card_cache[card.model_id] = card
@@ -550,16 +558,8 @@ def get_model_engine_support(
     """Return active signed support claims matching one exact card artifact."""
     architecture = model_card.registry_architecture
     artifact_format = model_card.registry_artifact_format
-    incomplete_artifact_capabilities = {
-        claim.capability_id
-        for claim in model_card.registry_capability_claims
-        if claim.scope == "artifact" and claim.status == "incomplete"
-    }
-    capability_ids = {
-        claim.capability_id
-        for claim in model_card.registry_capability_claims
-        if claim.capability_id not in incomplete_artifact_capabilities
-    }
+
+    capability_ids = _registry_intrinsic_capability_ids(model_card)
     if (
         model_card.registry_card_id is None
         or model_card.registry_provenance is None
@@ -577,8 +577,25 @@ def get_model_engine_support(
             claim.artifact_card_id is None
             or claim.artifact_card_id == model_card.registry_card_id
         )
-        and (claim.quantization is None or claim.quantization == model_card.quantization)
+        and (
+            claim.quantization is None or claim.quantization == model_card.quantization
+        )
         and claim.capability_id in capability_ids
+    )
+
+
+def _registry_intrinsic_capability_ids(model_card: "ModelCard") -> frozenset[str]:
+    """Return positively evidenced intrinsic capabilities of one artifact."""
+    incomplete_artifact_capabilities = {
+        claim.capability_id
+        for claim in model_card.registry_capability_claims
+        if claim.scope == "artifact" and claim.status == "incomplete"
+    }
+    return frozenset(
+        claim.capability_id
+        for claim in model_card.registry_capability_claims
+        if claim.status in _POSITIVE_REGISTRY_CAPABILITY_STATUSES
+        if claim.capability_id not in incomplete_artifact_capabilities
     )
 
 
@@ -590,20 +607,30 @@ def registry_supported_backends_for_node(
     hardware_classes: AbstractSet[str],
 ) -> frozenset[str]:
     """Resolve signed positive support against one node's live engine inventory."""
+    required_capabilities = _registry_intrinsic_capability_ids(model_card)
+    if not required_capabilities:
+        return frozenset()
+    support_claims = get_model_engine_support(model_card)
     resolved: set[str] = set()
-    for claim in get_model_engine_support(model_card):
-        if claim.status != "supported":
-            continue
-        if claim.hardware_classes and not (
-            set(claim.hardware_classes) & hardware_classes
-        ):
-            continue
-        for backend in node_backends:
+    for backend in node_backends:
+        supported_capabilities: set[str] = set()
+        for claim in support_claims:
+            if claim.status != "supported":
+                continue
+            if claim.hardware_classes and not (
+                set(claim.hardware_classes) & hardware_classes
+            ):
+                continue
             engine = engine_of(backend)
             if engine is None or claim.engine not in {engine, backend}:
                 continue
-            if engine_builds.get(backend, engine_builds.get(engine)) != claim.engine_build:
+            if (
+                engine_builds.get(backend, engine_builds.get(engine))
+                != claim.engine_build
+            ):
                 continue
+            supported_capabilities.add(claim.capability_id)
+        if required_capabilities.issubset(supported_capabilities):
             resolved.add(backend)
     return frozenset(resolved)
 
@@ -635,17 +662,25 @@ def same_model_artifact(existing: "ModelCard", expected: "ModelCard") -> bool:
 
 async def _refresh_card_cache_if_due() -> None:
     """Refresh catalog state at most once per configured interval."""
-    refresh_due = _card_cache_dirty or not _card_cache or (
-        _registry_enabled()
-        and time.monotonic() - _last_registry_refresh
-        >= SKULK_MODEL_REGISTRY_REFRESH_SECONDS
+    refresh_due = (
+        _card_cache_dirty
+        or not _card_cache
+        or (
+            _registry_enabled()
+            and time.monotonic() - _last_registry_refresh
+            >= SKULK_MODEL_REGISTRY_REFRESH_SECONDS
+        )
     )
     if refresh_due:
         async with _registry_refresh_lock:
-            refresh_still_due = _card_cache_dirty or not _card_cache or (
-                _registry_enabled()
-                and time.monotonic() - _last_registry_refresh
-                >= SKULK_MODEL_REGISTRY_REFRESH_SECONDS
+            refresh_still_due = (
+                _card_cache_dirty
+                or not _card_cache
+                or (
+                    _registry_enabled()
+                    and time.monotonic() - _last_registry_refresh
+                    >= SKULK_MODEL_REGISTRY_REFRESH_SECONDS
+                )
             )
             if refresh_still_due:
                 await _refresh_card_cache()

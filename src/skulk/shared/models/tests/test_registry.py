@@ -22,6 +22,7 @@ from skulk.shared.models.model_cards import (
     registry_supported_backends_for_node,
 )
 from skulk.shared.models.registry import (
+    RegistryAdvisories,
     RegistryCatalog,
     RegistryEngineSupport,
     RegistryUnavailableError,
@@ -117,17 +118,17 @@ def _advisories_payload() -> bytes:
             "enforcement": "warn",
             "advisories": [
                 {
-                "schema_version": 1,
-                "advisory_id": "FLA-2026-0001",
-                "severity": "critical",
-                "title": "Test model warning",
-                "description": "Retain this warning during a registry outage.",
-                "affected_card_ids": (f"card_{'a' * 52}",),
-                "affected_model_aliases": (),
-                "active": True,
-                "created_at": "2026-08-10T12:00:00Z",
-                "updated_at": "2026-08-10T12:00:00Z",
-                "enforcement": "warn",
+                    "schema_version": 1,
+                    "advisory_id": "FLA-2026-0001",
+                    "severity": "critical",
+                    "title": "Test model warning",
+                    "description": "Retain this warning during a registry outage.",
+                    "affected_card_ids": (f"card_{'a' * 52}",),
+                    "affected_model_aliases": (),
+                    "active": True,
+                    "created_at": "2026-08-10T12:00:00Z",
+                    "updated_at": "2026-08-10T12:00:00Z",
+                    "enforcement": "warn",
                 }
             ],
         }
@@ -248,17 +249,15 @@ def test_runner_process_restores_signed_support_from_verified_cache(
     assert registry_supported_backends_for_node(
         card,
         node_backends=frozenset({"llama_server-vulkan"}),
-        engine_builds={
-            "llama_server-vulkan": "llama.cpp@sha256:" + "1" * 64
-        },
+        engine_builds={"llama_server-vulkan": "llama.cpp@sha256:" + "1" * 64},
         hardware_classes=frozenset({"amd"}),
     ) == frozenset({"llama_server-vulkan"})
 
 
-def test_signed_support_rejects_other_artifact_and_incomplete_capability(
+def test_signed_support_requires_positive_complete_artifact_capabilities(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Exact qualification never leaks to other or known-incomplete artifacts."""
+    """Exact qualification needs positive evidence for every artifact capability."""
     card = registry_model_cards(
         RegistryCatalog.model_validate_json(_catalog_payload(), strict=False)
     )[0]
@@ -268,9 +267,7 @@ def test_signed_support_rejects_other_artifact_and_incomplete_capability(
     monkeypatch.setattr(
         model_cards_module, "_registry_engine_support", support.active_claims()
     )
-    other_artifact = card.model_copy(
-        update={"registry_card_id": "card_" + "c" * 52}
-    )
+    other_artifact = card.model_copy(update={"registry_card_id": "card_" + "c" * 52})
     incomplete_claims = card.registry_capability_claims + (
         card.registry_capability_claims[0].model_copy(
             update={"scope": "artifact", "status": "incomplete"}
@@ -279,14 +276,32 @@ def test_signed_support_rejects_other_artifact_and_incomplete_capability(
     incomplete_artifact = card.model_copy(
         update={"registry_capability_claims": incomplete_claims}
     )
+    unknown_artifact = card.model_copy(
+        update={
+            "registry_capability_claims": (
+                card.registry_capability_claims[0].model_copy(
+                    update={"status": "unknown"}
+                ),
+            )
+        }
+    )
+    second_capability = card.registry_capability_claims[0].model_copy(
+        update={"capability_id": "vision.generate"}
+    )
+    multi_capability_artifact = card.model_copy(
+        update={
+            "registry_capability_claims": (
+                *card.registry_capability_claims,
+                second_capability,
+            )
+        }
+    )
 
     assert (
         registry_supported_backends_for_node(
             other_artifact,
             node_backends=frozenset({"llama_server-vulkan"}),
-            engine_builds={
-                "llama_server-vulkan": "llama.cpp@sha256:" + "1" * 64
-            },
+            engine_builds={"llama_server-vulkan": "llama.cpp@sha256:" + "1" * 64},
             hardware_classes=frozenset({"amd"}),
         )
         == frozenset()
@@ -295,13 +310,111 @@ def test_signed_support_rejects_other_artifact_and_incomplete_capability(
         registry_supported_backends_for_node(
             incomplete_artifact,
             node_backends=frozenset({"llama_server-vulkan"}),
-            engine_builds={
-                "llama_server-vulkan": "llama.cpp@sha256:" + "1" * 64
-            },
+            engine_builds={"llama_server-vulkan": "llama.cpp@sha256:" + "1" * 64},
             hardware_classes=frozenset({"amd"}),
         )
         == frozenset()
     )
+    assert (
+        registry_supported_backends_for_node(
+            unknown_artifact,
+            node_backends=frozenset({"llama_server-vulkan"}),
+            engine_builds={"llama_server-vulkan": "llama.cpp@sha256:" + "1" * 64},
+            hardware_classes=frozenset({"amd"}),
+        )
+        == frozenset()
+    )
+    assert (
+        registry_supported_backends_for_node(
+            multi_capability_artifact,
+            node_backends=frozenset({"llama_server-vulkan"}),
+            engine_builds={"llama_server-vulkan": "llama.cpp@sha256:" + "1" * 64},
+            hardware_classes=frozenset({"amd"}),
+        )
+        == frozenset()
+    )
+
+    complete_support = support.claims[0].model_copy(
+        update={
+            "claim_id": "support_" + "d" * 52,
+            "capability_id": "vision.generate",
+            "status": "supported",
+        }
+    )
+    monkeypatch.setattr(
+        model_cards_module,
+        "_registry_engine_support",
+        (*support.active_claims(), complete_support),
+    )
+    assert registry_supported_backends_for_node(
+        multi_capability_artifact,
+        node_backends=frozenset({"llama_server-vulkan"}),
+        engine_builds={"llama_server-vulkan": "llama.cpp@sha256:" + "1" * 64},
+        hardware_classes=frozenset({"amd"}),
+    ) == frozenset({"llama_server-vulkan"})
+
+
+@pytest.mark.asyncio
+async def test_registry_refresh_swaps_engine_support_after_verified_load(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Concurrent placement retains the prior support projection during refresh."""
+    catalog = RegistryCatalog.model_validate_json(_catalog_payload(), strict=False)
+    refreshed_support = RegistryEngineSupport.model_validate_json(
+        _engine_support_payload(), strict=False
+    )
+    prior_support = refreshed_support.claims[0].model_copy(
+        update={"engine_build": "llama.cpp@sha256:" + "0" * 64}
+    )
+    prior_card = registry_model_cards(catalog)[0]
+    load_started = threading.Event()
+    allow_load = threading.Event()
+
+    class BlockingClient:
+        def load_catalog(self, _catalog_validator: object = None) -> RegistryCatalog:
+            load_started.set()
+            if not allow_load.wait(timeout=5):
+                raise TimeoutError("test did not release catalog load")
+            return catalog
+
+        def load_advisories(self) -> RegistryAdvisories:
+            return RegistryAdvisories.model_validate_json(
+                _advisories_payload(), strict=False
+            )
+
+        def load_engine_support(self) -> RegistryEngineSupport:
+            return refreshed_support
+
+    original_support = model_cards_module._registry_engine_support
+    original_current_cards = dict(model_cards_module._registry_current_cards)
+    original_card_cache = dict(model_cards_module._card_cache)
+    model_cards_module._registry_engine_support = (prior_support,)
+    model_cards_module._registry_current_cards.clear()
+    model_cards_module._registry_current_cards[prior_card.model_id] = prior_card
+    monkeypatch.setattr(model_cards_module, "_registry_enabled", lambda: True)
+    monkeypatch.setattr(model_cards_module, "_registry_client", BlockingClient())
+    refresh = asyncio.create_task(model_cards_module._load_cards_from_registry())
+    try:
+        assert await asyncio.to_thread(load_started.wait, 2)
+        assert model_cards_module._registry_engine_support == (prior_support,)
+        assert (
+            model_cards_module._registry_current_cards[prior_card.model_id]
+            == prior_card
+        )
+        allow_load.set()
+        assert await refresh
+        assert model_cards_module._registry_engine_support == (
+            refreshed_support.active_claims()
+        )
+    finally:
+        allow_load.set()
+        if not refresh.done():
+            await refresh
+        model_cards_module._registry_engine_support = original_support
+        model_cards_module._registry_current_cards.clear()
+        model_cards_module._registry_current_cards.update(original_current_cards)
+        model_cards_module._card_cache.clear()
+        model_cards_module._card_cache.update(original_card_cache)
 
 
 def test_engine_support_rejects_cross_key_supersession() -> None:
@@ -1026,9 +1139,7 @@ async def test_current_registry_id_is_visible_behind_installed_generation(
 
     catalog = RegistryCatalog.model_validate_json(_catalog_payload(), strict=False)
     current = registry_model_cards(catalog)[0]
-    installed = current.model_copy(
-        update={"registry_card_id": f"card_{'z' * 52}"}
-    )
+    installed = current.model_copy(update={"registry_card_id": f"card_{'z' * 52}"})
     original_cache = dict(model_cards_module._card_cache)
     original_current = dict(model_cards_module._registry_current_cards)
     model_cards_module._card_cache.clear()
@@ -1058,16 +1169,12 @@ async def test_installed_startup_selects_current_generation_deterministically(
 
     catalog = RegistryCatalog.model_validate_json(_catalog_payload(), strict=False)
     current = registry_model_cards(catalog)[0]
-    stale = current.model_copy(
-        update={"registry_card_id": f"card_{'z' * 52}"}
-    )
+    stale = current.model_copy(update={"registry_card_id": f"card_{'z' * 52}"})
     for directory_name, card in (("aaa-current", current), ("zzz-stale", stale)):
         artifact = tmp_path / directory_name
         artifact.mkdir()
         (artifact / "model-Q4_K_M.gguf").write_bytes(directory_name.encode())
-        (artifact / ".skulk-source-revision").write_text(
-            f"{card.source_revision}\n"
-        )
+        (artifact / ".skulk-source-revision").write_text(f"{card.source_revision}\n")
         write_installed_card(artifact, build_installed_card_record(artifact, card))
 
     original_cache = dict(model_cards_module._card_cache)
