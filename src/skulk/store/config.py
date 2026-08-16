@@ -676,7 +676,12 @@ def _write_skulk_config_atomic_unlocked(path: Path, config_yaml: str) -> None:
     temporary_path = Path(temporary_name)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as temporary:
-            os.fchmod(temporary.fileno(), 0o600)
+            file_descriptor_chmod = getattr(os, "fchmod", None)
+            if file_descriptor_chmod is not None:
+                # Windows has no descriptor chmod. Its mkstemp permissions are
+                # already owner-scoped by the process ACL; Unix tightens the
+                # temporary before any secret-bearing bytes are written.
+                file_descriptor_chmod(temporary.fileno(), 0o600)
             temporary.write(config_yaml)
             temporary.flush()
             os.fsync(temporary.fileno())

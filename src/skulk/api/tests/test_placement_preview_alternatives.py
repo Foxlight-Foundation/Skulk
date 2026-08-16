@@ -19,6 +19,7 @@ from skulk.master.placement import PlacementModelCodeApprovalError
 from skulk.shared.election import ElectionMessage
 from skulk.shared.models.model_cards import ModelCard, ModelTask
 from skulk.shared.models.registry import RegistryEngineSupportClaim
+from skulk.shared.models.remote_code_approval import remote_code_trust_identity
 from skulk.shared.types.commands import (
     ForwarderCommand,
     ForwarderDownloadCommand,
@@ -69,11 +70,15 @@ def _card() -> ModelCard:
 
 
 def _single_node_instance(
-    node: str, *, resolved_backend: str | None = None
+    node: str,
+    *,
+    model_card: ModelCard | None = None,
+    resolved_backend: str | None = None,
 ) -> MlxRingInstance:
     runner = RunnerId(f"runner-{node}")
+    card = _card() if model_card is None else model_card
     shard = PipelineShardMetadata(
-        model_card=_card(),
+        model_card=card,
         device_rank=0,
         world_size=1,
         start_layer=0,
@@ -91,6 +96,41 @@ def _single_node_instance(
         hosts_by_node={},
         ephemeral_port=0,
     )
+
+
+async def test_exact_instance_creation_reports_model_trust_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """POST /instance rejects unapproved shard cards before acknowledgement."""
+
+    api = _build_api()
+    client = TestClient(api.app)
+    card = _card().model_copy(
+        update={
+            "source_revision": "a" * 40,
+            "registry_card_id": "card_" + "d" * 52,
+            "registry_snapshot_id": "snapshot-test",
+            "registry_provenance": "agent",
+            "trust_remote_code": True,
+        }
+    )
+    instance = _single_node_instance("unapproved-node", model_card=card)
+
+    async def _load(_model_id: object) -> ModelCard:
+        return card
+
+    monkeypatch.setattr(ModelCard, "load", staticmethod(_load))
+    response = client.post(
+        "/instance",
+        json={"instance": instance.model_dump(mode="json")},
+    )
+
+    assert response.status_code == 400
+    assert (
+        response.headers["X-Skulk-Placement-Failure"]
+        == "model_code_approval_required"
+    )
+    assert remote_code_trust_identity(card) in response.json()["error"]["message"]
 
 
 async def test_preview_exposes_exact_signed_engine_support(

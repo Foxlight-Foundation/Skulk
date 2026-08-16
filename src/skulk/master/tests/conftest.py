@@ -14,7 +14,10 @@ from skulk.shared.types.topology import RDMAConnection, SocketConnection
 @pytest.fixture(autouse=True)
 def approve_synthetic_planner_cards(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep placement fixtures focused on topology unless a test opts into trust."""
-    def approval_not_required(_card: ModelCard) -> bool:
+    def approval_not_required(
+        _card: ModelCard,
+        _approved_identities: set[str] | frozenset[str] | None = None,
+    ) -> bool:
         return False
 
     monkeypatch.setattr(

@@ -288,7 +288,12 @@ from skulk.extensions import (
     validate_against_schema,
 )
 from skulk.master.image_store import ImageStore
-from skulk.master.placement import PlacementError, PlacementInfoPendingError
+from skulk.master.placement import (
+    PlacementError,
+    PlacementInfoPendingError,
+    PlacementModelCodeApprovalError,
+    require_instance_model_code_approval,
+)
 from skulk.master.placement import place_instance as get_instance_placements
 from skulk.master.placement_utils import (
     unified_memory_gpu_node_ids,
@@ -2961,6 +2966,7 @@ class API:
                         self._telemetry_view.node_resources,
                         node_memory=self._telemetry_view.node_memory,
                     ),
+                    approved_remote_code_identities=self._cluster_remote_code_approvals(),
                 )
                 break
             except PlacementInfoPendingError as exc:
@@ -3010,6 +3016,17 @@ class API:
                 ),
             )
         model_card = await ModelCard.load(instance.shard_assignments.model_id)
+        try:
+            require_instance_model_code_approval(
+                instance,
+                self._cluster_remote_code_approvals(),
+            )
+        except PlacementModelCodeApprovalError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=str(exc),
+                headers={"X-Skulk-Placement-Failure": exc.code},
+            ) from exc
         required_memory = model_card.storage_size
         available_memory = self._calculate_total_available_memory()
 
@@ -3066,6 +3083,7 @@ class API:
                     self._telemetry_view.node_resources,
                     node_memory=self._telemetry_view.node_memory,
                 ),
+                approved_remote_code_identities=self._cluster_remote_code_approvals(),
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -3228,6 +3246,7 @@ class API:
                     node_resources=self._telemetry_view.node_resources,
                     node_vram=placement_node_vram,
                     unified_memory_gpu_nodes=placement_unified_memory_gpu_nodes,
+                    approved_remote_code_identities=self._cluster_remote_code_approvals(),
                 )
             except ValueError as exc:
                 if (model_card.model_id, sharding, instance_meta, 0) not in seen:
@@ -3380,6 +3399,7 @@ class API:
                             node_resources=self._telemetry_view.node_resources,
                             node_vram=placement_node_vram,
                             unified_memory_gpu_nodes=placement_unified_memory_gpu_nodes,
+                            approved_remote_code_identities=self._cluster_remote_code_approvals(),
                         )
                     except ValueError:
                         continue

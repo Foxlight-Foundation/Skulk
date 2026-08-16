@@ -30,6 +30,9 @@ from skulk.shared.models.registry import (
     RegistryCapabilityClaim,
     RegistryEngineSupportClaim,
 )
+from skulk.shared.models.remote_code_approval import (
+    remote_code_approval_required as actual_remote_code_approval_required,
+)
 from skulk.shared.models.remote_code_approval import remote_code_trust_identity
 from skulk.shared.topology import Topology
 from skulk.shared.types.commands import CreateInstance, PlaceInstance
@@ -1363,17 +1366,14 @@ def test_cluster_approved_card_remains_adaptively_placeable(
             "registry_card_id": "card_" + "a" * 52,
             "registry_snapshot_id": "snapshot-test",
             "registry_provenance": "agent",
+            "trust_remote_code": True,
         }
     )
     trust_identity = remote_code_trust_identity(card)
-
-    def approval_required(candidate: ModelCard) -> bool:
-        return remote_code_trust_identity(candidate) != trust_identity
-
     monkeypatch.setattr(
         placement_module,
         "remote_code_approval_required",
-        approval_required,
+        actual_remote_code_approval_required,
     )
 
     placements = place_instance(
@@ -1382,6 +1382,7 @@ def test_cluster_approved_card_remains_adaptively_placeable(
         {},
         node_memory,
         node_network,
+        approved_remote_code_identities={trust_identity},
     )
 
     assert len(placements) == 1
@@ -1398,17 +1399,14 @@ def test_placement_fails_actionably_without_cluster_model_approval(
             "registry_card_id": "card_" + "a" * 52,
             "registry_snapshot_id": "snapshot-test",
             "registry_provenance": "agent",
+            "trust_remote_code": True,
         }
     )
     trust_identity = remote_code_trust_identity(card)
-
-    def approval_required(_card: ModelCard) -> bool:
-        return True
-
     monkeypatch.setattr(
         placement_module,
         "remote_code_approval_required",
-        approval_required,
+        actual_remote_code_approval_required,
     )
 
     with pytest.raises(
@@ -1421,9 +1419,64 @@ def test_placement_fails_actionably_without_cluster_model_approval(
             {},
             node_memory,
             node_network,
+            approved_remote_code_identities=frozenset(),
         )
 
     assert failure.value.code == "model_code_approval_required"
+
+
+def test_exact_instance_creation_enforces_cluster_model_approval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exact-placement path cannot bypass model-level trust admission."""
+
+    node_id = NodeId()
+    runner_id = RunnerId()
+    card = _small_model_card().model_copy(
+        update={
+            "source_revision": "a" * 40,
+            "registry_card_id": "card_" + "c" * 52,
+            "registry_snapshot_id": "snapshot-test",
+            "registry_provenance": "agent",
+            "trust_remote_code": True,
+        }
+    )
+    trust_identity = remote_code_trust_identity(card)
+    monkeypatch.setattr(
+        placement_module,
+        "remote_code_approval_required",
+        actual_remote_code_approval_required,
+    )
+    instance = MlxRingInstance(
+        instance_id=InstanceId(),
+        shard_assignments=ShardAssignments(
+            model_id=card.model_id,
+            runner_to_shard={runner_id: _make_shard_metadata(card)},
+            node_to_runner={node_id: runner_id},
+        ),
+        hosts_by_node={},
+        ephemeral_port=50000,
+    )
+    command = CreateInstance(instance=instance)
+    node_memory = {node_id: create_node_memory(Memory.from_gb(8).in_bytes)}
+
+    with pytest.raises(PlacementModelCodeApprovalError, match=trust_identity):
+        add_instance_to_placements(
+            command,
+            Topology(),
+            {},
+            node_memory,
+            approved_remote_code_identities=frozenset(),
+        )
+
+    placements = add_instance_to_placements(
+        command,
+        Topology(),
+        {},
+        node_memory,
+        approved_remote_code_identities={trust_identity},
+    )
+    assert instance.instance_id in placements
 
 
 def test_foxlight_signed_card_needs_no_separate_operator_approval() -> None:

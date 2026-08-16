@@ -149,7 +149,26 @@ def add_instance_to_placements(
     node_memory: Mapping[NodeId, MemoryUsage],
     node_vram: Mapping[NodeId, Memory] | None = None,
     unified_memory_gpu_nodes: AbstractSet[NodeId] | None = None,
+    approved_remote_code_identities: AbstractSet[str] | None = None,
 ) -> Mapping[InstanceId, Instance]:
+    """Validate and add one caller-specified exact instance placement.
+
+    Args:
+        command: Exact instance creation request.
+        topology: Current cluster topology.
+        current_instances: Existing authoritative placements.
+        node_memory: Current node memory observations.
+        node_vram: Current discrete-GPU memory observations.
+        unified_memory_gpu_nodes: Nodes whose GPU allocations use system RAM.
+        approved_remote_code_identities: Authoritative cluster trust set.
+
+    Returns:
+        Existing placements plus the validated, memory-stamped instance.
+
+    Raises:
+        PlacementModelCodeApprovalError: If any embedded shard card requires
+            repository-code approval that is absent from the cluster trust set.
+    """
     # TODO: validate against topology
 
     # Stamp the memory-derived context-admission ceiling, same as the
@@ -163,6 +182,10 @@ def add_instance_to_placements(
     # still unknown, so a transient missing reading yields the card guard rather
     # than None (review catch on #292).
     assignments = command.instance.shard_assignments
+    require_instance_model_code_approval(
+        command.instance,
+        approved_remote_code_identities,
+    )
     ceiling = instance_context_token_limit(
         assignments,
         {
@@ -373,6 +396,43 @@ class PlacementModelCodeApprovalError(PlacementError):
     code: ClassVar[PlacementFailureCode] = "model_code_approval_required"
 
 
+def _raise_model_code_approval_error(card: ModelCard) -> None:
+    """Raise the stable actionable placement error for one exact card."""
+
+    trust_identity = remote_code_trust_identity(card)
+    raise PlacementModelCodeApprovalError(
+        "The cluster operator has not approved repository code for immutable "
+        f"model-card identity {trust_identity}. Approve this model in Settings "
+        "before placing it."
+    )
+
+
+def require_instance_model_code_approval(
+    instance: Instance,
+    approved_remote_code_identities: AbstractSet[str] | None = None,
+) -> None:
+    """Require repository-code approval for every card embedded in an instance.
+
+    Args:
+        instance: Caller-specified exact placement containing shard cards.
+        approved_remote_code_identities: Authoritative cluster trust set. When
+            omitted, the converged local configuration is used for compatibility.
+
+    Raises:
+        PlacementModelCodeApprovalError: If any distinct shard card is blocked.
+    """
+
+    checked_identities: set[str] = set()
+    for shard in instance.shard_assignments.runner_to_shard.values():
+        card = shard.model_card
+        trust_identity = remote_code_trust_identity(card)
+        if trust_identity in checked_identities:
+            continue
+        checked_identities.add(trust_identity)
+        if remote_code_approval_required(card, approved_remote_code_identities):
+            _raise_model_code_approval_error(card)
+
+
 def place_instance(
     command: PlaceInstance,
     topology: Topology,
@@ -386,14 +446,12 @@ def place_instance(
     node_vram: Mapping[NodeId, Memory] | None = None,
     unified_memory_gpu_nodes: AbstractSet[NodeId] | None = None,
     stamped_exclusions: set[NodeId] | None = None,
+    approved_remote_code_identities: AbstractSet[str] | None = None,
 ) -> dict[InstanceId, Instance]:
-    if remote_code_approval_required(command.model_card):
-        trust_identity = remote_code_trust_identity(command.model_card)
-        raise PlacementModelCodeApprovalError(
-            "The cluster operator has not approved repository code for immutable "
-            f"model-card identity {trust_identity}. Approve this model in Settings "
-            "before placing it."
-        )
+    if remote_code_approval_required(
+        command.model_card, approved_remote_code_identities
+    ):
+        _raise_model_code_approval_error(command.model_card)
 
     cycles = topology.get_cycles()
     candidate_cycles = list(filter(lambda it: len(it) >= command.min_nodes, cycles))

@@ -1623,6 +1623,7 @@ class Master:
                                             self._telemetry_view.node_resources,
                                             node_memory=self._telemetry_view.node_memory,
                                         ),
+                                        approved_remote_code_identities=self._model_trust_approvals,
                                     )
                                     logger.warning(
                                         "Re-placing "
@@ -1683,6 +1684,7 @@ class Master:
                                                 self._telemetry_view.node_resources,
                                                 node_memory=self._telemetry_view.node_memory,
                                             ),
+                                            approved_remote_code_identities=self._model_trust_approvals,
                                         )
                                         for new_id in final_placement:
                                             if new_id not in after_delete:
@@ -1773,6 +1775,7 @@ class Master:
                                     self._telemetry_view.node_resources,
                                     node_memory=credited_memory,
                                 ),
+                                approved_remote_code_identities=self._model_trust_approvals,
                             )
                             transition_events = get_transition_events(
                                 self.state.instances, placement, self.state.tasks
@@ -1796,6 +1799,7 @@ class Master:
                                     self._telemetry_view.node_resources,
                                     node_memory=credited_memory,
                                 ),
+                                approved_remote_code_identities=self._model_trust_approvals,
                             )
                             transition_events = get_transition_events(
                                 self.state.instances, placement, self.state.tasks
@@ -2117,6 +2121,7 @@ class Master:
                         self._telemetry_view.node_resources,
                         node_memory=self._telemetry_view.node_memory,
                     ),
+                    approved_remote_code_identities=self._model_trust_approvals,
                 )
                 logger.warning(
                     f"Re-placing {replace_command.model_card.model_id} excluding "
@@ -2283,6 +2288,7 @@ class Master:
                         self._telemetry_view.node_resources,
                         node_memory=self._telemetry_view.node_memory,
                     ),
+                    approved_remote_code_identities=self._model_trust_approvals,
                 )
             except (PlacementError, PlacementInfoPendingError) as err:
                 logger.warning(

@@ -1709,6 +1709,10 @@ Use this when you already have an `instance` object and want exact control. A
 successful response returns the accepted `command_id`, the submitted
 `instance_id`, and its `model_card`; clients can use that exact instance
 identity to correlate the acknowledgement with later runtime and failure truth.
+The API validates every embedded shard card against the cluster's exact model
+trust decisions before acknowledging creation. An unapproved repository-code
+card returns HTTP 400 with `X-Skulk-Placement-Failure:
+model_code_approval_required`; no instance state is created.
 
 ### Inspect one instance
 

@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -145,6 +146,22 @@ def test_persist_model_trust_updates_only_authoritative_section(
     assert config.model_trust is not None
     assert config.model_trust.approved_remote_code_identities == [card_id]
     assert target.stat().st_mode & 0o777 == 0o600
+
+
+def test_persist_model_trust_without_descriptor_chmod(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Platforms without os.fchmod still atomically persist cluster trust."""
+
+    target = tmp_path / "skulk.yaml"
+    target.write_text("{}\n")
+    monkeypatch.delattr(os, "fchmod")
+    card_id = f"card_{'b' * 52}"
+
+    config = persist_model_trust_config(target, [card_id])
+
+    assert config.model_trust is not None
+    assert config.model_trust.approved_remote_code_identities == [card_id]
 
 
 def test_experiments_config_defaults_speech_streaming_off() -> None:
