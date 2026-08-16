@@ -15,6 +15,7 @@ from skulk.shared.types.events import (
     InstanceCreated,
     InstanceDeleted,
     InstanceFailureRecorded,
+    ModelTrustApprovalChanged,
     NodeDownloadProgress,
     NodeGatheredInfo,
     NodeTimedOut,
@@ -118,6 +119,19 @@ def event_apply(event: Event, state: State) -> State:
             return apply_topology_edge_deleted(event, state)
         case TracingStateChanged():
             return state.model_copy(update={"tracing_enabled": event.enabled})
+        case ModelTrustApprovalChanged():
+            approvals = set(state.model_trust_approved_remote_code_identities)
+            if event.approved:
+                approvals.add(event.trust_identity)
+            else:
+                approvals.discard(event.trust_identity)
+            return state.model_copy(
+                update={
+                    "model_trust_approved_remote_code_identities": tuple(
+                        sorted(approvals)
+                    )
+                }
+            )
         case StateSnapshotHydrated():
             return _sanitize_snapshot_downloads(event.state)
 

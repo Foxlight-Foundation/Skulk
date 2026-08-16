@@ -2,7 +2,7 @@ import random
 from collections.abc import Mapping
 from collections.abc import Set as AbstractSet
 from copy import deepcopy
-from typing import Final, Sequence
+from typing import ClassVar, Final, Literal, Sequence, TypeAlias
 
 from skulk.master.placement_utils import (
     Cycle,
@@ -29,6 +29,10 @@ from skulk.shared.models.model_cards import (
     ModelId,
     card_serves_speech,
     registry_supported_backends_for_node,
+)
+from skulk.shared.models.remote_code_approval import (
+    remote_code_approval_required,
+    remote_code_trust_identity,
 )
 from skulk.shared.topology import Topology
 from skulk.shared.types.commands import (
@@ -145,7 +149,28 @@ def add_instance_to_placements(
     node_memory: Mapping[NodeId, MemoryUsage],
     node_vram: Mapping[NodeId, Memory] | None = None,
     unified_memory_gpu_nodes: AbstractSet[NodeId] | None = None,
+    approved_remote_code_identities: AbstractSet[str] | None = None,
 ) -> Mapping[InstanceId, Instance]:
+    """Validate and add one caller-specified exact instance placement.
+
+    Args:
+        command: Exact instance creation request.
+        topology: Current cluster topology.
+        current_instances: Existing authoritative placements.
+        node_memory: Current node memory observations.
+        node_vram: Current discrete-GPU memory observations.
+        unified_memory_gpu_nodes: Nodes whose GPU allocations use system RAM.
+        approved_remote_code_identities: Authoritative cluster trust set.
+
+    Returns:
+        Existing placements plus the validated, memory-stamped instance.
+
+    Raises:
+        PlacementModelCardIdentityError: If a shard card identifies a model
+            other than the assignment alias.
+        PlacementModelCodeApprovalError: If any embedded shard card requires
+            repository-code approval that is absent from the cluster trust set.
+    """
     # TODO: validate against topology
 
     # Stamp the memory-derived context-admission ceiling, same as the
@@ -159,6 +184,11 @@ def add_instance_to_placements(
     # still unknown, so a transient missing reading yields the card guard rather
     # than None (review catch on #292).
     assignments = command.instance.shard_assignments
+    require_instance_model_card_identity(command.instance)
+    require_instance_model_code_approval(
+        command.instance,
+        approved_remote_code_identities,
+    )
     ceiling = instance_context_token_limit(
         assignments,
         {
@@ -331,12 +361,22 @@ def _is_llama_rpc_cycle(
     return "llama_server" in engines and "mlx" not in engines
 
 
+PlacementFailureCode: TypeAlias = Literal[
+    "no_valid_placement",
+    "placement_info_pending",
+    "model_code_approval_required",
+    "model_card_identity_mismatch",
+]
+
+
 class PlacementError(ValueError):
     """Placement is impossible for the requested command and current state.
 
     Subclasses ``ValueError`` so existing callers that catch ``ValueError``
     (the API preview endpoint, the master command processor) keep working.
     """
+
+    code: ClassVar[PlacementFailureCode] = "no_valid_placement"
 
 
 class PlacementInfoPendingError(PlacementError):
@@ -350,6 +390,83 @@ class PlacementInfoPendingError(PlacementError):
     topology gap or memory shortfall so callers can wait instead of
     reporting a false error.
     """
+
+    code: ClassVar[PlacementFailureCode] = "placement_info_pending"
+
+
+class PlacementModelCodeApprovalError(PlacementError):
+    """The operator has not approved repository code for this exact card."""
+
+    code: ClassVar[PlacementFailureCode] = "model_code_approval_required"
+
+
+class PlacementModelCardIdentityError(PlacementError):
+    """A caller-specified shard embeds a card for a different model alias."""
+
+    code: ClassVar[PlacementFailureCode] = "model_card_identity_mismatch"
+
+
+def require_instance_model_card_identity(instance: Instance) -> None:
+    """Require every embedded shard card to match the assignment model alias.
+
+    Args:
+        instance: Caller-specified exact placement containing shard cards.
+
+    Raises:
+        PlacementModelCardIdentityError: If a shard identifies another model.
+    """
+
+    expected_model_id = instance.shard_assignments.model_id
+    mismatched_model_ids = sorted(
+        {
+            str(shard.model_card.model_id)
+            for shard in instance.shard_assignments.runner_to_shard.values()
+            if shard.model_card.model_id != expected_model_id
+        }
+    )
+    if mismatched_model_ids:
+        mismatches = ", ".join(mismatched_model_ids)
+        raise PlacementModelCardIdentityError(
+            "Exact placement model-card identity mismatch: assignment model "
+            f"{expected_model_id} contains shard card(s) for {mismatches}."
+        )
+
+
+def _raise_model_code_approval_error(card: ModelCard) -> None:
+    """Raise the stable actionable placement error for one exact card."""
+
+    trust_identity = remote_code_trust_identity(card)
+    raise PlacementModelCodeApprovalError(
+        "The cluster operator has not approved repository code for immutable "
+        f"model-card identity {trust_identity}. Approve this model in Settings "
+        "before placing it."
+    )
+
+
+def require_instance_model_code_approval(
+    instance: Instance,
+    approved_remote_code_identities: AbstractSet[str] | None = None,
+) -> None:
+    """Require repository-code approval for every card embedded in an instance.
+
+    Args:
+        instance: Caller-specified exact placement containing shard cards.
+        approved_remote_code_identities: Authoritative cluster trust set. When
+            omitted, the converged local configuration is used for compatibility.
+
+    Raises:
+        PlacementModelCodeApprovalError: If any distinct shard card is blocked.
+    """
+
+    checked_identities: set[str] = set()
+    for shard in instance.shard_assignments.runner_to_shard.values():
+        card = shard.model_card
+        trust_identity = remote_code_trust_identity(card)
+        if trust_identity in checked_identities:
+            continue
+        checked_identities.add(trust_identity)
+        if remote_code_approval_required(card, approved_remote_code_identities):
+            _raise_model_code_approval_error(card)
 
 
 def place_instance(
@@ -365,7 +482,13 @@ def place_instance(
     node_vram: Mapping[NodeId, Memory] | None = None,
     unified_memory_gpu_nodes: AbstractSet[NodeId] | None = None,
     stamped_exclusions: set[NodeId] | None = None,
+    approved_remote_code_identities: AbstractSet[str] | None = None,
 ) -> dict[InstanceId, Instance]:
+    if remote_code_approval_required(
+        command.model_card, approved_remote_code_identities
+    ):
+        _raise_model_code_approval_error(command.model_card)
+
     cycles = topology.get_cycles()
     candidate_cycles = list(filter(lambda it: len(it) >= command.min_nodes, cycles))
     if not candidate_cycles:
@@ -433,7 +556,9 @@ def place_instance(
                     "node before placing the model."
                 )
 
-    # Hard-filter on node participation and backend compatibility (#149).
+    # Hard-filter on node participation and backend compatibility (#149/#845).
+    # Repository-code trust is an operator decision for the exact model-card
+    # identity and was checked once above; it is deliberately not a node axis.
     # A node is ineligible for an inference shard of THIS model when it
     # declares a non-``full`` participation role (e.g. a ``management`` /
     # edge node that serves the API but never joins a ring), or when its

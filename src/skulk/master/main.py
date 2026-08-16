@@ -52,6 +52,7 @@ from skulk.shared.types.commands import (
     RefuseInstancePlacement,
     RequestEventLog,
     SendInputChunk,
+    SetModelTrustApproval,
     SetTracingEnabled,
     SpeechSynthesis,
     TaskCancelled,
@@ -70,6 +71,7 @@ from skulk.shared.types.events import (
     InstanceDeleted,
     InstanceFailureRecorded,
     LocalForwarderEvent,
+    ModelTrustApprovalChanged,
     NodeDownloadProgress,
     NodeGatheredInfo,
     NodeTimedOut,
@@ -133,7 +135,11 @@ from skulk.shared.types.worker.instances import (
 )
 from skulk.shared.types.worker.runners import RunnerReady, RunnerRunning
 from skulk.shared.types.worker.shards import RpcDonorShardMetadata, Sharding
-from skulk.store.config import load_skulk_config, resolve_config_path
+from skulk.store.config import (
+    load_skulk_config,
+    persist_model_trust_config,
+    resolve_config_path,
+)
 from skulk.utils.channels import Receiver, Sender
 from skulk.utils.disk_event_log import DiskEventLog
 from skulk.utils.event_buffer import MultiSourceBuffer
@@ -667,6 +673,7 @@ class Master:
         initial_state: State | None = None,
         telemetry_view: TelemetryView | None = None,
         state_sync_store_http_host: str | None = None,
+        initial_model_trust_identities: tuple[str, ...] = (),
     ):
         self.node_id = node_id
         self.session_id = session_id
@@ -693,8 +700,34 @@ class Master:
         # hydrating) passes None and starts empty exactly as before — a
         # stale-boot winner cannot resurrect a cluster view it does not
         # have.
-        self._seed_state = initial_state
-        self.state = State(tracing_enabled=SKULK_TRACING_ENABLED)
+        initial_trust_identities = (
+            initial_state.model_trust_approved_remote_code_identities
+            if initial_state is not None
+            else initial_model_trust_identities
+        )
+        # Commands are processed serially, but their indexed echoes return on a
+        # separate task. Keep the master's authoritative decision set here so
+        # back-to-back mutations cannot each read the same stale State snapshot
+        # and accidentally resurrect a revocation or discard an approval.
+        self._model_trust_approvals = set(initial_trust_identities)
+        self.state = State(
+            tracing_enabled=SKULK_TRACING_ENABLED,
+            model_trust_approved_remote_code_identities=tuple(
+                sorted(self._model_trust_approvals)
+            ),
+        )
+        # A cold-start trust baseline needs the same indexed delivery path as
+        # failover state. Leaving non-empty approvals only in this idx=-1 State
+        # makes state-sync followers treat it as a fresh empty snapshot; their
+        # first unrelated event then replaces the config fallback with an empty
+        # replicated set. Index the baseline as event 0 before serving sync.
+        self._seed_state = (
+            initial_state
+            if initial_state is not None
+            else self.state
+            if self._model_trust_approvals
+            else None
+        )
         self._started_monotonic = time.monotonic()
         self._tg: TaskGroup = TaskGroup()
         self.command_task_mapping: dict[CommandId, TaskId] = {}
@@ -903,7 +936,7 @@ class Master:
         return memory, vram
 
     async def _index_seed_event(self) -> None:
-        """Index the failover seed as the first event of this session (#273).
+        """Index failover or cold-start trust seed as this session's first event.
 
         Making the carried state an ordinary logged ``StateSnapshotHydrated``
         event gives every consumer exactly one delivery path: followers that
@@ -928,8 +961,10 @@ class Master:
         self._append_event_log(indexed.event)
         await self._send_event(indexed)
         logger.info(
-            f"Indexed failover seed as event {idx}: "
-            f"{len(seed.instances)} carried instance(s)"
+            f"Indexed startup seed as event {idx}: "
+            f"{len(seed.instances)} carried instance(s), "
+            f"{len(seed.model_trust_approved_remote_code_identities)} "
+            "model trust decision(s)"
         )
 
     async def run(self):
@@ -1397,6 +1432,36 @@ class Master:
                             generated_events.append(
                                 TracingStateChanged(enabled=command.enabled)
                             )
+                        case SetModelTrustApproval():
+                            if command.approved:
+                                self._model_trust_approvals.add(
+                                    command.trust_identity
+                                )
+                            else:
+                                self._model_trust_approvals.discard(
+                                    command.trust_identity
+                                )
+                            try:
+                                persist_model_trust_config(
+                                    resolve_config_path(),
+                                    self._model_trust_approvals,
+                                )
+                            except (OSError, ValueError):
+                                # Replicated State is authoritative. A degraded
+                                # local disk must not kill the master command
+                                # processor; workers gate new runner creation
+                                # and loading from that State, while YAML remains
+                                # only the durable restart/child-process fallback.
+                                logger.exception(
+                                    "Master failed to persist model trust locally; "
+                                    "continuing with the indexed cluster decision"
+                                )
+                            generated_events.append(
+                                ModelTrustApprovalChanged(
+                                    trust_identity=command.trust_identity,
+                                    approved=command.approved,
+                                )
+                            )
                         case DeleteInstance():
                             # Credit the freed memory back to placement admission
                             # for a short grace window so a back-to-back placement
@@ -1571,6 +1636,7 @@ class Master:
                                             self._telemetry_view.node_resources,
                                             node_memory=self._telemetry_view.node_memory,
                                         ),
+                                        approved_remote_code_identities=self._model_trust_approvals,
                                     )
                                     logger.warning(
                                         "Re-placing "
@@ -1631,6 +1697,7 @@ class Master:
                                                 self._telemetry_view.node_resources,
                                                 node_memory=self._telemetry_view.node_memory,
                                             ),
+                                            approved_remote_code_identities=self._model_trust_approvals,
                                         )
                                         for new_id in final_placement:
                                             if new_id not in after_delete:
@@ -1721,6 +1788,7 @@ class Master:
                                     self._telemetry_view.node_resources,
                                     node_memory=credited_memory,
                                 ),
+                                approved_remote_code_identities=self._model_trust_approvals,
                             )
                             transition_events = get_transition_events(
                                 self.state.instances, placement, self.state.tasks
@@ -1744,6 +1812,7 @@ class Master:
                                     self._telemetry_view.node_resources,
                                     node_memory=credited_memory,
                                 ),
+                                approved_remote_code_identities=self._model_trust_approvals,
                             )
                             transition_events = get_transition_events(
                                 self.state.instances, placement, self.state.tasks
@@ -2065,6 +2134,7 @@ class Master:
                         self._telemetry_view.node_resources,
                         node_memory=self._telemetry_view.node_memory,
                     ),
+                    approved_remote_code_identities=self._model_trust_approvals,
                 )
                 logger.warning(
                     f"Re-placing {replace_command.model_card.model_id} excluding "
@@ -2231,6 +2301,7 @@ class Master:
                         self._telemetry_view.node_resources,
                         node_memory=self._telemetry_view.node_memory,
                     ),
+                    approved_remote_code_identities=self._model_trust_approvals,
                 )
             except (PlacementError, PlacementInfoPendingError) as err:
                 logger.warning(
@@ -2553,6 +2624,7 @@ class Master:
             str(key): copy.deepcopy(value) for key, value in raw_config.items()
         }
         sanitized_config.pop("hf_token", None)
+        sanitized_config.pop("model_trust", None)
         model_store = sanitized_config.get("model_store")
         if (
             self._state_sync_store_http_host is not None

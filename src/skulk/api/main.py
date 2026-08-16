@@ -110,7 +110,10 @@ from skulk.api.node_health import (
     live_skulk_build_mismatch,
 )
 from skulk.api.operator_auth import create_operator_auth_router
-from skulk.api.operator_gateway import OperatorGatewayAuthorization
+from skulk.api.operator_gateway import (
+    OPERATOR_GATEWAY_AUTHORIZED_SCOPE_KEY,
+    OperatorGatewayAuthorization,
+)
 from skulk.api.performance_envelope import (
     ClusterPerformanceEnvelopes,
     GenerationOutcome,
@@ -285,7 +288,12 @@ from skulk.extensions import (
     validate_against_schema,
 )
 from skulk.master.image_store import ImageStore
-from skulk.master.placement import PlacementInfoPendingError
+from skulk.master.placement import (
+    PlacementError,
+    PlacementInfoPendingError,
+    require_instance_model_card_identity,
+    require_instance_model_code_approval,
+)
 from skulk.master.placement import place_instance as get_instance_placements
 from skulk.master.placement_utils import (
     unified_memory_gpu_node_ids,
@@ -334,8 +342,8 @@ from skulk.shared.models.model_cards import (
 )
 from skulk.shared.models.registry import RegistryAdvisory
 from skulk.shared.models.remote_code_approval import (
-    REMOTE_CODE_APPROVALS,
-    remote_code_approval_mutation_allowed,
+    approved_remote_code_identities,
+    loopback_mutation_allowed,
     remote_code_execution_requires_approval,
     remote_code_is_automatically_trusted,
     remote_code_trust_identity,
@@ -385,6 +393,7 @@ from skulk.shared.types.commands import (
     ImageGeneration,
     PlaceInstance,
     RealtimeAudioTranscription,
+    SetModelTrustApproval,
     SetTracingEnabled,
     SpeechSynthesis,
     StartDownload,
@@ -428,6 +437,7 @@ from skulk.shared.types.events import (
     IndexedEvent,
     InstanceCreated,
     InstanceDeleted,
+    ModelTrustApprovalChanged,
     NodeTimedOut,
     RunnerStatusUpdated,
     StateSnapshotHydrated,
@@ -465,10 +475,13 @@ from skulk.shared.types.worker.runners import RunnerId, RunnerReady, RunnerRunni
 from skulk.shared.types.worker.shards import Sharding, ShardMetadata
 from skulk.shared.version import get_skulk_version, get_skulk_version_label
 from skulk.store.config import (
+    SkulkConfig,
     TelemetryConfig,
     load_skulk_config,
+    persist_model_trust_config,
     resolve_config_path,
     resolve_node_staging,
+    update_skulk_config_atomic,
 )
 from skulk.tools.web_search import default_browser_tool_provider
 from skulk.utils.banner import print_startup_banner
@@ -566,6 +579,11 @@ _STREAM_IDLE_TIMEOUT_SECONDS = 120.0
 # terminal/delete event into a typed provider failure instead of an indefinite
 # resource hold.
 _REALTIME_TASK_RELEASE_TIMEOUT_SECONDS = 10.0
+
+# Trust mutations are synchronous operator decisions. Bound convergence so a
+# missing master/event becomes an actionable 503 instead of a false success or
+# an indefinitely hanging Settings request.
+_MODEL_TRUST_DECISION_TIMEOUT_SECONDS = 10.0
 
 # Largest per-command data-plane reorder window (#279 Phase 2b). The DATA topic
 # is best-effort: a genuinely dropped chunk would otherwise stall the reorder
@@ -1739,6 +1757,9 @@ class API:
         ] = {}
         self._realtime_audio_transcription_commands: set[CommandId] = set()
         self._realtime_task_release_events: dict[CommandId, anyio.Event] = {}
+        self._model_trust_decision_waiters: dict[
+            tuple[str, bool], list[anyio.Event]
+        ] = {}
         self._cancelled_command_ids: set[CommandId] = set()
         # Per-command data-plane reorder buffers (#279 Phase 2b). The DATA gossip
         # topic has no total order (unlike the master event idx it replaced), so
@@ -1868,6 +1889,10 @@ class API:
         for release_event in self._realtime_task_release_events.values():
             release_event.set()
         self._realtime_task_release_events = {}
+        for waiters in self._model_trust_decision_waiters.values():
+            for waiter in waiters:
+                waiter.set()
+        self._model_trust_decision_waiters = {}
         self._speech_media_commands = set()
         self._speech_media_targets = {}
         self._transcription_media_targets = {}
@@ -1951,7 +1976,11 @@ class API:
                 code=exc.status_code,
             )
         )
-        return JSONResponse(err.model_dump(), status_code=exc.status_code)
+        return JSONResponse(
+            err.model_dump(),
+            status_code=exc.status_code,
+            headers=exc.headers,
+        )
 
     def _setup_cors(self) -> None:
         self.app.add_middleware(
@@ -1964,6 +1993,7 @@ class API:
                 "X-Audio-Sample-Rate",
                 "X-Audio-Channels",
                 "X-Audio-Sample-Format",
+                "X-Skulk-Placement-Failure",
             ],
         )
 
@@ -1977,12 +2007,37 @@ class API:
             "/instance",
             tags=["Instances"],
             summary="Create an instance from a fully specified placement",
-            description="Create an instance from an already computed placement object when you want exact control instead of Skulk picking the placement for you.",
+            description=(
+                "Create an instance from an already computed placement object "
+                "when you want exact control instead of Skulk picking the "
+                "placement. Every embedded shard card must identify the same "
+                "model alias as the assignment and satisfy current cluster trust."
+            ),
         )(self.create_instance)
         self.app.post(
             "/place_instance",
             tags=["Instances"],
             summary="Quick-launch a model placement",
+            responses={
+                400: {
+                    "description": "Current fleet facts admit no valid placement.",
+                    "headers": {
+                        "X-Skulk-Placement-Failure": {
+                            "description": "Stable placement failure category.",
+                            "schema": {"type": "string"},
+                        }
+                    },
+                },
+                503: {
+                    "description": "Required placement telemetry is still arriving.",
+                    "headers": {
+                        "X-Skulk-Placement-Failure": {
+                            "description": "Stable placement failure category.",
+                            "schema": {"type": "string"},
+                        }
+                    },
+                },
+            },
             description=(
                 "Place and launch a model with Skulk choosing a valid concrete placement "
                 "from the requested sharding, instance metadata, and minimum-node constraints. "
@@ -1991,7 +2046,12 @@ class API:
                 "reason (no connected cycle, exclusions removed every candidate, a node cannot "
                 "fit its shard with runtime headroom, ...). If node memory info is still being "
                 "gathered (cluster just formed), the request waits up to 15 seconds for it "
-                "before returning 503 — retry shortly in that case."
+                "before returning 503 — retry shortly in that case. Model cards may declare "
+                "several open backend tags in preference order; the planner filters current "
+                "trust, engine/build, topology, and capacity blockers before ranking and "
+                "automatically falls through to the next launchable candidate. Placement "
+                "failures retain a readable error message and expose a stable category in the "
+                "X-Skulk-Placement-Failure response header."
             ),
         )(self.place_instance)
         self.app.get(
@@ -2012,7 +2072,9 @@ class API:
                 "Besides the planner's ranked pick per placement shape, the response includes "
                 "per-host single-node previews marked `alternative: true` for every other host "
                 "that passes admission, so heterogeneous fleets expose the full set of valid "
-                "hosts rather than only the ranking winner."
+                "hosts rather than only the ranking winner. Previews explain current planner "
+                "choices; ordinary launch requests remain adaptive and do not reserve or replay "
+                "one preview. Unavailable previews include a stable error_code."
             ),
         )(self.get_placement_previews)
         self.app.get(
@@ -2045,37 +2107,43 @@ class API:
                 "OpenAI-style listing of Skulk's effective model catalog rather "
                 "than only running instances. Entries distinguish the active "
                 "installed generation from current signed registry truth and "
-                "report updates, verification, advisories, and local remote-code approval."
+                "report updates, verification, advisories, and cluster model trust."
             ),
         )(self.get_models)
         self.app.get(
             "/models/remote-code-approvals",
             tags=["Models"],
-            summary="List remote-code approvals on this node",
+            summary="List cluster model-code approvals",
             description=(
-                "Lists immutable signed-registry card ids approved to execute "
-                "repository Python on this node. Approvals are deliberately "
-                "node-local and must be repeated on every serving node."
+                "Lists immutable model-card identities the operator has approved "
+                "to execute repository Python across the cluster."
             ),
         )(self.list_remote_code_approvals)
         self.app.post(
             "/models/remote-code-approvals/{card_id}",
             tags=["Models"],
-            summary="Approve registry remote code on this node",
+            summary="Approve model repository code for the cluster",
             description=(
-                "Approves one immutable signed-registry card to download and execute "
-                "repository Python on this node only. This mutation accepts only "
-                "loopback clients and loopback browser origins."
+                "Approves one exact signed-registry or content-derived custom-card "
+                "identity for download and execution across the cluster. The elected "
+                "master serializes the decision into replicated State; every node "
+                "then persists its local runner-facing copy. Success is returned "
+                "only after this API applies the indexed decision. "
+                "The mutation requires direct loopback access or an authenticated "
+                "operator-gateway credential."
             ),
         )(self.approve_remote_code)
         self.app.delete(
             "/models/remote-code-approvals/{card_id}",
             tags=["Models"],
-            summary="Revoke registry remote code on this node",
+            summary="Revoke cluster model repository-code approval",
             description=(
-                "Revokes node-local execution approval for one immutable registry "
-                "card. This mutation accepts only loopback clients and loopback "
-                "browser origins."
+                "Revokes the operator's cluster-wide approval for one immutable "
+                "model-card identity. Existing processes are not killed, but future "
+                "downloads and runner starts fail closed. Success is returned only "
+                "after this API applies the master-indexed decision. The mutation "
+                "requires direct "
+                "loopback access or an authenticated operator-gateway credential."
             ),
         )(self.revoke_remote_code)
         self.app.post(
@@ -2085,9 +2153,10 @@ class API:
             description=(
                 "Add a custom model card to Skulk's model catalog so it becomes "
                 "searchable and launchable. An optional gguf_file selects one exact "
-                "quant from a multi-quant GGUF repository. This mutation accepts "
-                "only loopback clients and loopback browser origins because generated "
-                "cards may execute repository code."
+                "quant from a multi-quant GGUF repository. Cards that can execute "
+                "repository code remain blocked until the operator approves their "
+                "exact identity in cluster Settings. The mutation requires direct "
+                "loopback access or an authenticated operator-gateway credential."
             ),
         )(self.add_custom_model)
         self.app.delete(
@@ -2690,7 +2759,9 @@ class API:
             summary="Update cluster config",
             description=(
                 "Update cluster-wide config. Some changes apply to future launches immediately, "
-                "while model-store location changes still require a restart."
+                "while model-store location changes still require a restart. model_trust is not "
+                "replaceable through this snapshot endpoint; authenticated operators must use "
+                "the dedicated master-ordered remote-code approval endpoints."
             ),
         )(self.update_config)
         self.app.get(
@@ -2914,6 +2985,7 @@ class API:
                         self._telemetry_view.node_resources,
                         node_memory=self._telemetry_view.node_memory,
                     ),
+                    approved_remote_code_identities=self._cluster_remote_code_approvals(),
                 )
                 break
             except PlacementInfoPendingError as exc:
@@ -2921,10 +2993,21 @@ class API:
                     raise HTTPException(
                         status_code=503,
                         detail=f"{exc} (waited {_PLACEMENT_INFO_WAIT_SECONDS:.0f}s)",
+                        headers={"X-Skulk-Placement-Failure": exc.code},
                     ) from exc
                 await anyio.sleep(1)
+            except PlacementError as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=str(exc),
+                    headers={"X-Skulk-Placement-Failure": exc.code},
+                ) from exc
             except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
+                raise HTTPException(
+                    status_code=400,
+                    detail=str(exc),
+                    headers={"X-Skulk-Placement-Failure": "no_valid_placement"},
+                ) from exc
 
         await self._send(command)
 
@@ -2952,6 +3035,18 @@ class API:
                 ),
             )
         model_card = await ModelCard.load(instance.shard_assignments.model_id)
+        try:
+            require_instance_model_card_identity(instance)
+            require_instance_model_code_approval(
+                instance,
+                self._cluster_remote_code_approvals(),
+            )
+        except PlacementError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=str(exc),
+                headers={"X-Skulk-Placement-Failure": exc.code},
+            ) from exc
         required_memory = model_card.storage_size
         available_memory = self._calculate_total_available_memory()
 
@@ -3008,6 +3103,7 @@ class API:
                     self._telemetry_view.node_resources,
                     node_memory=self._telemetry_view.node_memory,
                 ),
+                approved_remote_code_identities=self._cluster_remote_code_approvals(),
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -3044,11 +3140,13 @@ class API:
             raise HTTPException(
                 status_code=400, detail=f"Failed to load model card: {exc}"
             ) from exc
+        trust_identity = remote_code_trust_identity(model_card)
         trust_requirement = (
-            "Repository code requires node-local approval for immutable trust "
-            f"identity {remote_code_trust_identity(model_card)} on every selected "
-            "serving node."
+            "Repository code requires cluster operator approval for immutable "
+            f"model-card identity {trust_identity}. Open Settings and approve "
+            "this model before placing it."
             if remote_code_execution_requires_approval(model_card)
+            and trust_identity not in self._cluster_remote_code_approvals()
             else None
         )
         matching_engine_support = get_model_engine_support(model_card)
@@ -3168,6 +3266,7 @@ class API:
                     node_resources=self._telemetry_view.node_resources,
                     node_vram=placement_node_vram,
                     unified_memory_gpu_nodes=placement_unified_memory_gpu_nodes,
+                    approved_remote_code_identities=self._cluster_remote_code_approvals(),
                 )
             except ValueError as exc:
                 if (model_card.model_id, sharding, instance_meta, 0) not in seen:
@@ -3178,6 +3277,11 @@ class API:
                             instance_meta=instance_meta,
                             instance=None,
                             error=str(exc),
+                            error_code=(
+                                exc.code
+                                if isinstance(exc, PlacementError)
+                                else "no_valid_placement"
+                            ),
                             compatibility_detail=support_gap_detail,
                         )
                     )
@@ -3200,6 +3304,7 @@ class API:
                             instance_meta=instance_meta,
                             instance=None,
                             error="Expected exactly one new instance from placement",
+                            error_code="no_valid_placement",
                             compatibility_detail=support_gap_detail,
                         )
                     )
@@ -3314,6 +3419,7 @@ class API:
                             node_resources=self._telemetry_view.node_resources,
                             node_vram=placement_node_vram,
                             unified_memory_gpu_nodes=placement_unified_memory_gpu_nodes,
+                            approved_remote_code_identities=self._cluster_remote_code_approvals(),
                         )
                     except ValueError:
                         continue
@@ -3357,9 +3463,7 @@ class API:
 
         return PlacementPreviewResponse(
             previews=[
-                preview.model_copy(
-                    update={"trust_requirement": trust_requirement}
-                )
+                preview.model_copy(update={"trust_requirement": trust_requirement})
                 for preview in previews
             ]
         )
@@ -8015,7 +8119,7 @@ class API:
         """Build the public model-list representation for one model card."""
         remote_code_approval_required = remote_code_execution_requires_approval(card)
         if remote_code_approval_required and approved_remote_code_card_ids is None:
-            approved_remote_code_card_ids = REMOTE_CODE_APPROVALS.approved_card_ids()
+            approved_remote_code_card_ids = approved_remote_code_identities()
         resolved_profile = resolve_model_capability_profile(
             card.model_id,
             model_card=card,
@@ -8085,6 +8189,18 @@ class API:
                 else "bundled"
             ),
             remote_code_approval_required=remote_code_approval_required,
+            remote_code_trust_identity=(
+                remote_code_trust_identity(card)
+                if remote_code_approval_required
+                else None
+            ),
+            remote_code_approved_for_cluster=(
+                remote_code_approval_required
+                and remote_code_trust_identity(card)
+                in (approved_remote_code_card_ids or ())
+            ),
+            # Deprecated wire alias retained for older operator clients. Trust
+            # is cluster-wide even though this historical field name is not.
             remote_code_approved_on_this_node=(
                 remote_code_approval_required
                 and remote_code_trust_identity(card)
@@ -8118,7 +8234,7 @@ class API:
                         downloaded_model_ids.add(dl.shard_metadata.model_card.model_id)
             cards = [c for c in cards if c.model_id in downloaded_model_ids]
 
-        approved_remote_code_card_ids = REMOTE_CODE_APPROVALS.approved_card_ids()
+        approved_remote_code_card_ids = self._cluster_remote_code_approvals()
         entries = [
             self._model_list_entry(card, approved_remote_code_card_ids)
             for card in cards
@@ -8144,33 +8260,120 @@ class API:
         return ModelList(data=entries)
 
     async def list_remote_code_approvals(self) -> list[RemoteCodeApprovalView]:
-        """List immutable model-card trust identities approved on this node."""
+        """List immutable model-card identities approved across the cluster."""
         return [
-            RemoteCodeApprovalView(card_id=card_id, approved_on_this_node=True)
-            for card_id in sorted(REMOTE_CODE_APPROVALS.approved_card_ids())
+            RemoteCodeApprovalView(
+                card_id=card_id,
+                approved_for_cluster=True,
+                approved_on_this_node=True,
+            )
+            for card_id in sorted(self._cluster_remote_code_approvals())
         ]
+
+    def _cluster_remote_code_approvals(self) -> frozenset[str]:
+        """Read master-ordered cluster trust with a pre-bootstrap fallback."""
+        if self.state.last_event_applied_idx >= 0:
+            return frozenset(
+                self.state.model_trust_approved_remote_code_identities
+            )
+        try:
+            config = load_skulk_config(self._config_path)
+        except Exception:
+            config = self._skulk_config
+        if config is None or config.model_trust is None:
+            return frozenset()
+        return frozenset(config.model_trust.approved_remote_code_identities)
+
+    def _release_model_trust_decision_waiters(
+        self,
+        trust_identity: str,
+        approved: bool,
+    ) -> None:
+        """Wake requests waiting for one exact indexed trust decision."""
+
+        for waiter in self._model_trust_decision_waiters.pop(
+            (trust_identity, approved),
+            [],
+        ):
+            waiter.set()
+
+    async def set_cluster_remote_code_approval(
+        self, card_id: str, *, approved: bool
+    ) -> None:
+        """Submit one cluster-wide model trust decision to the elected master.
+
+        Args:
+            card_id: Exact immutable model-card trust identity.
+            approved: Whether repository-code execution is allowed.
+
+        Side effects:
+            Sends a command that the elected master serializes into the indexed
+            event log, then waits for this API to apply that indexed decision.
+            Every node persists the resulting replicated State.
+        """
+        if (card_id in self._cluster_remote_code_approvals()) == approved:
+            return
+
+        waiter = anyio.Event()
+        waiters = self._model_trust_decision_waiters.setdefault(
+            (card_id, approved),
+            [],
+        )
+        waiters.append(waiter)
+        try:
+            await self._send(
+                SetModelTrustApproval(
+                    trust_identity=card_id,
+                    approved=approved,
+                )
+            )
+            try:
+                with anyio.fail_after(_MODEL_TRUST_DECISION_TIMEOUT_SECONDS):
+                    await waiter.wait()
+            except TimeoutError as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "The elected master did not confirm the model trust "
+                        "decision before the convergence deadline; retry."
+                    ),
+                ) from exc
+            if (card_id in self._cluster_remote_code_approvals()) != approved:
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "The cluster session changed before the model trust "
+                        "decision converged; retry."
+                    ),
+                )
+        finally:
+            remaining = self._model_trust_decision_waiters.get((card_id, approved))
+            if remaining is not None:
+                with contextlib.suppress(ValueError):
+                    remaining.remove(waiter)
+                if not remaining:
+                    self._model_trust_decision_waiters.pop((card_id, approved), None)
 
     async def approve_remote_code(
         self, card_id: str, request: Request
     ) -> RemoteCodeApprovalView:
-        """Persist approval for one immutable model card on this API node.
+        """Persist approval for one immutable model card across the cluster.
 
         Args:
             card_id: Signed card ID or content-derived local card identity.
-            request: Incoming request whose peer, origin, and forwarding headers
-                establish the node-local mutation boundary.
+            request: Incoming request proving a local or authenticated operator.
 
         Returns:
-            The node-local approval view for the newly approved card.
+            The cluster approval view for the newly approved card.
 
         Raises:
-            HTTPException: If the caller is not node-local, the identifier is
+            HTTPException: If the caller is not an operator, the identifier is
                 malformed or unknown, or the card needs no repository-code approval.
 
         Side effects:
-            Atomically adds the card identifier to this node's durable approval file.
+            Submits the decision for serialization in the master's event log.
         """
-        self._require_node_local_remote_code_mutation(request)
+        self._require_operator_mutation(request)
         if not re.fullmatch(r"(?:card|local)_[a-z2-7]{52}", card_id):
             raise HTTPException(status_code=422, detail="Invalid model trust identity")
         card = next(
@@ -8186,41 +8389,48 @@ class API:
         if not remote_code_execution_requires_approval(card):
             raise HTTPException(
                 status_code=409,
-                detail="Model card does not require node-local repository-code approval",
+                detail="Model card does not require explicit repository-code approval",
             )
-        REMOTE_CODE_APPROVALS.approve(card_id)
-        return RemoteCodeApprovalView(card_id=card_id, approved_on_this_node=True)
+        await self.set_cluster_remote_code_approval(card_id, approved=True)
+        return RemoteCodeApprovalView(
+            card_id=card_id,
+            approved_for_cluster=True,
+            approved_on_this_node=True,
+        )
 
     async def revoke_remote_code(
         self, card_id: str, request: Request
     ) -> RemoteCodeApprovalView:
-        """Persist revocation for one immutable model card on this API node.
+        """Persist revocation for one immutable model card across the cluster.
 
         Args:
             card_id: Signed card ID or content-derived local card identity.
-            request: Incoming request whose peer, origin, and forwarding headers
-                establish the node-local mutation boundary.
+            request: Incoming request proving a local or authenticated operator.
 
         Returns:
-            The node-local approval view showing the card as revoked.
+            The cluster approval view showing the card as revoked.
 
         Raises:
-            HTTPException: If the caller is not node-local or the identifier is
+            HTTPException: If the caller is not an operator or the identifier is
                 malformed.
 
         Side effects:
-            Atomically removes the card identifier from this node's durable
-            approval file, preventing future downloads and runner starts.
+            Submits the revocation for serialization in the master's event log,
+            preventing future downloads and runner starts after convergence.
         """
-        self._require_node_local_remote_code_mutation(request)
+        self._require_operator_mutation(request)
         if not re.fullmatch(r"(?:card|local)_[a-z2-7]{52}", card_id):
             raise HTTPException(status_code=422, detail="Invalid model trust identity")
-        REMOTE_CODE_APPROVALS.revoke(card_id)
-        return RemoteCodeApprovalView(card_id=card_id, approved_on_this_node=False)
+        await self.set_cluster_remote_code_approval(card_id, approved=False)
+        return RemoteCodeApprovalView(
+            card_id=card_id,
+            approved_for_cluster=False,
+            approved_on_this_node=False,
+        )
 
     @staticmethod
-    def _require_node_local_remote_code_mutation(request: Request) -> None:
-        """Reject approval writes not made through a loopback control surface."""
+    def _require_loopback_mutation(request: Request) -> None:
+        """Reject an operator mutation not made directly through loopback."""
         client_host = request.client.host if request.client is not None else None
         forwarding_headers_present = any(
             raw_name.lower() == b"forwarded"
@@ -8229,39 +8439,42 @@ class API:
             in {b"x-real-ip", b"cf-connecting-ip", b"true-client-ip"}
             for raw_name, _raw_value in request.headers.raw
         )
-        if not remote_code_approval_mutation_allowed(
+        if not loopback_mutation_allowed(
             client_host,
             request.headers.get("origin"),
             forwarding_headers_present=forwarding_headers_present,
         ):
             raise HTTPException(
                 status_code=403,
-                detail=(
-                    "Remote-code approvals may be changed only from a loopback "
-                    "client with no proxy forwarding headers and, for browsers, "
-                    "a loopback origin"
-                ),
+                detail="This operator mutation is available only through loopback",
             )
+
+    @classmethod
+    def _require_operator_mutation(cls, request: Request) -> None:
+        """Allow a mutation only from loopback or the authenticated gateway."""
+        if request.scope.get(OPERATOR_GATEWAY_AUTHORIZED_SCOPE_KEY) is True:
+            return
+        cls._require_loopback_mutation(request)
 
     async def add_custom_model(
         self, payload: AddCustomModelParams, request: Request
     ) -> ModelListModel:
-        """Fetch and persist a custom card from a node-local control request.
+        """Fetch and persist a custom model card for the cluster.
 
         Args:
             payload: Hugging Face repository, optional quant file, and revision.
-            request: Incoming request used to enforce the node-local mutation boundary.
+            request: Incoming request proving a local or authenticated operator.
 
         Returns:
             The generated custom model entry added to the cluster catalog.
 
         Raises:
-            HTTPException: If the caller is not node-local or card generation fails.
+            HTTPException: If the caller is not an operator or card generation fails.
 
         Side effects:
             Fetches Hub metadata and broadcasts a persistent custom-card mutation.
         """
-        self._require_node_local_remote_code_mutation(request)
+        self._require_operator_mutation(request)
         # Load curated truth before generating the override. A generated card
         # is a metadata cache, not operator-authored placement policy, and must
         # retain architecture safety constraints from an exact bundled match.
@@ -8536,6 +8749,23 @@ class API:
                     self._event_log.append(event)
                     self._maybe_compact_event_log()
                 self.state = apply(self.state, i_event)
+
+                if isinstance(event, (ModelTrustApprovalChanged, StateSnapshotHydrated)):
+                    try:
+                        self._skulk_config = persist_model_trust_config(
+                            self._config_path,
+                            self.state.model_trust_approved_remote_code_identities,
+                        )
+                    except (OSError, ValueError, ValidationError):
+                        logger.exception(
+                            "Failed to persist master-ordered model trust; "
+                            "replicated State remains authoritative for placement"
+                        )
+                    if isinstance(event, ModelTrustApprovalChanged):
+                        self._release_model_trust_decision_waiters(
+                            event.trust_identity,
+                            event.approved,
+                        )
 
                 released_task: task_types.Task | None = None
                 if isinstance(event, TaskDeleted):
@@ -11528,42 +11758,43 @@ class API:
             config_data = _coerce_json_object(cast(dict[object, object], raw_config))
         else:
             config_data = dict(body)
-        # Preserve existing secrets if not provided in this update
-        # (GET /config strips them for security, so saves won't have them)
-        existing_config_object: dict[str, object] | None = None
-        if self._config_path.exists():
-            try:
-                existing = _load_yaml_object(self._config_path)
-                existing_config_object = existing
-                if "hf_token" not in config_data and "hf_token" in existing:
-                    config_data["hf_token"] = existing["hf_token"]
-                # Preserve logging config when omitted from the request
-                if "logging" not in config_data and "logging" in existing:
-                    config_data["logging"] = existing["logging"]
-                # Preserve experiment toggles when omitted from the request.
-                if "experiments" not in config_data and "experiments" in existing:
-                    config_data["experiments"] = existing["experiments"]
-            except Exception:
-                pass
-        # Telemetry section normalization (preserve on partial saves, stamp
-        # consented_version only once decided, backfill install_id): pure
-        # logic lives in field_telemetry.prepare_telemetry_config_update.
-        # Reuses the YAML object already loaded for the secrets-preservation
-        # block above; None when the file was absent or unreadable.
-        prepare_telemetry_config_update(config_data, existing_config_object)
-        # Validate by attempting to parse with Pydantic
-        from skulk.store.config import SkulkConfig
+        if "model_trust" in config_data:
+            self._require_operator_mutation(request)
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Model trust is master-ordered; use the dedicated "
+                    "/models/remote-code-approvals endpoints"
+                ),
+            )
+        requested_config = dict(config_data)
+
+        def merge_local_fields(existing: dict[str, object]) -> dict[str, object]:
+            """Preserve local-only fields inside the atomic config transaction."""
+
+            updated = dict(requested_config)
+            for field_name in (
+                "hf_token",
+                "logging",
+                "experiments",
+                "model_trust",
+            ):
+                if field_name not in updated and field_name in existing:
+                    updated[field_name] = existing[field_name]
+            # Normalize telemetry against the same locked snapshot that will be
+            # replaced, so neither trust nor consent metadata can be stale.
+            prepare_telemetry_config_update(updated, existing or None)
+            SkulkConfig.model_validate(updated)
+            return updated
 
         try:
+            config_data = update_skulk_config_atomic(
+                self._config_path,
+                merge_local_fields,
+            )
             parsed_config = SkulkConfig.model_validate(config_data)
-        except Exception as exc:
+        except (ValueError, yaml.YAMLError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        config_yaml = yaml.safe_dump(
-            config_data, default_flow_style=False, sort_keys=False
-        )
-        # Write locally
-        with self._config_path.open("w") as f:
-            f.write(config_yaml)
         self._skulk_config = parsed_config
         # A consent change must apply immediately, not after the TTL.
         self._telemetry_config_cached_until = 0.0
@@ -11575,6 +11806,7 @@ class API:
 
         broadcast_data = copy.deepcopy(config_data)
         broadcast_data.pop("hf_token", None)
+        broadcast_data.pop("model_trust", None)
         broadcast_yaml = yaml.safe_dump(
             broadcast_data, default_flow_style=False, sort_keys=False
         )
@@ -12044,7 +12276,7 @@ class API:
     ) -> ReconciliationStatus:
         """Run an immediate loopback-only fleet reconciliation pass."""
 
-        self._require_node_local_remote_code_mutation(request)
+        self._require_loopback_mutation(request)
         return await self._run_store_reconciliation()
 
     async def _run_store_reconciliation(self) -> ReconciliationStatus:

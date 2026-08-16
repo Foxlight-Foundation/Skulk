@@ -1,94 +1,51 @@
-"""Trust policy for model artifacts that execute repository code."""
+"""Cluster-wide trust policy for model artifacts that execute repository code."""
 
 import base64
 import hashlib
 import json
+from collections.abc import Set as AbstractSet
 from ipaddress import ip_address
-from pathlib import Path
 from urllib.parse import urlsplit
 
-from filelock import FileLock
-from pydantic import BaseModel, ConfigDict, Field
-
-from skulk.shared.constants import SKULK_MODEL_REMOTE_CODE_APPROVALS_PATH
 from skulk.shared.models.model_cards import ModelCard
+from skulk.store.config import SkulkConfig, load_skulk_config
 
 MODEL_TRUST_FAILURE_MARKER = "model_trust_denied"
 """Stable runner-failure marker for deterministic, non-retriable trust denial."""
 
 
-class RemoteCodeApprovals(BaseModel):
-    """Durable allow-list keyed by immutable registry card identity."""
+def approved_remote_code_identities(
+    config: SkulkConfig | None = None,
+) -> frozenset[str]:
+    """Return exact model-card identities approved for the whole cluster.
 
-    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+    Args:
+        config: Parsed cluster configuration. When omitted, read the converged
+            local ``skulk.yaml`` copy used by every node and runner process.
 
-    schema_version: int = Field(default=1, ge=1)
-    card_ids: frozenset[str] = frozenset()
-
-
-class RemoteCodeApprovalStore:
-    """Read and atomically mutate one node's remote-code allow-list."""
-
-    def __init__(self, path: Path = SKULK_MODEL_REMOTE_CODE_APPROVALS_PATH) -> None:
-        """Bind the store to an explicit local configuration path."""
-        self._path = path
-        self._lock = FileLock(str(path.with_suffix(path.suffix + ".lock")))
-
-    def approved_card_ids(self) -> frozenset[str]:
-        """Return immutable card ids approved on this node."""
-        with self._lock:
-            return self._read().card_ids
-
-    def is_approved(self, card_id: str) -> bool:
-        """Return whether an immutable registry card is locally approved."""
-        return card_id in self.approved_card_ids()
-
-    def approve(self, card_id: str) -> None:
-        """Atomically approve one immutable registry card on this node."""
-        with self._lock:
-            approvals = self._read()
-            self._write(
-                approvals.model_copy(update={"card_ids": approvals.card_ids | {card_id}})
-            )
-
-    def revoke(self, card_id: str) -> None:
-        """Atomically revoke one immutable registry card on this node."""
-        with self._lock:
-            approvals = self._read()
-            self._write(
-                approvals.model_copy(update={"card_ids": approvals.card_ids - {card_id}})
-            )
-
-    def _read(self) -> RemoteCodeApprovals:
-        """Read strict local state, treating a missing file as empty."""
-        if not self._path.exists():
-            return RemoteCodeApprovals()
-        return RemoteCodeApprovals.model_validate_json(
-            self._path.read_bytes(), strict=False
-        )
-
-    def _write(self, approvals: RemoteCodeApprovals) -> None:
-        """Replace approvals without exposing partial or world-readable state."""
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self._path.with_name(f".{self._path.name}.tmp")
-        temporary.write_text(approvals.model_dump_json(indent=2) + "\n")
-        temporary.chmod(0o600)
-        temporary.replace(self._path)
-
-
-REMOTE_CODE_APPROVALS = RemoteCodeApprovalStore()
-"""Process-wide facade over the node-local approval file."""
+    Returns:
+        The operator-approved immutable identities. Missing or unreadable
+        configuration fails closed as an empty set.
+    """
+    if config is None:
+        try:
+            config = load_skulk_config()
+        except Exception:
+            return frozenset()
+    if config is None or config.model_trust is None:
+        return frozenset()
+    return frozenset(config.model_trust.approved_remote_code_identities)
 
 
 def remote_code_execution_requires_approval(card: ModelCard) -> bool:
-    """Return whether repository Python needs explicit node-local approval.
+    """Return whether repository Python needs an explicit operator decision.
 
     MLX vision processor discovery currently includes loaders that enable
     ``trust_remote_code`` internally. Treat that platform behavior as an
     execution risk even when the artifact card itself does not request remote
     code. An immutable Foxlight-provenance card from the signed registry is the
     trust decision for its exact pinned artifact; agent, community, custom and
-    unsigned cards retain the explicit local approval boundary.
+    unsigned cards retain an explicit model-by-model cluster approval boundary.
     """
     return (
         card.trust_remote_code or card.vision is not None
@@ -104,7 +61,8 @@ def remote_code_is_automatically_trusted(card: ModelCard) -> bool:
     therefore evaluated independently.
     """
     return (
-        card.registry_card_id is not None
+        not card.is_custom
+        and card.registry_card_id is not None
         and card.registry_snapshot_id is not None
         and card.registry_provenance == "foxlight"
         and card.source_revision is not None
@@ -112,13 +70,13 @@ def remote_code_is_automatically_trusted(card: ModelCard) -> bool:
 
 
 def remote_code_trust_identity(card: ModelCard) -> str:
-    """Return the immutable identity used by the local approval store.
+    """Return the immutable identity used by cluster model-trust settings.
 
     Signed cards use their registry identity. Unsigned and custom cards use a
     digest of the complete effective card, so a revision or policy change
     cannot inherit approval from an earlier definition.
     """
-    if card.registry_card_id is not None:
+    if not card.is_custom and card.registry_card_id is not None:
         return card.registry_card_id
     payload = card.model_dump(
         mode="json",
@@ -129,16 +87,46 @@ def remote_code_trust_identity(card: ModelCard) -> str:
     return f"local_{digest.rstrip('=')}"
 
 
-def remote_code_approval_required(card: ModelCard) -> bool:
-    """Return whether a repository-code card is blocked on local approval."""
-    return (
-        remote_code_execution_requires_approval(card)
-        and not REMOTE_CODE_APPROVALS.is_approved(remote_code_trust_identity(card))
+def remote_code_approval_required(
+    card: ModelCard,
+    approved_identities: AbstractSet[str] | None = None,
+) -> bool:
+    """Return whether repository code is blocked on cluster approval.
+
+    Args:
+        card: Exact effective model card being downloaded or launched.
+        approved_identities: Injectable cluster allow-list. When omitted, read
+            the converged local cluster configuration.
+
+    Returns:
+        ``True`` when the card can execute repository code and its exact
+        identity has not been approved by the operator.
+    """
+    approvals = (
+        approved_remote_code_identities()
+        if approved_identities is None
+        else approved_identities
+    )
+    return remote_code_execution_requires_approval(card) and (
+        remote_code_trust_identity(card) not in approvals
     )
 
 
-def require_remote_code_approval(card: ModelCard) -> None:
-    """Fail closed before downloading or executing unapproved repository code."""
+def require_remote_code_approval(
+    card: ModelCard,
+    approved_identities: AbstractSet[str] | None = None,
+) -> None:
+    """Fail closed before downloading or executing unapproved repository code.
+
+    Args:
+        card: Exact effective model card being downloaded or launched.
+        approved_identities: Injectable cluster allow-list. When omitted, read
+            the converged local cluster configuration.
+
+    Raises:
+        PermissionError: If a signed card references mutable processor code or
+            the operator has not approved the exact card identity.
+    """
     if (
         card.registry_card_id is not None
         and card.vision is not None
@@ -150,31 +138,35 @@ def require_remote_code_approval(card: ModelCard) -> None:
             "unpinned vision processor repository: "
             f"{card.registry_card_id}"
         )
-    if remote_code_approval_required(card):
+    if remote_code_approval_required(card, approved_identities):
         trust_identity = remote_code_trust_identity(card)
         raise PermissionError(
-            f"{MODEL_TRUST_FAILURE_MARKER}: model card requires node-local "
-            "remote-code approval: "
+            f"{MODEL_TRUST_FAILURE_MARKER}: model card requires cluster "
+            "operator approval for repository code: "
             f"{trust_identity}"
         )
 
 
-def remote_code_approval_mutation_allowed(
+def loopback_mutation_allowed(
     client_host: str | None,
     origin: str | None,
     *,
     forwarding_headers_present: bool = False,
 ) -> bool:
-    """Return whether an HTTP peer may mutate this node's approval file.
+    """Return whether a request came directly from a loopback control surface.
 
-    The socket peer must be loopback. Browser requests must additionally come
-    from a loopback origin so permissive inference CORS cannot turn a remote
-    webpage into a localhost approval authority. A local reverse proxy also
-    appears as a loopback peer, so any forwarding header makes the mutation
-    ineligible rather than attempting to trust or interpret proxy identity.
+    Args:
+        client_host: Socket peer host reported by the ASGI server.
+        origin: Optional browser Origin header.
+        forwarding_headers_present: Whether a proxy-origin header was supplied.
+
+    Returns:
+        ``True`` only for a direct loopback peer and, for browser requests, a
+        loopback origin. Proxy-shaped requests fail closed because a local
+        reverse proxy otherwise appears indistinguishable from localhost.
     """
 
-    def _is_loopback(host: str | None) -> bool:
+    def is_loopback(host: str | None) -> bool:
         if host == "localhost":
             return True
         if host is None:
@@ -184,7 +176,7 @@ def remote_code_approval_mutation_allowed(
         except ValueError:
             return False
 
-    if forwarding_headers_present or not _is_loopback(client_host):
+    if forwarding_headers_present or not is_loopback(client_host):
         return False
     if origin is None:
         return True
@@ -192,6 +184,6 @@ def remote_code_approval_mutation_allowed(
         parsed_origin = urlsplit(origin)
     except ValueError:
         return False
-    return parsed_origin.scheme in {"http", "https"} and _is_loopback(
+    return parsed_origin.scheme in {"http", "https"} and is_loopback(
         parsed_origin.hostname
     )

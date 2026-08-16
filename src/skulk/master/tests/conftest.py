@@ -1,3 +1,7 @@
+import pytest
+
+import skulk.master.placement as placement_module
+from skulk.shared.models.model_cards import ModelCard
 from skulk.shared.types.multiaddr import Multiaddr
 from skulk.shared.types.profiling import (
     MemoryUsage,
@@ -5,6 +9,22 @@ from skulk.shared.types.profiling import (
     NodeNetworkInfo,
 )
 from skulk.shared.types.topology import RDMAConnection, SocketConnection
+
+
+@pytest.fixture(autouse=True)
+def approve_synthetic_planner_cards(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep placement fixtures focused on topology unless a test opts into trust."""
+    def approval_not_required(
+        _card: ModelCard,
+        _approved_identities: set[str] | frozenset[str] | None = None,
+    ) -> bool:
+        return False
+
+    monkeypatch.setattr(
+        placement_module,
+        "remote_code_approval_required",
+        approval_not_required,
+    )
 
 
 def create_node_memory(memory: int, ram_total: int | None = None) -> MemoryUsage:

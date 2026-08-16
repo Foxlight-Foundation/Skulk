@@ -1,9 +1,12 @@
 import pytest
 
+import skulk.master.placement as placement_module
 import skulk.shared.models.model_cards as model_cards_module
 from skulk.master.placement import (
     PlacementError,
     PlacementInfoPendingError,
+    PlacementModelCardIdentityError,
+    PlacementModelCodeApprovalError,
     add_instance_to_placements,
     fallback_command_for_refused_instance,
     get_transition_events,
@@ -28,6 +31,10 @@ from skulk.shared.models.registry import (
     RegistryCapabilityClaim,
     RegistryEngineSupportClaim,
 )
+from skulk.shared.models.remote_code_approval import (
+    remote_code_approval_required as actual_remote_code_approval_required,
+)
+from skulk.shared.models.remote_code_approval import remote_code_trust_identity
 from skulk.shared.topology import Topology
 from skulk.shared.types.commands import CreateInstance, PlaceInstance
 from skulk.shared.types.common import CommandId, NodeId
@@ -1344,6 +1351,185 @@ def test_missing_node_resources_is_treated_as_eligible() -> None:
         node_memory,
         node_network,
         node_resources={},  # nothing gossiped yet
+    )
+
+    assert len(placements) == 1
+
+
+def test_cluster_approved_card_remains_adaptively_placeable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Trust is settled once and does not constrain planner node choice."""
+    topology, _node_a, _node_b, node_memory, node_network = _two_node_topology()
+    card = _small_model_card().model_copy(
+        update={
+            "source_revision": "a" * 40,
+            "registry_card_id": "card_" + "a" * 52,
+            "registry_snapshot_id": "snapshot-test",
+            "registry_provenance": "agent",
+            "trust_remote_code": True,
+        }
+    )
+    trust_identity = remote_code_trust_identity(card)
+    monkeypatch.setattr(
+        placement_module,
+        "remote_code_approval_required",
+        actual_remote_code_approval_required,
+    )
+
+    placements = place_instance(
+        place_instance_command(card),
+        topology,
+        {},
+        node_memory,
+        node_network,
+        approved_remote_code_identities={trust_identity},
+    )
+
+    assert len(placements) == 1
+
+
+def test_placement_fails_actionably_without_cluster_model_approval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unapproved exact registry card is a model-level launch blocker."""
+    topology, _node_a, _node_b, node_memory, node_network = _two_node_topology()
+    card = _small_model_card().model_copy(
+        update={
+            "source_revision": "a" * 40,
+            "registry_card_id": "card_" + "a" * 52,
+            "registry_snapshot_id": "snapshot-test",
+            "registry_provenance": "agent",
+            "trust_remote_code": True,
+        }
+    )
+    trust_identity = remote_code_trust_identity(card)
+    monkeypatch.setattr(
+        placement_module,
+        "remote_code_approval_required",
+        actual_remote_code_approval_required,
+    )
+
+    with pytest.raises(
+        PlacementModelCodeApprovalError,
+        match=trust_identity,
+    ) as failure:
+        place_instance(
+            place_instance_command(card),
+            topology,
+            {},
+            node_memory,
+            node_network,
+            approved_remote_code_identities=frozenset(),
+        )
+
+    assert failure.value.code == "model_code_approval_required"
+
+
+def test_exact_instance_creation_enforces_cluster_model_approval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exact-placement path cannot bypass model-level trust admission."""
+
+    node_id = NodeId()
+    runner_id = RunnerId()
+    card = _small_model_card().model_copy(
+        update={
+            "source_revision": "a" * 40,
+            "registry_card_id": "card_" + "c" * 52,
+            "registry_snapshot_id": "snapshot-test",
+            "registry_provenance": "agent",
+            "trust_remote_code": True,
+        }
+    )
+    trust_identity = remote_code_trust_identity(card)
+    monkeypatch.setattr(
+        placement_module,
+        "remote_code_approval_required",
+        actual_remote_code_approval_required,
+    )
+    instance = MlxRingInstance(
+        instance_id=InstanceId(),
+        shard_assignments=ShardAssignments(
+            model_id=card.model_id,
+            runner_to_shard={runner_id: _make_shard_metadata(card)},
+            node_to_runner={node_id: runner_id},
+        ),
+        hosts_by_node={},
+        ephemeral_port=50000,
+    )
+    command = CreateInstance(instance=instance)
+    node_memory = {node_id: create_node_memory(Memory.from_gb(8).in_bytes)}
+
+    with pytest.raises(PlacementModelCodeApprovalError, match=trust_identity):
+        add_instance_to_placements(
+            command,
+            Topology(),
+            {},
+            node_memory,
+            approved_remote_code_identities=frozenset(),
+        )
+
+    placements = add_instance_to_placements(
+        command,
+        Topology(),
+        {},
+        node_memory,
+        approved_remote_code_identities={trust_identity},
+    )
+    assert instance.instance_id in placements
+
+
+def test_exact_instance_creation_rejects_mismatched_shard_card() -> None:
+    """The master independently rejects inconsistent exact placements."""
+
+    node_id = NodeId()
+    runner_id = RunnerId()
+    assignment_card = _small_model_card()
+    shard_card = assignment_card.model_copy(
+        update={"model_id": ModelId("other-org/other-model")}
+    )
+    instance = MlxRingInstance(
+        instance_id=InstanceId(),
+        shard_assignments=ShardAssignments(
+            model_id=assignment_card.model_id,
+            runner_to_shard={runner_id: _make_shard_metadata(shard_card)},
+            node_to_runner={node_id: runner_id},
+        ),
+        hosts_by_node={},
+        ephemeral_port=50000,
+    )
+
+    with pytest.raises(
+        PlacementModelCardIdentityError,
+        match="other-org/other-model",
+    ):
+        add_instance_to_placements(
+            CreateInstance(instance=instance),
+            Topology(),
+            {},
+            {node_id: create_node_memory(Memory.from_gb(8).in_bytes)},
+        )
+
+
+def test_foxlight_signed_card_needs_no_separate_operator_approval() -> None:
+    """The signed pinned card remains the complete Foxlight trust decision."""
+    topology, _node_a, _node_b, node_memory, node_network = _two_node_topology()
+    card = _small_model_card().model_copy(
+        update={
+            "source_revision": "a" * 40,
+            "registry_card_id": "card_" + "a" * 52,
+            "registry_snapshot_id": "snapshot-test",
+            "registry_provenance": "foxlight",
+        }
+    )
+
+    placements = place_instance(
+        place_instance_command(card),
+        topology,
+        {},
+        node_memory,
+        node_network,
     )
 
     assert len(placements) == 1

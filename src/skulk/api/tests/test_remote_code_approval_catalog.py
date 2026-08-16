@@ -1,57 +1,41 @@
 # pyright: reportPrivateUsage=false
-"""Remote-code approval resolves immutable IDs from the complete catalog."""
+"""Cluster model trust resolves immutable IDs from the complete catalog."""
 
-from typing import cast
+from unittest.mock import AsyncMock
 
 import pytest
-from fastapi import HTTPException
 from starlette.requests import Request
 
 from skulk.api import main as api_main
 from skulk.api.main import API
-from skulk.api.types.api import AddCustomModelParams
+from skulk.api.operator_gateway import OPERATOR_GATEWAY_AUTHORIZED_SCOPE_KEY
 from skulk.shared.models.model_cards import ModelCard, ModelTask, VisionCardConfig
-from skulk.shared.models.remote_code_approval import (
-    RemoteCodeApprovalStore,
-    remote_code_trust_identity,
-)
+from skulk.shared.models.remote_code_approval import remote_code_trust_identity
 from skulk.shared.types.common import ModelId
 from skulk.shared.types.memory import Memory
 
 
-class _RecordingApprovalStore:
-    """Minimal approval-store test double that records immutable IDs."""
-
-    def __init__(self) -> None:
-        self.approved: list[str] = []
-
-    def approve(self, card_id: str) -> None:
-        """Record one approved card ID."""
-        self.approved.append(card_id)
-
-
-@pytest.mark.asyncio
-async def test_remote_client_cannot_add_custom_remote_code_card() -> None:
-    """Custom-card generation shares the node-local approval boundary."""
-    request = Request(
+def _loopback_operator_request() -> Request:
+    """Return a direct-local request authorized for operator mutations."""
+    return Request(
         {
             "type": "http",
-            "method": "POST",
-            "path": "/models/add",
             "headers": [],
-            "client": ("192.0.2.10", 12345),
-            "scheme": "http",
-            "server": ("192.0.2.20", 52415),
+            "client": ("127.0.0.1", 52415),
         }
     )
 
-    with pytest.raises(HTTPException) as raised:
-        await object.__new__(API).add_custom_model(
-            AddCustomModelParams(model_id=ModelId("org/custom-model")),
-            request,
-        )
 
-    assert raised.value.status_code == 403
+def _authenticated_gateway_request() -> Request:
+    """Return a remote request already validated by the operator gateway."""
+    return Request(
+        {
+            "type": "http",
+            "headers": [],
+            "client": ("198.51.100.10", 52415),
+            OPERATOR_GATEWAY_AUTHORIZED_SCOPE_KEY: True,
+        }
+    )
 
 
 @pytest.mark.asyncio
@@ -75,33 +59,20 @@ async def test_image_card_approval_uses_unfiltered_catalog(
     async def complete_catalog() -> list[ModelCard]:
         return [card]
 
-    store = _RecordingApprovalStore()
+    persist = AsyncMock()
+    api = object.__new__(API)
+    monkeypatch.setattr(api, "set_cluster_remote_code_approval", persist)
     monkeypatch.setattr(api_main, "get_all_model_cards", complete_catalog)
-    monkeypatch.setattr(
-        api_main,
-        "REMOTE_CODE_APPROVALS",
-        cast(RemoteCodeApprovalStore, cast(object, store)),
-    )
-    request = Request(
-        {
-            "type": "http",
-            "method": "POST",
-            "path": "/models/remote-code-approvals/test",
-            "headers": [],
-            "client": ("127.0.0.1", 12345),
-            "scheme": "http",
-            "server": ("127.0.0.1", 52415),
-        }
-    )
 
-    result = await object.__new__(API).approve_remote_code(card_id, request)
+    result = await api.approve_remote_code(card_id, _loopback_operator_request())
 
     assert result.card_id == card_id
-    assert store.approved == [card_id]
+    assert result.approved_for_cluster
+    persist.assert_awaited_once_with(card_id, approved=True)
 
 
 def test_model_catalog_exposes_foxlight_automatic_remote_code_trust() -> None:
-    """Operators can distinguish signed trust from a local approval gap."""
+    """Operators can distinguish signed trust from explicit approval."""
     card = ModelCard(
         model_id=ModelId("org/model"),
         source_revision="b" * 40,
@@ -120,7 +91,7 @@ def test_model_catalog_exposes_foxlight_automatic_remote_code_trust() -> None:
 
     assert entry.remote_code_automatically_trusted
     assert not entry.remote_code_approval_required
-    assert not entry.remote_code_approved_on_this_node
+    assert not entry.remote_code_approved_for_cluster
 
 
 @pytest.mark.asyncio
@@ -143,27 +114,16 @@ async def test_custom_card_approval_uses_content_derived_identity(
     async def complete_catalog() -> list[ModelCard]:
         return [card]
 
-    store = _RecordingApprovalStore()
+    persist = AsyncMock()
+    api = object.__new__(API)
+    monkeypatch.setattr(api, "set_cluster_remote_code_approval", persist)
     monkeypatch.setattr(api_main, "get_all_model_cards", complete_catalog)
-    monkeypatch.setattr(
-        api_main,
-        "REMOTE_CODE_APPROVALS",
-        cast(RemoteCodeApprovalStore, cast(object, store)),
-    )
-    request = Request(
-        {
-            "type": "http",
-            "method": "POST",
-            "path": "/models/remote-code-approvals/test",
-            "headers": [],
-            "client": ("127.0.0.1", 12345),
-            "scheme": "http",
-            "server": ("127.0.0.1", 52415),
-        }
-    )
     trust_identity = remote_code_trust_identity(card)
 
-    result = await object.__new__(API).approve_remote_code(trust_identity, request)
+    result = await api.approve_remote_code(
+        trust_identity, _authenticated_gateway_request()
+    )
 
     assert result.card_id == trust_identity
-    assert store.approved == [trust_identity]
+    assert result.approved_for_cluster
+    persist.assert_awaited_once_with(trust_identity, approved=True)

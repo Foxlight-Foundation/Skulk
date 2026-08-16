@@ -9,6 +9,21 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- Placement now keeps heterogeneous engine choice planner-owned: model cards may
+  declare an open set of compatible backends and an ordered fallback preference,
+  and the planner automatically falls through when an earlier engine or host is
+  unavailable. Repository-code trust is now one operator decision per immutable
+  model-card identity in cluster Settings, synchronized to the canonical store
+  and every node rather than repeated machine by machine. Previews expose stable
+  failure categories and placement responses add `X-Skulk-Placement-Failure`
+  without replacing their readable error message. Trust and custom-card writes
+  require direct loopback or authenticated operator-gateway access; synchronized
+  settings preserve node-local Hugging Face credentials and atomically retain
+  owner-only config permissions. Trust changes are serialized by the elected
+  master and replicated as durable state rather than competing replaceable
+  config snapshots, so concurrent approvals and revocations cannot overwrite
+  one another or be resurrected by an unrelated Settings save.
+
 - The managed llama.cpp served engine advances to b10434 across the CUDA and
   Vulkan wheels, verified Linux archives, and the prebaked CUDA pod image. The
   release adds the RPC tensor operation required for DeepSeek V4 multi-node

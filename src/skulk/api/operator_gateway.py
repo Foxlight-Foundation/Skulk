@@ -36,6 +36,8 @@ _INFERENCE_PREFIXES: Final = (
     "/v1/fabric/chains",
     "/bench/",
 )
+OPERATOR_GATEWAY_AUTHORIZED_SCOPE_KEY: Final = "skulk.operator_gateway_authorized"
+"""ASGI scope marker set only after operator bearer validation succeeds."""
 
 
 @final
@@ -89,6 +91,7 @@ class OperatorGatewayAuthorization:
         except (OperatorCredentialInvalidError, OperatorCredentialExpiredError):
             await _deny(scope, receive, send, status_code=401, detail="operator credential invalid")
             return
+        scope[OPERATOR_GATEWAY_AUTHORIZED_SCOPE_KEY] = True
         await self._app(scope, receive, send)
 
 

@@ -60,6 +60,9 @@ def seed_state_for_new_session(prior: State, now: datetime | None = None) -> Sta
       failover. Gossip refreshes them within seconds either way.
     - ``thunderbolt_bridge_cycles`` and ``tracing_enabled`` — cluster
       configuration facts that have no session affinity.
+    - ``model_trust_approved_remote_code_identities`` — security decisions are
+      master-ordered durable facts and must survive election without falling
+      back to independently written node snapshots.
 
     - ``last_seen`` — carried, but re-stamped to ``now`` for every node the
       seed still knows about (the union of the carried ``node_*`` maps) rather
@@ -116,6 +119,9 @@ def seed_state_for_new_session(prior: State, now: datetime | None = None) -> Sta
         instance_failures=prior.instance_failures,
         downloads=_completed_downloads_only(prior.downloads),
         tracing_enabled=prior.tracing_enabled,
+        model_trust_approved_remote_code_identities=(
+            prior.model_trust_approved_remote_code_identities
+        ),
         last_seen=last_seen,
         node_network=prior.node_network,
         node_thunderbolt=prior.node_thunderbolt,

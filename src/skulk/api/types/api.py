@@ -210,18 +210,37 @@ class ModelListModel(BaseModel):
         description=(
             "Whether this card or its selected platform loader can execute "
             "repository Python and is not automatically trusted by immutable "
-            "Foxlight provenance, requiring approval on each serving node."
+            "Foxlight provenance, requiring a cluster operator decision."
+        ),
+    )
+    remote_code_trust_identity: str | None = Field(
+        default=None,
+        pattern=r"^(?:card|local)_[a-z2-7]{52}$",
+        description=(
+            "Exact identity the operator approves for repository-code execution, "
+            "or null when the model needs no explicit decision."
+        ),
+    )
+    remote_code_approved_for_cluster: bool = Field(
+        default=False,
+        description=(
+            "Whether the operator approved this exact immutable model-card "
+            "identity for repository-code execution across the cluster."
         ),
     )
     remote_code_approved_on_this_node: bool = Field(
         default=False,
-        description="Whether the required immutable trust identity is approved locally.",
+        deprecated=True,
+        description=(
+            "Deprecated compatibility alias for remote_code_approved_for_cluster; "
+            "model trust is no longer node-local."
+        ),
     )
     remote_code_automatically_trusted: bool = Field(
         default=False,
         description=(
             "Whether signed Foxlight provenance authorizes repository code for "
-            "this exact pinned registry card without a second local approval."
+            "this exact pinned registry card without a second operator decision."
         ),
     )
     source_revision: str | None = Field(
@@ -267,7 +286,7 @@ class ModelListModel(BaseModel):
 
 
 class RemoteCodeApprovalView(BaseModel):
-    """Node-local approval state for one immutable model-card identity."""
+    """Cluster approval state for one immutable model-card identity."""
 
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
@@ -278,11 +297,18 @@ class RemoteCodeApprovalView(BaseModel):
             "unsigned/custom card."
         ),
     )
-    approved_on_this_node: bool = Field(
+    approved_for_cluster: bool = Field(
         description=(
-            "Whether this API node's local approval file permits the card to "
-            "download or execute repository code."
+            "Whether cluster Settings permit the card to download or execute "
+            "repository code on every node."
         )
+    )
+    approved_on_this_node: bool = Field(
+        deprecated=True,
+        description=(
+            "Deprecated compatibility alias for approved_for_cluster; trust "
+            "decisions are synchronized across the cluster."
+        ),
     )
 
 
@@ -1511,6 +1537,18 @@ class PlacementPreview(BaseModel):
     # Keys are NodeId strings, values are additional bytes that would be used on that node
     memory_delta_by_node: dict[str, int] | None = None
     error: str | None = None
+    error_code: Literal[
+        "no_valid_placement",
+        "placement_info_pending",
+        "model_code_approval_required",
+        "model_card_identity_mismatch",
+    ] | None = Field(
+        default=None,
+        description=(
+            "Stable placement failure category, or null for a launchable preview. "
+            "Backend and hardware identifiers remain open strings elsewhere."
+        ),
+    )
     trust_requirement: str | None = Field(
         default=None,
         description=(

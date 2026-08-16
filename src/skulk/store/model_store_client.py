@@ -1174,8 +1174,8 @@ class ModelStoreClient:
                 or ``None`` to follow mutable ``main``.
             source_repository: Upstream Hugging Face repository containing the
                 bytes. ``None`` means it is identical to the store identity.
-            registry_card_id: Immutable signed-card identity whose node-local
-                approval policy the store host must independently enforce.
+            registry_card_id: Immutable signed-card identity whose synchronized
+                cluster approval policy the store host independently enforces.
             owner_model_id: Owning base-model alias for a companion artifact.
             owner_registry_card_id: Immutable owning card for a companion.
             artifact_role: Base or declared companion role retained locally.
@@ -1856,7 +1856,7 @@ class ModelStoreDownloader(ShardDownloader):
         # A companion shard intentionally carries a bare transport card to stop
         # recursive companion discovery. Its owning full card is the trust
         # decision; evaluating the synthetic bare card would discard signed
-        # provenance and spuriously demand a second local approval.
+        # provenance and spuriously demand a second operator approval.
         require_remote_code_approval(installed_owner_card or shard.model_card)
         protected_model_ids = {
             str(shard.model_card.model_id),

@@ -42,6 +42,7 @@ from skulk.worker.tests.constants import MODEL_A_ID
 def _master(
     initial_state: State | None,
     telemetry_view: TelemetryView | None = None,
+    initial_model_trust_identities: tuple[str, ...] = (),
 ) -> tuple[Master, Receiver[GlobalForwarderEvent]]:
     global_send, global_recv = channel[GlobalForwarderEvent]()
     master = Master(
@@ -56,6 +57,7 @@ def _master(
         download_command_sender=channel[ForwarderDownloadCommand]()[0],
         initial_state=initial_state,
         telemetry_view=telemetry_view,
+        initial_model_trust_identities=initial_model_trust_identities,
     )
     return master, global_recv
 
@@ -96,6 +98,40 @@ async def test_no_seed_indexes_nothing():
         await master._index_seed_event()  # pyright: ignore[reportPrivateUsage]
     assert master.state.instances == {}
     assert master.state.last_event_applied_idx == -1
+
+
+async def test_cold_start_trust_baseline_is_indexed_before_state_sync() -> None:
+    """Existing config approvals reach followers through indexed event zero."""
+
+    trust_identity = "card_" + ("a" * 52)
+    master, global_recv = _master(
+        None,
+        initial_model_trust_identities=(trust_identity,),
+    )
+    received: list[GlobalForwarderEvent] = []
+
+    async def consume() -> None:
+        with global_recv as events:
+            async for event in events:
+                received.append(event)
+                return
+
+    with anyio.fail_after(10):
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(consume)
+            await master._index_seed_event()  # pyright: ignore[reportPrivateUsage]
+
+    assert master.state.last_event_applied_idx == 0
+    assert master.state.model_trust_approved_remote_code_identities == (
+        trust_identity,
+    )
+    assert len(received) == 1
+    assert received[0].origin_idx == 0
+    assert isinstance(received[0].event, StateSnapshotHydrated)
+    assert (
+        received[0].event.state.model_trust_approved_remote_code_identities
+        == (trust_identity,)
+    )
 
 
 @pytest.mark.parametrize("tracing", [True, False])

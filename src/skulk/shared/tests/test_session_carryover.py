@@ -36,6 +36,7 @@ def _prior_state() -> tuple[State, NodeId]:
         last_seen={node: datetime(2020, 1, 1, tzinfo=timezone.utc)},
         topology=topology,
         tracing_enabled=True,
+        model_trust_approved_remote_code_identities=(f"card_{'a' * 52}",),
         last_event_applied_idx=4242,
         # A connectivity field stays on the control plane and is carried; the
         # telemetry-plane readings (identities/disk/etc.) are not.
@@ -49,6 +50,10 @@ def test_carries_durable_facts():
     assert seed.instances == prior.instances
     assert seed.downloads == prior.downloads
     assert seed.tracing_enabled is True
+    assert (
+        seed.model_trust_approved_remote_code_identities
+        == prior.model_trust_approved_remote_code_identities
+    )
     assert node in seed.node_network
     # The telemetry-plane readings (node_memory/system since slice 2;
     # node_identities/disk/rdma-ctl since slice 3) are no longer carried — they

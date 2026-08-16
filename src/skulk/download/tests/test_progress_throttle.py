@@ -8,6 +8,7 @@ readings regardless of size or duration; completion and failure still use the
 ordered event plane.
 """
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
@@ -27,6 +28,7 @@ from skulk.shared.types.worker.downloads import (
     DownloadOngoing,
     DownloadProgressData,
 )
+from skulk.store.config import persist_model_trust_config, update_skulk_config_atomic
 from skulk.utils.channels import channel
 from skulk.worker.tests.constants import MODEL_A_ID
 
@@ -71,6 +73,70 @@ async def test_synced_config_notifies_config_dependent_capabilities(
 
     assert config_path.read_text() == "experiments:\n  stt_realtime: true\n"
     assert callbacks == 1
+
+
+@pytest.mark.asyncio
+async def test_synced_config_preserves_node_local_hugging_face_token(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Secret-stripped cluster sync cannot erase a node's local credential."""
+
+    config_path = tmp_path / "skulk.yaml"
+    card_id = f"card_{'a' * 52}"
+    config_path.write_text(
+        "hf_token: local-secret\n"
+        "model_trust:\n"
+        "  approved_remote_code_identities:\n"
+        f"    - {card_id}\n"
+    )
+    coordinator = _make_coordinator()
+    monkeypatch.setattr(coordinator_mod, "resolve_config_path", lambda: config_path)
+
+    await coordinator._sync_config("logging:\n  enabled: false\n")
+
+    synchronized = config_path.read_text()
+    assert "hf_token: local-secret" in synchronized
+    assert "model_trust:" in synchronized
+    assert card_id in synchronized
+    assert config_path.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.asyncio
+async def test_synced_config_merges_latest_trust_inside_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A peer config sync cannot overwrite a concurrent trust decision."""
+
+    config_path = tmp_path / "skulk.yaml"
+    initial_identity = f"card_{'a' * 52}"
+    latest_identity = f"card_{'b' * 52}"
+    persist_model_trust_config(config_path, [initial_identity])
+    coordinator = _make_coordinator()
+    monkeypatch.setattr(coordinator_mod, "resolve_config_path", lambda: config_path)
+
+    def inject_latest_trust(
+        path: Path,
+        update: object,
+    ) -> dict[str, object]:
+        persist_model_trust_config(path, [latest_identity])
+        return update_skulk_config_atomic(
+            path,
+            cast("Callable[[dict[str, object]], dict[str, object]]", update),
+        )
+
+    monkeypatch.setattr(
+        coordinator_mod,
+        "update_skulk_config_atomic",
+        inject_latest_trust,
+    )
+
+    await coordinator._sync_config("logging:\n  enabled: false\n")
+
+    synchronized = config_path.read_text()
+    assert latest_identity in synchronized
+    assert initial_identity not in synchronized
 
 
 def test_in_progress_throttle_gates_by_fraction_rate_and_heartbeat(

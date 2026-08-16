@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,7 @@ from skulk.store.config import (
     hostname_aliases,
     load_skulk_config,
     node_matches_store_host,
+    persist_model_trust_config,
     resolve_node_staging,
 )
 
@@ -125,6 +127,41 @@ def test_load_skulk_config_fails_loud_on_legacy_exo_yaml(tmp_path: Path) -> None
     target = tmp_path / "skulk.yaml"
     with pytest.raises(FileNotFoundError, match="exo.yaml is no longer read"):
         load_skulk_config(target)
+
+
+def test_persist_model_trust_updates_only_authoritative_section(
+    tmp_path: Path,
+) -> None:
+    """Indexed trust updates retain node-local secrets and unrelated settings."""
+    target = tmp_path / "skulk.yaml"
+    target.write_text(
+        "hf_token: keep-secret\nlogging:\n  enabled: true\n  ingest_url: https://logs.invalid\n"
+    )
+    card_id = f"card_{'a' * 52}"
+
+    config = persist_model_trust_config(target, [card_id])
+
+    assert config.hf_token == "keep-secret"
+    assert config.logging is not None and config.logging.enabled
+    assert config.model_trust is not None
+    assert config.model_trust.approved_remote_code_identities == [card_id]
+    assert target.stat().st_mode & 0o777 == 0o600
+
+
+def test_persist_model_trust_without_descriptor_chmod(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Platforms without os.fchmod still atomically persist cluster trust."""
+
+    target = tmp_path / "skulk.yaml"
+    target.write_text("{}\n")
+    monkeypatch.delattr(os, "fchmod")
+    card_id = f"card_{'b' * 52}"
+
+    config = persist_model_trust_config(target, [card_id])
+
+    assert config.model_trust is not None
+    assert config.model_trust.approved_remote_code_identities == [card_id]
 
 
 def test_experiments_config_defaults_speech_streaming_off() -> None:

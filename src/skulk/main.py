@@ -67,6 +67,7 @@ from skulk.shared.types.events import (
     IndexedEvent,
     InstanceCreated,
     InstanceDeleted,
+    ModelTrustApprovalChanged,
     NodeDownloadProgress,
     RunnerStatusUpdated,
     StagedModelEvicted,
@@ -85,6 +86,7 @@ from skulk.store.config import (
     SkulkConfig,
     load_skulk_config,
     node_matches_store_host,
+    persist_model_trust_config,
     resolve_config_path,
     resolve_node_staging,
 )
@@ -840,6 +842,11 @@ class Node:
                 node_id,
                 skulk_config,
             ),
+            initial_model_trust_identities=(
+                tuple(skulk_config.model_trust.approved_remote_code_identities)
+                if skulk_config is not None and skulk_config.model_trust is not None
+                else ()
+            ),
         )
 
         er_send, er_recv = channel[ElectionResult]()
@@ -923,15 +930,52 @@ class Node:
             return
 
     async def _observe_artifact_inventory_events(self) -> None:
-        """Translate relevant replicated transitions into local rescan hints."""
+        """Apply node-level replicated side effects and local rescan hints.
+
+        Dedicated model-store hosts may intentionally run without either a
+        worker or an API. Those roles normally persist the master-ordered trust
+        set, so this node-level subscriber owns that side effect only when both
+        are absent. This keeps repository-code authorization cluster-scoped for
+        every supported node role without duplicating writes on ordinary nodes.
+        """
 
         receiver = self.artifact_inventory_event_receiver
         if receiver is None:
             return
+        trust_approvals = set(
+            self.skulk_config.model_trust.approved_remote_code_identities
+            if self.skulk_config is not None
+            and self.skulk_config.model_trust is not None
+            else ()
+        )
         with receiver as events:
             async for indexed_event in events:
+                event = indexed_event.event
+                if self.worker is None and self.api is None:
+                    if isinstance(event, StateSnapshotHydrated):
+                        trust_approvals = set(
+                            event.state.model_trust_approved_remote_code_identities
+                        )
+                    elif isinstance(event, ModelTrustApprovalChanged):
+                        if event.approved:
+                            trust_approvals.add(event.trust_identity)
+                        else:
+                            trust_approvals.discard(event.trust_identity)
+                    if isinstance(
+                        event, (ModelTrustApprovalChanged, StateSnapshotHydrated)
+                    ):
+                        try:
+                            self.skulk_config = persist_model_trust_config(
+                                resolve_config_path(), trust_approvals
+                            )
+                        except (OSError, ValueError):
+                            logger.exception(
+                                "Store-only node failed to persist master-ordered "
+                                "model trust; repository-code downloads remain "
+                                "fail-closed"
+                            )
                 if isinstance(
-                    indexed_event.event,
+                    event,
                     (
                         InstanceCreated,
                         InstanceDeleted,
@@ -1282,6 +1326,7 @@ class Node:
         broadcast_dict = copy.deepcopy(self.skulk_config.model_dump())
         broadcast_dict["model_store"]["store_http_host"] = reachable_host
         broadcast_dict.pop("hf_token", None)
+        broadcast_dict.pop("model_trust", None)
         broadcast_yaml = yaml.safe_dump(
             broadcast_dict, default_flow_style=False, sort_keys=False
         )
@@ -1352,14 +1397,20 @@ class Node:
                     and self.master is None
                 ):
                     logger.info("Node elected Master - promoting self")
-                    # Seed the new session from this node's replicated view
-                    # (captured before the worker below is torn down and
-                    # re-created): placements survive master failover (#273)
-                    # instead of every worker reconciling its healthy runners
-                    # away against an empty snapshot. apply() replaces the
-                    # worker's state wholesale (immutable convention), so the
-                    # reference read here is a consistent snapshot.
-                    prior_state = self.worker.state if self.worker is not None else None
+                    # Seed the new session from this node's freshest replicated
+                    # view (captured before local roles are torn down and
+                    # re-created). API-only management nodes must use API State:
+                    # their startup config can lag a master-ordered trust event,
+                    # so falling back to it could resurrect a revocation after
+                    # promotion. apply() replaces State wholesale (immutable
+                    # convention), making either reference a consistent snapshot.
+                    prior_state = (
+                        self.worker.state
+                        if self.worker is not None
+                        else self.api.state
+                        if self.api is not None
+                        else None
+                    )
                     self.master = Master(
                         self.node_id,
                         result.session_id,
@@ -1385,6 +1436,14 @@ class Node:
                         state_sync_store_http_host=_state_sync_store_http_host(
                             self.node_id,
                             self.skulk_config,
+                        ),
+                        initial_model_trust_identities=(
+                            tuple(
+                                self.skulk_config.model_trust.approved_remote_code_identities
+                            )
+                            if self.skulk_config is not None
+                            and self.skulk_config.model_trust is not None
+                            else ()
                         ),
                     )
                     self._tg.start_soon(self.master.run)

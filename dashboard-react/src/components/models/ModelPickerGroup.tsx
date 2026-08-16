@@ -323,8 +323,8 @@ function ModelGroupInfo({ group, title }: { group: ModelGroup; title: string }) 
         {v.remote_code_approval_required && (
           <>
             <span style={{ color: theme.colors.textMuted }}>{t('modelInfo.remoteCode', 'Repository code')}</span>
-            <span style={{ color: v.remote_code_approved_on_this_node ? theme.colors.healthy : theme.colors.warning }}>
-              {v.remote_code_approved_on_this_node ? t('modelInfo.approvedHere', 'Approved on this node') : t('modelInfo.approvalRequired', 'Approval required on this node')}
+            <span style={{ color: v.remote_code_approved_for_cluster ? theme.colors.healthy : theme.colors.warning }}>
+              {v.remote_code_approved_for_cluster ? t('modelInfo.approvedForCluster', 'Approved for cluster') : t('modelInfo.approvalRequired', 'Operator approval required')}
             </span>
           </>
         )}

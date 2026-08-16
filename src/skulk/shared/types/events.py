@@ -238,6 +238,18 @@ class TracingStateChanged(BaseEvent):
     enabled: bool
 
 
+class ModelTrustApprovalChanged(BaseEvent):
+    """One master-ordered exact-card repository-code trust decision."""
+
+    trust_identity: str = Field(
+        pattern=r"^(?:card|local)_[a-z2-7]{52}$",
+        description="Immutable signed-card or content-derived model trust identity.",
+    )
+    approved: bool = Field(
+        description="Whether repository code for the exact identity is authorized."
+    )
+
+
 Event = (
     TestEvent
     | TaskCreated
@@ -259,6 +271,7 @@ Event = (
     | TracesCollected
     | TracesMerged
     | TracingStateChanged
+    | ModelTrustApprovalChanged
     | CustomModelCardAdded
     | CustomModelCardDeleted
     | StagedModelEvicted
@@ -281,6 +294,7 @@ _PERSISTED_CONTROL_EVENT_TYPES: tuple[type[BaseEvent], ...] = (
     TopologyEdgeCreated,
     TopologyEdgeDeleted,
     TracingStateChanged,
+    ModelTrustApprovalChanged,
     CustomModelCardAdded,
     CustomModelCardDeleted,
     StagedModelEvicted,

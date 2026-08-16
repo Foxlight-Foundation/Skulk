@@ -7,11 +7,20 @@ especially because wedges take ~300s each and would never trip the
 3-in-60s crash window.
 """
 
-from skulk.shared.models.remote_code_approval import MODEL_TRUST_FAILURE_MARKER
+import pytest
+
+from skulk.shared.models.model_cards import ModelCard, ModelTask
+from skulk.shared.models.remote_code_approval import (
+    MODEL_TRUST_FAILURE_MARKER,
+    remote_code_trust_identity,
+)
 from skulk.shared.types.common import ModelId
+from skulk.shared.types.memory import Memory
+from skulk.shared.types.state import State
 from skulk.shared.types.worker.runners import RunnerFailed, RunnerReady
 from skulk.worker.main import (
     _model_load_trust_failure_message,  # pyright: ignore[reportPrivateUsage] — unit under test
+    _require_worker_model_code_approval,  # pyright: ignore[reportPrivateUsage] — unit under test
     _runner_failed_wedged,  # pyright: ignore[reportPrivateUsage] — unit under test
     model_trust_failed_live_instances,
 )
@@ -172,3 +181,29 @@ def test_missing_model_path_is_a_terminal_trust_failure() -> None:
 
     assert message.startswith(f"{MODEL_TRUST_FAILURE_MARKER}:")
     assert "model missing" in message
+
+
+def test_worker_state_gate_overrides_stale_local_approval() -> None:
+    """A replicated revocation blocks starts even when disk persistence failed."""
+
+    card = ModelCard(
+        model_id=ModelId("org/model"),
+        storage_size=Memory.from_mb(100),
+        n_layers=4,
+        hidden_size=64,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        source_revision="a" * 40,
+        registry_card_id="card_" + "a" * 52,
+        registry_snapshot_id="snapshot-test",
+        registry_provenance="agent",
+        trust_remote_code=True,
+    )
+    identity = remote_code_trust_identity(card)
+
+    _require_worker_model_code_approval(
+        card,
+        State(model_trust_approved_remote_code_identities=(identity,)),
+    )
+    with pytest.raises(PermissionError, match=identity):
+        _require_worker_model_code_approval(card, State())

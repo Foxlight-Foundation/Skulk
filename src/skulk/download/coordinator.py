@@ -51,7 +51,7 @@ from skulk.shared.types.worker.downloads import (
     DownloadProgress,
 )
 from skulk.shared.types.worker.shards import PipelineShardMetadata, ShardMetadata
-from skulk.store.config import resolve_config_path
+from skulk.store.config import resolve_config_path, update_skulk_config_atomic
 from skulk.utils.channels import Receiver, Sender
 from skulk.utils.task_group import TaskGroup
 
@@ -336,12 +336,30 @@ class DownloadCoordinator:
         apply runtime-effective settings (e.g., KV cache backend)."""
         config_path = resolve_config_path()
         try:
-            config_path.write_text(config_yaml)
+            received = _coerce_json_object(cast(object, yaml.safe_load(config_yaml)))
+
+            def preserve_local_fields(
+                existing: dict[str, object],
+            ) -> dict[str, object]:
+                """Merge node-local secrets and trust inside the write lock."""
+
+                updated = dict(received)
+                if "hf_token" not in updated and "hf_token" in existing:
+                    updated["hf_token"] = existing["hf_token"]
+                if "model_trust" not in updated and "model_trust" in existing:
+                    updated["model_trust"] = existing["model_trust"]
+                return updated
+
+            raw = update_skulk_config_atomic(config_path, preserve_local_fields)
+            local_config_yaml = yaml.safe_dump(
+                raw,
+                default_flow_style=False,
+                sort_keys=False,
+            )
             logger.info(
-                f"DownloadCoordinator: synced {config_path.name} from cluster ({len(config_yaml)} bytes)"
+                f"DownloadCoordinator: synced {config_path.name} from cluster ({len(local_config_yaml)} bytes)"
             )
             # Apply inference config to env var so next runner spawn picks it up
-            raw = _coerce_json_object(cast(object, yaml.safe_load(config_yaml)))
             inference = _coerce_json_object(raw.get("inference"))
             if "kv_cache_backend" in inference:
                 # Don't overwrite if user provided the env var at launch

@@ -48,3 +48,23 @@ experimental, unsupported, other-artifact, or incomplete evidence fails closed.
 Empirical load and feature claims are pinned to the exact card tested. Model
 APIs, placement previews, and the dashboard expose the evidence source and
 actionable compatibility gaps.
+
+## Adaptive placement and model-scoped trust
+
+Models may advertise several compatible engines and an ordered preference;
+Skulk keeps the final choice in the planner and falls through to another
+currently admissible engine or node when the preferred option is unavailable.
+Placement failures retain readable messages and now expose a stable category
+for operator clients.
+
+Repository-code trust is now one operator decision per exact immutable model
+card, managed in cluster Settings rather than repeated on individual nodes.
+Revision-pinned Foxlight-provenance cards from the signed registry are already
+Foxlight's trust decision. Agent, community, custom, and unsigned cards remain
+loadable after explicit approval, and any changed card identity must be
+evaluated again. Trust and custom-card mutations require the direct-local
+dashboard or an authenticated operator-gateway credential. Config convergence
+also preserves each node's private Hugging Face token and owner-only config
+permissions. Approval and revocation are serialized by the elected master and
+replicated as durable cluster state, so concurrent operator actions and
+unrelated Settings saves cannot overwrite or resurrect trust decisions.

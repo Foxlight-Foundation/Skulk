@@ -13,10 +13,13 @@ import pytest
 from fastapi.testclient import TestClient
 
 import skulk.api.main as api_main
+import skulk.master.placement as placement_module
 from skulk.api.main import API
+from skulk.master.placement import PlacementModelCodeApprovalError
 from skulk.shared.election import ElectionMessage
 from skulk.shared.models.model_cards import ModelCard, ModelTask
 from skulk.shared.models.registry import RegistryEngineSupportClaim
+from skulk.shared.models.remote_code_approval import remote_code_trust_identity
 from skulk.shared.types.commands import (
     ForwarderCommand,
     ForwarderDownloadCommand,
@@ -67,11 +70,15 @@ def _card() -> ModelCard:
 
 
 def _single_node_instance(
-    node: str, *, resolved_backend: str | None = None
+    node: str,
+    *,
+    model_card: ModelCard | None = None,
+    resolved_backend: str | None = None,
 ) -> MlxRingInstance:
     runner = RunnerId(f"runner-{node}")
+    card = _card() if model_card is None else model_card
     shard = PipelineShardMetadata(
-        model_card=_card(),
+        model_card=card,
         device_rank=0,
         world_size=1,
         start_layer=0,
@@ -89,6 +96,74 @@ def _single_node_instance(
         hosts_by_node={},
         ephemeral_port=0,
     )
+
+
+async def test_exact_instance_creation_reports_model_trust_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """POST /instance rejects unapproved shard cards before acknowledgement."""
+
+    api = _build_api()
+    client = TestClient(api.app)
+    card = _card().model_copy(
+        update={
+            "source_revision": "a" * 40,
+            "registry_card_id": "card_" + "d" * 52,
+            "registry_snapshot_id": "snapshot-test",
+            "registry_provenance": "agent",
+            "trust_remote_code": True,
+        }
+    )
+    instance = _single_node_instance("unapproved-node", model_card=card)
+
+    async def _load(_model_id: object) -> ModelCard:
+        return card
+
+    monkeypatch.setattr(ModelCard, "load", staticmethod(_load))
+    response = client.post(
+        "/instance",
+        json={"instance": instance.model_dump(mode="json")},
+    )
+
+    assert response.status_code == 400
+    assert (
+        response.headers["X-Skulk-Placement-Failure"]
+        == "model_code_approval_required"
+    )
+    assert remote_code_trust_identity(card) in response.json()["error"]["message"]
+
+
+async def test_exact_instance_creation_rejects_mismatched_shard_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """POST /instance cannot mix assignment and embedded model identities."""
+
+    api = _build_api()
+    client = TestClient(api.app)
+    canonical_card = _card()
+    mismatched_card = canonical_card.model_copy(
+        update={"model_id": ModelId("other-org/other-model")}
+    )
+    instance = _single_node_instance(
+        "mismatched-node",
+        model_card=mismatched_card,
+    )
+
+    async def _load(_model_id: object) -> ModelCard:
+        return canonical_card
+
+    monkeypatch.setattr(ModelCard, "load", staticmethod(_load))
+    response = client.post(
+        "/instance",
+        json={"instance": instance.model_dump(mode="json")},
+    )
+
+    assert response.status_code == 400
+    assert (
+        response.headers["X-Skulk-Placement-Failure"]
+        == "model_card_identity_mismatch"
+    )
+    assert "other-org/other-model" in response.json()["error"]["message"]
 
 
 async def test_preview_exposes_exact_signed_engine_support(
@@ -122,6 +197,20 @@ async def test_preview_exposes_exact_signed_engine_support(
             "registry_architecture": "future_architecture_v1",
             "registry_artifact_format": "safetensors",
         }
+    )
+    monkeypatch.setattr(
+        api,
+        "_cluster_remote_code_approvals",
+        lambda: frozenset({card.registry_card_id or ""}),
+    )
+
+    def approval_not_required(_card: ModelCard) -> bool:
+        return False
+
+    monkeypatch.setattr(
+        placement_module,
+        "remote_code_approval_required",
+        approval_not_required,
     )
     support = RegistryEngineSupportClaim.model_validate(
         {
@@ -177,6 +266,73 @@ async def test_preview_exposes_exact_signed_engine_support(
         preview["support_claim_ids"] == [support.claim_id]
         for preview in successful
     )
+    assert all(preview["trust_requirement"] is None for preview in successful)
+
+
+async def test_preview_reports_stable_trust_failure_category(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fleet-wide trust block is actionable without freezing a preview."""
+    api = _build_api()
+    client = TestClient(api.app)
+    api.state.topology.add_node(NodeId("unapproved-node"))
+
+    async def _load(_model_id: object) -> ModelCard:
+        return _card()
+
+    def _blocked(
+        _command: PlaceInstance, **_kwargs: object
+    ) -> dict[InstanceId, MlxRingInstance]:
+        raise PlacementModelCodeApprovalError(
+            "No candidate serving cycle approves the exact model card."
+        )
+
+    monkeypatch.setattr(ModelCard, "load", staticmethod(_load))
+    monkeypatch.setattr(api_main, "get_instance_placements", _blocked)
+
+    response = client.get("/instance/previews", params={"model_id": str(_MODEL_ID)})
+
+    assert response.status_code == 200
+    previews = cast("list[dict[str, object]]", response.json()["previews"])
+    assert previews
+    assert all(preview["instance"] is None for preview in previews)
+    assert all(
+        preview["error_code"] == "model_code_approval_required"
+        for preview in previews
+    )
+    assert all(preview["trust_requirement"] for preview in previews)
+
+
+async def test_launch_reports_stable_trust_failure_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Adaptive launch keeps readable detail plus a machine-stable category."""
+    api = _build_api()
+    client = TestClient(api.app)
+
+    async def _load(_model_id: object) -> ModelCard:
+        return _card()
+
+    def _blocked(
+        _command: PlaceInstance, **_kwargs: object
+    ) -> dict[InstanceId, MlxRingInstance]:
+        raise PlacementModelCodeApprovalError(
+            "Approve the exact model card in cluster Settings."
+        )
+
+    monkeypatch.setattr(ModelCard, "load", staticmethod(_load))
+    monkeypatch.setattr(api_main, "get_instance_placements", _blocked)
+
+    response = client.post(
+        "/place_instance",
+        json={"model_id": str(_MODEL_ID)},
+    )
+
+    assert response.status_code == 400
+    assert response.headers["X-Skulk-Placement-Failure"] == (
+        "model_code_approval_required"
+    )
+    assert "Approve the exact model card" in response.json()["error"]["message"]
 
 
 async def test_previews_surface_per_host_alternatives(
@@ -219,7 +375,7 @@ async def test_previews_surface_per_host_alternatives(
     alternatives = [p for p in previews if p.get("alternative")]
     assert any(p.get("instance") is not None for p in ranked)
     assert all(
-        "node-local approval" in str(preview.get("trust_requirement"))
+        "cluster operator approval" in str(preview.get("trust_requirement"))
         for preview in previews
     )
     assert len(alternatives) == 1

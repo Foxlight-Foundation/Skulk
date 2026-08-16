@@ -72,6 +72,12 @@ export interface IntelligentFabricConfig {
   steward_models?: string[];
 }
 
+/** Cluster-wide operator decisions for exact model-card identities. */
+export interface ModelTrustConfig {
+  /** Cards approved to execute repository-supplied code on every node. */
+  approved_remote_code_identities: string[];
+}
+
 export interface FullConfig {
   model_store?: PersistedStoreConfig;
   inference?: InferenceConfig;
@@ -79,6 +85,7 @@ export interface FullConfig {
   experiments?: ExperimentsConfig;
   telemetry?: TelemetryConfig;
   intelligent_fabric?: IntelligentFabricConfig;
+  model_trust?: ModelTrustConfig;
   hf_token?: string;
 }
 
