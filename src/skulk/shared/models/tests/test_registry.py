@@ -17,6 +17,7 @@ import skulk.shared.models.registry as registry_module
 from skulk.shared.models.model_cards import (
     ModelCard,
     ModelTask,
+    load_cached_registry_engine_support,
     registry_model_cards,
     registry_supported_backends_for_node,
 )
@@ -224,6 +225,34 @@ def test_signed_support_expands_only_exact_node_build(
 
     assert exact == frozenset({"llama_server", "llama_server-vulkan"})
     assert stale == frozenset()
+
+
+def test_runner_process_restores_signed_support_from_verified_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unstamped child fallback recovers support not inherited from its parent."""
+    card = registry_model_cards(
+        RegistryCatalog.model_validate_json(_catalog_payload(), strict=False)
+    )[0]
+    support = RegistryEngineSupport.model_validate_json(
+        _engine_support_payload(), strict=False
+    )
+    monkeypatch.setattr(model_cards_module, "_registry_engine_support", ())
+    monkeypatch.setattr(
+        model_cards_module._registry_client,
+        "load_cached_engine_support",
+        lambda: support,
+    )
+
+    assert load_cached_registry_engine_support() is True
+    assert registry_supported_backends_for_node(
+        card,
+        node_backends=frozenset({"llama_server-vulkan"}),
+        engine_builds={
+            "llama_server-vulkan": "llama.cpp@sha256:" + "1" * 64
+        },
+        hardware_classes=frozenset({"amd"}),
+    ) == frozenset({"llama_server-vulkan"})
 
 
 def test_signed_support_rejects_other_artifact_and_incomplete_capability(

@@ -414,7 +414,10 @@ def _resolve_text_engine(bound_instance: BoundInstance) -> str | None:
         probe_node_backends,
         resolve_node_engine,
     )
-    from skulk.shared.models.model_cards import registry_supported_backends_for_node
+    from skulk.shared.models.model_cards import (
+        load_cached_registry_engine_support,
+        registry_supported_backends_for_node,
+    )
     shard = bound_instance.bound_shard
     require_remote_code_approval(shard.model_card)
     if shard.resolved_backend is not None:
@@ -426,6 +429,8 @@ def _resolve_text_engine(bound_instance: BoundInstance) -> str | None:
     engine_builds = safe_engine_build_inventory(
         lambda: engine_build_inventory(derivation.backends, facts)
     )
+    if shard.model_card.registry_card_id is not None:
+        load_cached_registry_engine_support()
     compatible_backends = placement.compatible_backends | (
         registry_supported_backends_for_node(
             shard.model_card,

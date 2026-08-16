@@ -513,6 +513,32 @@ def get_model_advisories(model_card: "ModelCard") -> tuple[RegistryAdvisory, ...
     )
 
 
+def load_cached_registry_engine_support() -> bool:
+    """Load previously TUF-verified support claims into this process.
+
+    Runner subprocesses do not inherit the parent's Python module globals. This
+    synchronous cache-only path restores the signed support projection without
+    network access before a legacy unstamped shard performs node-local fallback.
+
+    Returns:
+        True when verified support is available in this process, otherwise False.
+
+    Side effects:
+        Replaces the process-local active support-claim tuple and logs a warning
+        when the verified cache is absent or invalid.
+    """
+    global _registry_engine_support  # noqa: PLW0603
+    if _registry_engine_support:
+        return True
+    try:
+        support = _registry_client.load_cached_engine_support()
+    except Exception as error:  # noqa: BLE001 - optional signed fallback boundary
+        logger.warning(f"cached signed engine support unavailable ({error})")
+        return False
+    _registry_engine_support = support.active_claims()
+    return True
+
+
 def get_model_engine_support(
     model_card: "ModelCard",
 ) -> tuple[RegistryEngineSupportClaim, ...]:
