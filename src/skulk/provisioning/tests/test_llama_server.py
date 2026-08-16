@@ -36,6 +36,20 @@ def test_select_variant_chain_by_gpu_vendor() -> None:
     assert select_variant(make_facts(gpus=(AMD_STRIX,))) == "vulkan"
 
 
+def test_manifest_matches_pinned_linux_release_shape() -> None:
+    """Only Linux assets that exist for the pinned upstream tag are exposed."""
+    assert set(LLAMA_SERVER_ARTIFACTS) == {
+        ("x86_64", "cpu"),
+        ("x86_64", "vulkan"),
+        ("aarch64", "cpu"),
+        ("aarch64", "vulkan"),
+    }
+    for artifact in LLAMA_SERVER_ARTIFACTS.values():
+        assert LLAMA_SERVER_PIN in artifact.asset_name
+        assert len(artifact.sha256) == 64
+        assert artifact.url().endswith(artifact.asset_name)
+
+
 def test_select_variant_cpu_without_gpu() -> None:
     assert select_variant(make_facts()) == "cpu"
 
