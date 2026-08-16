@@ -1006,7 +1006,8 @@ change ships:
    (scheme `0.<build>.<rev>`) and the engine workflow pin; the `engine-wheel`
    guard fails if either package, the workflow, the manifest, or the installer's
    derived-version wiring disagrees.
-3. Rebuild both wheels and publish them together (`engine-wheel` workflow,
+3. Rebuild the Vulkan wheel and both CUDA platform wheels (x86_64 and aarch64)
+   and publish them together (`engine-wheel` workflow,
    dispatch with `publish=true`). When the CUDA pod image pin also changes,
    rebuild it from the same source tag so its server and RPC donor cannot drift.
 4. Diagnose the new pin on a clean ephemeral NVIDIA target, then run the full

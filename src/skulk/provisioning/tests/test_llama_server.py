@@ -121,6 +121,9 @@ def _never_install_wheels(  # pyright: ignore[reportUnusedFunction] - autouse
     def _no_install(installed_facts: object) -> bool:
         return False
 
+    # Existing synthetic NVIDIA facts model the established x86_64 wheel lane.
+    # Tests for the narrower arm64 kernel contract override this explicitly.
+    monkeypatch.setattr(provisioning.platform_module, "machine", lambda: "x86_64")
     monkeypatch.setattr(provisioning, "try_install_cuda_wheel", _no_install)
 
 
@@ -469,6 +472,30 @@ def test_cuda_capability_gate() -> None:
         provisioning._cuda_capability_ok(make_facts(gpus=(NVIDIA_PRESENCE_ONLY,)))
         is False
     )
+
+
+def test_cuda_capability_gate_on_arm64(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The arm64 package tag must not admit a GPU without a compiled kernel."""
+    from skulk.shared.types.node_facts import GpuDeviceFact
+
+    monkeypatch.setattr(provisioning.platform_module, "machine", lambda: "aarch64")
+    gb10 = GpuDeviceFact(
+        vendor="nvidia",
+        name="NVIDIA GB10",
+        detection_source="nvml",
+        vram_total_bytes=128 * 2**30,
+        compute_capability="12.1",
+    )
+    gh200 = GpuDeviceFact(
+        vendor="nvidia",
+        name="NVIDIA GH200",
+        detection_source="nvml",
+        vram_total_bytes=96 * 2**30,
+        compute_capability="9.0",
+    )
+
+    assert provisioning._cuda_capability_ok(make_facts(gpus=(gb10,))) is True
+    assert provisioning._cuda_capability_ok(make_facts(gpus=(gh200,))) is False
 
 
 def test_cuda_wheel_install_gates_on_capability_and_uv(

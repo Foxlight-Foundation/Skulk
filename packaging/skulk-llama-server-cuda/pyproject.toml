@@ -19,15 +19,19 @@
 [project]
 name = "skulk-llama-server-cuda"
 version = "0.10434.0"
-description = "Pinned CUDA llama-server build for Skulk's served GGUF engine (Linux x86_64)"
+description = "Pinned CUDA llama-server build for Skulk's served GGUF engine (Linux x86_64 and aarch64)"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 dependencies = [
   # NVIDIA's official CUDA runtime wheels; the shim puts their lib dirs on
   # LD_LIBRARY_PATH before exec'ing llama-server.
-  "nvidia-cuda-runtime-cu12>=12.4",
-  "nvidia-cublas-cu12>=12.4",
+  "nvidia-cuda-runtime-cu12>=12.4; platform_machine == 'x86_64'",
+  "nvidia-cublas-cu12>=12.4; platform_machine == 'x86_64'",
+  # The aarch64 wheel targets Grace Blackwell sm_121 and is compiled with
+  # CUDA 12.9, so its user-space runtime must be at least that new.
+  "nvidia-cuda-runtime-cu12>=12.9; platform_machine == 'aarch64'",
+  "nvidia-cublas-cu12>=12.9; platform_machine == 'aarch64'",
 ]
 
 [project.scripts]
@@ -45,6 +49,6 @@ packages = ["src/skulk_llama_server_cuda"]
 artifacts = ["src/skulk_llama_server_cuda/bin/**", "src/skulk_llama_server_cuda/licenses/**"]
 
 [tool.hatch.build.targets.wheel.hooks.custom]
-# Marks the wheel platform-specific (linux x86_64) even though the Python
-# shim itself is pure: the payload under bin/ is compiled.
+# Marks the wheel platform-specific (Linux x86_64 or aarch64) even though the
+# Python shim itself is pure: the payload under bin/ is compiled.
 path = "hatch_build.py"

@@ -1,8 +1,8 @@
 # Builds the pip-installable llama-server engine wheels
 # (skulk-llama-server-cuda, skulk-llama-server-vulkan; packaging/) and
 # publishes them to PyPI via trusted publishing. Same principle as
-# cuda-image.yml: the compilers run on plain amd64 runners without a GPU,
-# inside pinned containers, so each wheel's glibc/toolkit lineage is known.
+# cuda-image.yml: the compilers run on plain amd64 or arm64 runners without a
+# GPU, inside pinned containers, so each wheel's glibc/toolkit lineage is known.
 # Building from the pinned upstream SOURCE (not upstream's binaries) is the
 # supply-chain posture: we trust llama.cpp's code at a tag, built by us.
 #
@@ -35,11 +35,9 @@ env:
   # Must match src/skulk/provisioning/manifest.py LLAMA_SERVER_PIN and both
   # packaging versions (0.<build>.<rev>); the guard step enforces all of them.
   LLAMA_CPP_PIN: b10434
-  CUDA_ARCHITECTURES: "80-real;86-real;89-real;90"
-
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       id-token: write
@@ -53,13 +51,29 @@ jobs:
       matrix:
         include:
           - variant: cuda
+            runner: ubuntu-22.04
             container: nvidia/cuda:12.4.1-devel-ubuntu22.04
+            cuda_architectures: "80-real;86-real;89-real;90"
             package: skulk-llama-server-cuda
             module: skulk_llama_server_cuda
+            artifact: skulk-llama-server-cuda-amd64-wheel
+          - variant: cuda
+            # Grace Blackwell / GB10 is an arm64 host with compute capability
+            # 12.1. CUDA 12.9 is the first toolkit lane we support for sm_121.
+            runner: ubuntu-22.04-arm
+            container: nvidia/cuda:12.9.1-devel-ubuntu22.04
+            cuda_architectures: "121-real"
+            package: skulk-llama-server-cuda
+            module: skulk_llama_server_cuda
+            artifact: skulk-llama-server-cuda-arm64-wheel
           - variant: vulkan
+            runner: ubuntu-22.04
             container: ubuntu:22.04
+            cuda_architectures: ""
             package: skulk-llama-server-vulkan
             module: skulk_llama_server_vulkan
+            # The PyPI mirror job intentionally downloads this exact name.
+            artifact: skulk-llama-server-vulkan-wheel
     container: ${{ matrix.container }}
     steps:
       - name: Install build prerequisites
@@ -109,7 +123,7 @@ jobs:
             # driver-API reference; llama-server commits its KV window up
             # front at a fixed -c, so the VMM pool allocator's benefit is
             # marginal for this serving shape.
-            BACKEND_FLAGS="-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=$CUDA_ARCHITECTURES -DGGML_CUDA_NO_VMM=ON"
+            BACKEND_FLAGS="-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=${{ matrix.cuda_architectures }} -DGGML_CUDA_NO_VMM=ON"
           else
             BACKEND_FLAGS="-DGGML_VULKAN=ON"
           fi
@@ -168,7 +182,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.package }}-wheel
+          name: ${{ matrix.artifact }}
           path: packaging/${{ matrix.package }}/dist/*.whl
           if-no-files-found: error
 
