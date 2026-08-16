@@ -14,12 +14,16 @@ from skulk.shared.types.profiling import NodeResources
 def test_node_resources_survives_json_wire_round_trip() -> None:
     original = NodeResources(
         backends=frozenset({"mlx"}),
+        engine_builds={"mlx": "mlx@0.29.1"},
+        hardware_classes=frozenset({"apple", "apple:m4-max"}),
         participation="management",
         data_transport="zenoh",
     )
     restored = NodeResources.model_validate(original.model_dump(mode="json"))
     assert restored == original
     assert restored.backends == frozenset({"mlx"})
+    assert restored.engine_builds == {"mlx": "mlx@0.29.1"}
+    assert restored.hardware_classes == frozenset({"apple", "apple:m4-max"})
     assert restored.participation == "management"
     assert restored.data_transport == "zenoh"
 

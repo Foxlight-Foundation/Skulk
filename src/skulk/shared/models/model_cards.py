@@ -4,7 +4,8 @@ import os
 import re
 import struct
 import time
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
+from collections.abc import Set as AbstractSet
 from enum import Enum
 from typing import TYPE_CHECKING, Annotated, Any, Final, Literal, NamedTuple, cast
 
@@ -27,6 +28,7 @@ from pydantic import (
 )
 from tomlkit.exceptions import TOMLKitError
 
+from skulk.shared.backends import engine_of
 from skulk.shared.constants import (
     RESOURCES_DIR,
     SKULK_CUSTOM_MODEL_CARDS_DIR,
@@ -43,7 +45,9 @@ from skulk.shared.constants import (
 from skulk.shared.models.registry import (
     EMBEDDED_REGISTRY_ROOT,
     RegistryAdvisory,
+    RegistryCapabilityClaim,
     RegistryCatalog,
+    RegistryEngineSupportClaim,
     TufRegistryClient,
 )
 from skulk.shared.types.common import ModelId
@@ -83,7 +87,11 @@ _installed_current_registry_ids: dict[ModelId, str | None] = {}
 _installed_card_cache_version = 0
 _installed_card_mutation_versions: dict[ModelId, int] = {}
 _registry_advisories: tuple[RegistryAdvisory, ...] = ()
+_registry_engine_support: tuple[RegistryEngineSupportClaim, ...] = ()
 _registry_current_cards: dict[ModelId, "ModelCard"] = {}
+_POSITIVE_REGISTRY_CAPABILITY_STATUSES: Final[frozenset[str]] = frozenset(
+    {"claimed", "observed", "complete"}
+)
 _registry_refresh_lock = asyncio.Lock()
 _last_registry_refresh = 0.0
 _card_cache_dirty = False
@@ -128,6 +136,10 @@ def registry_model_cards(catalog: RegistryCatalog) -> list["ModelCard"]:
             raise ValueError(
                 f"registry envelope file disagrees with card {envelope.card_id}"
             )
+        if payload.get("quantization") != envelope.artifact.quantization:
+            raise ValueError(
+                f"registry envelope quantization disagrees with card {envelope.card_id}"
+            )
         metadata = catalog.card_metadata.get(envelope.card_id)
         if metadata is None:
             raise ValueError(
@@ -140,6 +152,9 @@ def registry_model_cards(catalog: RegistryCatalog) -> list["ModelCard"]:
                 "registry_card_id": envelope.card_id,
                 "registry_snapshot_id": catalog.snapshot_id,
                 "registry_provenance": metadata.provenance,
+                "registry_architecture": metadata.architecture,
+                "registry_artifact_format": envelope.artifact.format,
+                "registry_capability_claims": metadata.capability_claims,
                 # Only cards loaded from the operator-owned custom directory
                 # receive override semantics. Signed content cannot opt itself
                 # out of registry replacement or revocation.
@@ -152,8 +167,21 @@ def registry_model_cards(catalog: RegistryCatalog) -> list["ModelCard"]:
 
 async def _load_cards_from_registry() -> bool:
     """Refresh a complete registry snapshot and report whether it is authoritative."""
-    _registry_current_cards.clear()
+    global _registry_advisories, _registry_engine_support  # noqa: PLW0603
     if not _registry_enabled():
+        _registry_current_cards.clear()
+        _registry_engine_support = ()
+        if SKULK_OFFLINE and os.environ.get("SKULK_TESTS") != "1":
+            try:
+                support = await to_thread.run_sync(
+                    _registry_client.load_cached_engine_support
+                )
+                _registry_engine_support = support.active_claims()
+                logger.info(
+                    "loaded signed engine support from the offline verified cache"
+                )
+            except Exception as error:  # noqa: BLE001 - offline optional projection
+                logger.warning(f"cached signed engine support unavailable ({error})")
         return False
     try:
         catalog = await to_thread.run_sync(
@@ -165,11 +193,12 @@ async def _load_cards_from_registry() -> bool:
         logger.warning(
             f"signed model registry unavailable ({error}); using bundled model cards"
         )
+        _registry_current_cards.clear()
+        _registry_engine_support = ()
         for model_id, card in tuple(_card_cache.items()):
             if card.registry_card_id is not None and not card.is_custom:
                 del _card_cache[model_id]
         return False
-    global _registry_advisories  # noqa: PLW0603
     try:
         advisories = await to_thread.run_sync(_registry_client.load_advisories)
         _registry_advisories = tuple(
@@ -177,11 +206,20 @@ async def _load_cards_from_registry() -> bool:
         )
     except Exception as error:  # noqa: BLE001 - warning channel fallback
         logger.warning(f"signed model advisories unavailable ({error})")
+    refreshed_engine_support: tuple[RegistryEngineSupportClaim, ...] = ()
+    try:
+        support = await to_thread.run_sync(_registry_client.load_engine_support)
+        refreshed_engine_support = support.active_claims()
+    except Exception as error:  # noqa: BLE001 - additive compatibility fallback
+        logger.warning(f"signed engine support unavailable ({error})")
     for model_id, card in tuple(_card_cache.items()):
         if not card.is_custom:
             del _card_cache[model_id]
+    refreshed_current_cards = {card.model_id: card for card in cards}
+    _registry_current_cards.clear()
+    _registry_current_cards.update(refreshed_current_cards)
+    _registry_engine_support = refreshed_engine_support
     for card in cards:
-        _registry_current_cards[card.model_id] = card
         existing = _card_cache.get(card.model_id)
         if existing is None or not existing.is_custom:
             _card_cache[card.model_id] = card
@@ -488,6 +526,115 @@ def get_model_advisories(model_card: "ModelCard") -> tuple[RegistryAdvisory, ...
     )
 
 
+def load_cached_registry_engine_support() -> bool:
+    """Load previously TUF-verified support claims into this process.
+
+    Runner subprocesses do not inherit the parent's Python module globals. This
+    synchronous cache-only path restores the signed support projection without
+    network access before a legacy unstamped shard performs node-local fallback.
+
+    Returns:
+        True when verified support is available in this process, otherwise False.
+
+    Side effects:
+        Replaces the process-local active support-claim tuple and logs a warning
+        when the verified cache is absent or invalid.
+    """
+    global _registry_engine_support  # noqa: PLW0603
+    if _registry_engine_support:
+        return True
+    try:
+        support = _registry_client.load_cached_engine_support()
+    except Exception as error:  # noqa: BLE001 - optional signed fallback boundary
+        logger.warning(f"cached signed engine support unavailable ({error})")
+        return False
+    _registry_engine_support = support.active_claims()
+    return True
+
+
+def get_model_engine_support(
+    model_card: "ModelCard",
+) -> tuple[RegistryEngineSupportClaim, ...]:
+    """Return active signed support claims matching one exact card artifact."""
+    architecture = model_card.registry_architecture
+    artifact_format = model_card.registry_artifact_format
+
+    capability_ids = _registry_intrinsic_capability_ids(model_card)
+    if (
+        model_card.registry_card_id is None
+        or model_card.registry_provenance is None
+        or architecture is None
+        or artifact_format is None
+        or not capability_ids
+    ):
+        return ()
+    return tuple(
+        claim
+        for claim in _registry_engine_support
+        if claim.architecture == architecture
+        and claim.artifact_format == artifact_format
+        and (
+            claim.artifact_card_id is None
+            or claim.artifact_card_id == model_card.registry_card_id
+        )
+        and (
+            claim.quantization is None or claim.quantization == model_card.quantization
+        )
+        and claim.capability_id in capability_ids
+    )
+
+
+def _registry_intrinsic_capability_ids(model_card: "ModelCard") -> frozenset[str]:
+    """Return positively evidenced intrinsic capabilities of one artifact."""
+    incomplete_artifact_capabilities = {
+        claim.capability_id
+        for claim in model_card.registry_capability_claims
+        if claim.scope == "artifact" and claim.status == "incomplete"
+    }
+    return frozenset(
+        claim.capability_id
+        for claim in model_card.registry_capability_claims
+        if claim.status in _POSITIVE_REGISTRY_CAPABILITY_STATUSES
+        if claim.capability_id not in incomplete_artifact_capabilities
+    )
+
+
+def registry_supported_backends_for_node(
+    model_card: "ModelCard",
+    *,
+    node_backends: AbstractSet[str],
+    engine_builds: Mapping[str, str],
+    hardware_classes: AbstractSet[str],
+) -> frozenset[str]:
+    """Resolve signed positive support against one node's live engine inventory."""
+    required_capabilities = _registry_intrinsic_capability_ids(model_card)
+    if not required_capabilities:
+        return frozenset()
+    support_claims = get_model_engine_support(model_card)
+    resolved: set[str] = set()
+    for backend in node_backends:
+        supported_capabilities: set[str] = set()
+        for claim in support_claims:
+            if claim.status != "supported":
+                continue
+            if claim.hardware_classes and not (
+                set(claim.hardware_classes) & hardware_classes
+            ):
+                continue
+            engine = engine_of(backend)
+            if engine is None or claim.engine not in {engine, backend}:
+                continue
+            if (
+                engine_builds.get(backend, engine_builds.get(engine))
+                != claim.engine_build
+            ):
+                continue
+            supported_capabilities.add(claim.capability_id)
+        if required_capabilities.issubset(supported_capabilities):
+            resolved.add(backend)
+    return frozenset(resolved)
+
+
 def _is_image_card(card: "ModelCard") -> bool:
     return any(t in (ModelTask.TextToImage, ModelTask.ImageToImage) for t in card.tasks)
 
@@ -515,17 +662,25 @@ def same_model_artifact(existing: "ModelCard", expected: "ModelCard") -> bool:
 
 async def _refresh_card_cache_if_due() -> None:
     """Refresh catalog state at most once per configured interval."""
-    refresh_due = _card_cache_dirty or not _card_cache or (
-        _registry_enabled()
-        and time.monotonic() - _last_registry_refresh
-        >= SKULK_MODEL_REGISTRY_REFRESH_SECONDS
+    refresh_due = (
+        _card_cache_dirty
+        or not _card_cache
+        or (
+            _registry_enabled()
+            and time.monotonic() - _last_registry_refresh
+            >= SKULK_MODEL_REGISTRY_REFRESH_SECONDS
+        )
     )
     if refresh_due:
         async with _registry_refresh_lock:
-            refresh_still_due = _card_cache_dirty or not _card_cache or (
-                _registry_enabled()
-                and time.monotonic() - _last_registry_refresh
-                >= SKULK_MODEL_REGISTRY_REFRESH_SECONDS
+            refresh_still_due = (
+                _card_cache_dirty
+                or not _card_cache
+                or (
+                    _registry_enabled()
+                    and time.monotonic() - _last_registry_refresh
+                    >= SKULK_MODEL_REGISTRY_REFRESH_SECONDS
+                )
             )
             if refresh_still_due:
                 await _refresh_card_cache()
@@ -1522,6 +1677,20 @@ class ModelCard(CamelCaseModel):
     """Signed registry snapshot that supplied this runtime card."""
     registry_provenance: Literal["foxlight", "agent", "community"] | None = None
     """Audited registry origin, kept separate from immutable artifact identity."""
+    registry_architecture: str | None = None
+    """Trusted upstream architecture identity used for support-matrix joins."""
+    registry_artifact_format: str | None = None
+    """Exact signed artifact format used for support-matrix joins."""
+    registry_capability_claims: tuple[RegistryCapabilityClaim, ...] = ()
+    """Open signed model/artifact capability claims, independent of engines."""
+
+    @field_validator("registry_capability_claims", mode="before")
+    @classmethod
+    def _coerce_registry_capability_claims(cls, value: object) -> object:
+        """Coerce TOML arrays-of-tables into the immutable runtime tuple."""
+        if isinstance(value, list):
+            return tuple(cast("list[object]", value))
+        return value
 
     @model_validator(mode="after")
     def _require_registry_companion_revisions(self) -> "ModelCard":

@@ -1,6 +1,8 @@
 # pyright: reportPrivateUsage=false
 """Tests for derived model tags exposed by the API."""
 
+import pytest
+
 from skulk.api.main import API
 from skulk.shared.models.model_cards import (
     AudioCardConfig,
@@ -16,6 +18,10 @@ from skulk.shared.models.model_cards import (
     RuntimeCapabilityCardConfig,
     ToolCallFormat,
     ToolingCardConfig,
+)
+from skulk.shared.models.registry import (
+    RegistryCapabilityClaim,
+    RegistryEngineSupportClaim,
 )
 from skulk.shared.types.common import ModelId
 from skulk.shared.types.memory import Memory
@@ -96,6 +102,68 @@ def test_model_list_entry_exposes_declared_and_resolved_capabilities() -> None:
     assert entry.resolved_capabilities is not None
     assert entry.resolved_capabilities.supports_thinking_toggle is True
     assert entry.resolved_capabilities.prompt_renderer == "gemma4"
+
+
+def test_model_list_entry_exposes_signed_intrinsic_and_engine_truth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Registry truth remains distinct from current platform compatibility."""
+    capability = RegistryCapabilityClaim.model_validate(
+        {
+            "capability_id": "video.generate",
+            "scope": "model",
+            "status": "claimed",
+            "source": "upstream_structured",
+            "confidence": 0.9,
+        },
+        strict=False,
+    )
+    support = RegistryEngineSupportClaim.model_validate(
+        {
+            "claim_id": "support_" + "b" * 52,
+            "engine": "future_engine",
+            "engine_build": "future-engine@1.0.0",
+            "architecture": "future_video_v1",
+            "artifact_format": "safetensors",
+            "quantization": None,
+            "capability_id": "video.generate",
+            "status": "experimental",
+            "evidence_kind": "upstream_compatibility",
+            "evidence_trust": "reproducible",
+            "source_url": "https://evidence.example/video",
+            "source_sha256": "c" * 64,
+            "rationale": "Upstream engine integration declares this architecture.",
+            "hardware_classes": [],
+            "recorded_by": "operator@example.com",
+            "created_at": "2026-08-16T12:00:00Z",
+        },
+        strict=False,
+    )
+    card = ModelCard(
+        model_id=ModelId("org/future-video"),
+        storage_size=Memory.from_bytes(1024),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        capabilities=["video"],
+        source_revision="a" * 40,
+        registry_card_id="card_" + "a" * 52,
+        registry_snapshot_id="snapshot-test",
+        registry_provenance="agent",
+        registry_architecture="future_video_v1",
+        registry_artifact_format="safetensors",
+        registry_capability_claims=(capability,),
+    )
+    monkeypatch.setattr(
+        "skulk.shared.models.model_cards._registry_engine_support", (support,)
+    )
+
+    entry = API._model_list_entry(card)
+
+    assert entry.registry_architecture == "future_video_v1"
+    assert entry.capability_claims == [capability]
+    assert entry.engine_support == [support]
 
 
 def test_model_list_entry_exposes_audio_capabilities() -> None:

@@ -14,9 +14,17 @@ import skulk.download.download_utils as download_utils
 import skulk.shared.constants as constants_module
 import skulk.shared.models.model_cards as model_cards_module
 import skulk.shared.models.registry as registry_module
-from skulk.shared.models.model_cards import ModelCard, ModelTask, registry_model_cards
+from skulk.shared.models.model_cards import (
+    ModelCard,
+    ModelTask,
+    load_cached_registry_engine_support,
+    registry_model_cards,
+    registry_supported_backends_for_node,
+)
 from skulk.shared.models.registry import (
+    RegistryAdvisories,
     RegistryCatalog,
+    RegistryEngineSupport,
     RegistryUnavailableError,
     TufRegistryClient,
 )
@@ -38,7 +46,37 @@ def _catalog_payload() -> bytes:
             "generated_at": "2026-08-08T12:00:00Z",
             "published_by": "validator@example.com",
             "note": "test",
-            "card_metadata": {f"card_{'a' * 52}": {"provenance": "foxlight"}},
+            "card_metadata": {
+                f"card_{'a' * 52}": {
+                    "provenance": "foxlight",
+                    "architecture": "future_architecture_v1",
+                    "capability_claims": [
+                        {
+                            "capability_id": "text.generate",
+                            "scope": "model",
+                            "status": "observed",
+                            "source": "upstream_structured",
+                            "confidence": 1,
+                            "evidence_urls": [],
+                            "reviewer_model": None,
+                            "input_modalities": ["text"],
+                            "output_modalities": ["text"],
+                            "details": {"pipeline_tag": "text-generation"},
+                        }
+                    ],
+                    "source_links": {
+                        "repository_url": "https://huggingface.co/org/multi-gguf",
+                        "revision_url": "https://huggingface.co/org/multi-gguf/tree/"
+                        + "b" * 40,
+                        "artifact_url": "https://huggingface.co/org/multi-gguf/blob/"
+                        + "b" * 40
+                        + "/model-Q4_K_M.gguf",
+                        "download_url": "https://huggingface.co/org/multi-gguf/resolve/"
+                        + "b" * 40
+                        + "/model-Q4_K_M.gguf",
+                    },
+                }
+            },
             "cards": [
                 {
                     "schema_version": 1,
@@ -80,18 +118,61 @@ def _advisories_payload() -> bytes:
             "enforcement": "warn",
             "advisories": [
                 {
-                "schema_version": 1,
-                "advisory_id": "FLA-2026-0001",
-                "severity": "critical",
-                "title": "Test model warning",
-                "description": "Retain this warning during a registry outage.",
-                "affected_card_ids": (f"card_{'a' * 52}",),
-                "affected_model_aliases": (),
-                "active": True,
-                "created_at": "2026-08-10T12:00:00Z",
-                "updated_at": "2026-08-10T12:00:00Z",
-                "enforcement": "warn",
+                    "schema_version": 1,
+                    "advisory_id": "FLA-2026-0001",
+                    "severity": "critical",
+                    "title": "Test model warning",
+                    "description": "Retain this warning during a registry outage.",
+                    "affected_card_ids": (f"card_{'a' * 52}",),
+                    "affected_model_aliases": (),
+                    "active": True,
+                    "created_at": "2026-08-10T12:00:00Z",
+                    "updated_at": "2026-08-10T12:00:00Z",
+                    "enforcement": "warn",
                 }
+            ],
+        }
+    ).encode()
+
+
+def _engine_support_payload() -> bytes:
+    """Build signed support history with one active exact-build decision."""
+    base: dict[str, object] = {
+        "engine": "llama_server",
+        "engine_build": "llama.cpp@sha256:" + "1" * 64,
+        "architecture": "future_architecture_v1",
+        "artifact_format": "gguf",
+        "artifact_card_id": "card_" + "a" * 52,
+        "quantization": "Q4_K_M",
+        "capability_id": "text.generate",
+        "evidence_kind": "feature_qualification",
+        "evidence_trust": "foxlight_observed",
+        "source_url": "https://evidence.example/test",
+        "rationale": "Qualified exact artifact and engine build.",
+        "hardware_classes": list[str](),
+        "recorded_by": "operator@example.com",
+        "created_at": "2026-08-16T12:00:00Z",
+    }
+    return json.dumps(
+        {
+            "schema_version": 1,
+            "matrix_version": 7,
+            "generated_at": "2026-08-16T12:00:00Z",
+            "claims": [
+                {
+                    **base,
+                    "claim_id": "support_" + "a" * 52,
+                    "status": "experimental",
+                    "source_sha256": "2" * 64,
+                    "supersedes_claim_id": None,
+                },
+                {
+                    **base,
+                    "claim_id": "support_" + "b" * 52,
+                    "status": "supported",
+                    "source_sha256": "3" * 64,
+                    "supersedes_claim_id": "support_" + "a" * 52,
+                },
             ],
         }
     ).encode()
@@ -108,6 +189,252 @@ def test_registry_alias_is_separate_from_artifact_repository() -> None:
     assert card.gguf_file == "model-Q4_K_M.gguf"
     assert card.registry_snapshot_id == "snapshot_1_test"
     assert card.registry_provenance == "foxlight"
+    assert card.registry_architecture == "future_architecture_v1"
+    assert card.registry_artifact_format == "gguf"
+    assert card.registry_capability_claims[0].capability_id == "text.generate"
+
+
+def test_signed_support_expands_only_exact_node_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A positive active claim adds a backend without rewriting card identity."""
+    card = registry_model_cards(
+        RegistryCatalog.model_validate_json(_catalog_payload(), strict=False)
+    )[0]
+    support = RegistryEngineSupport.model_validate_json(
+        _engine_support_payload(), strict=False
+    )
+    monkeypatch.setattr(
+        model_cards_module, "_registry_engine_support", support.active_claims()
+    )
+
+    exact = registry_supported_backends_for_node(
+        card,
+        node_backends=frozenset({"llama_server", "llama_server-vulkan"}),
+        engine_builds={
+            "llama_server": "llama.cpp@sha256:" + "1" * 64,
+            "llama_server-vulkan": "llama.cpp@sha256:" + "1" * 64,
+        },
+        hardware_classes=frozenset({"amd"}),
+    )
+    stale = registry_supported_backends_for_node(
+        card,
+        node_backends=frozenset({"llama_server-vulkan"}),
+        engine_builds={"llama_server-vulkan": "llama.cpp@sha256:" + "9" * 64},
+        hardware_classes=frozenset({"amd"}),
+    )
+
+    assert exact == frozenset({"llama_server", "llama_server-vulkan"})
+    assert stale == frozenset()
+
+
+def test_runner_process_restores_signed_support_from_verified_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unstamped child fallback recovers support not inherited from its parent."""
+    card = registry_model_cards(
+        RegistryCatalog.model_validate_json(_catalog_payload(), strict=False)
+    )[0]
+    support = RegistryEngineSupport.model_validate_json(
+        _engine_support_payload(), strict=False
+    )
+    monkeypatch.setattr(model_cards_module, "_registry_engine_support", ())
+    monkeypatch.setattr(
+        model_cards_module._registry_client,
+        "load_cached_engine_support",
+        lambda: support,
+    )
+
+    assert load_cached_registry_engine_support() is True
+    assert registry_supported_backends_for_node(
+        card,
+        node_backends=frozenset({"llama_server-vulkan"}),
+        engine_builds={"llama_server-vulkan": "llama.cpp@sha256:" + "1" * 64},
+        hardware_classes=frozenset({"amd"}),
+    ) == frozenset({"llama_server-vulkan"})
+
+
+def test_signed_support_requires_positive_complete_artifact_capabilities(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exact qualification needs positive evidence for every artifact capability."""
+    card = registry_model_cards(
+        RegistryCatalog.model_validate_json(_catalog_payload(), strict=False)
+    )[0]
+    support = RegistryEngineSupport.model_validate_json(
+        _engine_support_payload(), strict=False
+    )
+    monkeypatch.setattr(
+        model_cards_module, "_registry_engine_support", support.active_claims()
+    )
+    other_artifact = card.model_copy(update={"registry_card_id": "card_" + "c" * 52})
+    incomplete_claims = card.registry_capability_claims + (
+        card.registry_capability_claims[0].model_copy(
+            update={"scope": "artifact", "status": "incomplete"}
+        ),
+    )
+    incomplete_artifact = card.model_copy(
+        update={"registry_capability_claims": incomplete_claims}
+    )
+    unknown_artifact = card.model_copy(
+        update={
+            "registry_capability_claims": (
+                card.registry_capability_claims[0].model_copy(
+                    update={"status": "unknown"}
+                ),
+            )
+        }
+    )
+    second_capability = card.registry_capability_claims[0].model_copy(
+        update={"capability_id": "vision.generate"}
+    )
+    multi_capability_artifact = card.model_copy(
+        update={
+            "registry_capability_claims": (
+                *card.registry_capability_claims,
+                second_capability,
+            )
+        }
+    )
+
+    assert (
+        registry_supported_backends_for_node(
+            other_artifact,
+            node_backends=frozenset({"llama_server-vulkan"}),
+            engine_builds={"llama_server-vulkan": "llama.cpp@sha256:" + "1" * 64},
+            hardware_classes=frozenset({"amd"}),
+        )
+        == frozenset()
+    )
+    assert (
+        registry_supported_backends_for_node(
+            incomplete_artifact,
+            node_backends=frozenset({"llama_server-vulkan"}),
+            engine_builds={"llama_server-vulkan": "llama.cpp@sha256:" + "1" * 64},
+            hardware_classes=frozenset({"amd"}),
+        )
+        == frozenset()
+    )
+    assert (
+        registry_supported_backends_for_node(
+            unknown_artifact,
+            node_backends=frozenset({"llama_server-vulkan"}),
+            engine_builds={"llama_server-vulkan": "llama.cpp@sha256:" + "1" * 64},
+            hardware_classes=frozenset({"amd"}),
+        )
+        == frozenset()
+    )
+    assert (
+        registry_supported_backends_for_node(
+            multi_capability_artifact,
+            node_backends=frozenset({"llama_server-vulkan"}),
+            engine_builds={"llama_server-vulkan": "llama.cpp@sha256:" + "1" * 64},
+            hardware_classes=frozenset({"amd"}),
+        )
+        == frozenset()
+    )
+
+    complete_support = support.claims[0].model_copy(
+        update={
+            "claim_id": "support_" + "d" * 52,
+            "capability_id": "vision.generate",
+            "status": "supported",
+        }
+    )
+    monkeypatch.setattr(
+        model_cards_module,
+        "_registry_engine_support",
+        (*support.active_claims(), complete_support),
+    )
+    assert registry_supported_backends_for_node(
+        multi_capability_artifact,
+        node_backends=frozenset({"llama_server-vulkan"}),
+        engine_builds={"llama_server-vulkan": "llama.cpp@sha256:" + "1" * 64},
+        hardware_classes=frozenset({"amd"}),
+    ) == frozenset({"llama_server-vulkan"})
+
+
+@pytest.mark.asyncio
+async def test_registry_refresh_swaps_engine_support_after_verified_load(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Concurrent placement retains the prior support projection during refresh."""
+    catalog = RegistryCatalog.model_validate_json(_catalog_payload(), strict=False)
+    refreshed_support = RegistryEngineSupport.model_validate_json(
+        _engine_support_payload(), strict=False
+    )
+    prior_support = refreshed_support.claims[0].model_copy(
+        update={"engine_build": "llama.cpp@sha256:" + "0" * 64}
+    )
+    prior_card = registry_model_cards(catalog)[0]
+    load_started = threading.Event()
+    allow_load = threading.Event()
+
+    class BlockingClient:
+        def load_catalog(self, _catalog_validator: object = None) -> RegistryCatalog:
+            load_started.set()
+            if not allow_load.wait(timeout=5):
+                raise TimeoutError("test did not release catalog load")
+            return catalog
+
+        def load_advisories(self) -> RegistryAdvisories:
+            return RegistryAdvisories.model_validate_json(
+                _advisories_payload(), strict=False
+            )
+
+        def load_engine_support(self) -> RegistryEngineSupport:
+            return refreshed_support
+
+    original_support = model_cards_module._registry_engine_support
+    original_current_cards = dict(model_cards_module._registry_current_cards)
+    original_card_cache = dict(model_cards_module._card_cache)
+    model_cards_module._registry_engine_support = (prior_support,)
+    model_cards_module._registry_current_cards.clear()
+    model_cards_module._registry_current_cards[prior_card.model_id] = prior_card
+    monkeypatch.setattr(model_cards_module, "_registry_enabled", lambda: True)
+    monkeypatch.setattr(model_cards_module, "_registry_client", BlockingClient())
+    refresh = asyncio.create_task(model_cards_module._load_cards_from_registry())
+    try:
+        assert await asyncio.to_thread(load_started.wait, 2)
+        assert model_cards_module._registry_engine_support == (prior_support,)
+        assert (
+            model_cards_module._registry_current_cards[prior_card.model_id]
+            == prior_card
+        )
+        allow_load.set()
+        assert await refresh
+        assert model_cards_module._registry_engine_support == (
+            refreshed_support.active_claims()
+        )
+    finally:
+        allow_load.set()
+        if not refresh.done():
+            await refresh
+        model_cards_module._registry_engine_support = original_support
+        model_cards_module._registry_current_cards.clear()
+        model_cards_module._registry_current_cards.update(original_current_cards)
+        model_cards_module._card_cache.clear()
+        model_cards_module._card_cache.update(original_card_cache)
+
+
+def test_engine_support_rejects_cross_key_supersession() -> None:
+    """A signed target cannot hide one compatibility key with another."""
+    payload = cast("dict[str, object]", json.loads(_engine_support_payload()))
+    claims = cast("list[dict[str, object]]", payload["claims"])
+    claims[1]["architecture"] = "different_architecture"
+
+    with pytest.raises(ValueError, match="supersedes a different key"):
+        RegistryEngineSupport.model_validate(payload, strict=False)
+
+
+def test_engine_support_rejects_supersession_cycles() -> None:
+    """A signed replacement history cannot erase every active decision."""
+    payload = cast("dict[str, object]", json.loads(_engine_support_payload()))
+    claims = cast("list[dict[str, object]]", payload["claims"])
+    claims[0]["supersedes_claim_id"] = claims[1]["claim_id"]
+
+    with pytest.raises(ValueError, match="supersession cycle"):
+        RegistryEngineSupport.model_validate(payload, strict=False)
 
 
 @pytest.mark.parametrize("location", ["catalog", "card"])
@@ -144,6 +471,18 @@ def test_registry_forces_signed_cards_to_non_custom() -> None:
     catalog = RegistryCatalog.model_validate(payload, strict=False)
 
     assert not registry_model_cards(catalog)[0].is_custom
+
+
+def test_registry_rejects_envelope_card_quantization_mismatch() -> None:
+    """Support evidence cannot join a card to a different artifact quantization."""
+    payload = cast("dict[str, object]", json.loads(_catalog_payload()))
+    cards = cast("list[dict[str, object]]", payload["cards"])
+    artifact = cast("dict[str, object]", cards[0]["artifact"])
+    artifact["quantization"] = "Q8_0"
+    catalog = RegistryCatalog.model_validate(payload, strict=False)
+
+    with pytest.raises(ValueError, match="envelope quantization disagrees"):
+        registry_model_cards(catalog)
 
 
 def test_registry_rejects_unpinned_separate_processor_repository() -> None:
@@ -512,6 +851,59 @@ def test_client_uses_hash_bound_last_known_good_advisories(
         client.load_advisories()
 
 
+def test_client_retains_hash_bound_engine_support_for_offline_clusters(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verified support survives offline indefinitely but cache tampering fails."""
+    payload_path = tmp_path / "engine-support.json"
+    payload_path.write_bytes(_engine_support_payload())
+    embedded_root = tmp_path / "embedded-root.json"
+    embedded_root.write_text("{}")
+
+    class WorkingUpdater:
+        def __init__(self, **kwargs: object) -> None:
+            self.metadata_dir = Path(cast("str", kwargs["metadata_dir"]))
+
+        def refresh(self) -> None:
+            self.metadata_dir.mkdir(parents=True, exist_ok=True)
+            (self.metadata_dir / "targets.json").write_text(
+                json.dumps(
+                    {
+                        "signatures": [],
+                        "signed": {
+                            "_type": "targets",
+                            "spec_version": "1.0.31",
+                            "version": 7,
+                            "expires": "2030-01-01T00:00:00Z",
+                            "targets": {},
+                        },
+                    }
+                )
+            )
+
+        def get_targetinfo(self, target_path: str) -> object:
+            assert target_path == "v1/engine-support.json"
+            return object()
+
+        def download_target(self, _target: object) -> str:
+            return str(payload_path)
+
+    monkeypatch.setattr(registry_module, "Updater", WorkingUpdater)
+    client = TufRegistryClient(
+        base_url="https://registry.example/",
+        cache_dir=tmp_path / "cache",
+        embedded_root=embedded_root,
+        timeout_seconds=1,
+        max_stale_days=0,
+    )
+    assert client.load_engine_support().matrix_version == 7
+    assert client.load_cached_engine_support().active_claims()[0].status == "supported"
+
+    (tmp_path / "cache/last-known-good-engine-support.json").write_bytes(b"tampered")
+    with pytest.raises(ValueError, match="hash mismatch"):
+        client.load_cached_engine_support()
+
+
 def test_embedded_roots_match_release_resources() -> None:
     """Package and frozen-app trust anchors cannot drift independently."""
     package_root = registry_module.EMBEDDED_REGISTRY_ROOT.read_bytes()
@@ -747,9 +1139,7 @@ async def test_current_registry_id_is_visible_behind_installed_generation(
 
     catalog = RegistryCatalog.model_validate_json(_catalog_payload(), strict=False)
     current = registry_model_cards(catalog)[0]
-    installed = current.model_copy(
-        update={"registry_card_id": f"card_{'z' * 52}"}
-    )
+    installed = current.model_copy(update={"registry_card_id": f"card_{'z' * 52}"})
     original_cache = dict(model_cards_module._card_cache)
     original_current = dict(model_cards_module._registry_current_cards)
     model_cards_module._card_cache.clear()
@@ -779,16 +1169,12 @@ async def test_installed_startup_selects_current_generation_deterministically(
 
     catalog = RegistryCatalog.model_validate_json(_catalog_payload(), strict=False)
     current = registry_model_cards(catalog)[0]
-    stale = current.model_copy(
-        update={"registry_card_id": f"card_{'z' * 52}"}
-    )
+    stale = current.model_copy(update={"registry_card_id": f"card_{'z' * 52}"})
     for directory_name, card in (("aaa-current", current), ("zzz-stale", stale)):
         artifact = tmp_path / directory_name
         artifact.mkdir()
         (artifact / "model-Q4_K_M.gguf").write_bytes(directory_name.encode())
-        (artifact / ".skulk-source-revision").write_text(
-            f"{card.source_revision}\n"
-        )
+        (artifact / ".skulk-source-revision").write_text(f"{card.source_revision}\n")
         write_installed_card(artifact, build_installed_card_record(artifact, card))
 
     original_cache = dict(model_cards_module._card_cache)

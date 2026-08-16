@@ -268,6 +268,15 @@ tags are derived per node from observed hardware and configuration (see
 "A node that just works" below) and
 gossiped on the telemetry plane as part of `NodeResources`.
 
+The same reading carries exact `engineBuilds` and open `hardwareClasses`.
+Python engines identify their installed distribution version; the configured
+vLLM CLI reports the version of its separate managed environment, and native
+served binaries use a SHA-256 content identity. Operators can supply a
+canonical upstream identity with `SKULK_ENGINE_BUILDS`, a JSON object keyed by
+engine or backend tag. These values are evidence inputs, not capability
+declarations: they can satisfy an exact signed support claim only for a backend
+the node already advertises.
+
 `NodeResources` also carries the DATA transport that startup actually resolved
 (`gossipsub` or `zenoh`). This is a fleet invariant, not a placement preference:
 Skulk does not bridge the transports. `GET /state` merges the live resource map
@@ -411,8 +420,8 @@ the model fits one node, so this shape only appears for genuinely pooled-only
 models. If a donor dies mid-generation the driver exits immediately and the
 normal crash recovery tears the instance down and re-places it.
 
-A model card declares two placement axes that are deliberately separate from the
-memory/topology axes above:
+A model card's legacy runtime projection declares two placement axes that are
+deliberately separate from the memory/topology axes above:
 
 - `compatible_backends` is a **hard filter**: the planner excludes any node whose
   advertised backends do not intersect it. A GGUF card lists the llama.cpp
@@ -429,12 +438,23 @@ memory/topology axes above:
   allocation may move boundaries left, but never beyond this limit; the usual
   per-node memory check then validates the adjusted shards before launch.
 
-The engine axis (which runtime) is orthogonal to the node axis (which machine):
-the same card mechanism that routes a GGUF model to a Vulkan llama.cpp node would
-route a future engine to whichever nodes advertise it. The worker resolves the
-concrete engine for its node at runner-spawn time by intersecting the card's
-`compatible_backends` with the node's advertised backends, ordered by
-`backend_preference`. See the
+The signed registry adds an adaptive path without rewriting cards. Intrinsic
+capability claims describe what the model or selected artifact can do. A
+separate signed engine-support matrix records whether one exact engine build can
+serve one architecture, artifact format, quantization, and capability, with
+optional hardware constraints and auditable evidence. Placement unions active
+`supported` matches with the card's legacy `compatible_backends`; experimental,
+unsupported, stale-build, hardware-mismatched, other-artifact, and explicitly
+incomplete claims add nothing. Empirical load and feature qualification is
+bound to the immutable card tested; cited upstream engine compatibility may be
+architecture-scoped. Existing cards therefore keep working while a new
+architecture can become placeable as soon as independently signed support
+evidence exists.
+
+The engine axis (which runtime) remains orthogonal to the node axis (which
+machine). The master resolves and stamps the concrete backend selected for each
+node. The worker trusts that stamped choice and repeats the exact signed-matrix
+check when it must use its node-local fallback. See the
 [AMD Strix Halo nodes](./amd-strix-halo-nodes.md) guide for bringing up a
 non-Mac node.
 
@@ -505,15 +525,14 @@ fixed clamp that makes served models unusable for real-context work. The
 [Architecture Reference](architecture-reference) carries the exact admission
 arithmetic.
 
-Cards describe the model; the platform describes itself. A card's
-`compatible_backends` records which engines the model's artifacts run on
-(model truth), and it never encodes a gap in Skulk's own implementation
-(platform truth). When one of our runners cannot yet exploit a capability a
-card declares (for example, the served llama.cpp engine cannot load a vision
-model's projector yet, and only the `mlx_audio` engine currently owns TTS/STT),
-that limitation lives in a code-level capability table that placement and the
-worker both consult, so the model never lands where an advertised capability
-would silently degrade, and the card needs no edit when the platform catches up.
+The compatibility decision has four independent layers: intrinsic model
+capability, selected-artifact completeness, exact engine/build support, and
+Skulk runner support. Signed capability claims preserve the first two even when
+Skulk cannot use them yet. The support matrix supplies the third. Platform
+limitations remain code-level gates applied last (for example, the served
+llama.cpp runner cannot load a vision projector yet, and only `mlx_audio` owns
+TTS/STT), so catalog truth never shrinks to today's platform and no model card
+needs editing when Skulk catches up.
 Speech serving is the largest current example of that gating and has its own
 section below.
 

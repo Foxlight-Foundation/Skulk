@@ -18,6 +18,7 @@ import threading
 from loguru import logger
 
 from skulk.facts.derive import BackendDerivation, derive_node_backends
+from skulk.facts.inventory import engine_build_inventory, hardware_class_inventory
 from skulk.facts.probe import gather_node_facts
 from skulk.shared.types.node_facts import CONFLICT_ERROR_CODES, NodeFacts
 
@@ -26,7 +27,9 @@ __all__ = [
     "current_backend_derivation",
     "current_node_facts",
     "derive_node_backends",
+    "engine_build_inventory",
     "gather_node_facts",
+    "hardware_class_inventory",
     "refresh_node_facts",
 ]
 

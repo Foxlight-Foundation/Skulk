@@ -1,5 +1,6 @@
 import pytest
 
+import skulk.shared.models.model_cards as model_cards_module
 from skulk.master.placement import (
     PlacementError,
     PlacementInfoPendingError,
@@ -17,7 +18,16 @@ from skulk.master.tests.conftest import (
     create_socket_connection,
 )
 from skulk.shared.models.memory_estimate import KV_CONTEXT_BUDGET_TOKENS
-from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
+from skulk.shared.models.model_cards import (
+    ModelCard,
+    ModelId,
+    ModelTask,
+    PlacementCardConfig,
+)
+from skulk.shared.models.registry import (
+    RegistryCapabilityClaim,
+    RegistryEngineSupportClaim,
+)
 from skulk.shared.topology import Topology
 from skulk.shared.types.commands import CreateInstance, PlaceInstance
 from skulk.shared.types.common import CommandId, NodeId
@@ -1210,6 +1220,115 @@ def test_backend_incompatible_node_is_excluded() -> None:
     assert len(placements) == 1
     instance = next(iter(placements.values()))
     assert set(instance.shard_assignments.node_to_runner.keys()) == {node_b}
+
+
+def test_signed_engine_support_adds_backend_without_card_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An exact matrix claim makes an already-known empty-projection card placeable."""
+    topology, node_a, node_b, node_memory, node_network = _two_node_topology()
+    capability = RegistryCapabilityClaim.model_validate(
+        {
+            "capability_id": "text.generate",
+            "scope": "model",
+            "status": "observed",
+            "source": "upstream_structured",
+            "confidence": 1,
+        },
+        strict=False,
+    )
+    card = _small_model_card().model_copy(
+        update={
+            "model_id": ModelId("org/future-model"),
+            "source_revision": "a" * 40,
+            "registry_card_id": "card_" + "a" * 52,
+            "registry_snapshot_id": "snapshot-test",
+            "registry_provenance": "agent",
+            "registry_architecture": "future_architecture_v1",
+            "registry_artifact_format": "safetensors",
+            "registry_capability_claims": (capability,),
+            "placement": PlacementCardConfig(compatible_backends=frozenset()),
+        }
+    )
+    support = RegistryEngineSupportClaim.model_validate(
+        {
+            "claim_id": "support_" + "b" * 52,
+            "engine": "vllm",
+            "engine_build": "vllm@9.9.9",
+            "architecture": "future_architecture_v1",
+            "artifact_format": "safetensors",
+            "artifact_card_id": "card_" + "a" * 52,
+            "quantization": "",
+            "capability_id": "text.generate",
+            "status": "supported",
+            "evidence_kind": "load_qualification",
+            "evidence_trust": "foxlight_observed",
+            "source_url": "https://evidence.example/load",
+            "source_sha256": "c" * 64,
+            "rationale": "Exact engine build loaded the exact artifact.",
+            "hardware_classes": ["nvidia"],
+            "supersedes_claim_id": None,
+            "recorded_by": "operator@example.com",
+            "created_at": "2026-08-16T12:00:00Z",
+        },
+        strict=False,
+    )
+    monkeypatch.setattr(model_cards_module, "_registry_engine_support", (support,))
+
+    placements = place_instance(
+        place_instance_command(card),
+        topology,
+        {},
+        node_memory,
+        node_network,
+        node_resources={
+            node_a: NodeResources(
+                backends=frozenset({"vllm", "vllm-cuda"}),
+                engine_builds={"vllm": "vllm@9.9.9", "vllm-cuda": "vllm@9.9.9"},
+                hardware_classes=frozenset({"nvidia"}),
+            ),
+            node_b: NodeResources(
+                backends=frozenset({"vllm", "vllm-cuda"}),
+                engine_builds={"vllm": "vllm@9.9.8", "vllm-cuda": "vllm@9.9.8"},
+                hardware_classes=frozenset({"nvidia"}),
+            ),
+        },
+    )
+
+    instance = next(iter(placements.values()))
+    assert set(instance.shard_assignments.node_to_runner) == {node_a}
+    assert {
+        shard.resolved_backend
+        for shard in instance.shard_assignments.runner_to_shard.values()
+    } <= {"vllm", "vllm-cuda"}
+
+    with pytest.raises(PlacementError, match="No candidate cycle"):
+        place_instance(
+            place_instance_command(card),
+            topology,
+            {},
+            node_memory,
+            node_network,
+            required_nodes={node_b},
+            node_resources={
+                node_a: NodeResources(
+                    backends=frozenset({"vllm", "vllm-cuda"}),
+                    engine_builds={
+                        "vllm": "vllm@9.9.9",
+                        "vllm-cuda": "vllm@9.9.9",
+                    },
+                    hardware_classes=frozenset({"nvidia"}),
+                ),
+                node_b: NodeResources(
+                    backends=frozenset({"vllm", "vllm-cuda"}),
+                    engine_builds={
+                        "vllm": "vllm@9.9.8",
+                        "vllm-cuda": "vllm@9.9.8",
+                    },
+                    hardware_classes=frozenset({"nvidia"}),
+                ),
+            },
+        )
 
 
 def test_missing_node_resources_is_treated_as_eligible() -> None:

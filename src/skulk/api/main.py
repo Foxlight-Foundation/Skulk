@@ -329,6 +329,7 @@ from skulk.shared.models.model_cards import (
     get_installed_card_record,
     get_model_advisories,
     get_model_cards,
+    get_model_engine_support,
     preserve_generated_card_constraints,
 )
 from skulk.shared.models.registry import RegistryAdvisory
@@ -3050,6 +3051,78 @@ class API:
             if remote_code_execution_requires_approval(model_card)
             else None
         )
+        matching_engine_support = get_model_engine_support(model_card)
+        supported_claim_ids = [
+            claim.claim_id
+            for claim in matching_engine_support
+            if claim.status == "supported"
+        ]
+        incomplete_capabilities = sorted(
+            claim.capability_id
+            for claim in model_card.registry_capability_claims
+            if claim.status == "incomplete"
+        )
+        support_gap_detail = (
+            "Artifact evidence marks required capability components incomplete: "
+            + ", ".join(incomplete_capabilities)
+            if incomplete_capabilities
+            else (
+                "Signed engine support matches this artifact, but no node advertises "
+                "the exact supported engine build and hardware constraint."
+                if supported_claim_ids
+                else (
+                    "Model or artifact capabilities are known, but no active signed "
+                    "supported engine claim matches this architecture and artifact."
+                    if model_card.registry_capability_claims
+                    and not model_card.placement.compatible_backends
+                    else None
+                )
+            )
+        )
+
+        def compatibility_for_instance(
+            instance: Instance,
+        ) -> tuple[Literal["card", "signed_engine_support"], list[str]]:
+            """Identify whether immutable card or signed support admitted a backend."""
+            resolved_backends = {
+                shard.resolved_backend
+                for shard in instance.shard_assignments.runner_to_shard.values()
+                if shard.resolved_backend is not None
+            }
+            uses_matrix = bool(
+                resolved_backends - model_card.placement.compatible_backends
+            )
+            applicable_claim_ids: set[str] = set()
+            if uses_matrix:
+                for node_id, runner_id in (
+                    instance.shard_assignments.node_to_runner.items()
+                ):
+                    backend = instance.shard_assignments.runner_to_shard[
+                        runner_id
+                    ].resolved_backend
+                    resources = self._telemetry_view.node_resources.get(node_id)
+                    if backend is None or resources is None:
+                        continue
+                    engine = engine_of(backend)
+                    build = resources.engine_builds.get(
+                        backend,
+                        resources.engine_builds.get(engine) if engine else None,
+                    )
+                    for claim in matching_engine_support:
+                        hardware_matches = not claim.hardware_classes or bool(
+                            set(claim.hardware_classes) & resources.hardware_classes
+                        )
+                        if (
+                            claim.status == "supported"
+                            and claim.engine in {backend, engine}
+                            and claim.engine_build == build
+                            and hardware_matches
+                        ):
+                            applicable_claim_ids.add(claim.claim_id)
+            return (
+                "signed_engine_support" if uses_matrix else "card",
+                sorted(applicable_claim_ids),
+            )
         placement_node_vram = usable_vram_by_node(
             self._telemetry_view.node_system,
             self._telemetry_view.node_resources,
@@ -3105,6 +3178,7 @@ class API:
                             instance_meta=instance_meta,
                             instance=None,
                             error=str(exc),
+                            compatibility_detail=support_gap_detail,
                         )
                     )
                 seen.add((model_card.model_id, sharding, instance_meta, 0))
@@ -3126,6 +3200,7 @@ class API:
                             instance_meta=instance_meta,
                             instance=None,
                             error="Expected exactly one new instance from placement",
+                            compatibility_detail=support_gap_detail,
                         )
                     )
                 seen.add((model_card.model_id, sharding, instance_meta, 0))
@@ -3152,6 +3227,9 @@ class API:
             # the preview must be truthful about the shape a real placement
             # would produce.
             minted_meta = instance_meta_of(instance)
+            compatibility_source, applicable_claim_ids = (
+                compatibility_for_instance(instance)
+            )
             if (
                 model_card.model_id,
                 sharding,
@@ -3166,6 +3244,8 @@ class API:
                         instance=instance,
                         memory_delta_by_node=memory_delta_by_node or None,
                         error=None,
+                        compatibility_source=compatibility_source,
+                        support_claim_ids=applicable_claim_ids,
                     )
                 )
             seen.add(
@@ -3253,6 +3333,9 @@ class API:
                     # is an alternative the operator can reason about.
                     if alt_nodes != [candidate]:
                         continue
+                    alt_compatibility_source, alt_claim_ids = (
+                        compatibility_for_instance(alt_instance)
+                    )
                     previews.append(
                         PlacementPreview(
                             model_id=model_card.model_id,
@@ -3264,6 +3347,8 @@ class API:
                             },
                             error=None,
                             alternative=True,
+                            compatibility_source=alt_compatibility_source,
+                            support_claim_ids=alt_claim_ids,
                         )
                     )
                     # One alternative per host is enough; stop at the first
@@ -7972,6 +8057,9 @@ class API:
             registry_card_id=card.registry_card_id,
             registry_snapshot_id=card.registry_snapshot_id,
             registry_provenance=card.registry_provenance,
+            registry_architecture=card.registry_architecture,
+            capability_claims=list(card.registry_capability_claims),
+            engine_support=list(get_model_engine_support(card)),
             installed=installed_record is not None,
             active_installed_identity=(
                 installed_record.installed_identity

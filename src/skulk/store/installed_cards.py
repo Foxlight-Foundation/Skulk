@@ -361,6 +361,8 @@ def _revision_marker(model_directory: Path) -> str | None:
 def model_card_artifact_format(model_card: ModelCard) -> str:
     """Derive the human artifact format from immutable card selection truth."""
 
+    if model_card.registry_artifact_format is not None:
+        return model_card.registry_artifact_format
     if model_card.gguf_file is not None:
         return "gguf"
     backends = model_card.placement.compatible_backends

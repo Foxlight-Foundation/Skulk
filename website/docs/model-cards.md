@@ -36,6 +36,16 @@ at `registry.foxlight.ai`. A registry card represents one exact selectable
 artifact—one quant or selected file—and carries an immutable card ID and signed
 snapshot provenance. Registry refreshes do not require a Skulk release.
 
+The signed catalog also carries open `architecture` and `capability_claims`
+metadata beside the immutable card. Claims describe intrinsic model behavior
+and selected-artifact completeness without asserting that Skulk can serve the
+capability today. A separately signed engine-support matrix records exact
+engine-build compatibility; neither discovery agents nor mutable card fields
+can turn a claim into placement permission. Empirical load and feature
+qualification is bound to the exact immutable card it tested. An explicit
+artifact-scoped `incomplete` claim blocks matrix-derived placement for that
+capability even when the base model advertises it.
+
 Complete canonical and staged artifacts retain their full effective card and
 hashed manifest beside the bytes in `.skulk/installed-card.json`. These
 installed cards load before registry access, remain usable indefinitely while
@@ -112,6 +122,11 @@ node in a cluster must run the same Skulk version.
   - provenance is signed catalog metadata (`foxlight`, `agent`, or `community`)
     and is deliberately excluded from the content-derived card identity
   - runtime provenance attached by the verified external catalog; these are absent from bundled and custom cards
+- `registry_architecture` / `registry_capability_claims`
+  - signed intrinsic architecture and model/artifact capability evidence from
+    the registry envelope; persisted into installed sidecars for air-gapped use
+  - these fields do not declare present-day Skulk compatibility. Placement may
+    expand only from a separate exact signed engine/build support decision.
 
 - `family`
   - coarse family label such as `gemma`, `qwen`, `deepseek`

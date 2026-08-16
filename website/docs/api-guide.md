@@ -1362,6 +1362,25 @@ access and its acceptable cache are unavailable or disabled. Registry entries
 include immutable card and snapshot identities; local custom cards retain final
 override precedence.
 
+Each entry also separates discovery truth from runtime truth:
+
+- `registry_architecture` is the trusted open architecture identifier retained
+  from the signed catalog.
+- `capability_claims` reports signed model/artifact capabilities even when no
+  current Skulk engine can serve them.
+- `engine_support` reports the active signed engine/build decisions matching
+  that exact architecture, artifact format, quantization, capability, and any
+  required immutable card identity. These may include experimental or
+  unsupported history; placement expands only from exact `supported` claims
+  whose build and hardware constraints match a node. Load and feature
+  qualification always names the exact card tested, and known-incomplete
+  artifact capability evidence blocks expansion.
+
+Installed sidecars retain the intrinsic architecture and capability claims for
+air-gapped use. A hash-bound support matrix that was previously TUF-verified is
+also usable offline; it never converts an experimental or negative decision
+into placement permission.
+
 ### Approve repository code on one node
 
 **GET** `/models/remote-code-approvals`
@@ -1625,6 +1644,14 @@ typically the node with the most free accelerator memory; the alternatives
 expose the full set of valid hosts so an operator can choose by cost,
 locality, or to keep the big GPU free. Alternatives are omitted when
 `node_ids` already constrains the hosts.
+
+Every preview additionally reports `compatibility_source` (`card` or
+`signed_engine_support`), the exact `support_claim_ids` used when a signed
+matrix expanded placement, and an operator-readable `compatibility_detail` on
+engine/build, hardware, or incomplete-artifact gaps. A positive matrix claim
+must match the node's advertised exact build and hardware class. Missing,
+stale, experimental, or unsupported claims do not widen placement; legacy
+`compatible_backends` remain valid for existing cards.
 
 | Query parameter | Meaning |
 |-----------------|---------|

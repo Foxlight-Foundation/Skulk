@@ -6,6 +6,7 @@ every other host that passes admission. The alternatives pass re-runs the
 planner per remaining host and surfaces the viable single-node options.
 """
 
+from datetime import datetime, timezone
 from typing import cast
 
 import pytest
@@ -15,6 +16,7 @@ import skulk.api.main as api_main
 from skulk.api.main import API
 from skulk.shared.election import ElectionMessage
 from skulk.shared.models.model_cards import ModelCard, ModelTask
+from skulk.shared.models.registry import RegistryEngineSupportClaim
 from skulk.shared.types.commands import (
     ForwarderCommand,
     ForwarderDownloadCommand,
@@ -23,6 +25,8 @@ from skulk.shared.types.commands import (
 from skulk.shared.types.common import ModelId, NodeId
 from skulk.shared.types.events import IndexedEvent
 from skulk.shared.types.memory import Memory
+from skulk.shared.types.profiling import NodeResources
+from skulk.shared.types.telemetry import NodeTelemetry
 from skulk.shared.types.worker.instances import (
     InstanceId,
     MlxRingInstance,
@@ -62,7 +66,9 @@ def _card() -> ModelCard:
     )
 
 
-def _single_node_instance(node: str) -> MlxRingInstance:
+def _single_node_instance(
+    node: str, *, resolved_backend: str | None = None
+) -> MlxRingInstance:
     runner = RunnerId(f"runner-{node}")
     shard = PipelineShardMetadata(
         model_card=_card(),
@@ -71,6 +77,7 @@ def _single_node_instance(node: str) -> MlxRingInstance:
         start_layer=0,
         end_layer=8,
         n_layers=8,
+        resolved_backend=resolved_backend,
     )
     return MlxRingInstance(
         instance_id=InstanceId(f"instance-{node}"),
@@ -81,6 +88,94 @@ def _single_node_instance(node: str) -> MlxRingInstance:
         ),
         hosts_by_node={},
         ephemeral_port=0,
+    )
+
+
+async def test_preview_exposes_exact_signed_engine_support(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Operators can distinguish matrix-admitted placements from legacy cards."""
+    api = _build_api()
+    client = TestClient(api.app)
+    node_id = NodeId("future-engine-node")
+    api.state.topology.add_node(node_id)
+    api._telemetry_view.apply(  # pyright: ignore[reportPrivateUsage]
+        NodeTelemetry(
+            node_id=node_id,
+            info=NodeResources(
+                backends=frozenset({"vllm", "vllm-cuda"}),
+                engine_builds={
+                    "vllm": "vllm@9.9.9",
+                    "vllm-cuda": "vllm@9.9.9",
+                },
+                hardware_classes=frozenset({"nvidia"}),
+            ),
+        ),
+        received_at=datetime.now(tz=timezone.utc),
+    )
+    card = _card().model_copy(
+        update={
+            "source_revision": "a" * 40,
+            "registry_card_id": "card_" + "a" * 52,
+            "registry_snapshot_id": "snapshot-test",
+            "registry_provenance": "agent",
+            "registry_architecture": "future_architecture_v1",
+            "registry_artifact_format": "safetensors",
+        }
+    )
+    support = RegistryEngineSupportClaim.model_validate(
+        {
+            "claim_id": "support_" + "b" * 52,
+            "engine": "vllm",
+            "engine_build": "vllm@9.9.9",
+            "architecture": "future_architecture_v1",
+            "artifact_format": "safetensors",
+            "artifact_card_id": "card_" + "a" * 52,
+            "capability_id": "text.generate",
+            "status": "supported",
+            "evidence_kind": "load_qualification",
+            "evidence_trust": "foxlight_observed",
+            "source_url": "https://evidence.example/load",
+            "source_sha256": "c" * 64,
+            "rationale": "Qualified the exact build and artifact.",
+            "hardware_classes": ["nvidia"],
+            "recorded_by": "operator@example.com",
+            "created_at": "2026-08-16T12:00:00Z",
+        },
+        strict=False,
+    )
+
+    async def _load(_model_id: object) -> ModelCard:
+        return card
+
+    def _fake_placements(
+        _command: PlaceInstance, **_kwargs: object
+    ) -> dict[InstanceId, MlxRingInstance]:
+        instance = _single_node_instance(
+            str(node_id), resolved_backend="vllm-cuda"
+        )
+        return {instance.instance_id: instance}
+
+    def _support_for_card(_card: ModelCard) -> tuple[RegistryEngineSupportClaim, ...]:
+        return (support,)
+
+    monkeypatch.setattr(ModelCard, "load", staticmethod(_load))
+    monkeypatch.setattr(api_main, "get_model_engine_support", _support_for_card)
+    monkeypatch.setattr(api_main, "get_instance_placements", _fake_placements)
+
+    response = client.get("/instance/previews", params={"model_id": str(_MODEL_ID)})
+
+    assert response.status_code == 200
+    previews = cast("list[dict[str, object]]", response.json()["previews"])
+    successful = [preview for preview in previews if preview["instance"] is not None]
+    assert successful
+    assert all(
+        preview["compatibility_source"] == "signed_engine_support"
+        for preview in successful
+    )
+    assert all(
+        preview["support_claim_ids"] == [support.claim_id]
+        for preview in successful
     )
 
 

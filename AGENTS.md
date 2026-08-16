@@ -215,14 +215,20 @@ TTS cards may declare `audio.voices`, optional bundled `reference_profile`
 identifiers, plus a validated `audio.default_voice`, which the API applies only
 when callers omit `voice`.
 
-**Model truth vs platform truth:** a card's `compatible_backends` declares which
-engines the model's artifacts run on (MODEL truth) and must never encode a gap
-in Skulk's own runners (PLATFORM truth). Platform limitations live in code:
-`platform_compatible_backends` in `src/skulk/shared/backends.py` (currently:
-served `llama_server` vision cards are gated off served engines; TTS/STT cards
-are gated to `mlx_audio`). Placement (`_card_platform_backends`) and the
-worker's fallback probe both apply the filter. When a runner gains a
-capability, flip the code table; do not sweep cards.
+**Four compatibility truth layers:** signed registry capability claims describe
+intrinsic model behavior and selected-artifact completeness; signed engine
+support claims establish compatibility for one exact architecture, artifact,
+quantization, capability, engine build, and optional hardware class;
+`NodeResources.engine_builds` / `hardware_classes` prove the live node match;
+and `platform_compatible_backends` applies Skulk runner limitations last.
+Empirical load/feature claims also bind the immutable card tested, and an
+artifact-scoped `incomplete` capability claim blocks matrix admission.
+Legacy card `compatible_backends` remain valid and are unioned with exact active
+`supported` matrix matches. Experimental, unsupported, stale-build, and
+hardware-mismatched claims never expand placement. The master stamps the
+resolved backend; the worker repeats the matrix check only for unstamped
+fallback. When a runner gains a capability, flip the code table; do not shrink
+model capability truth.
 
 ### Logging & Observability
 Centralized logging uses a three-layer stack:

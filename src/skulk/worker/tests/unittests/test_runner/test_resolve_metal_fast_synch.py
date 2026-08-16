@@ -15,7 +15,17 @@ from skulk.shared.models.model_cards import RuntimeCapabilityCardConfig
 from skulk.worker.runner.bootstrap import (
     FAST_SYNCH_CLUSTER_DEFAULT,
     resolve_metal_fast_synch,
+    safe_engine_build_inventory,
 )
+
+
+def test_invalid_engine_build_inventory_preserves_legacy_fallback() -> None:
+    """Malformed optional matrix configuration must not abort runner startup."""
+
+    def invalid_inventory() -> dict[str, str]:
+        raise ValueError("malformed override")
+
+    assert safe_engine_build_inventory(invalid_inventory) == {}
 
 
 def test_returns_cluster_default_when_no_override_or_card(

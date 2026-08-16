@@ -35,3 +35,16 @@ artifacts, verification state, reconciliation progress, and signed security
 advisories. Advisories are warnings only and cannot disable user workloads.
 Store deletions also persist reconciliation tombstones, so a stale cache on an
 unreachable node cannot silently recreate an intentionally removed model.
+
+## Adaptive model and engine capability truth
+
+Signed registry cards now retain open architecture and intrinsic capability
+claims independently of what Skulk can serve today. A separately signed support
+matrix can make a newly discovered architecture placeable without replacing its
+card, but only when an active positive claim matches the exact engine build,
+artifact format, quantization, capability, and hardware class advertised by a
+node. Existing card backend declarations remain compatible, while stale,
+experimental, unsupported, other-artifact, or incomplete evidence fails closed.
+Empirical load and feature claims are pinned to the exact card tested. Model
+APIs, placement previews, and the dashboard expose the evidence source and
+actionable compatibility gaps.
