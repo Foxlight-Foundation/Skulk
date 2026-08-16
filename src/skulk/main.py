@@ -1397,14 +1397,20 @@ class Node:
                     and self.master is None
                 ):
                     logger.info("Node elected Master - promoting self")
-                    # Seed the new session from this node's replicated view
-                    # (captured before the worker below is torn down and
-                    # re-created): placements survive master failover (#273)
-                    # instead of every worker reconciling its healthy runners
-                    # away against an empty snapshot. apply() replaces the
-                    # worker's state wholesale (immutable convention), so the
-                    # reference read here is a consistent snapshot.
-                    prior_state = self.worker.state if self.worker is not None else None
+                    # Seed the new session from this node's freshest replicated
+                    # view (captured before local roles are torn down and
+                    # re-created). API-only management nodes must use API State:
+                    # their startup config can lag a master-ordered trust event,
+                    # so falling back to it could resurrect a revocation after
+                    # promotion. apply() replaces State wholesale (immutable
+                    # convention), making either reference a consistent snapshot.
+                    prior_state = (
+                        self.worker.state
+                        if self.worker is not None
+                        else self.api.state
+                        if self.api is not None
+                        else None
+                    )
                     self.master = Master(
                         self.node_id,
                         result.session_id,
