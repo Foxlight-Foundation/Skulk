@@ -110,7 +110,10 @@ from skulk.api.node_health import (
     live_skulk_build_mismatch,
 )
 from skulk.api.operator_auth import create_operator_auth_router
-from skulk.api.operator_gateway import OperatorGatewayAuthorization
+from skulk.api.operator_gateway import (
+    OPERATOR_GATEWAY_AUTHORIZED_SCOPE_KEY,
+    OperatorGatewayAuthorization,
+)
 from skulk.api.performance_envelope import (
     ClusterPerformanceEnvelopes,
     GenerationOutcome,
@@ -470,6 +473,7 @@ from skulk.store.config import (
     load_skulk_config,
     resolve_config_path,
     resolve_node_staging,
+    write_skulk_config_atomic,
 )
 from skulk.tools.web_search import default_browser_tool_provider
 from skulk.utils.banner import print_startup_banner
@@ -2097,7 +2101,9 @@ class API:
             description=(
                 "Approves one exact signed-registry or content-derived custom-card "
                 "identity for download and execution across the cluster. The decision "
-                "is persisted in cluster Settings and synchronized to every node."
+                "is persisted in cluster Settings and synchronized to every node. "
+                "The mutation requires direct loopback access or an authenticated "
+                "operator-gateway credential."
             ),
         )(self.approve_remote_code)
         self.app.delete(
@@ -2107,7 +2113,8 @@ class API:
             description=(
                 "Revokes the operator's cluster-wide approval for one immutable "
                 "model-card identity. Existing processes are not killed, but future "
-                "downloads and runner starts fail closed."
+                "downloads and runner starts fail closed. The mutation requires direct "
+                "loopback access or an authenticated operator-gateway credential."
             ),
         )(self.revoke_remote_code)
         self.app.post(
@@ -2119,7 +2126,8 @@ class API:
                 "searchable and launchable. An optional gguf_file selects one exact "
                 "quant from a multi-quant GGUF repository. Cards that can execute "
                 "repository code remain blocked until the operator approves their "
-                "exact identity in cluster Settings."
+                "exact identity in cluster Settings. The mutation requires direct "
+                "loopback access or an authenticated operator-gateway credential."
             ),
         )(self.add_custom_model)
         self.app.delete(
@@ -2722,7 +2730,9 @@ class API:
             summary="Update cluster config",
             description=(
                 "Update cluster-wide config. Some changes apply to future launches immediately, "
-                "while model-store location changes still require a restart."
+                "while model-store location changes still require a restart. Writes that include "
+                "model_trust require direct loopback access or an authenticated operator-gateway "
+                "credential."
             ),
         )(self.update_config)
         self.app.get(
@@ -8257,10 +8267,7 @@ class API:
         config_yaml = yaml.safe_dump(
             config_data, default_flow_style=False, sort_keys=False
         )
-        self._config_path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self._config_path.with_name(f".{self._config_path.name}.tmp")
-        temporary.write_text(config_yaml)
-        temporary.replace(self._config_path)
+        write_skulk_config_atomic(self._config_path, config_yaml)
         self._skulk_config = parsed_config
 
         from skulk.shared.types.commands import SyncConfig
@@ -8272,22 +8279,26 @@ class API:
         )
         await self._send_download(SyncConfig(config_yaml=broadcast_yaml))
 
-    async def approve_remote_code(self, card_id: str) -> RemoteCodeApprovalView:
+    async def approve_remote_code(
+        self, card_id: str, request: Request
+    ) -> RemoteCodeApprovalView:
         """Persist approval for one immutable model card across the cluster.
 
         Args:
             card_id: Signed card ID or content-derived local card identity.
+            request: Incoming request proving a local or authenticated operator.
 
         Returns:
             The cluster approval view for the newly approved card.
 
         Raises:
-            HTTPException: If the identifier is malformed or unknown, or the
-                card needs no repository-code approval.
+            HTTPException: If the caller is not an operator, the identifier is
+                malformed or unknown, or the card needs no repository-code approval.
 
         Side effects:
             Persists and broadcasts the updated cluster model-trust settings.
         """
+        self._require_operator_mutation(request)
         if not re.fullmatch(r"(?:card|local)_[a-z2-7]{52}", card_id):
             raise HTTPException(status_code=422, detail="Invalid model trust identity")
         card = next(
@@ -8312,22 +8323,27 @@ class API:
             approved_on_this_node=True,
         )
 
-    async def revoke_remote_code(self, card_id: str) -> RemoteCodeApprovalView:
+    async def revoke_remote_code(
+        self, card_id: str, request: Request
+    ) -> RemoteCodeApprovalView:
         """Persist revocation for one immutable model card across the cluster.
 
         Args:
             card_id: Signed card ID or content-derived local card identity.
+            request: Incoming request proving a local or authenticated operator.
 
         Returns:
             The cluster approval view showing the card as revoked.
 
         Raises:
-            HTTPException: If the identifier is malformed.
+            HTTPException: If the caller is not an operator or the identifier is
+                malformed.
 
         Side effects:
             Persists and broadcasts the updated cluster model-trust settings,
             preventing future downloads and runner starts.
         """
+        self._require_operator_mutation(request)
         if not re.fullmatch(r"(?:card|local)_[a-z2-7]{52}", card_id):
             raise HTTPException(status_code=422, detail="Invalid model trust identity")
         await self.set_cluster_remote_code_approval(card_id, approved=False)
@@ -8358,21 +8374,32 @@ class API:
                 detail="This operator mutation is available only through loopback",
             )
 
-    async def add_custom_model(self, payload: AddCustomModelParams) -> ModelListModel:
+    @classmethod
+    def _require_operator_mutation(cls, request: Request) -> None:
+        """Allow a mutation only from loopback or the authenticated gateway."""
+        if request.scope.get(OPERATOR_GATEWAY_AUTHORIZED_SCOPE_KEY) is True:
+            return
+        cls._require_loopback_mutation(request)
+
+    async def add_custom_model(
+        self, payload: AddCustomModelParams, request: Request
+    ) -> ModelListModel:
         """Fetch and persist a custom model card for the cluster.
 
         Args:
             payload: Hugging Face repository, optional quant file, and revision.
+            request: Incoming request proving a local or authenticated operator.
 
         Returns:
             The generated custom model entry added to the cluster catalog.
 
         Raises:
-            HTTPException: If card generation fails.
+            HTTPException: If the caller is not an operator or card generation fails.
 
         Side effects:
             Fetches Hub metadata and broadcasts a persistent custom-card mutation.
         """
+        self._require_operator_mutation(request)
         # Load curated truth before generating the override. A generated card
         # is a metadata cache, not operator-authored placement policy, and must
         # retain architecture safety constraints from an exact bundled match.
@@ -11639,6 +11666,8 @@ class API:
             config_data = _coerce_json_object(cast(dict[object, object], raw_config))
         else:
             config_data = dict(body)
+        if "model_trust" in config_data:
+            self._require_operator_mutation(request)
         # Preserve existing secrets if not provided in this update
         # (GET /config strips them for security, so saves won't have them)
         existing_config_object: dict[str, object] | None = None
@@ -11676,9 +11705,8 @@ class API:
         config_yaml = yaml.safe_dump(
             config_data, default_flow_style=False, sort_keys=False
         )
-        # Write locally
-        with self._config_path.open("w") as f:
-            f.write(config_yaml)
+        # Write locally with the same private, atomic contract used by trust updates.
+        write_skulk_config_atomic(self._config_path, config_yaml)
         self._skulk_config = parsed_config
         # A consent change must apply immediately, not after the TTL.
         self._telemetry_config_cached_until = 0.0

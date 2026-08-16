@@ -1412,6 +1412,11 @@ Approval lookup uses the complete catalog, independent of this node's
 image-model visibility setting. The dashboard exposes the same model-by-model
 decision in Settings.
 
+Approval and revocation are operator mutations. They accept a direct loopback
+request from the local dashboard or a request that has passed the authenticated
+operator gateway with `operations:write`; the unauthenticated fabric listener
+cannot change trust from a remote host.
+
 **DELETE** `/models/remote-code-approvals/{card_id}`
 
 Revokes the cluster decision. Revocation prevents future downloads and runner
@@ -1494,9 +1499,11 @@ opened.
 
 Fetches metadata and adds a custom model card to the cluster catalog. The
 dashboard and operator API may call this through the normal cluster control
-surface. Generated cards that may execute repository code remain blocked until
-the operator approves their exact identity in Model trust Settings. A generated GGUF card is compatible
-with both llama.cpp engines and prefers
+surface only when the request is direct-loopback or has passed the authenticated
+operator gateway with `operations:write`. Generated cards that may execute
+repository code remain blocked until the operator approves their exact identity
+in Model trust Settings. A generated GGUF card is compatible with both llama.cpp
+engines and prefers
 the served `llama_server` tags, so on a node running llama-server it gets
 that engine's concurrency slots and is eligible for multi-node pooling via
 RPC; nodes without a served binary fall through to the in-process engine.
@@ -2214,7 +2221,11 @@ Updates cluster-wide config. Important behavior:
 - if you omit `experiments`, Skulk preserves the existing experiment toggles
 - if you omit `model_trust`, Skulk preserves existing exact-card decisions so
   older operator clients cannot silently revoke them
-- `hf_token` is not broadcast over gossipsub; it stays on the local node's `skulk.yaml`
+- writes that include `model_trust` require direct loopback access or an
+  authenticated operator-gateway credential with `operations:write`
+- `hf_token` is not broadcast over gossipsub; each receiving node merges its
+  existing local token into the synchronized config before an atomic
+  owner-only write
 - logging changes (enable/disable) take effect immediately on all nodes
 - inference changes affect future launches
 - model-trust changes converge to the canonical store and every serving node;

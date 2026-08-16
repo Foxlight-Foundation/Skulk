@@ -495,6 +495,11 @@ the operator approves one exact immutable model-card identity in cluster
 host and every serving node; trust is never a placement axis. Placement still
 applies open backend preferences, locality, and capacity ranking adaptively, and
 the store plus runner remain final enforcement boundaries.
+Trust mutations, custom-card creation, and config writes carrying model trust
+require direct loopback or the authenticated operator gateway's write scope.
+The gateway records successful bearer validation in the internal ASGI scope,
+not a caller-provided header. Secret-stripped convergence preserves each node's
+local Hugging Face token and atomically writes `skulk.yaml` mode `0o600`.
 Installer-generated configs begin as local bootstrap stores. On cluster
 formation, followers retry state-sync config bootstrap, receive the elected
 master's routable store address, stop superseded local store servers, and

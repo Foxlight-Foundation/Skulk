@@ -73,6 +73,26 @@ async def test_synced_config_notifies_config_dependent_capabilities(
     assert callbacks == 1
 
 
+@pytest.mark.asyncio
+async def test_synced_config_preserves_node_local_hugging_face_token(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Secret-stripped cluster sync cannot erase a node's local credential."""
+
+    config_path = tmp_path / "skulk.yaml"
+    config_path.write_text("hf_token: local-secret\n")
+    coordinator = _make_coordinator()
+    monkeypatch.setattr(coordinator_mod, "resolve_config_path", lambda: config_path)
+
+    await coordinator._sync_config("model_trust:\n  approved_remote_code_identities: []\n")
+
+    synchronized = config_path.read_text()
+    assert "hf_token: local-secret" in synchronized
+    assert "model_trust:" in synchronized
+    assert config_path.stat().st_mode & 0o777 == 0o600
+
+
 def test_in_progress_throttle_gates_by_fraction_rate_and_heartbeat(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

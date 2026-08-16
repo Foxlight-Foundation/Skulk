@@ -62,4 +62,7 @@ card, managed in cluster Settings rather than repeated on individual nodes.
 Revision-pinned Foxlight-provenance cards from the signed registry are already
 Foxlight's trust decision. Agent, community, custom, and unsigned cards remain
 loadable after explicit approval, and any changed card identity must be
-evaluated again.
+evaluated again. Trust and custom-card mutations require the direct-local
+dashboard or an authenticated operator-gateway credential. Config convergence
+also preserves each node's private Hugging Face token and owner-only config
+permissions.

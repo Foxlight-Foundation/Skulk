@@ -112,6 +112,8 @@ def test_custom_card_cannot_copy_foxlight_metadata_to_gain_automatic_trust() -> 
 
     assert not remote_code_is_automatically_trusted(card)
     assert remote_code_execution_requires_approval(card)
+    assert remote_code_trust_identity(card).startswith("local_")
+    assert remote_code_trust_identity(card) != card.registry_card_id
 
 
 @pytest.mark.parametrize(

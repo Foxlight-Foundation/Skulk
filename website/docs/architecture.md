@@ -468,6 +468,12 @@ in cluster Settings. The synchronized `model_trust` configuration reaches the
 canonical store and every serving node, so trust never biases placement toward
 one machine. After approval, the planner applies backend preference, locality,
 and capacity normally and may fall through among any admissible candidates.
+Trust mutations and custom-card creation accept only a direct loopback request
+or an authenticated operator-gateway request with write scope; successful
+gateway validation is carried to the canonical route in the ASGI scope rather
+than through a caller-spoofable header. Secret-stripped config convergence
+merges each recipient's local Hugging Face token before atomically replacing
+its owner-only config file.
 `GET /instance/previews` explains a missing model decision without reserving a
 placement; `POST /place_instance` re-evaluates current facts at launch.
 

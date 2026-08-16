@@ -193,6 +193,45 @@ def test_update_config_preserves_existing_model_trust_when_omitted(
     assert config.model_trust.approved_remote_code_identities == [card_id]
 
 
+@pytest.mark.parametrize(
+    ("method", "path", "payload"),
+    [
+        (
+            "PUT",
+            "/config",
+            {"config": {"model_trust": {"approved_remote_code_identities": []}}},
+        ),
+        (
+            "POST",
+            f"/models/remote-code-approvals/card_{'a' * 52}",
+            None,
+        ),
+        (
+            "DELETE",
+            f"/models/remote-code-approvals/card_{'a' * 52}",
+            None,
+        ),
+        ("POST", "/models/add", {"model_id": "org/model"}),
+    ],
+)
+def test_sensitive_model_mutations_reject_unauthenticated_network_client(
+    tmp_path: Path,
+    method: str,
+    path: str,
+    payload: dict[str, object] | None,
+) -> None:
+    """The unauthenticated fabric listener cannot grant model-code authority."""
+
+    api = _build_api()
+    object.__setattr__(api, "_config_path", tmp_path / "skulk.yaml")
+    client = TestClient(api.app)
+
+    response = client.request(method, path, json=payload)
+
+    assert response.status_code == 403
+    assert "loopback" in response.json()["error"]["message"]
+
+
 @pytest.mark.asyncio
 async def test_model_trust_decision_persists_in_cluster_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -216,6 +255,7 @@ async def test_model_trust_decision_persists_in_cluster_config(
     assert config.model_trust is not None
     assert config.model_trust.approved_remote_code_identities == [card_id]
     assert config.hf_token == "keep-secret"
+    assert config_path.stat().st_mode & 0o777 == 0o600
     send_download.assert_awaited_once()
     assert send_download.await_args is not None
     sent = cast(SyncConfig, cast(object, send_download.await_args.args[0]))

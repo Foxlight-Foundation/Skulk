@@ -76,7 +76,7 @@ def remote_code_trust_identity(card: ModelCard) -> str:
     digest of the complete effective card, so a revision or policy change
     cannot inherit approval from an earlier definition.
     """
-    if card.registry_card_id is not None:
+    if not card.is_custom and card.registry_card_id is not None:
         return card.registry_card_id
     payload = card.model_dump(
         mode="json",

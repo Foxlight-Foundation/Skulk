@@ -51,7 +51,7 @@ from skulk.shared.types.worker.downloads import (
     DownloadProgress,
 )
 from skulk.shared.types.worker.shards import PipelineShardMetadata, ShardMetadata
-from skulk.store.config import resolve_config_path
+from skulk.store.config import resolve_config_path, write_skulk_config_atomic
 from skulk.utils.channels import Receiver, Sender
 from skulk.utils.task_group import TaskGroup
 
@@ -336,12 +336,23 @@ class DownloadCoordinator:
         apply runtime-effective settings (e.g., KV cache backend)."""
         config_path = resolve_config_path()
         try:
-            config_path.write_text(config_yaml)
+            raw = _coerce_json_object(cast(object, yaml.safe_load(config_yaml)))
+            if "hf_token" not in raw and config_path.exists():
+                existing = _coerce_json_object(
+                    cast(object, yaml.safe_load(config_path.read_text()))
+                )
+                if "hf_token" in existing:
+                    raw["hf_token"] = existing["hf_token"]
+            local_config_yaml = yaml.safe_dump(
+                raw,
+                default_flow_style=False,
+                sort_keys=False,
+            )
+            write_skulk_config_atomic(config_path, local_config_yaml)
             logger.info(
-                f"DownloadCoordinator: synced {config_path.name} from cluster ({len(config_yaml)} bytes)"
+                f"DownloadCoordinator: synced {config_path.name} from cluster ({len(local_config_yaml)} bytes)"
             )
             # Apply inference config to env var so next runner spawn picks it up
-            raw = _coerce_json_object(cast(object, yaml.safe_load(config_yaml)))
             inference = _coerce_json_object(raw.get("inference"))
             if "kv_cache_backend" in inference:
                 # Don't overwrite if user provided the env var at launch

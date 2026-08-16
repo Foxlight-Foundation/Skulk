@@ -68,8 +68,10 @@ Example ``skulk.yaml``::
 
 from __future__ import annotations
 
+import os
 import re
 import socket
+import tempfile
 from pathlib import Path
 from typing import Final, Literal, final
 
@@ -571,6 +573,37 @@ class InferenceConfig(FrozenModel):
 def resolve_config_path() -> Path:
     """Return the cluster config path (``skulk.yaml`` in the working directory)."""
     return Path("skulk.yaml")
+
+
+def write_skulk_config_atomic(path: Path, config_yaml: str) -> None:
+    """Atomically replace a cluster config with owner-only permissions.
+
+    Args:
+        path: Destination ``skulk.yaml`` path.
+        config_yaml: Complete serialized configuration.
+
+    Side effects:
+        Creates the parent directory, fsyncs a private temporary file, and
+        atomically replaces the destination. The resulting file is always
+        mode ``0o600`` because it may contain local credentials.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        text=True,
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as temporary:
+            os.fchmod(temporary.fileno(), 0o600)
+            temporary.write(config_yaml)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        temporary_path.replace(path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
 
 def load_skulk_config(

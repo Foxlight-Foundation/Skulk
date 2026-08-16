@@ -9,11 +9,14 @@ from uuid import UUID
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, Request, WebSocket
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from skulk.api.operator_gateway import OperatorGatewayAuthorization
+from skulk.api.operator_gateway import (
+    OPERATOR_GATEWAY_AUTHORIZED_SCOPE_KEY,
+    OperatorGatewayAuthorization,
+)
 from skulk.operator.authority import EncryptedAuthorityStore
 from skulk.operator.key_provider import LocalFileAuthorityKeyProvider
 from skulk.operator.pairing import (
@@ -86,6 +89,15 @@ def test_remote_listener_reuses_canonical_routes_and_requires_scoped_bearer(
     def place() -> dict[str, bool]:
         return {"placed": True}
 
+    @canonical.post("/models/remote-code-approvals/card_test")
+    def approve_model_code(request: Request) -> dict[str, bool]:
+        return {
+            "operator_authorized": request.scope.get(
+                OPERATOR_GATEWAY_AUTHORIZED_SCOPE_KEY
+            )
+            is True
+        }
+
     client = TestClient(OperatorGatewayAuthorization(canonical, service))
     assert client.get("/state").status_code == 401
     assert client.get(
@@ -96,6 +108,10 @@ def test_remote_listener_reuses_canonical_routes_and_requires_scoped_bearer(
         "/place_instance",
         headers={"Authorization": f"Bearer {exchange.access_token}"},
     ).json() == {"placed": True}
+    assert client.post(
+        "/models/remote-code-approvals/card_test",
+        headers={"Authorization": f"Bearer {exchange.access_token}"},
+    ).json() == {"operator_authorized": True}
     assert client.get(
         "/state",
         headers={"Authorization": "Bearer wrong"},

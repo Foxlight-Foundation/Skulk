@@ -4,13 +4,38 @@
 from unittest.mock import AsyncMock
 
 import pytest
+from starlette.requests import Request
 
 from skulk.api import main as api_main
 from skulk.api.main import API
+from skulk.api.operator_gateway import OPERATOR_GATEWAY_AUTHORIZED_SCOPE_KEY
 from skulk.shared.models.model_cards import ModelCard, ModelTask, VisionCardConfig
 from skulk.shared.models.remote_code_approval import remote_code_trust_identity
 from skulk.shared.types.common import ModelId
 from skulk.shared.types.memory import Memory
+
+
+def _loopback_operator_request() -> Request:
+    """Return a direct-local request authorized for operator mutations."""
+    return Request(
+        {
+            "type": "http",
+            "headers": [],
+            "client": ("127.0.0.1", 52415),
+        }
+    )
+
+
+def _authenticated_gateway_request() -> Request:
+    """Return a remote request already validated by the operator gateway."""
+    return Request(
+        {
+            "type": "http",
+            "headers": [],
+            "client": ("198.51.100.10", 52415),
+            OPERATOR_GATEWAY_AUTHORIZED_SCOPE_KEY: True,
+        }
+    )
 
 
 @pytest.mark.asyncio
@@ -39,7 +64,7 @@ async def test_image_card_approval_uses_unfiltered_catalog(
     monkeypatch.setattr(api, "set_cluster_remote_code_approval", persist)
     monkeypatch.setattr(api_main, "get_all_model_cards", complete_catalog)
 
-    result = await api.approve_remote_code(card_id)
+    result = await api.approve_remote_code(card_id, _loopback_operator_request())
 
     assert result.card_id == card_id
     assert result.approved_for_cluster
@@ -95,7 +120,9 @@ async def test_custom_card_approval_uses_content_derived_identity(
     monkeypatch.setattr(api_main, "get_all_model_cards", complete_catalog)
     trust_identity = remote_code_trust_identity(card)
 
-    result = await api.approve_remote_code(trust_identity)
+    result = await api.approve_remote_code(
+        trust_identity, _authenticated_gateway_request()
+    )
 
     assert result.card_id == trust_identity
     assert result.approved_for_cluster
