@@ -25,6 +25,11 @@ This project records release notes here and mirrors public-facing notes in
   capability 12.1, allowing Grace Blackwell and GB10 nodes to use the CUDA
   served engine instead of falling back to Vulkan.
 
+- Supervised startup now preserves an installed managed CUDA or Vulkan
+  llama-server wheel across its routine `uv sync`; previously the exact sync
+  could prune the installer-managed wheel on the first service restart and
+  silently return the node to tarball provisioning.
+
 - Intelligent Fabric now speaks and identifies as Skulk rather than presenting
   a separate Steward character. The dashboard streams answer prose through a
   ready TTS model only when its voice catalog contains the signature `skulk`

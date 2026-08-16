@@ -145,6 +145,18 @@ run_prep() {
         log "GPU llama.cpp node: 'uv sync --inexact' to preserve the source-built wheel"
         ;;
     esac
+    # install.sh deliberately installs the large, platform-specific served
+    # engine wheels after the locked project sync. They are not project
+    # dependencies, so a later exact supervised sync would otherwise prune the
+    # working engine on the first restart and silently fall back to a tarball.
+    # Detect the already-installed distributions before syncing and preserve
+    # the venv extras just as we do for source-built GPU bindings and plugins.
+    ENGINE_WHEEL_PROBE='import importlib.metadata as m, sys; names = {"skulk-llama-server-cuda", "skulk-llama-server-vulkan"}; sys.exit(0 if any((distribution.metadata.get("Name") or "").lower() in names for distribution in m.distributions()) else 1)'
+    if [ -x .venv/bin/python ] \
+        && .venv/bin/python -c "$ENGINE_WHEEL_PROBE" >/dev/null 2>&1; then
+        SYNC_FLAGS="--inexact"
+        log "managed llama-server engine wheel installed: 'uv sync --inexact' to preserve it"
+    fi
     # Nodes carrying separately installed skulk.extensions plugins (for
     # example the den's fabric-memory plugin) have the same shape as the
     # GPU wheel: correct packages outside uv's locked resolution that a

@@ -57,6 +57,19 @@ def test_supervised_startup_uses_bundled_npm_before_system_fallback() -> None:
     assert system_fallback < system_install
 
 
+def test_supervised_startup_preserves_managed_engine_wheels() -> None:
+    """A restart must not prune the engine wheel installed by install.sh."""
+
+    script = (_REPO_ROOT / "deployment/install/skulk-startup.sh").read_text()
+    probe = script.index("ENGINE_WHEEL_PROBE=")
+    sync = script.index('log "uv sync (non-fatal)"', probe)
+
+    assert "skulk-llama-server-cuda" in script[probe:sync]
+    assert "skulk-llama-server-vulkan" in script[probe:sync]
+    assert 'SYNC_FLAGS="--inexact"' in script[probe:sync]
+    assert probe < sync
+
+
 def test_vector_startup_expands_home_defaults_before_vector(
     tmp_path: Path,
 ) -> None:
