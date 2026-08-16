@@ -481,7 +481,7 @@ from skulk.store.config import (
     persist_model_trust_config,
     resolve_config_path,
     resolve_node_staging,
-    write_skulk_config_atomic,
+    update_skulk_config_atomic,
 )
 from skulk.tools.web_search import default_browser_tool_provider
 from skulk.utils.banner import print_startup_banner
@@ -11692,45 +11692,34 @@ class API:
                     "/models/remote-code-approvals endpoints"
                 ),
             )
-        # Preserve existing secrets if not provided in this update
-        # (GET /config strips them for security, so saves won't have them)
-        existing_config_object: dict[str, object] | None = None
-        if self._config_path.exists():
-            try:
-                existing = _load_yaml_object(self._config_path)
-                existing_config_object = existing
-                if "hf_token" not in config_data and "hf_token" in existing:
-                    config_data["hf_token"] = existing["hf_token"]
-                # Preserve logging config when omitted from the request
-                if "logging" not in config_data and "logging" in existing:
-                    config_data["logging"] = existing["logging"]
-                # Preserve experiment toggles when omitted from the request.
-                if "experiments" not in config_data and "experiments" in existing:
-                    config_data["experiments"] = existing["experiments"]
-                # Older operator clients do not know about model trust. Their
-                # unrelated Settings saves must not silently revoke approvals.
-                if "model_trust" not in config_data and "model_trust" in existing:
-                    config_data["model_trust"] = existing["model_trust"]
-            except Exception:
-                pass
-        # Telemetry section normalization (preserve on partial saves, stamp
-        # consented_version only once decided, backfill install_id): pure
-        # logic lives in field_telemetry.prepare_telemetry_config_update.
-        # Reuses the YAML object already loaded for the secrets-preservation
-        # block above; None when the file was absent or unreadable.
-        prepare_telemetry_config_update(config_data, existing_config_object)
-        # Validate by attempting to parse with Pydantic
-        from skulk.store.config import SkulkConfig
+        requested_config = dict(config_data)
+
+        def merge_local_fields(existing: dict[str, object]) -> dict[str, object]:
+            """Preserve local-only fields inside the atomic config transaction."""
+
+            updated = dict(requested_config)
+            for field_name in (
+                "hf_token",
+                "logging",
+                "experiments",
+                "model_trust",
+            ):
+                if field_name not in updated and field_name in existing:
+                    updated[field_name] = existing[field_name]
+            # Normalize telemetry against the same locked snapshot that will be
+            # replaced, so neither trust nor consent metadata can be stale.
+            prepare_telemetry_config_update(updated, existing or None)
+            SkulkConfig.model_validate(updated)
+            return updated
 
         try:
+            config_data = update_skulk_config_atomic(
+                self._config_path,
+                merge_local_fields,
+            )
             parsed_config = SkulkConfig.model_validate(config_data)
-        except Exception as exc:
+        except (ValueError, yaml.YAMLError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        config_yaml = yaml.safe_dump(
-            config_data, default_flow_style=False, sort_keys=False
-        )
-        # Write locally with the same private, atomic contract used by trust updates.
-        write_skulk_config_atomic(self._config_path, config_yaml)
         self._skulk_config = parsed_config
         # A consent change must apply immediately, not after the TTL.
         self._telemetry_config_cached_until = 0.0

@@ -1,5 +1,6 @@
 """Tests for the /config API endpoint."""
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 from unittest.mock import AsyncMock
@@ -8,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 from httpx2 import Response
 
+from skulk.api import main as api_main
 from skulk.api.main import API
 from skulk.shared.election import ElectionMessage
 from skulk.shared.types.commands import (
@@ -17,7 +19,11 @@ from skulk.shared.types.commands import (
 )
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.events import IndexedEvent
-from skulk.store.config import load_skulk_config
+from skulk.store.config import (
+    load_skulk_config,
+    persist_model_trust_config,
+    update_skulk_config_atomic,
+)
 from skulk.utils.channels import channel
 
 
@@ -191,6 +197,45 @@ def test_update_config_preserves_existing_model_trust_when_omitted(
     assert config is not None
     assert config.model_trust is not None
     assert config.model_trust.approved_remote_code_identities == [card_id]
+
+
+def test_update_config_merges_latest_trust_inside_transaction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unrelated Settings save cannot overwrite a concurrent decision."""
+
+    initial_identity = f"card_{'a' * 52}"
+    latest_identity = f"card_{'b' * 52}"
+    config_path = tmp_path / "skulk.yaml"
+    persist_model_trust_config(config_path, [initial_identity])
+    api = _build_api()
+    object.__setattr__(api, "_config_path", config_path)
+
+    def inject_latest_trust(
+        path: Path,
+        update: Callable[[dict[str, object]], dict[str, object]],
+    ) -> dict[str, object]:
+        persist_model_trust_config(path, [latest_identity])
+        return update_skulk_config_atomic(path, update)
+
+    monkeypatch.setattr(
+        api_main,
+        "update_skulk_config_atomic",
+        inject_latest_trust,
+    )
+    client = TestClient(api.app)
+
+    response = client.put(
+        "/config",
+        json={"config": {"inference": {"kv_cache_backend": "default"}}},
+    )
+
+    assert response.status_code == 200
+    config = load_skulk_config(config_path)
+    assert config is not None
+    assert config.model_trust is not None
+    assert config.model_trust.approved_remote_code_identities == [latest_identity]
 
 
 def test_update_config_rejects_model_trust_snapshot_on_loopback(
