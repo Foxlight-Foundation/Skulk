@@ -57,6 +57,12 @@ _DOWNLOAD_TIMEOUT_SECONDS = 300.0
 # degrading to the Vulkan/tarball chain.
 _WHEEL_INSTALL_TIMEOUT_SECONDS = 900.0
 
+# The first native arm64 CUDA wheel is deliberately GB10-specific: unlike the
+# x86_64 wheel, its CI build carries only an sm_121 real-code image. Do not let
+# package-tag compatibility masquerade as GPU-kernel compatibility on GH200 or
+# another arm64 NVIDIA system; those nodes retain the verified Vulkan fallback.
+_ARM64_CUDA_WHEEL_COMPUTE_CAPABILITIES = frozenset({(12, 1)})
+
 # Mirrors install.sh's ENGINE_INDEX_FLAGS: the Foxlight PEP 503 index is the
 # source of truth for engine wheels (the CUDA wheel exceeds PyPI's size
 # limit), with the default index pinned explicitly so a host exporting
@@ -162,12 +168,16 @@ def _wheel_version_matches_pin(distribution: str, *, quiet: bool = False) -> boo
 
 
 def _cuda_capability_ok(facts: NodeFacts) -> bool:
-    """Whether an observed NVIDIA GPU meets the CUDA wheel's compiled SM floor.
+    """Whether an observed NVIDIA GPU matches this host wheel's compiled SMs.
 
     An unknown capability (NVML degraded) is treated as not-ok: preferring a
     wheel that may have no kernels for the silicon would fail at model load,
     while the Vulkan fallback fails loudly at probe time if it fails at all.
+    The x86_64 wheel retains its established Ampere-or-newer policy. The first
+    aarch64 wheel is narrower and accepts only the GB10 ``sm_121`` target it
+    actually carries.
     """
+    machine = platform_module.machine().lower()
     for gpu in facts.gpus_of("nvidia"):
         if gpu.compute_capability is None:
             continue
@@ -175,7 +185,14 @@ def _cuda_capability_ok(facts: NodeFacts) -> bool:
             major, minor = (int(part) for part in gpu.compute_capability.split("."))
         except ValueError:
             continue
-        if (major, minor) >= CUDA_WHEEL_MIN_COMPUTE_CAPABILITY:
+        capability = (major, minor)
+        if machine in {"aarch64", "arm64"}:
+            if capability in _ARM64_CUDA_WHEEL_COMPUTE_CAPABILITIES:
+                return True
+            continue
+        if machine in {"x86_64", "amd64"} and (
+            capability >= CUDA_WHEEL_MIN_COMPUTE_CAPABILITY
+        ):
             return True
     return False
 
