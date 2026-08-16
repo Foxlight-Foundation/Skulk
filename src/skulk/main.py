@@ -67,6 +67,7 @@ from skulk.shared.types.events import (
     IndexedEvent,
     InstanceCreated,
     InstanceDeleted,
+    ModelTrustApprovalChanged,
     NodeDownloadProgress,
     RunnerStatusUpdated,
     StagedModelEvicted,
@@ -85,6 +86,7 @@ from skulk.store.config import (
     SkulkConfig,
     load_skulk_config,
     node_matches_store_host,
+    persist_model_trust_config,
     resolve_config_path,
     resolve_node_staging,
 )
@@ -928,15 +930,52 @@ class Node:
             return
 
     async def _observe_artifact_inventory_events(self) -> None:
-        """Translate relevant replicated transitions into local rescan hints."""
+        """Apply node-level replicated side effects and local rescan hints.
+
+        Dedicated model-store hosts may intentionally run without either a
+        worker or an API. Those roles normally persist the master-ordered trust
+        set, so this node-level subscriber owns that side effect only when both
+        are absent. This keeps repository-code authorization cluster-scoped for
+        every supported node role without duplicating writes on ordinary nodes.
+        """
 
         receiver = self.artifact_inventory_event_receiver
         if receiver is None:
             return
+        trust_approvals = set(
+            self.skulk_config.model_trust.approved_remote_code_identities
+            if self.skulk_config is not None
+            and self.skulk_config.model_trust is not None
+            else ()
+        )
         with receiver as events:
             async for indexed_event in events:
+                event = indexed_event.event
+                if self.worker is None and self.api is None:
+                    if isinstance(event, StateSnapshotHydrated):
+                        trust_approvals = set(
+                            event.state.model_trust_approved_remote_code_identities
+                        )
+                    elif isinstance(event, ModelTrustApprovalChanged):
+                        if event.approved:
+                            trust_approvals.add(event.trust_identity)
+                        else:
+                            trust_approvals.discard(event.trust_identity)
+                    if isinstance(
+                        event, (ModelTrustApprovalChanged, StateSnapshotHydrated)
+                    ):
+                        try:
+                            self.skulk_config = persist_model_trust_config(
+                                resolve_config_path(), trust_approvals
+                            )
+                        except (OSError, ValueError):
+                            logger.exception(
+                                "Store-only node failed to persist master-ordered "
+                                "model trust; repository-code downloads remain "
+                                "fail-closed"
+                            )
                 if isinstance(
-                    indexed_event.event,
+                    event,
                     (
                         InstanceCreated,
                         InstanceDeleted,

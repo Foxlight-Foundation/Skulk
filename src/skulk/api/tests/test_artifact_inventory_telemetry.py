@@ -24,11 +24,21 @@ from skulk.shared.types.artifact_inventory import (
     NodeArtifactInventory,
 )
 from skulk.shared.types.common import NodeId
-from skulk.shared.types.events import IndexedEvent, StagedModelEvicted
+from skulk.shared.types.events import (
+    IndexedEvent,
+    ModelTrustApprovalChanged,
+    StagedModelEvicted,
+    StateSnapshotHydrated,
+)
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.state import State
 from skulk.shared.types.telemetry import NodeTelemetry, TelemetryView
-from skulk.store.config import ModelStoreConfig, SkulkConfig, StagingNodeConfig
+from skulk.store.config import (
+    ModelStoreConfig,
+    SkulkConfig,
+    StagingNodeConfig,
+    load_skulk_config,
+)
 from skulk.store.installed_cards import (
     InstalledCardRecord,
     VerifiedDetachedInstalledCardCache,
@@ -422,6 +432,101 @@ async def test_node_event_tap_requests_inventory_refresh_without_an_api() -> Non
         with anyio.fail_after(0.25):
             await node._artifact_inventory_trigger_receiver.receive()
         task_group.cancel_scope.cancel()
+
+
+async def test_store_only_node_persists_master_ordered_model_trust(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dedicated store host converges trust from deltas and snapshots."""
+
+    config_path = tmp_path / "skulk.yaml"
+    config_path.write_text("{}\n")
+    monkeypatch.setattr(skulk_main, "resolve_config_path", lambda: config_path)
+    node = _publisher_node(_RecordingTelemetrySender())
+    event_sender, event_receiver = channel[IndexedEvent](4)
+    node.artifact_inventory_event_receiver = event_receiver
+    first_identity = "card_" + ("a" * 52)
+    second_identity = "card_" + ("b" * 52)
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(node._observe_artifact_inventory_events)
+        await event_sender.send(
+            IndexedEvent(
+                idx=1,
+                event=ModelTrustApprovalChanged(
+                    trust_identity=first_identity,
+                    approved=True,
+                ),
+            )
+        )
+        snapshot = State(
+            model_trust_approved_remote_code_identities=(second_identity,)
+        )
+        await event_sender.send(
+            IndexedEvent(idx=2, event=StateSnapshotHydrated(state=snapshot))
+        )
+        with anyio.fail_after(0.25):
+            while True:
+                persisted_config = load_skulk_config(config_path)
+                persisted_trust = (
+                    persisted_config.model_trust
+                    if persisted_config is not None
+                    else None
+                )
+                if (
+                    persisted_trust is not None
+                    and persisted_trust.approved_remote_code_identities
+                    == [second_identity]
+                ):
+                    break
+                await anyio.sleep(0)
+        task_group.cancel_scope.cancel()
+
+    assert node.skulk_config is not None
+    assert node.skulk_config.model_trust is not None
+    assert node.skulk_config.model_trust.approved_remote_code_identities == [
+        second_identity
+    ]
+
+
+async def test_store_only_trust_persistence_failure_keeps_event_tap_alive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A local config failure cannot stop later store-only trust events."""
+
+    attempts: list[tuple[str, ...]] = []
+
+    def fail_persistence(_path: Path, approvals: set[str]) -> SkulkConfig:
+        attempts.append(tuple(sorted(approvals)))
+        raise OSError("read-only config")
+
+    monkeypatch.setattr(
+        skulk_main, "persist_model_trust_config", fail_persistence
+    )
+    node = _publisher_node(_RecordingTelemetrySender())
+    event_sender, event_receiver = channel[IndexedEvent](2)
+    node.artifact_inventory_event_receiver = event_receiver
+    first_identity = "card_" + ("a" * 52)
+    second_identity = "card_" + ("b" * 52)
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(node._observe_artifact_inventory_events)
+        for idx, identity in enumerate((first_identity, second_identity), start=1):
+            await event_sender.send(
+                IndexedEvent(
+                    idx=idx,
+                    event=ModelTrustApprovalChanged(
+                        trust_identity=identity,
+                        approved=True,
+                    ),
+                )
+            )
+        with anyio.fail_after(0.25):
+            while len(attempts) != 2:
+                await anyio.sleep(0)
+        task_group.cancel_scope.cancel()
+
+    assert attempts == [(first_identity,), (first_identity, second_identity)]
 
 
 async def test_registry_synthesizes_store_local_and_keeps_node_cache_distinct(
