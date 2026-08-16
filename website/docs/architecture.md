@@ -836,7 +836,10 @@ Provisioning also checks that exact compute capability before adopting the
 ARM64 wheel, so another ARM64 NVIDIA system without an included kernel retains
 the verified Vulkan fallback instead of failing later during model load.
 An installed wheel is wired automatically, including its bundled
-`ggml-rpc-server` donor binary for multi-node GGUF. On an NVIDIA node with
+`ggml-rpc-server` donor binary for multi-node GGUF. Because these platform
+wheels live outside the project's locked dependency set, supervised startup
+detects an installed engine wheel before syncing and uses `uv sync --inexact`
+to preserve it across service restarts. On an NVIDIA node with
 no usable CUDA wheel installed (a bare checkout or a GPU-cloud container
 that skipped the installer's engine step), provisioning first installs the
 Foxlight CUDA wheel on demand from the wheel index, so the CUDA lane

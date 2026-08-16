@@ -63,6 +63,11 @@ The installer wires an inference engine matched to the hardware it detects:
   managed-tarball fallback.
 - **macOS**: needs nothing; Apple Silicon serves through in-process MLX.
 
+Managed engine wheels are intentionally installed outside the project's locked
+dependency set. Once one is present, the supervised startup wrapper uses
+`uv sync --inexact` so routine service restarts preserve that platform wheel
+instead of pruning it before Skulk starts.
+
 Skulk also auto-provisions a pinned, checksum-verified `llama-server` at node
 startup on Linux when no engine is configured. Setting
 `SKULK_LLAMA_SERVER_BIN` to your own build always overrides, and

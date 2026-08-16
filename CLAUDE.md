@@ -178,7 +178,10 @@ limit) with the Vulkan wheel mirrored to PyPI. The CUDA wheel builds with
 libcuda.so.1 link (stubs ship only libcuda.so), so never reintroduce
 driver-API-dependent flags to that build. The aarch64 lane uses CUDA 12.9 and
 targets compute capability 12.1 for Grace Blackwell/GB10; provisioning admits
-that first ARM64 payload only on exact `sm_121` hardware. ADVANCING THE ENGINE PIN IS A
+that first ARM64 payload only on exact `sm_121` hardware. Supervised startup
+detects an installed CUDA or Vulkan engine distribution before syncing and uses
+`uv sync --inexact` so the installer-managed wheel survives routine restarts.
+ADVANCING THE ENGINE PIN IS A
 CHECKLIST (architecture-reference.md "Engine pin advancement"): bump pin +
 re-record checksums + bump wheel version + republish + fresh-box gauntlet;
 never advance casually. `install.sh` is the one-command fresh-box installer
