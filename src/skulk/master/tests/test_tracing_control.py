@@ -268,6 +268,43 @@ async def test_master_serializes_back_to_back_model_trust_mutations(
 
 
 @pytest.mark.asyncio
+async def test_master_keeps_processing_when_model_trust_persistence_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A degraded local config file cannot stop master command processing."""
+
+    def fail_persistence(_path: Path, _identities: object) -> None:
+        raise OSError("read-only filesystem")
+
+    monkeypatch.setattr(
+        "skulk.master.main.persist_model_trust_config",
+        fail_persistence,
+    )
+    master, _node_id, command_sender, event_receiver = _build_master()
+    identities = (f"card_{'a' * 52}", f"card_{'b' * 52}")
+    received: list[ModelTrustApprovalChanged] = []
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(master._command_processor)  # pyright: ignore[reportPrivateUsage]
+        for identity in identities:
+            await command_sender.send(
+                ForwarderCommand(
+                    origin=SystemId("API"),
+                    command=SetModelTrustApproval(
+                        trust_identity=identity,
+                        approved=True,
+                    ),
+                )
+            )
+            event = await event_receiver.receive()
+            assert isinstance(event, ModelTrustApprovalChanged)
+            received.append(event)
+        task_group.cancel_scope.cancel()
+
+    assert tuple(event.trust_identity for event in received) == identities
+
+
+@pytest.mark.asyncio
 async def test_master_new_text_tasks_inherit_cluster_tracing_state() -> None:
     """New text tasks should inherit the cluster tracing toggle."""
 

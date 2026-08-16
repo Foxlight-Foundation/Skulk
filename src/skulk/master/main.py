@@ -1428,9 +1428,21 @@ class Master:
                                 self._model_trust_approvals.discard(
                                     command.trust_identity
                                 )
-                            persist_model_trust_config(
-                                resolve_config_path(), self._model_trust_approvals
-                            )
+                            try:
+                                persist_model_trust_config(
+                                    resolve_config_path(),
+                                    self._model_trust_approvals,
+                                )
+                            except (OSError, ValueError):
+                                # Replicated State is authoritative. A degraded
+                                # local disk must not kill the master command
+                                # processor; this node's runner boundary keeps
+                                # using its last good copy and therefore fails
+                                # closed until a later persistence attempt works.
+                                logger.exception(
+                                    "Master failed to persist model trust locally; "
+                                    "continuing with the indexed cluster decision"
+                                )
                             generated_events.append(
                                 ModelTrustApprovalChanged(
                                     trust_identity=command.trust_identity,
