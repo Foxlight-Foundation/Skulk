@@ -1541,6 +1541,7 @@ class PlacementPreview(BaseModel):
         "no_valid_placement",
         "placement_info_pending",
         "model_code_approval_required",
+        "model_card_identity_mismatch",
     ] | None = Field(
         default=None,
         description=(

@@ -3,9 +3,10 @@
 from collections.abc import Callable
 from pathlib import Path
 from typing import cast
-from unittest.mock import AsyncMock
 
+import anyio
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from httpx2 import Response
 
@@ -299,7 +300,7 @@ def test_sensitive_model_mutations_reject_unauthenticated_network_client(
 async def test_model_trust_decision_is_submitted_to_master(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """One model approval becomes a master-serialized command."""
+    """One model approval waits for its master-indexed decision."""
     config_path = tmp_path / "skulk.yaml"
     config_path.write_text(
         "hf_token: keep-secret\n",
@@ -307,15 +308,66 @@ async def test_model_trust_decision_is_submitted_to_master(
     )
     api = _build_api()
     object.__setattr__(api, "_config_path", config_path)
-    send = AsyncMock()
-    monkeypatch.setattr(api, "_send", send)
     card_id = f"card_{'a' * 52}"
+    sent = anyio.Event()
+    submitted: list[SetModelTrustApproval] = []
+    completed = False
 
-    await api.set_cluster_remote_code_approval(card_id, approved=True)
+    async def send(command: object) -> None:
+        submitted.append(cast(SetModelTrustApproval, command))
+        sent.set()
 
-    send.assert_awaited_once()
-    assert send.await_args is not None
-    command = cast(SetModelTrustApproval, cast(object, send.await_args.args[0]))
+    async def approve() -> None:
+        nonlocal completed
+        await api.set_cluster_remote_code_approval(card_id, approved=True)
+        completed = True
+
+    monkeypatch.setattr(api, "_send", send)
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(approve)
+        await sent.wait()
+        await anyio.sleep(0)
+        assert completed is False
+        api.state = api.state.model_copy(
+            update={
+                "last_event_applied_idx": 0,
+                "model_trust_approved_remote_code_identities": (card_id,),
+            }
+        )
+        api._release_model_trust_decision_waiters(  # pyright: ignore[reportPrivateUsage]
+            card_id,
+            True,
+        )
+
+    assert completed is True
+    assert len(submitted) == 1
+    command = submitted[0]
     assert command.trust_identity == card_id
     assert command.approved is True
     assert config_path.read_text() == "hf_token: keep-secret\n"
+
+
+@pytest.mark.asyncio
+async def test_model_trust_decision_timeout_is_actionable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lost indexed event returns 503 and does not leak its waiter."""
+
+    api = _build_api()
+
+    async def send(_command: object) -> None:
+        return None
+
+    monkeypatch.setattr(api, "_send", send)
+    monkeypatch.setattr(api_main, "_MODEL_TRUST_DECISION_TIMEOUT_SECONDS", 0.01)
+
+    with pytest.raises(HTTPException) as failure:
+        await api.set_cluster_remote_code_approval(
+            f"card_{'a' * 52}",
+            approved=True,
+        )
+
+    assert failure.value.status_code == 503
+    assert "retry" in str(failure.value.detail).lower()
+    assert not api._model_trust_decision_waiters  # pyright: ignore[reportPrivateUsage]

@@ -166,6 +166,8 @@ def add_instance_to_placements(
         Existing placements plus the validated, memory-stamped instance.
 
     Raises:
+        PlacementModelCardIdentityError: If a shard card identifies a model
+            other than the assignment alias.
         PlacementModelCodeApprovalError: If any embedded shard card requires
             repository-code approval that is absent from the cluster trust set.
     """
@@ -182,6 +184,7 @@ def add_instance_to_placements(
     # still unknown, so a transient missing reading yields the card guard rather
     # than None (review catch on #292).
     assignments = command.instance.shard_assignments
+    require_instance_model_card_identity(command.instance)
     require_instance_model_code_approval(
         command.instance,
         approved_remote_code_identities,
@@ -362,6 +365,7 @@ PlacementFailureCode: TypeAlias = Literal[
     "no_valid_placement",
     "placement_info_pending",
     "model_code_approval_required",
+    "model_card_identity_mismatch",
 ]
 
 
@@ -394,6 +398,38 @@ class PlacementModelCodeApprovalError(PlacementError):
     """The operator has not approved repository code for this exact card."""
 
     code: ClassVar[PlacementFailureCode] = "model_code_approval_required"
+
+
+class PlacementModelCardIdentityError(PlacementError):
+    """A caller-specified shard embeds a card for a different model alias."""
+
+    code: ClassVar[PlacementFailureCode] = "model_card_identity_mismatch"
+
+
+def require_instance_model_card_identity(instance: Instance) -> None:
+    """Require every embedded shard card to match the assignment model alias.
+
+    Args:
+        instance: Caller-specified exact placement containing shard cards.
+
+    Raises:
+        PlacementModelCardIdentityError: If a shard identifies another model.
+    """
+
+    expected_model_id = instance.shard_assignments.model_id
+    mismatched_model_ids = sorted(
+        {
+            str(shard.model_card.model_id)
+            for shard in instance.shard_assignments.runner_to_shard.values()
+            if shard.model_card.model_id != expected_model_id
+        }
+    )
+    if mismatched_model_ids:
+        mismatches = ", ".join(mismatched_model_ids)
+        raise PlacementModelCardIdentityError(
+            "Exact placement model-card identity mismatch: assignment model "
+            f"{expected_model_id} contains shard card(s) for {mismatches}."
+        )
 
 
 def _raise_model_code_approval_error(card: ModelCard) -> None:

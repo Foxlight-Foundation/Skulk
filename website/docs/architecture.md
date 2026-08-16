@@ -1300,7 +1300,9 @@ loaders that enable repository code internally; that is platform truth and does
 not rewrite the artifact card. These explicit decisions flow through the
 master's command/event log rather than replaceable config synchronization;
 failover state seeding carries them into the next master session and each node
-atomically persists the replicated set.
+atomically persists the replicated set. The worker also gates runner creation
+and model loading directly against replicated State, so a failed local config
+write cannot leave a revoked identity launchable from stale YAML.
 When a card names any separately hosted companion—vision weights or processor,
 an MTP sidecar, an assistant model, or a served-engine/vLLM draft—its signed
 content must also name that repository's full immutable revision. Every download
@@ -1312,12 +1314,14 @@ rechecks that a signed card's installed sidecar, repository, revision marker,
 selected file, and manifest all identify that card. A deterministic trust
 denial reports `RunnerFailed` and tears down the instance without retrying the
 unchanged generation.
-The model-by-model decision is editable in dashboard Settings and travels over
-the existing cluster-config synchronization path. A worker requesting a
-canonical-store download forwards the immutable card ID; the store host verifies
-it against its own signed catalog and applies the same converged trust policy
-before fetching bytes. Only immutable Foxlight provenance grants automatic
-trust; registry publication with agent or community provenance cannot do so.
+The model-by-model decision is editable in dashboard Settings and travels as a
+master-indexed event. Ordinary cluster-config snapshots explicitly omit trust
+so a stale settings write cannot replace that ordered decision. A worker
+requesting a canonical-store download forwards the immutable card ID; the store
+host verifies it against its own signed catalog and applies the same converged
+trust policy before fetching bytes. Only immutable Foxlight provenance grants
+automatic trust; registry publication with agent or community provenance cannot
+do so.
 
 Model discovery feeds this card system. `GET /models/search` searches Hugging Face repositories, and `POST /models/add` builds a custom card from repository metadata, detecting GGUF repositories (which `mlx-lm` cannot load) and giving them a llama.cpp card instead of the MLX default. Hugging Face's search indexes repository metadata, not file manifests, so a pasted GGUF filename can come back empty even when the file exists somewhere on the Hub. Filename-shaped queries therefore get a bounded fallback: Skulk progressively broadens the model-name prefix, inspects a capped set of candidate repositories' file manifests, keeps only repositories containing the exact basename, and returns the matched repo-relative path alongside each result. Adding such a result pins that exact quant file on the generated card instead of applying the default quant preference, and the pin is honored end to end: the store download request names the pinned file, a staged directory that lacks the pinned quant (or its complete shard group) is not treated as a cache hit, and the store recovers a missing selected file before staging.
 

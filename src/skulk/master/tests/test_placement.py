@@ -5,6 +5,7 @@ import skulk.shared.models.model_cards as model_cards_module
 from skulk.master.placement import (
     PlacementError,
     PlacementInfoPendingError,
+    PlacementModelCardIdentityError,
     PlacementModelCodeApprovalError,
     add_instance_to_placements,
     fallback_command_for_refused_instance,
@@ -1477,6 +1478,38 @@ def test_exact_instance_creation_enforces_cluster_model_approval(
         approved_remote_code_identities={trust_identity},
     )
     assert instance.instance_id in placements
+
+
+def test_exact_instance_creation_rejects_mismatched_shard_card() -> None:
+    """The master independently rejects inconsistent exact placements."""
+
+    node_id = NodeId()
+    runner_id = RunnerId()
+    assignment_card = _small_model_card()
+    shard_card = assignment_card.model_copy(
+        update={"model_id": ModelId("other-org/other-model")}
+    )
+    instance = MlxRingInstance(
+        instance_id=InstanceId(),
+        shard_assignments=ShardAssignments(
+            model_id=assignment_card.model_id,
+            runner_to_shard={runner_id: _make_shard_metadata(shard_card)},
+            node_to_runner={node_id: runner_id},
+        ),
+        hosts_by_node={},
+        ephemeral_port=50000,
+    )
+
+    with pytest.raises(
+        PlacementModelCardIdentityError,
+        match="other-org/other-model",
+    ):
+        add_instance_to_placements(
+            CreateInstance(instance=instance),
+            Topology(),
+            {},
+            {node_id: create_node_memory(Memory.from_gb(8).in_bytes)},
+        )
 
 
 def test_foxlight_signed_card_needs_no_separate_operator_approval() -> None:

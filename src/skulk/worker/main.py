@@ -44,7 +44,10 @@ from skulk.shared.models.model_cards import (
     add_to_card_cache,
     delete_custom_card,
 )
-from skulk.shared.models.remote_code_approval import MODEL_TRUST_FAILURE_MARKER
+from skulk.shared.models.remote_code_approval import (
+    MODEL_TRUST_FAILURE_MARKER,
+    require_remote_code_approval,
+)
 from skulk.shared.types.audio import RealtimeAudioInputFrame
 from skulk.shared.types.chunks import DataChunk, InputImageChunk
 from skulk.shared.types.commands import (
@@ -289,6 +292,28 @@ def _model_load_trust_failure_message(error: Exception) -> str:
         f"{MODEL_TRUST_FAILURE_MARKER}: Model load refused before repository "
         f"code execution: {error}. Re-download the exact signed artifact so "
         "its installed-card sidecar and pinned revision can be verified."
+    )
+
+
+def _require_worker_model_code_approval(card: ModelCard, state: State) -> None:
+    """Enforce repository-code trust from authoritative replicated State.
+
+    The runner process also reads the durable config as a defense in depth.
+    This parent-process gate is required for revocations: if persisting the new
+    set fails, a stale YAML approval must not authorize a newly created or
+    newly loaded runner.
+
+    Args:
+        card: Exact shard card the worker is about to create or load.
+        state: Current replicated cluster State.
+
+    Raises:
+        PermissionError: If the exact card is not currently approved.
+    """
+
+    require_remote_code_approval(
+        card,
+        frozenset(state.model_trust_approved_remote_code_identities),
     )
 
 
@@ -1851,7 +1876,7 @@ class Worker:
                     except (OSError, ValueError):
                         logger.exception(
                             "Worker failed to persist master-ordered model trust; "
-                            "repository-code runner starts may fail closed"
+                            "replicated State still gates runner creation and load"
                         )
 
                 # A confirmation is scoped to the event-log state that echoed
@@ -2495,6 +2520,29 @@ class Worker:
     async def _execute_create_runner(self, task: CreateRunner) -> None:
         """Validate and register one planned runner under the staging guard."""
 
+        try:
+            _require_worker_model_code_approval(
+                task.bound_instance.bound_shard.model_card,
+                self.state,
+            )
+        except PermissionError as error:
+            message = _model_load_trust_failure_message(error)
+            logger.error(message)
+            await self.event_sender.send(
+                TaskStatusUpdated(
+                    task_id=task.task_id,
+                    task_status=TaskStatus.Failed,
+                )
+            )
+            await self._give_up_on_instance(
+                task.instance_id,
+                _model_trust_instance_failure_message(
+                    task.bound_instance.bound_shard.model_card.model_id
+                ),
+                error_code="model_trust_rejected",
+            )
+            return
+
         # The local fit guard sizes a shard's footprint against this node's
         # memory, but an RPC placement's shares are decided by llama.cpp at
         # load (the driver's shard nominally spans ALL layers and a donor holds
@@ -2538,6 +2586,7 @@ class Worker:
             runner = self.runners[runner_id]
             if isinstance(task, LoadModel) and shard is not None:
                 try:
+                    _require_worker_model_code_approval(shard.model_card, self.state)
                     model_directory = build_model_path(
                         shard.model_card.model_id,
                         shard.model_card.source_revision,

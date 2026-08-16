@@ -291,7 +291,7 @@ from skulk.master.image_store import ImageStore
 from skulk.master.placement import (
     PlacementError,
     PlacementInfoPendingError,
-    PlacementModelCodeApprovalError,
+    require_instance_model_card_identity,
     require_instance_model_code_approval,
 )
 from skulk.master.placement import place_instance as get_instance_placements
@@ -579,6 +579,11 @@ _STREAM_IDLE_TIMEOUT_SECONDS = 120.0
 # terminal/delete event into a typed provider failure instead of an indefinite
 # resource hold.
 _REALTIME_TASK_RELEASE_TIMEOUT_SECONDS = 10.0
+
+# Trust mutations are synchronous operator decisions. Bound convergence so a
+# missing master/event becomes an actionable 503 instead of a false success or
+# an indefinitely hanging Settings request.
+_MODEL_TRUST_DECISION_TIMEOUT_SECONDS = 10.0
 
 # Largest per-command data-plane reorder window (#279 Phase 2b). The DATA topic
 # is best-effort: a genuinely dropped chunk would otherwise stall the reorder
@@ -1752,6 +1757,9 @@ class API:
         ] = {}
         self._realtime_audio_transcription_commands: set[CommandId] = set()
         self._realtime_task_release_events: dict[CommandId, anyio.Event] = {}
+        self._model_trust_decision_waiters: dict[
+            tuple[str, bool], list[anyio.Event]
+        ] = {}
         self._cancelled_command_ids: set[CommandId] = set()
         # Per-command data-plane reorder buffers (#279 Phase 2b). The DATA gossip
         # topic has no total order (unlike the master event idx it replaced), so
@@ -1881,6 +1889,10 @@ class API:
         for release_event in self._realtime_task_release_events.values():
             release_event.set()
         self._realtime_task_release_events = {}
+        for waiters in self._model_trust_decision_waiters.values():
+            for waiter in waiters:
+                waiter.set()
+        self._model_trust_decision_waiters = {}
         self._speech_media_commands = set()
         self._speech_media_targets = {}
         self._transcription_media_targets = {}
@@ -1995,7 +2007,12 @@ class API:
             "/instance",
             tags=["Instances"],
             summary="Create an instance from a fully specified placement",
-            description="Create an instance from an already computed placement object when you want exact control instead of Skulk picking the placement for you.",
+            description=(
+                "Create an instance from an already computed placement object "
+                "when you want exact control instead of Skulk picking the "
+                "placement. Every embedded shard card must identify the same "
+                "model alias as the assignment and satisfy current cluster trust."
+            ),
         )(self.create_instance)
         self.app.post(
             "/place_instance",
@@ -2110,7 +2127,8 @@ class API:
                 "Approves one exact signed-registry or content-derived custom-card "
                 "identity for download and execution across the cluster. The elected "
                 "master serializes the decision into replicated State; every node "
-                "then persists its local runner-facing copy. "
+                "then persists its local runner-facing copy. Success is returned "
+                "only after this API applies the indexed decision. "
                 "The mutation requires direct loopback access or an authenticated "
                 "operator-gateway credential."
             ),
@@ -2122,8 +2140,9 @@ class API:
             description=(
                 "Revokes the operator's cluster-wide approval for one immutable "
                 "model-card identity. Existing processes are not killed, but future "
-                "downloads and runner starts fail closed after the master-indexed "
-                "decision converges. The mutation requires direct "
+                "downloads and runner starts fail closed. Success is returned only "
+                "after this API applies the master-indexed decision. The mutation "
+                "requires direct "
                 "loopback access or an authenticated operator-gateway credential."
             ),
         )(self.revoke_remote_code)
@@ -3017,11 +3036,12 @@ class API:
             )
         model_card = await ModelCard.load(instance.shard_assignments.model_id)
         try:
+            require_instance_model_card_identity(instance)
             require_instance_model_code_approval(
                 instance,
                 self._cluster_remote_code_approvals(),
             )
-        except PlacementModelCodeApprovalError as exc:
+        except PlacementError as exc:
             raise HTTPException(
                 status_code=400,
                 detail=str(exc),
@@ -8264,6 +8284,19 @@ class API:
             return frozenset()
         return frozenset(config.model_trust.approved_remote_code_identities)
 
+    def _release_model_trust_decision_waiters(
+        self,
+        trust_identity: str,
+        approved: bool,
+    ) -> None:
+        """Wake requests waiting for one exact indexed trust decision."""
+
+        for waiter in self._model_trust_decision_waiters.pop(
+            (trust_identity, approved),
+            [],
+        ):
+            waiter.set()
+
     async def set_cluster_remote_code_approval(
         self, card_id: str, *, approved: bool
     ) -> None:
@@ -8275,14 +8308,51 @@ class API:
 
         Side effects:
             Sends a command that the elected master serializes into the indexed
-            event log. Every node persists the resulting replicated State.
+            event log, then waits for this API to apply that indexed decision.
+            Every node persists the resulting replicated State.
         """
-        await self._send(
-            SetModelTrustApproval(
-                trust_identity=card_id,
-                approved=approved,
-            )
+        if (card_id in self._cluster_remote_code_approvals()) == approved:
+            return
+
+        waiter = anyio.Event()
+        waiters = self._model_trust_decision_waiters.setdefault(
+            (card_id, approved),
+            [],
         )
+        waiters.append(waiter)
+        try:
+            await self._send(
+                SetModelTrustApproval(
+                    trust_identity=card_id,
+                    approved=approved,
+                )
+            )
+            try:
+                with anyio.fail_after(_MODEL_TRUST_DECISION_TIMEOUT_SECONDS):
+                    await waiter.wait()
+            except TimeoutError as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "The elected master did not confirm the model trust "
+                        "decision before the convergence deadline; retry."
+                    ),
+                ) from exc
+            if (card_id in self._cluster_remote_code_approvals()) != approved:
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "The cluster session changed before the model trust "
+                        "decision converged; retry."
+                    ),
+                )
+        finally:
+            remaining = self._model_trust_decision_waiters.get((card_id, approved))
+            if remaining is not None:
+                with contextlib.suppress(ValueError):
+                    remaining.remove(waiter)
+                if not remaining:
+                    self._model_trust_decision_waiters.pop((card_id, approved), None)
 
     async def approve_remote_code(
         self, card_id: str, request: Request
@@ -8689,7 +8759,12 @@ class API:
                     except (OSError, ValueError, ValidationError):
                         logger.exception(
                             "Failed to persist master-ordered model trust; "
-                            "new repository-code launches remain fail-closed"
+                            "replicated State remains authoritative for placement"
+                        )
+                    if isinstance(event, ModelTrustApprovalChanged):
+                        self._release_model_trust_decision_waiters(
+                            event.trust_identity,
+                            event.approved,
                         )
 
                 released_task: task_types.Task | None = None

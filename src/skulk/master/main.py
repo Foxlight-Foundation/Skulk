@@ -1449,9 +1449,9 @@ class Master:
                             except (OSError, ValueError):
                                 # Replicated State is authoritative. A degraded
                                 # local disk must not kill the master command
-                                # processor; this node's runner boundary keeps
-                                # using its last good copy and therefore fails
-                                # closed until a later persistence attempt works.
+                                # processor; workers gate new runner creation
+                                # and loading from that State, while YAML remains
+                                # only the durable restart/child-process fallback.
                                 logger.exception(
                                     "Master failed to persist model trust locally; "
                                     "continuing with the indexed cluster decision"

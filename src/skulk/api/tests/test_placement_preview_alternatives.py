@@ -133,6 +133,39 @@ async def test_exact_instance_creation_reports_model_trust_block(
     assert remote_code_trust_identity(card) in response.json()["error"]["message"]
 
 
+async def test_exact_instance_creation_rejects_mismatched_shard_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """POST /instance cannot mix assignment and embedded model identities."""
+
+    api = _build_api()
+    client = TestClient(api.app)
+    canonical_card = _card()
+    mismatched_card = canonical_card.model_copy(
+        update={"model_id": ModelId("other-org/other-model")}
+    )
+    instance = _single_node_instance(
+        "mismatched-node",
+        model_card=mismatched_card,
+    )
+
+    async def _load(_model_id: object) -> ModelCard:
+        return canonical_card
+
+    monkeypatch.setattr(ModelCard, "load", staticmethod(_load))
+    response = client.post(
+        "/instance",
+        json={"instance": instance.model_dump(mode="json")},
+    )
+
+    assert response.status_code == 400
+    assert (
+        response.headers["X-Skulk-Placement-Failure"]
+        == "model_card_identity_mismatch"
+    )
+    assert "other-org/other-model" in response.json()["error"]["message"]
+
+
 async def test_preview_exposes_exact_signed_engine_support(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
