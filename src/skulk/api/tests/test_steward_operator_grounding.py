@@ -228,6 +228,44 @@ def test_operator_summary_separates_internal_services_and_historical_failures() 
     ]
 
 
+def test_operator_summary_keeps_replacement_instance_current_with_same_model_id() -> None:
+    payload: dict[str, object] = {
+        "topology": {"nodes": ["node-a"]},
+        "instances": {
+            "replacement-instance": _instance(
+                model_id="org/recovered-model",
+                node_to_runner={"node-a": "replacement-runner"},
+            )
+        },
+        "runners": {"replacement-runner": {"RunnerReady": {}}},
+        "instanceFailures": [
+            {
+                "instanceId": "failed-instance",
+                "modelId": "org/recovered-model",
+                "errorCode": "runner_crashed",
+                "errorMessage": "Earlier runner exited.",
+                "affectedNodeIds": ["node-a"],
+                "recordedAt": "2026-08-17T12:00:00Z",
+            }
+        ],
+    }
+
+    summary = steward_operator_summary(payload)
+
+    ready = cast(
+        "list[dict[str, object]]", summary["operatorReadyOrRunningInstances"]
+    )
+    failures = cast(
+        "list[dict[str, object]]", summary["historicalTerminalFailures"]
+    )
+    assert [(row["modelId"], row["lifecycle"]) for row in ready] == [
+        ("org/recovered-model", "ready")
+    ]
+    assert [(row["instanceId"], row["modelId"]) for row in failures] == [
+        ("failed-instance", "org/recovered-model")
+    ]
+
+
 def test_operator_summary_marks_terminal_downloads_inactive() -> None:
     payload: dict[str, object] = {
         "topology": {"nodes": ["node-a"]},
