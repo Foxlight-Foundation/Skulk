@@ -474,6 +474,11 @@ def _bounded(payload: object) -> str:
     return rendered
 
 
+def _compact_json(payload: object) -> str:
+    """Render one tool result as compact JSON without sacrificing validity."""
+    return json.dumps(payload, separators=(",", ":"), default=str)
+
+
 InstanceLifecycle = Literal[
     "placing", "loading", "warming", "ready", "running", "stopping", "failed"
 ]
@@ -581,6 +586,7 @@ def _node_summaries(state_payload: dict[str, object]) -> list[dict[str, object]]
         accelerator_vendor = accelerator.get("vendor")
         if isinstance(accelerator_vendor, str):
             capability_tokens.add(accelerator_vendor.lower())
+        has_capability_evidence = bool(resources or accelerator)
         total_bytes = _memory_bytes(memory.get("ramTotal"))
         available_bytes = _memory_bytes(memory.get("ramAvailable"))
         summaries.append(
@@ -615,19 +621,25 @@ def _node_summaries(state_payload: dict[str, object]) -> list[dict[str, object]]
                 "hardwareClasses": hardware_classes,
                 "participation": resources.get("participation"),
                 "supports": {
-                    "cuda": any(
+                    "cuda": None
+                    if not has_capability_evidence
+                    else any(
                         token == "nvidia"
                         or token.startswith("nvidia:")
                         or "cuda" in token
                         for token in capability_tokens
                     ),
-                    "rocm": any(
+                    "rocm": None
+                    if not has_capability_evidence
+                    else any(
                         token == "amd"
                         or token.startswith("amd:")
                         or "rocm" in token
                         for token in capability_tokens
                     ),
-                    "mlx": any(
+                    "mlx": None
+                    if not has_capability_evidence
+                    else any(
                         token == "apple"
                         or token.startswith(("apple:", "mlx"))
                         for token in capability_tokens
@@ -731,6 +743,132 @@ def steward_operator_summary(state_payload: dict[str, object]) -> dict[str, obje
         "downloads": _downloads_summary(state_payload),
         "nodeDisk": state_payload.get("nodeDisk", {}),
     }
+
+
+def _compact_node_summary(node: dict[str, object]) -> dict[str, object]:
+    """Keep the exact node facts most useful to operator questions."""
+    health = _as_object_dict(node.get("health"))
+    return {
+        key: node.get(key)
+        for key in ("nodeId", "name", "model", "chip")
+    } | {
+        "health": {"level": health.get("level")},
+        "memory": node.get("memory"),
+        "accelerator": node.get("accelerator"),
+        "backends": node.get("backends"),
+        "supports": node.get("supports"),
+    }
+
+
+def steward_operator_tool_result(state_payload: dict[str, object]) -> str:
+    """Render authoritative operator truth within the steward tool budget.
+
+    The complete compact record is preferred. If it is still too large, the
+    fallback reserves space for every lifecycle bucket before adding compact
+    node and download rows. Coverage counts make every omission explicit, and
+    the result always remains valid JSON rather than ending inside a record.
+
+    Args:
+        state_payload: JSON-compatible cluster state returned by the API.
+
+    Returns:
+        A valid JSON document no longer than :data:`MAX_TOOL_RESULT_CHARS`.
+    """
+    summary = steward_operator_summary(state_payload)
+    rendered = _compact_json(summary)
+    if len(rendered) <= MAX_TOOL_RESULT_CHARS:
+        return rendered
+
+    list_fields = (
+        "activePlacements",
+        "readyOrRunningInstances",
+        "stoppingOrFailedInstances",
+        "recentInstanceFailures",
+    )
+    nodes = [
+        _compact_node_summary(node)
+        for item in _as_object_list(summary.get("nodes"))
+        if (node := _as_object_dict(item))
+    ]
+    downloads = _as_object_dict(summary.get("downloads"))
+    node_disk = _as_object_dict(summary.get("nodeDisk"))
+    total_downloads = sum(
+        len(_as_object_list(rows)) for rows in downloads.values()
+    )
+    coverage: dict[str, object] = {
+        field: {
+            "included": 0,
+            "total": len(_as_object_list(summary.get(field))),
+        }
+        for field in list_fields
+    }
+    coverage["nodes"] = {"included": 0, "total": len(nodes)}
+    coverage["downloads"] = {
+        "included": 0,
+        "total": total_downloads,
+    }
+    coverage["nodeDisk"] = {"included": 0, "total": len(node_disk)}
+    compact: dict[str, object] = {
+        "nodeCount": summary.get("nodeCount"),
+        "detailState": "compacted",
+        "coverage": coverage,
+        **{field: [] for field in list_fields},
+        "nodes": [],
+        "downloads": {},
+        "nodeDisk": {},
+    }
+
+    def append_list_row(field: str, row: object) -> bool:
+        target = _as_object_list(compact[field])
+        compact[field] = target
+        field_coverage = _as_object_dict(coverage[field])
+        target.append(row)
+        field_coverage["included"] = len(target)
+        if len(_compact_json(compact)) <= MAX_TOOL_RESULT_CHARS:
+            return True
+        target.pop()
+        field_coverage["included"] = len(target)
+        return False
+
+    # Lifecycle truth answers the most important operator questions and must
+    # never disappear behind a large node table.
+    for field in list_fields:
+        for row in _as_object_list(summary.get(field)):
+            if not append_list_row(field, row):
+                break
+    for node in nodes:
+        if not append_list_row("nodes", node):
+            break
+
+    compact_downloads = cast("dict[str, object]", compact["downloads"])
+    download_coverage = _as_object_dict(coverage["downloads"])
+    included_downloads = 0
+    download_limit_reached = False
+    for node_id, rows in downloads.items():
+        compact_downloads[node_id] = []
+        target_rows = _as_object_list(compact_downloads[node_id])
+        compact_downloads[node_id] = target_rows
+        for row in _as_object_list(rows):
+            target_rows.append(row)
+            download_coverage["included"] = included_downloads + 1
+            if len(_compact_json(compact)) > MAX_TOOL_RESULT_CHARS:
+                target_rows.pop()
+                download_coverage["included"] = included_downloads
+                download_limit_reached = True
+                break
+            included_downloads += 1
+        if not target_rows:
+            del compact_downloads[node_id]
+        if download_limit_reached:
+            break
+
+    compact["nodeDisk"] = node_disk
+    node_disk_coverage = _as_object_dict(coverage["nodeDisk"])
+    node_disk_coverage["included"] = len(node_disk)
+    if len(_compact_json(compact)) > MAX_TOOL_RESULT_CHARS:
+        compact["nodeDisk"] = {}
+        node_disk_coverage["included"] = 0
+    return _compact_json(compact)
 
 
 _FUNCTION_BLOCK = re.compile(r"<function=([\w.-]+)>(.*?)</function>", re.DOTALL)
@@ -964,7 +1102,7 @@ class StewardHarness:
         api = self._api
         if name == "get_cluster_state":
             payload = await api.get_cluster_state()
-            return _bounded(steward_operator_summary(payload))
+            return steward_operator_tool_result(payload)
         if name == "get_node_resources":
             payload = await api.get_cluster_state()
             nodes = _as_object_dict(payload.get("nodeResources"))

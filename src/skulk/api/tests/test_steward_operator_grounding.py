@@ -1,8 +1,13 @@
 """Regression coverage for the fabric resident's factual operator projection."""
 
+import json
 from typing import cast
 
-from skulk.api.steward import steward_operator_summary
+from skulk.api.steward import (
+    MAX_TOOL_RESULT_CHARS,
+    steward_operator_summary,
+    steward_operator_tool_result,
+)
 
 
 def _instance(
@@ -113,6 +118,27 @@ def test_operator_summary_preserves_heterogeneous_node_truth() -> None:
     assert cast("dict[str, object]", by_id["apple-node"]["supports"])["mlx"] is True
 
 
+def test_operator_summary_does_not_invent_negative_capability_truth() -> None:
+    payload: dict[str, object] = {
+        "topology": {"nodes": ["joining-node"]},
+        "nodeIdentities": {
+            "joining-node": {
+                "friendlyName": "Joining",
+                "modelId": "Unknown workstation",
+            }
+        },
+    }
+
+    summary = steward_operator_summary(payload)
+
+    nodes = cast("list[dict[str, object]]", summary["nodes"])
+    assert cast("dict[str, object]", nodes[0]["supports"]) == {
+        "cuda": None,
+        "rocm": None,
+        "mlx": None,
+    }
+
+
 def test_operator_summary_separates_active_placement_from_ready_instances() -> None:
     payload: dict[str, object] = {
         "topology": {"nodes": ["node-a", "node-b"]},
@@ -180,3 +206,79 @@ def test_operator_summary_marks_terminal_downloads_inactive() -> None:
         ("org/already-downloaded", "completed", False),
         ("org/downloading-now", "downloading", True),
     ]
+
+
+def test_operator_tool_result_preserves_lifecycle_truth_when_nodes_are_large() -> None:
+    node_ids = [f"node-{index}" for index in range(12)]
+    payload: dict[str, object] = {
+        "topology": {"nodes": node_ids},
+        "nodeIdentities": {
+            node_id: {
+                "friendlyName": f"Detailed node {index} " + "x" * 180,
+                "modelId": "Workstation " + "y" * 180,
+                "chipId": "Heterogeneous accelerator " + "z" * 180,
+                "osVersion": "Linux distribution with extensive build metadata " + "v" * 180,
+            }
+            for index, node_id in enumerate(node_ids)
+        },
+        "nodeResources": {
+            node_id: {
+                "backends": ["llama_server-cuda", "llama_cpp-cpu"],
+                "hardwareClasses": ["nvidia", "nvidia:sm-12.1"],
+                "participation": "full",
+            }
+            for node_id in node_ids
+        },
+        "instances": {
+            "placing": _instance(
+                model_id="org/model-being-placed",
+                node_to_runner={"node-0": "runner-loading"},
+            ),
+            "ready": _instance(
+                model_id="org/model-ready",
+                node_to_runner={"node-1": "runner-ready"},
+            ),
+        },
+        "runners": {
+            "runner-loading": {"RunnerLoading": {}},
+            "runner-ready": {"RunnerReady": {}},
+        },
+    }
+
+    rendered = steward_operator_tool_result(payload)
+    result = cast("dict[str, object]", json.loads(rendered))
+
+    assert len(rendered) <= MAX_TOOL_RESULT_CHARS
+    assert result["detailState"] == "compacted"
+    assert result["nodeCount"] == 12
+    active = cast("list[dict[str, object]]", result["activePlacements"])
+    ready = cast("list[dict[str, object]]", result["readyOrRunningInstances"])
+    assert [(row["modelId"], row["lifecycle"]) for row in active] == [
+        ("org/model-being-placed", "loading")
+    ]
+    assert [(row["modelId"], row["lifecycle"]) for row in ready] == [
+        ("org/model-ready", "ready")
+    ]
+    coverage = cast("dict[str, dict[str, int]]", result["coverage"])
+    assert coverage["nodes"]["total"] == 12
+
+
+def test_operator_tool_result_keeps_downloads_from_multiple_nodes() -> None:
+    payload: dict[str, object] = {
+        "topology": {"nodes": ["node-a", "node-b"]},
+        "downloads": {
+            "node-a": [{"DownloadPending": {}}],
+            "node-b": [{"DownloadPending": {}}],
+        },
+        # Force the bounded representation without competing with the compact
+        # rows whose cross-node behavior this regression covers.
+        "nodeDisk": {"diagnostic": "x" * MAX_TOOL_RESULT_CHARS},
+    }
+
+    rendered = steward_operator_tool_result(payload)
+    result = cast("dict[str, object]", json.loads(rendered))
+
+    downloads = cast("dict[str, list[dict[str, object]]]", result["downloads"])
+    assert sorted(downloads) == ["node-a", "node-b"]
+    coverage = cast("dict[str, dict[str, int]]", result["coverage"])
+    assert coverage["downloads"] == {"included": 2, "total": 2}
