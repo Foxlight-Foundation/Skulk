@@ -733,7 +733,10 @@ endpoint using the reserved virtual model id `skulk/steward`, streaming
 included, so any OpenAI-compatible client can talk to the cluster with no
 steward-specific integration. The reserved id selects the model plus the
 server-side harness: a bounded, strictly read-only tool surface (cluster
-state with health reasons, per-node resources and capability conflicts,
+state normalized into an exact node count, heterogeneous identity, RAM,
+accelerator, backend, and capability facts plus mutually exclusive active
+placement, ready/running, and stopping/failed instance lifecycle buckets;
+health reasons and capability conflicts;
 telemetry and data-plane diagnostics, per-node version status, performance
 envelopes, the local doctor check registry, the model catalog, and a
 search over Skulk's own bundled documentation so what-is and how-to
@@ -765,6 +768,9 @@ probe already shows up in the status as a degraded steward, well before the
 third one triggers the replacement. In this release
 the steward observes and advises only: no tool can change the cluster, and
 anything action-shaped is returned to the operator as a recommendation.
+The normalized operator record is deliberately deterministic: the resident
+copies counts and measurements rather than reconstructing them from prose, and
+"placing" never includes an already-ready or running instance.
 
 The role name remains internal plumbing (`system_role: "steward"`,
 `skulk/steward`, and `GET /v1/steward`). Product surfaces instead let an
