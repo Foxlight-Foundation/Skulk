@@ -326,7 +326,9 @@ platform gate bars them from `llama_server`. Repair builders re-stamp `system_ro
 exclusions). `TextGeneration.target_instance_id` pins generation to one
 instance (mirrors SpeechSynthesis). Harness = `src/skulk/api/steward.py`:
 bounded read-only tools (state/resources/telemetry/data-plane/versions/
-envelopes/doctor/catalog), 8 steps per turn, observe/advise only, rides the
+envelopes/doctor/catalog), with state normalized into exact heterogeneous
+node facts and non-overlapping placement/ready/terminal lifecycle buckets;
+8 steps per turn, observe/advise only, rides the
 normal chat dispatch path. Client surface = reserved virtual
 model `skulk/steward` on chat-completions (client tools 400; trace as
 reasoning_content; streaming via the ordinary adapters over

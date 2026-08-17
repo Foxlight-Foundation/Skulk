@@ -124,7 +124,9 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 - Pinning: `TextGeneration.target_instance_id` (mirrors SpeechSynthesis);
   miss emits TaskFailed `instance_unavailable`.
 - Harness: `src/skulk/api/steward.py`. Read-only tools: cluster state
-  summary, node resources, telemetry diagnostics, data-plane diagnostics,
+  summary (exact node count; per-node identity, RAM, accelerator, backends,
+  and CUDA/ROCm/MLX support; separate active-placement, ready/running, and
+  stopping/failed lifecycle buckets), node resources, telemetry diagnostics, data-plane diagnostics,
   cluster versions, performance envelopes, local doctor registry, model
   catalog, and `search_docs` (steward_docs.py: dependency-free tf-idf
   section index over the checkout's own docs, anchored on
