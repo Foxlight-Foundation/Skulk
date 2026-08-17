@@ -19,6 +19,8 @@ def test_steward_receives_recent_instance_failure_truth() -> None:
 
     assert _instance_failures_summary(payload) == [
         {
+            "historical": True,
+            "currentInstance": False,
             "instanceId": "instance-a",
             "modelId": "org/model",
             "errorCode": "runner_crashed",

@@ -158,13 +158,111 @@ def test_operator_summary_separates_active_placement_from_ready_instances() -> N
 
     summary = steward_operator_summary(payload)
 
-    active = cast("list[dict[str, object]]", summary["activePlacements"])
-    ready = cast("list[dict[str, object]]", summary["readyOrRunningInstances"])
+    active = cast("list[dict[str, object]]", summary["operatorActivePlacements"])
+    ready = cast(
+        "list[dict[str, object]]", summary["operatorReadyOrRunningInstances"]
+    )
     assert [(row["modelId"], row["lifecycle"]) for row in active] == [
         ("org/placing-model", "loading")
     ]
     assert [(row["modelId"], row["lifecycle"]) for row in ready] == [
         ("org/ready-model", "ready")
+    ]
+
+
+def test_operator_summary_separates_internal_services_and_historical_failures() -> None:
+    payload: dict[str, object] = {
+        "topology": {"nodes": ["node-a", "node-b"]},
+        "instances": {
+            "operator-ready": _instance(
+                model_id="org/operator-model",
+                node_to_runner={"node-a": "runner-operator"},
+            ),
+            "fabric-ready": _instance(
+                model_id="org/steward-brain",
+                node_to_runner={"node-b": "runner-steward"},
+                system_role="steward",
+            ),
+        },
+        "runners": {
+            "runner-operator": {"RunnerReady": {}},
+            "runner-steward": {"RunnerReady": {}},
+        },
+        "instanceFailures": [
+            {
+                "instanceId": "vanished-instance",
+                "modelId": "org/old-model",
+                "errorCode": "runner_crashed",
+                "errorMessage": "Runner exited.",
+                "affectedNodeIds": ["node-a"],
+                "recordedAt": "2026-08-17T12:00:00Z",
+            }
+        ],
+    }
+
+    summary = steward_operator_summary(payload)
+
+    operator_ready = cast(
+        "list[dict[str, object]]", summary["operatorReadyOrRunningInstances"]
+    )
+    system_instances = cast(
+        "list[dict[str, object]]", summary["fabricSystemInstances"]
+    )
+    failures = cast(
+        "list[dict[str, object]]", summary["historicalTerminalFailures"]
+    )
+    assert [row["modelId"] for row in operator_ready] == ["org/operator-model"]
+    assert [row["modelId"] for row in system_instances] == ["org/steward-brain"]
+    assert system_instances[0]["systemRole"] == "steward"
+    assert failures == [
+        {
+            "historical": True,
+            "currentInstance": False,
+            "instanceId": "vanished-instance",
+            "modelId": "org/old-model",
+            "errorCode": "runner_crashed",
+            "errorMessage": "Runner exited.",
+            "affectedNodeIds": ["node-a"],
+            "recordedAt": "2026-08-17T12:00:00Z",
+        }
+    ]
+
+
+def test_operator_summary_keeps_replacement_instance_current_with_same_model_id() -> None:
+    payload: dict[str, object] = {
+        "topology": {"nodes": ["node-a"]},
+        "instances": {
+            "replacement-instance": _instance(
+                model_id="org/recovered-model",
+                node_to_runner={"node-a": "replacement-runner"},
+            )
+        },
+        "runners": {"replacement-runner": {"RunnerReady": {}}},
+        "instanceFailures": [
+            {
+                "instanceId": "failed-instance",
+                "modelId": "org/recovered-model",
+                "errorCode": "runner_crashed",
+                "errorMessage": "Earlier runner exited.",
+                "affectedNodeIds": ["node-a"],
+                "recordedAt": "2026-08-17T12:00:00Z",
+            }
+        ],
+    }
+
+    summary = steward_operator_summary(payload)
+
+    ready = cast(
+        "list[dict[str, object]]", summary["operatorReadyOrRunningInstances"]
+    )
+    failures = cast(
+        "list[dict[str, object]]", summary["historicalTerminalFailures"]
+    )
+    assert [(row["modelId"], row["lifecycle"]) for row in ready] == [
+        ("org/recovered-model", "ready")
+    ]
+    assert [(row["instanceId"], row["modelId"]) for row in failures] == [
+        ("failed-instance", "org/recovered-model")
     ]
 
 
@@ -251,8 +349,10 @@ def test_operator_tool_result_preserves_lifecycle_truth_when_nodes_are_large() -
     assert len(rendered) <= MAX_TOOL_RESULT_CHARS
     assert result["detailState"] == "compacted"
     assert result["nodeCount"] == 12
-    active = cast("list[dict[str, object]]", result["activePlacements"])
-    ready = cast("list[dict[str, object]]", result["readyOrRunningInstances"])
+    active = cast("list[dict[str, object]]", result["operatorActivePlacements"])
+    ready = cast(
+        "list[dict[str, object]]", result["operatorReadyOrRunningInstances"]
+    )
     assert [(row["modelId"], row["lifecycle"]) for row in active] == [
         ("org/model-being-placed", "loading")
     ]

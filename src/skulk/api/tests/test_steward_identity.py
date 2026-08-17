@@ -10,3 +10,5 @@ def test_intelligent_fabric_prompt_identifies_as_skulk_itself() -> None:
     assert "speak in the first person" in prompt
     assert "not a separate assistant, steward, or" in prompt
     assert "intelligent distributed AI fabric" in prompt
+    assert "failed instanceId or historical event" in prompt
+    assert "newer live instance may legitimately use the same modelId" in prompt
