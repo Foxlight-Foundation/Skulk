@@ -327,7 +327,9 @@ exclusions). `TextGeneration.target_instance_id` pins generation to one
 instance (mirrors SpeechSynthesis). Harness = `src/skulk/api/steward.py`:
 bounded read-only tools (state/resources/telemetry/data-plane/versions/
 envelopes/doctor/catalog), with state normalized into exact heterogeneous
-node facts and non-overlapping placement/ready/terminal lifecycle buckets;
+node facts, non-overlapping operator placement/ready/terminal lifecycle
+buckets, a separate internal-service bucket, and explicitly historical
+terminal failures;
 8 steps per turn, observe/advise only, rides the
 normal chat dispatch path. Client surface = reserved virtual
 model `skulk/steward` on chat-completions (client tools 400; trace as

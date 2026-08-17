@@ -734,8 +734,10 @@ included, so any OpenAI-compatible client can talk to the cluster with no
 steward-specific integration. The reserved id selects the model plus the
 server-side harness: a bounded, strictly read-only tool surface (cluster
 state normalized into an exact node count, heterogeneous identity, RAM,
-accelerator, backend, and capability facts plus mutually exclusive active
-placement, ready/running, and stopping/failed instance lifecycle buckets;
+accelerator, backend, and capability facts plus mutually exclusive operator
+active-placement, ready/running, and stopping/failed lifecycle buckets;
+internal system-role services in a separate bucket; retained terminal failures
+explicitly marked as historical and non-current;
 health reasons and capability conflicts;
 telemetry and data-plane diagnostics, per-node version status, performance
 envelopes, the local doctor check registry, the model catalog, and a
@@ -770,7 +772,10 @@ the steward observes and advises only: no tool can change the cluster, and
 anything action-shaped is returned to the operator as a recommendation.
 The normalized operator record is deliberately deterministic: the resident
 copies counts and measurements rather than reconstructing them from prose, and
-"placing" never includes an already-ready or running instance.
+"placing" never includes an already-ready or running instance. Current
+operator instances, internal fabric services, and retained failure history are
+separate top-level records, so a vanished failed placement cannot be reported
+as active and the resident brain is never counted as an operator-placed model.
 
 The role name remains internal plumbing (`system_role: "steward"`,
 `skulk/steward`, and `GET /v1/steward`). Product surfaces instead let an

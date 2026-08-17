@@ -147,8 +147,17 @@ Rules:
 - Evidence means concrete observed values from tool results, not guesses.
 - Treat the tool's nodeCount, memory values, capability booleans, and lifecycle
   buckets as authoritative. Copy them exactly; never infer a missing value.
-- "Placing" means only the entries in activePlacements. Ready or running
-  instances are already placed and must not be described as placing.
+- The latest tool result supersedes model memory and earlier conversation
+  claims about cluster state.
+- Current operator-managed model instances exist ONLY in the three fields whose
+  names begin with "operator". An empty operator field means there are none.
+- "Placing" means only the entries in operatorActivePlacements. Ready or
+  running instances are already placed and must not be described as placing.
+- fabricSystemInstances are internal services, not operator-placed models. Do
+  not count them as active operator models unless explicitly asked about
+  internal fabric services.
+- historicalTerminalFailures are retained past events, never current instances.
+  Do not report a model from this field as placed, running, or active.
 - If everything is healthy, say so; do not invent problems.
 - In this interface you can only observe and advise. You cannot change your
   cluster; when
@@ -165,9 +174,10 @@ def steward_tool_definitions() -> list[dict[str, Any]]:
             "get_cluster_state",
             "Fetch the cluster's authoritative state summary: nodes with "
             "exact identity, memory, accelerator and backend facts; model "
-            "instances split into active placement versus ready/running "
-            "lifecycle buckets; recent terminal failures; and typed download "
-            "records. This is the first thing to look at.",
+            "instances split into current operator lifecycle buckets versus "
+            "internal fabric services; explicitly historical terminal "
+            "failures; and typed download records. This is the first thing "
+            "to look at, and it supersedes earlier conversation claims.",
             no_args,
         ),
         (
@@ -653,23 +663,27 @@ def _node_summaries(state_payload: dict[str, object]) -> list[dict[str, object]]
 def _instance_failures_summary(
     state_payload: dict[str, object],
 ) -> list[dict[str, object]]:
-    """Compact retained failure truth so vanished placements remain explainable."""
+    """Compact retained failures while marking them as non-current history."""
     summary: list[dict[str, object]] = []
     for item in _as_object_list(state_payload.get("instanceFailures")):
         failure = _as_object_dict(item)
         summary.append(
             {
-                key: failure.get(key)
-                for key in (
-                    "instanceId",
-                    "modelId",
-                    "systemRole",
-                    "errorCode",
-                    "errorMessage",
-                    "affectedNodeIds",
-                    "recordedAt",
-                )
-                if failure.get(key) is not None
+                "historical": True,
+                "currentInstance": False,
+                **{
+                    key: failure.get(key)
+                    for key in (
+                        "instanceId",
+                        "modelId",
+                        "systemRole",
+                        "errorCode",
+                        "errorMessage",
+                        "affectedNodeIds",
+                        "recordedAt",
+                    )
+                    if failure.get(key) is not None
+                },
             }
         )
     return summary
@@ -718,28 +732,35 @@ def _downloads_summary(state_payload: dict[str, object]) -> dict[str, object]:
 
 
 def steward_operator_summary(state_payload: dict[str, object]) -> dict[str, object]:
-    """Build the complete factual record supplied to the fabric resident."""
+    """Build current operator truth separately from internal and past state."""
     instances = _instances_summary(state_payload)
     nodes = _node_summaries(state_payload)
+    operator_instances = [
+        instance for instance in instances if not instance.get("systemRole")
+    ]
+    fabric_system_instances = [
+        instance for instance in instances if instance.get("systemRole")
+    ]
     return {
         "nodeCount": len(nodes),
         "nodes": nodes,
-        "activePlacements": [
+        "operatorActivePlacements": [
             instance
-            for instance in instances
+            for instance in operator_instances
             if instance.get("lifecycle") in {"placing", "loading", "warming"}
         ],
-        "readyOrRunningInstances": [
+        "operatorReadyOrRunningInstances": [
             instance
-            for instance in instances
+            for instance in operator_instances
             if instance.get("lifecycle") in {"ready", "running"}
         ],
-        "stoppingOrFailedInstances": [
+        "operatorStoppingOrFailedInstances": [
             instance
-            for instance in instances
+            for instance in operator_instances
             if instance.get("lifecycle") in {"stopping", "failed"}
         ],
-        "recentInstanceFailures": _instance_failures_summary(state_payload),
+        "fabricSystemInstances": fabric_system_instances,
+        "historicalTerminalFailures": _instance_failures_summary(state_payload),
         "downloads": _downloads_summary(state_payload),
         "nodeDisk": state_payload.get("nodeDisk", {}),
     }
@@ -780,10 +801,11 @@ def steward_operator_tool_result(state_payload: dict[str, object]) -> str:
         return rendered
 
     list_fields = (
-        "activePlacements",
-        "readyOrRunningInstances",
-        "stoppingOrFailedInstances",
-        "recentInstanceFailures",
+        "operatorActivePlacements",
+        "operatorReadyOrRunningInstances",
+        "operatorStoppingOrFailedInstances",
+        "fabricSystemInstances",
+        "historicalTerminalFailures",
     )
     nodes = [
         _compact_node_summary(node)
