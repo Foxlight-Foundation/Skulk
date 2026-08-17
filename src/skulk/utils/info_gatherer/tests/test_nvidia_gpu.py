@@ -9,6 +9,7 @@ import pytest
 from skulk.utils.info_gatherer.nvidia_gpu import (
     has_nvidia_gpu,
     read_accelerator_metrics,
+    read_nvidia_device_name,
     read_system_profile,
 )
 
@@ -131,6 +132,34 @@ def test_compute_capability_degrades_to_none() -> None:
 def test_bytes_name_decodes() -> None:
     metrics = read_accelerator_metrics(_FakeNvml(name=b"NVIDIA A5000"))
     assert metrics.name == "NVIDIA A5000"
+
+
+def test_device_name_reads_only_static_nvml_identity() -> None:
+    nvml = _FakeNvml(
+        broken={
+            "utilization",
+            "memory",
+            "power",
+            "temperature",
+            "clock",
+            "compute_capability",
+        },
+        name=b"NVIDIA GB10",
+    )
+
+    assert read_nvidia_device_name(nvml) == "NVIDIA GB10"
+
+
+@pytest.mark.parametrize("broken", [{"handle"}, {"name"}])
+def test_device_name_degrades_when_nvml_identity_is_unavailable(
+    broken: set[str],
+) -> None:
+    assert read_nvidia_device_name(_FakeNvml(broken=broken)) is None
+
+
+@pytest.mark.parametrize("name", ["", "  ", "Unknown", b"unknown"])
+def test_device_name_rejects_empty_or_unknown_values(name: str | bytes) -> None:
+    assert read_nvidia_device_name(_FakeNvml(name=name)) is None
 
 
 def test_per_field_degradation_never_blanks_the_rest() -> None:

@@ -8,6 +8,10 @@ import psutil
 from anyio import run_process
 
 from skulk.shared.types.profiling import InterfaceType, NetworkInterfaceInfo
+from skulk.utils.info_gatherer.nvidia_gpu import (
+    load_nvml,
+    read_nvidia_device_name,
+)
 
 # DMI fields are frequently populated with OEM placeholder junk; treat these
 # (case-insensitively) as "not set" so a node reports a real name or nothing.
@@ -264,14 +268,16 @@ async def get_network_interfaces() -> list[NetworkInterfaceInfo]:
 
 
 def _linux_model_and_chip() -> tuple[str, str]:
-    """Derive (model, chip) for a Linux node from sysfs/procfs (no subprocess).
+    """Derive (model, chip) for a Linux node without launching subprocesses.
 
     Model comes from DMI (``/sys/class/dmi/id``): the product name, falling back
     to the board name, prefixed with the vendor when it adds information (e.g.
     ``"Nimo Direct Inc. MME3L"``). Chip is the CPU brand string from
     ``/proc/cpuinfo`` (``"AMD RYZEN AI MAX+ 395 w/ Radeon 8060S"``), which on an
-    APU usefully also names the integrated GPU. Either falls back to the Mac-style
-    ``"Unknown Model"`` / ``"Unknown Chip"`` so callers stay uniform.
+    APU usefully also names the integrated GPU. ARM systems commonly omit that
+    x86-style field, so an available NVIDIA device name from the existing NVML
+    collector provides the chip identity instead. Either falls back to the
+    Mac-style ``"Unknown Model"`` / ``"Unknown Chip"`` so callers stay uniform.
     """
     dmi = "/sys/class/dmi/id"
     product = _clean_dmi(_read_text(f"{dmi}/product_name")) or _clean_dmi(
@@ -288,6 +294,10 @@ def _linux_model_and_chip() -> tuple[str, str]:
         if line.lower().startswith("model name"):
             chip = line.split(":", 1)[1].strip() or "Unknown Chip"
             break
+    if chip == "Unknown Chip":
+        nvml = load_nvml()
+        if nvml is not None:
+            chip = read_nvidia_device_name(nvml) or chip
     return (model, chip)
 
 
