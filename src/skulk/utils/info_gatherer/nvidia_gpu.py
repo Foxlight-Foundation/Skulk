@@ -113,6 +113,29 @@ def _name_of(nvml: NvmlLike, handle: object) -> str:
     return raw.decode() if isinstance(raw, bytes) else raw
 
 
+def read_nvidia_device_name(nvml: NvmlLike) -> str | None:
+    """Return the normalized name of NVML device 0 when it is available.
+
+    This intentionally queries only the device handle and name. Static Linux
+    identity collection uses it as a fallback on ARM systems whose
+    ``/proc/cpuinfo`` omits the x86-style ``model name`` field, and should not
+    pay for or depend on live utilization, memory, power, or thermal metrics.
+
+    Args:
+        nvml: Initialized NVML-compatible collector surface.
+
+    Returns:
+        A non-empty device name, or ``None`` when NVML cannot identify a device.
+    """
+    try:
+        handle = nvml.nvmlDeviceGetHandleByIndex(0)
+        name = _name_of(nvml, handle).strip()
+    except Exception as exc:  # noqa: BLE001 - identity degrades independently
+        logger.debug(f"NVML device-name query failed: {exc}")
+        return None
+    return name if name and name.casefold() != "unknown" else None
+
+
 @final
 class _MemoryInfoLike:
     total: int
