@@ -289,6 +289,89 @@ async def test_registry_identity_change_restarts_same_revision_status() -> None:
     assert status.shard_metadata.model_card.gguf_file == "model-q5.gguf"
 
 
+async def test_complete_byte_probe_cannot_bypass_signed_card_refresh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stale sidecar keeps a byte-complete probe on the refresh path."""
+
+    import skulk.shared.constants as constants
+
+    _command_send, command_receive = channel[ForwarderDownloadCommand]()
+    event_send, _event_receive = channel[Event]()
+    telemetry_send, _telemetry_receive = channel[NodeTelemetry]()
+    downloader = FakeShardDownloader()
+    coordinator = DownloadCoordinator(
+        node_id=NODE_ID,
+        shard_downloader=downloader,
+        download_command_receiver=command_receive,
+        event_sender=event_send,
+        telemetry_sender=telemetry_send,
+    )
+    revision = "a" * 40
+    old_shard = _make_shard(
+        source_revision=revision,
+        gguf_file="model.gguf",
+        registry_card_id=f"card_{'a' * 52}",
+    )
+    requested_shard = _make_shard(
+        source_revision=revision,
+        gguf_file="model.gguf",
+        registry_card_id=f"card_{'b' * 52}",
+    )
+    model_directory = tmp_path / MODEL_ID.normalize()
+    model_directory.mkdir()
+    (model_directory / "model.gguf").write_bytes(b"weights")
+    (model_directory / ".skulk-source-revision").write_text(f"{revision}\n")
+    write_installed_card(
+        model_directory,
+        build_installed_card_record(model_directory, old_shard.model_card),
+    )
+    monkeypatch.setattr(constants, "SKULK_MODELS_PATH", (tmp_path,))
+
+    async def byte_complete_status(
+        shard: ShardMetadata,
+    ) -> RepoDownloadProgress:
+        return RepoDownloadProgress(
+            repo_id=str(shard.model_card.model_id),
+            repo_revision=revision,
+            shard=shard,
+            completed_files=1,
+            total_files=1,
+            downloaded=Memory.from_mb(100),
+            downloaded_this_session=Memory.from_bytes(0),
+            total=Memory.from_mb(100),
+            overall_speed=0,
+            overall_eta=timedelta(seconds=0),
+            status="complete",
+        )
+
+    started: list[RepoDownloadProgress] = []
+    monkeypatch.setattr(
+        downloader,
+        "get_shard_download_status_for_shard",
+        byte_complete_status,
+    )
+
+    def record_download_start(
+        _shard: ShardMetadata,
+        progress: RepoDownloadProgress,
+    ) -> None:
+        started.append(progress)
+
+    monkeypatch.setattr(
+        coordinator,
+        "_start_download_task",
+        record_download_start,
+    )
+
+    await coordinator._start_download(requested_shard)
+
+    assert len(started) == 1
+    assert started[0].status == "in_progress"
+    assert not isinstance(coordinator.download_status[MODEL_ID], DownloadCompleted)
+
+
 async def test_revision_change_replaces_active_download_after_cleanup() -> None:
     """A corrected pin must cancel and replace an active old-pin download."""
 

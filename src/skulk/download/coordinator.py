@@ -625,15 +625,32 @@ class DownloadCoordinator:
             await self.shard_downloader.get_shard_download_status_for_shard(shard)
         )
 
-        if initial_progress.status == "complete":
+        completed_path = (
+            resolve_model_in_path(
+                model_id,
+                shard.model_card.source_revision,
+                expected_card=shard.model_card,
+            )
+            if initial_progress.status == "complete"
+            else None
+        )
+        if initial_progress.status == "complete" and completed_path is not None:
             completed = DownloadCompleted(
                 shard_metadata=shard,
                 node_id=self.node_id,
                 total=initial_progress.total,
-                model_directory=self._model_dir(model_id),
+                model_directory=str(completed_path),
             )
             await self._emit_status(completed)
             return
+        if initial_progress.status == "complete":
+            # Byte-only direct-download probes cannot distinguish a signed
+            # same-artifact card replacement. Keep the transfer path active so
+            # the store can atomically refresh the installed-card identity
+            # without retransferring unchanged model bytes.
+            initial_progress = initial_progress.model_copy(
+                update={"status": "in_progress"}
+            )
 
         if self.offline:
             logger.warning(
@@ -858,7 +875,11 @@ class DownloadCoordinator:
                         (DownloadCompleted, DownloadOngoing, DownloadFailed),
                     ):
                         continue
-                    found = resolve_model_in_path(mid, card.source_revision)
+                    found = resolve_model_in_path(
+                        mid,
+                        card.source_revision,
+                        expected_card=card,
+                    )
                     if found is not None and not model_companions_present_on_disk(
                         card, required_only=self.offline
                     ):
