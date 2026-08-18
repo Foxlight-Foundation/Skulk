@@ -10,7 +10,12 @@ import pytest
 
 from skulk.download.download_utils import RepoDownloadProgress
 from skulk.download.shard_downloader import ShardDownloader
-from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
+from skulk.shared.models.model_cards import (
+    ModelCard,
+    ModelId,
+    ModelTask,
+    VisionCardConfig,
+)
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.worker.shards import PipelineShardMetadata, ShardMetadata
 from skulk.store.config import StagingNodeConfig
@@ -458,6 +463,75 @@ async def test_store_host_reloads_canonical_path_after_generation_replacement(
 
     assert path == new_path
     assert (path / "model-IQ3_XXS.gguf").read_bytes() == b"new"
+
+
+@pytest.mark.anyio
+async def test_store_host_repairs_corrupt_canonical_projector(
+    tmp_path: Path,
+) -> None:
+    """A direct-store load must repair invalid projector bytes before serving."""
+
+    card = _aliased_shard().model_card.model_copy(
+        update={
+            "registry_provenance": "foxlight",
+            "vision": VisionCardConfig(
+                projector_file="mmproj-F16.gguf",
+                projector_size=1,
+            )
+        }
+    )
+    shard = _aliased_shard().model_copy(update={"model_card": card})
+    direct_path = tmp_path / "canonical"
+    direct_path.mkdir()
+    (direct_path / "model-IQ3_XXS.gguf").write_bytes(b"weights")
+    (direct_path / "mmproj-F16.gguf").write_bytes(b"x")
+    (direct_path / ".skulk-source-revision").write_text(f"{card.source_revision}\n")
+    write_installed_card(
+        direct_path,
+        build_installed_card_record(direct_path, card),
+    )
+    (direct_path / "mmproj-F16.gguf").write_bytes(b"y")
+
+    class RepairingCanonicalStoreClient(_RecordingStoreClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.local_store_path = tmp_path
+            self.repaired = False
+
+        async def local_model_path(
+            self,
+            model_id: str,
+            source_revision: str | None = None,
+        ) -> Path:
+            del model_id, source_revision
+            return direct_path
+
+        async def request_and_wait_for_download(
+            self,
+            model_id: str,
+            **kwargs: object,
+        ) -> bool:
+            del model_id, kwargs
+            (direct_path / "mmproj-F16.gguf").write_bytes(b"x")
+            write_installed_card(
+                direct_path,
+                build_installed_card_record(direct_path, card),
+            )
+            self.repaired = True
+            return True
+
+    store_client = RepairingCanonicalStoreClient()
+    downloader = ModelStoreDownloader(
+        inner=_UnusedInnerDownloader(),
+        store_client=cast(ModelStoreClient, cast(object, store_client)),
+        staging_config=StagingNodeConfig(enabled=False),
+    )
+
+    path = await downloader.ensure_shard(shard)
+
+    assert path == direct_path
+    assert store_client.repaired is True
+    assert (path / "mmproj-F16.gguf").read_bytes() == b"x"
 
 
 @pytest.mark.anyio

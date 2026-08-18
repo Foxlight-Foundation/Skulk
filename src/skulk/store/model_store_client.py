@@ -100,12 +100,15 @@ from skulk.store.installed_cards import (
     INSTALLED_CARD_RELATIVE_PATH,
     InstalledArtifactRole,
     InstalledCardRecord,
+    VerifiedDetachedInstalledCardCache,
     build_installed_card_record,
     companion_artifact_role,
     installed_card_matches,
     installed_companion_matches,
     read_installed_card_with_fallback,
     require_registry_installed_artifact,
+    unlink_relative_artifact_path_without_following,
+    verify_installed_file,
     write_installed_card_with_fallback,
 )
 from skulk.store.staging_eviction import touch_last_used
@@ -160,6 +163,7 @@ def _staged_generation_matches(
     requested_card: ModelCard,
     owner_card: ModelCard | None,
     artifact_role: InstalledArtifactRole,
+    verified_detached_cache: VerifiedDetachedInstalledCardCache | None = None,
 ) -> bool:
     """Return whether local bytes carry the requested durable generation.
 
@@ -169,7 +173,10 @@ def _staged_generation_matches(
     """
 
     try:
-        installed = read_installed_card_with_fallback(model_directory)
+        installed = read_installed_card_with_fallback(
+            model_directory,
+            verified_detached_cache=verified_detached_cache,
+        )
     except (OSError, ValueError):
         return False
     if installed is not None:
@@ -179,17 +186,23 @@ def _staged_generation_matches(
                 artifact_model_id=artifact_model_id,
                 owner_card=owner_card,
                 artifact_role=artifact_role,
+                verified_detached_cache=verified_detached_cache,
             )
         if requested_card.registry_card_id is not None:
             try:
                 require_registry_installed_artifact(
                     model_directory,
                     requested_card,
+                    verified_detached_cache=verified_detached_cache,
                 )
             except PermissionError:
                 return False
             return True
-        return installed_card_matches(model_directory, requested_card)
+        return installed_card_matches(
+            model_directory,
+            requested_card,
+            verified_detached_cache=verified_detached_cache,
+        )
     return _staged_source_revision_matches(
         model_directory, requested_card.source_revision
     )
@@ -202,11 +215,15 @@ def _completed_staged_generation_differs(
     requested_card: ModelCard,
     owner_card: ModelCard | None,
     artifact_role: InstalledArtifactRole,
+    verified_detached_cache: VerifiedDetachedInstalledCardCache | None = None,
 ) -> bool:
     """Return whether a completed local generation must be transactionally replaced."""
 
     try:
-        installed = read_installed_card_with_fallback(model_directory)
+        installed = read_installed_card_with_fallback(
+            model_directory,
+            verified_detached_cache=verified_detached_cache,
+        )
     except (OSError, ValueError):
         return True
     if installed is not None:
@@ -216,6 +233,7 @@ def _completed_staged_generation_differs(
             requested_card=requested_card,
             owner_card=owner_card,
             artifact_role=artifact_role,
+            verified_detached_cache=verified_detached_cache,
         )
     # An in-progress directory has no final marker and remains resumable. A
     # completed legacy generation with a different revision must retain its
@@ -473,8 +491,12 @@ def _staged_directory_looks_complete(directory: Path) -> bool:
     return (directory / "mtp.safetensors").is_file()
 
 
-def _staged_vision_projector_missing(shard: ShardMetadata, directory: Path) -> bool:
-    """True when a GGUF vision model's staged dir is missing its ``mmproj``.
+def _staged_vision_projector_missing(
+    shard: ShardMetadata,
+    directory: Path,
+    verified_detached_cache: VerifiedDetachedInstalledCardCache | None = None,
+) -> bool:
+    """True when a GGUF vision model's staged dir lacks its authenticated ``mmproj``.
 
     The generic completeness probe (``_staged_directory_looks_complete``)
     excludes ``mmproj`` files, so a GGUF vision model staged without its
@@ -492,15 +514,68 @@ def _staged_vision_projector_missing(shard: ShardMetadata, directory: Path) -> b
     if card.vision is None or not card.gguf_file:
         return False
     if card.vision.projector_file is not None:
-        projector = directory.joinpath(*Path(card.vision.projector_file).parts)
-        return (
-            not projector.is_file()
-            or projector.stat().st_size != card.vision.projector_size
+        assert card.vision.projector_size is not None
+        try:
+            record = read_installed_card_with_fallback(
+                directory,
+                verified_detached_cache=verified_detached_cache,
+            )
+        except (OSError, ValueError):
+            return True
+        return record is None or not verify_installed_file(
+            directory,
+            record,
+            card.vision.projector_file,
+            expected_size=card.vision.projector_size,
         )
     from skulk.store.model_store import has_gguf_projector
 
     return not has_gguf_projector(
         path.name for path in directory.rglob("*") if path.is_file()
+    )
+
+
+def _remove_invalid_staged_projector(
+    shard: ShardMetadata,
+    directory: Path,
+    verified_detached_cache: VerifiedDetachedInstalledCardCache | None = None,
+) -> None:
+    """Remove only a corrupt pinned projector so normal staging replaces it."""
+
+    card = shard.model_card
+    vision = card.vision
+    if (
+        vision is None
+        or vision.projector_file is None
+        or not _staged_vision_projector_missing(
+            shard,
+            directory,
+            verified_detached_cache,
+        )
+    ):
+        return
+    if unlink_relative_artifact_path_without_following(
+        directory,
+        vision.projector_file,
+    ):
+        logger.warning(
+            f"ModelStoreDownloader: removed invalid staged projector "
+            f"{vision.projector_file!r} for {card.model_id} before recovery"
+        )
+
+
+async def _staged_vision_projector_missing_async(
+    shard: ShardMetadata,
+    directory: Path,
+    verified_detached_cache: VerifiedDetachedInstalledCardCache | None = None,
+) -> bool:
+    """Authenticate a staged projector without hashing it on the event loop."""
+
+    return await asyncio.to_thread(
+        _staged_vision_projector_missing,
+        shard,
+        directory,
+        verified_detached_cache,
     )
 
 
@@ -1749,6 +1824,9 @@ class ModelStoreDownloader(ShardDownloader):
         self._staging_config = staging_config
         self._allow_hf_fallback = allow_hf_fallback
         self._installed_card_callback = installed_card_callback
+        self._verified_detached_installed_card_cache = (
+            VerifiedDetachedInstalledCardCache()
+        )
         self._staging_transfer_lock = asyncio.Lock()
         self._staging_capacity_callback: StagingCapacityCallback | None = None
         self._active_staging_model_ids: dict[str, int] = {}
@@ -1806,6 +1884,13 @@ class ModelStoreDownloader(ShardDownloader):
             )
 
         async with self._staging_transfer_lock:
+            if not replace_existing_generation and destination.exists():
+                await asyncio.to_thread(
+                    _remove_invalid_staged_projector,
+                    shard,
+                    destination,
+                    self._verified_detached_installed_card_cache,
+                )
             staged_path = await self._store_client.stage_shard(
                 model_id,
                 transfer_root,
@@ -2051,16 +2136,26 @@ class ModelStoreDownloader(ShardDownloader):
                     direct_path is not None
                     and _staged_directory_looks_complete(direct_path)
                     and not _staged_pinned_gguf_missing(shard, direct_path)
-                    and not _staged_vision_projector_missing(shard, direct_path)
                     and not _staged_same_repo_draft_missing(shard, direct_path)
                 ):
-                    if not _staged_generation_matches(
+                    projector_requires_recovery = (
+                        await _staged_vision_projector_missing_async(
+                            shard,
+                            direct_path,
+                            self._verified_detached_installed_card_cache,
+                        )
+                    )
+                    generation_requires_recovery = not _staged_generation_matches(
                         direct_path,
                         artifact_model_id=model_id,
                         requested_card=shard.model_card,
                         owner_card=installed_owner_card,
                         artifact_role=installed_artifact_role,
-                    ):
+                        verified_detached_cache=(
+                            self._verified_detached_installed_card_cache
+                        ),
+                    )
+                    if projector_requires_recovery or generation_requires_recovery:
                         await self._store_client.request_and_wait_for_download(
                             model_id,
                             pinned_gguf=shard.model_card.gguf_file,
@@ -2088,9 +2183,10 @@ class ModelStoreDownloader(ShardDownloader):
                             replacement_path is None
                             or not _staged_directory_looks_complete(replacement_path)
                             or _staged_pinned_gguf_missing(shard, replacement_path)
-                            or _staged_vision_projector_missing(
+                            or await _staged_vision_projector_missing_async(
                                 shard,
                                 replacement_path,
+                                self._verified_detached_installed_card_cache,
                             )
                             or _staged_same_repo_draft_missing(
                                 shard,
@@ -2102,6 +2198,9 @@ class ModelStoreDownloader(ShardDownloader):
                                 requested_card=shard.model_card,
                                 owner_card=installed_owner_card,
                                 artifact_role=installed_artifact_role,
+                                verified_detached_cache=(
+                                    self._verified_detached_installed_card_cache
+                                ),
                             )
                         ):
                             raise ModelNotInStoreError(
@@ -2132,13 +2231,18 @@ class ModelStoreDownloader(ShardDownloader):
                 requested_card=shard.model_card,
                 owner_card=installed_owner_card,
                 artifact_role=installed_artifact_role,
+                verified_detached_cache=self._verified_detached_installed_card_cache,
             )
         )
         if (
             dest_path.exists()
             and _staged_directory_looks_complete(dest_path)
             and not _staged_pinned_gguf_missing(shard, dest_path)
-            and not _staged_vision_projector_missing(shard, dest_path)
+            and not await _staged_vision_projector_missing_async(
+                shard,
+                dest_path,
+                self._verified_detached_installed_card_cache,
+            )
             and not _staged_same_repo_draft_missing(shard, dest_path)
             and _staged_generation_matches(
                 dest_path,
@@ -2146,6 +2250,7 @@ class ModelStoreDownloader(ShardDownloader):
                 requested_card=shard.model_card,
                 owner_card=installed_owner_card,
                 artifact_role=installed_artifact_role,
+                verified_detached_cache=self._verified_detached_installed_card_cache,
             )
         ):
             logger.info(

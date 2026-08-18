@@ -116,6 +116,28 @@ def test_invalid_projector_is_removed_before_recovery_download(tmp_path: Path) -
     assert not projector.exists()
 
 
+def test_invalid_canonical_projector_symlink_preserves_target(tmp_path: Path) -> None:
+    """Canonical recovery unlinks an escaping projector symlink, not its target."""
+
+    store = ModelStore(tmp_path / "store")
+    model_dir, _card = _register_pinned_projector(store)
+    projector = model_dir / "mmproj-F16.gguf"
+    projector.unlink()
+    external = tmp_path / "external-projector.gguf"
+    external.write_bytes(b"x")
+    projector.symlink_to(external)
+
+    store._remove_invalid_registered_file_for_recovery(  # pyright: ignore[reportPrivateUsage]
+        "org/vision",
+        "mmproj-F16.gguf",
+        1,
+        model_dir,
+    )
+
+    assert not projector.exists()
+    assert external.read_bytes() == b"x"
+
+
 async def test_cached_complete_entry_redownloads_when_companion_missing(
     tmp_path: Path,
 ) -> None:

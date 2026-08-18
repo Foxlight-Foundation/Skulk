@@ -8,7 +8,10 @@ projector, so it must NOT be flagged (doing so would disable the staged-cache
 fast path that keeps inference working when the store is unreachable).
 """
 
+from collections.abc import Callable
 from pathlib import Path
+
+import pytest
 
 from skulk.shared.models.model_cards import (
     ModelCard,
@@ -18,7 +21,17 @@ from skulk.shared.models.model_cards import (
 )
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.worker.shards import PipelineShardMetadata
-from skulk.store.model_store_client import _staged_vision_projector_missing
+from skulk.store.installed_cards import (
+    VerifiedDetachedInstalledCardCache,
+    build_installed_card_record,
+    write_installed_card,
+)
+from skulk.store.model_store_client import (
+    _remove_invalid_staged_projector,
+    _staged_generation_matches,
+    _staged_vision_projector_missing,
+    _staged_vision_projector_missing_async,
+)
 
 
 def _shard(
@@ -95,7 +108,140 @@ def test_pinned_projector_requires_exact_path_and_size(tmp_path: Path) -> None:
     (staged / "mmproj-F16.gguf").write_bytes(b"wrong")
     assert _staged_vision_projector_missing(shard, staged) is True
     (staged / "mmproj-F16.gguf").write_bytes(b"x")
+    write_installed_card(
+        staged,
+        build_installed_card_record(staged, shard.model_card),
+    )
     assert _staged_vision_projector_missing(shard, staged) is False
+
+
+def test_same_size_corrupt_projector_is_removed_for_recovery(tmp_path: Path) -> None:
+    """Manifest-invalid staged bytes cannot survive the store recovery path."""
+
+    staged = _write(
+        tmp_path,
+        "model-Q4_K_M.gguf",
+        "mmproj-F16.gguf",
+        "config.json",
+    )
+    shard = _shard(
+        vision=True,
+        gguf_file="model-Q4_K_M.gguf",
+        projector_file="mmproj-F16.gguf",
+        projector_size=1,
+    )
+    write_installed_card(
+        staged,
+        build_installed_card_record(staged, shard.model_card),
+    )
+    (staged / "mmproj-F16.gguf").write_bytes(b"y")
+
+    assert _staged_vision_projector_missing(shard, staged) is True
+    _remove_invalid_staged_projector(shard, staged)
+
+    assert not (staged / "mmproj-F16.gguf").exists()
+
+
+def test_corrupt_projector_symlink_is_unlinked_without_following(
+    tmp_path: Path,
+) -> None:
+    """Recovery removes the staged symlink entry and preserves its target."""
+
+    staged = _write(tmp_path / "staged", "model-Q4_K_M.gguf", "config.json")
+    external = tmp_path / "external-projector.gguf"
+    external.write_bytes(b"x")
+    (staged / "mmproj-F16.gguf").symlink_to(external)
+    shard = _shard(
+        vision=True,
+        gguf_file="model-Q4_K_M.gguf",
+        projector_file="mmproj-F16.gguf",
+        projector_size=1,
+    )
+
+    _remove_invalid_staged_projector(shard, staged)
+
+    assert not (staged / "mmproj-F16.gguf").exists()
+    assert external.read_bytes() == b"x"
+
+
+async def test_async_projector_check_hashes_off_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The worker's cache fast path delegates projector hashing to a thread."""
+
+    staged = _write(
+        tmp_path,
+        "model-Q4_K_M.gguf",
+        "mmproj-F16.gguf",
+        "config.json",
+    )
+    shard = _shard(
+        vision=True,
+        gguf_file="model-Q4_K_M.gguf",
+        projector_file="mmproj-F16.gguf",
+        projector_size=1,
+    )
+    write_installed_card(
+        staged,
+        build_installed_card_record(staged, shard.model_card),
+    )
+    delegated: list[Callable[..., bool]] = []
+
+    async def _to_thread(function: Callable[..., bool], *args: object) -> bool:
+        delegated.append(function)
+        return function(*args)
+
+    monkeypatch.setattr("skulk.store.model_store_client.asyncio.to_thread", _to_thread)
+
+    assert await _staged_vision_projector_missing_async(shard, staged) is False
+    assert delegated == [_staged_vision_projector_missing]
+
+
+def test_projector_and_generation_checks_share_detached_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One downloader cache is threaded through both installed-record reads."""
+
+    staged = _write(tmp_path, "model-Q4_K_M.gguf", "config.json")
+    shard = _shard(
+        vision=True,
+        gguf_file="model-Q4_K_M.gguf",
+        projector_file="mmproj-F16.gguf",
+        projector_size=1,
+    )
+    cache = VerifiedDetachedInstalledCardCache()
+    observed: list[VerifiedDetachedInstalledCardCache | None] = []
+
+    def _record_cache(
+        _directory: Path,
+        *,
+        fallback_root: Path | None = None,
+        verified_detached_cache: VerifiedDetachedInstalledCardCache | None = None,
+    ) -> None:
+        del fallback_root
+        observed.append(verified_detached_cache)
+        return None
+
+    monkeypatch.setattr(
+        "skulk.store.model_store_client.read_installed_card_with_fallback",
+        _record_cache,
+    )
+
+    assert _staged_vision_projector_missing(shard, staged, cache) is True
+    assert (
+        _staged_generation_matches(
+            staged,
+            artifact_model_id=str(shard.model_card.model_id),
+            requested_card=shard.model_card,
+            owner_card=None,
+            artifact_role="base",
+            verified_detached_cache=cache,
+        )
+        is False
+    )
+    assert observed == [cache, cache]
 
 
 def test_mlx_vision_without_projector_is_not_flagged(tmp_path: Path) -> None:

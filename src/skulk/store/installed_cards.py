@@ -226,9 +226,10 @@ class VerifiedDetachedInstalledCardCache:
     """Process-local cache for expensive detached installed-card verification.
 
     Detached records receive full hash verification before admission. Later
-    operator-inventory scans may reuse that result only while every manifest
-    file retains the same path, device, inode, size, modification time, and
-    change time. Transfer and reconciliation callers do not use this cache.
+    operator-inventory scans and local launch/cache checks may reuse that result
+    only while every manifest file retains the same path, device, inode, size,
+    modification time, and change time. Transfer and reconciliation callers do
+    not use this cache.
     """
 
     def __init__(self) -> None:
@@ -288,6 +289,49 @@ def _sha256_file(path: Path) -> str:
         while chunk := source.read(8 * 1024 * 1024):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def unlink_relative_artifact_path_without_following(
+    model_directory: Path,
+    relative_path: str,
+) -> bool:
+    """Unlink one invalid artifact entry without following staged symlinks.
+
+    The path must use the installed-manifest canonical relative POSIX form. If
+    an intermediate component is a symlink, that in-root symlink is removed so
+    the normal staging path can recreate the directory tree. A final symlink is
+    likewise unlinked as an entry rather than resolving and deleting its target.
+
+    Args:
+        model_directory: Root of the canonical or staged artifact generation.
+        relative_path: Canonical repository-relative path selected by the card.
+
+    Returns:
+        ``True`` when an invalid file or symlink entry was removed.
+    """
+
+    path = PurePosixPath(relative_path)
+    if (
+        path.is_absolute()
+        or relative_path != path.as_posix()
+        or "\\" in relative_path
+        or any(part in {"", ".", ".."} for part in path.parts)
+    ):
+        return False
+    current = model_directory.resolve()
+    for part in path.parts[:-1]:
+        component = current / part
+        if component.is_symlink():
+            component.unlink()
+            return True
+        if not component.is_dir():
+            return False
+        current = component
+    candidate = current / path.name
+    if candidate.is_symlink() or candidate.is_file():
+        candidate.unlink()
+        return True
+    return False
 
 
 def build_file_manifest(
@@ -580,8 +624,8 @@ def read_installed_card_with_fallback(
         model_directory: Artifact directory whose installed identity is needed.
         fallback_root: Process-level directory containing detached records.
         verified_detached_cache: Optional process-local cache used only by
-            lossy operator inventory. A detached record is admitted only after
-            a full hash pass and is invalidated by file-stat changes.
+            inventory or launch/cache checks. A detached record is admitted
+            only after a full hash pass and is invalidated by file-stat changes.
 
     Returns:
         The trusted installed-card record, or ``None`` when no complete record
@@ -646,11 +690,23 @@ def read_installed_card_with_fallback(
 def installed_card_matches(
     model_directory: Path,
     model_card: ModelCard,
+    *,
+    verified_detached_cache: VerifiedDetachedInstalledCardCache | None = None,
 ) -> bool:
-    """Return whether a complete sidecar identifies the requested card generation."""
+    """Return whether a complete sidecar identifies the requested card generation.
+
+    Args:
+        model_directory: Artifact root containing or owning installed metadata.
+        model_card: Exact effective card requested for the generation.
+        verified_detached_cache: Optional cache for an already authenticated
+            detached record on a read-only artifact root.
+    """
 
     try:
-        record = read_installed_card_with_fallback(model_directory)
+        record = read_installed_card_with_fallback(
+            model_directory,
+            verified_detached_cache=verified_detached_cache,
+        )
     except (OSError, ValueError):
         return False
     if record is None:
@@ -670,6 +726,8 @@ def installed_card_matches(
 def require_registry_installed_artifact(
     model_directory: Path,
     model_card: ModelCard,
+    *,
+    verified_detached_cache: VerifiedDetachedInstalledCardCache | None = None,
 ) -> None:
     """Require a staged artifact to match an immutable signed card exactly.
 
@@ -683,6 +741,8 @@ def require_registry_installed_artifact(
     Args:
         model_directory: Complete staged or canonical artifact directory.
         model_card: Signed card selected for this runner generation.
+        verified_detached_cache: Optional cache for an already authenticated
+            detached record on a read-only artifact root.
 
     Raises:
         PermissionError: If signed identity cannot be proven from local state.
@@ -691,7 +751,10 @@ def require_registry_installed_artifact(
     if card_id is None:
         return
     try:
-        record = read_installed_card_with_fallback(model_directory)
+        record = read_installed_card_with_fallback(
+            model_directory,
+            verified_detached_cache=verified_detached_cache,
+        )
     except (OSError, ValueError) as error:
         raise PermissionError(
             f"{MODEL_TRUST_FAILURE_MARKER}: installed artifact identity is "
@@ -724,11 +787,24 @@ def installed_companion_matches(
     artifact_model_id: str,
     owner_card: ModelCard,
     artifact_role: InstalledArtifactRole,
+    verified_detached_cache: VerifiedDetachedInstalledCardCache | None = None,
 ) -> bool:
-    """Return whether a complete local artifact belongs to an owning card."""
+    """Return whether a complete local artifact belongs to an owning card.
+
+    Args:
+        model_directory: Complete companion artifact directory.
+        artifact_model_id: Store identity of the companion repository.
+        owner_card: Complete effective card that owns the companion.
+        artifact_role: Declared role of the companion artifact.
+        verified_detached_cache: Optional cache for an already authenticated
+            detached record on a read-only artifact root.
+    """
 
     try:
-        record = read_installed_card_with_fallback(model_directory)
+        record = read_installed_card_with_fallback(
+            model_directory,
+            verified_detached_cache=verified_detached_cache,
+        )
     except (OSError, ValueError):
         return False
     if record is None:
