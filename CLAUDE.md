@@ -587,6 +587,27 @@ peer APIs rather than through a central authoritative trace store.
 
 These rules apply to every change. No exceptions.
 
+### Work from `dev`, always
+
+`dev` is the baseline for every change. Cut branches from it, open pull
+requests against it, and read it whenever you need current truth:
+
+```bash
+git fetch origin dev && git checkout -b <branch> origin/dev
+```
+
+`main` is the release branch and trails `dev` by an entire release cycle -
+routinely hundreds of commits. Anything read from `main` may therefore be
+stale: file paths and line anchors, where a function lives, which subsystems
+exist at all, and whether an architectural claim still holds. This is a
+recorded failure mode, not a theoretical one - a planning pass was once
+researched entirely against `main` and had to be redone when `dev` turned out
+to be 305 commits and a minor version ahead, with a whole subsystem the
+research never saw.
+
+So: when a claim about this codebase matters, verify it on `dev`, and say which
+branch you checked.
+
 ### Experimental code stays out of dev
 
 Unproven, demo-bound, or design-in-motion work never merges to dev. It lives
