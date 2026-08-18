@@ -2101,19 +2101,22 @@ class ModelStoreDownloader(ShardDownloader):
                     direct_path is not None
                     and _staged_directory_looks_complete(direct_path)
                     and not _staged_pinned_gguf_missing(shard, direct_path)
-                    and not await _staged_vision_projector_missing_async(
-                        shard,
-                        direct_path,
-                    )
                     and not _staged_same_repo_draft_missing(shard, direct_path)
                 ):
-                    if not _staged_generation_matches(
+                    projector_requires_recovery = (
+                        await _staged_vision_projector_missing_async(
+                            shard,
+                            direct_path,
+                        )
+                    )
+                    generation_requires_recovery = not _staged_generation_matches(
                         direct_path,
                         artifact_model_id=model_id,
                         requested_card=shard.model_card,
                         owner_card=installed_owner_card,
                         artifact_role=installed_artifact_role,
-                    ):
+                    )
+                    if projector_requires_recovery or generation_requires_recovery:
                         await self._store_client.request_and_wait_for_download(
                             model_id,
                             pinned_gguf=shard.model_card.gguf_file,
