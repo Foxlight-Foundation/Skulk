@@ -22,11 +22,13 @@ from skulk.shared.models.model_cards import (
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.worker.shards import PipelineShardMetadata
 from skulk.store.installed_cards import (
+    VerifiedDetachedInstalledCardCache,
     build_installed_card_record,
     write_installed_card,
 )
 from skulk.store.model_store_client import (
     _remove_invalid_staged_projector,
+    _staged_generation_matches,
     _staged_vision_projector_missing,
     _staged_vision_projector_missing_async,
 )
@@ -194,6 +196,52 @@ async def test_async_projector_check_hashes_off_event_loop(
 
     assert await _staged_vision_projector_missing_async(shard, staged) is False
     assert delegated == [_staged_vision_projector_missing]
+
+
+def test_projector_and_generation_checks_share_detached_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One downloader cache is threaded through both installed-record reads."""
+
+    staged = _write(tmp_path, "model-Q4_K_M.gguf", "config.json")
+    shard = _shard(
+        vision=True,
+        gguf_file="model-Q4_K_M.gguf",
+        projector_file="mmproj-F16.gguf",
+        projector_size=1,
+    )
+    cache = VerifiedDetachedInstalledCardCache()
+    observed: list[VerifiedDetachedInstalledCardCache | None] = []
+
+    def _record_cache(
+        _directory: Path,
+        *,
+        fallback_root: Path | None = None,
+        verified_detached_cache: VerifiedDetachedInstalledCardCache | None = None,
+    ) -> None:
+        del fallback_root
+        observed.append(verified_detached_cache)
+        return None
+
+    monkeypatch.setattr(
+        "skulk.store.model_store_client.read_installed_card_with_fallback",
+        _record_cache,
+    )
+
+    assert _staged_vision_projector_missing(shard, staged, cache) is True
+    assert (
+        _staged_generation_matches(
+            staged,
+            artifact_model_id=str(shard.model_card.model_id),
+            requested_card=shard.model_card,
+            owner_card=None,
+            artifact_role="base",
+            verified_detached_cache=cache,
+        )
+        is False
+    )
+    assert observed == [cache, cache]
 
 
 def test_mlx_vision_without_projector_is_not_flagged(tmp_path: Path) -> None:
