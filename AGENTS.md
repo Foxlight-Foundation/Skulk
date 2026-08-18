@@ -242,7 +242,7 @@ These rules apply to every change. No exceptions.
 
 ### Work from `dev`, always
 
-`dev` is the baseline for every change. Cut branches from it, open pull
+`dev` is the baseline for day-to-day work. Cut branches from it, open pull
 requests against it, and read it whenever you need current truth:
 
 ```bash
@@ -260,6 +260,11 @@ research never saw.
 
 So: when a claim about this codebase matters, verify it on `dev`, and say which
 branch you checked.
+
+The one exception is the release cut itself: promotion pull requests from `dev`
+to `main` are opened by maintainers. This rule restates, for agents, the
+branching model already documented in
+[`CONTRIBUTING.md`](CONTRIBUTING.md) - keep the two in step if either changes.
 
 ### Experimental code stays out of dev
 
