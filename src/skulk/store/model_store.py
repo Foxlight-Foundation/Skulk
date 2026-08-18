@@ -235,7 +235,9 @@ def select_store_gguf_download_files(
     # absent draft loudly at launch via _draft_model_args).
     for extra in extra_pinned_gguf or []:
         if extra in pinned_paths:
-            keep_patterns.extend(gguf_allow_patterns(extra))
+            # Same-repo draft expansion must preserve an exact projector pin;
+            # otherwise the legacy projector glob retains every variant.
+            keep_patterns.extend(gguf_allow_patterns(extra, pinned_projector))
         elif extra:
             logger.warning(
                 f"ModelStore: extra pinned GGUF {extra!r} not found in repo; "

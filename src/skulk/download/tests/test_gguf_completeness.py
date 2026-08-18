@@ -129,3 +129,53 @@ async def test_resolve_allow_patterns_gguf_vs_safetensors() -> None:
 
     mlx = _card("o/r2")
     assert await resolve_allow_patterns(_shard(mlx)) == ["*"]
+
+
+async def test_same_repo_draft_preserves_exact_projector_pattern() -> None:
+    """A same-repository draft must not reintroduce the legacy projector glob."""
+    from skulk.download.download_utils import resolve_allow_patterns
+    from skulk.shared.models.model_cards import (
+        ModelCard,
+        ModelId,
+        ModelTask,
+        RuntimeCapabilityCardConfig,
+        VisionCardConfig,
+    )
+    from skulk.shared.types.memory import Memory
+    from skulk.shared.types.worker.shards import PipelineShardMetadata
+
+    revision = "a" * 40
+    card = ModelCard(
+        model_id=ModelId("o/r"),
+        source_revision=revision,
+        storage_size=Memory.from_gb(1),
+        n_layers=16,
+        hidden_size=2048,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        gguf_file="base-Q4_K_M.gguf",
+        vision=VisionCardConfig(
+            projector_file="mmproj-F16.gguf",
+            projector_size=100,
+        ),
+        runtime=RuntimeCapabilityCardConfig(
+            served_spec_draft_repo="o/r",
+            served_spec_draft_revision=revision,
+            served_spec_draft_file="draft-Q4_K_M.gguf",
+        ),
+    )
+    shard = PipelineShardMetadata(
+        model_card=card,
+        device_rank=0,
+        world_size=1,
+        start_layer=0,
+        end_layer=card.n_layers,
+        n_layers=card.n_layers,
+    )
+
+    assert await resolve_allow_patterns(shard) == [
+        "base-Q4_K_M.gguf",
+        "mmproj-F16.gguf",
+        "config.json",
+        "draft-Q4_K_M.gguf",
+    ]
