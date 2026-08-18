@@ -14,6 +14,11 @@ the projector and image input owned by the driver. Vision and native MTP work
 together with serial serving as the initial compatibility mode; legacy cards
 without a projector pin continue through the in-process runner.
 
+When a signed replacement changes only card metadata for the same immutable
+artifact, Skulk now refreshes the installed-card sidecar before treating a
+staged cache hit as launchable. The unchanged model bytes remain in place while
+runner trust sees the newly approved exact card identity.
+
 ## Native CUDA serving on Linux ARM64
 
 The managed CUDA llama-server wheel now ships for Linux aarch64 as well as

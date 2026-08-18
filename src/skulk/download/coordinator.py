@@ -579,7 +579,9 @@ class DownloadCoordinator:
         # review on the launch-smoke fix). Fall through to the download
         # path instead so the companion gets fetched.
         found_path = resolve_model_in_path(
-            model_id, shard.model_card.source_revision
+            model_id,
+            shard.model_card.source_revision,
+            expected_card=shard.model_card,
         )
         # In offline mode optional companions can never be fetched and the
         # runner degrades to run-without-speculation, so only load-bearing

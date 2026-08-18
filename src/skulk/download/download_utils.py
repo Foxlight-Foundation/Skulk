@@ -247,19 +247,27 @@ def _commit_replacement_model_dir(replacement_dir: Path, target_dir: Path) -> No
 
 
 def resolve_model_in_path(
-    model_id: ModelId, source_revision: str | None = None
+    model_id: ModelId,
+    source_revision: str | None = None,
+    *,
+    expected_card: ModelCard | None = None,
 ) -> Path | None:
     """Search SKULK_MODELS_PATH directories for a pre-existing model.
 
     Checks each directory for the normalized name (org--model) and, for pinned
     artifacts, the store's revision-qualified sibling name. A candidate is only
     returned if ``is_model_directory_complete`` confirms all weight files are
-    present and its revision marker matches.
+    present and its revision marker matches. When ``expected_card`` is a signed
+    registry card, the installed-card sidecar must also prove that exact card
+    identity. This prevents a same-revision card replacement from bypassing the
+    normal card-only refresh transaction and then failing at runner load.
 
     Args:
         model_id: Model repository identifier to resolve.
         source_revision: Full immutable Hugging Face commit required by the
             card. When set, the directory must carry a matching revision marker.
+        expected_card: Optional complete card whose signed installed identity
+            must match the resolved directory.
 
     Returns:
         The first complete matching model directory, or ``None``.
@@ -282,6 +290,18 @@ def resolve_model_in_path(
                 and is_model_directory_complete(candidate)
                 and _source_revision_matches(candidate, source_revision)
             ):
+                if (
+                    expected_card is not None
+                    and expected_card.registry_card_id is not None
+                ):
+                    from skulk.store.installed_cards import (
+                        require_registry_installed_artifact,
+                    )
+
+                    try:
+                        require_registry_installed_artifact(candidate, expected_card)
+                    except PermissionError:
+                        continue
                 return candidate
     return None
 
