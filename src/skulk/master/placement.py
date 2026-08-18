@@ -6,6 +6,7 @@ from typing import ClassVar, Final, Literal, Sequence, TypeAlias
 
 from skulk.master.placement_utils import (
     Cycle,
+    CycleMemoryDiagnostics,
     filter_cycles_by_memory,
     get_llama_rpc_donor_endpoints,
     get_mlx_jaccl_coordinators,
@@ -189,6 +190,21 @@ def add_instance_to_placements(
         command.instance,
         approved_remote_code_identities,
     )
+    fixed_memory_by_node: dict[NodeId, Memory] = {}
+    first_shard = next(iter(assignments.runner_to_shard.values()), None)
+    if first_shard is not None:
+        card = first_shard.model_card
+        projector_size = (
+            card.vision.projector_size if card.vision is not None else None
+        )
+        if projector_size is not None:
+            projector_memory = Memory.from_bytes(projector_size)
+            if isinstance(command.instance, LlamaRpcInstance):
+                fixed_memory_by_node[command.instance.driver_node] = projector_memory
+            elif len(assignments.node_to_runner) == 1:
+                fixed_memory_by_node[next(iter(assignments.node_to_runner))] = (
+                    projector_memory
+                )
     ceiling = instance_context_token_limit(
         assignments,
         {
@@ -198,6 +214,7 @@ def add_instance_to_placements(
         },
         node_vram=node_vram,
         unified_memory_gpu_nodes=unified_memory_gpu_nodes,
+        fixed_memory_by_node=fixed_memory_by_node,
     )
     instance = command.instance.model_copy(update={"context_token_limit": ceiling})
     return {**current_instances, instance.instance_id: instance}
@@ -299,6 +316,9 @@ def _card_platform_backends(
         frozenset(compatible),
         card_serves_vision=card.vision is not None,
         card_serves_speech=card_serves_speech(card),
+        card_has_pinned_projector=(
+            card.vision is not None and card.vision.has_pinned_projector
+        ),
     )
 
 
@@ -359,6 +379,36 @@ def _is_llama_rpc_cycle(
         return False
     engines = _cycle_common_multi_node_engines(cycle, card, node_resources)
     return "llama_server" in engines and "mlx" not in engines
+
+
+def _common_served_accelerator_tags(
+    cycle: Cycle,
+    card: ModelCard,
+    node_resources: Mapping[NodeId, NodeResources],
+) -> frozenset[str]:
+    """Return exact served accelerator tags shared by every node in a cycle.
+
+    Vision RPC is qualified only when all ranks execute one homogeneous
+    llama.cpp accelerator backend. Bare and CPU tags are intentionally absent:
+    donors do not execute the image path, but mixed accelerator builds have not
+    yet been qualified for multimodal RPC.
+    """
+
+    allowed_suffixes = ("-cuda", "-rocm", "-vulkan")
+    common: set[str] | None = None
+    for node_id in cycle.node_ids:
+        resources = node_resources.get(node_id)
+        if resources is None:
+            return frozenset()
+        tags = {
+            tag
+            for tag in resources.backends & _card_platform_backends(card, resources)
+            if tag.startswith("llama_server-") and tag.endswith(allowed_suffixes)
+        }
+        common = tags if common is None else common & tags
+        if not common:
+            return frozenset()
+    return frozenset(common or set())
 
 
 PlacementFailureCode: TypeAlias = Literal[
@@ -680,6 +730,39 @@ def place_instance(
                 "pipeline-only."
             )
 
+    pinned_projector_size = (
+        command.model_card.vision.projector_size
+        if command.model_card.vision is not None
+        else None
+    )
+    projector_memory = (
+        Memory.from_bytes(pinned_projector_size)
+        if pinned_projector_size is not None
+        else Memory()
+    )
+    if projector_memory.in_bytes > 0:
+        vision_rpc_candidates = [
+            cycle
+            for cycle in candidate_cycles
+            if _is_llama_rpc_cycle(
+                cycle, command.model_card, resolved_node_resources
+            )
+        ]
+        candidate_cycles = [
+            cycle
+            for cycle in candidate_cycles
+            if cycle not in vision_rpc_candidates
+            or _common_served_accelerator_tags(
+                cycle, command.model_card, resolved_node_resources
+            )
+        ]
+        if not candidate_cycles:
+            raise PlacementError(
+                "Served vision RPC requires one exact llama_server accelerator "
+                "backend tag (CUDA, ROCm, or Vulkan) shared by every node in "
+                "the cycle. Mixed-backend multimodal RPC is not qualified."
+            )
+
     # Filter to cycles containing all required nodes (subset matching)
     if required_nodes:
         candidate_cycles = [
@@ -713,13 +796,33 @@ def place_instance(
         for cycle in candidate_cycles
         if _is_llama_rpc_cycle(cycle, command.model_card, resolved_node_resources)
     ]
-    cycles_with_sufficient_memory, memory_diagnostics = filter_cycles_by_memory(
-        standard_candidates,
-        node_memory,
-        command.model_card,
-        command.sharding,
-        node_vram=node_vram,
-    )
+    cycles_with_sufficient_memory: list[Cycle] = []
+    memory_diagnostics = CycleMemoryDiagnostics()
+    for standard_cycle in standard_candidates:
+        standard_fixed = (
+            {standard_cycle.node_ids[0]: projector_memory}
+            if len(standard_cycle) == 1 and projector_memory.in_bytes > 0
+            else {}
+        )
+        standard_fit, standard_diagnostics = filter_cycles_by_memory(
+            [standard_cycle],
+            node_memory,
+            command.model_card,
+            command.sharding,
+            node_vram=node_vram,
+            fixed_memory_by_node=standard_fixed,
+        )
+        cycles_with_sufficient_memory.extend(standard_fit)
+        memory_diagnostics.pending_info_node_ids.extend(
+            node_id
+            for node_id in standard_diagnostics.pending_info_node_ids
+            if node_id not in memory_diagnostics.pending_info_node_ids
+        )
+        memory_diagnostics.rejection_reasons.extend(
+            standard_diagnostics.rejection_reasons
+        )
+    rpc_driver_by_cycle: dict[tuple[NodeId, ...], NodeId] = {}
+    resolved_download_status = download_status or {}
     if rpc_candidates:
         rpc_vram_map: Mapping[NodeId, Memory] = node_vram or {}
         # A cycle node missing from the usable-GPU map (telemetry warm-up:
@@ -738,24 +841,50 @@ def place_instance(
             for cycle in rpc_candidates
             if all(node_id in rpc_vram_map for node_id in cycle.node_ids)
         ]
-        rpc_fit, rpc_diagnostics = filter_cycles_by_memory(
-            vram_known_rpc_candidates,
-            node_memory,
-            command.model_card,
-            # llama.cpp splits the pooled model proportional to device memory,
-            # which is exactly the Pipeline-proportional fit estimate.
-            Sharding.Pipeline,
-            node_vram=rpc_vram_map,
-            exact_pipeline_layers=False,
-        )
-        cycles_with_sufficient_memory = cycles_with_sufficient_memory + rpc_fit
+        for rpc_cycle in vram_known_rpc_candidates:
+            driver = max(
+                rpc_cycle.node_ids,
+                key=lambda node_id: (
+                    max(
+                        0,
+                        rpc_vram_map[node_id].in_bytes - projector_memory.in_bytes,
+                    ),
+                    _get_node_download_fraction(
+                        node_id,
+                        command.model_card.model_id,
+                        resolved_download_status,
+                    ),
+                ),
+            )
+            rpc_fixed = (
+                {driver: projector_memory}
+                if projector_memory.in_bytes > 0
+                else {}
+            )
+            rpc_fit, rpc_diagnostics = filter_cycles_by_memory(
+                [rpc_cycle],
+                node_memory,
+                command.model_card,
+                Sharding.Pipeline,
+                node_vram=rpc_vram_map,
+                exact_pipeline_layers=False,
+                fixed_memory_by_node=rpc_fixed,
+            )
+            cycles_with_sufficient_memory.extend(rpc_fit)
+            if rpc_fit:
+                rpc_driver_by_cycle[tuple(rpc_cycle.node_ids)] = driver
+            memory_diagnostics.pending_info_node_ids.extend(
+                node_id
+                for node_id in rpc_diagnostics.pending_info_node_ids
+                if node_id not in memory_diagnostics.pending_info_node_ids
+            )
+            memory_diagnostics.rejection_reasons.extend(
+                rpc_diagnostics.rejection_reasons
+            )
         memory_diagnostics.pending_info_node_ids.extend(
             node_id
-            for node_id in (*rpc_diagnostics.pending_info_node_ids, *sorted(vram_pending_nodes))
+            for node_id in sorted(vram_pending_nodes)
             if node_id not in memory_diagnostics.pending_info_node_ids
-        )
-        memory_diagnostics.rejection_reasons.extend(
-            rpc_diagnostics.rejection_reasons
         )
     if len(cycles_with_sufficient_memory) == 0:
         if memory_diagnostics.pending_info_node_ids:
@@ -820,7 +949,6 @@ def place_instance(
         if any(topology.node_is_leaf(node_id) for node_id in cycle)
     ]
 
-    resolved_download_status = download_status or {}
     candidate_cycles = (
         cycles_with_leaf_nodes if cycles_with_leaf_nodes != [] else smallest_cycles
     )
@@ -868,20 +996,28 @@ def place_instance(
         )
 
     driver_node: NodeId | None = None
+    selected_rpc_backend: str | None = None
     if selected_is_rpc:
         # Driver = the node with the largest usable VRAM (most layers land
         # locally, minimizing cross-network boundaries), tie-broken by which
         # node already has the model on disk (only the driver reads the GGUF).
-        rpc_vram = node_vram or {}
-        driver_node = max(
-            selected_cycle.node_ids,
-            key=lambda node_id: (
-                rpc_vram.get(node_id, Memory()).in_bytes,
-                _get_node_download_fraction(
-                    node_id, command.model_card.model_id, resolved_download_status
-                ),
-            ),
+        driver_node = rpc_driver_by_cycle.get(tuple(selected_cycle.node_ids))
+        if driver_node is None:
+            raise PlacementError(
+                "The selected RPC cycle has no memory-qualified driver. Retry "
+                "after accelerator telemetry converges."
+            )
+        common_tags = _common_served_accelerator_tags(
+            selected_cycle,
+            command.model_card,
+            resolved_node_resources,
         )
+        if projector_memory.in_bytes > 0:
+            selected_rpc_backend = resolve_node_backend(
+                common_tags,
+                backend_preference,
+                common_tags,
+            )
         shard_assignments = get_shard_assignments_for_llama_rpc(
             command.model_card, selected_cycle, driver_node
         )
@@ -907,10 +1043,14 @@ def place_instance(
         resources = resolved_node_resources.get(node_id)
         compatible_backends = _card_platform_backends(command.model_card, resources)
         if selected_is_rpc:
-            compatible_backends = frozenset(
-                tag
-                for tag in compatible_backends
-                if engine_of(tag) == "llama_server"
+            compatible_backends = (
+                frozenset({selected_rpc_backend})
+                if selected_rpc_backend is not None
+                else frozenset(
+                    tag
+                    for tag in compatible_backends
+                    if engine_of(tag) == "llama_server"
+                )
             )
         resolved_backend = (
             resolve_node_backend(
@@ -942,6 +1082,15 @@ def place_instance(
         },
         node_vram=node_vram,
         unified_memory_gpu_nodes=unified_memory_gpu_nodes,
+        fixed_memory_by_node=(
+            {driver_node: projector_memory}
+            if driver_node is not None and projector_memory.in_bytes > 0
+            else (
+                {selected_cycle.node_ids[0]: projector_memory}
+                if len(selected_cycle) == 1 and projector_memory.in_bytes > 0
+                else {}
+            )
+        ),
     )
 
     cycle_digraph: Topology = topology.get_subgraph_from_nodes(selected_cycle.node_ids)

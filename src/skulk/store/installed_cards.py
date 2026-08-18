@@ -769,6 +769,46 @@ def verify_installed_card(
     return bool(record.files)
 
 
+def verify_installed_file(
+    model_directory: Path,
+    record: InstalledCardRecord,
+    relative_path: str,
+    *,
+    expected_size: int,
+) -> bool:
+    """Verify one card-pinned file against its installed manifest and digest.
+
+    This is intended for comparatively small executable companion artifacts,
+    such as a GGUF multimodal projector, that must be re-authenticated at the
+    runner boundary without re-hashing the base model's multi-gigabyte weights.
+
+    Args:
+        model_directory: Root containing the installed artifact generation.
+        record: Durable installed-card record for that root.
+        relative_path: Canonical repository-relative file selected by the card.
+        expected_size: Exact immutable byte size declared by the card.
+
+    Returns:
+        ``True`` only when the path is bounded, the manifest agrees with the
+        card, and the current bytes match the manifest digest.
+    """
+
+    entry = next((item for item in record.files if item.path == relative_path), None)
+    if entry is None or entry.size_bytes != expected_size:
+        return False
+    resolved_root = model_directory.resolve()
+    candidate = (resolved_root / relative_path).resolve()
+    if not candidate.is_relative_to(resolved_root) or not candidate.is_file():
+        return False
+    try:
+        return (
+            candidate.stat().st_size == expected_size
+            and _sha256_file(candidate) == entry.sha256
+        )
+    except OSError:
+        return False
+
+
 def discover_installed_cards(roots: Iterable[Path]) -> list[InstalledCardRecord]:
     """Discover complete installed records below model-search roots.
 

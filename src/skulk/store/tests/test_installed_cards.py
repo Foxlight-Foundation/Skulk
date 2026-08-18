@@ -18,6 +18,7 @@ from skulk.store.installed_cards import (
     read_installed_card,
     read_installed_card_with_fallback,
     require_registry_installed_artifact,
+    verify_installed_file,
     write_installed_card,
     write_installed_card_with_fallback,
 )
@@ -70,6 +71,29 @@ def test_verified_registry_record_round_trips(tmp_path: Path) -> None:
     assert read_installed_card(artifact) == record
     assert installed_card_matches(artifact, card)
     assert all(entry.path != ".skulk-source-revision" for entry in record.files)
+
+
+def test_pinned_companion_verification_detects_corruption(tmp_path: Path) -> None:
+    """Runner-bound companion verification checks path, size, and exact digest."""
+
+    artifact = _artifact(tmp_path)
+    projector = artifact / "mmproj-F16.gguf"
+    projector.write_bytes(b"projector")
+    record = build_installed_card_record(artifact, _card())
+
+    assert verify_installed_file(
+        artifact,
+        record,
+        "mmproj-F16.gguf",
+        expected_size=len(b"projector"),
+    )
+    projector.write_bytes(b"corrupt!!")
+    assert not verify_installed_file(
+        artifact,
+        record,
+        "mmproj-F16.gguf",
+        expected_size=len(b"projector"),
+    )
 
 
 def test_unmarked_registry_bytes_remain_local_legacy(tmp_path: Path) -> None:

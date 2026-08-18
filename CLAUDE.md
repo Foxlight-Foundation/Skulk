@@ -274,9 +274,15 @@ A model card's `placement.compatible_backends` selects which engine serves it
   `--kv-unified` above one slot so every slot keeps the full stamped window
   rather than `n_ctx / N` (#689). Exact prompt-plus-output reservations queue
   FIFO against that shared pool before generation, and an unavailable
-  token-count probe reserves the whole pool as a fail-safe. Single-node;
-  coexists with `llama_cpp`; the managed-server-plus-proxy shape is shared with
-  `vllm`.
+  token-count probe reserves the whole pool as a fail-safe. A GGUF vision card
+  becomes eligible when it pins one exact projector path and size at its
+  immutable source revision; the runner verifies that projector against the
+  installed manifest and passes `--mmproj` (`--no-mmproj-offload` on CPU).
+  Vision plus served MTP is serial until concurrent multimodal serving is
+  qualified. Multi-node RPC vision requires one homogeneous CUDA, ROCm, or
+  Vulkan served tag, reserves the projector on the driver, and sends image
+  media only to that driver. The engine coexists with `llama_cpp`; the
+  managed-server-plus-proxy shape is shared with `vllm`.
 - **`vllm`** (`worker/runner/vllm/`): second served-backend engine; the worker
   launches an external `vllm serve` process and proxies its OpenAI HTTP API. The
   GPU-serving fast path: continuous batching + paged attention hold latency flat
@@ -358,7 +364,7 @@ Components communicate via typed pub/sub topics (src/skulk/routing/topics.py):
 - `REALTIME_AUDIO`: Built-in realtime STT PCM ingress, off the event log/master/State. `RealtimeAudioPacket` carries a bounded JSON lifecycle header plus raw PCM bytes from the owning API node to the selected single-host speech worker. It shares the Zenoh scheduler's bounded independent command queues and same-node short circuit; transport rejection is source-routed so only the affected provider call fails. Remote capability is unavailable without Zenoh. Same-version fleet required.
 - `SPEECH_MEDIA`: Bounded speech input, off the event log/master/State. TTS reference audio requires node-addressed Zenoh. Batch STT audio is retained at the owning API until authoritative `TaskCreated` placement, then sent as raw frames to each selected speech worker; workers gate runner dispatch on exact sequence, task owner, count, and SHA-256 verification. Batch STT retains a target-filtered gossipsub fallback on the trusted fabric. Same-version fleet required.
 - `TRACE_DATA`: Best-effort diagnostic trace payloads, off the event log/master/State. Each runner supervisor sends one terminal packet per traced task rank to the owning API; that API assembles the expected rank set under fixed task-count and age bounds before writing the Chrome trace. Same-version fleet required.
-- `VISION_MEDIA`: VLM and image-edit input, off the event log/master/State. The API waits for authoritative `TaskCreated` placement, then sends an `opened -> chunk* -> completed` binary-framed stream directly to every selected worker rank. Workers apply stream/frame/byte/age bounds and expose input to planning only after exact sequence, metadata, task-owner, and SHA-256 verification plus successful acknowledgement admission; timed-out acknowledgement sends retry while the task remains gated. Each rank returns `accepted`, and a bounded missing-ack deadline fails the source request. Vision ingress has separate bounded network-receive lanes and a separate remote dispatcher; `NodeDiagnostics.visionMediaEgress` reports router pressure and `visionMediaIngress` reports worker retention and outcomes, so uploads cannot delay control receive, consume generated-output capacity, or fail invisibly. Same-version fleet required.
+- `VISION_MEDIA`: VLM and image-edit input, off the event log/master/State. The API waits for authoritative `TaskCreated` placement, then sends an `opened -> chunk* -> completed` binary-framed stream directly to every selected MLX rank, or only to the `LlamaRpcInstance` driver because RPC donors never execute inference. Workers apply stream/frame/byte/age bounds and expose input to planning only after exact sequence, metadata, task-owner, and SHA-256 verification plus successful acknowledgement admission; timed-out acknowledgement sends retry while the task remains gated. Each target returns `accepted`, and a bounded missing-ack deadline fails the source request. Vision ingress has separate bounded network-receive lanes and a separate remote dispatcher; `NodeDiagnostics.visionMediaEgress` reports router pressure and `visionMediaIngress` reports worker retention and outcomes, so uploads cannot delay control receive, consume generated-output capacity, or fail invisibly. Same-version fleet required.
 - `ELECTION_MESSAGES`: Election protocol messages
 - `AUTHORITY_MESSAGES`: Stable-installation-addressed, Ed25519-signed public authority consensus messages (prepare/promise/accept/vote/commit/catch-up). It has dedicated bounded Python egress, but currently uses the default libp2p gossipsub behavior; secret payloads never enter it.
 - `CONNECTION_MESSAGES`: libp2p connection updates

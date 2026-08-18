@@ -169,11 +169,23 @@ def estimate_shard_footprint(
     weights_share = model_card.storage_size * shard_fraction
     full_kv = estimate_kv_cache_bytes(model_card, model_card.n_layers, context_budget)
     kv_share = full_kv * shard_fraction
-    return (
+    footprint = (
         weights_share * memory_overhead_factor(model_card)
         + kv_share
         + MEMORY_OVERHEAD_FLOOR
     )
+    # A single-node GGUF vision runner owns the complete projector in addition
+    # to the base weights. RPC donors bypass this shard guard; the RPC driver
+    # reservation is handled explicitly by placement because llama.cpp chooses
+    # the pooled weight split itself.
+    if (
+        shard_fraction >= 1.0
+        and model_card.gguf_file is not None
+        and model_card.vision is not None
+        and model_card.vision.projector_size is not None
+    ):
+        footprint += Memory.from_bytes(model_card.vision.projector_size)
+    return footprint
 
 
 def gpu_working_set_ceiling(ram_total: Memory) -> Memory:
@@ -298,6 +310,7 @@ def instance_context_token_limit(
     node_ram_totals: Mapping[NodeId, Memory],
     node_vram: Mapping[NodeId, Memory] | None = None,
     unified_memory_gpu_nodes: AbstractSet[NodeId] | None = None,
+    fixed_memory_by_node: Mapping[NodeId, Memory] | None = None,
 ) -> int | None:
     """Deterministic context-token ceiling for one placed instance.
 
@@ -330,6 +343,7 @@ def instance_context_token_limit(
     """
     node_vram = node_vram or {}
     unified_memory_gpu_nodes = unified_memory_gpu_nodes or frozenset()
+    fixed_memory_by_node = fixed_memory_by_node or {}
     model_card: ModelCard | None = None
     memory_limit: int | None = None
     for shard in shard_assignments.runner_to_shard.values():
@@ -362,6 +376,7 @@ def instance_context_token_limit(
                 working_set
                 - model_card.storage_size * fraction * memory_overhead_factor(model_card)
                 - MEMORY_OVERHEAD_FLOOR
+                - fixed_memory_by_node.get(node_id, Memory())
             )
             node_tokens = max(
                 0, int(kv_budget.in_bytes / (whole_model_token_bytes * fraction))

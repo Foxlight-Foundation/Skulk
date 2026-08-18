@@ -76,6 +76,32 @@ def test_mmproj_projector_is_kept_for_vision_models() -> None:
     assert kept == {"config.json", "model-Q4_K_M.gguf", "mmproj-model-f16.gguf"}
 
 
+def test_pinned_projector_excludes_other_projector_variants() -> None:
+    """New signed cards fetch only the exact projector selected by the registry."""
+
+    files = [
+        _entry("config.json"),
+        _entry("model-Q4_K_M.gguf", 800),
+        _entry("projectors/mmproj-model-F16.gguf", 600),
+        _entry("projectors/mmproj-model-Q4_K_M.gguf", 200),
+    ]
+
+    kept = {
+        entry.path
+        for entry in select_store_gguf_download_files(
+            files,
+            "model-Q4_K_M.gguf",
+            pinned_projector="projectors/mmproj-model-F16.gguf",
+        )
+    }
+
+    assert kept == {
+        "config.json",
+        "model-Q4_K_M.gguf",
+        "projectors/mmproj-model-F16.gguf",
+    }
+
+
 def test_has_gguf_projector_detects_mmproj() -> None:
     # The store uses this to (a) detect a vision GGUF from its full repo listing
     # and (b) verify the projector actually landed before registering (#346).
@@ -229,6 +255,33 @@ def test_extra_pinned_same_repo_draft_is_cofetched() -> None:
         "config.json",
         "gemma-4-31B-it-IQ4_XS.gguf",
         "mtp-gemma-4-31B-it.gguf",
+    }
+
+
+def test_extra_pinned_draft_preserves_exact_projector_selection() -> None:
+    files = [
+        _entry("config.json"),
+        _entry("base-Q4_K_M.gguf", 800),
+        _entry("draft-Q4_K_M.gguf", 200),
+        _entry("mmproj-F16.gguf", 100),
+        _entry("mmproj-Q4_K_M.gguf", 40),
+    ]
+
+    kept = {
+        entry.path
+        for entry in select_store_gguf_download_files(
+            files,
+            "base-Q4_K_M.gguf",
+            ["draft-Q4_K_M.gguf"],
+            "mmproj-F16.gguf",
+        )
+    }
+
+    assert kept == {
+        "config.json",
+        "base-Q4_K_M.gguf",
+        "draft-Q4_K_M.gguf",
+        "mmproj-F16.gguf",
     }
 
 

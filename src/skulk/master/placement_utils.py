@@ -243,6 +243,7 @@ def _per_node_required_memory(
     node_vram: Mapping[NodeId, Memory] | None = None,
     *,
     exact_pipeline_layers: bool = True,
+    fixed_memory_by_node: Mapping[NodeId, Memory] | None = None,
 ) -> dict[NodeId, Memory]:
     """Estimate the weight bytes each node in the cycle must hold.
 
@@ -268,12 +269,17 @@ def _per_node_required_memory(
     the heterogeneous clusters this check is meant to support.
     """
     node_vram = node_vram or {}
+    fixed_memory_by_node = fixed_memory_by_node or {}
     required_memory = model_card.storage_size
     if sharding == Sharding.Tensor:
         even_share = required_memory / len(cycle.node_ids)
         return {node_id: even_share for node_id in cycle.node_ids}
     node_usable = {
-        node_id: _node_usable_memory(node_memory[node_id], node_vram.get(node_id))
+        node_id: max(
+            Memory(),
+            _node_usable_memory(node_memory[node_id], node_vram.get(node_id))
+            - fixed_memory_by_node.get(node_id, Memory()),
+        )
         for node_id in cycle.node_ids
     }
     total_usable = sum(node_usable.values(), start=Memory())
@@ -363,6 +369,7 @@ def filter_cycles_by_memory(
     node_vram: Mapping[NodeId, Memory] | None = None,
     *,
     exact_pipeline_layers: bool = True,
+    fixed_memory_by_node: Mapping[NodeId, Memory] | None = None,
 ) -> tuple[list[Cycle], CycleMemoryDiagnostics]:
     """Keep cycles whose every node can hold its shard with runtime headroom.
 
@@ -393,6 +400,7 @@ def filter_cycles_by_memory(
     Returns the surviving cycles plus diagnostics describing every rejection.
     """
     node_vram = node_vram or {}
+    fixed_memory_by_node = fixed_memory_by_node or {}
     diagnostics = CycleMemoryDiagnostics()
     filtered_cycles: list[Cycle] = []
     required_memory = model_card.storage_size
@@ -456,6 +464,7 @@ def filter_cycles_by_memory(
             sharding,
             node_vram,
             exact_pipeline_layers=exact_pipeline_layers,
+            fixed_memory_by_node=fixed_memory_by_node,
         )
         # GGUF runs on the lighter llama.cpp C++ runtime, so its weight overhead
         # is smaller than MLX's; use the engine-aware factor for the fit decision.
@@ -465,6 +474,7 @@ def filter_cycles_by_memory(
             kv_share = share * kv_ratio
             required_with_overhead = (
                 share * overhead_factor + kv_share + PLACEMENT_MEMORY_OVERHEAD_FLOOR
+                + fixed_memory_by_node.get(node_id, Memory())
             )
             node_vram_usable = node_vram.get(node_id)
             available = _node_usable_memory(node_memory[node_id], node_vram_usable)
@@ -477,7 +487,7 @@ def filter_cycles_by_memory(
                 overloaded.append(
                     f"node {node_id} needs ~{required_with_overhead.in_gb:.1f}GB "
                     f"({share.in_gb:.1f}GB weights + {kv_share.in_gb:.1f}GB "
-                    f"KV@{context_budget}tok + runtime headroom) but can use "
+                    f"KV@{context_budget}tok + runtime/fixed headroom) but can use "
                     f"{available.in_gb:.1f}GB ({pool})"
                 )
         if overloaded:

@@ -491,6 +491,12 @@ def _staged_vision_projector_missing(shard: ShardMetadata, directory: Path) -> b
     card = shard.model_card
     if card.vision is None or not card.gguf_file:
         return False
+    if card.vision.projector_file is not None:
+        projector = directory.joinpath(*Path(card.vision.projector_file).parts)
+        return (
+            not projector.is_file()
+            or projector.stat().st_size != card.vision.projector_size
+        )
     from skulk.store.model_store import has_gguf_projector
 
     return not has_gguf_projector(

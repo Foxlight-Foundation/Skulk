@@ -7,6 +7,7 @@ import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from collections.abc import Set as AbstractSet
 from enum import Enum
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Annotated, Any, Final, Literal, NamedTuple, cast
 
 import aiofiles
@@ -915,6 +916,50 @@ class VisionCardConfig(CamelCaseModel):
     """Begin-of-image token id, for families that bracket image spans."""
     eoi_token_id: int | None = None
     """End-of-image token id, for families that bracket image spans."""
+    projector_file: str | None = None
+    """Exact repository-relative GGUF projector selected for served vision.
+
+    The projector is pinned by the owning card's immutable ``source_revision``.
+    Legacy GGUF vision cards may omit this field and continue to use the
+    in-process llama.cpp compatibility path.
+    """
+    projector_size: PositiveInt | None = None
+    """Exact byte size of ``projector_file`` at ``source_revision``."""
+
+    @field_validator("projector_file")
+    @classmethod
+    def validate_projector_file(cls, value: str | None) -> str | None:
+        """Require a canonical repository-relative path for a pinned projector."""
+
+        if value is None:
+            return None
+        path = PurePosixPath(value)
+        if (
+            path.is_absolute()
+            or value != path.as_posix()
+            or "\\" in value
+            or any(part in {"", ".", ".."} for part in path.parts)
+        ):
+            raise ValueError(
+                "vision.projector_file must be a canonical relative POSIX path"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def validate_projector_pin(self) -> "VisionCardConfig":
+        """Require the projector path and immutable byte size as one contract."""
+
+        if (self.projector_file is None) != (self.projector_size is None):
+            raise ValueError(
+                "vision.projector_file and vision.projector_size must be set together"
+            )
+        return self
+
+    @property
+    def has_pinned_projector(self) -> bool:
+        """Return whether this vision contract pins one exact projector artifact."""
+
+        return self.projector_file is not None and self.projector_size is not None
 
     @property
     def required_image_token_id(self) -> int:
@@ -1669,6 +1714,18 @@ class ModelCard(CamelCaseModel):
             )
         return self
 
+    @model_validator(mode="after")
+    def _require_projector_artifact_pin(self) -> "ModelCard":
+        """Bind a served projector to an exact GGUF and immutable revision."""
+
+        if self.vision is None or not self.vision.has_pinned_projector:
+            return self
+        if self.gguf_file is None:
+            raise ValueError("a pinned vision projector requires gguf_file")
+        if self.source_revision is None:
+            raise ValueError("a pinned vision projector requires source_revision")
+        return self
+
     registry_card_id: Annotated[str, Field(pattern=r"^card_[a-z2-7]{52}$")] | None = (
         None
     )
@@ -2421,7 +2478,10 @@ def select_requested_gguf(
 _GGUF_PROJECTOR_PATTERN: Final = "*mmproj*.gguf"
 
 
-def gguf_allow_patterns(gguf_file: str) -> list[str]:
+def gguf_allow_patterns(
+    gguf_file: str,
+    projector_file: str | None = None,
+) -> list[str]:
     """Download allow-patterns for a card's selected GGUF (its shard group +
     any multimodal projector).
 
@@ -2432,10 +2492,11 @@ def gguf_allow_patterns(gguf_file: str) -> list[str]:
     vision GGUF model fetches its projector too (#346); it matches nothing on a
     text-only repo. Caller adds non-weight files (e.g. ``config.json``).
     """
+    projector_pattern = projector_file or _GGUF_PROJECTOR_PATTERN
     base = _gguf_shard_base(gguf_file)
     if base is None:
-        return [gguf_file, _GGUF_PROJECTOR_PATTERN]
-    return [f"{base}-*-of-*.gguf", _GGUF_PROJECTOR_PATTERN]
+        return [gguf_file, projector_pattern]
+    return [f"{base}-*-of-*.gguf", projector_pattern]
 
 
 def gguf_shard_group_size(selected: str, gguf_files: "list[tuple[str, int]]") -> Memory:

@@ -8,6 +8,14 @@ draft missing so a re-download recovers it before staging.
 
 from pathlib import Path
 
+from skulk.shared.models.model_cards import (
+    ModelCard,
+    ModelId,
+    ModelTask,
+    VisionCardConfig,
+)
+from skulk.shared.types.memory import Memory
+from skulk.store.installed_cards import build_installed_card_record
 from skulk.store.model_store import ModelStore
 
 
@@ -17,6 +25,40 @@ def _register(store: ModelStore, model_id: str, files: list[str]) -> None:
     for name in files:
         (model_dir / name).write_text("x")
     store.register_model(model_id, model_dir, files, 1, repo_has_projector=False)
+
+
+def _register_pinned_projector(store: ModelStore) -> tuple[Path, ModelCard]:
+    model_id = "org/vision"
+    revision = "a" * 40
+    model_dir = store.store_path / model_id.replace("/", "--")
+    model_dir.mkdir(parents=True, exist_ok=True)
+    (model_dir / "base-Q4_K_M.gguf").write_bytes(b"base")
+    (model_dir / "mmproj-F16.gguf").write_bytes(b"x")
+    card = ModelCard(
+        model_id=ModelId(model_id),
+        source_revision=revision,
+        storage_size=Memory.from_bytes(4),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        gguf_file="base-Q4_K_M.gguf",
+        vision=VisionCardConfig(
+            projector_file="mmproj-F16.gguf",
+            projector_size=1,
+        ),
+    )
+    installed_card = build_installed_card_record(model_dir, card)
+    store.register_model(
+        model_id,
+        model_dir,
+        ["base-Q4_K_M.gguf", "mmproj-F16.gguf"],
+        5,
+        repo_has_projector=True,
+        source_revision=revision,
+        installed_card=installed_card,
+    )
+    return model_dir, card
 
 
 def test_entry_missing_requested_companion_is_flagged(tmp_path: Path) -> None:
@@ -41,6 +83,37 @@ def test_absent_model_is_not_flagged(tmp_path: Path) -> None:
     # Not in store: the normal download path handles it, not the recovery guard.
     store = ModelStore(tmp_path)
     assert store.entry_missing_files("org/missing", ["draft.gguf"]) is False
+
+
+def test_pinned_projector_requires_valid_installed_manifest(tmp_path: Path) -> None:
+    store = ModelStore(tmp_path)
+    model_dir, _card = _register_pinned_projector(store)
+
+    assert (
+        store.entry_file_requires_recovery("org/vision", "mmproj-F16.gguf", 1)
+        is False
+    )
+    (model_dir / "mmproj-F16.gguf").write_bytes(b"y")
+    assert (
+        store.entry_file_requires_recovery("org/vision", "mmproj-F16.gguf", 1)
+        is True
+    )
+
+
+def test_invalid_projector_is_removed_before_recovery_download(tmp_path: Path) -> None:
+    store = ModelStore(tmp_path)
+    model_dir, _card = _register_pinned_projector(store)
+    projector = model_dir / "mmproj-F16.gguf"
+    projector.write_bytes(b"y")
+
+    store._remove_invalid_registered_file_for_recovery(  # pyright: ignore[reportPrivateUsage]
+        "org/vision",
+        "mmproj-F16.gguf",
+        1,
+        model_dir,
+    )
+
+    assert not projector.exists()
 
 
 async def test_cached_complete_entry_redownloads_when_companion_missing(

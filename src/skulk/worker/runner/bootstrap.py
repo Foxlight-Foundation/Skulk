@@ -448,6 +448,10 @@ def _resolve_text_engine(bound_instance: BoundInstance) -> str | None:
             compatible_backends,
             card_serves_vision=shard.model_card.vision is not None,
             card_serves_speech=card_serves_speech(shard.model_card),
+            card_has_pinned_projector=(
+                shard.model_card.vision is not None
+                and shard.model_card.vision.has_pinned_projector
+            ),
         ),
         placement.backend_preference,
         probe_node_backends(),

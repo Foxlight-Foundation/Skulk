@@ -90,6 +90,7 @@ from skulk.store.installed_cards import (
     manifest_sha256,
     read_installed_card,
     verify_installed_card,
+    verify_installed_file,
     write_installed_card,
 )
 from skulk.store.staging_eviction import MINIMUM_STAGING_FREE_DISK_BYTES
@@ -155,6 +156,7 @@ def select_store_gguf_download_files(
     file_list: list[FileListEntry],
     pinned_gguf: str | None = None,
     extra_pinned_gguf: list[str] | None = None,
+    pinned_projector: str | None = None,
 ) -> list[FileListEntry]:
     """Filter a repo's file list to what the store host should download (#339).
 
@@ -222,7 +224,10 @@ def select_store_gguf_download_files(
     # on, so a GGUF in a subdirectory aligns with the direct path. Every other
     # file (other quants, original/* full-precision weights, metal/*, tokenizer,
     # README) is dropped, just as the direct path drops them.
-    keep_patterns = [*gguf_allow_patterns(selected), "config.json"]
+    keep_patterns = [
+        *gguf_allow_patterns(selected, pinned_projector),
+        "config.json",
+    ]
     # Co-fetch any same-repo companion GGUF the requester pinned (e.g. a
     # served-engine draft bundled with the base): keep each one's own shard
     # group so a single store download lands the base AND the companion. A pin
@@ -231,7 +236,9 @@ def select_store_gguf_download_files(
     # absent draft loudly at launch via _draft_model_args).
     for extra in extra_pinned_gguf or []:
         if extra in pinned_paths:
-            keep_patterns.extend(gguf_allow_patterns(extra))
+            # Same-repo draft expansion must preserve an exact projector pin;
+            # otherwise the legacy projector glob retains every variant.
+            keep_patterns.extend(gguf_allow_patterns(extra, pinned_projector))
         elif extra:
             logger.warning(
                 f"ModelStore: extra pinned GGUF {extra!r} not found in repo; "
@@ -245,7 +252,7 @@ def select_store_gguf_download_files(
         # case-insensitive, so the selection MUST be too, or an uppercase
         # ``MMPROJ-*.gguf`` would be detected-but-never-selected and the
         # registration guard would fail every retry.
-        if has_gguf_projector([entry.path]):
+        if pinned_projector is None and has_gguf_projector([entry.path]):
             return True
         return any(fnmatch(entry.path, pattern) for pattern in keep_patterns)
 
@@ -1071,6 +1078,57 @@ class ModelStore:
         registered = set(entry.files)
         return any(name not in registered for name in required_files)
 
+    def entry_file_requires_recovery(
+        self,
+        model_id: str,
+        required_file: str,
+        expected_size: int,
+    ) -> bool:
+        """Return whether one pinned file is absent or fails its installed manifest.
+
+        An absent model returns ``False`` because the normal download path owns
+        that case. A registered file without a durable installed-card manifest
+        is stale: its name alone cannot prove immutable artifact identity.
+        """
+
+        entry = self._read_registry().get(model_id)
+        if entry is None:
+            return False
+        if required_file not in entry.files or entry.installed_card is None:
+            return True
+        model_path = _resolve_store_child_path(self._store_path, entry.store_path)
+        return model_path is None or not verify_installed_file(
+            model_path,
+            entry.installed_card,
+            required_file,
+            expected_size=expected_size,
+        )
+
+    def _remove_invalid_registered_file_for_recovery(
+        self,
+        model_id: str,
+        required_file: str,
+        expected_size: int,
+        target_dir: Path,
+    ) -> None:
+        """Remove one invalid canonical file so the resumable downloader replaces it."""
+
+        entry = self.get_entry(model_id)
+        if entry is None or not self.entry_file_requires_recovery(
+            model_id, required_file, expected_size
+        ):
+            return
+        registered_path = _resolve_store_child_path(self._store_path, entry.store_path)
+        if registered_path is None or registered_path.resolve() != target_dir.resolve():
+            return
+        candidate = (registered_path / required_file).resolve()
+        if candidate.is_relative_to(registered_path.resolve()) and candidate.is_file():
+            candidate.unlink()
+            logger.warning(
+                f"ModelStore: removed invalid pinned file {required_file!r} from "
+                f"{model_id} before immutable recovery download"
+            )
+
     @staticmethod
     def _same_requested_card(
         existing: ModelCard | None,
@@ -1168,11 +1226,29 @@ class ModelStore:
         and owning identities instead of synthesizing a bare model card.
         """
         requested_repository = source_repository or model_id
+        pinned_projector = (
+            model_card.vision.projector_file
+            if model_card is not None and model_card.vision is not None
+            else None
+        )
+        pinned_projector_size = (
+            model_card.vision.projector_size
+            if model_card is not None and model_card.vision is not None
+            else None
+        )
         requested_companions = tuple(sorted(extra_pinned_gguf or []))
         # Checked outside the lock: it may do a (cached) repo file-list fetch, and
         # holding the download lock across network I/O would serialize unrelated
         # requests.
-        missing_projector = await self.vision_entry_missing_projector(model_id)
+        missing_projector = (
+            self.entry_file_requires_recovery(
+                model_id,
+                pinned_projector,
+                pinned_projector_size,
+            )
+            if pinned_projector is not None and pinned_projector_size is not None
+            else await self.vision_entry_missing_projector(model_id)
+        )
         missing_pinned_gguf = self.entry_missing_files(
             model_id,
             [pinned_gguf] if pinned_gguf is not None else [],
@@ -1636,7 +1712,14 @@ class ModelStore:
             # glob is retained by ``gguf_allow_patterns``, so a vision GGUF keeps
             # its ``*mmproj*.gguf``.
             selected_files = select_store_gguf_download_files(
-                repo_file_list, pinned_gguf, extra_pinned_gguf
+                repo_file_list,
+                pinned_gguf,
+                extra_pinned_gguf,
+                (
+                    model_card.vision.projector_file
+                    if model_card is not None and model_card.vision is not None
+                    else None
+                ),
             )
             if len(selected_files) != len(repo_file_list):
                 logger.info(
@@ -1652,6 +1735,24 @@ class ModelStore:
             # never evicted automatically; an unsafe transfer fails closed.
             await self._download_transfer_lock.acquire()
             transfer_lock_acquired = True
+            expected_projector = (
+                model_card.vision.projector_file
+                if model_card is not None and model_card.vision is not None
+                else None
+            )
+            expected_projector_size = (
+                model_card.vision.projector_size
+                if model_card is not None and model_card.vision is not None
+                else None
+            )
+            if expected_projector is not None and expected_projector_size is not None:
+                await asyncio.to_thread(
+                    self._remove_invalid_registered_file_for_recovery,
+                    model_id,
+                    expected_projector,
+                    expected_projector_size,
+                    target_dir,
+                )
             # Keep the public status pending while this request is queued
             # behind another canonical transfer. Clients deliberately exclude
             # pending time from their no-progress stall budget; switching only
@@ -1716,7 +1817,28 @@ class ModelStore:
             # the failure is a loud, fixable download error here (re-running the
             # download re-fetches the projector, which the selective allow-list
             # already retains) instead of a confusing crash on a remote node.
-            if repo_ships_projector and not has_gguf_projector(files):
+            if expected_projector is not None and expected_projector not in files:
+                raise RuntimeError(
+                    f"{model_id}: pinned projector {expected_projector!r} did not "
+                    "land in the store download; refusing to register an "
+                    "incomplete served-vision artifact."
+                )
+            if (
+                expected_projector is not None
+                and expected_projector_size is not None
+                and (target_dir / expected_projector).stat().st_size
+                != expected_projector_size
+            ):
+                raise RuntimeError(
+                    f"{model_id}: pinned projector {expected_projector!r} has "
+                    "the wrong immutable byte size; refusing to register a "
+                    "stale served-vision artifact."
+                )
+            if (
+                expected_projector is None
+                and repo_ships_projector
+                and not has_gguf_projector(files)
+            ):
                 raise RuntimeError(
                     f"{model_id} is a vision GGUF whose repo ships an mmproj "
                     "projector, but none landed in the store download; refusing to "

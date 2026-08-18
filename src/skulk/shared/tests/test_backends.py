@@ -159,6 +159,11 @@ def test_platform_compatible_backends_gates_vision_off_served() -> None:
     assert (
         platform_compatible_backends(declared, card_serves_vision=False) == declared
     )
+    assert platform_compatible_backends(
+        declared,
+        card_serves_vision=True,
+        card_has_pinned_projector=True,
+    ) == declared
 
 
 def test_vision_card_preferring_llama_server_still_resolves_to_llama_cpp() -> None:

@@ -1394,9 +1394,20 @@ async def resolve_allow_patterns(shard: ShardMetadata) -> list[str]:
     if gguf_file:
         from skulk.shared.models.model_cards import gguf_allow_patterns
 
-        patterns = [*gguf_allow_patterns(gguf_file), "config.json"]
+        projector_file = (
+            shard.model_card.vision.projector_file
+            if shard.model_card.vision is not None
+            else None
+        )
+        patterns = [
+            *gguf_allow_patterns(gguf_file, projector_file),
+            "config.json",
+        ]
         for draft_file in same_repo_served_draft_files(shard.model_card):
-            patterns.extend(gguf_allow_patterns(draft_file))
+            # A draft contributes only its own shard group. Passing the base
+            # card's projector pin prevents the legacy projector glob from
+            # widening an otherwise exact served-vision download.
+            patterns.extend(gguf_allow_patterns(draft_file, projector_file))
         return list(dict.fromkeys(patterns))
     # Non-GGUF (safetensors/MLX): 'Smart' downloads stay disabled because
     #  (i) we don't handle all kinds of files; (ii) no sticky sessions;

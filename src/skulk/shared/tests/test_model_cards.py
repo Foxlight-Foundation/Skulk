@@ -10,12 +10,16 @@ from skulk.shared.constants import RESOURCES_DIR
 from skulk.shared.models import model_cards as model_cards_module
 from skulk.shared.models.model_cards import (
     ModelCard,
+    ModelTask,
     PlacementCardConfig,
     RuntimeCapabilityCardConfig,
+    VisionCardConfig,
     get_bundled_card,
+    gguf_allow_patterns,
     preserve_generated_card_constraints,
 )
 from skulk.shared.types.common import ModelId
+from skulk.shared.types.memory import Memory
 
 _MINIMAL_CARD = """\
 model_id = "testorg/override-model"
@@ -28,6 +32,44 @@ quantization = "{quantization}"
 [storage_size]
 in_bytes = 1024
 """
+
+
+def test_vision_projector_pin_is_atomic_and_path_safe() -> None:
+    """A served projector cannot be partially pinned or escape its artifact."""
+
+    with pytest.raises(ValueError, match="must be set together"):
+        VisionCardConfig(projector_file="mmproj-f16.gguf")
+    with pytest.raises(ValueError, match="canonical relative POSIX path"):
+        VisionCardConfig(projector_file="../mmproj.gguf", projector_size=1024)
+
+    vision = VisionCardConfig(
+        projector_file="projectors/mmproj-f16.gguf",
+        projector_size=1024,
+    )
+    assert vision.has_pinned_projector is True
+    assert gguf_allow_patterns("model-Q4_K_M.gguf", vision.projector_file) == [
+        "model-Q4_K_M.gguf",
+        "projectors/mmproj-f16.gguf",
+    ]
+
+
+def test_model_card_binds_projector_to_immutable_gguf_revision() -> None:
+    """A projector pin is meaningful only beside exact base bytes."""
+
+    with pytest.raises(ValueError, match="requires source_revision"):
+        ModelCard(
+            model_id=ModelId("org/vision"),
+            storage_size=Memory.from_bytes(1024),
+            n_layers=1,
+            hidden_size=1,
+            supports_tensor=False,
+            tasks=[ModelTask.TextGeneration],
+            gguf_file="model-Q4_K_M.gguf",
+            vision=VisionCardConfig(
+                projector_file="mmproj-F16.gguf",
+                projector_size=512,
+            ),
+        )
 
 
 def test_pipeline_split_limit_must_be_inside_model() -> None:
