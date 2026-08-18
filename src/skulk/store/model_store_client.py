@@ -535,6 +535,19 @@ def _remove_invalid_staged_projector(
         )
 
 
+async def _staged_vision_projector_missing_async(
+    shard: ShardMetadata,
+    directory: Path,
+) -> bool:
+    """Authenticate a staged projector without hashing it on the event loop."""
+
+    return await asyncio.to_thread(
+        _staged_vision_projector_missing,
+        shard,
+        directory,
+    )
+
+
 def _staged_pinned_gguf_missing(shard: ShardMetadata, directory: Path) -> bool:
     """Return whether a staged directory lacks the card-selected GGUF group.
 
@@ -2088,7 +2101,10 @@ class ModelStoreDownloader(ShardDownloader):
                     direct_path is not None
                     and _staged_directory_looks_complete(direct_path)
                     and not _staged_pinned_gguf_missing(shard, direct_path)
-                    and not _staged_vision_projector_missing(shard, direct_path)
+                    and not await _staged_vision_projector_missing_async(
+                        shard,
+                        direct_path,
+                    )
                     and not _staged_same_repo_draft_missing(shard, direct_path)
                 ):
                     if not _staged_generation_matches(
@@ -2125,7 +2141,7 @@ class ModelStoreDownloader(ShardDownloader):
                             replacement_path is None
                             or not _staged_directory_looks_complete(replacement_path)
                             or _staged_pinned_gguf_missing(shard, replacement_path)
-                            or _staged_vision_projector_missing(
+                            or await _staged_vision_projector_missing_async(
                                 shard,
                                 replacement_path,
                             )
@@ -2175,7 +2191,7 @@ class ModelStoreDownloader(ShardDownloader):
             dest_path.exists()
             and _staged_directory_looks_complete(dest_path)
             and not _staged_pinned_gguf_missing(shard, dest_path)
-            and not _staged_vision_projector_missing(shard, dest_path)
+            and not await _staged_vision_projector_missing_async(shard, dest_path)
             and not _staged_same_repo_draft_missing(shard, dest_path)
             and _staged_generation_matches(
                 dest_path,

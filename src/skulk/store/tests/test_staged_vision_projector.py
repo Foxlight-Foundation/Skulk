@@ -8,7 +8,10 @@ projector, so it must NOT be flagged (doing so would disable the staged-cache
 fast path that keeps inference working when the store is unreachable).
 """
 
+from collections.abc import Callable
 from pathlib import Path
+
+import pytest
 
 from skulk.shared.models.model_cards import (
     ModelCard,
@@ -25,6 +28,7 @@ from skulk.store.installed_cards import (
 from skulk.store.model_store_client import (
     _remove_invalid_staged_projector,
     _staged_vision_projector_missing,
+    _staged_vision_projector_missing_async,
 )
 
 
@@ -134,6 +138,40 @@ def test_same_size_corrupt_projector_is_removed_for_recovery(tmp_path: Path) -> 
     _remove_invalid_staged_projector(shard, staged)
 
     assert not (staged / "mmproj-F16.gguf").exists()
+
+
+async def test_async_projector_check_hashes_off_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The worker's cache fast path delegates projector hashing to a thread."""
+
+    staged = _write(
+        tmp_path,
+        "model-Q4_K_M.gguf",
+        "mmproj-F16.gguf",
+        "config.json",
+    )
+    shard = _shard(
+        vision=True,
+        gguf_file="model-Q4_K_M.gguf",
+        projector_file="mmproj-F16.gguf",
+        projector_size=1,
+    )
+    write_installed_card(
+        staged,
+        build_installed_card_record(staged, shard.model_card),
+    )
+    delegated: list[Callable[..., bool]] = []
+
+    async def _to_thread(function: Callable[..., bool], *args: object) -> bool:
+        delegated.append(function)
+        return function(*args)
+
+    monkeypatch.setattr("skulk.store.model_store_client.asyncio.to_thread", _to_thread)
+
+    assert await _staged_vision_projector_missing_async(shard, staged) is False
+    assert delegated == [_staged_vision_projector_missing]
 
 
 def test_mlx_vision_without_projector_is_not_flagged(tmp_path: Path) -> None:
