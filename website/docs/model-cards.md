@@ -166,6 +166,18 @@ Fields include:
   - optional begin-of-image token id
 - `eoi_token_id`
   - optional end-of-image token id
+- `projector_file`
+  - exact repository-relative GGUF multimodal projector selected for served
+    vision; when present, `gguf_file` and a full immutable `source_revision`
+    are also required
+- `projector_size`
+  - exact positive byte size of `projector_file` at `source_revision`; it must
+    appear together with `projector_file`
+
+Legacy GGUF vision cards without an exact projector pin remain loadable through
+the in-process `llama_cpp` path. `llama_server` becomes eligible only when both
+projector fields are present, so the served runner never guesses among upstream
+projector variants.
 
 ## Placement Section
 

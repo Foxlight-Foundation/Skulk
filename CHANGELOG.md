@@ -9,6 +9,16 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- Served GGUF vision now uses one truthful model card for the base quant,
+  immutable projector, vision capability, and native MTP behavior. New cards
+  pin one exact projector path and size; downloads retain only that projector,
+  the runner verifies it against the installed manifest before launching
+  `llama-server --mmproj`, and CPU placement disables projector offload. Vision
+  plus MTP degrades to serial serving until concurrent multimodal qualification.
+  Homogeneous CUDA, ROCm, and Vulkan RPC placements reserve the projector on
+  their selected driver and route image media only there; legacy cards continue
+  through the in-process llama.cpp path.
+
 - Placement now keeps heterogeneous engine choice planner-owned: model cards may
   declare an open set of compatible backends and an ordered fallback preference,
   and the planner automatically falls through when an earlier engine or host is

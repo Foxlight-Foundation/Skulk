@@ -469,6 +469,7 @@ from skulk.shared.types.worker.instances import (
     Instance,
     InstanceId,
     InstanceMeta,
+    LlamaRpcInstance,
     instance_meta_of,
 )
 from skulk.shared.types.worker.runners import RunnerId, RunnerReady, RunnerRunning
@@ -4642,7 +4643,14 @@ class API:
                 "The selected model instance disappeared before image upload",
             )
             return
-        targets = tuple(sorted(instance.shard_assignments.node_to_runner, key=str))
+        # llama.cpp RPC donors only contribute memory; the stamped driver is
+        # the sole process that executes inference and owns the projector.
+        # MLX distributed vision still requires identical media on every rank.
+        targets = (
+            (instance.driver_node,)
+            if isinstance(instance, LlamaRpcInstance)
+            else tuple(sorted(instance.shard_assignments.node_to_runner, key=str))
+        )
         if not targets:
             self._tg.start_soon(
                 self._fail_vision_media_command,

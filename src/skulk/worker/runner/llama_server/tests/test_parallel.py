@@ -4,6 +4,7 @@
 import threading
 import time
 from collections import deque
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -13,10 +14,39 @@ from skulk.shared.types.tasks import TaskId
 from skulk.worker.runner.llama_server.runner import (
     _LLAMA_SERVER_MAX_OUTPUT_TOKENS,
     Runner,
+    _effective_server_parallel,
     _llama_server_parallel,
     _request_context_reservation,
     _slot_server_args,
 )
+
+
+def test_vision_with_mtp_degrades_to_serial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the unqualified vision-plus-MTP combination loses concurrency."""
+
+    monkeypatch.setenv("SKULK_LLAMA_SERVER_PARALLEL", "8")
+    monkeypatch.delenv("SKULK_LLAMA_SERVER_FORCE_NO_SPEC", raising=False)
+    vision_mtp = SimpleNamespace(
+        vision=object(),
+        runtime=SimpleNamespace(served_spec_type="draft_mtp"),
+    )
+    vision_plain = SimpleNamespace(
+        vision=object(),
+        runtime=SimpleNamespace(served_spec_type="none"),
+    )
+    text_mtp = SimpleNamespace(
+        vision=None,
+        runtime=SimpleNamespace(served_spec_type="draft_mtp"),
+    )
+
+    assert _effective_server_parallel(vision_mtp) == 1
+    assert _effective_server_parallel(vision_plain) == 8
+    assert _effective_server_parallel(text_mtp) == 8
+
+    monkeypatch.setenv("SKULK_LLAMA_SERVER_FORCE_NO_SPEC", "1")
+    assert _effective_server_parallel(vision_mtp) == 8
 
 
 def test_parallel_defaults_to_sixteen(monkeypatch: pytest.MonkeyPatch) -> None:

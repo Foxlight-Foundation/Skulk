@@ -22,7 +22,11 @@ from skulk.store.model_store_client import _staged_vision_projector_missing
 
 
 def _shard(
-    *, vision: bool, gguf_file: str | None
+    *,
+    vision: bool,
+    gguf_file: str | None,
+    projector_file: str | None = None,
+    projector_size: int | None = None,
 ) -> PipelineShardMetadata:
     card = ModelCard(
         model_id=ModelId("org/model"),
@@ -32,7 +36,15 @@ def _shard(
         supports_tensor=False,
         tasks=[ModelTask.TextGeneration],
         gguf_file=gguf_file,
-        vision=VisionCardConfig() if vision else None,
+        source_revision="a" * 40 if projector_file is not None else None,
+        vision=(
+            VisionCardConfig(
+                projector_file=projector_file,
+                projector_size=projector_size,
+            )
+            if vision
+            else None
+        ),
     )
     return PipelineShardMetadata(
         model_card=card,
@@ -60,6 +72,29 @@ def test_gguf_vision_without_projector_is_flagged(tmp_path: Path) -> None:
 def test_gguf_vision_with_projector_is_complete(tmp_path: Path) -> None:
     staged = _write(tmp_path, "model-Q4_K_M.gguf", "mmproj-F16.gguf", "config.json")
     shard = _shard(vision=True, gguf_file="model-Q4_K_M.gguf")
+    assert _staged_vision_projector_missing(shard, staged) is False
+
+
+def test_pinned_projector_requires_exact_path_and_size(tmp_path: Path) -> None:
+    """Another projector variant cannot satisfy an immutable card selection."""
+
+    staged = _write(
+        tmp_path,
+        "model-Q4_K_M.gguf",
+        "mmproj-Q4_K_M.gguf",
+        "config.json",
+    )
+    shard = _shard(
+        vision=True,
+        gguf_file="model-Q4_K_M.gguf",
+        projector_file="mmproj-F16.gguf",
+        projector_size=1,
+    )
+
+    assert _staged_vision_projector_missing(shard, staged) is True
+    (staged / "mmproj-F16.gguf").write_bytes(b"wrong")
+    assert _staged_vision_projector_missing(shard, staged) is True
+    (staged / "mmproj-F16.gguf").write_bytes(b"x")
     assert _staged_vision_projector_missing(shard, staged) is False
 
 

@@ -25,6 +25,7 @@ from skulk.shared.models.model_cards import (
     ModelId,
     ModelTask,
     PlacementCardConfig,
+    VisionCardConfig,
 )
 from skulk.shared.topology import Topology
 from skulk.shared.types.commands import PlaceInstance
@@ -68,6 +69,45 @@ def _amd_resources() -> NodeResources:
             {"llama_server", "llama_server-vulkan", "llama_cpp", "llama_cpp-vulkan"}
         ),
         participation="full",
+    )
+
+
+def _served_resources(compute: str) -> NodeResources:
+    """One node advertising a single exact served accelerator backend."""
+
+    return NodeResources(
+        backends=frozenset({"llama_server", f"llama_server-{compute}"}),
+        participation="full",
+    )
+
+
+def _served_vision_card(storage_gb: float = 30.0) -> ModelCard:
+    """Pinned GGUF vision card eligible for served placement."""
+
+    return _gguf_card(storage_gb).model_copy(
+        update={
+            "source_revision": "a" * 40,
+            "gguf_file": "model-Q4_K_M.gguf",
+            "vision": VisionCardConfig(
+                model_type="future_vlm",
+                projector_file="mmproj-F16.gguf",
+                projector_size=Memory.from_gb(1).in_bytes,
+            ),
+            "placement": PlacementCardConfig(
+                compatible_backends=frozenset(
+                    {
+                        "llama_server-cuda",
+                        "llama_server-rocm",
+                        "llama_server-vulkan",
+                    }
+                ),
+                backend_preference=(
+                    "llama_server-cuda",
+                    "llama_server-rocm",
+                    "llama_server-vulkan",
+                ),
+            ),
+        }
     )
 
 
@@ -463,6 +503,73 @@ def test_vision_card_never_pools_on_served_backends() -> None:
             node_resources=resources,
             node_vram=node_vram,
         )
+
+
+def test_pinned_vision_rpc_requires_homogeneous_accelerator_tag() -> None:
+    """Engine-name equality cannot hide mixed CUDA/ROCm vision RPC."""
+
+    topology, first, second = _amd_pair()
+    node_memory = {
+        first: create_node_memory(Memory.from_gb(64).in_bytes),
+        second: create_node_memory(Memory.from_gb(64).in_bytes),
+    }
+    node_network = {first: create_node_network(), second: create_node_network()}
+    resources = {
+        first: _served_resources("cuda"),
+        second: _served_resources("rocm"),
+    }
+    node_vram = {
+        first: Memory.from_gb(48),
+        second: Memory.from_gb(48),
+    }
+
+    with pytest.raises(PlacementError, match="Mixed-backend multimodal RPC"):
+        place_instance(
+            _command(_served_vision_card(), min_nodes=2),
+            topology,
+            {},
+            node_memory,
+            node_network,
+            node_resources=resources,
+            node_vram=node_vram,
+        )
+
+
+def test_pinned_vision_rpc_stamps_one_exact_backend_and_driver() -> None:
+    """Homogeneous vision RPC reserves its projector on the selected driver."""
+
+    topology, big, small = _amd_pair()
+    node_memory = {
+        big: create_node_memory(Memory.from_gb(64).in_bytes),
+        small: create_node_memory(Memory.from_gb(64).in_bytes),
+    }
+    node_network = {big: create_node_network(), small: create_node_network()}
+    resources = {
+        big: _served_resources("cuda"),
+        small: _served_resources("cuda"),
+    }
+    node_vram = {big: Memory.from_gb(48), small: Memory.from_gb(40)}
+
+    instance = next(
+        iter(
+            place_instance(
+                _command(_served_vision_card(), min_nodes=2),
+                topology,
+                {},
+                node_memory,
+                node_network,
+                node_resources=resources,
+                node_vram=node_vram,
+            ).values()
+        )
+    )
+
+    assert isinstance(instance, LlamaRpcInstance)
+    assert instance.driver_node == big
+    assert {
+        shard.resolved_backend
+        for shard in instance.shard_assignments.runner_to_shard.values()
+    } == {"llama_server-cuda"}
 
 
 def test_missing_vram_is_info_pending_not_ram_fallback() -> None:

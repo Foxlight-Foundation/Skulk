@@ -211,11 +211,10 @@ def engine_supports_multi_node(engine: EngineType) -> bool:
 # [vision] section declares what the MODEL can do (its projector artifact
 # exists and is grounded); this table declares which of our runner
 # implementations can actually serve it. The served ``llama_server`` engine is
-# text-only until its runner stages and passes the mmproj projector (upstream
-# llama-server supports --mmproj; the gap is ours). Keeping the limitation
-# here rather than on cards means a platform capability landing lights up
-# every affected card at once, with no card edits, and cards stay a clean
-# description of the model.
+# admitted conditionally below only when a card pins one exact projector; legacy
+# cards stay on the in-process compatibility path. Keeping the limitation here
+# rather than deleting model capability from cards preserves model/platform
+# truth and makes newly compiled cards light up without a broad card sweep.
 _VISION_SERVING_ENGINES: Final[frozenset[EngineType]] = frozenset(
     {"mlx", "llama_cpp"}
 )
@@ -227,6 +226,7 @@ def platform_compatible_backends(
     *,
     card_serves_vision: bool,
     card_serves_speech: bool = False,
+    card_has_pinned_projector: bool = False,
 ) -> frozenset[str]:
     """Filter a card's declared backends down to what this platform can serve.
 
@@ -244,16 +244,23 @@ def platform_compatible_backends(
         compatible_backends: the card's declared backend tags.
         card_serves_vision: whether the card declares a vision capability.
         card_serves_speech: whether the card declares a speech capability.
+        card_has_pinned_projector: whether a vision card identifies one exact
+            immutable projector that the served runner can validate and load.
 
     Returns:
         The subset of tags whose engine can serve everything the card declares.
     """
     filtered = compatible_backends
     if card_serves_vision:
+        vision_engines = (
+            _VISION_SERVING_ENGINES | frozenset({"llama_server"})
+            if card_has_pinned_projector
+            else _VISION_SERVING_ENGINES
+        )
         filtered = frozenset(
             tag
             for tag in filtered
-            if (engine := engine_of(tag)) is None or engine in _VISION_SERVING_ENGINES
+            if (engine := engine_of(tag)) is None or engine in vision_engines
         )
     if card_serves_speech:
         filtered = frozenset(

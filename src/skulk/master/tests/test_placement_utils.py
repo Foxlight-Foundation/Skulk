@@ -831,6 +831,34 @@ def test_filter_cycles_reserves_kv_cache():
     assert "KV@32768tok" in diagnostics.rejection_reasons[0]
 
 
+def test_filter_cycles_reserves_driver_fixed_memory() -> None:
+    """A pinned projector must consume capacity beyond the base GGUF weights."""
+
+    node_id = NodeId()
+    topology = Topology()
+    topology.add_node(node_id)
+    node_memory = {
+        node_id: create_node_memory(
+            Memory.from_gb(12).in_bytes,
+            ram_total=Memory.from_gb(48).in_bytes,
+        )
+    }
+    cycles = topology.get_cycles()
+    card = _card(8, gguf_file="model-Q4_K_M.gguf")
+
+    fitting, _ = filter_cycles_by_memory(cycles, node_memory, card)
+    rejected, diagnostics = filter_cycles_by_memory(
+        cycles,
+        node_memory,
+        card,
+        fixed_memory_by_node={node_id: Memory.from_gb(4)},
+    )
+
+    assert len(fitting) == 1
+    assert rejected == []
+    assert "fixed headroom" in diagnostics.rejection_reasons[0]
+
+
 def test_get_smallest_cycles():
     # arrange
     node_a_id = NodeId()

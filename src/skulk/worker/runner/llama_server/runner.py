@@ -13,8 +13,8 @@ This is the first *served* engine. Its shape (managed inference server + OpenAI
 proxy) is deliberately generic so vLLM and other OpenAI-compatible servers can
 become additional served backends without new runner architecture.
 
-Single-node only (no ring / ConnectToGroup / warmup), mirroring the in-process
-llama.cpp and embeddings runners. Linux-oriented: the subprocess is reaped on
+Single-node or the driver of a homogeneous llama.cpp RPC placement (no Skulk
+ring / ConnectToGroup / warmup). Linux-oriented: the subprocess is reaped on
 parent death via ``PR_SET_PDEATHSIG`` so a runner crash never orphans a server
 holding GPU memory. Per-request cancellation aborts the proxied HTTP connection
 (which stops server-side generation); ``SIGTERM`` is for instance teardown of the
@@ -93,6 +93,26 @@ from skulk.worker.runner.llama_server.channel_text_parser import (
     GemmaChannelTextParser,
 )
 from skulk.worker.runner.served_concurrency import ServedConcurrentDispatch
+
+
+def _effective_server_parallel(card: Any) -> int:
+    """Return the safe served slot count for this card generation.
+
+    llama.cpp can serve multimodal requests with native MTP, but concurrent
+    multimodal qualification is intentionally outside the current evidence
+    envelope. Keep that exact combination serial while preserving configured
+    batching for text-only and non-speculative vision models.
+    """
+
+    runtime = getattr(card, "runtime", None)
+    served_spec_type = getattr(runtime, "served_spec_type", None) if runtime else None
+    if (
+        getattr(card, "vision", None) is not None
+        and served_spec_type not in (None, "none")
+        and not _force_no_spec()
+    ):
+        return 1
+    return _llama_server_parallel()
 
 # Card ``served_spec_type`` value -> the ``llama-server --spec-type`` token.
 # ``draft_mtp`` usually uses the model's own built-in MTP heads; a separate
@@ -451,6 +471,24 @@ def _gpu_layers_for_backend(resolved_backend: str | None) -> str:
     return "0"
 
 
+def _projector_server_args(
+    projector_path: Path | None,
+    resolved_backend: str | None,
+) -> list[str]:
+    """Return served multimodal flags for one authenticated projector.
+
+    CPU-resolved service keeps the projector in host memory explicitly;
+    accelerator backends retain llama.cpp's default projector offload.
+    """
+
+    if projector_path is None:
+        return []
+    args = ["--mmproj", str(projector_path)]
+    if _gpu_layers_for_backend(resolved_backend) == "0":
+        args.append("--no-mmproj-offload")
+    return args
+
+
 def _parse_sse_line(line: str) -> _StreamDelta | None:
     """Parse one SSE line into a ``_StreamDelta``, or ``None`` to skip it.
 
@@ -511,7 +549,7 @@ def _set_pdeathsig() -> None:
 
 
 class Runner(ServedConcurrentDispatch):
-    """Single-node served-backend runner that proxies an external ``llama-server``.
+    """Served-backend runner that proxies an external ``llama-server``.
 
     Lifecycle mirrors the in-process llama.cpp runner: it skips the ring
     (``ConnectToGroup`` / ``StartWarmup``), spawns the server on ``LoadModel``,
@@ -580,7 +618,19 @@ class Runner(ServedConcurrentDispatch):
         # _spawn_server) keeps every slot's context at the full stamped window,
         # while the weighted gate below prevents their aggregate reservations
         # from exhausting the one shared pool.
-        self._init_concurrent_dispatch(_llama_server_parallel(), "llama-gen")
+        effective_parallel = _effective_server_parallel(self.shard_metadata.model_card)
+        self._init_concurrent_dispatch(effective_parallel, "llama-gen")
+        if (
+            effective_parallel == 1
+            and self.shard_metadata.model_card.vision is not None
+            and self.shard_metadata.model_card.runtime is not None
+            and self.shard_metadata.model_card.runtime.served_spec_type
+            not in (None, "none")
+        ):
+            logger.warning(
+                "served vision plus speculative decoding is running serially "
+                "because concurrent multimodal serving is not yet qualified"
+            )
         if self._max_concurrency > 1:
             # The shipped default uses the shared buffer, so normal startup
             # records the trade without presenting the supported default as an
@@ -696,6 +746,7 @@ class Runner(ServedConcurrentDispatch):
                 )
         if gguf_path is None:
             gguf_path = select_gguf_file(model_dir)
+        projector_path = self._resolve_projector(model_dir)
 
         # When the card declares a channel output parser we strip reasoning
         # markers ourselves, so llama-server must hand back raw text
@@ -725,7 +776,11 @@ class Runner(ServedConcurrentDispatch):
                 },
             ):
                 self._spawn_server(
-                    gguf_path, n_ctx, card.runtime, reasoning_format_none
+                    gguf_path,
+                    n_ctx,
+                    card.runtime,
+                    reasoning_format_none,
+                    projector_path,
                 )
                 self._await_health()
         except Exception:
@@ -744,6 +799,7 @@ class Runner(ServedConcurrentDispatch):
         n_ctx: int,
         runtime: Any,
         reasoning_format_none: bool,
+        projector_path: Path | None = None,
     ) -> None:
         binary = os.environ.get(LLAMA_SERVER_BIN_ENV, "").strip()
         if not binary:
@@ -782,6 +838,10 @@ class Runner(ServedConcurrentDispatch):
         # deterministic command line.
         if self._rpc_donor_endpoints:
             cmd += ["--rpc", ",".join(sorted(self._rpc_donor_endpoints.values()))]
+        cmd += _projector_server_args(
+            projector_path,
+            self.shard_metadata.resolved_backend,
+        )
         # --reasoning-format none hands back raw text in message.content. We use
         # it for (a) plain non-reasoning models (otherwise llama-server's default
         # `auto` extracts their prose into reasoning_content, leaving content
@@ -853,6 +913,47 @@ class Runner(ServedConcurrentDispatch):
             preexec_fn=_set_pdeathsig,  # noqa: PLW1509 - Linux reap-on-parent-death
         )
         self.base_url = f"http://127.0.0.1:{port}"
+
+    def _resolve_projector(self, model_dir: Path) -> Path | None:
+        """Resolve and authenticate the card-pinned served-vision projector.
+
+        Legacy vision cards intentionally return ``None`` and remain gated to
+        the in-process runner. A new served card must prove the exact projector
+        path, byte size, and installed-manifest digest before llama-server is
+        allowed to read it.
+        """
+
+        card = self.shard_metadata.model_card
+        vision = card.vision
+        if vision is None or not vision.has_pinned_projector:
+            return None
+        assert vision.projector_file is not None
+        assert vision.projector_size is not None
+        from skulk.store.installed_cards import (
+            read_installed_card_with_fallback,
+            verify_installed_file,
+        )
+
+        try:
+            record = read_installed_card_with_fallback(model_dir)
+        except (OSError, ValueError) as error:
+            raise RuntimeError(
+                f"served vision projector metadata is unreadable for "
+                f"{card.model_id}: {error}"
+            ) from error
+        if record is None or not verify_installed_file(
+            model_dir,
+            record,
+            vision.projector_file,
+            expected_size=vision.projector_size,
+        ):
+            raise RuntimeError(
+                f"served vision projector {vision.projector_file!r} is missing, "
+                "stale, incorrectly sized, or corrupt; re-stage the exact signed "
+                "model generation"
+            )
+        projector = (model_dir.resolve() / vision.projector_file).resolve()
+        return projector
 
     def _pick_port(self) -> int:
         """Pick a free ephemeral port for the server, avoiding the API port."""

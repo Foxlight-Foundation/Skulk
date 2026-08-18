@@ -4,6 +4,16 @@ title: Next release
 sidebar_position: 0
 ---
 
+## Served GGUF vision
+
+GGUF vision cards can now pin one exact multimodal projector and run through
+the external llama-server engine on CUDA, ROCm, Vulkan, or CPU. Skulk stages
+only that projector, verifies its manifest digest before load, and accounts for
+its fixed memory cost. Homogeneous llama.cpp RPC placements are supported with
+the projector and image input owned by the driver. Vision and native MTP work
+together with serial serving as the initial compatibility mode; legacy cards
+without a projector pin continue through the in-process runner.
+
 ## Native CUDA serving on Linux ARM64
 
 The managed CUDA llama-server wheel now ships for Linux aarch64 as well as

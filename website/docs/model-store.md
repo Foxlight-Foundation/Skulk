@@ -121,10 +121,18 @@ restarts; a later explicit, successfully completed store download clears it.
 
 A GGUF repository often ships several quantizations of the same model (for
 example `Q4_K_M`, `Q5_K_M`, `Q8_0`, `bf16`). The store downloads only the
-quantization a model card pins (its `gguf_file`), plus the multimodal projector
-for a vision model, rather than every quant in the repository. This keeps a
+quantization a model card pins (its `gguf_file`), plus the exact
+`vision.projector_file` for a newly compiled vision model, rather than every
+quant or projector variant in the repository. Legacy cards retain the older
+projector-glob behavior for compatibility. This keeps a
 single-quant download to roughly the size of that one file instead of the whole
 repo.
+
+The projector is included in the installed-card manifest and staged atomically
+with the selected GGUF. At served-runner load, Skulk verifies its path, card
+size, manifest entry, and SHA-256 digest. A missing, stale, incorrectly sized,
+or corrupt projector fails with an actionable re-stage error instead of
+silently serving image prompts as text.
 
 ### Qualified cards can pin immutable artifacts
 
