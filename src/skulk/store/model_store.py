@@ -89,6 +89,7 @@ from skulk.store.installed_cards import (
     build_installed_card_record,
     manifest_sha256,
     read_installed_card,
+    unlink_relative_artifact_path_without_following,
     verify_installed_card,
     verify_installed_file,
     write_installed_card,
@@ -1121,9 +1122,10 @@ class ModelStore:
         registered_path = _resolve_store_child_path(self._store_path, entry.store_path)
         if registered_path is None or registered_path.resolve() != target_dir.resolve():
             return
-        candidate = (registered_path / required_file).resolve()
-        if candidate.is_relative_to(registered_path.resolve()) and candidate.is_file():
-            candidate.unlink()
+        if unlink_relative_artifact_path_without_following(
+            registered_path,
+            required_file,
+        ):
             logger.warning(
                 f"ModelStore: removed invalid pinned file {required_file!r} from "
                 f"{model_id} before immutable recovery download"

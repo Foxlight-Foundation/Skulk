@@ -140,6 +140,28 @@ def test_same_size_corrupt_projector_is_removed_for_recovery(tmp_path: Path) -> 
     assert not (staged / "mmproj-F16.gguf").exists()
 
 
+def test_corrupt_projector_symlink_is_unlinked_without_following(
+    tmp_path: Path,
+) -> None:
+    """Recovery removes the staged symlink entry and preserves its target."""
+
+    staged = _write(tmp_path / "staged", "model-Q4_K_M.gguf", "config.json")
+    external = tmp_path / "external-projector.gguf"
+    external.write_bytes(b"x")
+    (staged / "mmproj-F16.gguf").symlink_to(external)
+    shard = _shard(
+        vision=True,
+        gguf_file="model-Q4_K_M.gguf",
+        projector_file="mmproj-F16.gguf",
+        projector_size=1,
+    )
+
+    _remove_invalid_staged_projector(shard, staged)
+
+    assert not (staged / "mmproj-F16.gguf").exists()
+    assert external.read_bytes() == b"x"
+
+
 async def test_async_projector_check_hashes_off_event_loop(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

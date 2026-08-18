@@ -106,6 +106,7 @@ from skulk.store.installed_cards import (
     installed_companion_matches,
     read_installed_card_with_fallback,
     require_registry_installed_artifact,
+    unlink_relative_artifact_path_without_following,
     verify_installed_file,
     write_installed_card_with_fallback,
 )
@@ -525,10 +526,10 @@ def _remove_invalid_staged_projector(
         or not _staged_vision_projector_missing(shard, directory)
     ):
         return
-    root = directory.resolve()
-    projector = (root / vision.projector_file).resolve()
-    if projector.is_relative_to(root) and projector.is_file():
-        projector.unlink()
+    if unlink_relative_artifact_path_without_following(
+        directory,
+        vision.projector_file,
+    ):
         logger.warning(
             f"ModelStoreDownloader: removed invalid staged projector "
             f"{vision.projector_file!r} for {card.model_id} before recovery"

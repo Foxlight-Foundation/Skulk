@@ -290,6 +290,49 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def unlink_relative_artifact_path_without_following(
+    model_directory: Path,
+    relative_path: str,
+) -> bool:
+    """Unlink one invalid artifact entry without following staged symlinks.
+
+    The path must use the installed-manifest canonical relative POSIX form. If
+    an intermediate component is a symlink, that in-root symlink is removed so
+    the normal staging path can recreate the directory tree. A final symlink is
+    likewise unlinked as an entry rather than resolving and deleting its target.
+
+    Args:
+        model_directory: Root of the canonical or staged artifact generation.
+        relative_path: Canonical repository-relative path selected by the card.
+
+    Returns:
+        ``True`` when an invalid file or symlink entry was removed.
+    """
+
+    path = PurePosixPath(relative_path)
+    if (
+        path.is_absolute()
+        or relative_path != path.as_posix()
+        or "\\" in relative_path
+        or any(part in {"", ".", ".."} for part in path.parts)
+    ):
+        return False
+    current = model_directory.resolve()
+    for part in path.parts[:-1]:
+        component = current / part
+        if component.is_symlink():
+            component.unlink()
+            return True
+        if not component.is_dir():
+            return False
+        current = component
+    candidate = current / path.name
+    if candidate.is_symlink() or candidate.is_file():
+        candidate.unlink()
+        return True
+    return False
+
+
 def build_file_manifest(
     model_directory: Path,
 ) -> tuple[InstalledFileManifestEntry, ...]:
