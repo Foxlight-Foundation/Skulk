@@ -7,7 +7,12 @@ from pathlib import Path
 import pytest
 
 import skulk.store.installed_cards as installed_cards
-from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
+from skulk.shared.models.model_cards import (
+    ModelCard,
+    ModelId,
+    ModelTask,
+    VisionCardConfig,
+)
 from skulk.shared.types.memory import Memory
 from skulk.store.installed_cards import (
     InstalledCardRecord,
@@ -17,6 +22,7 @@ from skulk.store.installed_cards import (
     installed_card_matches,
     read_installed_card,
     read_installed_card_with_fallback,
+    refresh_registry_installed_card_if_same_artifact,
     require_registry_installed_artifact,
     verify_installed_file,
     write_installed_card,
@@ -94,6 +100,76 @@ def test_pinned_companion_verification_detects_corruption(tmp_path: Path) -> Non
         "mmproj-F16.gguf",
         expected_size=len(b"projector"),
     )
+
+
+def test_signed_same_artifact_card_refresh_reuses_verified_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Metadata-only refresh neither transfers nor re-hashes unchanged bytes."""
+
+    artifact = _artifact(tmp_path)
+    old_card = _card()
+    old_record = build_installed_card_record(artifact, old_card)
+    write_installed_card(artifact, old_record)
+    requested = old_card.model_copy(
+        update={"registry_card_id": f"card_{'b' * 52}"}
+    )
+
+    def reject_rehash(_directory: Path) -> object:
+        raise AssertionError("card-only refresh rehashed artifact bytes")
+
+    monkeypatch.setattr(installed_cards, "build_file_manifest", reject_rehash)
+
+    refreshed = refresh_registry_installed_card_if_same_artifact(
+        artifact,
+        requested,
+    )
+
+    assert refreshed is not None
+    assert refreshed.files == old_record.files
+    require_registry_installed_artifact(artifact, requested)
+
+
+def test_signed_card_refresh_upgrades_same_card_from_legacy_marker_state(
+    tmp_path: Path,
+) -> None:
+    """A later immutable revision marker upgrades, rather than reuses, legacy truth."""
+
+    artifact = _artifact(tmp_path, revision_marker=False)
+    card = _card()
+    legacy = build_installed_card_record(artifact, card)
+    write_installed_card(artifact, legacy)
+    (artifact / ".skulk-source-revision").write_text(f"{card.source_revision}\n")
+
+    refreshed = refresh_registry_installed_card_if_same_artifact(artifact, card)
+
+    assert refreshed is not None
+    assert refreshed.verification == "registry_verified"
+    require_registry_installed_artifact(artifact, card)
+
+
+def test_signed_card_refresh_rejects_absent_new_projector(tmp_path: Path) -> None:
+    """A card selecting new bytes stays on the normal artifact transfer path."""
+
+    artifact = _artifact(tmp_path)
+    old_card = _card()
+    old_record = build_installed_card_record(artifact, old_card)
+    write_installed_card(artifact, old_record)
+    requested = old_card.model_copy(
+        update={
+            "registry_card_id": f"card_{'b' * 52}",
+            "vision": VisionCardConfig(
+                projector_file="mmproj-F16.gguf",
+                projector_size=9,
+            ),
+        }
+    )
+
+    assert (
+        refresh_registry_installed_card_if_same_artifact(artifact, requested) is None
+    )
+    assert read_installed_card(artifact) == old_record
 
 
 def test_unmarked_registry_bytes_remain_local_legacy(tmp_path: Path) -> None:

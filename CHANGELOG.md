@@ -7,6 +7,14 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Fixed
+
+- Same-artifact signed card replacements now run the card-only installed-sidecar
+  refresh before a staged-cache fast path can report the model ready. This
+  prevents a newly approved replacement card from passing placement and then
+  failing runner startup against the prior installed identity, without
+  retransferring unchanged model bytes.
+
 ### Added
 
 - Served GGUF vision now uses one truthful model card for the base quant,

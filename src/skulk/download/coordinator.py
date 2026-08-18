@@ -24,6 +24,7 @@ from skulk.shared.constants import SKULK_MODELS_DIR
 from skulk.shared.models.model_cards import (
     ModelId,
     get_model_cards,
+    register_installed_card_record,
     same_model_artifact,
     unregister_installed_card_record,
 )
@@ -52,6 +53,9 @@ from skulk.shared.types.worker.downloads import (
 )
 from skulk.shared.types.worker.shards import PipelineShardMetadata, ShardMetadata
 from skulk.store.config import resolve_config_path, update_skulk_config_atomic
+from skulk.store.installed_cards import (
+    refresh_registry_installed_card_if_same_artifact,
+)
 from skulk.utils.channels import Receiver, Sender
 from skulk.utils.task_group import TaskGroup
 
@@ -125,6 +129,66 @@ class DownloadCoordinator:
 
     def _model_dir(self, model_id: ModelId) -> str:
         return str(SKULK_MODELS_DIR / model_id.normalize())
+
+    async def _resolve_or_refresh_complete_artifact(
+        self,
+        shard: ShardMetadata,
+        candidate: Path | None = None,
+    ) -> Path | None:
+        """Resolve exact installed truth or refresh a proven card-only update.
+
+        Args:
+            shard: Exact card generation requested by the coordinator.
+            candidate: Optional byte-complete directory reported by the direct
+                downloader's status probe.
+
+        Returns:
+            A directory carrying the exact requested installed-card identity,
+            or ``None`` when bytes must still be downloaded or staged.
+
+        Side effects:
+            May atomically refresh only installed-card metadata when an older
+            sidecar proves the same repository, revision, and selected files.
+        """
+
+        card = shard.model_card
+        exact = resolve_model_in_path(
+            card.model_id,
+            card.source_revision,
+            expected_card=card,
+        )
+        if exact is not None:
+            return exact
+
+        candidates: list[Path] = []
+        if candidate is not None:
+            candidates.append(candidate.parent if candidate.is_file() else candidate)
+        retained_path = resolve_model_in_path(card.model_id, card.source_revision)
+        if retained_path is not None:
+            candidates.append(retained_path)
+        if card.registry_card_id is not None:
+            candidates.append(Path(self._model_dir(card.model_id)))
+        seen: set[Path] = set()
+        for artifact_directory in candidates:
+            resolved = artifact_directory.resolve()
+            if resolved in seen or not artifact_directory.is_dir():
+                continue
+            seen.add(resolved)
+            if card.registry_card_id is None:
+                return artifact_directory
+            refreshed = await asyncio.to_thread(
+                refresh_registry_installed_card_if_same_artifact,
+                artifact_directory,
+                card,
+            )
+            if refreshed is not None:
+                register_installed_card_record(refreshed)
+                logger.info(
+                    "DownloadCoordinator: refreshed installed-card identity for "
+                    f"{card.model_id} without transferring model bytes"
+                )
+                return artifact_directory
+        return None
 
     def _reset_progress_throttle(self, model_id: ModelId) -> None:
         """Start a fresh progress high-water mark for one download attempt."""
@@ -578,9 +642,7 @@ class DownloadCoordinator:
         # models with speculative decoding silently unavailable (codex
         # review on the launch-smoke fix). Fall through to the download
         # path instead so the companion gets fetched.
-        found_path = resolve_model_in_path(
-            model_id, shard.model_card.source_revision
-        )
+        found_path = await self._resolve_or_refresh_complete_artifact(shard)
         # In offline mode optional companions can never be fetched and the
         # runner degrades to run-without-speculation, so only load-bearing
         # companions (split vision weights) block the shortcut there —
@@ -623,15 +685,30 @@ class DownloadCoordinator:
             await self.shard_downloader.get_shard_download_status_for_shard(shard)
         )
 
-        if initial_progress.status == "complete":
+        completed_path = (
+            await self._resolve_or_refresh_complete_artifact(
+                shard,
+                Path(self._model_dir(model_id)),
+            )
+            if initial_progress.status == "complete"
+            else None
+        )
+        if initial_progress.status == "complete" and completed_path is not None:
             completed = DownloadCompleted(
                 shard_metadata=shard,
                 node_id=self.node_id,
                 total=initial_progress.total,
-                model_directory=self._model_dir(model_id),
+                model_directory=str(completed_path),
             )
             await self._emit_status(completed)
             return
+        if initial_progress.status == "complete":
+            # Byte-only direct-download probes cannot distinguish a genuinely
+            # different generation from a replacement card whose newly
+            # selected files are absent. Keep those cases on the transfer path.
+            initial_progress = initial_progress.model_copy(
+                update={"status": "in_progress"}
+            )
 
         if self.offline:
             logger.warning(
@@ -783,7 +860,7 @@ class DownloadCoordinator:
                         "DownloadCoordinator: One-time scan for existing HF download progress..."
                     )
                     async for (
-                        _,
+                        discovered_path,
                         progress,
                     ) in self.shard_downloader.get_shard_download_status():
                         model_id = progress.shard.model_card.model_id
@@ -802,14 +879,31 @@ class DownloadCoordinator:
                             continue
 
                         if progress.status == "complete":
-                            status: DownloadProgress = DownloadCompleted(
-                                node_id=self.node_id,
-                                shard_metadata=progress.shard,
-                                total=progress.total,
-                                model_directory=self._model_dir(
-                                    progress.shard.model_card.model_id
-                                ),
+                            completed_path = (
+                                await self._resolve_or_refresh_complete_artifact(
+                                    progress.shard,
+                                    discovered_path,
+                                )
                             )
+                            companions_present = model_companions_present_on_disk(
+                                progress.shard.model_card,
+                                required_only=self.offline,
+                            )
+                            if completed_path is not None and companions_present:
+                                status: DownloadProgress = DownloadCompleted(
+                                    node_id=self.node_id,
+                                    shard_metadata=progress.shard,
+                                    total=progress.total,
+                                    model_directory=str(completed_path),
+                                )
+                            else:
+                                status = DownloadPending(
+                                    node_id=self.node_id,
+                                    shard_metadata=progress.shard,
+                                    model_directory=self._model_dir(model_id),
+                                    downloaded=progress.downloaded,
+                                    total=progress.total,
+                                )
                         elif progress.status in ["in_progress", "not_started"]:
                             if progress.downloaded_this_session.in_bytes == 0:
                                 status = DownloadPending(
@@ -856,7 +950,11 @@ class DownloadCoordinator:
                         (DownloadCompleted, DownloadOngoing, DownloadFailed),
                     ):
                         continue
-                    found = resolve_model_in_path(mid, card.source_revision)
+                    found = resolve_model_in_path(
+                        mid,
+                        card.source_revision,
+                        expected_card=card,
+                    )
                     if found is not None and not model_companions_present_on_disk(
                         card, required_only=self.offline
                     ):

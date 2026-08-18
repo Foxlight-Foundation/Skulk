@@ -32,6 +32,7 @@ from skulk.shared.types.worker.downloads import DownloadCompleted, DownloadFaile
 from skulk.shared.types.worker.shards import PipelineShardMetadata, ShardMetadata
 from skulk.store.installed_cards import (
     build_installed_card_record,
+    require_registry_installed_artifact,
     write_installed_card,
 )
 from skulk.utils.channels import Receiver, Sender, channel
@@ -287,6 +288,171 @@ async def test_registry_identity_change_restarts_same_revision_status() -> None:
     assert isinstance(status, DownloadFailed)
     assert status.shard_metadata.model_card.registry_card_id == f"card_{'b' * 52}"
     assert status.shard_metadata.model_card.gguf_file == "model-q5.gguf"
+
+
+@pytest.mark.parametrize("offline", [False, True])
+async def test_complete_byte_probe_refreshes_signed_card_without_transfer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    offline: bool,
+) -> None:
+    """A stale same-artifact sidecar refreshes locally, including offline."""
+
+    import skulk.shared.constants as constants
+
+    _command_send, command_receive = channel[ForwarderDownloadCommand]()
+    event_send, _event_receive = channel[Event]()
+    telemetry_send, _telemetry_receive = channel[NodeTelemetry]()
+    downloader = FakeShardDownloader()
+    coordinator = DownloadCoordinator(
+        node_id=NODE_ID,
+        shard_downloader=downloader,
+        download_command_receiver=command_receive,
+        event_sender=event_send,
+        telemetry_sender=telemetry_send,
+        offline=offline,
+    )
+    revision = "a" * 40
+    old_shard = _make_shard(
+        source_revision=revision,
+        gguf_file="model.gguf",
+        registry_card_id=f"card_{'a' * 52}",
+    )
+    requested_shard = _make_shard(
+        source_revision=revision,
+        gguf_file="model.gguf",
+        registry_card_id=f"card_{'b' * 52}",
+    )
+    model_directory = tmp_path / MODEL_ID.normalize()
+    model_directory.mkdir()
+    (model_directory / "model.gguf").write_bytes(b"weights")
+    (model_directory / ".skulk-source-revision").write_text(f"{revision}\n")
+    write_installed_card(
+        model_directory,
+        build_installed_card_record(model_directory, old_shard.model_card),
+    )
+    monkeypatch.setattr(constants, "SKULK_MODELS_PATH", (tmp_path,))
+
+    async def byte_complete_status(
+        shard: ShardMetadata,
+    ) -> RepoDownloadProgress:
+        return RepoDownloadProgress(
+            repo_id=str(shard.model_card.model_id),
+            repo_revision=revision,
+            shard=shard,
+            completed_files=1,
+            total_files=1,
+            downloaded=Memory.from_mb(100),
+            downloaded_this_session=Memory.from_bytes(0),
+            total=Memory.from_mb(100),
+            overall_speed=0,
+            overall_eta=timedelta(seconds=0),
+            status="complete",
+        )
+
+    started: list[RepoDownloadProgress] = []
+    monkeypatch.setattr(
+        downloader,
+        "get_shard_download_status_for_shard",
+        byte_complete_status,
+    )
+
+    def record_download_start(
+        _shard: ShardMetadata,
+        progress: RepoDownloadProgress,
+    ) -> None:
+        started.append(progress)
+
+    monkeypatch.setattr(
+        coordinator,
+        "_start_download_task",
+        record_download_start,
+    )
+
+    await coordinator._start_download(requested_shard)
+
+    assert started == []
+    status = coordinator.download_status[MODEL_ID]
+    assert isinstance(status, DownloadCompleted)
+    assert status.model_directory == str(model_directory)
+    require_registry_installed_artifact(model_directory, requested_shard.model_card)
+
+
+async def test_startup_complete_probe_refreshes_signed_card_before_terminal_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Restart discovery cannot retain a stale signed completion identity."""
+
+    _command_send, command_receive = channel[ForwarderDownloadCommand]()
+    event_send, _event_receive = channel[Event]()
+    telemetry_send, _telemetry_receive = channel[NodeTelemetry]()
+    downloader = FakeShardDownloader()
+    coordinator = DownloadCoordinator(
+        node_id=NODE_ID,
+        shard_downloader=downloader,
+        download_command_receiver=command_receive,
+        event_sender=event_send,
+        telemetry_sender=telemetry_send,
+        offline=True,
+    )
+    revision = "a" * 40
+    old_shard = _make_shard(
+        source_revision=revision,
+        gguf_file="model.gguf",
+        registry_card_id=f"card_{'a' * 52}",
+    )
+    requested_shard = _make_shard(
+        source_revision=revision,
+        gguf_file="model.gguf",
+        registry_card_id=f"card_{'b' * 52}",
+    )
+    model_directory = tmp_path / MODEL_ID.normalize()
+    model_directory.mkdir()
+    (model_directory / "model.gguf").write_bytes(b"weights")
+    (model_directory / ".skulk-source-revision").write_text(f"{revision}\n")
+    write_installed_card(
+        model_directory,
+        build_installed_card_record(model_directory, old_shard.model_card),
+    )
+    progress = RepoDownloadProgress(
+        repo_id=str(MODEL_ID),
+        repo_revision=revision,
+        shard=requested_shard,
+        completed_files=1,
+        total_files=1,
+        downloaded=Memory.from_mb(100),
+        downloaded_this_session=Memory.from_bytes(0),
+        total=Memory.from_mb(100),
+        overall_speed=0,
+        overall_eta=timedelta(seconds=0),
+        status="complete",
+    )
+
+    async def startup_status() -> AsyncIterator[tuple[Path, RepoDownloadProgress]]:
+        yield model_directory, progress
+
+    async def no_catalog_cards() -> list[ModelCard]:
+        return []
+
+    monkeypatch.setattr(downloader, "get_shard_download_status", startup_status)
+    monkeypatch.setattr(coordinator_module, "get_model_cards", no_catalog_cards)
+    monkeypatch.setattr(coordinator_module, "SKULK_MODELS_DIR", tmp_path)
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(coordinator._emit_existing_download_progress)
+        with anyio.fail_after(1):
+            while not isinstance(
+                coordinator.download_status.get(MODEL_ID),
+                DownloadCompleted,
+            ):
+                await anyio.sleep(0)
+        task_group.cancel_scope.cancel()
+
+    status = coordinator.download_status[MODEL_ID]
+    assert isinstance(status, DownloadCompleted)
+    assert status.model_directory == str(model_directory)
+    require_registry_installed_artifact(model_directory, requested_shard.model_card)
 
 
 async def test_revision_change_replaces_active_download_after_cleanup() -> None:

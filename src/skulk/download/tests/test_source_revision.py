@@ -17,6 +17,10 @@ from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.worker.downloads import FileListEntry, RepoDownloadProgress
 from skulk.shared.types.worker.shards import PipelineShardMetadata, ShardMetadata
+from skulk.store.installed_cards import (
+    build_installed_card_record,
+    write_installed_card,
+)
 
 _OLD_REVISION = "0" * 40
 _NEW_REVISION = "1" * 40
@@ -196,6 +200,54 @@ def test_pinned_store_revision_directory_is_discoverable(
 
     assert resolve_model_in_path(model_id, _NEW_REVISION) == model_dir
     assert build_model_path(model_id, _NEW_REVISION) == model_dir
+
+
+def test_signed_card_replacement_does_not_reuse_stale_installed_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Same artifact bytes still require the requested card-only refresh."""
+
+    model_id = ModelId("org/model")
+    model_dir = tmp_path / model_id.normalize()
+    model_dir.mkdir()
+    (model_dir / "model.gguf").write_bytes(b"weights")
+    (model_dir / ".skulk-source-revision").write_text(f"{_NEW_REVISION}\n")
+    old_card = _shard(_NEW_REVISION).model_card.model_copy(
+        update={
+            "registry_card_id": f"card_{'a' * 52}",
+            "registry_snapshot_id": "snapshot_1_old",
+            "registry_provenance": "agent",
+        }
+    )
+    requested_card = old_card.model_copy(
+        update={
+            "registry_card_id": f"card_{'b' * 52}",
+            "registry_snapshot_id": "snapshot_2_current",
+        }
+    )
+    write_installed_card(
+        model_dir,
+        build_installed_card_record(model_dir, old_card),
+    )
+    monkeypatch.setattr(constants, "SKULK_MODELS_PATH", (tmp_path,))
+
+    assert (
+        resolve_model_in_path(
+            model_id,
+            _NEW_REVISION,
+            expected_card=old_card,
+        )
+        == model_dir
+    )
+    assert (
+        resolve_model_in_path(
+            model_id,
+            _NEW_REVISION,
+            expected_card=requested_card,
+        )
+        is None
+    )
 
 
 @pytest.mark.asyncio
