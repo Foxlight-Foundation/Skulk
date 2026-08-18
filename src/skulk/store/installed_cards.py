@@ -845,6 +845,90 @@ def verify_installed_card(
     return bool(record.files)
 
 
+def refresh_registry_installed_card_if_same_artifact(
+    model_directory: Path,
+    model_card: ModelCard,
+) -> InstalledCardRecord | None:
+    """Atomically adopt a replacement signed card for unchanged local bytes.
+
+    The refresh is deliberately narrower than repository/revision equality. It
+    also requires the same selected base artifact and proves that every newly
+    selected same-repository file is already covered by the verified installed
+    manifest. A card that changes bytes, adds an absent projector, or selects a
+    different draft therefore stays on the normal download/staging path.
+
+    Args:
+        model_directory: Complete canonical or staged base-artifact directory.
+        model_card: Replacement signed registry card requested for launch.
+
+    Returns:
+        The newly written installed record, or ``None`` when local evidence is
+        insufficient for a metadata-only refresh.
+
+    Side effects:
+        Atomically replaces the adjacent installed-card sidecar, falling back
+        to Skulk's data directory for a read-only artifact root.
+    """
+
+    if model_card.registry_card_id is None or model_card.source_revision is None:
+        return None
+    try:
+        retained = read_installed_card_with_fallback(model_directory)
+    except (OSError, ValueError):
+        return None
+    if (
+        retained is None
+        or retained.artifact_role != "base"
+        or retained.artifact_model_id != str(model_card.model_id)
+        or retained.artifact_repository != str(model_card.artifact_repository)
+        or retained.artifact_revision != model_card.source_revision
+        or retained.artifact_file != model_card.gguf_file
+        or _revision_marker(model_directory) != model_card.source_revision
+        or not verify_installed_card(model_directory, retained)
+    ):
+        return None
+    if (
+        retained.verification == "registry_verified"
+        and retained.installed_identity == model_card.registry_card_id
+        and retained.model_card.registry_card_id == model_card.registry_card_id
+    ):
+        return retained
+
+    manifest_by_path = {entry.path: entry for entry in retained.files}
+    required_files: list[tuple[str, int | None]] = []
+    if model_card.gguf_file is not None:
+        required_files.append((model_card.gguf_file, None))
+    if model_card.vision is not None and model_card.vision.projector_file is not None:
+        required_files.append(
+            (model_card.vision.projector_file, model_card.vision.projector_size)
+        )
+    runtime = model_card.runtime
+    if (
+        runtime is not None
+        and runtime.served_spec_draft_repo
+        == str(model_card.artifact_repository)
+        and runtime.served_spec_draft_file is not None
+    ):
+        required_files.append((runtime.served_spec_draft_file, None))
+    for relative_path, expected_size in required_files:
+        entry = manifest_by_path.get(relative_path)
+        if entry is None or (
+            expected_size is not None and entry.size_bytes != expected_size
+        ):
+            return None
+
+    refreshed = build_installed_card_record(
+        model_directory,
+        model_card,
+        artifact_repository=str(model_card.artifact_repository),
+        artifact_revision=model_card.source_revision,
+        artifact_file=model_card.gguf_file,
+        file_manifest=retained.files,
+    )
+    write_installed_card_with_fallback(model_directory, refreshed)
+    return refreshed
+
+
 def verify_installed_file(
     model_directory: Path,
     record: InstalledCardRecord,
