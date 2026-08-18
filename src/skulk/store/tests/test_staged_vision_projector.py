@@ -18,7 +18,14 @@ from skulk.shared.models.model_cards import (
 )
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.worker.shards import PipelineShardMetadata
-from skulk.store.model_store_client import _staged_vision_projector_missing
+from skulk.store.installed_cards import (
+    build_installed_card_record,
+    write_installed_card,
+)
+from skulk.store.model_store_client import (
+    _remove_invalid_staged_projector,
+    _staged_vision_projector_missing,
+)
 
 
 def _shard(
@@ -95,7 +102,38 @@ def test_pinned_projector_requires_exact_path_and_size(tmp_path: Path) -> None:
     (staged / "mmproj-F16.gguf").write_bytes(b"wrong")
     assert _staged_vision_projector_missing(shard, staged) is True
     (staged / "mmproj-F16.gguf").write_bytes(b"x")
+    write_installed_card(
+        staged,
+        build_installed_card_record(staged, shard.model_card),
+    )
     assert _staged_vision_projector_missing(shard, staged) is False
+
+
+def test_same_size_corrupt_projector_is_removed_for_recovery(tmp_path: Path) -> None:
+    """Manifest-invalid staged bytes cannot survive the store recovery path."""
+
+    staged = _write(
+        tmp_path,
+        "model-Q4_K_M.gguf",
+        "mmproj-F16.gguf",
+        "config.json",
+    )
+    shard = _shard(
+        vision=True,
+        gguf_file="model-Q4_K_M.gguf",
+        projector_file="mmproj-F16.gguf",
+        projector_size=1,
+    )
+    write_installed_card(
+        staged,
+        build_installed_card_record(staged, shard.model_card),
+    )
+    (staged / "mmproj-F16.gguf").write_bytes(b"y")
+
+    assert _staged_vision_projector_missing(shard, staged) is True
+    _remove_invalid_staged_projector(shard, staged)
+
+    assert not (staged / "mmproj-F16.gguf").exists()
 
 
 def test_mlx_vision_without_projector_is_not_flagged(tmp_path: Path) -> None:

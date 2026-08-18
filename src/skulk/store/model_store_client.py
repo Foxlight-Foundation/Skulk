@@ -106,6 +106,7 @@ from skulk.store.installed_cards import (
     installed_companion_matches,
     read_installed_card_with_fallback,
     require_registry_installed_artifact,
+    verify_installed_file,
     write_installed_card_with_fallback,
 )
 from skulk.store.staging_eviction import touch_last_used
@@ -474,7 +475,7 @@ def _staged_directory_looks_complete(directory: Path) -> bool:
 
 
 def _staged_vision_projector_missing(shard: ShardMetadata, directory: Path) -> bool:
-    """True when a GGUF vision model's staged dir is missing its ``mmproj``.
+    """True when a GGUF vision model's staged dir lacks its authenticated ``mmproj``.
 
     The generic completeness probe (``_staged_directory_looks_complete``)
     excludes ``mmproj`` files, so a GGUF vision model staged without its
@@ -492,16 +493,46 @@ def _staged_vision_projector_missing(shard: ShardMetadata, directory: Path) -> b
     if card.vision is None or not card.gguf_file:
         return False
     if card.vision.projector_file is not None:
-        projector = directory.joinpath(*Path(card.vision.projector_file).parts)
-        return (
-            not projector.is_file()
-            or projector.stat().st_size != card.vision.projector_size
+        assert card.vision.projector_size is not None
+        try:
+            record = read_installed_card_with_fallback(directory)
+        except (OSError, ValueError):
+            return True
+        return record is None or not verify_installed_file(
+            directory,
+            record,
+            card.vision.projector_file,
+            expected_size=card.vision.projector_size,
         )
     from skulk.store.model_store import has_gguf_projector
 
     return not has_gguf_projector(
         path.name for path in directory.rglob("*") if path.is_file()
     )
+
+
+def _remove_invalid_staged_projector(
+    shard: ShardMetadata,
+    directory: Path,
+) -> None:
+    """Remove only a corrupt pinned projector so normal staging replaces it."""
+
+    card = shard.model_card
+    vision = card.vision
+    if (
+        vision is None
+        or vision.projector_file is None
+        or not _staged_vision_projector_missing(shard, directory)
+    ):
+        return
+    root = directory.resolve()
+    projector = (root / vision.projector_file).resolve()
+    if projector.is_relative_to(root) and projector.is_file():
+        projector.unlink()
+        logger.warning(
+            f"ModelStoreDownloader: removed invalid staged projector "
+            f"{vision.projector_file!r} for {card.model_id} before recovery"
+        )
 
 
 def _staged_pinned_gguf_missing(shard: ShardMetadata, directory: Path) -> bool:
@@ -1806,6 +1837,12 @@ class ModelStoreDownloader(ShardDownloader):
             )
 
         async with self._staging_transfer_lock:
+            if not replace_existing_generation and destination.exists():
+                await asyncio.to_thread(
+                    _remove_invalid_staged_projector,
+                    shard,
+                    destination,
+                )
             staged_path = await self._store_client.stage_shard(
                 model_id,
                 transfer_root,
