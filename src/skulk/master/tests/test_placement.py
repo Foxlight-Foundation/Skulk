@@ -26,6 +26,7 @@ from skulk.shared.models.model_cards import (
     ModelId,
     ModelTask,
     PlacementCardConfig,
+    VisionCardConfig,
 )
 from skulk.shared.models.registry import (
     RegistryCapabilityClaim,
@@ -991,6 +992,62 @@ def test_create_instance_restamps_context_token_limit() -> None:
     result = add_instance_to_placements(command, Topology(), {}, node_memory)
     stamped = next(iter(result.values())).context_token_limit
     assert stamped is not None and stamped <= 4096
+
+
+def test_create_instance_reserves_pinned_projector_on_exact_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exact-control path cannot spend projector bytes on KV admission."""
+
+    node_id = NodeId("served-driver")
+    runner_id = RunnerId("served-runner")
+    projector_size = Memory.from_gb(1).in_bytes
+    card = ModelCard(
+        model_id=ModelId("org/served-vision"),
+        storage_size=Memory.from_gb(4),
+        n_layers=10,
+        hidden_size=30,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        gguf_file="model-Q4_K_M.gguf",
+        source_revision="a" * 40,
+        vision=VisionCardConfig(
+            projector_file="mmproj-F16.gguf",
+            projector_size=projector_size,
+        ),
+    )
+    client_instance = MlxRingInstance(
+        instance_id=InstanceId(),
+        shard_assignments=ShardAssignments(
+            model_id=card.model_id,
+            runner_to_shard={runner_id: _make_shard_metadata(card)},
+            node_to_runner={node_id: runner_id},
+        ),
+        hosts_by_node={},
+        ephemeral_port=50000,
+    )
+    captured: dict[str, object] = {}
+
+    def fake_context_limit(*_args: object, **kwargs: object) -> int:
+        captured.update(kwargs)
+        return 2048
+
+    monkeypatch.setattr(
+        placement_module,
+        "instance_context_token_limit",
+        fake_context_limit,
+    )
+
+    add_instance_to_placements(
+        CreateInstance(command_id=CommandId(), instance=client_instance),
+        Topology(),
+        {},
+        {node_id: create_node_memory(Memory.from_gb(8).in_bytes)},
+    )
+
+    assert captured["fixed_memory_by_node"] == {
+        node_id: Memory.from_bytes(projector_size)
+    }
 
 
 def test_placement_prefers_cycle_with_downloaded_model(

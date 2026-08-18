@@ -190,6 +190,21 @@ def add_instance_to_placements(
         command.instance,
         approved_remote_code_identities,
     )
+    fixed_memory_by_node: dict[NodeId, Memory] = {}
+    first_shard = next(iter(assignments.runner_to_shard.values()), None)
+    if first_shard is not None:
+        card = first_shard.model_card
+        projector_size = (
+            card.vision.projector_size if card.vision is not None else None
+        )
+        if projector_size is not None:
+            projector_memory = Memory.from_bytes(projector_size)
+            if isinstance(command.instance, LlamaRpcInstance):
+                fixed_memory_by_node[command.instance.driver_node] = projector_memory
+            elif len(assignments.node_to_runner) == 1:
+                fixed_memory_by_node[next(iter(assignments.node_to_runner))] = (
+                    projector_memory
+                )
     ceiling = instance_context_token_limit(
         assignments,
         {
@@ -199,6 +214,7 @@ def add_instance_to_placements(
         },
         node_vram=node_vram,
         unified_memory_gpu_nodes=unified_memory_gpu_nodes,
+        fixed_memory_by_node=fixed_memory_by_node,
     )
     instance = command.instance.model_copy(update={"context_token_limit": ceiling})
     return {**current_instances, instance.instance_id: instance}
