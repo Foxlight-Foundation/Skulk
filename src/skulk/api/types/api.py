@@ -1289,6 +1289,12 @@ class CacheInventoryStatus(BaseModel):
         ge=0,
         description="Nodes currently expected from live cluster topology.",
     )
+    store_nodes: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Live nodes currently advertising the authoritative canonical-store role."
+        ),
+    )
 
 
 class StoreRegistryEntry(BaseModel):
