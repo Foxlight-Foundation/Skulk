@@ -140,6 +140,35 @@ def test_operator_summary_does_not_invent_negative_capability_truth() -> None:
     }
 
 
+def test_operator_tools_name_telemetry_only_nodes_without_changing_node_count() -> None:
+    topology_node = "12D3KooWTopologyNode123456789"
+    telemetry_node = "12D3KooWTelemetryOnlyNode123456789"
+    payload: dict[str, object] = {
+        "topology": {"nodes": [topology_node]},
+        "nodeIdentities": {
+            topology_node: {"friendlyName": "Worker"},
+            telemetry_node: {"friendlyName": "Operator API"},
+        },
+        "nodeResources": {
+            topology_node: {"backends": ["mlx"]},
+            telemetry_node: {"backends": ["management"]},
+        },
+        "nodeDisk": {
+            telemetry_node: {"freeBytes": 10 * 1024**3},
+        },
+    }
+
+    summary = steward_operator_summary(payload)
+    rendered = steward_operator_tool_result(payload)
+
+    assert summary["nodeCount"] == 1
+    assert cast("dict[str, object]", summary["nodeDisk"]) == {
+        "Operator API": {"freeBytes": 10 * 1024**3}
+    }
+    assert "Operator API" in rendered
+    assert telemetry_node not in rendered
+
+
 def test_operator_summary_separates_active_placement_from_ready_instances() -> None:
     payload: dict[str, object] = {
         "topology": {"nodes": ["node-a", "node-b"]},

@@ -525,12 +525,28 @@ def _node_name_lookup(state_payload: dict[str, object]) -> dict[str, str]:
     useful without leaking an implementation key into conversation.
     """
     topology = _as_object_dict(state_payload.get("topology"))
-    node_ids = [
+    topology_node_ids = [
         node_id
         for node_id in _as_object_list(topology.get("nodes"))
         if isinstance(node_id, str)
     ]
     identities = _as_object_dict(state_payload.get("nodeIdentities"))
+    telemetry_node_ids: set[str] = set()
+    for field in (
+        "nodeIdentities",
+        "nodeMemory",
+        "nodeSystem",
+        "nodeResources",
+        "nodeDisk",
+        "nodeRdmaCtl",
+        "nodeCapabilities",
+        "nodeHealth",
+    ):
+        telemetry_node_ids.update(_as_object_dict(state_payload.get(field)))
+    # Topology order remains authoritative for familiar fallback names. Extra
+    # management/API participants are sorted so aliases do not depend on the
+    # order in which their telemetry reached this API process.
+    node_ids = topology_node_ids + sorted(telemetry_node_ids - set(topology_node_ids))
     names: dict[str, str] = {}
     used_names: set[str] = set()
     for index, node_id in enumerate(node_ids, start=1):
