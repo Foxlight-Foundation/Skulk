@@ -190,6 +190,7 @@ def test_registry_inventory_is_current_only_when_every_node_is_fresh() -> None:
     assert status.state == "current"
     assert status.observed_nodes == 2
     assert status.expected_nodes == 2
+    assert status.store_nodes == ["node-a"]
     assert {location.node_id for location in locations["generation"]} == {
         "node-a",
         "node-b",
@@ -613,3 +614,60 @@ async def test_registry_synthesizes_store_local_and_keeps_node_cache_distinct(
         ("store-node", "store_local", False),
         ("worker-node", "node_cache", True),
     }
+
+
+async def test_registry_reports_store_node_for_unresolved_legacy_entry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Canonical locality remains additive before a legacy entry gains a card."""
+
+    store_root = tmp_path / "store"
+    store_root.mkdir()
+    card = _model_card()
+    registry_entry: dict[str, object] = {
+        "model_id": str(card.model_id),
+        "store_path": "org--model",
+        "files": ["model.safetensors"],
+        "downloaded_at": "2026-08-11T12:00:00+00:00",
+        "total_bytes": 7,
+        "source_revision": None,
+        "source_repository": None,
+        "repo_has_projector": None,
+        "installed_card": None,
+    }
+    client = ModelStoreClient(
+        store_host="store-node",
+        local_store_path=store_root,
+    )
+
+    async def fetch_registry() -> list[dict[str, object]]:
+        return [registry_entry]
+
+    async def cards() -> tuple[ModelCard, ...]:
+        return ()
+
+    def current_card(_model_id: ModelId) -> ModelCard | None:
+        return None
+
+    def current_card_id(_model_id: ModelId) -> str | None:
+        return None
+
+    monkeypatch.setattr(client, "fetch_registry", fetch_registry)
+    monkeypatch.setattr(api_main, "get_all_model_cards", cards)
+    monkeypatch.setattr(api_main, "get_current_registry_card", current_card)
+    monkeypatch.setattr(api_main, "get_current_registry_card_id", current_card_id)
+    api = _projection_api("store-node")
+    api._store_client = client
+    api._reconciliation_status = ReconciliationStatus()
+    _apply_inventory(
+        api,
+        "store-node",
+        NodeArtifactInventory(artifacts=[], store_host=True, truncated=False),
+    )
+
+    response = await api.get_store_registry()
+
+    assert response.cache_inventory.state == "current"
+    assert response.cache_inventory.store_nodes == ["store-node"]
+    assert response.entries[0].cached_on_nodes == []

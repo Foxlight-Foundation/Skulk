@@ -11977,6 +11977,7 @@ class API:
                 state=state,
                 observed_nodes=observed_nodes,
                 expected_nodes=expected_count,
+                store_nodes=[str(node_id) for node_id in store_hosts],
             ),
             locations,
             store_hosts,

@@ -1898,7 +1898,9 @@ artifact role and owning card, `current_registry_identity`,
 their owning base card by the dashboard.
 
 The top-level `cache_inventory` reports `observed_nodes`, `expected_nodes`, and a
-coverage state:
+coverage state. Its additive `store_nodes` list identifies live nodes currently
+advertising the canonical-store role, including when a legacy entry has not yet
+resolved to an exact installed identity:
 
 - `syncing`: at least one newly live node has not published its first inventory.
 - `current`: every live node has a fresh, complete reading.
@@ -1906,8 +1908,10 @@ coverage state:
   after convergence, or truncated by the fixed telemetry bound.
 - `unavailable`: no usable node inventory exists.
 
-Canonical store entries are not copied into telemetry. The store host publishes
-only its role, and each API synthesizes `store_local` for canonical entries.
+Canonical store entries are not copied into telemetry. Store hosts publish only
+their role. Each API synthesizes exact `store_local` entries when an installed
+identity is available; clients can combine `store_nodes` with canonical store
+truth for unresolved legacy entries without weakening identity verification.
 Other cache locations come from compact, last-write-wins node telemetry. Stale
 known locations remain visible while the top-level state is `degraded`; callers
 must not treat this operator/read projection as transfer authorization.
