@@ -567,10 +567,21 @@ def _friendly_node_payload(value: object, node_names: Mapping[str, str]) -> obje
     """Replace known routing identifiers throughout a diagnostic payload."""
     if isinstance(value, dict):
         mapping = cast("dict[object, object]", value)
-        return {
-            node_names.get(str(key), str(key)): _friendly_node_payload(item, node_names)
-            for key, item in mapping.items()
-        }
+        rendered_mapping: dict[str, object] = {}
+        used_keys: set[str] = set()
+        for key, item in mapping.items():
+            raw_key = str(key)
+            friendly_key = node_names.get(raw_key, raw_key)
+            if raw_key not in node_names:
+                friendly_key = _NODE_IDENTIFIER.sub("Unavailable node", friendly_key)
+            base_key = friendly_key
+            suffix = 2
+            while friendly_key.casefold() in used_keys:
+                friendly_key = f"{base_key} ({suffix})"
+                suffix += 1
+            rendered_mapping[friendly_key] = _friendly_node_payload(item, node_names)
+            used_keys.add(friendly_key.casefold())
+        return rendered_mapping
     if isinstance(value, list):
         items = cast("list[object]", value)
         return [_friendly_node_payload(item, node_names) for item in items]

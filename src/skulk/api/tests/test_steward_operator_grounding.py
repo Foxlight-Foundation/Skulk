@@ -169,6 +169,32 @@ def test_operator_tools_name_telemetry_only_nodes_without_changing_node_count() 
     assert telemetry_node not in rendered
 
 
+def test_operator_diagnostics_redact_unknown_node_identifier_keys() -> None:
+    first = "12D3KooWDepartedOwnerOne123456789"
+    second = "12D3KooWDepartedOwnerTwo123456789"
+    payload: dict[str, object] = {
+        "topology": {"nodes": ["current-node"]},
+        "nodeDisk": {
+            "current-node": {
+                "owners": {first: {"packets": 1}, second: {"packets": 2}}
+            }
+        },
+    }
+
+    node_disk = cast(
+        "dict[str, object]", steward_operator_summary(payload)["nodeDisk"]
+    )
+    current_node = cast("dict[str, object]", node_disk["Node 1"])
+    owners = cast("dict[str, object]", current_node["owners"])
+
+    assert owners == {
+        "Unavailable node": {"packets": 1},
+        "Unavailable node (2)": {"packets": 2},
+    }
+    assert first not in json.dumps(node_disk)
+    assert second not in json.dumps(node_disk)
+
+
 def test_operator_summary_separates_active_placement_from_ready_instances() -> None:
     payload: dict[str, object] = {
         "topology": {"nodes": ["node-a", "node-b"]},
