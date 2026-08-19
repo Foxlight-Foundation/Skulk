@@ -104,18 +104,19 @@ def test_operator_summary_preserves_heterogeneous_node_truth() -> None:
 
     assert summary["nodeCount"] == 3
     nodes = cast("list[dict[str, object]]", summary["nodes"])
-    by_id = {cast(str, node["nodeId"]): node for node in nodes}
-    assert by_id["apple-node"]["chip"] == "Apple M4"
-    assert by_id["amd-node"]["chip"] == "AMD Ryzen AI MAX+ 395"
-    assert by_id["cuda-node"]["chip"] == "NVIDIA GB10"
-    assert cast("dict[str, object]", by_id["amd-node"]["memory"])["ramTotalGiB"] == 128.0
-    assert cast("dict[str, object]", by_id["cuda-node"]["supports"]) == {
+    by_name = {cast(str, node["name"]): node for node in nodes}
+    assert by_name["Apple"]["chip"] == "Apple M4"
+    assert by_name["AMD"]["chip"] == "AMD Ryzen AI MAX+ 395"
+    assert by_name["CUDA"]["chip"] == "NVIDIA GB10"
+    assert cast("dict[str, object]", by_name["AMD"]["memory"])["ramTotalGiB"] == 128.0
+    assert cast("dict[str, object]", by_name["CUDA"]["supports"]) == {
         "cuda": True,
         "rocm": False,
         "mlx": False,
     }
-    assert cast("dict[str, object]", by_id["amd-node"]["supports"])["rocm"] is True
-    assert cast("dict[str, object]", by_id["apple-node"]["supports"])["mlx"] is True
+    assert cast("dict[str, object]", by_name["AMD"]["supports"])["rocm"] is True
+    assert cast("dict[str, object]", by_name["Apple"]["supports"])["mlx"] is True
+    assert "nodeId" not in nodes[0]
 
 
 def test_operator_summary_does_not_invent_negative_capability_truth() -> None:
@@ -218,11 +219,10 @@ def test_operator_summary_separates_internal_services_and_historical_failures() 
         {
             "historical": True,
             "currentInstance": False,
-            "instanceId": "vanished-instance",
             "modelId": "org/old-model",
             "errorCode": "runner_crashed",
             "errorMessage": "Runner exited.",
-            "affectedNodeIds": ["node-a"],
+            "affectedNodes": ["Node 1"],
             "recordedAt": "2026-08-17T12:00:00Z",
         }
     ]
@@ -261,9 +261,9 @@ def test_operator_summary_keeps_replacement_instance_current_with_same_model_id(
     assert [(row["modelId"], row["lifecycle"]) for row in ready] == [
         ("org/recovered-model", "ready")
     ]
-    assert [(row["instanceId"], row["modelId"]) for row in failures] == [
-        ("failed-instance", "org/recovered-model")
-    ]
+    assert [row["modelId"] for row in failures] == ["org/recovered-model"]
+    assert "instanceId" not in ready[0]
+    assert "instanceId" not in failures[0]
 
 
 def test_operator_summary_marks_terminal_downloads_inactive() -> None:
@@ -300,7 +300,7 @@ def test_operator_summary_marks_terminal_downloads_inactive() -> None:
 
     summary = steward_operator_summary(payload)
     downloads = cast("dict[str, list[dict[str, object]]]", summary["downloads"])
-    assert [(row["modelId"], row["lifecycle"], row["active"]) for row in downloads["node-a"]] == [
+    assert [(row["modelId"], row["lifecycle"], row["active"]) for row in downloads["Node 1"]] == [
         ("org/already-downloaded", "completed", False),
         ("org/downloading-now", "downloading", True),
     ]
@@ -360,12 +360,16 @@ def test_operator_tool_result_preserves_lifecycle_truth_when_nodes_are_large() -
         ("org/model-ready", "ready")
     ]
     coverage = cast("dict[str, dict[str, int]]", result["coverage"])
-    assert coverage["nodes"]["total"] == 12
+    assert coverage["nodes"] == {"included": 12, "total": 12}
 
 
 def test_operator_tool_result_keeps_downloads_from_multiple_nodes() -> None:
     payload: dict[str, object] = {
         "topology": {"nodes": ["node-a", "node-b"]},
+        "nodeIdentities": {
+            "node-a": {"friendlyName": "Node A"},
+            "node-b": {"friendlyName": "Node B"},
+        },
         "downloads": {
             "node-a": [{"DownloadPending": {}}],
             "node-b": [{"DownloadPending": {}}],
@@ -379,6 +383,38 @@ def test_operator_tool_result_keeps_downloads_from_multiple_nodes() -> None:
     result = cast("dict[str, object]", json.loads(rendered))
 
     downloads = cast("dict[str, list[dict[str, object]]]", result["downloads"])
-    assert sorted(downloads) == ["node-a", "node-b"]
+    assert sorted(downloads) == ["Node A", "Node B"]
     coverage = cast("dict[str, dict[str, int]]", result["coverage"])
     assert coverage["downloads"] == {"included": 2, "total": 2}
+
+
+def test_operator_tool_result_never_exposes_internal_identifiers() -> None:
+    node_id = "12D3KooWPrivateRoutingIdentity123456789"
+    instance_id = "b25203ab-6eb8-44b1-8b3d-9df19e751906"
+    payload: dict[str, object] = {
+        "topology": {"nodes": [node_id]},
+        "nodeIdentities": {node_id: {"friendlyName": "Studio"}},
+        "instances": {
+            instance_id: _instance(
+                model_id="org/current-model", node_to_runner={node_id: "runner-private"}
+            )
+        },
+        "runners": {"runner-private": {"RunnerReady": {}}},
+        "instanceFailures": [
+            {
+                "instanceId": "old-private-instance",
+                "modelId": "org/old-model",
+                "errorCode": "node_unavailable",
+                "errorMessage": f"Assigned node {node_id} timed out.",
+                "affectedNodeIds": [node_id],
+                "recordedAt": "2026-08-19T12:00:00Z",
+            }
+        ],
+    }
+
+    rendered = steward_operator_tool_result(payload)
+
+    assert "Studio" in rendered
+    assert node_id not in rendered
+    assert instance_id not in rendered
+    assert "runner-private" not in rendered

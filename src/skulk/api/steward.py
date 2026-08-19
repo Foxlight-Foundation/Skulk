@@ -147,6 +147,10 @@ Rules:
 - Evidence means concrete observed values from tool results, not guesses.
 - Treat the tool's nodeCount, memory values, capability booleans, and lifecycle
   buckets as authoritative. Copy them exactly; never infer a missing value.
+- Refer to nodes only by the friendly names supplied by the tools. Never emit
+  internal node, instance, runner, task, or command identifiers to an operator.
+- nodeCount is the complete current topology count. Do not substitute a count
+  of inspected nodes, model-hosting nodes, or nodes included after compaction.
 - The latest tool result supersedes model memory and earlier conversation
   claims about cluster state.
 - Current operator-managed model instances exist ONLY in the three fields whose
@@ -190,9 +194,9 @@ def steward_tool_definitions() -> list[dict[str, Any]]:
             {
                 "type": "object",
                 "properties": {
-                    "node_id": {
+                    "node_name": {
                         "type": "string",
-                        "description": "Node to inspect; omit for all nodes.",
+                        "description": "Friendly node name to inspect; omit for all nodes.",
                     }
                 },
                 "required": [],
@@ -510,6 +514,60 @@ def _memory_bytes(value: object) -> int | None:
     return raw if isinstance(raw, int) and not isinstance(raw, bool) else None
 
 
+_NODE_IDENTIFIER = re.compile(r"\b12D3Koo[A-Za-z0-9]+\b")
+
+
+def _node_name_lookup(state_payload: dict[str, object]) -> dict[str, str]:
+    """Map routing identities to unique operator-facing names.
+
+    Internal libp2p identifiers are intentionally absent from the returned
+    values. A stable positional fallback keeps incomplete identity telemetry
+    useful without leaking an implementation key into conversation.
+    """
+    topology = _as_object_dict(state_payload.get("topology"))
+    node_ids = [
+        node_id
+        for node_id in _as_object_list(topology.get("nodes"))
+        if isinstance(node_id, str)
+    ]
+    identities = _as_object_dict(state_payload.get("nodeIdentities"))
+    names: dict[str, str] = {}
+    used_names: set[str] = set()
+    for index, node_id in enumerate(node_ids, start=1):
+        friendly_name = _as_object_dict(identities.get(node_id)).get("friendlyName")
+        candidate = (
+            friendly_name.strip()
+            if isinstance(friendly_name, str) and friendly_name.strip()
+            else f"Node {index}"
+        )
+        if candidate in used_names:
+            candidate = f"{candidate} ({index})"
+        names[node_id] = candidate
+        used_names.add(candidate)
+    return names
+
+
+def _friendly_node_payload(value: object, node_names: Mapping[str, str]) -> object:
+    """Replace known routing identifiers throughout a diagnostic payload."""
+    if isinstance(value, dict):
+        mapping = cast("dict[object, object]", value)
+        return {
+            node_names.get(str(key), str(key)): _friendly_node_payload(item, node_names)
+            for key, item in mapping.items()
+        }
+    if isinstance(value, list):
+        items = cast("list[object]", value)
+        return [_friendly_node_payload(item, node_names) for item in items]
+    if isinstance(value, str):
+        rendered = value
+        for node_id, node_name in sorted(
+            node_names.items(), key=lambda item: len(item[0]), reverse=True
+        ):
+            rendered = rendered.replace(node_id, node_name)
+        return _NODE_IDENTIFIER.sub("an unavailable node", rendered)
+    return value
+
+
 def _instance_lifecycle(
     instance: dict[str, object], state_payload: dict[str, object]
 ) -> tuple[InstanceLifecycle, dict[str, str]]:
@@ -538,31 +596,36 @@ def _instance_lifecycle(
     return "placing", runner_states
 
 
-def _instances_summary(state_payload: dict[str, object]) -> list[dict[str, object]]:
+def _instances_summary(
+    state_payload: dict[str, object], node_names: Mapping[str, str]
+) -> list[dict[str, object]]:
     """Compact instance listing with explicit, non-overlapping lifecycle truth."""
     summary: list[dict[str, object]] = []
-    for instance_id, envelope in _as_object_dict(
+    for _instance_id, envelope in _as_object_dict(
         state_payload.get("instances")
     ).items():
-        for kind, body_obj in _as_object_dict(envelope).items():
+        for _kind, body_obj in _as_object_dict(envelope).items():
             body = _as_object_dict(body_obj)
             assignments = _as_object_dict(body.get("shardAssignments"))
-            lifecycle, runner_states = _instance_lifecycle(body, state_payload)
+            lifecycle, _runner_states = _instance_lifecycle(body, state_payload)
+            node_ids = sorted(_as_object_dict(assignments.get("nodeToRunner")))
             summary.append(
                 {
-                    "instanceId": instance_id,
-                    "kind": kind,
                     "modelId": assignments.get("modelId"),
-                    "nodes": sorted(_as_object_dict(assignments.get("nodeToRunner"))),
+                    "nodes": [
+                        node_names.get(node_id, "Unavailable node")
+                        for node_id in node_ids
+                    ],
                     "systemRole": body.get("systemRole"),
                     "lifecycle": lifecycle,
-                    "runnerStates": runner_states,
                 }
             )
     return summary
 
 
-def _node_summaries(state_payload: dict[str, object]) -> list[dict[str, object]]:
+def _node_summaries(
+    state_payload: dict[str, object], node_names: Mapping[str, str]
+) -> list[dict[str, object]]:
     """Project exact heterogeneous-node facts into a compact operator table."""
     topology = _as_object_dict(state_payload.get("topology"))
     topology_nodes = [
@@ -603,8 +666,7 @@ def _node_summaries(state_payload: dict[str, object]) -> list[dict[str, object]]
         available_bytes = _memory_bytes(memory.get("ramAvailable"))
         summaries.append(
             {
-                "nodeId": node_id,
-                "name": identity.get("friendlyName"),
+                "name": node_names[node_id],
                 "model": identity.get("modelId"),
                 "chip": identity.get("chipId"),
                 "operatingSystem": identity.get("osVersion"),
@@ -663,35 +725,44 @@ def _node_summaries(state_payload: dict[str, object]) -> list[dict[str, object]]
 
 
 def _instance_failures_summary(
-    state_payload: dict[str, object],
+    state_payload: dict[str, object], node_names: Mapping[str, str]
 ) -> list[dict[str, object]]:
     """Compact retained failures while marking them as non-current history."""
     summary: list[dict[str, object]] = []
     for item in _as_object_list(state_payload.get("instanceFailures")):
         failure = _as_object_dict(item)
+        affected_node_ids = [
+            node_id
+            for node_id in _as_object_list(failure.get("affectedNodeIds"))
+            if isinstance(node_id, str)
+        ]
         summary.append(
             {
+                key: value
+                for key, value in {
                 "historical": True,
                 "currentInstance": False,
-                **{
-                    key: failure.get(key)
-                    for key in (
-                        "instanceId",
-                        "modelId",
-                        "systemRole",
-                        "errorCode",
-                        "errorMessage",
-                        "affectedNodeIds",
-                        "recordedAt",
-                    )
-                    if failure.get(key) is not None
-                },
+                "modelId": failure.get("modelId"),
+                "systemRole": failure.get("systemRole"),
+                "errorCode": failure.get("errorCode"),
+                "errorMessage": _friendly_node_payload(
+                    failure.get("errorMessage"), node_names
+                ),
+                "affectedNodes": [
+                    node_names.get(node_id, "Unavailable node")
+                    for node_id in affected_node_ids
+                ],
+                "recordedAt": failure.get("recordedAt"),
+                }.items()
+                if value is not None
             }
         )
     return summary
 
 
-def _downloads_summary(state_payload: dict[str, object]) -> dict[str, object]:
+def _downloads_summary(
+    state_payload: dict[str, object], node_names: Mapping[str, str]
+) -> dict[str, object]:
     """Compact downloads while explicitly separating live from terminal state."""
     summary: dict[str, object] = {}
     for node_id, entries in _as_object_dict(state_payload.get("downloads")).items():
@@ -729,14 +800,15 @@ def _downloads_summary(state_payload: dict[str, object]) -> dict[str, object]:
                     row["etaMs"] = progress.get("etaMs")
                 rows.append(row)
         if rows:
-            summary[node_id] = rows
+            summary[node_names.get(node_id, "Unavailable node")] = rows
     return summary
 
 
 def steward_operator_summary(state_payload: dict[str, object]) -> dict[str, object]:
     """Build current operator truth separately from internal and past state."""
-    instances = _instances_summary(state_payload)
-    nodes = _node_summaries(state_payload)
+    node_names = _node_name_lookup(state_payload)
+    instances = _instances_summary(state_payload, node_names)
+    nodes = _node_summaries(state_payload, node_names)
     operator_instances = [
         instance for instance in instances if not instance.get("systemRole")
     ]
@@ -762,22 +834,34 @@ def steward_operator_summary(state_payload: dict[str, object]) -> dict[str, obje
             if instance.get("lifecycle") in {"stopping", "failed"}
         ],
         "fabricSystemInstances": fabric_system_instances,
-        "historicalTerminalFailures": _instance_failures_summary(state_payload),
-        "downloads": _downloads_summary(state_payload),
-        "nodeDisk": state_payload.get("nodeDisk", {}),
+        "historicalTerminalFailures": _instance_failures_summary(
+            state_payload, node_names
+        ),
+        "downloads": _downloads_summary(state_payload, node_names),
+        "nodeDisk": _friendly_node_payload(
+            state_payload.get("nodeDisk", {}), node_names
+        ),
     }
 
 
 def _compact_node_summary(node: dict[str, object]) -> dict[str, object]:
     """Keep the exact node facts most useful to operator questions."""
     health = _as_object_dict(node.get("health"))
-    return {
-        key: node.get(key)
-        for key in ("nodeId", "name", "model", "chip")
-    } | {
-        "health": {"level": health.get("level")},
-        "memory": node.get("memory"),
-        "accelerator": node.get("accelerator"),
+    memory = _as_object_dict(node.get("memory"))
+    identity = {
+        key: (
+            value[:48] + "…"
+            if isinstance(value := node.get(key), str) and len(value) > 48
+            else value
+        )
+        for key in ("name", "model", "chip")
+    }
+    return identity | {
+        "health": health.get("level"),
+        "memoryGiB": {
+            "total": memory.get("ramTotalGiB"),
+            "available": memory.get("ramAvailableGiB"),
+        },
         "backends": node.get("backends"),
         "supports": node.get("supports"),
     }
@@ -854,14 +938,24 @@ def steward_operator_tool_result(state_payload: dict[str, object]) -> str:
         field_coverage["included"] = len(target)
         return False
 
-    # Lifecycle truth answers the most important operator questions and must
-    # never disappear behind a large node table.
-    for field in list_fields:
+    # Current topology and lifecycle truth answer the most common operator
+    # questions. Historical failures are retained only after every live node
+    # and current runtime has had an opportunity to fit.
+    current_fields = (
+        "operatorActivePlacements",
+        "operatorReadyOrRunningInstances",
+        "operatorStoppingOrFailedInstances",
+        "fabricSystemInstances",
+    )
+    for field in current_fields:
         for row in _as_object_list(summary.get(field)):
             if not append_list_row(field, row):
                 break
     for node in nodes:
         if not append_list_row("nodes", node):
+            break
+    for row in _as_object_list(summary.get("historicalTerminalFailures")):
+        if not append_list_row("historicalTerminalFailures", row):
             break
 
     compact_downloads = cast("dict[str, object]", compact["downloads"])
@@ -1129,37 +1223,68 @@ class StewardHarness:
             return steward_operator_tool_result(payload)
         if name == "get_node_resources":
             payload = await api.get_cluster_state()
-            nodes = _as_object_dict(payload.get("nodeResources"))
-            node_id = arguments.get("node_id")
-            if isinstance(node_id, str) and node_id:
-                if node_id not in nodes:
+            node_names = _node_name_lookup(payload)
+            raw_nodes = _as_object_dict(payload.get("nodeResources"))
+            nodes = {
+                node_names.get(node_id, "Unavailable node"): _friendly_node_payload(
+                    resources, node_names
+                )
+                for node_id, resources in raw_nodes.items()
+            }
+            requested_node = arguments.get(
+                "node_name", arguments.get("node", arguments.get("node_id"))
+            )
+            if isinstance(requested_node, str) and requested_node:
+                matched_name = next(
+                    (
+                        node_name
+                        for node_name in nodes
+                        if node_name.casefold() == requested_node.casefold()
+                    ),
+                    None,
+                )
+                if matched_name is None:
                     return json.dumps(
                         {
-                            "error": f"unknown node_id '{node_id}'",
+                            "error": f"unknown node '{requested_node}'",
                             "known_nodes": sorted(nodes),
                         }
                     )
-                nodes = {node_id: nodes[node_id]}
+                nodes = {matched_name: nodes[matched_name]}
             return _bounded({"nodes": nodes})
         if name == "get_telemetry_diagnostics":
             report = await api.get_telemetry_plane_diagnostics()
-            return _bounded(report.model_dump(by_alias=True, mode="json"))
+            payload = await api.get_cluster_state()
+            return _bounded(
+                _friendly_node_payload(
+                    report.model_dump(by_alias=True, mode="json"),
+                    _node_name_lookup(payload),
+                )
+            )
         if name == "get_data_plane_diagnostics":
             diagnostics = await api.get_node_diagnostics()
+            payload = await api.get_cluster_state()
             return _bounded(
-                diagnostics.data_plane.model_dump(by_alias=True, mode="json")
+                _friendly_node_payload(
+                    diagnostics.data_plane.model_dump(by_alias=True, mode="json"),
+                    _node_name_lookup(payload),
+                )
             )
         if name == "get_cluster_versions":
             cluster = await api.get_cluster_diagnostics()
+            payload = await api.get_cluster_state()
+            node_names = _node_name_lookup(payload)
             return _bounded(
                 {
                     "versionStatus": cluster.version_status,
-                    "masterNodeId": str(cluster.master_node_id)
+                    "masterNode": node_names.get(str(cluster.master_node_id))
                     if cluster.master_node_id is not None
                     else None,
                     "nodes": [
                         {
-                            "nodeId": str(node.node_id),
+                            "name": node_names.get(
+                                str(node.node_id), "Unavailable node"
+                            ),
                             "ok": node.ok,
                             "versionStatus": node.version_status,
                             "error": node.error,
@@ -1170,7 +1295,13 @@ class StewardHarness:
             )
         if name == "get_performance_envelopes":
             report = await api.get_performance_envelopes()
-            return _bounded(report.model_dump(by_alias=True, mode="json"))
+            payload = await api.get_cluster_state()
+            return _bounded(
+                _friendly_node_payload(
+                    report.model_dump(by_alias=True, mode="json"),
+                    _node_name_lookup(payload),
+                )
+            )
         if name == "run_doctor":
             # The doctor registry runs against the process-cached facts
             # snapshot, so this is a cheap local read, not a fresh probe.
