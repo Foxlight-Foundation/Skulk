@@ -551,6 +551,7 @@ class ModelStore:
         model_id: str,
         source_revision: str | None,
         source_repository: str | None,
+        model_card: ModelCard | None = None,
     ) -> bool:
         """Return whether the canonical entry matches the complete byte source."""
         entry = self.get_entry(model_id)
@@ -558,7 +559,24 @@ class ModelStore:
             return False
         registered_repository = entry.source_repository or entry.model_id
         requested_repository = source_repository or model_id
-        return registered_repository == requested_repository
+        if registered_repository != requested_repository:
+            return False
+        if model_card is None or model_card.artifact_bundle is None:
+            return True
+        installed = entry.installed_card
+        if (
+            installed is None
+            or installed.artifact_bundle_id != model_card.artifact_bundle.bundle_id
+        ):
+            return False
+        model_path = _resolve_store_child_path(self._store_path, entry.store_path)
+        if model_path is None or not verify_installed_card(model_path, installed):
+            return False
+        installed_sizes = {item.path: item.size_bytes for item in installed.files}
+        requested_sizes = {
+            item.path: item.size_bytes for item in model_card.artifact_bundle.files
+        }
+        return installed_sizes == requested_sizes
 
     def list_models(self) -> list[StoreModelEntry]:
         """Return all :class:`StoreModelEntry` objects currently in the registry
@@ -1338,6 +1356,7 @@ class ModelStore:
                 model_id,
                 source_revision,
                 source_repository,
+                model_card,
             )
             if (
                 self.is_in_store(model_id)
@@ -1889,6 +1908,7 @@ class ModelStore:
                 )
             if (
                 expected_projector is None
+                and (model_card is None or model_card.artifact_bundle is None)
                 and repo_ships_projector
                 and not has_gguf_projector(files)
             ):

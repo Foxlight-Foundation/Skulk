@@ -894,6 +894,64 @@ async def test_completed_download_refreshes_card_without_rehashing_bytes(
     assert refreshed.installed_card.files == old_record.files
 
 
+async def test_matching_revision_does_not_relabel_a_different_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A same-revision alias cannot reuse bytes from another signed bundle."""
+
+    store = ModelStore(tmp_path)
+    artifact = _artifact(tmp_path)
+    first_bundle = ArtifactBundleConfig(
+        bundle_id=f"bundle_{'a' * 52}",
+        files=(
+            ArtifactBundleFile(path="config.json", size_bytes=2),
+            ArtifactBundleFile(path="model.safetensors", size_bytes=7),
+        ),
+        download_size=9,
+    )
+    first_card = _card().model_copy(update={"artifact_bundle": first_bundle})
+    first_record = build_installed_card_record(artifact, first_card)
+    write_installed_card(artifact, first_record)
+    store.register_model(
+        "org/model",
+        artifact,
+        [entry.path for entry in first_record.files],
+        sum(entry.size_bytes for entry in first_record.files),
+        source_revision=first_card.source_revision,
+        source_repository=str(first_card.artifact_repository),
+        installed_card=first_record,
+    )
+    second_bundle = ArtifactBundleConfig(
+        bundle_id=f"bundle_{'b' * 52}",
+        files=(ArtifactBundleFile(path="other.safetensors", size_bytes=8),),
+        download_size=8,
+    )
+    second_card = first_card.model_copy(
+        update={
+            "registry_card_id": f"card_{'b' * 52}",
+            "artifact_bundle": second_bundle,
+        }
+    )
+
+    async def hold_replacement(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(store, "_do_download", hold_replacement)
+
+    status = await store.request_download(
+        "org/model",
+        source_revision=second_card.source_revision,
+        source_repository=str(second_card.artifact_repository),
+        model_card=second_card,
+    )
+    await asyncio.sleep(0)
+
+    retained = store.get_entry("org/model")
+    assert status.status == "pending"
+    assert retained is not None and retained.installed_card == first_record
+
+
 async def test_completed_legacy_import_with_matching_revision_becomes_verified(
     tmp_path: Path,
 ) -> None:

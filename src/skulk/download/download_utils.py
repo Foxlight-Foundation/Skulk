@@ -1365,28 +1365,31 @@ async def _download_file(
 
         local_size = (await aios.stat(target_path)).st_size
 
-        # Try to verify against remote, but allow offline operation
+        # Transport failure may use a complete cached file for offline operation.
+        # A successful metadata lookup followed by a signed identity mismatch is
+        # deterministic evidence that the cache is not the requested object and
+        # must never be downgraded to an offline fallback.
         try:
             remote_size, remote_etag = await file_meta(model_id, revision, path)
-            _require_expected_remote_identity(
-                path,
-                remote_size,
-                remote_etag,
-                expected_size=expected_size,
-                expected_object_id=expected_object_id,
-            )
-            if local_size != remote_size:
-                logger.info(
-                    f"File {path} size mismatch (local={local_size}, remote={remote_size}), re-downloading"
-                )
-                await aios.remove(target_path)
-            else:
-                return target_path
         except Exception as e:
             # Offline or network error - trust local file
             logger.debug(
                 f"Could not verify {path} against remote (offline?): {e}, using local file"
             )
+            return target_path
+        _require_expected_remote_identity(
+            path,
+            remote_size,
+            remote_etag,
+            expected_size=expected_size,
+            expected_object_id=expected_object_id,
+        )
+        if local_size != remote_size:
+            logger.info(
+                f"File {path} size mismatch (local={local_size}, remote={remote_size}), re-downloading"
+            )
+            await aios.remove(target_path)
+        else:
             return target_path
 
     if skip_internet:
