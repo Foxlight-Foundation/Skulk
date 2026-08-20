@@ -467,6 +467,14 @@ generations load before registry access and remain usable in `SKULK_OFFLINE=true
 while complete. A registry replacement is reported as an update and becomes
 active only after its new generation commits atomically.
 
+Signed registry-v2 cards may carry an exact `artifact_bundle` with a
+repository-relative loader root, immutable required-file metadata, download
+size, and content-derived bundle identity. Direct and store downloaders fetch
+only that allow-list, preserve its layout, and fail on path, size, or upstream
+object mismatch. Bundle identity is part of installed generations and store
+keys, so aliases sharing one repository/revision cannot collide. V1 cards keep
+their existing repository-wide tensor and pinned-GGUF behavior.
+
 The authoritative store host periodically reconciles node caches through
 bounded `/store/storage` inventories and capability-bound range exports.
 Inventory covers staging, direct-download, and configured read-only model

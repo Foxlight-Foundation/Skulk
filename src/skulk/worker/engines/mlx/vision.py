@@ -914,11 +914,18 @@ class VisionEncoder:
         model_id: ModelId,
         source_revision: str | None = None,
         source_repository: ModelId | None = None,
+        artifact_root: str | None = None,
     ):
         self._config = config
         self._source_revision = source_revision
         self._source_repository = source_repository or model_id
-        self._main_model_path = build_model_path(model_id, source_revision)
+        self._main_model_path = (
+            build_model_path(model_id, source_revision)
+            if artifact_root is None
+            else build_model_path(
+                model_id, source_revision, artifact_root=artifact_root
+            )
+        )
         if config.weights_repo == str(self._source_repository):
             self._model_path = self._main_model_path
         else:
@@ -1637,6 +1644,7 @@ class VisionProcessor:
         model_id: ModelId,
         source_revision: str | None = None,
         source_repository: ModelId | None = None,
+        artifact_root: str | None = None,
     ):
         self.vision_config = config
         self._encoder = VisionEncoder(
@@ -1644,6 +1652,7 @@ class VisionProcessor:
             model_id,
             source_revision,
             source_repository,
+            artifact_root,
         )
         self._feature_cache: dict[str, tuple[mx.array, list[int]]] = {}
         self._feature_cache_max = 32

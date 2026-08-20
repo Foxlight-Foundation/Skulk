@@ -589,7 +589,11 @@ class Runner(ServedConcurrentDispatch):
 
         card = self.shard_metadata.model_card
         model_id = card.model_id
-        model_dir = build_model_path(ModelId(model_id), card.source_revision)
+        model_dir = build_model_path(
+            ModelId(model_id),
+            card.source_revision,
+            card.artifact_bundle.root if card.artifact_bundle is not None else None,
+        )
         # Placement stamps the vllm startup-cost cap into context_token_limit
         # (VLLM_MAX_MODEL_LEN at the stamp, so admission and the served
         # window agree); the min() here is defense in depth for instances

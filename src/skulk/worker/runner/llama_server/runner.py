@@ -725,21 +725,33 @@ class Runner(ServedConcurrentDispatch):
         self.update_status(RunnerLoading())
         self.acknowledge_task(task)
 
-        from skulk.download.download_utils import build_model_path
+        from skulk.download.download_utils import (
+            build_model_path,
+            resolve_artifact_file,
+        )
 
         card = self.shard_metadata.model_card
         model_id = card.model_id
-        model_dir = build_model_path(ModelId(model_id), card.source_revision)
+        model_dir = build_model_path(
+            ModelId(model_id),
+            card.source_revision,
+            card.artifact_bundle.root if card.artifact_bundle is not None else None,
+        )
         # Load the file the card pinned (the selected quant); fall back to scanning
         # so download / sizing / loading stay in agreement. Reject an absolute or
         # ``..`` path that escapes the model dir.
         pinned = card.gguf_file
         gguf_path: Path | None = None
         if pinned:
-            candidate = (model_dir / pinned).resolve()
-            if candidate.is_file() and candidate.is_relative_to(model_dir.resolve()):
-                gguf_path = candidate
-            else:
+            try:
+                gguf_path = resolve_artifact_file(
+                    model_dir,
+                    card.artifact_bundle.root
+                    if card.artifact_bundle is not None
+                    else None,
+                    pinned,
+                )
+            except (FileNotFoundError, ValueError):
                 logger.warning(
                     f"card gguf_file {pinned!r} is missing or outside the model "
                     f"dir; scanning {model_dir} instead"
@@ -929,20 +941,29 @@ class Runner(ServedConcurrentDispatch):
             return None
         assert vision.projector_file is not None
         assert vision.projector_size is not None
+        from skulk.download.download_utils import (
+            artifact_install_directory,
+            resolve_artifact_file,
+        )
         from skulk.store.installed_cards import (
             read_installed_card_with_fallback,
             verify_installed_file,
         )
 
+        artifact_root = (
+            card.artifact_bundle.root if card.artifact_bundle is not None else None
+        )
+        install_directory = artifact_install_directory(model_dir, artifact_root)
+
         try:
-            record = read_installed_card_with_fallback(model_dir)
+            record = read_installed_card_with_fallback(install_directory)
         except (OSError, ValueError) as error:
             raise RuntimeError(
                 f"served vision projector metadata is unreadable for "
                 f"{card.model_id}: {error}"
             ) from error
         if record is None or not verify_installed_file(
-            model_dir,
+            install_directory,
             record,
             vision.projector_file,
             expected_size=vision.projector_size,
@@ -952,8 +973,9 @@ class Runner(ServedConcurrentDispatch):
                 "stale, incorrectly sized, or corrupt; re-stage the exact signed "
                 "model generation"
             )
-        projector = (model_dir.resolve() / vision.projector_file).resolve()
-        return projector
+        return resolve_artifact_file(
+            model_dir, artifact_root, vision.projector_file
+        )
 
     def _pick_port(self) -> int:
         """Pick a free ephemeral port for the server, avoiding the API port."""

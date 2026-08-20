@@ -46,6 +46,14 @@ qualification is bound to the exact immutable card it tested. An explicit
 artifact-scoped `incomplete` claim blocks matrix-derived placement for that
 capability even when the base model advertises it.
 
+Registry envelope v2 can additionally carry an `artifact_bundle`: a strict,
+content-derived description of one complete executable artifact. It pins an
+optional repository-relative loader root and the exact required files, sizes,
+and upstream object identities. This lets several independently loadable quants
+share one Hugging Face repository and revision without collapsing into one
+card. Existing v1 cards remain valid and retain their historical download
+behavior.
+
 Complete canonical and staged artifacts retain their full effective card and
 hashed manifest beside the bytes in `.skulk/installed-card.json`. These
 installed cards load before registry access, remain usable indefinitely while
@@ -101,6 +109,16 @@ node in a cluster must run the same Skulk version.
   - for GGUF (llama.cpp) models only: the repo-relative weights file the runner loads (the selected quant's first shard), resolved once at card creation; `null` for safetensors/MLX cards
 - `source_revision`
   - optional full Hugging Face commit hash for the qualified model artifacts; when set, metadata, store downloads, direct downloads, and worker staging all use that immutable revision instead of the repository's mutable `main` branch
+- `artifact_bundle`
+  - optional signed v2 manifest for one exact executable artifact: `artifact_root`,
+    `files` (repository-relative path, size, and optional immutable upstream
+    object identity), `bundle_identity`, `download_size`, and equivalent
+    alternate locations
+  - signed v2 cards require this manifest to be internally consistent. Paths
+    are canonical POSIX-relative paths and cannot escape the repository or the
+    declared artifact root
+  - the loader runs from `artifact_root`, while file paths such as `gguf_file`
+    remain repository-relative for compatibility
 - `components`
   - for multi-component models (such as a diffusion stack): the per-component weight layout; `null` for a single-weights model
 

@@ -469,7 +469,9 @@ def _make_store_url(host: str, port: int, path: str) -> str:
     return f"http://{host}:{port}{path}"
 
 
-def _staged_directory_looks_complete(directory: Path) -> bool:
+def _staged_directory_looks_complete(
+    directory: Path, model_card: ModelCard | None = None
+) -> bool:
     """Heuristic completeness check for a staged directory.
 
     Accepts the three repo layouts the store serves: a full model repo
@@ -478,10 +480,25 @@ def _staged_directory_looks_complete(directory: Path) -> bool:
     MTP sidecar (mtp.safetensors). A directory with leftover ``.partial``
     files is never complete.
     """
-    from skulk.download.download_utils import is_model_directory_complete
-
     if any(directory.rglob("*.partial")):
         return False
+    if model_card is not None and model_card.artifact_bundle is not None:
+        root = directory.resolve()
+        for item in model_card.artifact_bundle.files:
+            candidate = (root / item.path).resolve()
+            try:
+                if (
+                    not candidate.is_relative_to(root)
+                    or not candidate.is_file()
+                    or candidate.stat().st_size != item.size_bytes
+                ):
+                    return False
+            except OSError:
+                return False
+        return True
+
+    from skulk.download.download_utils import is_model_directory_complete
+
     if is_model_directory_complete(directory):
         return True
     if (directory / "config.json").is_file() and (
@@ -2134,7 +2151,9 @@ class ModelStoreDownloader(ShardDownloader):
                 )
                 if (
                     direct_path is not None
-                    and _staged_directory_looks_complete(direct_path)
+                    and _staged_directory_looks_complete(
+                        direct_path, shard.model_card
+                    )
                     and not _staged_pinned_gguf_missing(shard, direct_path)
                     and not _staged_same_repo_draft_missing(shard, direct_path)
                 ):
@@ -2181,7 +2200,9 @@ class ModelStoreDownloader(ShardDownloader):
                         )
                         if (
                             replacement_path is None
-                            or not _staged_directory_looks_complete(replacement_path)
+                            or not _staged_directory_looks_complete(
+                                replacement_path, shard.model_card
+                            )
                             or _staged_pinned_gguf_missing(shard, replacement_path)
                             or await _staged_vision_projector_missing_async(
                                 shard,
@@ -2236,7 +2257,7 @@ class ModelStoreDownloader(ShardDownloader):
         )
         if (
             dest_path.exists()
-            and _staged_directory_looks_complete(dest_path)
+            and _staged_directory_looks_complete(dest_path, shard.model_card)
             and not _staged_pinned_gguf_missing(shard, dest_path)
             and not await _staged_vision_projector_missing_async(
                 shard,

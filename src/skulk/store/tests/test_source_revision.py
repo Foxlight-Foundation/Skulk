@@ -11,7 +11,13 @@ import pytest
 
 import skulk.shared.constants as constants
 from skulk.download import download_utils
-from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
+from skulk.shared.models.model_cards import (
+    ArtifactBundleConfig,
+    ArtifactBundleFile,
+    ModelCard,
+    ModelId,
+    ModelTask,
+)
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.worker.downloads import FileListEntry
 from skulk.store import model_store as model_store_module
@@ -82,6 +88,82 @@ async def test_store_alias_download_reads_from_artifact_repository(
     assert entry is not None
     assert entry.source_repository == str(repository)
     assert store.get_entry(str(repository)) is None
+
+
+async def test_exact_text_bundle_ignores_unselected_repository_projector(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Repo-wide legacy projector inference cannot invalidate a signed bundle."""
+
+    monkeypatch.setattr(model_store_module, "MINIMUM_STAGING_FREE_DISK_BYTES", 0)
+    store = ModelStore(tmp_path)
+    model_id = "org/text-gguf@q4"
+    revision = "a" * 40
+    card = ModelCard(
+        model_id=ModelId(model_id),
+        source_repository=ModelId("org/text-gguf"),
+        source_revision=revision,
+        storage_size=Memory.from_bytes(7),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        gguf_file="model-Q4_K_M.gguf",
+        artifact_bundle=ArtifactBundleConfig(
+            bundle_id=f"bundle_{'a' * 52}",
+            files=(
+                ArtifactBundleFile(path="model-Q4_K_M.gguf", size_bytes=7),
+            ),
+            download_size=7,
+        ),
+    )
+    store._active_downloads[model_id] = StoreDownloadStatus(model_id=model_id)
+
+    async def file_list(
+        _model_id: ModelId,
+        _revision: str,
+        recursive: bool,
+    ) -> list[FileListEntry]:
+        assert recursive
+        return [
+            FileListEntry(type="file", path="model-Q4_K_M.gguf", size=7),
+            FileListEntry(type="file", path="mmproj-F16.gguf", size=5),
+        ]
+
+    async def download_file(
+        _model_id: ModelId,
+        _revision: str,
+        path: str,
+        download_dir: Path,
+        on_progress: Callable[[int, int, bool], None],
+        *_: object,
+        **__: object,
+    ) -> Path:
+        target = download_dir / path
+        target.write_bytes(b"weights")
+        on_progress(7, 7, True)
+        return target
+
+    monkeypatch.setattr(download_utils, "fetch_file_list_with_cache", file_list)
+    monkeypatch.setattr(download_utils, "download_file_with_retry", download_file)
+
+    await store._do_download(
+        model_id,
+        pinned_gguf=card.gguf_file,
+        source_revision=revision,
+        source_repository=str(card.artifact_repository),
+        model_card=card,
+    )
+
+    entry = store.get_entry(model_id)
+    assert entry is not None
+    assert set(entry.files) == {
+        ".skulk-source-revision",
+        ".skulk/installed-card.json",
+        "model-Q4_K_M.gguf",
+    }
+    assert "mmproj-F16.gguf" not in entry.files
 
 
 def test_canonical_capacity_counts_resumable_and_replaced_bytes(

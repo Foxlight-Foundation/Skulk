@@ -2081,6 +2081,11 @@ class Worker:
                         model_id,
                         shard.model_card.source_revision,
                         expected_card=shard.model_card,
+                        artifact_root=(
+                            shard.model_card.artifact_bundle.root
+                            if shard.model_card.artifact_bundle is not None
+                            else None
+                        ),
                     )
                     if found_path is not None:
                         logger.info(

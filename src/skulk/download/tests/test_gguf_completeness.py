@@ -6,9 +6,11 @@ import pytest
 
 from skulk.download import download_utils
 from skulk.download.download_utils import (
+    artifact_install_directory,
     build_model_path,
     directory_has_gguf_weights,
     is_model_directory_complete,
+    resolve_artifact_file,
 )
 from skulk.shared.types.common import ModelId
 
@@ -57,9 +59,13 @@ def test_sharded_gguf_incomplete_missing_shard(tmp_path: Path) -> None:
 
 
 def _no_path_match(
-    _model_id: ModelId, _source_revision: str | None = None
+    _model_id: ModelId,
+    _source_revision: str | None = None,
+    *,
+    artifact_root: str | None = None,
 ) -> Path | None:
     """A resolve_model_in_path stub: no SKULK_MODELS_PATH hit."""
+    del artifact_root
     return None
 
 
@@ -88,6 +94,69 @@ def test_build_model_path_missing_is_filenotfound(
     monkeypatch.setattr(download_utils, "resolve_model_in_path", _no_path_match)
     with pytest.raises(FileNotFoundError):
         build_model_path(ModelId("org/not-on-disk"))
+
+
+def test_build_model_path_resolves_directory_scoped_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bundle root, rather than the repository root, is the loader directory."""
+
+    model_id = ModelId("org/multi-mlx")
+    model_dir = tmp_path / model_id.normalize()
+    bundle_root = model_dir / "4-bit"
+    bundle_root.mkdir(parents=True)
+    (bundle_root / "config.json").write_text("{}")
+    (bundle_root / "model.safetensors").write_bytes(b"weights")
+    monkeypatch.setattr(download_utils, "SKULK_MODELS_DIR", tmp_path)
+
+    assert build_model_path(model_id, artifact_root="4-bit") == bundle_root
+
+
+def test_build_model_path_rejects_escaping_artifact_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Runtime path resolution remains bounded beneath the staged generation."""
+
+    model_id = ModelId("org/multi-mlx")
+    model_dir = tmp_path / model_id.normalize()
+    model_dir.mkdir(parents=True)
+    (model_dir / "config.json").write_text("{}")
+    monkeypatch.setattr(download_utils, "SKULK_MODELS_DIR", tmp_path)
+
+    with pytest.raises(FileNotFoundError):
+        build_model_path(model_id, artifact_root="../outside")
+
+
+def test_nested_bundle_resolves_repository_paths_from_loader_root(
+    tmp_path: Path,
+) -> None:
+    """GGUF/projector paths remain repository-relative after root selection."""
+
+    install_directory = tmp_path / "generation"
+    load_directory = install_directory / "q4"
+    load_directory.mkdir(parents=True)
+    gguf = load_directory / "model-Q4_K_M.gguf"
+    gguf.write_bytes(b"GGUF")
+
+    assert artifact_install_directory(load_directory, "q4") == install_directory
+    assert (
+        resolve_artifact_file(load_directory, "q4", "q4/model-Q4_K_M.gguf")
+        == gguf
+    )
+
+
+def test_nested_bundle_rejects_file_outside_installed_generation(
+    tmp_path: Path,
+) -> None:
+    """A signed repository path cannot escape through the loader-root helper."""
+
+    load_directory = tmp_path / "generation" / "q4"
+    load_directory.mkdir(parents=True)
+    outside = tmp_path / "outside.gguf"
+    outside.write_bytes(b"GGUF")
+
+    with pytest.raises(FileNotFoundError):
+        resolve_artifact_file(load_directory, "q4", "../outside.gguf")
 
 
 async def test_resolve_allow_patterns_gguf_vs_safetensors() -> None:
@@ -129,6 +198,56 @@ async def test_resolve_allow_patterns_gguf_vs_safetensors() -> None:
 
     mlx = _card("o/r2")
     assert await resolve_allow_patterns(_shard(mlx)) == ["*"]
+
+
+async def test_resolve_allow_patterns_uses_exact_bundle_manifest() -> None:
+    """A v2 card never widens its signed file transaction with legacy globs."""
+
+    from skulk.download.download_utils import resolve_allow_patterns
+    from skulk.shared.models.model_cards import (
+        ArtifactBundleConfig,
+        ArtifactBundleFile,
+        ModelCard,
+        ModelId,
+        ModelTask,
+    )
+    from skulk.shared.types.memory import Memory
+    from skulk.shared.types.worker.shards import PipelineShardMetadata
+
+    card = ModelCard(
+        model_id=ModelId("org/multi-mlx@4bit"),
+        source_repository=ModelId("org/multi-mlx"),
+        source_revision="a" * 40,
+        storage_size=Memory.from_bytes(7),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        artifact_bundle=ArtifactBundleConfig(
+            bundle_id=f"bundle_{'a' * 52}",
+            root="4-bit",
+            files=(
+                ArtifactBundleFile(path="4-bit/config.json", size_bytes=2),
+                ArtifactBundleFile(
+                    path="4-bit/model.safetensors", size_bytes=5
+                ),
+            ),
+            download_size=7,
+        ),
+    )
+    shard = PipelineShardMetadata(
+        model_card=card,
+        device_rank=0,
+        world_size=1,
+        start_layer=0,
+        end_layer=1,
+        n_layers=1,
+    )
+
+    assert await resolve_allow_patterns(shard) == [
+        "4-bit/config.json",
+        "4-bit/model.safetensors",
+    ]
 
 
 async def test_same_repo_draft_preserves_exact_projector_pattern() -> None:

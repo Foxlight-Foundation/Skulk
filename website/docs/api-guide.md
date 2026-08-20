@@ -1888,6 +1888,13 @@ Each registry entry records nullable `source_revision` and `source_repository`
 metadata. Cache hits require the effective repository and revision to match, so
 an unchanged alias cannot reuse bytes from a different signed source.
 
+For registry v2 cards, the nested installed card may also contain
+`artifact_bundle`: its exact repository-relative root and required-file
+manifest, immutable bundle identity, download size, and equivalent alternate
+locations. Bundle identity is part of installed-generation matching, allowing
+multiple card aliases from one repository and revision without a store-key
+collision. V1 cards omit this additive field and retain prior behavior.
+
 Entries also include the full `installed_card` record, verification state,
 artifact role and owning card, `current_registry_identity`,
 `installed_not_current`, `update_available`, active signed `advisories`,
@@ -1950,7 +1957,10 @@ Use this when you want the store host to fetch and register a model.
 For signed-registry artifacts, Skulk's internal request also carries the
 immutable card ID. The store host verifies that identity against its own signed
 catalog and applies the synchronized cluster repository-code decision before
-fetching bytes. Trust does not depend on which node initiated the request.
+fetching bytes. A v2 card makes the signed bundle manifest authoritative: only
+its required files are fetched, directory layout is preserved, and every
+declared size and available upstream object identity is verified. Trust does
+not depend on which node initiated the request.
 
 The optional JSON body accepts the following fields:
 

@@ -156,6 +156,9 @@ class DownloadCoordinator:
             card.model_id,
             card.source_revision,
             expected_card=card,
+            artifact_root=(
+                card.artifact_bundle.root if card.artifact_bundle is not None else None
+            ),
         )
         if exact is not None:
             return exact
@@ -163,7 +166,13 @@ class DownloadCoordinator:
         candidates: list[Path] = []
         if candidate is not None:
             candidates.append(candidate.parent if candidate.is_file() else candidate)
-        retained_path = resolve_model_in_path(card.model_id, card.source_revision)
+        retained_path = resolve_model_in_path(
+            card.model_id,
+            card.source_revision,
+            artifact_root=(
+                card.artifact_bundle.root if card.artifact_bundle is not None else None
+            ),
+        )
         if retained_path is not None:
             candidates.append(retained_path)
         if card.registry_card_id is not None:
@@ -954,6 +963,11 @@ class DownloadCoordinator:
                         mid,
                         card.source_revision,
                         expected_card=card,
+                        artifact_root=(
+                            card.artifact_bundle.root
+                            if card.artifact_bundle is not None
+                            else None
+                        ),
                     )
                     if found is not None and not model_companions_present_on_disk(
                         card, required_only=self.offline

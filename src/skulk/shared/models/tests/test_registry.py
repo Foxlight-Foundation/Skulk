@@ -194,6 +194,71 @@ def test_registry_alias_is_separate_from_artifact_repository() -> None:
     assert card.registry_capability_claims[0].capability_id == "text.generate"
 
 
+def test_registry_v2_bundle_round_trips_to_runtime_card() -> None:
+    """The signed envelope and runtime card must agree on exact bundle truth."""
+
+    payload = cast("dict[str, object]", json.loads(_catalog_payload()))
+    cards = cast("list[dict[str, object]]", payload["cards"])
+    envelope = cards[0]
+    envelope["schema_version"] = 2
+    artifact = cast("dict[str, object]", envelope["artifact"])
+    bundle = {
+        "bundle_id": f"bundle_{'b' * 52}",
+        "root": None,
+        "files": [
+            {
+                "path": "model-Q4_K_M.gguf",
+                "size_bytes": 1024,
+                "object_id": f"sha256:{'c' * 64}",
+            }
+        ],
+        "download_size": 1024,
+        "alternate_locations": [
+            {"root": "duplicate", "paths": ["duplicate/model-Q4_K_M.gguf"]}
+        ],
+    }
+    artifact["bundle"] = bundle
+    card_payload = cast("dict[str, object]", envelope["card"])
+    card_payload["artifact_bundle"] = {
+        key: value for key, value in bundle.items() if key != "alternate_locations"
+    }
+
+    card = registry_model_cards(
+        RegistryCatalog.model_validate(payload, strict=False)
+    )[0]
+
+    assert card.artifact_bundle is not None
+    assert card.artifact_bundle.bundle_id == f"bundle_{'b' * 52}"
+    assert card.artifact_bundle.files[0].path == "model-Q4_K_M.gguf"
+
+
+def test_registry_v2_rejects_card_envelope_bundle_disagreement() -> None:
+    """A signed envelope cannot select different bytes from the runtime card."""
+
+    payload = cast("dict[str, object]", json.loads(_catalog_payload()))
+    cards = cast("list[dict[str, object]]", payload["cards"])
+    envelope = cards[0]
+    envelope["schema_version"] = 2
+    artifact = cast("dict[str, object]", envelope["artifact"])
+    artifact["bundle"] = {
+        "bundle_id": f"bundle_{'b' * 52}",
+        "root": None,
+        "files": [{"path": "model-Q4_K_M.gguf", "size_bytes": 1024}],
+        "download_size": 1024,
+    }
+    card_payload = cast("dict[str, object]", envelope["card"])
+    card_payload["artifact_bundle"] = {
+        "bundle_id": f"bundle_{'d' * 52}",
+        "root": None,
+        "files": [{"path": "model-Q4_K_M.gguf", "size_bytes": 1024}],
+        "download_size": 1024,
+    }
+    catalog = RegistryCatalog.model_validate(payload, strict=False)
+
+    with pytest.raises(ValueError, match="bundle disagrees"):
+        registry_model_cards(catalog)
+
+
 def test_signed_support_expands_only_exact_node_build(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

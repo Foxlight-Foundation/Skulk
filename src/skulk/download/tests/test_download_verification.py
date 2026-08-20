@@ -173,6 +173,38 @@ class TestFileVerification:
             assert result == local_file
             mock_session_factory.assert_not_called()
 
+    async def test_signed_identity_mismatch_rejects_cached_file(
+        self, model_id: ModelId, tmp_path: Path
+    ) -> None:
+        """Proven remote disagreement must not masquerade as offline reuse."""
+        from skulk.download.download_utils import (
+            _download_file,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        target_dir = tmp_path / "downloads"
+        target_dir.mkdir()
+        local_file = target_dir / "test.safetensors"
+        local_file.write_bytes(b"local content")
+
+        with (
+            patch(
+                "skulk.download.download_utils.file_meta",
+                new_callable=AsyncMock,
+                return_value=(len(b"local content"), "different-object"),
+            ),
+            pytest.raises(ValueError, match="object mismatch"),
+        ):
+            await _download_file(
+                model_id,
+                "a" * 40,
+                "test.safetensors",
+                target_dir,
+                expected_size=len(b"local content"),
+                expected_object_id="signed-object",
+            )
+
+        assert local_file.read_bytes() == b"local content"
+
     async def test_full_response_restarts_partial_download(
         self, model_id: ModelId, tmp_path: Path
     ) -> None:
