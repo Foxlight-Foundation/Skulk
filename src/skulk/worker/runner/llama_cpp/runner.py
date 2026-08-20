@@ -757,25 +757,35 @@ class Runner(ServedConcurrentDispatch):
 
         from llama_cpp import Llama  # pyright: ignore[reportAttributeAccessIssue]
 
-        from skulk.download.download_utils import build_model_path
+        from skulk.download.download_utils import (
+            build_model_path,
+            resolve_artifact_file,
+        )
 
         _require_bounded_swa_support(Llama)
 
         card = self.shard_metadata.model_card
         model_id = card.model_id
-        model_dir = build_model_path(ModelId(model_id), card.source_revision)
+        model_dir = build_model_path(
+            ModelId(model_id),
+            card.source_revision,
+            card.artifact_bundle.root if card.artifact_bundle is not None else None,
+        )
         # Load the exact file the card pinned at creation (the selected quant);
         # fall back to scanning if it's absent (older card / manual staging), so
         # download, sizing, and loading stay in agreement.
         pinned = self.shard_metadata.model_card.gguf_file
         gguf_path: Path | None = None
         if pinned:
-            candidate = (model_dir / pinned).resolve()
-            # Reject a hand-edited card whose gguf_file is absolute or uses ".."
-            # to escape the model directory; fall back to the in-dir scan.
-            if candidate.is_file() and candidate.is_relative_to(model_dir.resolve()):
-                gguf_path = candidate
-            else:
+            try:
+                gguf_path = resolve_artifact_file(
+                    model_dir,
+                    card.artifact_bundle.root
+                    if card.artifact_bundle is not None
+                    else None,
+                    pinned,
+                )
+            except (FileNotFoundError, ValueError):
                 logger.warning(
                     f"card gguf_file {pinned!r} is missing or outside the model "
                     f"dir; scanning {model_dir} instead"

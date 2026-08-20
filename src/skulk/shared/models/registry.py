@@ -20,6 +20,131 @@ class RegistryUnavailableError(RuntimeError):
     """Raised when neither the signed registry nor a safe local snapshot exists."""
 
 
+class RegistryArtifactBundleFile(BaseModel):
+    """One exact repository file required by a bundle-aware card."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    path: str = Field(min_length=1, max_length=4096)
+    size_bytes: int = Field(ge=0)
+    object_id: str | None = Field(
+        default=None,
+        pattern=r"^(?:sha256:[0-9a-f]{64}|git-sha1:[0-9a-f]{40})$",
+    )
+
+    @field_validator("path")
+    @classmethod
+    def validate_path(cls, value: str) -> str:
+        """Require a canonical repository-relative POSIX path."""
+
+        from pathlib import PurePosixPath
+
+        path = PurePosixPath(value)
+        if (
+            path.is_absolute()
+            or value != path.as_posix()
+            or "\\" in value
+            or any(part in {"", ".", ".."} for part in path.parts)
+        ):
+            raise ValueError("bundle file path must be canonical and relative")
+        return value
+
+
+def _validate_bundle_path(value: str, *, label: str) -> None:
+    """Validate one canonical repository-relative POSIX path."""
+
+    from pathlib import PurePosixPath
+
+    path = PurePosixPath(value)
+    if (
+        path.is_absolute()
+        or value != path.as_posix()
+        or "\\" in value
+        or any(part in {"", ".", ".."} for part in path.parts)
+    ):
+        raise ValueError(f"{label} must be canonical and relative")
+
+
+class RegistryArtifactBundleAlternate(BaseModel):
+    """One proven equivalent repository location for a bundle payload."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    root: str | None = Field(default=None, min_length=1, max_length=2048)
+    paths: tuple[str, ...] = Field(min_length=1)
+
+    @field_validator("root")
+    @classmethod
+    def validate_root(cls, value: str | None) -> str | None:
+        """Require an alternate loader root to remain repository-relative."""
+
+        if value is not None:
+            _validate_bundle_path(value, label="alternate root")
+        return value
+
+    @field_validator("paths")
+    @classmethod
+    def validate_paths(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """Require canonical, unique alternate file paths."""
+
+        for path in value:
+            _validate_bundle_path(path, label="alternate path")
+        if len(set(value)) != len(value):
+            raise ValueError("alternate bundle paths must be unique")
+        return value
+
+
+class RegistryArtifactBundle(BaseModel):
+    """Complete immutable repository file selection for one artifact."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    bundle_id: str = Field(pattern=r"^bundle_[a-z2-7]{52}$")
+    root: str | None = Field(default=None, min_length=1, max_length=2048)
+    files: tuple[RegistryArtifactBundleFile, ...] = Field(min_length=1)
+    download_size: int = Field(gt=0)
+    alternate_locations: tuple[RegistryArtifactBundleAlternate, ...] = ()
+
+    @field_validator("root")
+    @classmethod
+    def validate_root(cls, value: str | None) -> str | None:
+        """Require a safe directory root when the bundle is directory-scoped."""
+
+        if value is None:
+            return None
+        _validate_bundle_path(value, label="bundle root")
+        return value
+
+    @model_validator(mode="after")
+    def validate_manifest(self) -> "RegistryArtifactBundle":
+        """Keep the signed size and optional loader root internally consistent."""
+
+        paths = tuple(item.path for item in self.files)
+        if len(set(paths)) != len(paths):
+            raise ValueError("bundle files must not contain duplicate paths")
+        if sum(item.size_bytes for item in self.files) != self.download_size:
+            raise ValueError("bundle download_size must equal the file-size sum")
+        if self.root is not None:
+            prefix = f"{self.root}/"
+            if any(path != self.root and not path.startswith(prefix) for path in paths):
+                raise ValueError("every bundle file must be beneath the bundle root")
+        for alternate in self.alternate_locations:
+            if len(alternate.paths) != len(self.files):
+                raise ValueError(
+                    "alternate bundle locations must map every primary file"
+                )
+            if alternate.root is not None:
+                prefix = f"{alternate.root}/"
+                if any(
+                    path != alternate.root and not path.startswith(prefix)
+                    for path in alternate.paths
+                ):
+                    raise ValueError(
+                        "alternate bundle files must remain beneath their root"
+                    )
+        return self
+
+
 class RegistryArtifact(BaseModel):
     """Exact upstream artifact identity asserted by a registry card."""
 
@@ -30,6 +155,7 @@ class RegistryArtifact(BaseModel):
     selected_file: str | None = Field(default=None, max_length=2048)
     format: str = Field(min_length=1, max_length=80)
     quantization: str = Field(max_length=120)
+    bundle: RegistryArtifactBundle | None = None
 
 
 class RegistryCard(BaseModel):
@@ -37,12 +163,22 @@ class RegistryCard(BaseModel):
 
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
-    schema_version: Literal[1]
+    schema_version: Literal[1, 2]
     card_id: str = Field(pattern=r"^card_[a-z2-7]{52}$")
     alias: str = Field(min_length=1, max_length=512)
     model_ref: str = Field(min_length=1, max_length=512)
     artifact: RegistryArtifact
     card: dict[str, Any]
+
+    @model_validator(mode="after")
+    def validate_versioned_artifact(self) -> "RegistryCard":
+        """Require the v2 envelope exactly when bundle identity is present."""
+
+        if self.schema_version == 2 and self.artifact.bundle is None:
+            raise ValueError("registry card schema v2 requires an artifact bundle")
+        if self.schema_version == 1 and self.artifact.bundle is not None:
+            raise ValueError("registry card schema v1 cannot carry an artifact bundle")
+        return self
 
     @field_validator("alias")
     @classmethod

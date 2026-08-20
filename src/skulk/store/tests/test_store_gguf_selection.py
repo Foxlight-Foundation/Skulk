@@ -6,15 +6,74 @@ quant's shard group plus ``config.json``, and nothing else (not other quants,
 not ``original/*`` full-precision weights, not ``metal/*`` artifacts).
 """
 
+import pytest
+
+from skulk.shared.models.model_cards import (
+    ArtifactBundleConfig,
+    ArtifactBundleFile,
+    ModelCard,
+    ModelId,
+    ModelTask,
+)
+from skulk.shared.types.memory import Memory
 from skulk.shared.types.worker.downloads import FileListEntry
 from skulk.store.model_store import (
     has_gguf_projector,
+    select_store_artifact_bundle_files,
     select_store_gguf_download_files,
 )
 
 
 def _entry(path: str, size: int = 100) -> FileListEntry:
     return FileListEntry(type="file", path=path, size=size)
+
+
+def _bundle_card() -> ModelCard:
+    return ModelCard(
+        model_id=ModelId("org/multi-mlx@4bit"),
+        source_repository=ModelId("org/multi-mlx"),
+        source_revision="a" * 40,
+        storage_size=Memory.from_bytes(7),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        artifact_bundle=ArtifactBundleConfig(
+            bundle_id=f"bundle_{'a' * 52}",
+            root="4-bit",
+            files=(
+                ArtifactBundleFile(path="4-bit/config.json", size_bytes=2),
+                ArtifactBundleFile(
+                    path="4-bit/model.safetensors", size_bytes=5
+                ),
+            ),
+            download_size=7,
+        ),
+    )
+
+
+def test_signed_bundle_selects_only_exact_store_files() -> None:
+    files = [
+        _entry("4-bit/config.json", 2),
+        _entry("4-bit/model.safetensors", 5),
+        _entry("8-bit/config.json", 2),
+        _entry("8-bit/model.safetensors", 9),
+    ]
+
+    assert [
+        entry.path
+        for entry in select_store_artifact_bundle_files(files, _bundle_card())
+    ] == ["4-bit/config.json", "4-bit/model.safetensors"]
+
+
+def test_signed_bundle_rejects_listing_size_mismatch() -> None:
+    files = [
+        _entry("4-bit/config.json", 2),
+        _entry("4-bit/model.safetensors", 6),
+    ]
+
+    with pytest.raises(ValueError, match="size mismatch"):
+        select_store_artifact_bundle_files(files, _bundle_card())
 
 
 def test_multi_quant_repo_keeps_only_preferred_quant_and_config() -> None:

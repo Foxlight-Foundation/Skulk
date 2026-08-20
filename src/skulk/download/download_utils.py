@@ -8,7 +8,7 @@ import traceback
 from collections.abc import Awaitable
 from contextlib import suppress
 from datetime import timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Callable, Literal
 from urllib.parse import urljoin
 
@@ -251,6 +251,7 @@ def resolve_model_in_path(
     source_revision: str | None = None,
     *,
     expected_card: ModelCard | None = None,
+    artifact_root: str | None = None,
 ) -> Path | None:
     """Search SKULK_MODELS_PATH directories for a pre-existing model.
 
@@ -268,6 +269,8 @@ def resolve_model_in_path(
             card. When set, the directory must carry a matching revision marker.
         expected_card: Optional complete card whose signed installed identity
             must match the resolved directory.
+        artifact_root: Optional repository-relative loader root whose contents
+            determine runtime completeness for a directory-scoped bundle.
 
     Returns:
         The first complete matching model directory, or ``None``.
@@ -285,9 +288,21 @@ def resolve_model_in_path(
     for search_dir in search_path:
         for candidate_name in candidate_names:
             candidate = search_dir / candidate_name
+            load_candidate = (
+                candidate / artifact_root if artifact_root is not None else candidate
+            )
+            load_candidate_is_complete = (
+                is_model_directory_complete(load_candidate)
+                if artifact_root is None
+                else (
+                    (load_candidate / "config.json").is_file()
+                    or directory_has_gguf_weights(load_candidate)
+                )
+            )
             if (
                 candidate.is_dir()
-                and is_model_directory_complete(candidate)
+                and load_candidate.is_dir()
+                and load_candidate_is_complete
                 and _source_revision_matches(candidate, source_revision)
             ):
                 if (
@@ -637,7 +652,84 @@ def model_companions_present_on_disk(
     return True
 
 
-def build_model_path(model_id: ModelId, source_revision: str | None = None) -> Path:
+def _apply_artifact_root(model_directory: Path, artifact_root: str | None) -> Path:
+    """Resolve a declared loader root without permitting filesystem escape."""
+
+    if artifact_root is None:
+        return model_directory
+    resolved_directory = model_directory.resolve()
+    resolved_root = (resolved_directory / artifact_root).resolve()
+    if not resolved_root.is_relative_to(resolved_directory) or not resolved_root.is_dir():
+        raise FileNotFoundError(
+            f"Artifact root {artifact_root!r} is absent beneath {model_directory}"
+        )
+    return resolved_root
+
+
+def artifact_install_directory(
+    load_directory: Path, artifact_root: str | None
+) -> Path:
+    """Recover the staged generation root from its bundle loader directory.
+
+    Args:
+        load_directory: Directory returned by :func:`build_model_path`.
+        artifact_root: Repository-relative loader root from the signed card.
+
+    Returns:
+        The directory beneath which repository-relative bundle paths and the
+        installed-card sidecar are stored.
+
+    Raises:
+        ValueError: If the supplied loader directory cannot correspond to the
+            declared artifact root.
+    """
+
+    resolved_load = load_directory.resolve()
+    if artifact_root is None:
+        return resolved_load
+    install_directory = resolved_load
+    for _ in PurePosixPath(artifact_root).parts:
+        install_directory = install_directory.parent
+    if _apply_artifact_root(install_directory, artifact_root) != resolved_load:
+        raise ValueError("artifact loader directory does not match its signed root")
+    return install_directory
+
+
+def resolve_artifact_file(
+    load_directory: Path,
+    artifact_root: str | None,
+    repository_path: str,
+) -> Path:
+    """Resolve one signed repository path beneath its staged generation.
+
+    Args:
+        load_directory: Engine working directory returned by
+            :func:`build_model_path`.
+        artifact_root: Optional signed repository-relative loader root.
+        repository_path: Canonical repository-relative file path.
+
+    Returns:
+        The resolved file path, whether the bundle root is the repository root
+        or a nested directory.
+
+    Raises:
+        FileNotFoundError: If the path is absent or leaves the generation.
+    """
+
+    install_directory = artifact_install_directory(load_directory, artifact_root)
+    candidate = (install_directory / repository_path).resolve()
+    if not candidate.is_relative_to(install_directory) or not candidate.is_file():
+        raise FileNotFoundError(
+            f"Artifact file {repository_path!r} is absent beneath {install_directory}"
+        )
+    return candidate
+
+
+def build_model_path(
+    model_id: ModelId,
+    source_revision: str | None = None,
+    artifact_root: str | None = None,
+) -> Path:
     """Resolve a local filesystem path for *model_id*.
 
     Checks ``SKULK_MODELS_PATH`` (staging, store, etc.) first, then falls
@@ -649,6 +741,8 @@ def build_model_path(model_id: ModelId, source_revision: str | None = None) -> P
         model_id: Model repository identifier to resolve.
         source_revision: Immutable source revision required by the model card,
             or ``None`` for an unpinned mutable-main cache.
+        artifact_root: Optional repository-relative working directory declared
+            by a bundle-aware card.
 
     Returns:
         The complete local model directory.
@@ -656,33 +750,50 @@ def build_model_path(model_id: ModelId, source_revision: str | None = None) -> P
     Raises:
         FileNotFoundError: If no complete revision-matching directory exists.
     """
-    found = resolve_model_in_path(model_id, source_revision)
+    found = (
+        resolve_model_in_path(model_id, source_revision)
+        if artifact_root is None
+        else resolve_model_in_path(
+            model_id, source_revision, artifact_root=artifact_root
+        )
+    )
     if found is not None:
-        return found
+        return _apply_artifact_root(found, artifact_root)
     # A safetensors/MLX repo is identified by its config.json; a bare GGUF repo
     # (no config.json) is identified by a complete GGUF shard group on disk. Both
     # must be accepted here or a bare GGUF model that downloaded fine would fail
     # to load with FileNotFoundError (#327).
     default = SKULK_MODELS_DIR / model_id.normalize()
+    default_load_root = default / artifact_root if artifact_root is not None else default
     if (
         default.is_dir()
-        and ((default / "config.json").exists() or directory_has_gguf_weights(default))
+        and default_load_root.is_dir()
+        and (
+            (default_load_root / "config.json").exists()
+            or directory_has_gguf_weights(default_load_root)
+        )
         and _source_revision_matches(default, source_revision)
     ):
-        return default
+        return _apply_artifact_root(default, artifact_root)
     # Fallback: check the default staging directory directly.
     # This covers cases where the staging path wasn't registered in
     # SKULK_MODELS_PATH (e.g., config not yet synced) but files exist.
     staging_fallback = Path.home() / ".skulk" / "staging" / model_id.normalize()
+    staging_load_root = (
+        staging_fallback / artifact_root
+        if artifact_root is not None
+        else staging_fallback
+    )
     if (
         staging_fallback.is_dir()
+        and staging_load_root.is_dir()
         and (
-            (staging_fallback / "config.json").exists()
-            or directory_has_gguf_weights(staging_fallback)
+            (staging_load_root / "config.json").exists()
+            or directory_has_gguf_weights(staging_load_root)
         )
         and _source_revision_matches(staging_fallback, source_revision)
     ):
-        return staging_fallback
+        return _apply_artifact_root(staging_fallback, artifact_root)
     raise FileNotFoundError(
         f"Model {model_id} not found on disk. "
         f"Checked SKULK_MODELS_PATH, {default}, and {staging_fallback}. "
@@ -1192,12 +1303,22 @@ async def download_file_with_retry(
     on_progress: Callable[[int, int, bool], None] = lambda _, __, ___: None,
     on_connection_lost: Callable[[], None] = lambda: None,
     skip_internet: bool = False,
+    expected_size: int | None = None,
+    expected_object_id: str | None = None,
 ) -> Path:
+    """Download one immutable repository file with optional card assertions."""
     n_attempts = 3
     for attempt in range(n_attempts):
         try:
             return await _download_file(
-                model_id, revision, path, target_dir, on_progress, skip_internet
+                model_id,
+                revision,
+                path,
+                target_dir,
+                on_progress,
+                skip_internet,
+                expected_size,
+                expected_object_id,
             )
         except HuggingFaceAuthenticationError:
             raise
@@ -1232,7 +1353,10 @@ async def _download_file(
     target_dir: Path,
     on_progress: Callable[[int, int, bool], None] = lambda _, __, ___: None,
     skip_internet: bool = False,
+    expected_size: int | None = None,
+    expected_object_id: str | None = None,
 ) -> Path:
+    """Download a file and reject metadata that disagrees with a signed bundle."""
     target_path = target_dir / path
 
     if await aios.path.exists(target_path):
@@ -1243,7 +1367,14 @@ async def _download_file(
 
         # Try to verify against remote, but allow offline operation
         try:
-            remote_size, _ = await file_meta(model_id, revision, path)
+            remote_size, remote_etag = await file_meta(model_id, revision, path)
+            _require_expected_remote_identity(
+                path,
+                remote_size,
+                remote_etag,
+                expected_size=expected_size,
+                expected_object_id=expected_object_id,
+            )
             if local_size != remote_size:
                 logger.info(
                     f"File {path} size mismatch (local={local_size}, remote={remote_size}), re-downloading"
@@ -1265,6 +1396,13 @@ async def _download_file(
 
     await aios.makedirs((target_dir / path).parent, exist_ok=True)
     length, etag = await file_meta(model_id, revision, path)
+    _require_expected_remote_identity(
+        path,
+        length,
+        etag,
+        expected_size=expected_size,
+        expected_object_id=expected_object_id,
+    )
     remote_hash = etag[:-5] if etag.endswith("-gzip") else etag
     partial_path = target_dir / f"{path}.partial"
     resume_byte_pos = (
@@ -1323,6 +1461,32 @@ async def _download_file(
     await aios.rename(partial_path, target_dir / path)
     on_progress(length, length, True)
     return target_dir / path
+
+
+def _require_expected_remote_identity(
+    path: str,
+    remote_size: int,
+    remote_etag: str,
+    *,
+    expected_size: int | None,
+    expected_object_id: str | None,
+) -> None:
+    """Fail closed when immutable Hub metadata differs from signed card truth."""
+
+    if expected_size is not None and remote_size != expected_size:
+        raise ValueError(
+            f"Signed artifact bundle size mismatch for {path}: "
+            f"expected {expected_size}, Hub reports {remote_size}"
+        )
+    if expected_object_id is None:
+        return
+    _, _, expected_digest = expected_object_id.partition(":")
+    observed_digest = trim_etag(remote_etag.removesuffix("-gzip"))
+    if observed_digest != expected_digest:
+        raise ValueError(
+            f"Signed artifact bundle object mismatch for {path}: "
+            f"expected {expected_object_id}, Hub reports {observed_digest}"
+        )
 
 
 def calculate_repo_progress(
@@ -1407,6 +1571,12 @@ async def get_weight_map(model_id: ModelId, revision: str = "main") -> dict[str,
 
 
 async def resolve_allow_patterns(shard: ShardMetadata) -> list[str]:
+    bundle = shard.model_card.artifact_bundle
+    if bundle is not None:
+        # A v2 signed card is an exact immutable file transaction. Broad config
+        # or tokenizer globs would recreate the repository-wide ambiguity this
+        # contract removes.
+        return [item.path for item in bundle.files]
     # GGUF: the card pins the one quant to load (model_card.gguf_file), so fetch
     # only that shard group + config.json instead of every quant the repo hosts
     # (#332). Multi-quant repos otherwise download tens of GB of unused weights.
@@ -1553,10 +1723,27 @@ async def download_shard(
             key=lambda x: x.path,
         )
     )
+    bundle = shard.model_card.artifact_bundle
+    if bundle is not None:
+        listed_by_path = {item.path: item for item in filtered_file_list}
+        exact_files: list[FileListEntry] = []
+        for expected in bundle.files:
+            observed = listed_by_path.get(expected.path)
+            if observed is None:
+                raise FileNotFoundError(
+                    f"Signed artifact bundle file is absent: {expected.path}"
+                )
+            if observed.size != expected.size_bytes:
+                raise ValueError(
+                    f"Signed artifact bundle size mismatch for {expected.path}: "
+                    f"expected {expected.size_bytes}, listing reports {observed.size}"
+                )
+            exact_files.append(observed)
+        filtered_file_list = exact_files
 
     # For image models, skip root-level safetensors files since weights
     # are stored in component subdirectories (e.g., transformer/, vae/)
-    if is_image_model(shard):
+    if bundle is None and is_image_model(shard):
         filtered_file_list = [
             f
             for f in filtered_file_list
@@ -1675,16 +1862,33 @@ async def download_shard(
 
     async def download_with_semaphore(file: FileListEntry) -> None:
         async with semaphore:
+            def progress(
+                curr_bytes: int, total_bytes: int, is_renamed: bool
+            ) -> None:
+                schedule_progress(file, curr_bytes, total_bytes, is_renamed)
+
+            if bundle is None:
+                await download_file_with_retry(
+                    shard.model_card.artifact_repository,
+                    revision,
+                    file.path,
+                    target_dir,
+                    progress,
+                    on_connection_lost=on_connection_lost,
+                    skip_internet=skip_internet,
+                )
+                return
+            expected = next(item for item in bundle.files if item.path == file.path)
             await download_file_with_retry(
                 shard.model_card.artifact_repository,
                 revision,
                 file.path,
                 target_dir,
-                lambda curr_bytes, total_bytes, is_renamed: schedule_progress(
-                    file, curr_bytes, total_bytes, is_renamed
-                ),
+                progress,
                 on_connection_lost=on_connection_lost,
                 skip_internet=skip_internet,
+                expected_size=expected.size_bytes,
+                expected_object_id=expected.object_id,
             )
 
     download_cancelled = False

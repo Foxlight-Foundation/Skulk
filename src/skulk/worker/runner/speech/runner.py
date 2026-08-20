@@ -935,7 +935,13 @@ class Runner:
         from skulk.shared.types.common import ModelId
 
         local_path = build_model_path(
-            ModelId(model_id), self.shard_metadata.model_card.source_revision
+            ModelId(model_id),
+            self.shard_metadata.model_card.source_revision,
+            (
+                self.shard_metadata.model_card.artifact_bundle.root
+                if self.shard_metadata.model_card.artifact_bundle is not None
+                else None
+            ),
         )
         self.local_model_path = local_path
         logger.info(f"loading speech model from local path: {local_path}")

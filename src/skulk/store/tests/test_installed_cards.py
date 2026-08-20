@@ -8,6 +8,8 @@ import pytest
 
 import skulk.store.installed_cards as installed_cards
 from skulk.shared.models.model_cards import (
+    ArtifactBundleConfig,
+    ArtifactBundleFile,
     ModelCard,
     ModelId,
     ModelTask,
@@ -77,6 +79,37 @@ def test_verified_registry_record_round_trips(tmp_path: Path) -> None:
     assert read_installed_card(artifact) == record
     assert installed_card_matches(artifact, card)
     assert all(entry.path != ".skulk-source-revision" for entry in record.files)
+
+
+def test_bundle_identity_is_retained_and_required(tmp_path: Path) -> None:
+    """Installed generation trust includes the exact signed bundle identity."""
+
+    artifact = _artifact(tmp_path)
+    bundle = ArtifactBundleConfig(
+        bundle_id=f"bundle_{'a' * 52}",
+        files=(
+            ArtifactBundleFile(path="config.json", size_bytes=2),
+            ArtifactBundleFile(path="model.safetensors", size_bytes=7),
+        ),
+        download_size=9,
+    )
+    card = _card().model_copy(update={"artifact_bundle": bundle})
+    record = build_installed_card_record(artifact, card)
+    write_installed_card(artifact, record)
+
+    assert record.schema_version == 2
+    assert record.artifact_bundle_id == bundle.bundle_id
+    require_registry_installed_artifact(artifact, card)
+
+    changed = card.model_copy(
+        update={
+            "artifact_bundle": bundle.model_copy(
+                update={"bundle_id": f"bundle_{'b' * 52}"}
+            )
+        }
+    )
+    with pytest.raises(PermissionError, match="does not match"):
+        require_registry_installed_artifact(artifact, changed)
 
 
 def test_pinned_companion_verification_detects_corruption(tmp_path: Path) -> None:

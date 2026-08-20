@@ -292,7 +292,15 @@ class ResumableShardDownloader(ShardDownloader):
     async def ensure_shard(
         self, shard: ShardMetadata, config_only: bool = False
     ) -> Path:
-        allow_patterns = ["config.json"] if config_only else None
+        bundle_root = (
+            shard.model_card.artifact_bundle.root
+            if shard.model_card.artifact_bundle is not None
+            else None
+        )
+        config_path = (
+            f"{bundle_root}/config.json" if bundle_root is not None else "config.json"
+        )
+        allow_patterns = [config_path] if config_only else None
 
         # Companions download BEFORE the base on purpose: the base repo's
         # "complete" progress event becomes cluster-visible download state

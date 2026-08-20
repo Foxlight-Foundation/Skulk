@@ -67,6 +67,14 @@ Each subsystem has its own concern:
 - **API** is a FastAPI app that exposes inference endpoints in four wire formats (OpenAI Chat Completions, OpenAI Responses, Anthropic Messages, Ollama) and Skulk-native control endpoints (placements, diagnostics, traces, config). It also serves the dashboard build at `/` when those assets are present; a headless node built without the UI skips that mount and serves the API alone.
 - **Storage** is a collection of on-disk responsibilities: the event log (msgpack + zstd), the model cache directory, custom model cards (per-user TOML files), and the optional shared model store.
 
+Signed registry-v2 model cards can describe one exact `artifact_bundle`: a
+content-derived required-file manifest plus an optional repository-relative
+loader root. The direct and central-store paths fetch only those files, verify
+their immutable sizes/object identities, preserve layout, and include bundle
+identity in installed-generation matching. This allows multiple independent
+quants in one repository/revision without store collisions. Legacy cards remain
+on their established repository-wide tensor or pinned-GGUF path.
+
 ## The shape of a cluster
 
 ```mermaid

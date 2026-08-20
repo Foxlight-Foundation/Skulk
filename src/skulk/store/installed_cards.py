@@ -93,7 +93,7 @@ class InstalledCardRecord(BaseModel):
 
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
-    schema_version: Literal[1] = Field(
+    schema_version: Literal[1, 2] = Field(
         default=1,
         description="Installed-card sidecar schema version.",
     )
@@ -147,6 +147,13 @@ class InstalledCardRecord(BaseModel):
         default=None,
         max_length=2048,
         description="Selected repo-relative artifact file when file-addressed.",
+    )
+    artifact_bundle_id: str | None = Field(
+        default=None,
+        pattern=r"^bundle_[a-z2-7]{52}$",
+        description=(
+            "Exact signed bundle identity for v2 artifacts; absent for legacy cards."
+        ),
     )
     artifact_format: str = Field(
         default="unknown",
@@ -497,6 +504,7 @@ def build_installed_card_record(
         elif artifact_role == "served_draft" and model_card.runtime is not None:
             effective_artifact_file = model_card.runtime.served_spec_draft_file
     return InstalledCardRecord(
+        schema_version=2 if model_card.artifact_bundle is not None else 1,
         installed_identity=installed_identity,
         artifact_model_id=artifact_model_id or str(model_card.model_id),
         model_card=model_card,
@@ -507,6 +515,11 @@ def build_installed_card_record(
         artifact_repository=effective_repository,
         artifact_revision=effective_revision,
         artifact_file=effective_artifact_file,
+        artifact_bundle_id=(
+            model_card.artifact_bundle.bundle_id
+            if artifact_role == "base" and model_card.artifact_bundle is not None
+            else None
+        ),
         artifact_format=artifact_format or model_card_artifact_format(model_card),
         quantization=model_card.quantization,
         manifest_sha256=digest,
@@ -774,6 +787,12 @@ def require_registry_installed_artifact(
         or record.artifact_revision != model_card.source_revision
         or marker_revision != model_card.source_revision
         or record.artifact_file != model_card.gguf_file
+        or record.artifact_bundle_id
+        != (
+            model_card.artifact_bundle.bundle_id
+            if model_card.artifact_bundle is not None
+            else None
+        )
     ):
         raise PermissionError(
             f"{MODEL_TRUST_FAILURE_MARKER}: installed artifact does not match "
@@ -883,6 +902,12 @@ def refresh_registry_installed_card_if_same_artifact(
         or retained.artifact_repository != str(model_card.artifact_repository)
         or retained.artifact_revision != model_card.source_revision
         or retained.artifact_file != model_card.gguf_file
+        or retained.artifact_bundle_id
+        != (
+            model_card.artifact_bundle.bundle_id
+            if model_card.artifact_bundle is not None
+            else None
+        )
         or _revision_marker(model_directory) != model_card.source_revision
         or not verify_installed_card(model_directory, retained)
     ):
@@ -896,6 +921,10 @@ def refresh_registry_installed_card_if_same_artifact(
 
     manifest_by_path = {entry.path: entry for entry in retained.files}
     required_files: list[tuple[str, int | None]] = []
+    if model_card.artifact_bundle is not None:
+        required_files.extend(
+            (item.path, item.size_bytes) for item in model_card.artifact_bundle.files
+        )
     if model_card.gguf_file is not None:
         required_files.append((model_card.gguf_file, None))
     if model_card.vision is not None and model_card.vision.projector_file is not None:

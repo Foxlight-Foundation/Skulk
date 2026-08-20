@@ -260,6 +260,31 @@ def select_store_gguf_download_files(
     return [entry for entry in file_list if _keep(entry)]
 
 
+def select_store_artifact_bundle_files(
+    file_list: list[FileListEntry], model_card: ModelCard
+) -> list[FileListEntry]:
+    """Resolve a signed v2 bundle to one exact, size-verified store transfer."""
+
+    bundle = model_card.artifact_bundle
+    if bundle is None:
+        raise ValueError("artifact-bundle selection requires a v2 model card")
+    listed_by_path = {entry.path: entry for entry in file_list}
+    selected: list[FileListEntry] = []
+    for expected in bundle.files:
+        observed = listed_by_path.get(expected.path)
+        if observed is None:
+            raise FileNotFoundError(
+                f"Signed artifact bundle file is absent: {expected.path}"
+            )
+        if observed.size != expected.size_bytes:
+            raise ValueError(
+                f"Signed artifact bundle size mismatch for {expected.path}: "
+                f"expected {expected.size_bytes}, listing reports {observed.size}"
+            )
+        selected.append(observed)
+    return selected
+
+
 def has_gguf_projector(paths: Iterable[str]) -> bool:
     """Whether any path is a multimodal projector GGUF (``*mmproj*.gguf``).
 
@@ -1674,6 +1699,11 @@ class ModelStore:
                 :12
             ]
             sanitized = f"{sanitized}--source-{repository_digest}"
+        if model_card is not None and model_card.artifact_bundle is not None:
+            sanitized = (
+                f"{sanitized}--bundle-"
+                f"{model_card.artifact_bundle.bundle_id.removeprefix('bundle_')[:16]}"
+            )
         target_dir = self._store_path / sanitized
         previous_entry = self.get_entry(model_id)
         transfer_lock_acquired = False
@@ -1713,15 +1743,19 @@ class ModelStore:
             # mirroring the direct-HF selective download (#339). The projector
             # glob is retained by ``gguf_allow_patterns``, so a vision GGUF keeps
             # its ``*mmproj*.gguf``.
-            selected_files = select_store_gguf_download_files(
-                repo_file_list,
-                pinned_gguf,
-                extra_pinned_gguf,
-                (
-                    model_card.vision.projector_file
-                    if model_card is not None and model_card.vision is not None
-                    else None
-                ),
+            selected_files = (
+                select_store_artifact_bundle_files(repo_file_list, model_card)
+                if model_card is not None and model_card.artifact_bundle is not None
+                else select_store_gguf_download_files(
+                    repo_file_list,
+                    pinned_gguf,
+                    extra_pinned_gguf,
+                    (
+                        model_card.vision.projector_file
+                        if model_card is not None and model_card.vision is not None
+                        else None
+                    ),
+                )
             )
             if len(selected_files) != len(repo_file_list):
                 logger.info(
@@ -1779,9 +1813,15 @@ class ModelStore:
                         "available. Free disk space or move the model store."
                     )
             downloaded_bytes = 0
+            bundle_files = (
+                {item.path: item for item in model_card.artifact_bundle.files}
+                if model_card is not None and model_card.artifact_bundle is not None
+                else {}
+            )
 
             for f in file_list:
                 file_size = f.size or 0
+                bundle_file = bundle_files.get(f.path)
 
                 def make_progress_cb(fsize: int):
                     def cb(curr: int, total: int, is_renamed: bool) -> None:
@@ -1792,13 +1832,24 @@ class ModelStore:
 
                     return cb
 
-                await download_file_with_retry(
-                    ModelId(artifact_repository),
-                    revision,
-                    f.path,
-                    target_dir,
-                    make_progress_cb(file_size),
-                )
+                if bundle_file is None:
+                    await download_file_with_retry(
+                        ModelId(artifact_repository),
+                        revision,
+                        f.path,
+                        target_dir,
+                        make_progress_cb(file_size),
+                    )
+                else:
+                    await download_file_with_retry(
+                        ModelId(artifact_repository),
+                        revision,
+                        f.path,
+                        target_dir,
+                        make_progress_cb(file_size),
+                        expected_size=bundle_file.size_bytes,
+                        expected_object_id=bundle_file.object_id,
+                    )
                 downloaded_bytes += file_size
                 status.progress = downloaded_bytes / max(total_bytes, 1)
 

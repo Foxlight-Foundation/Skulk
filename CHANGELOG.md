@@ -17,6 +17,13 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- Signed registry-v2 cards can now describe one exact immutable artifact bundle
+  inside a shared upstream repository. Skulk downloads only the required file
+  allow-list, verifies sizes and available upstream object identities, preserves
+  directory layout, loads engines from the declared artifact root, and retains
+  bundle identity in installed sidecars and store generations. Existing v1
+  cards retain their previous behavior.
+
 - Served GGUF vision now uses one truthful model card for the base quant,
   immutable projector, vision capability, and native MTP behavior. New cards
   pin one exact projector path and size; downloads retain only that projector,

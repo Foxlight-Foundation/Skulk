@@ -162,7 +162,31 @@ def registry_model_cards(catalog: RegistryCatalog) -> list["ModelCard"]:
                 "is_custom": False,
             }
         )
-        cards.append(ModelCard.model_validate(payload))
+        card = ModelCard.model_validate(payload)
+        envelope_bundle = envelope.artifact.bundle
+        card_bundle = card.artifact_bundle
+        if envelope_bundle is None:
+            if card_bundle is not None:
+                raise ValueError(
+                    f"registry envelope omits card bundle for {envelope.card_id}"
+                )
+        elif card_bundle is None or (
+            card_bundle.bundle_id != envelope_bundle.bundle_id
+            or card_bundle.root != envelope_bundle.root
+            or card_bundle.download_size != envelope_bundle.download_size
+            or tuple(
+                (item.path, item.size_bytes, item.object_id)
+                for item in card_bundle.files
+            )
+            != tuple(
+                (item.path, item.size_bytes, item.object_id)
+                for item in envelope_bundle.files
+            )
+        ):
+            raise ValueError(
+                f"registry envelope bundle disagrees with card {envelope.card_id}"
+            )
+        cards.append(card)
     return cards
 
 
@@ -881,6 +905,119 @@ class ComponentInfo(CamelCaseModel):
     safetensors_index_filename: str | None = None
     """The component's ``*.safetensors.index.json`` filename when sharded across
     files; ``None`` for a single-file component."""
+
+
+class ArtifactBundleFile(CamelCaseModel):
+    """One exact immutable repository file required by a model artifact."""
+
+    path: str
+    """Canonical repository-relative POSIX path."""
+    size_bytes: int
+    """Exact upstream byte size at the card's immutable source revision."""
+    object_id: str | None = None
+    """Optional algorithm-qualified Hub object identity used for verification."""
+
+    @field_validator("path")
+    @classmethod
+    def validate_path(cls, value: str) -> str:
+        """Reject paths that could escape or ambiguously address an artifact."""
+
+        path = PurePosixPath(value)
+        if (
+            path.is_absolute()
+            or value != path.as_posix()
+            or "\\" in value
+            or any(part in {"", ".", ".."} for part in path.parts)
+        ):
+            raise ValueError("artifact bundle paths must be canonical and relative")
+        return value
+
+    @field_validator("size_bytes")
+    @classmethod
+    def validate_size(cls, value: int) -> int:
+        """Reject negative immutable file sizes."""
+
+        if value < 0:
+            raise ValueError("artifact bundle file size cannot be negative")
+        return value
+
+    @field_validator("object_id")
+    @classmethod
+    def validate_object_id(cls, value: str | None) -> str | None:
+        """Accept only explicit SHA-256 or Git SHA-1 object identities."""
+
+        if value is not None and re.fullmatch(
+            r"(?:sha256:[0-9a-f]{64}|git-sha1:[0-9a-f]{40})", value
+        ) is None:
+            raise ValueError("unsupported artifact bundle object identity")
+        return value
+
+
+class ArtifactBundleConfig(CamelCaseModel):
+    """Exact file selection and loader root for one downloadable artifact."""
+
+    bundle_id: str
+    """Content-derived immutable identity of the normalized file bundle."""
+    root: str | None = None
+    """Repository-relative directory used as the engine's model root."""
+    files: tuple[ArtifactBundleFile, ...]
+    """Every repository file required to install and run the artifact."""
+    download_size: int
+    """Total bytes transferred for the complete bundle."""
+
+    @field_validator("bundle_id")
+    @classmethod
+    def validate_bundle_id(cls, value: str) -> str:
+        """Require the registry's content-derived bundle identity form."""
+
+        if re.fullmatch(r"bundle_[a-z2-7]{52}", value) is None:
+            raise ValueError("invalid artifact bundle identity")
+        return value
+
+    @field_validator("files", mode="before")
+    @classmethod
+    def coerce_files(cls, value: object) -> object:
+        """Coerce JSON arrays into the immutable runtime tuple."""
+
+        if isinstance(value, list):
+            return tuple(cast("list[object]", value))
+        return value
+
+    @field_validator("root")
+    @classmethod
+    def validate_root(cls, value: str | None) -> str | None:
+        """Require a canonical repository-relative loader directory."""
+
+        if value is None:
+            return None
+        path = PurePosixPath(value)
+        if (
+            path.is_absolute()
+            or value != path.as_posix()
+            or "\\" in value
+            or any(part in {"", ".", ".."} for part in path.parts)
+        ):
+            raise ValueError("artifact bundle root must be canonical and relative")
+        return value
+
+    @model_validator(mode="after")
+    def validate_manifest(self) -> "ArtifactBundleConfig":
+        """Require one non-empty, internally consistent immutable manifest."""
+
+        if not self.files:
+            raise ValueError("artifact bundle must contain at least one file")
+        paths = tuple(item.path for item in self.files)
+        if len(set(paths)) != len(paths):
+            raise ValueError("artifact bundle files must be unique")
+        if self.download_size <= 0 or sum(
+            item.size_bytes for item in self.files
+        ) != self.download_size:
+            raise ValueError("artifact bundle download size must equal file sizes")
+        if self.root is not None:
+            prefix = f"{self.root}/"
+            if any(path != self.root and not path.startswith(prefix) for path in paths):
+                raise ValueError("artifact bundle files must remain beneath root")
+        return self
 
 
 class VisionCardConfig(CamelCaseModel):
@@ -1640,6 +1777,11 @@ class ModelCard(CamelCaseModel):
     (preferring a quant over BF16) so the download fetches only that quant and the
     runner loads deterministically, instead of each layer re-globbing/guessing.
     ``None`` for non-GGUF (safetensors/MLX) cards."""
+    artifact_bundle: ArtifactBundleConfig | None = None
+    """Exact signed file selection and engine working directory for a v2 card.
+
+    Legacy cards omit this field and preserve repository-wide tensor downloads.
+    """
     source_revision: (
         Annotated[
             str,
@@ -1724,6 +1866,20 @@ class ModelCard(CamelCaseModel):
             raise ValueError("a pinned vision projector requires gguf_file")
         if self.source_revision is None:
             raise ValueError("a pinned vision projector requires source_revision")
+        return self
+
+    @model_validator(mode="after")
+    def _require_bundle_revision_and_selected_file(self) -> "ModelCard":
+        """Bind a bundle manifest to one immutable upstream repository state."""
+
+        bundle = self.artifact_bundle
+        if bundle is None:
+            return self
+        if self.source_revision is None:
+            raise ValueError("an artifact bundle requires source_revision")
+        paths = {item.path for item in bundle.files}
+        if self.gguf_file is not None and self.gguf_file not in paths:
+            raise ValueError("artifact bundle must contain the selected GGUF")
         return self
 
     registry_card_id: Annotated[str, Field(pattern=r"^card_[a-z2-7]{52}$")] | None = (

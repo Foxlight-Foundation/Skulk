@@ -923,7 +923,11 @@ def load_mlx_items(
     if group is None:
         logger.info(f"Single device used for {bound_instance.instance}")
         card = bound_instance.bound_shard.model_card
-        model_path = build_model_path(card.model_id, card.source_revision)
+        model_path = build_model_path(
+            card.model_id,
+            card.source_revision,
+            card.artifact_bundle.root if card.artifact_bundle is not None else None,
+        )
         start_time = time.perf_counter()
         model, _ = load_model(
             model_path,
@@ -982,6 +986,11 @@ def load_mlx_items(
             bound_instance.bound_shard.model_card.model_id,
             bound_instance.bound_shard.model_card.source_revision,
             bound_instance.bound_shard.model_card.artifact_repository,
+            (
+                bound_instance.bound_shard.model_card.artifact_bundle.root
+                if bound_instance.bound_shard.model_card.artifact_bundle is not None
+                else None
+            ),
         )
     else:
         vision_processor = None
@@ -1112,6 +1121,11 @@ def shard_and_load(
     model_path = build_model_path(
         shard_metadata.model_card.model_id,
         shard_metadata.model_card.source_revision,
+        (
+            shard_metadata.model_card.artifact_bundle.root
+            if shard_metadata.model_card.artifact_bundle is not None
+            else None
+        ),
     )
 
     model, _ = load_model(

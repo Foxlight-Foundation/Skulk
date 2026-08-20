@@ -41,7 +41,9 @@ Every complete canonical or staged artifact carries an atomic
 `.skulk/installed-card.json` sidecar. The versioned record retains the full
 model card, immutable registry identity and provenance when available, exact
 artifact selection, base or companion role, owning base card, and a canonical
-SHA-256 file manifest. The sidecar is durable truth; `registry.json` is a
+SHA-256 file manifest. For signed v2 cards it also retains the bundle identity,
+so two aliases from one repository and revision cannot collide or reuse the
+wrong quant. The sidecar is durable truth; `registry.json` is a
 rebuildable index.
 The dashboard labels the immediately placeable group **Fits this cluster**. This
 is a live capacity statement, not a recommendation or qualification claim.
@@ -133,6 +135,23 @@ with the selected GGUF. At served-runner load, Skulk verifies its path, card
 size, manifest entry, and SHA-256 digest. A missing, stale, incorrectly sized,
 or corrupt projector fails with an actionable re-stage error instead of
 silently serving image prompts as text.
+
+### Exact artifact bundles
+
+A signed registry v2 card declares the complete downloadable bundle for one
+artifact. Direct downloads and central-store downloads fetch only that
+allow-list, preserve its repository-relative directory layout, and reject a
+missing file or immutable size/object-identity mismatch. The engine loads from
+the declared `artifact_root`; an MLX quant in `4-bit/`, for example, remains a
+self-contained directory instead of causing its sibling quants to be fetched.
+
+Bundle identity participates in canonical and staged generation matching. A
+metadata-only card refresh reuses existing bytes when the installed manifest
+already satisfies the exact bundle; a different bundle publishes as a distinct
+generation even when repository and revision are shared. Existing cards without
+`artifact_bundle` keep repository-wide tensor and pinned-GGUF behavior. Eviction
+still removes the complete staged generation, including its installed-card
+sidecar.
 
 ### Qualified cards can pin immutable artifacts
 

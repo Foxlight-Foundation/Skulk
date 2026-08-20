@@ -4,6 +4,15 @@ title: Next release
 sidebar_position: 0
 ---
 
+## Exact artifact bundles
+
+Signed registry-v2 cards may now identify one complete executable artifact or
+quant inside a repository containing many alternatives. Skulk fetches only the
+exact required files, validates immutable file metadata, preserves nested
+layouts, and loads from the declared artifact root. Bundle identity keeps
+several aliases from one repository and revision distinct in the model store
+and installed sidecars. Existing v1 cards remain compatible.
+
 ## Served GGUF vision
 
 GGUF vision cards can now pin one exact multimodal projector and run through
