@@ -28,13 +28,22 @@ from skulk.master.placement_utils import (
     usable_vram_by_node,
 )
 from skulk.shared.apply import apply
+from skulk.shared.backends import engine_of, platform_compatible_backends
 from skulk.shared.constants import SKULK_EVENT_LOG_DIR, SKULK_TRACING_ENABLED
 from skulk.shared.log_summaries import summarize_command_for_log
+from skulk.shared.models.capabilities import resolve_model_capability_profile
 from skulk.shared.models.memory_estimate import (
     estimate_shard_footprint,
     shard_fraction_of_model,
 )
-from skulk.shared.models.model_cards import ModelId, get_card, get_model_cards
+from skulk.shared.models.model_cards import (
+    ModelCard,
+    ModelId,
+    ModelTask,
+    card_serves_speech,
+    get_card,
+    get_model_cards,
+)
 from skulk.shared.types.commands import (
     AddCustomModelCard,
     AudioTranscription,
@@ -334,6 +343,107 @@ def dead_node_instance_failure_events(
             )
         )
     return failures
+
+
+def steward_candidate_is_servable(card: "ModelCard") -> bool:
+    """Whether a configured steward candidate can actually serve steward turns.
+
+    The steward harness always dispatches ``TextGeneration`` with server-side
+    tools, so a candidate must be a text-generation card whose resolved
+    capability profile supports tool calling. Anything else (an embedding,
+    image, speech, or tool-less card named through an operator override of
+    ``steward_models``) would place a steward that fails every turn instead
+    of falling through to the next candidate. The bundled defaults are
+    additionally CI-locked to pass this check.
+
+    Args:
+        card: The candidate's model card.
+
+    Returns:
+        True when the card can serve tool-driven steward text generation.
+    """
+    if ModelTask.TextGeneration not in card.tasks:
+        return False
+    # Routing truth: worker bootstrap dispatches image, embedding, and speech
+    # cards to their specialized runners BEFORE text-engine selection, so a
+    # multi-task card carrying any of those never reaches a text runner no
+    # matter what else it declares.
+    if (
+        ModelTask.TextToImage in card.tasks
+        or ModelTask.ImageToImage in card.tasks
+        or ModelTask.TextEmbedding in card.tasks
+        or card_serves_speech(card)
+    ):
+        return False
+    profile = resolve_model_capability_profile(card.model_id, model_card=card)
+    if not profile.supports_tool_calling:
+        return False
+    # Backend truth, not just model truth: a card whose only platform-
+    # servable engine is vllm needs an explicit tool-call parser pin, or
+    # the launched server rejects every tools-bearing request and the
+    # steward would place but fail every turn.
+    servable_engines = {
+        engine
+        for tag in platform_compatible_backends(
+            card.placement.compatible_backends,
+            card_serves_vision=card.vision is not None,
+            card_serves_speech=False,
+        )
+        if (engine := engine_of(tag)) is not None
+    }
+    return not (
+        servable_engines == {"vllm"}
+        and (card.runtime is None or card.runtime.vllm_tool_call_parser is None)
+    )
+
+
+def placement_may_select_parserless_vllm(
+    card: "ModelCard", placements: "Mapping[InstanceId, Instance]"
+) -> bool:
+    """Whether a minted placement could serve vllm for a card with no parser.
+
+    The pre-placement servability gate can only reject a card whose EVERY
+    servable engine needs the parser; a multi-engine card passes it and may
+    still end up on vllm on the fleet at hand. This checks the backends
+    placement actually stamped, so the walk can skip the candidate instead
+    of committing a steward whose server rejects every tools-bearing
+    request. An UNSTAMPED shard (``resolved_backend=None``, the telemetry
+    warm-up window) counts as selectable too: the worker then falls back to
+    its local probe, which is free to pick vllm, so the only safe answer
+    while vllm is among the card's servable engines is "not yet" — the
+    invariant simply retries on a later tick once resources have arrived.
+
+    Args:
+        card: The candidate's model card.
+        placements: ONLY the instances minted by this placement. The caller
+            must filter out pre-existing state (``place_instance`` returns
+            existing instances plus the new one), or an unrelated vllm or
+            unstamped shard would falsely condemn the candidate.
+
+    Returns:
+        True when the card pins no ``runtime.vllm_tool_call_parser``, vllm
+        is among its platform-servable engines, and any shard either
+        resolved to vllm or carries no stamped backend.
+    """
+    if card.runtime is not None and card.runtime.vllm_tool_call_parser is not None:
+        return False
+    servable_engines = {
+        engine
+        for tag in platform_compatible_backends(
+            card.placement.compatible_backends,
+            card_serves_vision=card.vision is not None,
+            card_serves_speech=False,
+        )
+        if (engine := engine_of(tag)) is not None
+    }
+    if "vllm" not in servable_engines:
+        return False
+    for instance in placements.values():
+        for shard in instance.shard_assignments.runner_to_shard.values():
+            backend: str | None = getattr(shard, "resolved_backend", None)
+            if backend is None or engine_of(backend) == "vllm":
+                return True
+    return False
 
 
 def _aware_timestamp(when: datetime) -> datetime:
@@ -2258,6 +2368,26 @@ class Master:
             await self._teardown_steward_instances(extras)
             return
         if stewards:
+            # Reconcile a preference-list edit: a steward whose model was
+            # removed from ``steward_models`` is deliberately deselected and
+            # must not keep serving indefinitely. Teardown here is enough —
+            # this same invariant re-places from the current list on the
+            # next tick. Reordering the list alone never replaces a placed
+            # steward (upgrade churn is worse than a working older brain).
+            placed = self.state.instances.get(stewards[0])
+            if placed is not None:
+                placed_model = str(placed.shard_assignments.model_id)
+                if placed_model not in fabric.steward_models:
+                    logger.info(
+                        f"Steward model {placed_model} was removed from "
+                        "steward_models; replacing the placement"
+                    )
+                    await self._teardown_steward_instances(stewards)
+                    # This teardown is an intentional replacement: open the
+                    # pacing window so the invariant really can re-place on
+                    # the next tick, as promised above, instead of waiting
+                    # out a window started by the previous placement.
+                    self._steward_last_attempt_monotonic = time.monotonic() - 60.0
             return
 
         now = time.monotonic()
@@ -2273,6 +2403,12 @@ class Master:
             if card is None:
                 logger.warning(
                     f"Steward model {model_ref} has no model card; skipping"
+                )
+                continue
+            if not steward_candidate_is_servable(card):
+                logger.warning(
+                    f"Steward model {model_ref} is not a tool-calling text "
+                    "card; skipping"
                 )
                 continue
             command = PlaceInstance(
@@ -2306,6 +2442,18 @@ class Master:
             except (PlacementError, PlacementInfoPendingError) as err:
                 logger.warning(
                     f"Steward placement with {model_ref} not possible yet: {err}"
+                )
+                continue
+            minted_instances = {
+                instance_id: instance
+                for instance_id, instance in final_placement.items()
+                if instance_id not in self.state.instances
+            }
+            if placement_may_select_parserless_vllm(card, minted_instances):
+                logger.warning(
+                    f"Steward model {model_ref} resolved (or may fall back) to "
+                    "the vllm engine without a pinned tool-call parser; "
+                    "skipping"
                 )
                 continue
             logger.info(

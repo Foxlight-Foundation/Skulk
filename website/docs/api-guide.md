@@ -1317,7 +1317,10 @@ Requests cancellation of one in-flight generation command by its command ID.
 It covers text generation, image generation, embeddings, and speech synthesis
 or transcription commands owned by the API node you call: Skulk closes the
 local response stream and sends a task cancellation so the serving runner
-stops instead of generating into the void.
+stops instead of generating into the void. Steward turns (`skulk/steward`)
+are covered too: the ID advertised on a steward response cancels the whole
+turn — the in-flight generation stops and the investigation loop ends
+instead of proceeding to its next step.
 
 Finding the command ID:
 
@@ -1334,11 +1337,12 @@ curl -X POST http://localhost:52415/v1/cancel/<command_id>
 ```
 
 A cancelled command returns
-`{"message": "Command cancelled.", "command_id": "..."}`. An unknown or
-already-completed command returns **404 Command not found or already
-completed**. Command streams are node-local, so call the same API node that
-accepted the original request. Simply disconnecting from a streaming response
-triggers the same cancellation path implicitly.
+`{"message": "Command cancelled.", "command_id": "..."}`; a cancelled steward
+turn returns `{"message": "Steward turn cancelled.", "command_id": "..."}`.
+An unknown or already-completed command returns **404 Command not found or
+already completed**. Command streams are node-local, so call the same API
+node that accepted the original request. Simply disconnecting from a
+streaming response triggers the same cancellation path implicitly.
 
 ## Model Discovery
 

@@ -166,3 +166,181 @@ def test_mlx_ring_meta_is_benign_for_a_single_node_gguf_steward() -> None:
     assert isinstance(instance, MlxRingInstance)
     assert instance.system_role == "steward"
     assert len(instance.shard_assignments.node_to_runner) == 1
+
+
+def test_steward_candidates_require_text_and_tool_capability() -> None:
+    """Only tool-calling text cards may serve as steward brains (#830).
+
+    The harness always dispatches ``TextGeneration`` with server tools, so
+    an operator override naming any other card shape must be skipped, not
+    placed.
+    """
+    from skulk.master.main import steward_candidate_is_servable
+    from skulk.shared.models.model_cards import ToolingCardConfig
+
+    def _card(tasks: list[ModelTask], *, tools: bool) -> ModelCard:
+        return ModelCard(
+            model_id=ModelId("candidate-model"),
+            storage_size=Memory.from_gb(3),
+            n_layers=12,
+            hidden_size=30,
+            supports_tensor=True,
+            tasks=tasks,
+            tooling=ToolingCardConfig(supports_tool_calling=True) if tools else None,
+        )
+
+    assert steward_candidate_is_servable(
+        _card([ModelTask.TextGeneration], tools=True)
+    )
+    # A speech card cannot serve steward turns no matter what it declares.
+    assert not steward_candidate_is_servable(
+        _card([ModelTask.TextToSpeech], tools=True)
+    )
+    # A text card without tool calling can never investigate.
+    assert not steward_candidate_is_servable(
+        _card([ModelTask.TextGeneration], tools=False)
+    )
+    # Routing truth: bootstrap sends image/embedding/speech cards to their
+    # specialized runners before text-engine dispatch, so a multi-task card
+    # carrying any of those tasks never reaches a text runner.
+    assert not steward_candidate_is_servable(
+        _card([ModelTask.TextGeneration, ModelTask.TextToSpeech], tools=True)
+    )
+    assert not steward_candidate_is_servable(
+        _card([ModelTask.TextGeneration, ModelTask.TextEmbedding], tools=True)
+    )
+    assert not steward_candidate_is_servable(
+        _card([ModelTask.TextGeneration, ModelTask.TextToImage], tools=True)
+    )
+
+
+def test_vllm_only_steward_candidates_require_a_pinned_parser() -> None:
+    """Backend truth joins model truth in the servability gate (#833).
+
+    A tool-declaring card whose only platform-servable engine is vllm still
+    fails every steward turn unless the card pins
+    ``runtime.vllm_tool_call_parser``: the launched server rejects
+    tools-bearing requests loudly, so such a candidate must be skipped.
+    """
+    from skulk.master.main import steward_candidate_is_servable
+    from skulk.shared.models.model_cards import (
+        RuntimeCapabilityCardConfig,
+        ToolingCardConfig,
+    )
+
+    def _vllm_card(parser: str | None) -> ModelCard:
+        return ModelCard(
+            model_id=ModelId("vllm-only-model"),
+            storage_size=Memory.from_gb(3),
+            n_layers=12,
+            hidden_size=30,
+            supports_tensor=True,
+            tasks=[ModelTask.TextGeneration],
+            tooling=ToolingCardConfig(supports_tool_calling=True),
+            runtime=(
+                RuntimeCapabilityCardConfig(vllm_tool_call_parser=parser)
+                if parser is not None
+                else None
+            ),
+            placement=PlacementCardConfig(
+                compatible_backends=frozenset({"vllm-cuda"}),
+            ),
+        )
+
+    assert not steward_candidate_is_servable(_vllm_card(None))
+    assert steward_candidate_is_servable(_vllm_card("hermes"))
+
+
+def test_stamped_vllm_placement_without_parser_is_rejected() -> None:
+    """The post-placement gate catches multi-engine cards that resolve to vllm.
+
+    A card listing vllm alongside another engine passes the card-level
+    servability gate, but a fleet whose hardware makes placement stamp
+    vllm still needs the parser pin; the walk must skip the candidate when
+    the minted shards resolved to vllm without one (#833).
+    """
+    from skulk.master.main import placement_may_select_parserless_vllm
+    from skulk.shared.models.model_cards import (
+        RuntimeCapabilityCardConfig,
+        ToolingCardConfig,
+    )
+    from skulk.shared.types.worker.instances import Instance, InstanceId
+
+    def _card(parser: str | None) -> ModelCard:
+        return ModelCard(
+            model_id=ModelId("multi-engine-model"),
+            storage_size=Memory.from_gb(3),
+            n_layers=12,
+            hidden_size=30,
+            supports_tensor=True,
+            tasks=[ModelTask.TextGeneration],
+            tooling=ToolingCardConfig(supports_tool_calling=True),
+            runtime=(
+                RuntimeCapabilityCardConfig(vllm_tool_call_parser=parser)
+                if parser is not None
+                else None
+            ),
+            placement=PlacementCardConfig(
+                compatible_backends=frozenset({"vllm-cuda", "llama_server-cuda"}),
+                backend_preference=("vllm-cuda", "llama_server-cuda"),
+            ),
+        )
+
+    topology, node_memory, node_network, node_ids = fully_connected_three_nodes(
+        (10.0, 10.0, 10.0)
+    )
+
+    def _place(card: ModelCard) -> "dict[InstanceId, Instance]":
+        command = PlaceInstance(
+            model_card=card,
+            sharding=Sharding.Pipeline,
+            instance_meta=InstanceMeta.MlxRing,
+            min_nodes=1,
+            system_role="steward",
+        )
+        return place_instance(
+            command,
+            topology,
+            {},
+            node_memory,
+            node_network,
+            node_resources={
+                node_id: NodeResources(
+                    backends=frozenset({"vllm-cuda", "llama_server-cuda"})
+                )
+                for node_id in node_ids
+            },
+        )
+
+    parserless = _place(_card(None))
+    stamped = {
+        shard.resolved_backend
+        for instance in parserless.values()
+        for shard in instance.shard_assignments.runner_to_shard.values()
+    }
+    assert stamped == {"vllm-cuda"}, "test premise: placement resolves vllm"
+    assert placement_may_select_parserless_vllm(_card(None), parserless)
+    assert not placement_may_select_parserless_vllm(
+        _card("hermes"), _place(_card("hermes"))
+    )
+
+    # Telemetry warm-up: no NodeResources means placement stamps no
+    # backend, and the worker's local fallback could still pick vllm, so
+    # an unstamped parserless placement must read as unsafe too.
+    unstamped_command = PlaceInstance(
+        model_card=_card(None),
+        sharding=Sharding.Pipeline,
+        instance_meta=InstanceMeta.MlxRing,
+        min_nodes=1,
+        system_role="steward",
+    )
+    unstamped = place_instance(
+        unstamped_command, topology, {}, node_memory, node_network
+    )
+    stamped_backends = {
+        shard.resolved_backend
+        for instance in unstamped.values()
+        for shard in instance.shard_assignments.runner_to_shard.values()
+    }
+    assert stamped_backends == {None}, "test premise: warm-up leaves no stamp"
+    assert placement_may_select_parserless_vllm(_card(None), unstamped)
