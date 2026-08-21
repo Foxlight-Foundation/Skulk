@@ -15,12 +15,14 @@ from skulk.shared.models.model_cards import ModelCard, ModelTask, VisionCardConf
 from skulk.shared.models.registry import RegistryCapabilityClaim
 from skulk.shared.models.remote_code_approval import remote_code_trust_identity
 from skulk.shared.types.commands import AddCustomModelCard, ForwarderCommand
-from skulk.shared.types.common import ModelId, NodeId
+from skulk.shared.types.common import CommandId, ModelId, NodeId
 from skulk.shared.types.memory import Memory
 from skulk.utils.channels import channel
 
 
-async def _accept_exact_card_convergence(_card: ModelCard) -> None:
+async def _accept_exact_card_convergence(
+    _card: ModelCard, _mutation_command_id: CommandId
+) -> None:
     """Stand in for the indexed event round-trip in narrow endpoint tests."""
 
 
@@ -460,9 +462,49 @@ async def test_exact_card_convergence_requires_the_ordered_card(
     def conflicting_card(_model_id: ModelId) -> ModelCard:
         return conflicting
 
+    def mutation_applied(_command_id: CommandId) -> bool:
+        return True
+
     monkeypatch.setattr(api_main, "get_card", conflicting_card)
+    monkeypatch.setattr(api_main, "custom_card_mutation_applied", mutation_applied)
     with pytest.raises(HTTPException, match="authoritative ordering"):
         await API._wait_for_exact_custom_card_convergence(
             expected,
+            CommandId(),
+            timeout_seconds=0.0,
+        )
+
+
+@pytest.mark.asyncio
+async def test_exact_card_convergence_requires_this_command_acknowledgement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pre-existing identical card cannot acknowledge a new service retry."""
+    expected = ModelCard(
+        model_id=ModelId("org/preexisting"),
+        source_revision="b" * 40,
+        storage_size=Memory.from_bytes(1),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        is_custom=True,
+        qualification_only=True,
+    )
+
+    def existing_card(_model_id: ModelId) -> ModelCard:
+        return expected
+
+    def mutation_not_applied(_command_id: CommandId) -> bool:
+        return False
+
+    monkeypatch.setattr(api_main, "get_card", existing_card)
+    monkeypatch.setattr(
+        api_main, "custom_card_mutation_applied", mutation_not_applied
+    )
+    with pytest.raises(HTTPException, match="did not converge"):
+        await API._wait_for_exact_custom_card_convergence(
+            expected,
+            CommandId(),
             timeout_seconds=0.0,
         )

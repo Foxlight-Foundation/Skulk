@@ -1570,7 +1570,9 @@ server-assigned `qualification_only` marker. These ownership preconditions are
 rechecked by the elected master when it orders the mutation, so concurrent
 operator changes cannot be overwritten or deleted through stale API-node state.
 The endpoint returns success only after the exact card has round-tripped through
-that ordering boundary and is visible in the responding node's catalog; a
+that ordering boundary, its originating command ID has been acknowledged after
+local persistence/cache application, and the card is visible in the responding
+node's catalog; a
 conflicting winner returns `409`, and convergence timeout returns `504`.
 
 ### Per-node storage breakdown

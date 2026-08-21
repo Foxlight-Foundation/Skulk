@@ -4,6 +4,7 @@ import os
 import re
 import struct
 import time
+from collections import deque
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from collections.abc import Set as AbstractSet
 from enum import Enum
@@ -51,7 +52,7 @@ from skulk.shared.models.registry import (
     RegistryEngineSupportClaim,
     TufRegistryClient,
 )
-from skulk.shared.types.common import ModelId
+from skulk.shared.types.common import CommandId, ModelId
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.text_generation import ReasoningEffort
 from skulk.utils.pydantic_ext import CamelCaseModel, FrozenModel
@@ -98,6 +99,9 @@ _last_registry_refresh = 0.0
 _card_cache_dirty = False
 _last_registry_miss_refresh = 0.0
 _REGISTRY_MISS_REFRESH_SECONDS: Final[float] = 1.0
+_CUSTOM_CARD_MUTATION_CONFIRMATION_LIMIT: Final[int] = 4096
+_applied_custom_card_mutations: deque[CommandId] = deque()
+_applied_custom_card_mutation_set: set[CommandId] = set()
 _registry_client = TufRegistryClient(
     base_url=SKULK_MODEL_REGISTRY_URL,
     cache_dir=SKULK_MODEL_REGISTRY_CACHE_DIR,
@@ -105,6 +109,36 @@ _registry_client = TufRegistryClient(
     timeout_seconds=SKULK_MODEL_REGISTRY_TIMEOUT_SECONDS,
     max_stale_days=SKULK_MODEL_REGISTRY_MAX_STALE_DAYS,
 )
+
+
+def record_custom_card_mutation_applied(command_id: CommandId) -> None:
+    """Record one card mutation only after local persistence and cache apply.
+
+    Args:
+        command_id: Originating cluster command acknowledged by the indexed event.
+
+    Side effects:
+        Updates a bounded process-local confirmation window used by API callers.
+    """
+    if command_id in _applied_custom_card_mutation_set:
+        return
+    if len(_applied_custom_card_mutations) >= _CUSTOM_CARD_MUTATION_CONFIRMATION_LIMIT:
+        expired = _applied_custom_card_mutations.popleft()
+        _applied_custom_card_mutation_set.discard(expired)
+    _applied_custom_card_mutations.append(command_id)
+    _applied_custom_card_mutation_set.add(command_id)
+
+
+def custom_card_mutation_applied(command_id: CommandId) -> bool:
+    """Return whether this process applied the exact indexed card mutation.
+
+    Args:
+        command_id: Originating cluster command to check.
+
+    Returns:
+        ``True`` only after the worker persisted and cached its matching event.
+    """
+    return command_id in _applied_custom_card_mutation_set
 
 
 def _registry_enabled() -> bool:

@@ -130,13 +130,15 @@ def test_older_indexed_echo_cannot_roll_back_newer_ordered_truth(
 
     monkeypatch.setattr(master_main, "get_card", existing_card)
     master = _master()
+    old_command = AddCustomModelCard(
+        model_card=temporary,
+        requires_qualification_ownership=True,
+    )
     old_event = master._order_custom_model_card_add(  # pyright: ignore[reportPrivateUsage]
-        AddCustomModelCard(
-            model_card=temporary,
-            requires_qualification_ownership=True,
-        )
+        old_command
     )
     assert isinstance(old_event, CustomModelCardAdded)
+    assert old_event.mutation_command_id == old_command.command_id
     master._order_custom_model_card_add(  # pyright: ignore[reportPrivateUsage]
         AddCustomModelCard(model_card=operator)
     )

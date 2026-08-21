@@ -26,7 +26,9 @@ This project records release notes here and mirrors public-facing notes in
   this immutable temporary install and server-owned custom-card cleanup
   lifecycle; only service-authenticated installs receive the ownership marker,
   and the credential cannot replace or delete any other card. The elected
-  master rechecks that precondition at the serialized ordering boundary.
+  master rechecks that precondition at the serialized ordering boundary, and
+  success waits for local persistence of the indexed event carrying the exact
+  originating command ID.
 
 - Signed registry-v2 cards can now describe one exact immutable artifact bundle
   inside a shared upstream repository. Skulk downloads only the required file

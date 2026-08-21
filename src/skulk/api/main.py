@@ -332,6 +332,7 @@ from skulk.shared.models.model_cards import (
     ModelCard,
     ModelId,
     ModelTask,
+    custom_card_mutation_applied,
     get_all_model_cards,
     get_bundled_card,
     get_card,
@@ -8804,21 +8805,23 @@ class API:
                     "model card"
                 ),
             )
+        mutation = AddCustomModelCard(
+            model_card=card,
+            requires_qualification_ownership=qualification_service,
+        )
         await self.command_sender.send(
             ForwarderCommand(
                 origin=self._system_id,
-                command=AddCustomModelCard(
-                    model_card=card,
-                    requires_qualification_ownership=qualification_service,
-                ),
+                command=mutation,
             )
         )
-        await self._wait_for_exact_custom_card_convergence(card)
+        await self._wait_for_exact_custom_card_convergence(card, mutation.command_id)
         return self._model_list_entry(card)
 
     @staticmethod
     async def _wait_for_exact_custom_card_convergence(
         card: ModelCard,
+        mutation_command_id: CommandId,
         *,
         timeout_seconds: float = _EXACT_CARD_CONVERGENCE_TIMEOUT_SECONDS,
     ) -> None:
@@ -8826,6 +8829,7 @@ class API:
 
         Args:
             card: Unsigned exact card sent through the master ordering boundary.
+            mutation_command_id: Exact command whose applied event must be observed.
             timeout_seconds: Maximum event round-trip time before failing.
 
         Raises:
@@ -8836,7 +8840,7 @@ class API:
         current: ModelCard | None = None
         while True:
             current = get_card(card.model_id)
-            if current == card:
+            if custom_card_mutation_applied(mutation_command_id) and current == card:
                 return
             if anyio.current_time() >= deadline:
                 break

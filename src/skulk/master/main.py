@@ -876,7 +876,10 @@ class Master:
             )
             return None
         self._ordered_model_cards[model_id] = command.model_card
-        return CustomModelCardAdded(model_card=command.model_card)
+        return CustomModelCardAdded(
+            model_card=command.model_card,
+            mutation_command_id=command.command_id,
+        )
 
     def _order_custom_model_card_delete(
         self, command: DeleteCustomModelCard
@@ -892,7 +895,10 @@ class Master:
             )
             return None
         self._ordered_model_cards[command.model_id] = None
-        return CustomModelCardDeleted(model_id=command.model_id)
+        return CustomModelCardDeleted(
+            model_id=command.model_id,
+            mutation_command_id=command.command_id,
+        )
 
     def _record_freed_instance(self, instance: Instance) -> None:
         """Record a deleted instance's per-node footprint for the grace window.

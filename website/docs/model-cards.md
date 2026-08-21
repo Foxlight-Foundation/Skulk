@@ -52,7 +52,9 @@ durable `qualification_only` marker only to service-authenticated installs, and
 refuses to replace or remove any pre-existing non-qualification card through
 this service credential. The elected master rechecks that ownership at its
 serialized command-ordering boundary, closing races between different API
-nodes.
+nodes. Success additionally requires local persistence of the indexed event
+carrying that exact command ID and visibility of the exact card, so a cached
+identical card cannot acknowledge a new qualification request.
 
 The signed catalog also carries open `architecture` and `capability_claims`
 metadata beside the immutable card. Claims describe intrinsic model behavior

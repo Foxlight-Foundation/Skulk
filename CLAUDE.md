@@ -527,7 +527,9 @@ installs never receive the marker, and the service never approves repository
 code. The elected master rechecks the service ownership precondition in its
 serialized command order before emitting a card event. `PUT /config` rejects
 `model_trust` snapshots and directs authenticated callers to the dedicated
-master-ordered endpoints.
+master-ordered endpoints. An exact-card install succeeds only after the local
+worker persists and caches the indexed event carrying that command's ID; card
+equality alone cannot acknowledge a new request.
 The gateway records successful bearer validation in the internal ASGI scope,
 not a caller-provided header. Secret-stripped convergence preserves each node's
 local Hugging Face token and atomically writes `skulk.yaml` mode `0o600`.
