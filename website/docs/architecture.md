@@ -1374,7 +1374,31 @@ trust policy before fetching bytes. Only immutable Foxlight provenance grants
 automatic trust; registry publication with agent or community provenance cannot
 do so.
 
-Model discovery feeds this card system. `GET /models/search` searches Hugging Face repositories, and `POST /models/add` builds a custom card from repository metadata, detecting GGUF repositories (which `mlx-lm` cannot load) and giving them a llama.cpp card instead of the MLX default. Hugging Face's search indexes repository metadata, not file manifests, so a pasted GGUF filename can come back empty even when the file exists somewhere on the Hub. Filename-shaped queries therefore get a bounded fallback: Skulk progressively broadens the model-name prefix, inspects a capped set of candidate repositories' file manifests, keeps only repositories containing the exact basename, and returns the matched repo-relative path alongside each result. Adding such a result pins that exact quant file on the generated card instead of applying the default quant preference, and the pin is honored end to end: the store download request names the pinned file, a staged directory that lacks the pinned quant (or its complete shard group) is not treated as a cache hit, and the store recovers a missing selected file before staging.
+Model discovery feeds this card system. `GET /models/search` searches Hugging Face repositories, and `POST /models/add` builds a custom card from repository metadata, detecting GGUF repositories (which `mlx-lm` cannot load) and giving them a llama.cpp card instead of the MLX default. `POST /models/add-card` is the narrower exact-card operator boundary: it accepts an already compiled immutable card, retains its bundle and artifact pins, strips registry identity and provenance, and persists it under unsigned custom trust. Registry qualification uses that path before publication, then exercises the normal store, placement, runner, and cleanup lifecycle without manufacturing a private signing channel. Hugging Face's search indexes repository metadata, not file manifests, so a pasted GGUF filename can come back empty even when the file exists somewhere on the Hub. Filename-shaped queries therefore get a bounded fallback: Skulk progressively broadens the model-name prefix, inspects a capped set of candidate repositories' file manifests, keeps only repositories containing the exact basename, and returns the matched repo-relative path alongside each result. Adding such a result pins that exact quant file on the generated card instead of applying the default quant preference, and the pin is honored end to end: the store download request names the pinned file, a staged directory that lacks the pinned quant (or its complete shard group) is not treated as a cache hit, and the store recovers a missing selected file before staging.
+
+Headless registry automation authenticates that temporary exact-card lifecycle
+with one high-entropy `SKULK_EXACT_CARD_QUALIFICATION_TOKEN` shared with Scout.
+Constant-time validation grants that token only the exact-card install and
+its server-marked `qualification_only` custom-card cleanup operation, not
+general cluster authority. Only service-authenticated installs receive that
+marker. The service path rejects a collision with any pre-existing
+non-qualification card and requires a full immutable source revision. Service
+cleanup carries the complete expected temporary card to the elected master,
+whose serialized command processor requires exact equality and advances a local ordered card view
+before emitting the replicated event; API-node cache timing cannot authorize a
+stale overwrite or let an older job delete a replacement under the same alias.
+Indexed event echoes do not rewrite that view,
+because an older echo may return after a newer command decision; a promoted
+master lazily seeds its fresh view from the converged local catalog.
+The add endpoint waits for that exact command ID's indexed event to persist and
+update its local catalog before returning success, so a pre-existing identical
+card cannot acknowledge a retry and callers cannot race a download or placement
+against an uncommitted card.
+Signed-registry refreshes are reconciled into the master's ownership view even
+though they do not use the command/event stream. Cleanup waits for its own
+command acknowledgement; downloaded qualification artifacts remain durable and
+self-describing, but their `qualification_only` sidecars are not projected into
+the catalog after the lifecycle-owned custom card file is removed.
 
 ## API adapters
 

@@ -517,10 +517,24 @@ unrelated Settings save cannot replace a newer decision. Trust is never a
 placement axis. Placement still
 applies open backend preferences, locality, and capacity ranking adaptively, and
 the store plus runner remain final enforcement boundaries.
-Trust mutations and custom-card creation require direct loopback or the
-authenticated operator gateway's write scope. `PUT /config` rejects
+Trust mutations and ordinary custom-card creation require direct loopback or the
+authenticated operator gateway's write scope. Exact pre-publication
+qualification may instead use `SKULK_EXACT_CARD_QUALIFICATION_TOKEN`; only
+`POST /models/add-card` and server-marked `qualification_only` custom-card
+cleanup accept it. Cleanup supplies the complete original candidate and the
+elected master requires exact card equality, so an older job cannot delete a
+replacement under the same alias. The service path requires an immutable source
+revision and cannot replace or delete any pre-existing non-qualification card; operator
+installs never receive the marker, and the service never approves repository
+code. The elected master rechecks the service ownership precondition in its
+serialized command order before emitting a card event. `PUT /config` rejects
 `model_trust` snapshots and directs authenticated callers to the dedicated
-master-ordered endpoints.
+master-ordered endpoints. An exact-card install succeeds only after the local
+worker persists and caches the indexed event carrying that command's ID; card
+equality alone cannot acknowledge a new request. Service cleanup has the same
+command-correlated wait, and retained `qualification_only` installed sidecars
+do not re-enter the catalog after cleanup. Signed-registry refreshes supersede
+stale qualification entries in the master's ownership view.
 The gateway records successful bearer validation in the internal ASGI scope,
 not a caller-provided header. Secret-stripped convergence preserves each node's
 local Hugging Face token and atomically writes `skulk.yaml` mode `0o600`.

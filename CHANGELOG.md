@@ -9,6 +9,11 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- Pre-publication qualification cleanup now names the complete temporary card
+  it owns, and the elected master compares that exact card before deleting the
+  alias. An older or retried job can no longer remove a newer qualification
+  replacement that reused the same model ID.
+
 - Same-artifact signed card replacements now run the card-only installed-sidecar
   refresh before a staged-cache fast path can report the model ready. This
   prevents a newly approved replacement card from passing placement and then
@@ -16,6 +21,24 @@ This project records release notes here and mirrors public-facing notes in
   retransferring unchanged model bytes.
 
 ### Added
+
+- Authenticated operator workflows can now install one complete pinned model
+  card through `POST /models/add-card` for pre-publication qualification. Skulk
+  preserves the exact artifact bundle while stripping registry identity and
+  provenance, so testing cannot impersonate signed trust and repository code
+  still requires its normal model-level approval. Headless registry automation
+  may use the narrowly scoped `SKULK_EXACT_CARD_QUALIFICATION_TOKEN` for only
+  this immutable temporary install and server-owned custom-card cleanup
+  lifecycle; only service-authenticated installs receive the ownership marker,
+  and the credential cannot replace or delete any other card. The elected
+  master rechecks that precondition at the serialized ordering boundary, and
+  success waits for local persistence of the indexed event carrying the exact
+  originating command ID. Cleanup preserves downloaded artifact bytes without
+  allowing their temporary installed sidecar to re-enter the catalog, and later
+  signed-registry refreshes update the master's ownership guard. Qualification
+  downloads additionally pin the immutable v2 bundle identity through both the
+  API node and canonical store, preventing a later alias replacement from
+  redirecting the bytes under test.
 
 - The dashboard has a new Integrations page that generates ready-to-paste
   configuration for connecting external tools to the cluster: Claude Code,

@@ -276,6 +276,20 @@ def test_update_config_rejects_model_trust_snapshot_on_loopback(
             None,
         ),
         ("POST", "/models/add", {"model_id": "org/model"}),
+        (
+            "POST",
+            "/models/add-card",
+            {
+                "model_card": {
+                    "modelId": "org/model",
+                    "storageSize": {"inBytes": 1},
+                    "nLayers": 1,
+                    "hiddenSize": 1,
+                    "supportsTensor": False,
+                    "tasks": ["TextGeneration"],
+                }
+            },
+        ),
     ],
 )
 def test_sensitive_model_mutations_reject_unauthenticated_network_client(

@@ -34,7 +34,14 @@ from skulk.shared.models.memory_estimate import (
     estimate_shard_footprint,
     shard_fraction_of_model,
 )
-from skulk.shared.models.model_cards import ModelId, get_card, get_model_cards
+from skulk.shared.models.model_cards import (
+    ModelCard,
+    ModelId,
+    get_card,
+    get_current_registry_card,
+    get_custom_card_storage_collision,
+    get_model_cards,
+)
 from skulk.shared.types.commands import (
     AddCustomModelCard,
     AudioTranscription,
@@ -710,6 +717,14 @@ class Master:
         # back-to-back mutations cannot each read the same stale State snapshot
         # and accidentally resurrect a revocation or discard an approval.
         self._model_trust_approvals = set(initial_trust_identities)
+        # Custom-card events are pass-through State events, so authoritative
+        # ownership races need a master-local ordered view. Seed aliases lazily
+        # from this node's converged card cache, then update the view before the
+        # indexed event round-trips. Indexed echoes deliberately never rewrite
+        # this view: an older echo may arrive after a newer command decision.
+        # A promoted master starts a new view and lazily seeds each alias from
+        # its node's already converged card cache before the first new command.
+        self._ordered_model_cards: dict[ModelId, ModelCard | None] = {}
         self.state = State(
             tracing_enabled=SKULK_TRACING_ENABLED,
             model_trust_approved_remote_code_identities=tuple(
@@ -839,6 +854,88 @@ class Master:
 
         self.state = apply(self.state, indexed)
         record_membership_from_event(self._telemetry_view, indexed.event)
+
+    def _ordered_model_card(self, model_id: ModelId) -> ModelCard | None:
+        """Return model-card truth at the master's current command order."""
+        if model_id not in self._ordered_model_cards:
+            self._ordered_model_cards[model_id] = get_card(model_id)
+        registry_card = get_current_registry_card(model_id)
+        ordered = self._ordered_model_cards[model_id]
+        if registry_card is not None and (
+            ordered is None
+            or ordered.qualification_only
+            or ordered.registry_card_id is not None
+        ):
+            # Registry refreshes do not traverse the command/event stream.  Pull
+            # newer signed truth into the service-ownership view without
+            # replacing an operator-owned custom override.  Signed truth always
+            # supersedes a lifecycle-owned temporary card for future mutations.
+            self._ordered_model_cards[model_id] = registry_card
+        return self._ordered_model_cards[model_id]
+
+    def _order_custom_model_card_add(
+        self, command: AddCustomModelCard
+    ) -> CustomModelCardAdded | None:
+        """Enforce service ownership before ordering a custom-card addition."""
+        model_id = command.model_card.model_id
+        storage_collision = get_custom_card_storage_collision(model_id)
+        if storage_collision is None:
+            storage_collision = next(
+                (
+                    ordered
+                    for ordered_model_id, ordered in self._ordered_model_cards.items()
+                    if ordered is not None
+                    and ordered.is_custom
+                    and ordered_model_id != model_id
+                    and ordered_model_id.normalize() == model_id.normalize()
+                ),
+                None,
+            )
+        if storage_collision is not None:
+            logger.warning(
+                "Rejected custom model card whose persistence key belongs to "
+                f"another alias (model_id={model_id}, "
+                f"owner={storage_collision.model_id})"
+            )
+            return None
+        existing = self._ordered_model_card(model_id)
+        if (
+            command.requires_qualification_ownership
+            and existing is not None
+            and not existing.qualification_only
+        ):
+            logger.warning(
+                "Rejected qualification card addition at authoritative ordering "
+                f"boundary (model_id={model_id})"
+            )
+            return None
+        self._ordered_model_cards[model_id] = command.model_card
+        return CustomModelCardAdded(
+            model_card=command.model_card,
+            mutation_command_id=command.command_id,
+        )
+
+    def _order_custom_model_card_delete(
+        self, command: DeleteCustomModelCard
+    ) -> CustomModelCardDeleted | None:
+        """Enforce service ownership before ordering a custom-card deletion."""
+        existing = self._ordered_model_card(command.model_id)
+        if command.requires_qualification_ownership and (
+            existing is None
+            or not existing.qualification_only
+            or command.expected_qualification_card is None
+            or existing != command.expected_qualification_card
+        ):
+            logger.warning(
+                "Rejected qualification card deletion at authoritative ordering "
+                f"boundary (model_id={command.model_id})"
+            )
+            return None
+        self._ordered_model_cards[command.model_id] = None
+        return CustomModelCardDeleted(
+            model_id=command.model_id,
+            mutation_command_id=command.command_id,
+        )
 
     def _record_freed_instance(self, instance: Instance) -> None:
         """Record a deleted instance's per-node footprint for the grace window.
@@ -1858,13 +1955,15 @@ class Master:
                                 )
 
                         case AddCustomModelCard():
-                            generated_events.append(
-                                CustomModelCardAdded(model_card=command.model_card)
-                            )
+                            if (
+                                event := self._order_custom_model_card_add(command)
+                            ) is not None:
+                                generated_events.append(event)
                         case DeleteCustomModelCard():
-                            generated_events.append(
-                                CustomModelCardDeleted(model_id=command.model_id)
-                            )
+                            if (
+                                event := self._order_custom_model_card_delete(command)
+                            ) is not None:
+                                generated_events.append(event)
                         case EvictStagedModel():
                             # Broadcast a fleet-wide eviction of the store-deleted
                             # model: apply() drops its download entries; workers

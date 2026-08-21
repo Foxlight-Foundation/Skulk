@@ -1,4 +1,5 @@
 from .api import AddCustomModelParams as AddCustomModelParams
+from .api import AddExactCustomModelCardParams as AddExactCustomModelCardParams
 from .api import AdvancedImageParams as AdvancedImageParams
 from .api import ArtifactExportRequest as ArtifactExportRequest
 from .api import ArtifactExportResponse as ArtifactExportResponse
@@ -32,6 +33,9 @@ from .api import CompletionTokensDetails as CompletionTokensDetails
 from .api import CreateInstanceParams as CreateInstanceParams
 from .api import CreateInstanceResponse as CreateInstanceResponse
 from .api import DeleteDownloadResponse as DeleteDownloadResponse
+from .api import (
+    DeleteExactCustomModelCardParams as DeleteExactCustomModelCardParams,
+)
 from .api import DeleteInstanceResponse as DeleteInstanceResponse
 from .api import DeleteTracesRequest as DeleteTracesRequest
 from .api import DeleteTracesResponse as DeleteTracesResponse

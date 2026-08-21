@@ -1,18 +1,43 @@
 # pyright: reportPrivateUsage=false
 """Cluster model trust resolves immutable IDs from the complete catalog."""
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
+from fastapi import HTTPException
 from starlette.requests import Request
 
 from skulk.api import main as api_main
 from skulk.api.main import API
 from skulk.api.operator_gateway import OPERATOR_GATEWAY_AUTHORIZED_SCOPE_KEY
+from skulk.api.types import (
+    AddExactCustomModelCardParams,
+    DeleteExactCustomModelCardParams,
+)
 from skulk.shared.models.model_cards import ModelCard, ModelTask, VisionCardConfig
+from skulk.shared.models.registry import RegistryCapabilityClaim
 from skulk.shared.models.remote_code_approval import remote_code_trust_identity
-from skulk.shared.types.common import ModelId
+from skulk.shared.types.commands import AddCustomModelCard, ForwarderCommand
+from skulk.shared.types.common import CommandId, ModelId, NodeId
+from skulk.shared.types.events import CustomModelCardAdded
 from skulk.shared.types.memory import Memory
+from skulk.utils.channels import channel
+
+
+async def _accept_exact_card_convergence(
+    _card: ModelCard, _mutation_command_id: CommandId
+) -> None:
+    """Stand in for the indexed event round-trip in narrow endpoint tests."""
+
+
+async def _accept_qualification_card_deletion(
+    _model_id: ModelId,
+    _mutation_command_id: CommandId,
+    *,
+    expected_card: ModelCard | None = None,
+) -> None:
+    """Stand in for an indexed cleanup round-trip in narrow endpoint tests."""
+    assert expected_card is not None
 
 
 def _loopback_operator_request() -> Request:
@@ -34,6 +59,18 @@ def _authenticated_gateway_request() -> Request:
             "headers": [],
             "client": ("198.51.100.10", 52415),
             OPERATOR_GATEWAY_AUTHORIZED_SCOPE_KEY: True,
+        }
+    )
+
+
+def _remote_bearer_request(token: str | None = None) -> Request:
+    """Return one direct remote request with an optional bearer credential."""
+    headers = [] if token is None else [(b"authorization", f"Bearer {token}".encode())]
+    return Request(
+        {
+            "type": "http",
+            "headers": headers,
+            "client": ("198.51.100.10", 52415),
         }
     )
 
@@ -127,3 +164,529 @@ async def test_custom_card_approval_uses_content_derived_identity(
     assert result.card_id == trust_identity
     assert result.approved_for_cluster
     persist.assert_awaited_once_with(trust_identity, approved=True)
+
+
+@pytest.mark.asyncio
+async def test_exact_custom_card_preserves_artifact_but_strips_registry_trust(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pre-publication validation cannot impersonate signed registry trust."""
+    registry_card_id = f"card_{'a' * 52}"
+    supplied = ModelCard(
+        model_id=ModelId("org/exact@q4_k_m"),
+        source_repository=ModelId("org/exact"),
+        source_revision="b" * 40,
+        storage_size=Memory.from_bytes(1234),
+        n_layers=2,
+        hidden_size=16,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        gguf_file="exact-Q4_K_M.gguf",
+        registry_card_id=registry_card_id,
+        registry_snapshot_id="snapshot_unpublished",
+        registry_provenance="foxlight",
+        registry_architecture="qwen3_5",
+        registry_artifact_format="gguf",
+        registry_capability_claims=(
+            RegistryCapabilityClaim(
+                capability_id="text.generate",
+                scope="model",
+                status="observed",
+                source="agent_analysis",
+                confidence=0.9,
+            ),
+        ),
+    )
+    sender, receiver = channel[ForwarderCommand]()
+    api = object.__new__(API)
+    object.__setattr__(api, "command_sender", sender)
+    object.__setattr__(api, "_system_id", NodeId("test-system"))
+    monkeypatch.setattr(
+        api,
+        "_wait_for_exact_custom_card_convergence",
+        _accept_exact_card_convergence,
+    )
+    result = await api.add_exact_custom_model_card(
+        AddExactCustomModelCardParams(model_card=supplied),
+        _authenticated_gateway_request(),
+    )
+
+    forwarded = await receiver.receive()
+    assert isinstance(forwarded.command, AddCustomModelCard)
+    persisted = forwarded.command.model_card
+    assert result.id == "org/exact@q4_k_m"
+    assert persisted.is_custom
+    assert not persisted.qualification_only
+    assert persisted.source_revision == "b" * 40
+    assert persisted.gguf_file == "exact-Q4_K_M.gguf"
+    assert persisted.registry_card_id is None
+    assert persisted.registry_snapshot_id is None
+    assert persisted.registry_provenance is None
+    assert persisted.registry_architecture is None
+    assert persisted.registry_artifact_format is None
+    assert persisted.registry_capability_claims == ()
+
+
+@pytest.mark.asyncio
+async def test_qualification_token_controls_exact_card_lifecycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The registry credential installs and removes only an unsigned exact card."""
+    token = "q" * 48
+    monkeypatch.setenv("SKULK_EXACT_CARD_QUALIFICATION_TOKEN", token)
+    supplied = ModelCard(
+        model_id=ModelId("org/exact@q4_k_m"),
+        source_repository=ModelId("org/exact"),
+        source_revision="b" * 40,
+        storage_size=Memory.from_bytes(1234),
+        n_layers=2,
+        hidden_size=16,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        gguf_file="exact-Q4_K_M.gguf",
+    )
+    sender, receiver = channel[ForwarderCommand]()
+    api = object.__new__(API)
+    object.__setattr__(api, "command_sender", sender)
+    object.__setattr__(api, "_system_id", NodeId("test-system"))
+    monkeypatch.setattr(
+        api,
+        "_wait_for_exact_custom_card_convergence",
+        _accept_exact_card_convergence,
+    )
+    monkeypatch.setattr(
+        api,
+        "_wait_for_qualification_card_deletion",
+        _accept_qualification_card_deletion,
+    )
+
+    with pytest.raises(HTTPException, match="loopback"):
+        API._require_operator_mutation(_remote_bearer_request(token))
+    with pytest.raises(HTTPException, match="loopback"):
+        await api.add_exact_custom_model_card(
+            AddExactCustomModelCardParams(model_card=supplied),
+            _remote_bearer_request("wrong"),
+        )
+
+    await api.add_exact_custom_model_card(
+        AddExactCustomModelCardParams(model_card=supplied),
+        _remote_bearer_request(token),
+    )
+    added = await receiver.receive()
+    assert isinstance(added.command, AddCustomModelCard)
+
+    def custom_card(_model_id: ModelId) -> ModelCard:
+        return supplied.model_copy(
+            update={"is_custom": True, "qualification_only": True}
+        )
+
+    monkeypatch.setattr(api_main, "get_card", custom_card)
+    response = await api.delete_custom_model(
+        supplied.model_id,
+        _remote_bearer_request(token),
+        DeleteExactCustomModelCardParams(model_card=supplied),
+    )
+    deleted = await receiver.receive()
+    assert isinstance(deleted.command, api_main.DeleteCustomModelCard)
+    assert deleted.command.expected_qualification_card == custom_card(
+        supplied.model_id
+    )
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_qualification_cleanup_cannot_delete_replacement_temporary_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An older job cannot remove a newer exact card sharing its alias."""
+    token = "q" * 48
+    monkeypatch.setenv("SKULK_EXACT_CARD_QUALIFICATION_TOKEN", token)
+    original = ModelCard(
+        model_id=ModelId("org/exact@q4_k_m"),
+        source_revision="a" * 40,
+        storage_size=Memory.from_bytes(1234),
+        n_layers=2,
+        hidden_size=16,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        gguf_file="original-Q4_K_M.gguf",
+    )
+    replacement = API._unsigned_exact_custom_card(
+        original.model_copy(
+            update={
+                "source_revision": "b" * 40,
+                "gguf_file": "replacement-Q4_K_M.gguf",
+            }
+        ),
+        qualification_only=True,
+    )
+
+    def replacement_card(_model_id: ModelId) -> ModelCard:
+        return replacement
+
+    monkeypatch.setattr(api_main, "get_card", replacement_card)
+    sender, _receiver = channel[ForwarderCommand]()
+    api = object.__new__(API)
+    object.__setattr__(api, "command_sender", sender)
+    object.__setattr__(api, "_system_id", NodeId("test-system"))
+
+    with pytest.raises(HTTPException, match="no longer owns"):
+        await api.delete_custom_model(
+            original.model_id,
+            _remote_bearer_request(token),
+            DeleteExactCustomModelCardParams(model_card=original),
+        )
+
+
+@pytest.mark.asyncio
+async def test_qualification_token_cannot_replace_or_delete_operator_custom_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The service lifecycle cannot collide with operator-owned custom truth."""
+    token = "q" * 48
+    monkeypatch.setenv("SKULK_EXACT_CARD_QUALIFICATION_TOKEN", token)
+    operator_card = ModelCard(
+        model_id=ModelId("org/operator-card"),
+        source_revision="b" * 40,
+        storage_size=Memory.from_bytes(1234),
+        n_layers=2,
+        hidden_size=16,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        is_custom=True,
+    )
+    def existing_operator_card(_model_id: ModelId) -> ModelCard:
+        return operator_card
+
+    monkeypatch.setattr(api_main, "get_card", existing_operator_card)
+    sender, _receiver = channel[ForwarderCommand]()
+    api = object.__new__(API)
+    object.__setattr__(api, "command_sender", sender)
+    object.__setattr__(api, "_system_id", NodeId("test-system"))
+    monkeypatch.setattr(
+        api,
+        "_wait_for_exact_custom_card_convergence",
+        _accept_exact_card_convergence,
+    )
+
+    with pytest.raises(HTTPException, match="non-qualification"):
+        await api.add_exact_custom_model_card(
+            AddExactCustomModelCardParams(model_card=operator_card),
+            _remote_bearer_request(token),
+        )
+    with pytest.raises(HTTPException, match="temporary custom cards"):
+        await api.delete_custom_model(
+            operator_card.model_id,
+            _remote_bearer_request(token),
+        )
+
+
+@pytest.mark.asyncio
+async def test_qualification_token_rejects_normalized_storage_collision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A distinct alias cannot overwrite an operator card's persistence file."""
+    token = "q" * 48
+    monkeypatch.setenv("SKULK_EXACT_CARD_QUALIFICATION_TOKEN", token)
+    operator_card = ModelCard(
+        model_id=ModelId("org/model"),
+        source_revision="b" * 40,
+        storage_size=Memory.from_bytes(1),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        is_custom=True,
+    )
+    candidate = operator_card.model_copy(
+        update={"model_id": ModelId("org--model"), "is_custom": False}
+    )
+
+    def storage_collision(_model_id: ModelId) -> ModelCard:
+        return operator_card
+
+    monkeypatch.setattr(
+        api_main,
+        "get_custom_card_storage_collision",
+        storage_collision,
+    )
+    api = object.__new__(API)
+
+    with pytest.raises(HTTPException, match="persisted storage key"):
+        await api.add_exact_custom_model_card(
+            AddExactCustomModelCardParams(model_card=candidate),
+            _remote_bearer_request(token),
+        )
+
+
+@pytest.mark.asyncio
+async def test_api_only_process_persists_and_acknowledges_exact_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A supported API-only node can complete exact-card convergence."""
+    card = ModelCard(
+        model_id=ModelId("org/api-only"),
+        source_revision="b" * 40,
+        storage_size=Memory.from_bytes(1),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        is_custom=True,
+        qualification_only=True,
+    )
+    mutation_command_id = CommandId()
+    saved_cards: list[ModelCard] = []
+    cache = Mock()
+    acknowledge = Mock()
+
+    async def save_card(saved_card: ModelCard) -> None:
+        saved_cards.append(saved_card)
+
+    monkeypatch.setattr(ModelCard, "save_to_custom_dir", save_card)
+    monkeypatch.setattr(api_main, "add_to_card_cache", cache)
+    monkeypatch.setattr(
+        api_main, "record_custom_card_mutation_applied", acknowledge
+    )
+
+    await API._apply_local_custom_card_mutation(
+        CustomModelCardAdded(
+            model_card=card,
+            mutation_command_id=mutation_command_id,
+        )
+    )
+
+    assert saved_cards == [card]
+    cache.assert_called_once_with(card)
+    acknowledge.assert_called_once_with(mutation_command_id)
+
+
+@pytest.mark.asyncio
+async def test_qualification_token_cannot_replace_signed_registry_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A temporary candidate can never shadow an existing signed catalog alias."""
+    token = "q" * 48
+    monkeypatch.setenv("SKULK_EXACT_CARD_QUALIFICATION_TOKEN", token)
+    signed_card = ModelCard(
+        model_id=ModelId("org/signed-card"),
+        source_revision="b" * 40,
+        storage_size=Memory.from_bytes(1234),
+        n_layers=2,
+        hidden_size=16,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        registry_card_id=f"card_{'a' * 52}",
+    )
+    def existing_signed_card(_model_id: ModelId) -> ModelCard:
+        return signed_card
+
+    monkeypatch.setattr(api_main, "get_card", existing_signed_card)
+    sender, _receiver = channel[ForwarderCommand]()
+    api = object.__new__(API)
+    object.__setattr__(api, "command_sender", sender)
+    object.__setattr__(api, "_system_id", NodeId("test-system"))
+
+    with pytest.raises(HTTPException, match="non-qualification"):
+        await api.add_exact_custom_model_card(
+            AddExactCustomModelCardParams(model_card=signed_card),
+            _remote_bearer_request(token),
+        )
+
+
+@pytest.mark.asyncio
+async def test_operator_exact_card_remains_outside_service_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Operator-installed exact cards never become service-owned temporaries."""
+    token = "q" * 48
+    monkeypatch.setenv("SKULK_EXACT_CARD_QUALIFICATION_TOKEN", token)
+    supplied = ModelCard(
+        model_id=ModelId("org/operator-exact"),
+        source_revision="b" * 40,
+        storage_size=Memory.from_bytes(1234),
+        n_layers=2,
+        hidden_size=16,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+    )
+    sender, receiver = channel[ForwarderCommand]()
+    api = object.__new__(API)
+    object.__setattr__(api, "command_sender", sender)
+    object.__setattr__(api, "_system_id", NodeId("test-system"))
+    monkeypatch.setattr(
+        api,
+        "_wait_for_exact_custom_card_convergence",
+        _accept_exact_card_convergence,
+    )
+
+    await api.add_exact_custom_model_card(
+        AddExactCustomModelCardParams(model_card=supplied),
+        _authenticated_gateway_request(),
+    )
+    added = await receiver.receive()
+    assert isinstance(added.command, AddCustomModelCard)
+    operator_exact_card = added.command.model_card
+    assert not operator_exact_card.qualification_only
+
+    def existing_operator_exact_card(_model_id: ModelId) -> ModelCard:
+        return operator_exact_card
+
+    monkeypatch.setattr(api_main, "get_card", existing_operator_exact_card)
+    with pytest.raises(HTTPException, match="temporary custom cards"):
+        await api.delete_custom_model(
+            supplied.model_id,
+            _remote_bearer_request(token),
+        )
+
+
+@pytest.mark.asyncio
+async def test_exact_custom_card_requires_immutable_revision() -> None:
+    """Qualification evidence cannot resolve a mutable repository branch."""
+    supplied = ModelCard(
+        model_id=ModelId("org/mutable"),
+        storage_size=Memory.from_bytes(1234),
+        n_layers=2,
+        hidden_size=16,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+    )
+    api = object.__new__(API)
+
+    with pytest.raises(HTTPException, match="immutable source revision"):
+        await api.add_exact_custom_model_card(
+            AddExactCustomModelCardParams(model_card=supplied),
+            _authenticated_gateway_request(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_exact_custom_card_requires_immutable_external_companions() -> None:
+    """Qualification evidence pins executable companion bytes as well as weights."""
+    supplied = ModelCard(
+        model_id=ModelId("org/model-with-processor"),
+        source_revision="b" * 40,
+        storage_size=Memory.from_bytes(1234),
+        n_layers=2,
+        hidden_size=16,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        vision=VisionCardConfig(
+            model_type="test_vlm",
+            processor_repo="org/external-processor",
+        ),
+    )
+    api = object.__new__(API)
+
+    with pytest.raises(HTTPException, match="processor_revision"):
+        await api.add_exact_custom_model_card(
+            AddExactCustomModelCardParams(model_card=supplied),
+            _authenticated_gateway_request(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_exact_card_convergence_requires_the_ordered_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A conflicting ordered card fails instead of qualifying different bytes."""
+    expected = ModelCard(
+        model_id=ModelId("org/expected"),
+        source_revision="b" * 40,
+        storage_size=Memory.from_bytes(1),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        is_custom=True,
+        qualification_only=True,
+    )
+    conflicting = expected.model_copy(
+        update={"source_revision": "c" * 40, "qualification_only": False}
+    )
+
+    def conflicting_card(_model_id: ModelId) -> ModelCard:
+        return conflicting
+
+    def mutation_applied(_command_id: CommandId) -> bool:
+        return True
+
+    monkeypatch.setattr(api_main, "get_card", conflicting_card)
+    monkeypatch.setattr(api_main, "custom_card_mutation_applied", mutation_applied)
+    with pytest.raises(HTTPException, match="authoritative ordering"):
+        await API._wait_for_exact_custom_card_convergence(
+            expected,
+            CommandId(),
+            timeout_seconds=0.0,
+        )
+
+
+@pytest.mark.asyncio
+async def test_exact_card_convergence_requires_this_command_acknowledgement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pre-existing identical card cannot acknowledge a new service retry."""
+    expected = ModelCard(
+        model_id=ModelId("org/preexisting"),
+        source_revision="b" * 40,
+        storage_size=Memory.from_bytes(1),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        is_custom=True,
+        qualification_only=True,
+    )
+
+    def existing_card(_model_id: ModelId) -> ModelCard:
+        return expected
+
+    def mutation_not_applied(_command_id: CommandId) -> bool:
+        return False
+
+    monkeypatch.setattr(api_main, "get_card", existing_card)
+    monkeypatch.setattr(
+        api_main, "custom_card_mutation_applied", mutation_not_applied
+    )
+    with pytest.raises(HTTPException, match="did not converge"):
+        await API._wait_for_exact_custom_card_convergence(
+            expected,
+            CommandId(),
+            timeout_seconds=0.0,
+        )
+
+
+@pytest.mark.asyncio
+async def test_qualification_cleanup_requires_this_command_acknowledgement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An absent cached card cannot acknowledge a new cleanup command."""
+    expected = ModelCard(
+        model_id=ModelId("org/preexisting"),
+        source_revision="b" * 40,
+        storage_size=Memory.from_bytes(1),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        is_custom=True,
+        qualification_only=True,
+    )
+
+    def missing_card(_model_id: ModelId) -> None:
+        return None
+
+    def mutation_not_applied(_command_id: CommandId) -> bool:
+        return False
+
+    monkeypatch.setattr(api_main, "get_card", missing_card)
+    monkeypatch.setattr(
+        api_main, "custom_card_mutation_applied", mutation_not_applied
+    )
+    with pytest.raises(HTTPException, match="did not converge"):
+        await API._wait_for_qualification_card_deletion(
+            ModelId("org/preexisting"),
+            CommandId(),
+            expected_card=expected,
+            timeout_seconds=0.0,
+        )

@@ -10,7 +10,12 @@ from aiohttp import web
 
 import skulk.shared.models.remote_code_approval as approval_module
 import skulk.store.model_store_server as model_store_server_module
-from skulk.shared.models.model_cards import ModelCard, ModelTask
+from skulk.shared.models.model_cards import (
+    ArtifactBundleConfig,
+    ArtifactBundleFile,
+    ModelCard,
+    ModelTask,
+)
 from skulk.shared.types.common import ModelId
 from skulk.shared.types.memory import Memory
 from skulk.store import model_store_client
@@ -93,6 +98,42 @@ def _registry_card() -> ModelCard:
         registry_snapshot_id="snapshot_1_test",
         registry_provenance="agent",
     )
+
+
+def _bundle_card() -> ModelCard:
+    """Build one signed card with an exact v2 artifact bundle."""
+    return _registry_card().model_copy(
+        update={
+            "artifact_bundle": ArtifactBundleConfig(
+                bundle_id=f"bundle_{'a' * 52}",
+                files=(ArtifactBundleFile(path="model.gguf", size_bytes=1024),),
+                download_size=1024,
+            )
+        }
+    )
+
+
+@pytest.mark.anyio
+async def test_store_host_rejects_a_changed_artifact_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bundle pin prevents an alias race from selecting different bytes."""
+    card = _bundle_card()
+
+    async def cards() -> list[ModelCard]:
+        return [card]
+
+    monkeypatch.setattr(model_store_server_module, "get_all_model_cards", cards)
+
+    with pytest.raises(web.HTTPConflict, match="immutable registry artifact"):
+        await ModelStoreServer._require_remote_code_download_approval(
+            str(card.model_id),
+            None,
+            artifact_bundle_id=f"bundle_{'b' * 52}",
+            source_repository=str(card.artifact_repository),
+            source_revision=card.source_revision,
+            pinned_gguf=card.gguf_file,
+        )
 
 
 @pytest.mark.anyio
@@ -606,6 +647,7 @@ async def test_store_client_sends_signed_artifact_identity(
         source_revision="a" * 40,
         source_repository="org/model",
         registry_card_id=f"card_{'b' * 52}",
+        artifact_bundle_id=f"bundle_{'c' * 52}",
     )
 
     assert session.requests == [
@@ -616,6 +658,7 @@ async def test_store_client_sends_signed_artifact_identity(
                 "source_revision": "a" * 40,
                 "source_repository": "org/model",
                 "registry_card_id": f"card_{'b' * 52}",
+                "artifact_bundle_id": f"bundle_{'c' * 52}",
             },
         )
     ]

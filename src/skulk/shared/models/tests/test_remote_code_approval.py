@@ -95,6 +95,22 @@ def test_unsigned_cards_require_content_scoped_cluster_approval() -> None:
         require_remote_code_approval(changed, frozenset({trust_identity}))
 
 
+def test_qualification_ownership_does_not_change_remote_code_identity() -> None:
+    """The cleanup marker is platform state, not executable artifact identity."""
+    card = _registry_card().model_copy(
+        update={
+            "registry_card_id": None,
+            "registry_snapshot_id": None,
+            "registry_provenance": None,
+            "is_custom": True,
+        }
+    )
+
+    assert remote_code_trust_identity(
+        card.model_copy(update={"qualification_only": True})
+    ) == remote_code_trust_identity(card)
+
+
 def test_foxlight_signed_pinned_card_is_the_remote_code_trust_decision() -> None:
     """Curated signed provenance needs no redundant operator approval."""
     card = _registry_card().model_copy(update={"registry_provenance": "foxlight"})

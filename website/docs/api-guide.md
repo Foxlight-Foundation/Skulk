@@ -128,6 +128,7 @@ The Ollama group also serves alias paths (`/ollama/api/api/...`,
 - `POST /v1/tools/extract_page`
 - `GET /models/search`
 - `POST /models/add`
+- `POST /models/add-card`
 - `DELETE /models/custom/{model_id}`
 - `POST /place_instance`
 - `POST /instance`
@@ -1353,14 +1354,17 @@ curl http://localhost:52415/v1/models
 This returns known model cards, not just running instances. `GET /models`
 serves the same catalog through the same handler; prefer the `/v1/models` path
 for OpenAI-compatible clients. Complete installed cards load first so an
-air-gapped node keeps the exact generation it can actually launch. The current
-supported catalog comes from the external TUF-signed registry and refreshes at
-most every 60 seconds; a previously verified catalog may be used for up to 30
-days during an outage. That age limit does not apply to complete installed
-artifacts. Bundled cards fill non-installed catalog entries only when registry
-access and its acceptable cache are unavailable or disabled. Registry entries
-include immutable card and snapshot identities; local custom cards retain final
-override precedence.
+air-gapped node keeps the exact generation it can actually launch. Temporary
+`qualification_only` installed records are the exception: once a normal signed
+catalog card owns the same alias, `/v1/models` reports the signed card and does
+not use the retained qualification record to claim that signed generation is
+installed. The current supported catalog comes from the external TUF-signed
+registry and refreshes at most every 60 seconds; a previously verified catalog
+may be used for up to 30 days during an outage. That age limit does not apply to
+complete installed artifacts. Bundled cards fill non-installed catalog entries
+only when registry access and its acceptable cache are unavailable or disabled.
+Registry entries include immutable card and snapshot identities; local custom
+cards retain final override precedence.
 
 Each entry also separates discovery truth from runtime truth:
 
@@ -1524,6 +1528,81 @@ stores its first shard as the backend entrypoint while downloading the full
 shard group. `source_revision` is also optional; when supplied it must be a full
 40-character Hugging Face commit hash, and both card metadata and subsequent
 artifact downloads are pinned to that immutable revision.
+
+### Add an exact unsigned model card
+
+**POST** `/models/add-card`
+
+```json
+{
+  "model_card": {
+    "modelId": "org/model@q4-k-m",
+    "sourceRepository": "org/model",
+    "sourceRevision": "0123456789abcdef0123456789abcdef01234567",
+    "storageSize": {"inBytes": 1234},
+    "nLayers": 32,
+    "hiddenSize": 4096,
+    "supportsTensor": false,
+    "tasks": ["TextGeneration"],
+    "ggufFile": "model-Q4_K_M.gguf"
+  }
+}
+```
+
+Persists a complete operator-supplied card without fetching or regenerating
+Hub metadata. This is intended for exact pre-publication qualification and
+other trusted operator workflows. The endpoint preserves the pinned artifact
+contract but always forces unsigned custom-card semantics: `is_custom` becomes
+true, and every supplied `registry_*` identity, provenance, architecture,
+format, or capability claim is removed. Service-bearer installs additionally
+receive `qualification_only`; operator installs do not. A full 40-character
+immutable `sourceRevision` is required.
+Every external vision, MTP, assistant, or draft repository must also declare
+its matching immutable companion revision.
+Repository code therefore retains the normal explicit model-level approval
+requirement. Like `/models/add`, this mutation accepts direct loopback access
+or an authenticated operator gateway with `operations:write`. A headless
+registry qualification worker may instead present
+`Authorization: Bearer <token>` when the node configures the same high-entropy
+value in `SKULK_EXACT_CARD_QUALIFICATION_TOKEN`. That credential is deliberately
+valid only for this exact-card install and
+`DELETE /models/custom/{model_id}` cleanup; it grants no general model,
+inference, configuration, or operator authority. The service bearer cannot
+replace or delete any pre-existing non-qualification card; cleanup requires the
+server-assigned `qualification_only` marker. Service cleanup must also send the
+complete original candidate as the DELETE body:
+
+```json
+{
+  "model_card": {
+    "modelId": "org/model@q4-k-m",
+    "sourceRepository": "org/model",
+    "sourceRevision": "0123456789abcdef0123456789abcdef01234567",
+    "storageSize": {"inBytes": 1234},
+    "nLayers": 32,
+    "hiddenSize": 4096,
+    "supportsTensor": false,
+    "tasks": ["TextGeneration"],
+    "ggufFile": "model-Q4_K_M.gguf"
+  }
+}
+```
+
+Skulk applies the same unsigned normalization and deletes only if that complete
+temporary card still owns the alias. These ownership preconditions are rechecked
+by the elected master when it orders the mutation, so a concurrent operator or
+newer qualification change cannot be overwritten or deleted through stale
+API-node state.
+The master also folds newly refreshed signed-registry truth into this ownership
+view, so publication prevents a later temporary override even though registry
+refreshes do not traverse the command log.
+The endpoint returns success only after the exact card has round-tripped through
+that ordering boundary, its originating command ID has been acknowledged after
+local persistence/cache application, and the card is visible in the responding
+node's catalog. Service-authenticated cleanup likewise waits for its exact
+delete event and suppresses retained `qualification_only` installed sidecars
+from catalog projection while preserving the downloaded artifact bytes; a
+conflicting winner returns `409`, and convergence timeout returns `504`.
 
 ### Per-node storage breakdown
 
@@ -1974,6 +2053,9 @@ The optional JSON body accepts the following fields:
   are rejected.
 - `registry_card_id`: immutable `card_<content-derived-id>` selecting the signed
   base-card generation.
+- `artifact_bundle_id`: immutable `bundle_<content-derived-id>` selecting the
+  exact v2 file bundle. Automated pre-publication qualification uses this pin
+  so an alias replacement cannot redirect the download.
 - `owner_model_id`: owning base-model alias for a companion artifact. It is
   required for non-`base` roles and must be an `owner/model` identifier no longer
   than 512 characters.
@@ -2012,6 +2094,9 @@ downloaded with no card ID; the store records it as unverified rather than
 claiming signed registry provenance. Supplying `registry_card_id` requests that
 exact immutable generation and returns `409 Conflict` when the store host cannot
 verify it.
+Supplying `artifact_bundle_id` additionally requires both the API node and the
+canonical store to resolve that exact bundle for the alias. A changed, missing,
+or legacy bundle returns `409 Conflict` instead of downloading different bytes.
 Companion requests instead bind `owner_registry_card_id` to `owner_model_id` and
 require the repository, revision, selected file, and `artifact_role` to match
 that owning card's signed companion declaration. A mismatched alias, role, or

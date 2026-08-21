@@ -391,7 +391,14 @@ def manifest_sha256(files: tuple[InstalledFileManifestEntry, ...]) -> str:
 
 def _local_identity(model_card: ModelCard, digest: str, role: str) -> str:
     payload = {
-        "card": model_card.model_dump(mode="json", exclude={"is_custom"}),
+        "card": model_card.model_dump(
+            mode="json",
+            exclude=(
+                {"is_custom"}
+                if model_card.qualification_only
+                else {"is_custom", "qualification_only"}
+            ),
+        ),
         "manifest_sha256": digest,
         "artifact_role": role,
     }

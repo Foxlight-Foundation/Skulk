@@ -13,6 +13,27 @@ layouts, and loads from the declared artifact root. Bundle identity keeps
 several aliases from one repository and revision distinct in the model store
 and installed sidecars. Existing v1 cards remain compatible.
 
+Trusted operator workflows may install one exact candidate card before registry
+publication and exercise the normal store, placement, and runner path. Skulk
+removes registry trust claims from this temporary custom card, so qualification
+does not pretend that unpublished content is signed. A dedicated high-entropy
+service bearer can authorize only the temporary install and cleanup calls for a
+headless registry worker; it grants no broader operator or inference access.
+Skulk requires an immutable source revision and marks lifecycle ownership so
+the worker cannot replace or delete any pre-existing non-qualification card;
+operator installs do not receive that marker. The elected master rechecks the
+ownership precondition when ordering every service mutation and reconciles
+later signed-registry refreshes into that view. Install and cleanup responses
+wait for their exact indexed command acknowledgements; cleanup retains model
+bytes without allowing a temporary installed sidecar to shadow signed truth.
+The store request can also pin the v2 artifact-bundle identity end to end, so
+qualification fails rather than downloading a replacement behind the same
+alias.
+
+Cleanup sends the complete original candidate back to Skulk. The elected master
+deletes the alias only while that exact temporary card still owns it, preventing
+an older or retried job from removing a newer qualification replacement.
+
 ## Served GGUF vision
 
 GGUF vision cards can now pin one exact multimodal projector and run through

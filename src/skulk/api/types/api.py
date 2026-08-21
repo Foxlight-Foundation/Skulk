@@ -1060,6 +1060,34 @@ class AddCustomModelParams(BaseModel):
     )
 
 
+class AddExactCustomModelCardParams(BaseModel):
+    """Operator-supplied exact card retained as unsigned local model truth."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    model_card: ModelCard = Field(
+        description=(
+            "Complete exact model card to install temporarily or permanently as "
+            "an unsigned custom card. Skulk removes any claimed registry trust "
+            "metadata before persisting it."
+        )
+    )
+
+
+class DeleteExactCustomModelCardParams(BaseModel):
+    """Exact temporary card a qualification service intends to remove."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    model_card: ModelCard = Field(
+        description=(
+            "Complete candidate card originally supplied to /models/add-card. "
+            "Skulk applies the same unsigned-card normalization and deletes only "
+            "when that exact temporary card still owns the alias."
+        )
+    )
+
+
 class HuggingFaceSearchResult(BaseModel):
     id: str
     author: str = ""
@@ -1202,6 +1230,14 @@ class StoreDownloadRequest(BaseModel):
         description=(
             "Optional immutable signed card identity. Omit to select the current "
             "card for the model alias."
+        ),
+    )
+    artifact_bundle_id: str | None = Field(
+        default=None,
+        pattern=r"^bundle_[a-z2-7]{52}$",
+        description=(
+            "Optional immutable v2 artifact-bundle identity. When supplied, "
+            "the selected local card and canonical store must both match it."
         ),
     )
     source_repository: str | None = Field(
