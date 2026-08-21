@@ -4,6 +4,7 @@ import binascii
 import contextlib
 import copy
 import hashlib
+import hmac
 import ipaddress
 import json
 import os
@@ -141,6 +142,7 @@ from skulk.api.steward import (
 )
 from skulk.api.types import (
     AddCustomModelParams,
+    AddExactCustomModelCardParams,
     AdvancedImageParams,
     ArtifactExportRequest,
     ArtifactExportResponse,
@@ -522,6 +524,8 @@ from skulk.store.peer_exports import ArtifactExportManager
 
 JsonObject = dict[str, object]
 _DEFAULT_OPTIMIZER_CANDIDATE_BITS = [4, 8]
+_EXACT_CARD_QUALIFICATION_TOKEN_ENV: Final = "SKULK_EXACT_CARD_QUALIFICATION_TOKEN"
+_MINIMUM_QUALIFICATION_TOKEN_LENGTH: Final = 32
 _MODEL_LIST_STORE_CACHE_TTL_SECONDS = 5.0
 _MODEL_LIST_STORE_FETCH_TIMEOUT_SECONDS = 1.0
 
@@ -2166,6 +2170,18 @@ class API:
                 "loopback access or an authenticated operator-gateway credential."
             ),
         )(self.add_custom_model)
+        self.app.post(
+            "/models/add-card",
+            tags=["Models"],
+            summary="Add one exact unsigned custom model card",
+            description=(
+                "Persist a complete exact model card supplied by an authenticated "
+                "operator workflow without fetching or regenerating Hub metadata. "
+                "Skulk forces custom-card semantics and removes registry trust "
+                "claims; repository code still requires the card's normal explicit "
+                "model-level approval."
+            ),
+        )(self.add_exact_custom_model_card)
         self.app.delete(
             "/models/custom/{model_id:path}",
             tags=["Models"],
@@ -8654,6 +8670,31 @@ class API:
             return
         cls._require_loopback_mutation(request)
 
+    @classmethod
+    def _require_exact_card_qualification_mutation(cls, request: Request) -> None:
+        """Authorize the narrow exact-card lifecycle used by registry qualification.
+
+        The long-lived service credential deliberately grants less authority than
+        an operator access token: only the exact-card installation and matching
+        custom-card cleanup handlers call this guard. Loopback and the authenticated
+        operator gateway retain their normal access.
+        """
+        if request.scope.get(OPERATOR_GATEWAY_AUTHORIZED_SCOPE_KEY) is True:
+            return
+        configured_token = os.environ.get(_EXACT_CARD_QUALIFICATION_TOKEN_ENV, "")
+        authorization = request.headers.get("authorization", "")
+        scheme, separator, presented_token = authorization.partition(" ")
+        credential_matches = (
+            len(configured_token) >= _MINIMUM_QUALIFICATION_TOKEN_LENGTH
+            and separator == " "
+            and scheme.lower() == "bearer"
+            and bool(presented_token.strip())
+            and hmac.compare_digest(configured_token, presented_token.strip())
+        )
+        if credential_matches:
+            return
+        cls._require_loopback_mutation(request)
+
     async def add_custom_model(
         self, payload: AddCustomModelParams, request: Request
     ) -> ModelListModel:
@@ -8698,8 +8739,47 @@ class API:
 
         return self._model_list_entry(card.model_copy(update={"is_custom": True}))
 
-    async def delete_custom_model(self, model_id: ModelId) -> JSONResponse:
+    async def add_exact_custom_model_card(
+        self, payload: AddExactCustomModelCardParams, request: Request
+    ) -> ModelListModel:
+        """Persist an operator-supplied exact card under unsigned custom trust.
+
+        Args:
+            payload: Complete card whose immutable artifact contract is preserved.
+            request: Incoming request proving a local or authenticated operator.
+
+        Returns:
+            The custom model entry added to the cluster catalog.
+
+        Raises:
+            HTTPException: If the caller is not an authorized operator.
+
+        Side effects:
+            Removes signed-registry trust claims and broadcasts a persistent
+            custom-card mutation across the cluster.
+        """
+        self._require_exact_card_qualification_mutation(request)
+        card = payload.model_card.model_copy(
+            update={
+                "is_custom": True,
+                "registry_card_id": None,
+                "registry_snapshot_id": None,
+                "registry_provenance": None,
+            }
+        )
+        await self.command_sender.send(
+            ForwarderCommand(
+                origin=self._system_id,
+                command=AddCustomModelCard(model_card=card),
+            )
+        )
+        return self._model_list_entry(card)
+
+    async def delete_custom_model(
+        self, model_id: ModelId, request: Request
+    ) -> JSONResponse:
         """Delete a user-added custom model card and sync deletion across the cluster."""
+        self._require_exact_card_qualification_mutation(request)
         card = get_card(model_id)
         if card is None or not card.is_custom:
             raise HTTPException(status_code=404, detail="Custom model card not found")

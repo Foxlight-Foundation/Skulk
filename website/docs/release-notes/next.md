@@ -13,6 +13,13 @@ layouts, and loads from the declared artifact root. Bundle identity keeps
 several aliases from one repository and revision distinct in the model store
 and installed sidecars. Existing v1 cards remain compatible.
 
+Trusted operator workflows may install one exact candidate card before registry
+publication and exercise the normal store, placement, and runner path. Skulk
+removes registry trust claims from this temporary custom card, so qualification
+does not pretend that unpublished content is signed. A dedicated high-entropy
+service bearer can authorize only the temporary install and cleanup calls for a
+headless registry worker; it grants no broader operator or inference access.
+
 ## Served GGUF vision
 
 GGUF vision cards can now pin one exact multimodal projector and run through

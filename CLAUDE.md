@@ -517,8 +517,11 @@ unrelated Settings save cannot replace a newer decision. Trust is never a
 placement axis. Placement still
 applies open backend preferences, locality, and capacity ranking adaptively, and
 the store plus runner remain final enforcement boundaries.
-Trust mutations and custom-card creation require direct loopback or the
-authenticated operator gateway's write scope. `PUT /config` rejects
+Trust mutations and ordinary custom-card creation require direct loopback or the
+authenticated operator gateway's write scope. Exact pre-publication
+qualification may instead use `SKULK_EXACT_CARD_QUALIFICATION_TOKEN`; only
+`POST /models/add-card` and matching custom-card cleanup accept it, and it never
+approves repository code. `PUT /config` rejects
 `model_trust` snapshots and directs authenticated callers to the dedicated
 master-ordered endpoints.
 The gateway records successful bearer validation in the internal ASGI scope,

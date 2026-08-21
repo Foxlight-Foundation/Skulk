@@ -1,4 +1,5 @@
 from .api import AddCustomModelParams as AddCustomModelParams
+from .api import AddExactCustomModelCardParams as AddExactCustomModelCardParams
 from .api import AdvancedImageParams as AdvancedImageParams
 from .api import ArtifactExportRequest as ArtifactExportRequest
 from .api import ArtifactExportResponse as ArtifactExportResponse

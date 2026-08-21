@@ -17,6 +17,14 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- Authenticated operator workflows can now install one complete pinned model
+  card through `POST /models/add-card` for pre-publication qualification. Skulk
+  preserves the exact artifact bundle while stripping registry identity and
+  provenance, so testing cannot impersonate signed trust and repository code
+  still requires its normal model-level approval. Headless registry automation
+  may use the narrowly scoped `SKULK_EXACT_CARD_QUALIFICATION_TOKEN` for only
+  this temporary install and custom-card cleanup lifecycle.
+
 - Signed registry-v2 cards can now describe one exact immutable artifact bundle
   inside a shared upstream repository. Skulk downloads only the required file
   allow-list, verifies sizes and available upstream object identities, preserves

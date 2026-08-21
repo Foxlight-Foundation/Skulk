@@ -128,6 +128,7 @@ The Ollama group also serves alias paths (`/ollama/api/api/...`,
 - `POST /v1/tools/extract_page`
 - `GET /models/search`
 - `POST /models/add`
+- `POST /models/add-card`
 - `DELETE /models/custom/{model_id}`
 - `POST /place_instance`
 - `POST /instance`
@@ -1524,6 +1525,41 @@ stores its first shard as the backend entrypoint while downloading the full
 shard group. `source_revision` is also optional; when supplied it must be a full
 40-character Hugging Face commit hash, and both card metadata and subsequent
 artifact downloads are pinned to that immutable revision.
+
+### Add an exact unsigned model card
+
+**POST** `/models/add-card`
+
+```json
+{
+  "model_card": {
+    "modelId": "org/model@q4-k-m",
+    "sourceRepository": "org/model",
+    "sourceRevision": "0123456789abcdef0123456789abcdef01234567",
+    "storageSize": {"inBytes": 1234},
+    "nLayers": 32,
+    "hiddenSize": 4096,
+    "supportsTensor": false,
+    "tasks": ["TextGeneration"],
+    "ggufFile": "model-Q4_K_M.gguf"
+  }
+}
+```
+
+Persists a complete operator-supplied card without fetching or regenerating
+Hub metadata. This is intended for exact pre-publication qualification and
+other trusted operator workflows. The endpoint preserves the pinned artifact
+contract but always forces unsigned custom-card semantics: `is_custom` becomes
+true and any supplied registry card ID, snapshot ID, or provenance is removed.
+Repository code therefore retains the normal explicit model-level approval
+requirement. Like `/models/add`, this mutation accepts direct loopback access
+or an authenticated operator gateway with `operations:write`. A headless
+registry qualification worker may instead present
+`Authorization: Bearer <token>` when the node configures the same high-entropy
+value in `SKULK_EXACT_CARD_QUALIFICATION_TOKEN`. That credential is deliberately
+valid only for this exact-card install and
+`DELETE /models/custom/{model_id}` cleanup; it grants no general model,
+inference, configuration, or operator authority.
 
 ### Per-node storage breakdown
 

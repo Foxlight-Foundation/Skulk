@@ -26,6 +26,7 @@ They drive:
 - placement and memory calculations
 - model browsing in the API and dashboard
 - custom model registration
+- exact pre-publication qualification without claiming registry trust
 - modality hints such as vision
 - advanced capability declarations for model-specific runtime behavior
 
@@ -35,6 +36,17 @@ Skulk's current supported catalog comes from the TUF-verified external registry
 at `registry.foxlight.ai`. A registry card represents one exact selectable
 artifact—one quant or selected file—and carries an immutable card ID and signed
 snapshot provenance. Registry refreshes do not require a Skulk release.
+
+An authenticated operator may also install a complete pinned card through
+`POST /models/add-card`. Skulk preserves its artifact bundle but strips every
+signed-registry trust claim and stores it as a custom card. This lets the model
+registry exercise an exact candidate on real hardware before publication while
+keeping publication and model-level repository-code approval as separate trust
+decisions.
+Headless qualification may use a dedicated
+`SKULK_EXACT_CARD_QUALIFICATION_TOKEN` bearer for only the temporary install and
+cleanup operations. The token does not approve repository code and does not
+grant any wider operator or inference scope.
 
 The signed catalog also carries open `architecture` and `capability_claims`
 metadata beside the immutable card. Claims describe intrinsic model behavior
