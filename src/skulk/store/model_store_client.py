@@ -995,6 +995,7 @@ class ModelStoreClient:
         self,
         *,
         recover_installed_cards: bool = False,
+        raise_on_error: bool = False,
     ) -> list[dict[str, object]]:
         """Fetch the full store registry from the store server.
 
@@ -1002,6 +1003,9 @@ class ModelStoreClient:
             recover_installed_cards: Ask a local authoritative store to adopt
                 complete adjacent sidecars before returning its index. Used by
                 reconciliation after it inventories pre-upgrade canonical data.
+            raise_on_error: Propagate transport, HTTP, and shape failures so a
+                latency-sensitive caller can retain last-known state. The
+                default preserves the historical empty-list fallback.
 
         Returns a list of registry entry dicts, or an empty list on error.
         """
@@ -1014,12 +1018,20 @@ class ModelStoreClient:
                 session.get(url) as resp,
             ):
                 if resp.status != 200:
+                    if raise_on_error:
+                        raise RuntimeError(
+                            f"store registry returned HTTP {resp.status}"
+                        )
                     return []
                 data: object = await resp.json()
                 if not isinstance(data, list):
+                    if raise_on_error:
+                        raise ValueError("store registry response is not a list")
                     return []
                 return [entry for entry in data if isinstance(entry, dict)]
         except Exception as exc:
+            if raise_on_error:
+                raise
             logger.debug(f"ModelStoreClient: fetch_registry failed: {exc}")
             return []
 

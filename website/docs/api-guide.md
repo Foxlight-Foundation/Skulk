@@ -2137,6 +2137,11 @@ Returns the known model catalog, including downloaded models and catalog-backed
 entries. Each item includes nullable `source_revision` metadata identifying the
 qualified Hugging Face commit when its card pins immutable artifacts.
 
+When an alias has an active installed generation, artifact, capability, runtime,
+trust, and `registry_card_id` fields describe that retained full card. The
+separate `current_registry_identity` and `update_available` fields describe a
+newer signed catalog generation without pretending it is already active.
+
 Important fields:
 
 | Field | Type | Meaning |
@@ -2149,11 +2154,11 @@ Important fields:
 | `artifact_repository` | string | Upstream repository containing the artifact bytes; may differ from `id` when several exact files or quants share one repository |
 | `artifact_file` | string or null | Exact selected file for file-addressed artifacts such as GGUF |
 | `catalog_source` | string | `registry`, `bundled`, or `custom` |
-| `registry_card_id` | string or null | Immutable content-derived card identity from the signed registry |
+| `registry_card_id` | string or null | Immutable content-derived identity of the active installed card, or the effective catalog card when not installed |
 | `registry_snapshot_id` | string or null | Signed catalog snapshot that supplied the card |
 | `registry_provenance` | string or null | Audited signed-registry origin (`foxlight`, `agent`, or `community`); null for bundled/custom cards |
-| `installed` | boolean | Whether this node has a complete active installed generation |
-| `active_installed_identity` | string or null | Durable generation identity this node will launch |
+| `installed` | boolean | Whether the authoritative cluster store has a complete active generation, falling back to the API node's local sidecar when the store has no record |
+| `active_installed_identity` | string or null | Durable identity of that cluster-store generation, or the node-local fallback generation |
 | `installed_verification` | string or null | `registry_verified`, `local_legacy`, `custom`, or `unresolved` |
 | `current_registry_identity` | string or null | Current signed identity for the alias, which may differ from the active install |
 | `update_available` | boolean | A newer signed generation exists but is not active until transfer commits |
