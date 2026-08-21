@@ -795,6 +795,23 @@ Typical flow:
 4. Send the tool result back as a `tool` message.
 5. Request the final model response.
 
+Two behaviors are worth knowing when you send `tools`.
+
+**Only the tools you offer come back.** Some models reach for a built-in of
+their own rather than one of yours: Llama answers some plain questions by
+calling `print`, and gpt-oss has `python` and `browser`. A response that names
+no tool you offered is returned as ordinary content with its normal
+`finish_reason`, not as a `tool_calls` response, because you would have no
+implementation to run. Check `finish_reason` rather than assuming a response is
+a call.
+
+**A JSON answer stays an answer.** Several model families write a tool call as
+a bare JSON object, so a request that both offers tools and asks for JSON output
+is ambiguous on the wire. Skulk resolves it in favor of the answer: text that
+does not parse as a call to one of your tools is returned as content. Expect
+that content to arrive in one piece rather than streamed token by token, since
+it can only be classified once the message is complete.
+
 ## Thinking / Reasoning
 
 Skulk supports reasoning-aware chat for compatible models.

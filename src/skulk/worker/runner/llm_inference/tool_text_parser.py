@@ -29,7 +29,10 @@ import re
 from typing import Any, cast
 
 from skulk.api.types import ToolCallItem
-from skulk.worker.runner.llm_inference.tool_parsers import coerce_tool_calls_to_schema
+from skulk.worker.runner.llm_inference.tool_parsers import (
+    coerce_tool_calls_to_schema,
+    declared_tool_calls,
+)
 
 # gpt-oss harmony tool call: the recipient `to=functions.NAME` and a `commentary`
 # channel together, then a `<|message|>` body holding the JSON arguments (up to
@@ -297,6 +300,10 @@ def parse_tool_calls_from_text(
     - Mistral ``[TOOL_CALLS]`` arrays
     - an unmarked call object, accepted only when it is the entire message
 
+    When ``tools`` is given, calls naming a tool the caller did not offer are
+    dropped, because a model reaching for one of its own built-ins has not
+    called anything the caller can run.
+
     Returns ``None`` when no tool call is present (the model answered in prose),
     so the caller can fall back to emitting the content.
     """
@@ -319,5 +326,12 @@ def parse_tool_calls_from_text(
     if not calls:
         return None
     if tools is not None:
+        # A model may reach for one of its own built-ins: Llama answers some
+        # plain questions with a call to `print`, and gpt-oss has `python` and
+        # `browser`. Those name nothing the caller can run, so a block left with
+        # no offered tool reads as prose and the caller gets the text instead.
+        calls = declared_tool_calls(calls, tools)
+        if not calls:
+            return None
         calls = coerce_tool_calls_to_schema(calls, tools)
     return calls

@@ -792,7 +792,47 @@ Inventory snapshot; see #130 for consolidation plan.
 | NemotronH | ~210 | `NemotronHShardingStrategy` + Mamba2 hybrid cache |
 | GPT-OSS | ~180 | MLX: `parse_gpt_oss` (token-level Harmony parser via `openai_harmony`) + `GptOssShardingStrategy`. llama.cpp: `HarmonyTextParser` in `harmony_text_parser.py` reparses the harmony channel markers from llama.cpp's detokenized *string* deltas (the engine exposes no token ids), splitting `analysis`→reasoning / `final`→content and stripping markers; wired in `llama_cpp/runner._generate`, gated on `OutputParserType.GptOss`, and dependency-free (no MLX/openai_harmony) so it runs on non-Mac GPU nodes. |
 | Step 3.5 | ~95 | Sliding-window cache tracking in `auto_parallel.py:639-650` |
-| Llama / Ministral | ~70 | `LlamaShardingStrategy` (default) |
+| Llama / Ministral | ~70 | `LlamaShardingStrategy` (default); the unmarked tool dialect (`<|eom_id|>` stop token plus `{`/`<|python_tag|>` block opening) in `utils_mlx.py` and `tool_parsers.make_text_dialect_parser` |
+
+## In-process tool-call dialects
+
+Both in-process engines (`mlx`, `llama_cpp`) recover tool calls from generated
+text through `worker/runner/llm_inference/tool_text_parser.parse_tool_calls_from_text`.
+Recognized dialects, tried in order: harmony `to=functions.NAME` channels
+(gpt-oss); `<tool_call>` blocks carrying Hermes JSON, Qwen3 XML, or GLM
+`<arg_key>`/`<arg_value>` pairs; Llama `<|python_tag|>` calls (which use
+`parameters` rather than `arguments` and may chain several with `;`); Mistral
+`[TOOL_CALLS]` arrays; and, strictly, an unmarked call object that is the
+entire message. The served engines (`llama_server`, `vllm`) do not use this
+path: their servers parse tool calls themselves and return structured
+`tool_calls`.
+
+The `mlx` engine drives this through a marker state machine
+(`model_output_parsers.parse_tool_calls`): a block opens when a chunk starts
+with one of `ToolParser.start_markers` and closes on `end_parsing` or on the
+end of generation. Three properties on `ToolParser` carry the family
+differences:
+
+- `extra_start_parsing`: further markers that also open a block. Llama writes
+  the bare call object but prefixes `<|python_tag|>` when it names a tool, and
+  a marker that does not open the block reaches the caller as content.
+- `unparsed_is_text`: a block that fails to parse is content, not a failure.
+  Set for unmarked dialects, which open on `{` and therefore also catch a model
+  answering in JSON.
+- `start_markers`: the read-side union of the above.
+
+`tool_parsers.declared_tool_calls` drops calls naming a tool the request did
+not offer, and a block left with no offered tool is delivered as content. This
+is what keeps a model's own built-ins (Llama `print`, gpt-oss `python` /
+`browser`) from reaching a caller that has no implementation for them. Nothing
+is filtered when the request declares no tools.
+
+`utils_mlx.load_mlx_items` adds `<|eom_id|>` to `eos_token_ids` for any
+tokenizer whose vocabulary has it. Llama declares only `<|eot_id|>`, so without
+this the model generates past the end of its own tool call and emits the next
+turn's header into the answer. Detection is by vocabulary, not by the chat
+template mentioning the token: Llama's template routes tool results through the
+`ipython` role and never writes `<|eom_id|>` or `<|python_tag|>` literally.
 
 ## KV cache backends
 

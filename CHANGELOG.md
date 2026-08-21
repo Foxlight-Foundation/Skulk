@@ -9,6 +9,32 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- Tool calling now works for Llama models on the MLX engine, and the shared
+  text parser recognizes the dialects the other families write. Llama declares
+  only its end-of-turn token as a stop token, not `<|eom_id|>`, which is how it
+  ends a message that hands off to a tool, so generation ran past the end of
+  the call and wrote the next turn's header into the answer text. Llama also
+  writes the call as a bare JSON object with no opening marker, so nothing
+  recognized it as a call at all: a caller offering a tool received JSON in
+  `content`, `finish_reason` of `stop`, and no `tool_calls`. Skulk now stops at
+  the message boundary for any model whose vocabulary has that token, and reads
+  the whole block with a set of cross-family dialects covering Llama
+  `<|python_tag|>` calls, Mistral `[TOOL_CALLS]` arrays, GLM
+  `<arg_key>`/`<arg_value>` pairs, and an unmarked call object that is the
+  entire message, alongside the harmony channels and `<tool_call>` blocks
+  already supported.
+
+- A model reaching for one of its own built-ins no longer surfaces as a tool
+  call. Llama answers some plain questions with a call to `print`, and gpt-oss
+  has `python` and `browser`; a caller has no implementation for those names,
+  so a response naming no offered tool is now returned as ordinary content.
+  Requests that declare no tools are unaffected. Relatedly, text that opens
+  like a call but does not parse as one, which is what a model answering in
+  JSON looks like when tools are also offered, is returned as content instead
+  of being reported as a generation error.
+
+### Fixed
+
 - Chat completions never return an empty body, and streaming responses always
   terminate. A task that ended without producing any output, for example after
   being cancelled, previously tripped an assertion inside the response

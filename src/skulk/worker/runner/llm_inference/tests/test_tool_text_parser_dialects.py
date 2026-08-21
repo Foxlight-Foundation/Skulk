@@ -129,3 +129,55 @@ class TestFalsePositiveGuards:
 
     def test_empty_text(self) -> None:
         assert parse_tool_calls_from_text("") is None
+
+
+class TestOfferedToolsOnly:
+    """A parsed call must name a tool the caller actually offered."""
+
+    WEATHER = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"location": {"type": "string"}},
+                },
+            },
+        }
+    ]
+
+    def test_a_llama_builtin_is_not_a_tool_call(self) -> None:
+        # Llama answers some plain questions with its own `print` built-in.
+        # Reporting that as a call hands the caller a name they cannot run.
+        assert (
+            parse_tool_calls_from_text(
+                '<|python_tag|>{"name": "print", "parameters": {"value": "hi"}}',
+                self.WEATHER,
+            )
+            is None
+        )
+
+    def test_an_offered_tool_still_parses(self) -> None:
+        calls = parse_tool_calls_from_text(
+            '<|python_tag|>{"name": "get_weather", "parameters": {"location": "x"}}',
+            self.WEATHER,
+        )
+        assert calls is not None
+        assert [call.name for call in calls] == ["get_weather"]
+
+    def test_the_offered_call_survives_alongside_a_builtin(self) -> None:
+        calls = parse_tool_calls_from_text(
+            '<|python_tag|>{"name": "print", "parameters": {}};'
+            '{"name": "get_weather", "parameters": {"location": "x"}}',
+            self.WEATHER,
+        )
+        assert calls is not None
+        assert [call.name for call in calls] == ["get_weather"]
+
+    def test_nothing_is_filtered_when_no_tools_were_declared(self) -> None:
+        calls = parse_tool_calls_from_text(
+            '<|python_tag|>{"name": "print", "parameters": {"value": "hi"}}'
+        )
+        assert calls is not None
+        assert [call.name for call in calls] == ["print"]

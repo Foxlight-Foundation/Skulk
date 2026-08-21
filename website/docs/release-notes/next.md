@@ -4,6 +4,25 @@ title: Next release
 sidebar_position: 0
 ---
 
+## Tool calling across more model families
+
+Tool calling now works for Llama models served by the MLX engine, and Skulk
+recognizes the ways more model families write a call. Llama ends a message that
+hands off to a tool with a token it does not declare as a stop token, so
+generation used to continue past the end of the call and write the next turn's
+opening into the answer. It also writes the call as a plain JSON object with no
+opening marker, which nothing recognized as a call, so a request that offered a
+tool came back with JSON in the message content and no tool call at all. Both
+are fixed, and the recognized formats now cover Llama calls, Mistral tool-call
+arrays, and GLM argument pairs alongside the formats already supported.
+
+Two rules make the result predictable when you send tools. A response that
+names no tool you offered comes back as ordinary content rather than as a tool
+call, because models sometimes reach for a built-in of their own that you have
+no implementation for. And text that opens like a call but does not parse as
+one, which is what a model answering in JSON looks like when tools are also
+available, is returned as content rather than reported as a generation error.
+
 ## Exact artifact bundles
 
 Signed registry-v2 cards may now identify one complete executable artifact or
