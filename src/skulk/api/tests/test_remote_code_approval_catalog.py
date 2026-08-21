@@ -26,6 +26,12 @@ async def _accept_exact_card_convergence(
     """Stand in for the indexed event round-trip in narrow endpoint tests."""
 
 
+async def _accept_qualification_card_deletion(
+    _model_id: ModelId, _mutation_command_id: CommandId
+) -> None:
+    """Stand in for an indexed cleanup round-trip in narrow endpoint tests."""
+
+
 def _loopback_operator_request() -> Request:
     """Return a direct-local request authorized for operator mutations."""
     return Request(
@@ -192,7 +198,6 @@ async def test_exact_custom_card_preserves_artifact_but_strips_registry_trust(
         "_wait_for_exact_custom_card_convergence",
         _accept_exact_card_convergence,
     )
-
     result = await api.add_exact_custom_model_card(
         AddExactCustomModelCardParams(model_card=supplied),
         _authenticated_gateway_request(),
@@ -240,6 +245,11 @@ async def test_qualification_token_controls_exact_card_lifecycle(
         api,
         "_wait_for_exact_custom_card_convergence",
         _accept_exact_card_convergence,
+    )
+    monkeypatch.setattr(
+        api,
+        "_wait_for_qualification_card_deletion",
+        _accept_qualification_card_deletion,
     )
 
     with pytest.raises(HTTPException, match="loopback"):
@@ -505,6 +515,30 @@ async def test_exact_card_convergence_requires_this_command_acknowledgement(
     with pytest.raises(HTTPException, match="did not converge"):
         await API._wait_for_exact_custom_card_convergence(
             expected,
+            CommandId(),
+            timeout_seconds=0.0,
+        )
+
+
+@pytest.mark.asyncio
+async def test_qualification_cleanup_requires_this_command_acknowledgement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An absent cached card cannot acknowledge a new cleanup command."""
+
+    def missing_card(_model_id: ModelId) -> None:
+        return None
+
+    def mutation_not_applied(_command_id: CommandId) -> bool:
+        return False
+
+    monkeypatch.setattr(api_main, "get_card", missing_card)
+    monkeypatch.setattr(
+        api_main, "custom_card_mutation_applied", mutation_not_applied
+    )
+    with pytest.raises(HTTPException, match="did not converge"):
+        await API._wait_for_qualification_card_deletion(
+            ModelId("org/preexisting"),
             CommandId(),
             timeout_seconds=0.0,
         )

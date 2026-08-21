@@ -8874,18 +8874,65 @@ class API:
                 detail="Qualification can remove only its temporary custom cards",
             )
 
+        mutation = DeleteCustomModelCard(
+            model_id=model_id,
+            requires_qualification_ownership=qualification_service,
+        )
         await self.command_sender.send(
             ForwarderCommand(
                 origin=self._system_id,
-                command=DeleteCustomModelCard(
-                    model_id=model_id,
-                    requires_qualification_ownership=qualification_service,
-                ),
+                command=mutation,
             )
         )
+        if qualification_service:
+            await self._wait_for_qualification_card_deletion(
+                model_id, mutation.command_id
+            )
 
         return JSONResponse(
             {"message": "Model card deleted", "model_id": str(model_id)}
+        )
+
+    @staticmethod
+    async def _wait_for_qualification_card_deletion(
+        model_id: ModelId,
+        mutation_command_id: CommandId,
+        *,
+        timeout_seconds: float = _EXACT_CARD_CONVERGENCE_TIMEOUT_SECONDS,
+    ) -> None:
+        """Wait until this exact cleanup no longer exposes its temporary card.
+
+        Args:
+            model_id: Temporary model alias sent for cleanup.
+            mutation_command_id: Exact delete command whose event must be applied.
+            timeout_seconds: Maximum event round-trip time before failing.
+
+        Raises:
+            HTTPException: If a non-qualification card wins authoritative
+                ordering or cleanup does not converge before the deadline.
+        """
+        deadline = anyio.current_time() + timeout_seconds
+        current: ModelCard | None = None
+        while True:
+            current = get_card(model_id)
+            if custom_card_mutation_applied(mutation_command_id) and (
+                current is None or not current.qualification_only
+            ):
+                return
+            if anyio.current_time() >= deadline:
+                break
+            await anyio.sleep(_EXACT_CARD_CONVERGENCE_POLL_SECONDS)
+        if current is not None and not current.qualification_only:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Qualification-card cleanup lost authoritative ordering to "
+                    "a different model card"
+                ),
+            )
+        raise HTTPException(
+            status_code=504,
+            detail="Qualification-card cleanup did not converge before the deadline",
         )
 
     async def get_model_card_summary(self, model_id: str) -> HuggingFaceCardSummary:

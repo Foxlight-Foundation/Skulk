@@ -1381,6 +1381,11 @@ The add endpoint waits for that exact command ID's indexed event to persist and
 update its local catalog before returning success, so a pre-existing identical
 card cannot acknowledge a retry and callers cannot race a download or placement
 against an uncommitted card.
+Signed-registry refreshes are reconciled into the master's ownership view even
+though they do not use the command/event stream. Cleanup waits for its own
+command acknowledgement; downloaded qualification artifacts remain durable and
+self-describing, but their `qualification_only` sidecars are not projected into
+the catalog after the lifecycle-owned custom card file is removed.
 
 ## API adapters
 

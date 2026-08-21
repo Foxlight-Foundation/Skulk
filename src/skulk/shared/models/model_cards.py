@@ -476,6 +476,15 @@ def _apply_installed_card_snapshot(
         _installed_current_registry_ids[model_id] = (
             current_card.registry_card_id if current_card is not None else None
         )
+        if record.model_card.qualification_only:
+            # Qualification downloads remain durable, self-describing store/cache
+            # artifacts after cleanup, but their unsigned temporary card must be
+            # supplied by the lifecycle-owned custom TOML.  Once that file is
+            # removed, an installed sidecar cannot resurrect the temporary card
+            # or shadow a later signed registry card.
+            if existing == record.model_card:
+                _card_cache.pop(model_id, None)
+            continue
         if existing is not None and existing.is_custom:
             continue
         if (

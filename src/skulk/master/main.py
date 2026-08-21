@@ -38,6 +38,7 @@ from skulk.shared.models.model_cards import (
     ModelCard,
     ModelId,
     get_card,
+    get_current_registry_card,
     get_model_cards,
 )
 from skulk.shared.types.commands import (
@@ -857,6 +858,18 @@ class Master:
         """Return model-card truth at the master's current command order."""
         if model_id not in self._ordered_model_cards:
             self._ordered_model_cards[model_id] = get_card(model_id)
+        registry_card = get_current_registry_card(model_id)
+        ordered = self._ordered_model_cards[model_id]
+        if registry_card is not None and (
+            ordered is None
+            or ordered.qualification_only
+            or ordered.registry_card_id is not None
+        ):
+            # Registry refreshes do not traverse the command/event stream.  Pull
+            # newer signed truth into the service-ownership view without
+            # replacing an operator-owned custom override.  Signed truth always
+            # supersedes a lifecycle-owned temporary card for future mutations.
+            self._ordered_model_cards[model_id] = registry_card
         return self._ordered_model_cards[model_id]
 
     def _order_custom_model_card_add(

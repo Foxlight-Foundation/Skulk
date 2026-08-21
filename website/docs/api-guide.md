@@ -1569,10 +1569,15 @@ replace or delete any pre-existing non-qualification card; cleanup requires the
 server-assigned `qualification_only` marker. These ownership preconditions are
 rechecked by the elected master when it orders the mutation, so concurrent
 operator changes cannot be overwritten or deleted through stale API-node state.
+The master also folds newly refreshed signed-registry truth into this ownership
+view, so publication prevents a later temporary override even though registry
+refreshes do not traverse the command log.
 The endpoint returns success only after the exact card has round-tripped through
 that ordering boundary, its originating command ID has been acknowledged after
 local persistence/cache application, and the card is visible in the responding
-node's catalog; a
+node's catalog. Service-authenticated cleanup likewise waits for its exact
+delete event and suppresses retained `qualification_only` installed sidecars
+from catalog projection while preserving the downloaded artifact bytes; a
 conflicting winner returns `409`, and convergence timeout returns `504`.
 
 ### Per-node storage breakdown

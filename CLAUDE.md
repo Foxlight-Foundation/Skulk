@@ -529,7 +529,10 @@ serialized command order before emitting a card event. `PUT /config` rejects
 `model_trust` snapshots and directs authenticated callers to the dedicated
 master-ordered endpoints. An exact-card install succeeds only after the local
 worker persists and caches the indexed event carrying that command's ID; card
-equality alone cannot acknowledge a new request.
+equality alone cannot acknowledge a new request. Service cleanup has the same
+command-correlated wait, and retained `qualification_only` installed sidecars
+do not re-enter the catalog after cleanup. Signed-registry refreshes supersede
+stale qualification entries in the master's ownership view.
 The gateway records successful bearer validation in the internal ASGI scope,
 not a caller-provided header. Secret-stripped convergence preserves each node's
 local Hugging Face token and atomically writes `skulk.yaml` mode `0o600`.

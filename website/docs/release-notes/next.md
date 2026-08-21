@@ -22,7 +22,10 @@ headless registry worker; it grants no broader operator or inference access.
 Skulk requires an immutable source revision and marks lifecycle ownership so
 the worker cannot replace or delete any pre-existing non-qualification card;
 operator installs do not receive that marker. The elected master rechecks the
-ownership precondition when ordering every service mutation.
+ownership precondition when ordering every service mutation and reconciles
+later signed-registry refreshes into that view. Install and cleanup responses
+wait for their exact indexed command acknowledgements; cleanup retains model
+bytes without allowing a temporary installed sidecar to shadow signed truth.
 
 ## Served GGUF vision
 

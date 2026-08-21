@@ -28,7 +28,9 @@ This project records release notes here and mirrors public-facing notes in
   and the credential cannot replace or delete any other card. The elected
   master rechecks that precondition at the serialized ordering boundary, and
   success waits for local persistence of the indexed event carrying the exact
-  originating command ID.
+  originating command ID. Cleanup preserves downloaded artifact bytes without
+  allowing their temporary installed sidecar to re-enter the catalog, and later
+  signed-registry refreshes update the master's ownership guard.
 
 - Signed registry-v2 cards can now describe one exact immutable artifact bundle
   inside a shared upstream repository. Skulk downloads only the required file

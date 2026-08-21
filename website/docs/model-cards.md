@@ -55,6 +55,10 @@ serialized command-ordering boundary, closing races between different API
 nodes. Success additionally requires local persistence of the indexed event
 carrying that exact command ID and visibility of the exact card, so a cached
 identical card cannot acknowledge a new qualification request.
+Cleanup waits for its own indexed delete acknowledgement. Downloaded bytes and
+their installed record remain available for later signed adoption, while the
+`qualification_only` sidecar is deliberately excluded from catalog projection
+once its lifecycle-owned custom card has been removed.
 
 The signed catalog also carries open `architecture` and `capability_claims`
 metadata beside the immutable card. Claims describe intrinsic model behavior
