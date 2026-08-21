@@ -1306,6 +1306,13 @@ def test_installed_qualification_card_does_not_survive_lifecycle_cleanup(
     model_cards_module._installed_current_registry_ids.clear()
     model_cards_module._card_cache[card.model_id] = card
     try:
+        model_cards_module.register_installed_card_record(record)
+
+        assert model_cards_module.get_card(card.model_id) == card
+        model_cards_module._card_cache.pop(card.model_id)
+        assert model_cards_module.get_card(card.model_id) is None
+        assert model_cards_module.get_installed_card_record(card.model_id) == record
+
         model_cards_module._apply_installed_card_snapshot([record], 0)
 
         assert card.model_id not in model_cards_module._card_cache
