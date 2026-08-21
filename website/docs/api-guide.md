@@ -656,18 +656,18 @@ carries the accumulated call and whose `finish_reason` is `tool_calls`.
 
 #### When generation fails mid-response
 
-The HTTP status is committed before the body starts, so a failure that happens
-after that point cannot change the status code. It is reported in the body
-instead, as an object carrying an `error` with a `message`, `type` and
-`code`, the same shape returned by a request that is rejected before
-generation starts:
+Failures are reported differently depending on whether the response streams,
+because a streaming response commits its status with the first byte:
 
-- **Streaming**: a `data:` frame carrying an `error` object, followed by
-  `data: [DONE]`. The stream always terminates with the sentinel, including
-  when the task is cancelled or ends without completing, so a client can
-  distinguish a finished turn from a dropped connection.
-- **Non-streaming**: the response body is the error object rather than a
-  completion.
+- **Non-streaming** (`stream` omitted or false): the status reflects the
+  outcome. A generation that fails or never completes returns a 4xx or 5xx
+  carrying an object with an `error` holding `message`, `type` and `code`,
+  the same shape a request rejected before generation returns.
+- **Streaming**: the status is already committed, so a failure after that
+  point is reported in band as a `data:` frame carrying that same error
+  object, followed by `data: [DONE]`. The stream always terminates with the
+  sentinel, including when the task is cancelled or ends without completing,
+  so a client can distinguish a finished turn from a dropped connection.
 
 A response body is never empty, and a partial answer is never presented as a
 complete one. A turn ends only when the model reports a finish reason, so a

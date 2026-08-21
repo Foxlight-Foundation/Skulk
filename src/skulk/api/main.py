@@ -65,7 +65,7 @@ from starlette.datastructures import UploadFile as StarletteUploadFile
 import skulk.shared.types.tasks as task_types
 from skulk.api.adapters.chat_completions import (
     chat_request_to_text_generation,
-    collect_chat_response,
+    collect_chat_response_body,
     fetch_image_url,
     generate_chat_stream,
 )
@@ -3519,7 +3519,7 @@ class API:
 
     async def _steward_chat_completions(
         self, payload: ChatCompletionRequest
-    ) -> StreamingResponse:
+    ) -> StreamingResponse | Response:
         """Serve the steward through the standard chat-completions surface.
 
         The steward's tool surface belongs to the server, so client tool
@@ -3631,8 +3631,15 @@ class API:
                     "X-Accel-Buffering": "no",
                 },
             )
-        return StreamingResponse(
-            collect_chat_response(command_id, chunk_stream),
+        # A non-streaming request commits no status until the outcome is
+        # known, so a failure answers with a real status code rather than a
+        # 200 whose body happens to carry an error (#872).
+        status_code, body = await collect_chat_response_body(
+            command_id, chunk_stream
+        )
+        return Response(
+            content=body,
+            status_code=status_code,
             media_type="application/json",
         )
 
@@ -5080,7 +5087,7 @@ class API:
 
     async def chat_completions(
         self, payload: ChatCompletionRequest
-    ) -> ChatCompletionResponse | StreamingResponse:
+    ) -> ChatCompletionResponse | StreamingResponse | Response:
         """OpenAI Chat Completions API - adapter."""
         if str(payload.model) == STEWARD_VIRTUAL_MODEL_ID:
             # The reserved steward id selects model-plus-harness: the
@@ -5131,11 +5138,15 @@ class API:
                 },
             )
         else:
-            return StreamingResponse(
-                collect_chat_response(
-                    command.command_id,
-                    chunk_stream,
-                ),
+            # Same contract as the ordinary chat route: no status is committed
+            # until the outcome is known (#872).
+            status_code, body = await collect_chat_response_body(
+                command.command_id,
+                chunk_stream,
+            )
+            return Response(
+                content=body,
+                status_code=status_code,
                 media_type="application/json",
             )
 

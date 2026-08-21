@@ -337,3 +337,36 @@ async def test_truncated_generation_is_reported_rather_than_returned() -> None:
     message = error["message"]
     assert isinstance(message, str)
     assert "finish reason" in message
+
+
+@pytest.mark.anyio
+async def test_non_streaming_failure_carries_a_real_status_code() -> None:
+    """A non-streaming failure answers with a status, not a 200 plus an error.
+
+    Nothing forces a non-streaming request to commit its status before the
+    outcome is known: the body is one complete object produced once. Every
+    OpenAI client branches on status first, so reporting a failure only in the
+    body means the client treats it as success and discovers the problem later
+    through missing ``choices``.
+    """
+    from skulk.api.adapters.chat_completions import collect_chat_response_body
+
+    status, body = await collect_chat_response_body(
+        CommandId("cmd-empty"), _empty_stream()
+    )
+
+    assert status >= 400, "a failed generation must not answer 2xx"
+    assert body.strip()
+
+
+@pytest.mark.anyio
+async def test_non_streaming_success_still_answers_200() -> None:
+    """The status derivation must not turn ordinary completions into errors."""
+    from skulk.api.adapters.chat_completions import collect_chat_response_body
+
+    status, body = await collect_chat_response_body(
+        CommandId("cmd-ok"), _single_token_stream()
+    )
+
+    assert status == 200
+    assert '"chat.completion"' in body

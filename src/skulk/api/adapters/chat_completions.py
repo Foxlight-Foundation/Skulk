@@ -1,10 +1,12 @@
 """OpenAI Chat Completions API adapter for converting requests/responses."""
 
 import base64
+import json
 import re
 import time
 from collections.abc import AsyncGenerator
-from typing import Any
+from http import HTTPStatus
+from typing import Any, cast
 
 from loguru import logger
 
@@ -421,6 +423,47 @@ async def generate_chat_stream(
         + "\n\n"
     )
     yield "data: [DONE]\n\n"
+
+
+async def collect_chat_response_body(
+    command_id: CommandId,
+    chunk_stream: AsyncGenerator[
+        ErrorChunk | ToolCallChunk | TokenChunk | PrefillProgressChunk, None
+    ],
+) -> tuple[int, str]:
+    """Collect a non-streaming chat response and its HTTP status.
+
+    A non-streaming request has no reason to commit a status before the
+    outcome is known: the body is one complete object, produced once. Awaiting
+    it here lets a failure answer with a real status code, so a client that
+    branches on status, which is every OpenAI client, sees a failure as a
+    failure rather than discovering it later through missing `choices`.
+
+    The streaming path cannot do this and does not try: its status is committed
+    with the first byte, so it reports post-commit failures in band.
+
+    Returns:
+        The HTTP status to send and the serialized JSON body.
+    """
+
+    body = "".join([part async for part in collect_chat_response(command_id, chunk_stream)])
+    try:
+        parsed = cast("object", json.loads(body))
+    except ValueError:
+        # collect_chat_response always serializes a model, so this is
+        # unreachable in practice; answering 500 keeps an impossible state from
+        # masquerading as success.
+        return (HTTPStatus.INTERNAL_SERVER_ERROR.value, body)
+    if not isinstance(parsed, dict):
+        return (HTTPStatus.INTERNAL_SERVER_ERROR.value, body)
+    payload = cast("dict[str, object]", parsed)
+    error = payload.get("error")
+    if not isinstance(error, dict):
+        return (HTTPStatus.OK.value, body)
+    code = cast("dict[str, object]", error).get("code")
+    if isinstance(code, int) and not isinstance(code, bool) and 400 <= code <= 599:
+        return (code, body)
+    return (HTTPStatus.INTERNAL_SERVER_ERROR.value, body)
 
 
 async def collect_chat_response(
