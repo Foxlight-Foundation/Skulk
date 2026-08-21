@@ -8771,6 +8771,12 @@ class API:
                 status_code=422,
                 detail="Exact-card qualification requires an immutable source revision",
             )
+        try:
+            payload.model_card.require_immutable_external_companions(
+                context="exact-card qualification"
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         card = payload.model_card.model_copy(
             update={
                 "is_custom": True,

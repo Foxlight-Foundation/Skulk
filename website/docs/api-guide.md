@@ -1553,6 +1553,8 @@ contract but always forces unsigned custom-card semantics: `is_custom` becomes
 true, `qualification_only` records temporary lifecycle ownership, and every
 supplied `registry_*` identity, provenance, architecture, format, or capability
 claim is removed. A full 40-character immutable `sourceRevision` is required.
+Every external vision, MTP, assistant, or draft repository must also declare
+its matching immutable companion revision.
 Repository code therefore retains the normal explicit model-level approval
 requirement. Like `/models/add`, this mutation accepts direct loopback access
 or an authenticated operator gateway with `operations:write`. A headless

@@ -312,3 +312,28 @@ async def test_exact_custom_card_requires_immutable_revision() -> None:
             AddExactCustomModelCardParams(model_card=supplied),
             _authenticated_gateway_request(),
         )
+
+
+@pytest.mark.asyncio
+async def test_exact_custom_card_requires_immutable_external_companions() -> None:
+    """Qualification evidence pins executable companion bytes as well as weights."""
+    supplied = ModelCard(
+        model_id=ModelId("org/model-with-processor"),
+        source_revision="b" * 40,
+        storage_size=Memory.from_bytes(1234),
+        n_layers=2,
+        hidden_size=16,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        vision=VisionCardConfig(
+            model_type="test_vlm",
+            processor_repo="org/external-processor",
+        ),
+    )
+    api = object.__new__(API)
+
+    with pytest.raises(HTTPException, match="processor_revision"):
+        await api.add_exact_custom_model_card(
+            AddExactCustomModelCardParams(model_card=supplied),
+            _authenticated_gateway_request(),
+        )

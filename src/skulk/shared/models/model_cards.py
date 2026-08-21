@@ -1916,6 +1916,19 @@ class ModelCard(CamelCaseModel):
         """Reject signed cards whose separate companion sources are mutable."""
         if self.registry_card_id is None:
             return self
+        self.require_immutable_external_companions(context="signed registry cards")
+        return self
+
+    def require_immutable_external_companions(self, *, context: str) -> None:
+        """Reject external companion repositories without immutable revisions.
+
+        Args:
+            context: Human-readable trust boundary included in validation errors.
+
+        Raises:
+            ValueError: If an external companion repository can resolve mutable
+                bytes because its matching revision is absent.
+        """
         base_repository = str(self.artifact_repository)
         companions: list[tuple[str, str | None, str | None]] = []
         if self.vision is not None:
@@ -1962,10 +1975,9 @@ class ModelCard(CamelCaseModel):
             if repository and repository != base_repository and revision is None:
                 revision_field = f"{field_name.removesuffix('_repo')}_revision"
                 raise ValueError(
-                    f"signed registry cards with {field_name} require immutable "
+                    f"{context} with {field_name} require immutable "
                     f"{revision_field}"
                 )
-        return self
 
     @property
     def artifact_repository(self) -> ModelId:
