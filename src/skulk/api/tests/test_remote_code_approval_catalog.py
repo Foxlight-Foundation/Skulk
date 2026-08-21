@@ -12,6 +12,7 @@ from skulk.api.main import API
 from skulk.api.operator_gateway import OPERATOR_GATEWAY_AUTHORIZED_SCOPE_KEY
 from skulk.api.types import AddExactCustomModelCardParams
 from skulk.shared.models.model_cards import ModelCard, ModelTask, VisionCardConfig
+from skulk.shared.models.registry import RegistryCapabilityClaim
 from skulk.shared.models.remote_code_approval import remote_code_trust_identity
 from skulk.shared.types.commands import AddCustomModelCard, ForwarderCommand
 from skulk.shared.types.common import ModelId, NodeId
@@ -164,6 +165,17 @@ async def test_exact_custom_card_preserves_artifact_but_strips_registry_trust(
         registry_card_id=registry_card_id,
         registry_snapshot_id="snapshot_unpublished",
         registry_provenance="foxlight",
+        registry_architecture="qwen3_5",
+        registry_artifact_format="gguf",
+        registry_capability_claims=(
+            RegistryCapabilityClaim(
+                capability_id="text.generate",
+                scope="model",
+                status="observed",
+                source="agent_analysis",
+                confidence=0.9,
+            ),
+        ),
     )
     sender, receiver = channel[ForwarderCommand]()
     api = object.__new__(API)
@@ -185,6 +197,9 @@ async def test_exact_custom_card_preserves_artifact_but_strips_registry_trust(
     assert persisted.registry_card_id is None
     assert persisted.registry_snapshot_id is None
     assert persisted.registry_provenance is None
+    assert persisted.registry_architecture is None
+    assert persisted.registry_artifact_format is None
+    assert persisted.registry_capability_claims == ()
 
 
 @pytest.mark.asyncio

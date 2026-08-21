@@ -8765,6 +8765,9 @@ class API:
                 "registry_card_id": None,
                 "registry_snapshot_id": None,
                 "registry_provenance": None,
+                "registry_architecture": None,
+                "registry_artifact_format": None,
+                "registry_capability_claims": (),
             }
         )
         await self.command_sender.send(
