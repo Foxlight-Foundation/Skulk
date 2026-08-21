@@ -1134,6 +1134,7 @@ class ModelStoreClient:
         source_revision: str | None = None,
         source_repository: str | None = None,
         registry_card_id: str | None = None,
+        artifact_bundle_id: str | None = None,
         owner_model_id: str | None = None,
         owner_registry_card_id: str | None = None,
         artifact_role: InstalledArtifactRole = "base",
@@ -1157,6 +1158,8 @@ class ModelStoreClient:
                     body["source_repository"] = source_repository
                 if registry_card_id is not None:
                     body["registry_card_id"] = registry_card_id
+                if artifact_bundle_id is not None:
+                    body["artifact_bundle_id"] = artifact_bundle_id
                 if owner_model_id is not None:
                     body["owner_model_id"] = owner_model_id
                 if owner_registry_card_id is not None:

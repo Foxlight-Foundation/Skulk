@@ -26,6 +26,9 @@ ownership precondition when ordering every service mutation and reconciles
 later signed-registry refreshes into that view. Install and cleanup responses
 wait for their exact indexed command acknowledgements; cleanup retains model
 bytes without allowing a temporary installed sidecar to shadow signed truth.
+The store request can also pin the v2 artifact-bundle identity end to end, so
+qualification fails rather than downloading a replacement behind the same
+alias.
 
 ## Served GGUF vision
 

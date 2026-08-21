@@ -1218,6 +1218,14 @@ class StoreDownloadRequest(BaseModel):
             "card for the model alias."
         ),
     )
+    artifact_bundle_id: str | None = Field(
+        default=None,
+        pattern=r"^bundle_[a-z2-7]{52}$",
+        description=(
+            "Optional immutable v2 artifact-bundle identity. When supplied, "
+            "the selected local card and canonical store must both match it."
+        ),
+    )
     source_repository: str | None = Field(
         default=None,
         min_length=3,

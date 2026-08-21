@@ -2029,6 +2029,9 @@ The optional JSON body accepts the following fields:
   are rejected.
 - `registry_card_id`: immutable `card_<content-derived-id>` selecting the signed
   base-card generation.
+- `artifact_bundle_id`: immutable `bundle_<content-derived-id>` selecting the
+  exact v2 file bundle. Automated pre-publication qualification uses this pin
+  so an alias replacement cannot redirect the download.
 - `owner_model_id`: owning base-model alias for a companion artifact. It is
   required for non-`base` roles and must be an `owner/model` identifier no longer
   than 512 characters.
@@ -2067,6 +2070,9 @@ downloaded with no card ID; the store records it as unverified rather than
 claiming signed registry provenance. Supplying `registry_card_id` requests that
 exact immutable generation and returns `409 Conflict` when the store host cannot
 verify it.
+Supplying `artifact_bundle_id` additionally requires both the API node and the
+canonical store to resolve that exact bundle for the alias. A changed, missing,
+or legacy bundle returns `409 Conflict` instead of downloading different bytes.
 Companion requests instead bind `owner_registry_card_id` to `owner_model_id` and
 require the repository, revision, selected file, and `artifact_role` to match
 that owning card's signed companion declaration. A mismatched alias, role, or

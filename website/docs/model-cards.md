@@ -59,6 +59,9 @@ Cleanup waits for its own indexed delete acknowledgement. Downloaded bytes and
 their installed record remain available for later signed adoption, while the
 `qualification_only` sidecar is deliberately excluded from catalog projection
 once its lifecycle-owned custom card has been removed.
+The qualification worker also sends the candidate's `artifact_bundle_id` to
+the store download endpoint. Both the API node and canonical store verify that
+identity, so a changed alias cannot redirect qualification to different bytes.
 
 The signed catalog also carries open `architecture` and `capability_claims`
 metadata beside the immutable card. Claims describe intrinsic model behavior

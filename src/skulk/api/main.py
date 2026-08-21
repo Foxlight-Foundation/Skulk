@@ -13134,6 +13134,9 @@ class API:
             payload.source_repository if payload is not None else None
         )
         registry_card_id = payload.registry_card_id if payload is not None else None
+        artifact_bundle_id = (
+            payload.artifact_bundle_id if payload is not None else None
+        )
         owner_model_id = payload.owner_model_id if payload is not None else None
         owner_registry_card_id = (
             payload.owner_registry_card_id if payload is not None else None
@@ -13158,6 +13161,17 @@ class API:
                     detail="Requested immutable card is not available for this alias",
                 )
         if card is not None:
+            card_bundle = card.artifact_bundle
+            if artifact_bundle_id is not None and (
+                card_bundle is None or card_bundle.bundle_id != artifact_bundle_id
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Requested immutable artifact bundle is not available "
+                        "for this alias"
+                    ),
+                )
             gguf_file = gguf_file or card.gguf_file
             source_revision = source_revision or card.source_revision
             source_repository = source_repository or str(card.artifact_repository)
@@ -13169,6 +13183,7 @@ class API:
             source_revision=source_revision,
             source_repository=source_repository,
             registry_card_id=registry_card_id,
+            artifact_bundle_id=artifact_bundle_id,
             owner_model_id=owner_model_id,
             owner_registry_card_id=owner_registry_card_id,
             artifact_role=artifact_role,
