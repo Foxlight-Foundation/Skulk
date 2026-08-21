@@ -41,3 +41,9 @@ model_type = "qwen3_5"
 
 [storage_size]
 in_bytes = 16081490064
+
+# Tool calling is MODEL truth and does not vary by quantization: the sibling
+# cards for this base model declare it, so silence here would resolve to
+# "no tools" for the same model.
+[tooling]
+supports_tool_calling = true

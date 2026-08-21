@@ -27,8 +27,12 @@ capabilities = ["text", "thinking"]
 context_length = 262144
 trust_remote_code = false
 
+# Tool calling is MODEL truth: Gemma 4 emits tool calls, which is why the
+# gemma4 family contract in shared/models/capabilities.py asserts it. An
+# engine that cannot parse that format is a PLATFORM limitation and lives
+# in code, never here.
 [tooling]
-supports_tool_calling = false
+supports_tool_calling = true
 
 [placement]
 compatible_backends = ["vllm-cuda", "vllm-rocm"]

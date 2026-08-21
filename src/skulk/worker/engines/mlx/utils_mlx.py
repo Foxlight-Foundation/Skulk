@@ -1357,6 +1357,27 @@ def load_tokenizer_for_model_id(
         else:
             tokenizer.eos_token_ids = [gemma_eos_id, gemma_end_of_turn_id]
 
+    # Llama 3.1+ ends a tool-calling turn with <|eom_id|> ("end of message",
+    # handing off to a tool) and a user-facing turn with <|eot_id|> ("end of
+    # turn"). Only <|eot_id|> reaches us from tokenizer_config, because
+    # generation_config carries no eos_token_id for these repos, so without
+    # this the model runs straight past the end of its own tool call: the
+    # scaffolding detokenizes into visible content and a second call begins.
+    # Upstream (Meta's reference, vLLM and llama.cpp) all stop on both.
+    llama_eom_id = _token_id_or_none(tokenizer, "<|eom_id|>")
+    if llama_eom_id is not None and "<|python_tag|>" in (
+        getattr(tokenizer, "chat_template", None) or ""
+    ):
+        existing = list(tokenizer.eos_token_ids or [])
+        if llama_eom_id not in existing:
+            tokenizer.eos_token_ids = existing + [llama_eom_id]
+        if not getattr(tokenizer, "tool_parser", None):
+            # Template truth decides, exactly as the generic branch below:
+            # a template that speaks <|python_tag|> gets the Llama dialect.
+            object.__setattr__(tokenizer, "_tool_call_start", "<|python_tag|>")
+            object.__setattr__(tokenizer, "_tool_call_end", "<|eom_id|>")
+            object.__setattr__(tokenizer, "_tool_parser", _parse_llama_tool_calls)
+
     if capability_profile.tool_call_format == ToolCallFormat.Gemma4:
         # mlx-lm exposes tool-call markers through read-only properties on
         # TokenizerWrapper. Configure the internal fields directly so Gemma 4
@@ -1776,6 +1797,47 @@ def mx_barrier(group: Group | None):
             "mx_barrier", {"group_size": group.size()}, is_prefill=False
         ),
     )
+
+
+def _token_id_or_none(tokenizer: object, token: str) -> int | None:
+    """Return a special token's id, or None when the tokenizer lacks it.
+
+    Vocabularies differ across quantizations and conversions, so a missing
+    token is normal and must not raise.
+    """
+
+    convert = getattr(tokenizer, "convert_tokens_to_ids", None)
+    if convert is None:
+        return None
+    try:
+        token_id = cast("object", convert(token))
+    except Exception:  # noqa: BLE001 - tokenizer implementations vary
+        return None
+    if not isinstance(token_id, int):
+        return None
+    unknown = getattr(tokenizer, "unk_token_id", None)
+    if token_id < 0 or (unknown is not None and token_id == unknown):
+        return None
+    return token_id
+
+
+def _parse_llama_tool_calls(text: str) -> list[dict[str, Any]]:
+    """Parse Llama ``<|python_tag|>`` tool calls from the block text.
+
+    Delegates to the shared text parser so the MLX lane recognizes exactly the
+    dialects the in-process llama.cpp lane does. Raising on an unrecognized
+    block routes the runner to its malformed-tool-call fallback rather than
+    fabricating an empty success, matching every other parser here.
+    """
+
+    from skulk.worker.runner.llm_inference.tool_text_parser import (
+        parse_tool_calls_from_text,
+    )
+
+    items = parse_tool_calls_from_text(f"<|python_tag|>{text}")
+    if not items:
+        raise ValueError("no recognized tool calls in block")
+    return [{"name": item.name, "arguments": item.arguments} for item in items]
 
 
 def _parse_generic_text_tool_calls(text: str) -> list[dict[str, Any]]:

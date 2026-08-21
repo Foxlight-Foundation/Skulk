@@ -750,12 +750,40 @@ def parse_tool_calls(
             continue
 
         if response.finish_reason is not None:
+            # Generation ended while inside a tool-call block. That is not
+            # always truncation: several families close a call by ending the
+            # message rather than by emitting a closing marker. Llama 3.1+ is
+            # the clearest case, where <|eom_id|> means "end of message,
+            # handing off to a tool", so the block is complete and the closing
+            # marker never arrives. Try to parse before declaring it garbage;
+            # only a block that genuinely does not parse falls through to the
+            # error path, which is what truncation actually looks like.
+            combined = "".join(tool_call_text_parts)
+            parsed = tool_parser.parse(combined.strip(), tools=tools)
+            if parsed:
+                logger.info(
+                    "Parsed tool-call block closed by end of generation "
+                    f"(generated_chars={len(combined)}, parsed_calls={len(parsed)})"
+                )
+                if trace_task_id is not None:
+                    record_trace_marker(
+                        "tool_call_parsed",
+                        trace_rank,
+                        category="tooling",
+                        task_id=trace_task_id,
+                        tags=["tool_call"],
+                        attrs={"tool_call_count": len(parsed)},
+                    )
+                yield ToolCallResponse(
+                    tool_calls=parsed, usage=response.usage, stats=response.stats
+                )
+                break
             logger.info(
                 "tool call parsing interrupted, yield partial tool call as text"
             )
             response = response.model_copy(
                 update={
-                    "text": "".join(tool_call_text_parts),
+                    "text": combined,
                     "token": 0,
                     "finish_reason": "error",
                 }
