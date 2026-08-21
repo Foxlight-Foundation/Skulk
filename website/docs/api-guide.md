@@ -1569,6 +1569,9 @@ replace or delete any pre-existing non-qualification card; cleanup requires the
 server-assigned `qualification_only` marker. These ownership preconditions are
 rechecked by the elected master when it orders the mutation, so concurrent
 operator changes cannot be overwritten or deleted through stale API-node state.
+The endpoint returns success only after the exact card has round-tripped through
+that ordering boundary and is visible in the responding node's catalog; a
+conflicting winner returns `409`, and convergence timeout returns `504`.
 
 ### Per-node storage breakdown
 

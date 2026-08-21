@@ -526,6 +526,8 @@ JsonObject = dict[str, object]
 _DEFAULT_OPTIMIZER_CANDIDATE_BITS = [4, 8]
 _EXACT_CARD_QUALIFICATION_TOKEN_ENV: Final = "SKULK_EXACT_CARD_QUALIFICATION_TOKEN"
 _MINIMUM_QUALIFICATION_TOKEN_LENGTH: Final = 32
+_EXACT_CARD_CONVERGENCE_TIMEOUT_SECONDS: Final = 15.0
+_EXACT_CARD_CONVERGENCE_POLL_SECONDS: Final = 0.05
 _MODEL_LIST_STORE_CACHE_TTL_SECONDS = 5.0
 _MODEL_LIST_STORE_FETCH_TIMEOUT_SECONDS = 1.0
 
@@ -8811,7 +8813,46 @@ class API:
                 ),
             )
         )
+        await self._wait_for_exact_custom_card_convergence(card)
         return self._model_list_entry(card)
+
+    @staticmethod
+    async def _wait_for_exact_custom_card_convergence(
+        card: ModelCard,
+        *,
+        timeout_seconds: float = _EXACT_CARD_CONVERGENCE_TIMEOUT_SECONDS,
+    ) -> None:
+        """Wait until the exact ordered card is visible on this API node.
+
+        Args:
+            card: Unsigned exact card sent through the master ordering boundary.
+            timeout_seconds: Maximum event round-trip time before failing.
+
+        Raises:
+            HTTPException: If a conflicting card wins authoritative ordering or
+                the exact event does not converge before the deadline.
+        """
+        deadline = anyio.current_time() + timeout_seconds
+        current: ModelCard | None = None
+        while True:
+            current = get_card(card.model_id)
+            if current == card:
+                return
+            if anyio.current_time() >= deadline:
+                break
+            await anyio.sleep(_EXACT_CARD_CONVERGENCE_POLL_SECONDS)
+        if current is not None and current != card:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Exact-card mutation lost authoritative ordering to a "
+                    "different model card"
+                ),
+            )
+        raise HTTPException(
+            status_code=504,
+            detail="Exact-card mutation did not converge before the deadline",
+        )
 
     async def delete_custom_model(
         self, model_id: ModelId, request: Request

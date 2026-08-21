@@ -1375,6 +1375,9 @@ commands carry this ownership precondition to the elected master, whose
 serialized command processor rechecks and advances a local ordered card view
 before emitting the replicated event; API-node cache timing cannot authorize a
 stale overwrite or cleanup.
+The add endpoint waits for that exact indexed event to update its local catalog
+before returning success, so callers cannot race a download or placement
+against an uncommitted card.
 
 ## API adapters
 

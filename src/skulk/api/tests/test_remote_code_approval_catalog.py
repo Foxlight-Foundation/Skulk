@@ -20,6 +20,10 @@ from skulk.shared.types.memory import Memory
 from skulk.utils.channels import channel
 
 
+async def _accept_exact_card_convergence(_card: ModelCard) -> None:
+    """Stand in for the indexed event round-trip in narrow endpoint tests."""
+
+
 def _loopback_operator_request() -> Request:
     """Return a direct-local request authorized for operator mutations."""
     return Request(
@@ -181,6 +185,11 @@ async def test_exact_custom_card_preserves_artifact_but_strips_registry_trust(
     api = object.__new__(API)
     object.__setattr__(api, "command_sender", sender)
     object.__setattr__(api, "_system_id", NodeId("test-system"))
+    monkeypatch.setattr(
+        api,
+        "_wait_for_exact_custom_card_convergence",
+        _accept_exact_card_convergence,
+    )
 
     result = await api.add_exact_custom_model_card(
         AddExactCustomModelCardParams(model_card=supplied),
@@ -225,6 +234,11 @@ async def test_qualification_token_controls_exact_card_lifecycle(
     api = object.__new__(API)
     object.__setattr__(api, "command_sender", sender)
     object.__setattr__(api, "_system_id", NodeId("test-system"))
+    monkeypatch.setattr(
+        api,
+        "_wait_for_exact_custom_card_convergence",
+        _accept_exact_card_convergence,
+    )
 
     with pytest.raises(HTTPException, match="loopback"):
         API._require_operator_mutation(_remote_bearer_request(token))
@@ -281,6 +295,11 @@ async def test_qualification_token_cannot_replace_or_delete_operator_custom_card
     api = object.__new__(API)
     object.__setattr__(api, "command_sender", sender)
     object.__setattr__(api, "_system_id", NodeId("test-system"))
+    monkeypatch.setattr(
+        api,
+        "_wait_for_exact_custom_card_convergence",
+        _accept_exact_card_convergence,
+    )
 
     with pytest.raises(HTTPException, match="non-qualification"):
         await api.add_exact_custom_model_card(
@@ -347,6 +366,11 @@ async def test_operator_exact_card_remains_outside_service_cleanup(
     api = object.__new__(API)
     object.__setattr__(api, "command_sender", sender)
     object.__setattr__(api, "_system_id", NodeId("test-system"))
+    monkeypatch.setattr(
+        api,
+        "_wait_for_exact_custom_card_convergence",
+        _accept_exact_card_convergence,
+    )
 
     await api.add_exact_custom_model_card(
         AddExactCustomModelCardParams(model_card=supplied),
@@ -410,4 +434,35 @@ async def test_exact_custom_card_requires_immutable_external_companions() -> Non
         await api.add_exact_custom_model_card(
             AddExactCustomModelCardParams(model_card=supplied),
             _authenticated_gateway_request(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_exact_card_convergence_requires_the_ordered_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A conflicting ordered card fails instead of qualifying different bytes."""
+    expected = ModelCard(
+        model_id=ModelId("org/expected"),
+        source_revision="b" * 40,
+        storage_size=Memory.from_bytes(1),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        is_custom=True,
+        qualification_only=True,
+    )
+    conflicting = expected.model_copy(
+        update={"source_revision": "c" * 40, "qualification_only": False}
+    )
+
+    def conflicting_card(_model_id: ModelId) -> ModelCard:
+        return conflicting
+
+    monkeypatch.setattr(api_main, "get_card", conflicting_card)
+    with pytest.raises(HTTPException, match="authoritative ordering"):
+        await API._wait_for_exact_custom_card_convergence(
+            expected,
+            timeout_seconds=0.0,
         )
