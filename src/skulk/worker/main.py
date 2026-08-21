@@ -214,6 +214,55 @@ and weight mmaps, far under an indefinite hang."""
 _INSTANCE_FAILURE_MESSAGE_LIMIT = 2048
 
 
+def already_present_download_events(
+    *,
+    node_id: NodeId,
+    shard: ShardMetadata,
+    model_directory: str,
+) -> tuple[NodeDownloadProgress, NodeDownloadProgress]:
+    """Build the events announcing a model that is already staged on disk.
+
+    This path never reaches the download coordinator, so nothing applies the
+    attempt stamping that `DownloadCoordinator._prepare_status` gives
+    coordinator-routed statuses. An unattributed terminal outcome is treated as
+    an unorderable legacy replay by `TelemetryView.record_download_event` and
+    ignored whenever a live attempt exists, which leaves the live `Pending`
+    overlaying the durable completion forever: the planner never sees the model
+    as downloaded and re-issues `DownloadModel` every tick while the instance
+    sits idle.
+
+    So this opens an attempt and closes it under one identity, which is exactly
+    the documented contract of the two events: a `Pending` establishes the
+    attempt subsequent telemetry belongs to, and a terminal outcome carrying
+    that attempt retires it.
+
+    Returns:
+        The pending and completed events, in the order they must be sent.
+    """
+
+    attempt_id = DownloadAttemptId()
+    return (
+        NodeDownloadProgress(
+            download_progress=DownloadPending(
+                node_id=node_id,
+                shard_metadata=shard,
+                model_directory=model_directory,
+                attempt_id=attempt_id,
+            )
+        ),
+        NodeDownloadProgress(
+            download_progress=DownloadCompleted(
+                node_id=node_id,
+                shard_metadata=shard,
+                model_directory=model_directory,
+                total=shard.model_card.storage_size,
+                read_only=True,
+                attempt_id=attempt_id,
+            )
+        ),
+    )
+
+
 def _instance_failure_message(reason: str) -> str:
     """Return bounded classified failure text suitable for replicated state.
 
@@ -2102,38 +2151,12 @@ class Worker:
                         )
                         # This path never reaches the download coordinator, so
                         # nothing stamps it with the attempt identity that
-                        # `_prepare_status` gives coordinator-routed statuses.
-                        # An unattributed terminal outcome is treated as a
-                        # legacy replay by `TelemetryView.record_download_event`
-                        # and ignored whenever a live attempt exists, which
-                        # leaves the live Pending overlaying the durable
-                        # completion forever: the planner never sees the model
-                        # as downloaded and re-issues DownloadModel every tick
-                        # while the instance sits idle. Open and close one
-                        # attempt of our own so the completion is attributable.
-                        already_present_attempt = DownloadAttemptId()
-                        await self.event_sender.send(
-                            NodeDownloadProgress(
-                                download_progress=DownloadPending(
-                                    node_id=self.node_id,
-                                    shard_metadata=shard,
-                                    model_directory=str(found_path),
-                                    attempt_id=already_present_attempt,
-                                )
-                            )
-                        )
-                        await self.event_sender.send(
-                            NodeDownloadProgress(
-                                download_progress=DownloadCompleted(
-                                    node_id=self.node_id,
-                                    shard_metadata=shard,
-                                    model_directory=str(found_path),
-                                    total=shard.model_card.storage_size,
-                                    read_only=True,
-                                    attempt_id=already_present_attempt,
-                                )
-                            )
-                        )
+                        for event in already_present_download_events(
+                            node_id=self.node_id,
+                            shard=shard,
+                            model_directory=str(found_path),
+                        ):
+                            await self.event_sender.send(event)
                         await self.event_sender.send(
                             TaskStatusUpdated(
                                 task_id=task.task_id,
