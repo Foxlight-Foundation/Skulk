@@ -95,6 +95,26 @@ def _custom_installed_record(tmp_path: Path) -> InstalledCardRecord:
     return build_installed_card_record(artifact, card, artifact_format="custom")
 
 
+def _qualification_installed_record(tmp_path: Path) -> InstalledCardRecord:
+    """Build a retained artifact whose temporary card is service-owned."""
+
+    card = ModelCard(
+        model_id=ModelId("example/model@q4"),
+        storage_size=Memory.from_mb(1),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        is_custom=True,
+        qualification_only=True,
+        quantization="Q4_K_M",
+    )
+    artifact = tmp_path / "qualification"
+    artifact.mkdir()
+    (artifact / "model.gguf").write_bytes(b"weights")
+    return build_installed_card_record(artifact, card, artifact_format="gguf")
+
+
 def _configure_model_list_test(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -352,6 +372,34 @@ async def test_store_only_installed_card_remains_in_model_list(
     assert response.data[0].installed is True
     assert response.data[0].current_registry_identity is None
     assert response.data[0].update_available is False
+
+
+async def test_store_only_qualification_card_stays_out_of_model_list(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Retained qualification bytes must not expose their temporary card."""
+
+    store_record = _qualification_installed_record(tmp_path)
+    store_client = _RegistryStoreClient(
+        [
+            {
+                "model_id": str(store_record.artifact_model_id),
+                "installed_card": store_record.model_dump(mode="json"),
+            }
+        ]
+    )
+    _configure_model_list_test(
+        monkeypatch,
+        catalog_card=None,
+        current_registry_card_value=None,
+        local_record=None,
+    )
+    api = _api_with_store(store_client)
+
+    response = await api.get_models(status=None)
+
+    assert response.data == []
 
 
 async def test_model_list_store_timeout_reuses_last_known_snapshot(
