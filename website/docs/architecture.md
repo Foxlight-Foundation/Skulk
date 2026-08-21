@@ -67,6 +67,18 @@ Each subsystem has its own concern:
 - **API** is a FastAPI app that exposes inference endpoints in four wire formats (OpenAI Chat Completions, OpenAI Responses, Anthropic Messages, Ollama) and Skulk-native control endpoints (placements, diagnostics, traces, config). It also serves the dashboard build at `/` when those assets are present; a headless node built without the UI skips that mount and serves the API alone.
 - **Storage** is a collection of on-disk responsibilities: the event log (msgpack + zstd), the model cache directory, custom model cards (per-user TOML files), and the optional shared model store.
 
+Because those four wire formats are the ones external tools already speak,
+connecting a coding agent or a chat application to a cluster is a configuration
+change rather than an integration. The dashboard's Integrations page writes that
+configuration for the operator, and it writes it from live cluster state rather
+than from a template: the models it names are the ones that currently have a
+ready instance, the context windows are those models' real windows, and the
+per-model flags follow the same resolved capability profile the runtime uses, so
+a vision model is declared as accepting images and a model that marks its
+reasoning is set up to send that reasoning back on later turns. The address it
+embeds is the node's routable address, not `localhost`, because the tool being
+configured usually runs on a different machine.
+
 Signed registry-v2 model cards can describe one exact `artifact_bundle`: a
 content-derived required-file manifest plus an optional repository-relative
 loader root. The direct and central-store paths fetch only those files, verify

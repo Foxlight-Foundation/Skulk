@@ -1,5 +1,13 @@
 import styled, { css, useTheme } from 'styled-components';
-import { FiSettings, FiSidebar, FiDatabase, FiMessageSquare, FiSun, FiMoon } from 'react-icons/fi';
+import {
+  FiSettings,
+  FiSidebar,
+  FiDatabase,
+  FiMessageSquare,
+  FiSun,
+  FiMoon,
+  FiLink,
+} from 'react-icons/fi';
 import { MdHub, MdAutoAwesome } from 'react-icons/md';
 import { VscBug } from 'react-icons/vsc';
 import { Button } from '../common/Button';
@@ -11,7 +19,13 @@ import { useSkulkTranslation } from '../../i18n/tolgee';
 import { useGetStewardStatusQuery } from '../../store/endpoints/steward';
 import { MOBILE_BREAKPOINT_PX } from '../../hooks/useMediaQuery';
 
-export type NavRoute = 'cluster' | 'model-store' | 'chat' | 'steward' | 'operator';
+export type NavRoute =
+  | 'cluster'
+  | 'model-store'
+  | 'chat'
+  | 'steward'
+  | 'integrations'
+  | 'operator';
 
 export interface HeaderNavProps {
   showHome?: boolean;
@@ -306,6 +320,7 @@ const ClusterIcon = () => <MdHub size={16} />;
 const StoreIcon = () => <FiDatabase size={16} />;
 const ChatIcon = () => <FiMessageSquare size={16} />;
 const StewardIcon = () => <MdAutoAwesome size={16} />;
+const IntegrationsIcon = () => <FiLink size={16} />;
 
 const ObservabilityIcon = () => <VscBug size={16} />;
 const SettingsIcon = () => <FiSettings size={16} />;
@@ -452,6 +467,10 @@ export function HeaderNav({
             <StewardIcon /> {t('header.nav.steward', 'Skulk')}
           </NavLink>
         )}
+
+        <NavLink $active={activeRoute === 'integrations'} onClick={() => navigate('integrations')}>
+          <IntegrationsIcon /> {t('header.nav.integrations', 'Integrations')}
+        </NavLink>
         </>)}
 
         {instanceCount > 0 && (
