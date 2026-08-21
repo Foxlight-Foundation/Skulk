@@ -8144,7 +8144,24 @@ class API:
             The public catalog projection for ``card``.
         """
         catalog_card = card
-        installed_record = installed_record or get_installed_card_record(card.model_id)
+        local_installed_record = get_installed_card_record(card.model_id)
+        if catalog_card.is_custom:
+            # A custom catalog entry is an operator-owned override. Prefer its
+            # node-local custom generation, but do not hide the same custom
+            # generation merely because it is canonical only in the store.
+            # Non-custom records sharing the alias cannot establish installed
+            # state for the custom card.
+            installed_record = (
+                local_installed_record
+                if local_installed_record is not None
+                and local_installed_record.model_card.is_custom
+                else installed_record
+                if installed_record is not None
+                and installed_record.model_card.is_custom
+                else None
+            )
+        else:
+            installed_record = installed_record or local_installed_record
         if installed_record is not None:
             card = installed_record.model_card
         remote_code_approval_required = remote_code_execution_requires_approval(card)
@@ -8410,11 +8427,7 @@ class API:
             self._model_list_entry(
                 card,
                 approved_remote_code_card_ids,
-                (
-                    None
-                    if card.is_custom
-                    else store_installed_records.get(card.model_id)
-                ),
+                store_installed_records.get(card.model_id),
             )
             for card in cards
         ]

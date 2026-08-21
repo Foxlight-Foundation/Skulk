@@ -253,6 +253,40 @@ async def test_custom_card_keeps_local_installed_precedence(
     assert response.data[0].installed_verification == "custom"
 
 
+async def test_custom_card_uses_matching_cluster_store_installation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A store-backed custom generation must be installed across API nodes."""
+
+    store_record = _custom_installed_record(tmp_path)
+    custom_card = store_record.model_card
+    store_client = _RegistryStoreClient(
+        [
+            {
+                "model_id": str(custom_card.model_id),
+                "installed_card": store_record.model_dump(mode="json"),
+            }
+        ]
+    )
+    _configure_model_list_test(
+        monkeypatch,
+        catalog_card=custom_card,
+        current_registry_card_value=None,
+        local_record=None,
+    )
+    api = _api_with_store(store_client)
+
+    response = await api.get_models(status=None)
+
+    assert len(response.data) == 1
+    assert response.data[0].installed is True
+    assert response.data[0].active_installed_identity == (
+        store_record.installed_identity
+    )
+    assert response.data[0].installed_verification == "custom"
+
+
 async def test_store_generation_supplies_active_metadata_and_current_update(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
