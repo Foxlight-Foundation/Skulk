@@ -1354,14 +1354,17 @@ curl http://localhost:52415/v1/models
 This returns known model cards, not just running instances. `GET /models`
 serves the same catalog through the same handler; prefer the `/v1/models` path
 for OpenAI-compatible clients. Complete installed cards load first so an
-air-gapped node keeps the exact generation it can actually launch. The current
-supported catalog comes from the external TUF-signed registry and refreshes at
-most every 60 seconds; a previously verified catalog may be used for up to 30
-days during an outage. That age limit does not apply to complete installed
-artifacts. Bundled cards fill non-installed catalog entries only when registry
-access and its acceptable cache are unavailable or disabled. Registry entries
-include immutable card and snapshot identities; local custom cards retain final
-override precedence.
+air-gapped node keeps the exact generation it can actually launch. Temporary
+`qualification_only` installed records are the exception: once a normal signed
+catalog card owns the same alias, `/v1/models` reports the signed card and does
+not use the retained qualification record to claim that signed generation is
+installed. The current supported catalog comes from the external TUF-signed
+registry and refreshes at most every 60 seconds; a previously verified catalog
+may be used for up to 30 days during an outage. That age limit does not apply to
+complete installed artifacts. Bundled cards fill non-installed catalog entries
+only when registry access and its acceptable cache are unavailable or disabled.
+Registry entries include immutable card and snapshot identities; local custom
+cards retain final override precedence.
 
 Each entry also separates discovery truth from runtime truth:
 
