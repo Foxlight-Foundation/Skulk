@@ -9,6 +9,11 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- Pre-publication qualification cleanup now names the complete temporary card
+  it owns, and the elected master compares that exact card before deleting the
+  alias. An older or retried job can no longer remove a newer qualification
+  replacement that reused the same model ID.
+
 - Same-artifact signed card replacements now run the card-only installed-sidecar
   refresh before a staged-cache fast path can report the model ready. This
   prevents a newly approved replacement card from passing placement and then

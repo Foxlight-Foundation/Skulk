@@ -30,6 +30,10 @@ The store request can also pin the v2 artifact-bundle identity end to end, so
 qualification fails rather than downloading a replacement behind the same
 alias.
 
+Cleanup sends the complete original candidate back to Skulk. The elected master
+deletes the alias only while that exact temporary card still owns it, preventing
+an older or retried job from removing a newer qualification replacement.
+
 ## Served GGUF vision
 
 GGUF vision cards can now pin one exact multimodal projector and run through

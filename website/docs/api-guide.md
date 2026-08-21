@@ -1566,9 +1566,30 @@ valid only for this exact-card install and
 `DELETE /models/custom/{model_id}` cleanup; it grants no general model,
 inference, configuration, or operator authority. The service bearer cannot
 replace or delete any pre-existing non-qualification card; cleanup requires the
-server-assigned `qualification_only` marker. These ownership preconditions are
-rechecked by the elected master when it orders the mutation, so concurrent
-operator changes cannot be overwritten or deleted through stale API-node state.
+server-assigned `qualification_only` marker. Service cleanup must also send the
+complete original candidate as the DELETE body:
+
+```json
+{
+  "model_card": {
+    "modelId": "org/model@q4-k-m",
+    "sourceRepository": "org/model",
+    "sourceRevision": "0123456789abcdef0123456789abcdef01234567",
+    "storageSize": {"inBytes": 1234},
+    "nLayers": 32,
+    "hiddenSize": 4096,
+    "supportsTensor": false,
+    "tasks": ["TextGeneration"],
+    "ggufFile": "model-Q4_K_M.gguf"
+  }
+}
+```
+
+Skulk applies the same unsigned normalization and deletes only if that complete
+temporary card still owns the alias. These ownership preconditions are rechecked
+by the elected master when it orders the mutation, so a concurrent operator or
+newer qualification change cannot be overwritten or deleted through stale
+API-node state.
 The master also folds newly refreshed signed-registry truth into this ownership
 view, so publication prevents a later temporary override even though registry
 refreshes do not traverse the command log.

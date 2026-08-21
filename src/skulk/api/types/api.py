@@ -1074,6 +1074,20 @@ class AddExactCustomModelCardParams(BaseModel):
     )
 
 
+class DeleteExactCustomModelCardParams(BaseModel):
+    """Exact temporary card a qualification service intends to remove."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    model_card: ModelCard = Field(
+        description=(
+            "Complete candidate card originally supplied to /models/add-card. "
+            "Skulk applies the same unsigned-card normalization and deletes only "
+            "when that exact temporary card still owns the alias."
+        )
+    )
+
+
 class HuggingFaceSearchResult(BaseModel):
     id: str
     author: str = ""
