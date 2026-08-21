@@ -7,7 +7,10 @@ from skulk.master.main import Master
 from skulk.shared.models.model_cards import ModelCard, ModelTask
 from skulk.shared.types.commands import AddCustomModelCard, DeleteCustomModelCard
 from skulk.shared.types.common import ModelId
+from skulk.shared.types.events import CustomModelCardAdded, IndexedEvent
 from skulk.shared.types.memory import Memory
+from skulk.shared.types.state import State
+from skulk.shared.types.telemetry import TelemetryView
 
 
 def _card(model_id: str, *, qualification_only: bool = False) -> ModelCard:
@@ -29,6 +32,8 @@ def _master() -> Master:
     """Return a narrow master instance containing only ordered card truth."""
     master = object.__new__(Master)
     object.__setattr__(master, "_ordered_model_cards", {})
+    object.__setattr__(master, "state", State())
+    object.__setattr__(master, "_telemetry_view", TelemetryView())
     return master
 
 
@@ -110,4 +115,32 @@ def test_operator_add_wins_before_stale_service_overwrite(
     )
 
     assert service_event is None
+    assert master._ordered_model_cards[operator.model_id] == operator  # pyright: ignore[reportPrivateUsage]
+
+
+def test_older_indexed_echo_cannot_roll_back_newer_ordered_truth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Event round trips never replace the command processor's newer decision."""
+    temporary = _card("org/model", qualification_only=True)
+    operator = _card("org/model")
+
+    def existing_card(_model_id: ModelId) -> ModelCard:
+        return temporary
+
+    monkeypatch.setattr(master_main, "get_card", existing_card)
+    master = _master()
+    old_event = master._order_custom_model_card_add(  # pyright: ignore[reportPrivateUsage]
+        AddCustomModelCard(
+            model_card=temporary,
+            requires_qualification_ownership=True,
+        )
+    )
+    assert isinstance(old_event, CustomModelCardAdded)
+    master._order_custom_model_card_add(  # pyright: ignore[reportPrivateUsage]
+        AddCustomModelCard(model_card=operator)
+    )
+
+    master._apply_indexed_event(IndexedEvent(idx=0, event=old_event))  # pyright: ignore[reportPrivateUsage]
+
     assert master._ordered_model_cards[operator.model_id] == operator  # pyright: ignore[reportPrivateUsage]

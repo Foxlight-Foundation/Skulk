@@ -718,8 +718,10 @@ class Master:
         # Custom-card events are pass-through State events, so authoritative
         # ownership races need a master-local ordered view. Seed aliases lazily
         # from this node's converged card cache, then update the view before the
-        # indexed event round-trips. A promoted master receives the same events
-        # and refreshes this view in _apply_indexed_event.
+        # indexed event round-trips. Indexed echoes deliberately never rewrite
+        # this view: an older echo may arrive after a newer command decision.
+        # A promoted master starts a new view and lazily seeds each alias from
+        # its node's already converged card cache before the first new command.
         self._ordered_model_cards: dict[ModelId, ModelCard | None] = {}
         self.state = State(
             tracing_enabled=SKULK_TRACING_ENABLED,
@@ -850,12 +852,6 @@ class Master:
 
         self.state = apply(self.state, indexed)
         record_membership_from_event(self._telemetry_view, indexed.event)
-        if isinstance(indexed.event, CustomModelCardAdded):
-            self._ordered_model_cards[indexed.event.model_card.model_id] = (
-                indexed.event.model_card
-            )
-        elif isinstance(indexed.event, CustomModelCardDeleted):
-            self._ordered_model_cards[indexed.event.model_id] = None
 
     def _ordered_model_card(self, model_id: ModelId) -> ModelCard | None:
         """Return model-card truth at the master's current command order."""
