@@ -4,6 +4,7 @@ import os
 import re
 import struct
 import time
+from collections import deque
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from collections.abc import Set as AbstractSet
 from enum import Enum
@@ -51,7 +52,7 @@ from skulk.shared.models.registry import (
     RegistryEngineSupportClaim,
     TufRegistryClient,
 )
-from skulk.shared.types.common import ModelId
+from skulk.shared.types.common import CommandId, ModelId
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.text_generation import ReasoningEffort
 from skulk.utils.pydantic_ext import CamelCaseModel, FrozenModel
@@ -98,6 +99,9 @@ _last_registry_refresh = 0.0
 _card_cache_dirty = False
 _last_registry_miss_refresh = 0.0
 _REGISTRY_MISS_REFRESH_SECONDS: Final[float] = 1.0
+_CUSTOM_CARD_MUTATION_CONFIRMATION_LIMIT: Final[int] = 4096
+_applied_custom_card_mutations: deque[CommandId] = deque()
+_applied_custom_card_mutation_set: set[CommandId] = set()
 _registry_client = TufRegistryClient(
     base_url=SKULK_MODEL_REGISTRY_URL,
     cache_dir=SKULK_MODEL_REGISTRY_CACHE_DIR,
@@ -105,6 +109,36 @@ _registry_client = TufRegistryClient(
     timeout_seconds=SKULK_MODEL_REGISTRY_TIMEOUT_SECONDS,
     max_stale_days=SKULK_MODEL_REGISTRY_MAX_STALE_DAYS,
 )
+
+
+def record_custom_card_mutation_applied(command_id: CommandId) -> None:
+    """Record one card mutation only after local persistence and cache apply.
+
+    Args:
+        command_id: Originating cluster command acknowledged by the indexed event.
+
+    Side effects:
+        Updates a bounded process-local confirmation window used by API callers.
+    """
+    if command_id in _applied_custom_card_mutation_set:
+        return
+    if len(_applied_custom_card_mutations) >= _CUSTOM_CARD_MUTATION_CONFIRMATION_LIMIT:
+        expired = _applied_custom_card_mutations.popleft()
+        _applied_custom_card_mutation_set.discard(expired)
+    _applied_custom_card_mutations.append(command_id)
+    _applied_custom_card_mutation_set.add(command_id)
+
+
+def custom_card_mutation_applied(command_id: CommandId) -> bool:
+    """Return whether this process applied the exact indexed card mutation.
+
+    Args:
+        command_id: Originating cluster command to check.
+
+    Returns:
+        ``True`` only after the worker persisted and cached its matching event.
+    """
+    return command_id in _applied_custom_card_mutation_set
 
 
 def _registry_enabled() -> bool:
@@ -442,6 +476,15 @@ def _apply_installed_card_snapshot(
         _installed_current_registry_ids[model_id] = (
             current_card.registry_card_id if current_card is not None else None
         )
+        if record.model_card.qualification_only:
+            # Qualification downloads remain durable, self-describing store/cache
+            # artifacts after cleanup, but their unsigned temporary card must be
+            # supplied by the lifecycle-owned custom TOML.  Once that file is
+            # removed, an installed sidecar cannot resurrect the temporary card
+            # or shadow a later signed registry card.
+            if existing == record.model_card:
+                _card_cache.pop(model_id, None)
+            continue
         if existing is not None and existing.is_custom:
             continue
         if (
@@ -1813,6 +1856,12 @@ class ModelCard(CamelCaseModel):
     is_custom: bool = False
     """Marks an operator-added custom card (not from the curated catalog). Excluded
     from the persisted card file so it is recomputed per environment."""
+    qualification_only: bool = False
+    """Marks an unsigned custom card owned by the temporary qualification lifecycle.
+
+    The registry service credential may clean up only cards carrying this marker;
+    ordinary operator-owned custom cards remain outside its deletion authority.
+    """
     generator_revision: int | None = None
     """Revision of the machine card generator that produced this card
     (:data:`CARD_GENERATOR_REVISION` at generation time), persisted in the card
@@ -1910,6 +1959,19 @@ class ModelCard(CamelCaseModel):
         """Reject signed cards whose separate companion sources are mutable."""
         if self.registry_card_id is None:
             return self
+        self.require_immutable_external_companions(context="signed registry cards")
+        return self
+
+    def require_immutable_external_companions(self, *, context: str) -> None:
+        """Reject external companion repositories without immutable revisions.
+
+        Args:
+            context: Human-readable trust boundary included in validation errors.
+
+        Raises:
+            ValueError: If an external companion repository can resolve mutable
+                bytes because its matching revision is absent.
+        """
         base_repository = str(self.artifact_repository)
         companions: list[tuple[str, str | None, str | None]] = []
         if self.vision is not None:
@@ -1956,10 +2018,9 @@ class ModelCard(CamelCaseModel):
             if repository and repository != base_repository and revision is None:
                 revision_field = f"{field_name.removesuffix('_repo')}_revision"
                 raise ValueError(
-                    f"signed registry cards with {field_name} require immutable "
+                    f"{context} with {field_name} require immutable "
                     f"{revision_field}"
                 )
-        return self
 
     @property
     def artifact_repository(self) -> ModelId:
@@ -1983,7 +2044,10 @@ class ModelCard(CamelCaseModel):
 
     async def save(self, path: Path) -> None:
         async with await open_file(path, "w") as f:
-            py = self.model_dump(exclude_none=True, exclude={"is_custom"})
+            excluded_fields = {"is_custom"}
+            if not self.qualification_only:
+                excluded_fields.add("qualification_only")
+            py = self.model_dump(exclude_none=True, exclude=excluded_fields)
             data = tomlkit.dumps(py)  # pyright: ignore[reportUnknownMemberType]
             await f.write(data)
 
@@ -2277,6 +2341,28 @@ def add_to_card_cache(card: "ModelCard") -> None:
     _card_cache[card.model_id] = card
 
 
+def get_custom_card_storage_collision(model_id: ModelId) -> "ModelCard | None":
+    """Return a distinct custom card that shares this alias's storage key.
+
+    Args:
+        model_id: Candidate alias whose normalized persistence key is being used.
+
+    Returns:
+        The conflicting custom card, or ``None`` when the key is unowned.
+    """
+    storage_key = model_id.normalize()
+    return next(
+        (
+            card
+            for card in _card_cache.values()
+            if card.is_custom
+            and card.model_id != model_id
+            and card.model_id.normalize() == storage_key
+        ),
+        None,
+    )
+
+
 async def delete_custom_card(model_id: ModelId) -> bool:
     """Delete a user-added custom model card. Returns True if deleted.
 
@@ -2286,6 +2372,11 @@ async def delete_custom_card(model_id: ModelId) -> bool:
     """
     card_path = _custom_cards_dir / (ModelId(model_id).normalize() + ".toml")
     if await card_path.exists():
+        stored_card = await ModelCard.load_from_path(card_path)
+        if stored_card.model_id != model_id:
+            raise ValueError(
+                "custom model-card storage key belongs to a different alias"
+            )
         await card_path.unlink()
         _card_cache.pop(model_id, None)
         await _refresh_card_cache()

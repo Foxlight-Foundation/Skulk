@@ -206,6 +206,25 @@ async def test_custom_card_deletion_restores_signed_registry_authority(
     assert revoked_bundled.model_id not in model_cards_module._card_cache
 
 
+@pytest.mark.anyio
+async def test_custom_card_deletion_rejects_normalized_alias_collision(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cleanup cannot unlink a file whose embedded alias has another owner."""
+    custom_dir = tmp_path / "custom"
+    custom_dir.mkdir()
+    custom_path = custom_dir / "testorg--override-model.toml"
+    custom_path.write_text(_MINIMAL_CARD.format(quantization="int4"))
+    monkeypatch.setattr(model_cards_module, "_custom_cards_dir", Path(str(custom_dir)))
+
+    with pytest.raises(ValueError, match="different alias"):
+        await model_cards_module.delete_custom_card(
+            ModelId("testorg--override-model")
+        )
+
+    assert custom_path.exists()
+
+
 _STAMPED_CARD = """\
 model_id = "testorg/override-model"
 n_layers = 4

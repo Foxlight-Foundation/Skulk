@@ -179,10 +179,14 @@ class TopologyEdgeDeleted(BaseEvent):
 
 class CustomModelCardAdded(BaseEvent):
     model_card: ModelCard
+    mutation_command_id: CommandId | None = None
+    """Command acknowledged by this applied card mutation, when available."""
 
 
 class CustomModelCardDeleted(BaseEvent):
     model_id: ModelId
+    mutation_command_id: CommandId | None = None
+    """Command acknowledged by this applied card mutation, when available."""
 
 
 class StagedModelEvicted(BaseEvent):

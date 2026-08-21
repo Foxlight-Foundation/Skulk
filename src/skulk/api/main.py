@@ -4,6 +4,7 @@ import binascii
 import contextlib
 import copy
 import hashlib
+import hmac
 import ipaddress
 import json
 import os
@@ -141,6 +142,7 @@ from skulk.api.steward import (
 )
 from skulk.api.types import (
     AddCustomModelParams,
+    AddExactCustomModelCardParams,
     AdvancedImageParams,
     ArtifactExportRequest,
     ArtifactExportResponse,
@@ -330,16 +332,21 @@ from skulk.shared.models.model_cards import (
     ModelCard,
     ModelId,
     ModelTask,
+    add_to_card_cache,
+    custom_card_mutation_applied,
+    delete_custom_card,
     get_all_model_cards,
     get_bundled_card,
     get_card,
     get_current_registry_card,
     get_current_registry_card_id,
+    get_custom_card_storage_collision,
     get_installed_card_record,
     get_model_advisories,
     get_model_cards,
     get_model_engine_support,
     preserve_generated_card_constraints,
+    record_custom_card_mutation_applied,
 )
 from skulk.shared.models.registry import RegistryAdvisory
 from skulk.shared.models.remote_code_approval import (
@@ -434,6 +441,8 @@ from skulk.shared.types.diagnostics import (
     VisionMediaIngressDiagnostics,
 )
 from skulk.shared.types.events import (
+    CustomModelCardAdded,
+    CustomModelCardDeleted,
     Event,
     IndexedEvent,
     InstanceCreated,
@@ -522,6 +531,10 @@ from skulk.store.peer_exports import ArtifactExportManager
 
 JsonObject = dict[str, object]
 _DEFAULT_OPTIMIZER_CANDIDATE_BITS = [4, 8]
+_EXACT_CARD_QUALIFICATION_TOKEN_ENV: Final = "SKULK_EXACT_CARD_QUALIFICATION_TOKEN"
+_MINIMUM_QUALIFICATION_TOKEN_LENGTH: Final = 32
+_EXACT_CARD_CONVERGENCE_TIMEOUT_SECONDS: Final = 15.0
+_EXACT_CARD_CONVERGENCE_POLL_SECONDS: Final = 0.05
 _MODEL_LIST_STORE_CACHE_TTL_SECONDS = 5.0
 _MODEL_LIST_STORE_FETCH_TIMEOUT_SECONDS = 1.0
 
@@ -1473,8 +1486,12 @@ class API:
         extensions: LoadedExtensions | None = None,
         enable_builtin_providers: bool = False,
         operator_pairing_service: OperatorPairingService | None = None,
+        apply_custom_card_mutations_locally: bool = False,
     ) -> None:
         self.state = State()
+        self._apply_custom_card_mutations_locally = (
+            apply_custom_card_mutations_locally
+        )
         self._operator_pairing_service = operator_pairing_service
         self._operator_relay_configuration: OperatorRelayConfiguration | None = None
         if operator_pairing_service is not None:
@@ -2166,6 +2183,18 @@ class API:
                 "loopback access or an authenticated operator-gateway credential."
             ),
         )(self.add_custom_model)
+        self.app.post(
+            "/models/add-card",
+            tags=["Models"],
+            summary="Add one exact unsigned custom model card",
+            description=(
+                "Persist a complete exact model card supplied by an authenticated "
+                "operator workflow without fetching or regenerating Hub metadata. "
+                "Skulk forces custom-card semantics and removes registry trust "
+                "claims; repository code still requires the card's normal explicit "
+                "model-level approval."
+            ),
+        )(self.add_exact_custom_model_card)
         self.app.delete(
             "/models/custom/{model_id:path}",
             tags=["Models"],
@@ -8654,6 +8683,36 @@ class API:
             return
         cls._require_loopback_mutation(request)
 
+    @classmethod
+    def _require_exact_card_qualification_mutation(cls, request: Request) -> bool:
+        """Authorize the narrow exact-card lifecycle used by registry qualification.
+
+        The long-lived service credential deliberately grants less authority than
+        an operator access token: only the exact-card installation and matching
+        custom-card cleanup handlers call this guard. Loopback and the authenticated
+        operator gateway retain their normal access.
+
+        Returns:
+            ``True`` only when the narrow service credential authorized the call;
+            operator-gateway and loopback callers return ``False``.
+        """
+        if request.scope.get(OPERATOR_GATEWAY_AUTHORIZED_SCOPE_KEY) is True:
+            return False
+        configured_token = os.environ.get(_EXACT_CARD_QUALIFICATION_TOKEN_ENV, "")
+        authorization = request.headers.get("authorization", "")
+        scheme, separator, presented_token = authorization.partition(" ")
+        credential_matches = (
+            len(configured_token) >= _MINIMUM_QUALIFICATION_TOKEN_LENGTH
+            and separator == " "
+            and scheme.lower() == "bearer"
+            and bool(presented_token.strip())
+            and hmac.compare_digest(configured_token, presented_token.strip())
+        )
+        if credential_matches:
+            return True
+        cls._require_loopback_mutation(request)
+        return False
+
     async def add_custom_model(
         self, payload: AddCustomModelParams, request: Request
     ) -> ModelListModel:
@@ -8698,21 +8757,201 @@ class API:
 
         return self._model_list_entry(card.model_copy(update={"is_custom": True}))
 
-    async def delete_custom_model(self, model_id: ModelId) -> JSONResponse:
-        """Delete a user-added custom model card and sync deletion across the cluster."""
-        card = get_card(model_id)
-        if card is None or not card.is_custom:
-            raise HTTPException(status_code=404, detail="Custom model card not found")
+    async def add_exact_custom_model_card(
+        self, payload: AddExactCustomModelCardParams, request: Request
+    ) -> ModelListModel:
+        """Persist an operator-supplied exact card under unsigned custom trust.
 
+        Args:
+            payload: Complete card whose immutable artifact contract is preserved.
+            request: Incoming request proving a local or authenticated operator.
+
+        Returns:
+            The custom model entry added to the cluster catalog.
+
+        Raises:
+            HTTPException: If the caller is not an authorized operator.
+
+        Side effects:
+            Removes signed-registry trust claims and broadcasts a persistent
+            custom-card mutation across the cluster.
+        """
+        qualification_service = self._require_exact_card_qualification_mutation(
+            request
+        )
+        if payload.model_card.source_revision is None:
+            raise HTTPException(
+                status_code=422,
+                detail="Exact-card qualification requires an immutable source revision",
+            )
+        try:
+            payload.model_card.require_immutable_external_companions(
+                context="exact-card qualification"
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        card = payload.model_card.model_copy(
+            update={
+                "is_custom": True,
+                "qualification_only": qualification_service,
+                "registry_card_id": None,
+                "registry_snapshot_id": None,
+                "registry_provenance": None,
+                "registry_architecture": None,
+                "registry_artifact_format": None,
+                "registry_capability_claims": (),
+            }
+        )
+        collision = get_custom_card_storage_collision(card.model_id)
+        if collision is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Exact-card alias collides with the persisted storage key "
+                    f"owned by {collision.model_id}"
+                ),
+            )
+        existing = get_card(card.model_id)
+        if (
+            qualification_service
+            and existing is not None
+            and not existing.qualification_only
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Qualification cannot replace an existing non-qualification "
+                    "model card"
+                ),
+            )
+        mutation = AddCustomModelCard(
+            model_card=card,
+            requires_qualification_ownership=qualification_service,
+        )
         await self.command_sender.send(
             ForwarderCommand(
                 origin=self._system_id,
-                command=DeleteCustomModelCard(model_id=model_id),
+                command=mutation,
             )
         )
+        await self._wait_for_exact_custom_card_convergence(card, mutation.command_id)
+        return self._model_list_entry(card)
+
+    @staticmethod
+    async def _wait_for_exact_custom_card_convergence(
+        card: ModelCard,
+        mutation_command_id: CommandId,
+        *,
+        timeout_seconds: float = _EXACT_CARD_CONVERGENCE_TIMEOUT_SECONDS,
+    ) -> None:
+        """Wait until the exact ordered card is visible on this API node.
+
+        Args:
+            card: Unsigned exact card sent through the master ordering boundary.
+            mutation_command_id: Exact command whose applied event must be observed.
+            timeout_seconds: Maximum event round-trip time before failing.
+
+        Raises:
+            HTTPException: If a conflicting card wins authoritative ordering or
+                the exact event does not converge before the deadline.
+        """
+        deadline = anyio.current_time() + timeout_seconds
+        current: ModelCard | None = None
+        while True:
+            current = get_card(card.model_id)
+            if custom_card_mutation_applied(mutation_command_id) and current == card:
+                return
+            if anyio.current_time() >= deadline:
+                break
+            await anyio.sleep(_EXACT_CARD_CONVERGENCE_POLL_SECONDS)
+        if current is not None and current != card:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Exact-card mutation lost authoritative ordering to a "
+                    "different model card"
+                ),
+            )
+        raise HTTPException(
+            status_code=504,
+            detail="Exact-card mutation did not converge before the deadline",
+        )
+
+    async def delete_custom_model(
+        self, model_id: ModelId, request: Request
+    ) -> JSONResponse:
+        """Delete a user-added custom model card and sync deletion across the cluster."""
+        qualification_service = self._require_exact_card_qualification_mutation(
+            request
+        )
+        card = get_card(model_id)
+        if card is None or not card.is_custom:
+            raise HTTPException(status_code=404, detail="Custom model card not found")
+        if qualification_service and not card.qualification_only:
+            raise HTTPException(
+                status_code=403,
+                detail="Qualification can remove only its temporary custom cards",
+            )
+
+        mutation = DeleteCustomModelCard(
+            model_id=model_id,
+            requires_qualification_ownership=qualification_service,
+        )
+        await self.command_sender.send(
+            ForwarderCommand(
+                origin=self._system_id,
+                command=mutation,
+            )
+        )
+        if qualification_service:
+            await self._wait_for_qualification_card_deletion(
+                model_id, mutation.command_id
+            )
 
         return JSONResponse(
             {"message": "Model card deleted", "model_id": str(model_id)}
+        )
+
+    @staticmethod
+    async def _wait_for_qualification_card_deletion(
+        model_id: ModelId,
+        mutation_command_id: CommandId,
+        *,
+        timeout_seconds: float = _EXACT_CARD_CONVERGENCE_TIMEOUT_SECONDS,
+    ) -> None:
+        """Wait until this exact cleanup no longer exposes its temporary card.
+
+        Args:
+            model_id: Temporary model alias sent for cleanup.
+            mutation_command_id: Exact delete command whose event must be applied.
+            timeout_seconds: Maximum event round-trip time before failing.
+
+        Raises:
+            HTTPException: If a non-qualification card wins authoritative
+                ordering or cleanup does not converge before the deadline.
+        """
+        deadline = anyio.current_time() + timeout_seconds
+        current: ModelCard | None = None
+        while True:
+            current = get_card(model_id)
+            if custom_card_mutation_applied(mutation_command_id) and (
+                current is None or not current.qualification_only
+            ):
+                return
+            if anyio.current_time() >= deadline:
+                break
+            await anyio.sleep(_EXACT_CARD_CONVERGENCE_POLL_SECONDS)
+        if current is not None and not current.qualification_only:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Qualification-card cleanup lost authoritative ordering to "
+                    "a different model card"
+                ),
+            )
+        raise HTTPException(
+            status_code=504,
+            detail="Qualification-card cleanup did not converge before the deadline",
         )
 
     async def get_model_card_summary(self, model_id: str) -> HuggingFaceCardSummary:
@@ -8948,6 +9187,9 @@ class API:
                     self._maybe_compact_event_log()
                 self.state = apply(self.state, i_event)
 
+                if self._apply_custom_card_mutations_locally:
+                    await self._apply_local_custom_card_mutation(event)
+
                 if isinstance(event, (ModelTrustApprovalChanged, StateSnapshotHydrated)):
                     try:
                         self._skulk_config = persist_model_trust_config(
@@ -9017,6 +9259,39 @@ class API:
                         event.task_id,
                         "The request was cancelled because its instance was deleted",
                     )
+
+    @staticmethod
+    async def _apply_local_custom_card_mutation(event: Event) -> None:
+        """Persist one indexed card mutation when this API has no local worker.
+
+        Args:
+            event: Indexed event already accepted by the API state applier.
+
+        Side effects:
+            Updates the node-local custom-card file and cache, then records the
+            originating command acknowledgement only after persistence succeeds.
+        """
+        if isinstance(event, CustomModelCardAdded):
+            try:
+                await event.model_card.save_to_custom_dir()
+                add_to_card_cache(event.model_card)
+                if event.mutation_command_id is not None:
+                    record_custom_card_mutation_applied(event.mutation_command_id)
+            except Exception:
+                logger.exception(
+                    "Failed to save custom model card in API-only process "
+                    f"(model_id={event.model_card.model_id})"
+                )
+        elif isinstance(event, CustomModelCardDeleted):
+            try:
+                await delete_custom_card(event.model_id)
+                if event.mutation_command_id is not None:
+                    record_custom_card_mutation_applied(event.mutation_command_id)
+            except Exception:
+                logger.exception(
+                    "Failed to delete custom model card in API-only process "
+                    f"(model_id={event.model_id})"
+                )
 
     async def _apply_data(self) -> None:
         """Consume the data plane (#279 Phase 2): per-command output chunks.
@@ -12859,6 +13134,9 @@ class API:
             payload.source_repository if payload is not None else None
         )
         registry_card_id = payload.registry_card_id if payload is not None else None
+        artifact_bundle_id = (
+            payload.artifact_bundle_id if payload is not None else None
+        )
         owner_model_id = payload.owner_model_id if payload is not None else None
         owner_registry_card_id = (
             payload.owner_registry_card_id if payload is not None else None
@@ -12883,6 +13161,17 @@ class API:
                     detail="Requested immutable card is not available for this alias",
                 )
         if card is not None:
+            card_bundle = card.artifact_bundle
+            if artifact_bundle_id is not None and (
+                card_bundle is None or card_bundle.bundle_id != artifact_bundle_id
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Requested immutable artifact bundle is not available "
+                        "for this alias"
+                    ),
+                )
             gguf_file = gguf_file or card.gguf_file
             source_revision = source_revision or card.source_revision
             source_repository = source_repository or str(card.artifact_repository)
@@ -12894,6 +13183,7 @@ class API:
             source_revision=source_revision,
             source_repository=source_repository,
             registry_card_id=registry_card_id,
+            artifact_bundle_id=artifact_bundle_id,
             owner_model_id=owner_model_id,
             owner_registry_card_id=owner_registry_card_id,
             artifact_role=artifact_role,

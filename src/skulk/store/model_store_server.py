@@ -567,6 +567,7 @@ class ModelStoreServer:
         source_revision: str | None = None
         source_repository: str | None = None
         registry_card_id: str | None = None
+        artifact_bundle_id: str | None = None
         owner_model_id: str | None = None
         owner_registry_card_id: str | None = None
         artifact_role: InstalledArtifactRole = "base"
@@ -610,6 +611,13 @@ class ModelStoreServer:
                             reason="registry_card_id must be an immutable card id"
                         )
                     registry_card_id = raw_card_id
+                raw_bundle_id = body_dict.get("artifact_bundle_id")
+                if isinstance(raw_bundle_id, str) and raw_bundle_id:
+                    if re.fullmatch(r"bundle_[a-z2-7]{52}", raw_bundle_id) is None:
+                        raise web.HTTPBadRequest(
+                            reason="artifact_bundle_id must be an immutable bundle id"
+                        )
+                    artifact_bundle_id = raw_bundle_id
                 raw_owner_model_id = body_dict.get("owner_model_id")
                 if isinstance(raw_owner_model_id, str) and raw_owner_model_id:
                     if len(raw_owner_model_id) > 512 or "/" not in raw_owner_model_id:
@@ -632,6 +640,7 @@ class ModelStoreServer:
         verified_card = await self._require_remote_code_download_approval(
             model_id,
             registry_card_id,
+            artifact_bundle_id=artifact_bundle_id,
             source_repository=source_repository,
             source_revision=source_revision,
             pinned_gguf=pinned_gguf,
@@ -667,6 +676,7 @@ class ModelStoreServer:
         model_id: str,
         registry_card_id: str | None,
         *,
+        artifact_bundle_id: str | None = None,
         source_repository: str | None,
         source_revision: str | None,
         pinned_gguf: str | None,
@@ -777,7 +787,7 @@ class ModelStoreServer:
                 None,
             )
         if card is None:
-            if registry_card_id is None:
+            if registry_card_id is None and artifact_bundle_id is None:
                 # Hugging Face search has always allowed operators to acquire
                 # uncatalogued artifacts. With no asserted signed identity,
                 # retain the entry as unverified instead of treating absence as
@@ -787,11 +797,19 @@ class ModelStoreServer:
                 reason="store host cannot verify the requested registry card"
             )
         artifact_repository = source_repository or model_id
+        card_bundle = card.artifact_bundle
         if (
             str(card.model_id) != model_id
             or str(card.artifact_repository) != artifact_repository
             or card.source_revision != source_revision
             or card.gguf_file != pinned_gguf
+            or (
+                artifact_bundle_id is not None
+                and (
+                    card_bundle is None
+                    or card_bundle.bundle_id != artifact_bundle_id
+                )
+            )
         ):
             raise web.HTTPConflict(
                 reason="store request disagrees with immutable registry artifact"

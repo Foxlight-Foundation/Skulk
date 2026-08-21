@@ -767,6 +767,7 @@ class Node:
                 extensions=load_extensions(),
                 enable_builtin_providers=True,
                 operator_pairing_service=OperatorPairingService.from_default_paths(),
+                apply_custom_card_mutations_locally=args.no_worker,
             )
         else:
             api = None
@@ -885,8 +886,11 @@ class Node:
         )
 
     async def run(self):
+        # Command ownership and persistence collision checks are synchronous.
+        # Load durable card truth before any API or master task can accept a
+        # mutation, including on nodes that do not host the model store.
+        await get_all_model_cards()
         if self.store_server is not None:
-            await get_all_model_cards()
             await self.store_server.refresh_recovered_generations(
                 get_current_registry_cards(),
             )

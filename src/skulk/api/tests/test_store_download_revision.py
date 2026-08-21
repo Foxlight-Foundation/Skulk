@@ -11,7 +11,13 @@ from fastapi.testclient import TestClient
 from skulk.api import main as api_main
 from skulk.api.main import API, StoreDownloadRequest
 from skulk.shared.election import ElectionMessage
-from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
+from skulk.shared.models.model_cards import (
+    ArtifactBundleConfig,
+    ArtifactBundleFile,
+    ModelCard,
+    ModelId,
+    ModelTask,
+)
 from skulk.shared.types.commands import ForwarderCommand, ForwarderDownloadCommand
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.events import IndexedEvent
@@ -35,6 +41,7 @@ class _RecordingStoreClient:
                 str | None,
                 str | None,
                 str | None,
+                str | None,
                 str,
             ]
         ] = []
@@ -49,6 +56,7 @@ class _RecordingStoreClient:
         source_revision: str | None = None,
         source_repository: str | None = None,
         registry_card_id: str | None = None,
+        artifact_bundle_id: str | None = None,
         owner_model_id: str | None = None,
         owner_registry_card_id: str | None = None,
         artifact_role: str = "base",
@@ -61,6 +69,7 @@ class _RecordingStoreClient:
                 source_revision,
                 source_repository,
                 registry_card_id,
+                artifact_bundle_id,
                 owner_model_id,
                 owner_registry_card_id,
                 artifact_role,
@@ -101,6 +110,7 @@ async def test_store_download_inherits_bundled_card_revision(
             source_revision=_QUALIFIED_REVISION,
             artifact_repository=ModelId(_MODEL_ID),
             registry_card_id=None,
+            artifact_bundle=None,
         )
 
     monkeypatch.setattr(
@@ -124,6 +134,7 @@ async def test_store_download_inherits_bundled_card_revision(
             None,
             None,
             None,
+            None,
             "base",
         )
     ]
@@ -137,6 +148,7 @@ async def test_store_download_populates_card_cache_before_inheriting_pins(
         source_revision=_QUALIFIED_REVISION,
         artifact_repository=ModelId(_MODEL_ID),
         registry_card_id=None,
+        artifact_bundle=None,
     )
     lookups = 0
 
@@ -167,6 +179,7 @@ async def test_store_download_populates_card_cache_before_inheriting_pins(
             None,
             None,
             None,
+            None,
             "base",
         )
     ]
@@ -190,6 +203,11 @@ async def test_store_download_selects_current_registry_generation(
         registry_snapshot_id="snapshot_1_old",
         registry_provenance="foxlight",
     )
+    current_bundle = ArtifactBundleConfig(
+        bundle_id=f"bundle_{'c' * 52}",
+        files=(ArtifactBundleFile(path="current.gguf", size_bytes=1024),),
+        download_size=1024,
+    )
     current = ModelCard(
         model_id=ModelId(_MODEL_ID),
         storage_size=Memory.from_mb(1),
@@ -202,6 +220,7 @@ async def test_store_download_selects_current_registry_generation(
         registry_card_id=f"card_{'b' * 52}",
         registry_snapshot_id="snapshot_2_current",
         registry_provenance="foxlight",
+        artifact_bundle=current_bundle,
     )
 
     def installed_card(_model_id: ModelId) -> ModelCard:
@@ -222,7 +241,10 @@ async def test_store_download_selects_current_registry_generation(
 
     await api.request_store_download(
         _MODEL_ID,
-        StoreDownloadRequest(registry_card_id=current.registry_card_id),
+        StoreDownloadRequest(
+            registry_card_id=current.registry_card_id,
+            artifact_bundle_id=current_bundle.bundle_id,
+        ),
     )
 
     assert store_client.requests == [
@@ -233,6 +255,7 @@ async def test_store_download_selects_current_registry_generation(
             "b" * 40,
             _MODEL_ID,
             current.registry_card_id,
+            current_bundle.bundle_id,
             None,
             None,
             "base",
@@ -268,6 +291,7 @@ async def test_store_download_forwards_complete_companion_identity() -> None:
             ["draft-00002.gguf"],
             "d" * 40,
             "org/draft-repository",
+            None,
             None,
             _MODEL_ID,
             owner_card_id,

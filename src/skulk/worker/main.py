@@ -43,6 +43,7 @@ from skulk.shared.models.model_cards import (
     ModelId,
     add_to_card_cache,
     delete_custom_card,
+    record_custom_card_mutation_applied,
 )
 from skulk.shared.models.remote_code_approval import (
     MODEL_TRUST_FAILURE_MARKER,
@@ -1970,6 +1971,10 @@ class Worker:
                     try:
                         await event.model_card.save_to_custom_dir()
                         add_to_card_cache(event.model_card)
+                        if event.mutation_command_id is not None:
+                            record_custom_card_mutation_applied(
+                                event.mutation_command_id
+                            )
                     except Exception:
                         logger.exception(
                             f"Failed to save custom model card (model_id={event.model_card.model_id})"
@@ -1978,6 +1983,10 @@ class Worker:
                 if isinstance(event, CustomModelCardDeleted):
                     try:
                         await delete_custom_card(event.model_id)
+                        if event.mutation_command_id is not None:
+                            record_custom_card_mutation_applied(
+                                event.mutation_command_id
+                            )
                     except Exception:
                         logger.exception(
                             f"Failed to delete custom model card (model_id={event.model_id})"

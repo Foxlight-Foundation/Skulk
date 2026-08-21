@@ -244,11 +244,19 @@ class RestartNode(BaseCommand):
 
 
 class AddCustomModelCard(BaseCommand):
+    """Order one custom model-card addition across the cluster."""
+
     model_card: ModelCard
+    requires_qualification_ownership: bool = False
+    """Require the existing alias to be absent or service-owned at ordering time."""
 
 
 class DeleteCustomModelCard(BaseCommand):
+    """Order one custom model-card deletion across the cluster."""
+
     model_id: ModelId
+    requires_qualification_ownership: bool = False
+    """Require the existing alias to be service-owned at ordering time."""
 
 
 DownloadCommand = (
