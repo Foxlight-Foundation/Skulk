@@ -167,7 +167,6 @@ from skulk.api.types import (
     ChatCompletionMessage,
     ChatCompletionMessageText,
     ChatCompletionRequest,
-    ChatCompletionResponse,
     CreateInstanceParams,
     CreateInstanceResponse,
     DeleteDownloadResponse,
@@ -5086,7 +5085,7 @@ class API:
 
     async def chat_completions(
         self, payload: ChatCompletionRequest
-    ) -> ChatCompletionResponse | StreamingResponse:
+    ) -> StreamingResponse:
         """OpenAI Chat Completions API - adapter."""
         if str(payload.model) == STEWARD_VIRTUAL_MODEL_ID:
             # The reserved steward id selects model-plus-harness: the
