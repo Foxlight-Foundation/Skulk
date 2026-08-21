@@ -2152,8 +2152,8 @@ Important fields:
 | `registry_card_id` | string or null | Immutable content-derived card identity from the signed registry |
 | `registry_snapshot_id` | string or null | Signed catalog snapshot that supplied the card |
 | `registry_provenance` | string or null | Audited signed-registry origin (`foxlight`, `agent`, or `community`); null for bundled/custom cards |
-| `installed` | boolean | Whether this node has a complete active installed generation |
-| `active_installed_identity` | string or null | Durable generation identity this node will launch |
+| `installed` | boolean | Whether the authoritative cluster store has a complete active generation, falling back to the API node's local sidecar when the store has no record |
+| `active_installed_identity` | string or null | Durable identity of that cluster-store generation, or the node-local fallback generation |
 | `installed_verification` | string or null | `registry_verified`, `local_legacy`, `custom`, or `unresolved` |
 | `current_registry_identity` | string or null | Current signed identity for the alias, which may differ from the active install |
 | `update_available` | boolean | A newer signed generation exists but is not active until transfer commits |

@@ -8123,8 +8123,20 @@ class API:
     def _model_list_entry(
         card: "ModelCard",
         approved_remote_code_card_ids: frozenset[str] | None = None,
+        installed_record: InstalledCardRecord | None = None,
     ) -> ModelListModel:
-        """Build the public model-list representation for one model card."""
+        """Build the public model-list representation for one model card.
+
+        Args:
+            card: Effective catalog card exposed by the API.
+            approved_remote_code_card_ids: Cluster-wide remote-code approvals.
+            installed_record: Authoritative central-store generation when one
+                exists. When omitted, the node-local installed-card cache keeps
+                air-gapped and store-unreachable operation self-describing.
+
+        Returns:
+            The public catalog projection for ``card``.
+        """
         remote_code_approval_required = remote_code_execution_requires_approval(card)
         if remote_code_approval_required and approved_remote_code_card_ids is None:
             approved_remote_code_card_ids = approved_remote_code_identities()
@@ -8137,7 +8149,7 @@ class API:
             "request-specific options such as tools may change prompt rendering "
             "and related resolved capability values."
         )
-        installed_record = get_installed_card_record(card.model_id)
+        installed_record = installed_record or get_installed_card_record(card.model_id)
         current_registry_identity = get_current_registry_card_id(card.model_id)
         current_registry_card = get_current_registry_card(card.model_id)
         advisories_by_id = {
@@ -8230,8 +8242,71 @@ class API:
             ),
         )
 
+    @staticmethod
+    def _store_installed_records(
+        entries: Iterable[dict[str, object]],
+    ) -> dict[ModelId, InstalledCardRecord]:
+        """Validate central-store base records for the cluster model projection.
+
+        Companion entries do not represent independently launchable model-list
+        aliases. Malformed or internally mismatched records are ignored rather
+        than allowing store-index corruption to manufacture installed state.
+
+        Args:
+            entries: Raw entries returned by the authoritative store server.
+
+        Returns:
+            Valid base installed-card records keyed by their exact model alias.
+        """
+
+        records: dict[ModelId, InstalledCardRecord] = {}
+        for entry in entries:
+            model_id_raw = entry.get("model_id")
+            installed_raw = entry.get("installed_card")
+            if not isinstance(model_id_raw, str) or not isinstance(
+                installed_raw, dict
+            ):
+                continue
+            try:
+                model_id = ModelId(model_id_raw)
+                record = InstalledCardRecord.model_validate(
+                    installed_raw,
+                    strict=False,
+                )
+            except (ValidationError, ValueError):
+                logger.warning(
+                    "Ignoring malformed installed-card record from the model store "
+                    "for alias {}",
+                    model_id_raw,
+                )
+                continue
+            if (
+                record.artifact_role != "base"
+                or record.artifact_model_id != model_id_raw
+                or record.model_card.model_id != model_id
+            ):
+                logger.warning(
+                    "Ignoring mismatched installed-card record from the model store "
+                    "for alias {}",
+                    model_id_raw,
+                )
+                continue
+            records[model_id] = record
+        return records
+
     async def get_models(self, status: str | None = Query(default=None)) -> ModelList:
-        """Returns list of available models, optionally filtered by being downloaded."""
+        """Return available models with cluster-authoritative installed state.
+
+        The central store is the canonical source for active installed
+        generations. Node-local installed-card records remain the fallback when
+        the store is absent, unreachable, or does not own a particular alias.
+
+        Args:
+            status: Optional legacy ``downloaded`` filter.
+
+        Returns:
+            Available catalog models and their effective installed state.
+        """
         cards = await get_model_cards()
 
         if status == "downloaded":
@@ -8243,8 +8318,21 @@ class API:
             cards = [c for c in cards if c.model_id in downloaded_model_ids]
 
         approved_remote_code_card_ids = self._cluster_remote_code_approvals()
+        store_installed_records = (
+            self._store_installed_records(await self._store_client.fetch_registry())
+            if self._store_client is not None
+            else {}
+        )
         entries = [
-            self._model_list_entry(card, approved_remote_code_card_ids)
+            self._model_list_entry(
+                card,
+                approved_remote_code_card_ids,
+                (
+                    None
+                    if card.is_custom
+                    else store_installed_records.get(card.model_id)
+                ),
+            )
             for card in cards
         ]
         if self._intelligent_fabric_enabled():
