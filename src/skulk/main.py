@@ -886,8 +886,11 @@ class Node:
         )
 
     async def run(self):
+        # Command ownership and persistence collision checks are synchronous.
+        # Load durable card truth before any API or master task can accept a
+        # mutation, including on nodes that do not host the model store.
+        await get_all_model_cards()
         if self.store_server is not None:
-            await get_all_model_cards()
             await self.store_server.refresh_recovered_generations(
                 get_current_registry_cards(),
             )
