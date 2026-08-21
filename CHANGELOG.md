@@ -17,6 +17,18 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- The dashboard has a new Integrations page that generates ready-to-paste
+  configuration for connecting external tools to the cluster: Claude Code,
+  OpenCode, Codex, Hermes, OpenClaw, Pi, AnythingLLM, Open WebUI, n8n and
+  Firefox. Snippets are built from live cluster state rather than being static
+  examples, so they carry the ids of models that currently have a ready
+  instance, those models' real context windows, and their capability flags
+  (image input is declared for vision models, and models that mark their
+  reasoning are configured to send it back on later turns). The address in a
+  snippet is the node's routable address rather than `localhost`, with a
+  chooser between the local network and Tailscale when both are available, and
+  Docker recipes rewrite it to `host.docker.internal`.
+
 - Signed registry-v2 cards can now describe one exact immutable artifact bundle
   inside a shared upstream repository. Skulk downloads only the required file
   allow-list, verifies sizes and available upstream object identities, preserves

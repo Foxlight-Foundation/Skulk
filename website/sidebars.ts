@@ -49,6 +49,7 @@ const sidebars: SidebarsConfig = {
         "external-logging",
         "tracing",
         "mobile-dashboard",
+        "integrations",
         {
           type: "category",
           label: "Model Behaviors",
