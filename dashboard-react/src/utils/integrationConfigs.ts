@@ -13,8 +13,11 @@ import { modelSupportsTextChat, type ModelInfo } from '../types/models';
  * through {@link PLACEHOLDER_MODEL_ID}.
  *
  * Skulk exposes three request surfaces and each recipe picks whichever one its
- * tool speaks natively: OpenAI-compatible at `<api>/v1`, Anthropic-compatible
- * at `<api>/v1/messages`, and Ollama-compatible at `<api>/ollama`.
+ * tool speaks natively. Every value below is the base URL a client is given,
+ * not the endpoint it eventually calls, because clients append their own path:
+ * OpenAI-compatible at `<api>/v1` (clients append `/chat/completions`),
+ * Anthropic-compatible at `<api>` (clients append `/v1/messages`), and
+ * Ollama-compatible at `<api>/ollama` (clients append `/api/chat`).
  */
 
 /** Identifier for a supported external tool. */
@@ -293,6 +296,14 @@ export function partitionServingInstances(
       embedding.push(instance);
       continue;
     }
+    // The instance already carries the app shell's verdict, so prefer it: the
+    // catalog is fetched separately and is empty on first render and after a
+    // failed fetch, and `modelSupportsTextChat(undefined)` answers true, which
+    // would let a speech model through exactly when we know least.
+    if (instance.supportsTextChat !== undefined) {
+      if (instance.supportsTextChat) chat.push(instance);
+      continue;
+    }
     if (modelSupportsTextChat(byId.get(instance.modelId))) {
       chat.push(instance);
     }
@@ -512,7 +523,11 @@ function buildCodexSnippets(options: IntegrationOptions, t: SkulkTranslate): Int
         '',
         '[mcp_servers.filesystem]',
         'command = "npx"',
-        `args = ["-y", "@modelcontextprotocol/server-filesystem", "${options.codexFilesystemPath}"]`,
+        // TOML basic strings share JSON's escape rules for backslashes and
+        // quotes, so a Windows path or a quoted directory stays parseable.
+        `args = ["-y", "@modelcontextprotocol/server-filesystem", ${JSON.stringify(
+          options.codexFilesystemPath,
+        )}]`,
       ].join('\n'),
     },
     {

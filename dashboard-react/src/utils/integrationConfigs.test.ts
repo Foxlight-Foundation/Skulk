@@ -237,6 +237,19 @@ describe('partitionServingInstances', () => {
     expect(embedding).toHaveLength(0);
   });
 
+  it('trusts the instance capability flag when the catalog has not loaded', () => {
+    // The catalog is empty on first render, and modelSupportsTextChat(undefined)
+    // answers true, so without the flag a speech model would slip through.
+    const { chat } = partitionServingInstances(
+      [
+        instance('org/Voice-TTS', { supportsTextChat: false }),
+        instance('org/Chat-8B', { supportsTextChat: true }),
+      ],
+      [],
+    );
+    expect(chat.map(entry => entry.modelId)).toEqual(['org/Chat-8B']);
+  });
+
   it('drops instances that are not serving yet', () => {
     const { chat } = partitionServingInstances(
       [instance('org/Chat-8B', { status: 'loading' } as Partial<InstanceCardData>)],
@@ -394,6 +407,16 @@ describe('buildIntegrationSnippets', () => {
     );
     expect(config.body).toContain('"/srv/work"');
     expect(config.body).toContain('base_url = "http://192.168.1.50:52415/v1"');
+  });
+
+  it('escapes a Windows filesystem path so the TOML stays parseable', () => {
+    const [config] = buildIntegrationSnippets(
+      'codex',
+      options({ codexFilesystemPath: 'C:\\Users\\me' }),
+      t,
+    );
+    // A raw backslash would be read as a TOML escape sequence and fail to parse.
+    expect(config.body).toContain('"C:\\\\Users\\\\me"');
   });
 
   it('adds the image command for OpenClaw only when the model takes images', () => {
