@@ -8359,6 +8359,11 @@ class API:
                     model_id_raw,
                 )
                 continue
+            if record.model_card.qualification_only:
+                # Qualification keeps exact bytes in the central store, but the
+                # temporary unsigned card is not installed catalog truth.  It
+                # must not override a later signed card sharing the same alias.
+                continue
             records[model_id] = record
         return records
 
@@ -8438,10 +8443,8 @@ class API:
         store_installed_records = await self._cached_store_installed_records()
         cards_by_id = {card.model_id: card for card in cards}
         for model_id, record in store_installed_records.items():
-            if (
-                model_id in cards_by_id
-                or record.model_card.qualification_only
-                or not self._model_list_card_visible(record.model_card)
+            if model_id in cards_by_id or not self._model_list_card_visible(
+                record.model_card
             ):
                 continue
             cards.append(record.model_card)

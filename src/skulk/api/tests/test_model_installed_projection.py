@@ -402,6 +402,38 @@ async def test_store_only_qualification_card_stays_out_of_model_list(
     assert response.data == []
 
 
+async def test_store_qualification_card_cannot_override_signed_catalog_card(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A retained temporary record cannot replace a same-alias signed card."""
+
+    catalog_card = _card("a")
+    store_record = _qualification_installed_record(tmp_path)
+    store_client = _RegistryStoreClient(
+        [
+            {
+                "model_id": str(store_record.artifact_model_id),
+                "installed_card": store_record.model_dump(mode="json"),
+            }
+        ]
+    )
+    _configure_model_list_test(
+        monkeypatch,
+        catalog_card=catalog_card,
+        current_registry_card_value=catalog_card,
+        local_record=None,
+    )
+    api = _api_with_store(store_client)
+
+    response = await api.get_models(status=None)
+
+    assert len(response.data) == 1
+    assert response.data[0].registry_card_id == catalog_card.registry_card_id
+    assert response.data[0].catalog_source == "registry"
+    assert response.data[0].installed is False
+
+
 async def test_model_list_store_timeout_reuses_last_known_snapshot(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
