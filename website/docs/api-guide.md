@@ -569,10 +569,10 @@ memory:
 - After tokenization on the serving instance, a prompt that fills the window,
   or a prompt plus an explicit `max_tokens` that exceeds the limit, is
   rejected with an OpenAI-style `invalid_request_error` whose message starts
-  with `context_length_exceeded:`. Non-streaming requests return this as
-  **400 Bad Request**. Streaming requests have already committed their status
-  by the time the rejection is computed on the serving node, so it arrives as
-  the first SSE `data:` event instead.
+  with `context_length_exceeded:`. The HTTP status is already committed when
+  the rejection is computed on the serving node, so this arrives in the body:
+  as the first SSE `data:` event for streaming requests, and as the response
+  body for non-streaming ones.
 - When `max_tokens` is omitted, the server default output budget is clamped to
   the remaining window, so generation ends with `finish_reason: "length"`
   instead of overrunning the context.
@@ -656,18 +656,22 @@ carries the accumulated call and whose `finish_reason` is `tool_calls`.
 
 #### When generation fails mid-response
 
-Failures are reported differently depending on whether the response streams,
-because a streaming response commits its status with the first byte:
+A request that reaches a serving instance has already committed its HTTP
+status by the time generation runs, streaming or not, so a failure after that
+point is reported in the body rather than by the status. It carries an
+`error` object holding `message`, `type` and `code`, the same shape a request
+rejected before generation returns:
 
-- **Non-streaming** (`stream` omitted or false): the status reflects the
-  outcome. A generation that fails or never completes returns a 4xx or 5xx
-  carrying an object with an `error` holding `message`, `type` and `code`,
-  the same shape a request rejected before generation returns.
-- **Streaming**: the status is already committed, so a failure after that
-  point is reported in band as a `data:` frame carrying that same error
-  object, followed by `data: [DONE]`. The stream always terminates with the
-  sentinel, including when the task is cancelled or ends without completing,
-  so a client can distinguish a finished turn from a dropped connection.
+- **Non-streaming**: the body is the error object instead of a completion.
+  Check for an `error` key before reading `choices`.
+- **Streaming**: a `data:` frame carrying the error object, followed by
+  `data: [DONE]`. The stream always terminates with the sentinel, including
+  when the task is cancelled or ends without completing, so a client can
+  distinguish a finished turn from a dropped connection.
+
+The status is committed early on purpose. It is what lets the server notice
+that a caller has disconnected and stop the generation, rather than producing
+tokens for a client that has gone away.
 
 A response body is never empty, and a partial answer is never presented as a
 complete one. A turn ends only when the model reports a finish reason, so a

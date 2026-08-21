@@ -38,30 +38,6 @@ from skulk.shared.types.worker.runners import RunnerId, RunnerReady, ShardAssign
 from skulk.shared.types.worker.shards import PipelineShardMetadata
 
 
-def _http_request() -> Request:
-    """A minimal connected HTTP request for direct handler calls.
-
-    The handler watches for client disconnect while collecting a
-    non-streaming body, so it needs a request whose receive channel reports a
-    live connection rather than a disconnect.
-    """
-
-    async def receive() -> dict[str, object]:
-        return {"type": "http.request", "body": b"", "more_body": False}
-
-    return Request(
-        {
-            "type": "http",
-            "method": "POST",
-            "path": "/v1/chat/completions",
-            "headers": [],
-        },
-        receive=receive,
-    )
-
-
-
-
 def _get_running_model_card_fn(api: API) -> Callable[[ModelId], Awaitable[ModelCard]]:
     """Return the protected running-card helper with an explicit callable type."""
     return cast(
@@ -135,7 +111,7 @@ async def test_chat_completions_validates_model_before_adapter(monkeypatch: pyte
     )
 
     with pytest.raises(HTTPException) as exc_info:
-        await api.chat_completions(payload, _http_request())
+        await api.chat_completions(payload)
 
     assert exc_info.value.status_code == 404
 
@@ -252,7 +228,7 @@ async def test_chat_rejects_speech_only_models_before_dispatch(
     )
 
     with pytest.raises(HTTPException) as exc_info:
-        await api.chat_completions(payload, _http_request())
+        await api.chat_completions(payload)
 
     assert exc_info.value.status_code == 400
     assert exc_info.value.detail == (
