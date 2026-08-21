@@ -533,6 +533,12 @@ def register_installed_card_record(record: "InstalledCardRecord") -> None:
     _installed_current_registry_ids[model_id] = (
         current_card.registry_card_id if current_card is not None else None
     )
+    if record.model_card.qualification_only:
+        # The lifecycle-owned custom TOML is the sole authority that makes an
+        # unsigned qualification card visible.  Retain its installed sidecar
+        # for offline artifact truth, but never let the live download path make
+        # that temporary card independently durable in the model catalog.
+        return
     existing = _card_cache.get(model_id)
     if existing is None or not existing.is_custom or record.verification == "custom":
         _card_cache[model_id] = record.model_card
