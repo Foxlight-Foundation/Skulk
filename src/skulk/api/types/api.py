@@ -892,7 +892,7 @@ class ChatCompletionResponse(BaseModel):
     object: Literal["chat.completion"] = "chat.completion"
     created: int
     model: str
-    choices: list[ChatCompletionChoice | StreamingChoiceResponse]
+    choices: list[ChatCompletionChoice]
     usage: Usage | None = None
     service_tier: str | None = None
 
@@ -910,6 +910,8 @@ class ChatCompletionChunkResponse(BaseModel):
     read `choices[0].delta` and never noticed; strict ones, including the
     Vercel AI SDK's openai-compatible provider, reject the stream outright.
     """
+
+    model_config = ConfigDict(frozen=True, strict=True)
 
     id: str
     object: Literal["chat.completion.chunk"] = "chat.completion.chunk"
