@@ -434,6 +434,56 @@ async def test_store_qualification_card_cannot_override_signed_catalog_card(
     assert response.data[0].installed is False
 
 
+async def test_local_qualification_card_cannot_override_signed_catalog_card(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A retained node-local temporary record cannot replace signed truth."""
+
+    catalog_card = _card("a")
+    local_record = _qualification_installed_record(tmp_path)
+    _configure_model_list_test(
+        monkeypatch,
+        catalog_card=catalog_card,
+        current_registry_card_value=catalog_card,
+        local_record=local_record,
+    )
+    api = _api_with_store(_RegistryStoreClient([]))
+
+    response = await api.get_models(status=None)
+
+    assert len(response.data) == 1
+    assert response.data[0].registry_card_id == catalog_card.registry_card_id
+    assert response.data[0].catalog_source == "registry"
+    assert response.data[0].installed is False
+
+
+async def test_active_qualification_card_uses_matching_local_record(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The service-owned card remains installed while its lifecycle is active."""
+
+    local_record = _qualification_installed_record(tmp_path)
+    qualification_card = local_record.model_card
+    _configure_model_list_test(
+        monkeypatch,
+        catalog_card=qualification_card,
+        current_registry_card_value=None,
+        local_record=local_record,
+    )
+    api = _api_with_store(_RegistryStoreClient([]))
+
+    response = await api.get_models(status=None)
+
+    assert len(response.data) == 1
+    assert response.data[0].catalog_source == "custom"
+    assert response.data[0].installed is True
+    assert response.data[0].active_installed_identity == (
+        local_record.installed_identity
+    )
+
+
 async def test_model_list_store_timeout_reuses_last_known_snapshot(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -8181,6 +8181,15 @@ class API:
         """
         catalog_card = card
         local_installed_record = get_installed_card_record(card.model_id)
+        if (
+            local_installed_record is not None
+            and local_installed_record.model_card.qualification_only
+            and not catalog_card.qualification_only
+        ):
+            # A retained local qualification artifact remains usable for a
+            # future signed-card refresh, but its temporary unsigned card is
+            # not installed truth for a normal catalog entry sharing the alias.
+            local_installed_record = None
         if catalog_card.is_custom:
             # A custom catalog entry is an operator-owned override. Prefer its
             # node-local custom generation, but do not hide the same custom
