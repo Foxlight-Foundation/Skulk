@@ -9,6 +9,18 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- Streaming chat completions now carry `"object": "chat.completion.chunk"`.
+  Every SSE frame previously carried `"chat.completion"`, the non-streaming
+  discriminator, because one response model served both paths. Clients that
+  read `choices[0].delta` directly were unaffected, which is why this went
+  unnoticed, but clients that validate the discriminator reject such a stream
+  outright, including the Vercel AI SDK's openai-compatible provider. The
+  streaming and non-streaming responses are now separate models so the two
+  cannot drift again. This changes bytes on the wire for streaming responses,
+  toward the documented OpenAI format rather than away from it.
+
+### Fixed
+
 - Pre-publication qualification cleanup now names the complete temporary card
   it owns, and the elected master compares that exact card before deleting the
   alias. An older or retried job can no longer remove a newer qualification

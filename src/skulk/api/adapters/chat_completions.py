@@ -10,6 +10,7 @@ from loguru import logger
 
 from skulk.api.types import (
     ChatCompletionChoice,
+    ChatCompletionChunkResponse,
     ChatCompletionMessage,
     ChatCompletionMessageImageUrl,
     ChatCompletionMessageText,
@@ -279,8 +280,8 @@ def usage_from_stats(stats: GenerationStats | None) -> Usage | None:
 
 def chunk_to_response(
     chunk: TokenChunk, command_id: CommandId
-) -> ChatCompletionResponse:
-    """Convert a TokenChunk to a streaming ChatCompletionResponse."""
+) -> ChatCompletionChunkResponse:
+    """Convert a TokenChunk to one streaming chat-completion chunk."""
     # Build logprobs if available
     logprobs: Logprobs | None = None
     if chunk.logprob is not None:
@@ -307,7 +308,7 @@ def chunk_to_response(
             f"finish_reason={chunk.finish_reason!r}"
         )
 
-    return ChatCompletionResponse(
+    return ChatCompletionChunkResponse(
         id=command_id,
         created=int(time.time()),
         model=chunk.model,
@@ -358,7 +359,7 @@ async def generate_chat_stream(
                     )
                     for i, tool in enumerate(chunk.tool_calls)
                 ]
-                tool_response = ChatCompletionResponse(
+                tool_response = ChatCompletionChunkResponse(
                     id=command_id,
                     created=int(time.time()),
                     model=chunk.model,

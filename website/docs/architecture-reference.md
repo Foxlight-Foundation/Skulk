@@ -79,6 +79,8 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 - **Default port:** 52415
 - **Mounts:** dashboard at `/` (skipped when the built assets are absent, e.g. a headless/non-Mac worker node with no `dashboard-react/dist`; `DASHBOARD_DIR` is then `None` and the API serves without the UI, #333); OpenAPI at `/api/openapi.json`
 - **Background tasks:** `_apply_state` (consumes `GLOBAL_EVENTS` and persists merged traces), `_pause_on_new_election`, `_cleanup_expired_images` (image-store TTL), `_prune_old_traces` (hourly trace janitor backed by `prune_old_trace_files`; retention via `tracing.retention_days`)
+- **Chat-completion response models:** non-streaming responses use `ChatCompletionResponse` (`object: "chat.completion"`, choices carry a complete `message`); streaming frames use `ChatCompletionChunkResponse` (`object: "chat.completion.chunk"`, choices carry a `delta`), both in `api/types/api.py`. These were one model until the harness's external-API compatibility suite caught streaming emitting the non-streaming discriminator; strict OpenAI clients validate it and reject the stream, while lenient ones read `choices[0].delta` and never notice. Keep them separate: the shared model is what allowed the drift.
+- **Third-party surface coverage:** the OpenAI, Anthropic and Ollama wire formats are contract-tested by the `external-api-compat` suite in the test harness, and a real client application is driven against them by `client-app-compat`. Wire-shape changes to these surfaces belong with a suite update.
 
 ### Intelligent fabric (internal steward role)
 
