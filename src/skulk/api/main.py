@@ -8359,6 +8359,11 @@ class API:
                     model_id_raw,
                 )
                 continue
+            if record.model_card.qualification_only:
+                # Qualification keeps exact bytes in the central store, but the
+                # temporary unsigned card is not installed catalog truth.  It
+                # must not override a later signed card sharing the same alias.
+                continue
             records[model_id] = record
         return records
 
