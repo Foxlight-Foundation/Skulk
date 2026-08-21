@@ -618,6 +618,42 @@ for chunk in stream:
         print(chunk.choices[0].delta.content, end="")
 ```
 
+#### Streaming response shape
+
+Streaming responses are Server-Sent Events. Each event is a `data:` line
+carrying one chunk object, and the stream ends with a literal `data: [DONE]`
+sentinel:
+
+```
+data: {"id":"...","object":"chat.completion.chunk","created":1787328699,
+       "model":"mlx-community/Llama-3.2-1B-Instruct-4bit",
+       "choices":[{"index":0,"delta":{"role":"assistant","content":"Once"},
+                   "finish_reason":null}],"usage":null}
+
+data: {"id":"...","object":"chat.completion.chunk", ... ,
+       "choices":[{"index":0,"delta":{"content":" upon"},"finish_reason":null}]}
+
+data: [DONE]
+```
+
+Two differences from the non-streaming response matter to clients:
+
+- `object` is `chat.completion.chunk`, not `chat.completion`. Strict clients
+  validate this discriminator and reject a stream that carries the
+  non-streaming value.
+- Each choice carries a `delta` holding only what is new, rather than a
+  complete `message`.
+
+Skulk also emits SSE comment lines, which begin with `:` and which a
+compliant client ignores. These carry the command id at the start of the
+stream, and generation statistics at the end when available. A client that
+treats every non-blank line as data will need to skip them.
+
+Reasoning models place thinking text on `delta.reasoning_content` rather than
+`delta.content`, so a client that reads only `content` shows the answer
+without the reasoning. Tool calls arrive as a frame whose `delta.tool_calls`
+carries the accumulated call and whose `finish_reason` is `tool_calls`.
+
 ### Common Request Fields
 
 | Field | Type | Notes |

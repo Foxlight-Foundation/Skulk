@@ -23,6 +23,7 @@ from .api import CachedArtifactLocation as CachedArtifactLocation
 from .api import CacheInventoryStatus as CacheInventoryStatus
 from .api import CancelCommandResponse as CancelCommandResponse
 from .api import ChatCompletionChoice as ChatCompletionChoice
+from .api import ChatCompletionChunkResponse as ChatCompletionChunkResponse
 from .api import ChatCompletionContentPart as ChatCompletionContentPart
 from .api import ChatCompletionMessage as ChatCompletionMessage
 from .api import ChatCompletionMessageImageUrl as ChatCompletionMessageImageUrl

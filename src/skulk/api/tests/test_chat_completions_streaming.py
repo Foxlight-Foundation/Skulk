@@ -1,5 +1,7 @@
 """Tests for streaming chat-completions adapter behavior."""
 
+from typing import cast
+
 import pytest
 
 from skulk.api.adapters.chat_completions import generate_chat_stream
@@ -132,3 +134,100 @@ async def test_streaming_tool_call_terminal_synthesizes_usage_from_stats() -> No
     assert '"prompt_tokens":43' in final_data
     assert '"completion_tokens":30' in final_data
     assert '"total_tokens":73' in final_data
+
+
+async def _tool_call_stream():
+    from skulk.api.types import ToolCallItem
+    from skulk.shared.types.chunks import ToolCallChunk
+
+    yield ToolCallChunk(
+        model=ModelId("mlx-community/gemma-4-26b-a4b-it-4bit"),
+        tool_calls=[ToolCallItem(id="call_1", name="get_weather", arguments="{}")],
+        usage=None,
+        stats=None,
+    )
+
+
+def _sse_payloads(chunks: list[str]) -> list[dict[str, object]]:
+    """Parse the JSON payload out of every non-sentinel SSE data line."""
+    import json
+
+    payloads: list[dict[str, object]] = []
+    for chunk in chunks:
+        if not chunk.startswith("data: ") or "[DONE]" in chunk:
+            continue
+        parsed = cast("object", json.loads(chunk.removeprefix("data: ").strip()))
+        assert isinstance(parsed, dict)
+        payloads.append(cast("dict[str, object]", parsed))
+    return payloads
+
+
+def _first_choice(payload: dict[str, object]) -> dict[str, object]:
+    """Return the first choice of a completion payload."""
+    choices = payload["choices"]
+    assert isinstance(choices, list)
+    first = cast("object", choices[0])
+    assert isinstance(first, dict)
+    return cast("dict[str, object]", first)
+
+
+@pytest.mark.anyio
+async def test_streaming_chunks_use_the_chunk_object_discriminator() -> None:
+    """Streaming frames must not carry the non-streaming ``object`` value.
+
+    OpenAI's streaming format requires ``chat.completion.chunk``. Lenient
+    clients read ``choices[0].delta`` and never notice a wrong discriminator,
+    but strict ones reject the stream outright, so this is pinned rather than
+    left to a response model shared with the non-streaming path.
+    """
+    chunks = [
+        chunk
+        async for chunk in generate_chat_stream(
+            CommandId("cmd-123"), _single_token_stream()
+        )
+    ]
+    payloads = _sse_payloads(chunks)
+
+    assert payloads, "expected at least one streamed frame"
+    for payload in payloads:
+        assert payload["object"] == "chat.completion.chunk"
+        choice = _first_choice(payload)
+        assert "delta" in choice
+        assert "message" not in choice
+
+
+@pytest.mark.anyio
+async def test_streaming_tool_call_frames_use_the_chunk_discriminator() -> None:
+    """The tool-call frame takes a separate construction path from token frames."""
+    chunks = [
+        chunk
+        async for chunk in generate_chat_stream(
+            CommandId("cmd-tool"), _tool_call_stream()
+        )
+    ]
+    payloads = _sse_payloads(chunks)
+
+    assert payloads, "expected a tool-call frame"
+    for payload in payloads:
+        assert payload["object"] == "chat.completion.chunk"
+
+
+@pytest.mark.anyio
+async def test_non_streaming_response_keeps_the_completion_discriminator() -> None:
+    """The collected response is not a chunk and must keep ``chat.completion``."""
+    import json
+
+    from skulk.api.adapters.chat_completions import collect_chat_response
+
+    parts = [
+        part
+        async for part in collect_chat_response(
+            CommandId("cmd-456"), _single_token_stream()
+        )
+    ]
+    parsed = cast("object", json.loads("".join(parts)))
+    assert isinstance(parsed, dict)
+    payload = cast("dict[str, object]", parsed)
+
+    assert payload["object"] == "chat.completion"
+    assert "message" in _first_choice(payload)

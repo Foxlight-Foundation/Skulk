@@ -882,11 +882,42 @@ class ChatCompletionChoice(BaseModel):
 
 
 class ChatCompletionResponse(BaseModel):
+    """One complete, non-streaming chat completion.
+
+    The `object` discriminator is the first field strict OpenAI clients check,
+    so streaming must not reuse this model: see `ChatCompletionChunkResponse`.
+    """
+
     id: str
     object: Literal["chat.completion"] = "chat.completion"
     created: int
     model: str
-    choices: list[ChatCompletionChoice | StreamingChoiceResponse]
+    choices: list[ChatCompletionChoice]
+    usage: Usage | None = None
+    service_tier: str | None = None
+
+
+class ChatCompletionChunkResponse(BaseModel):
+    """One frame of a streaming chat completion.
+
+    Identical to `ChatCompletionResponse` except for the two things the OpenAI
+    streaming format requires to differ: the `object` discriminator is
+    `chat.completion.chunk`, and every choice carries a `delta` rather than a
+    complete `message`.
+
+    These were one model until the external-API compatibility suite caught the
+    streaming path emitting the non-streaming discriminator. Lenient clients
+    read `choices[0].delta` and never noticed; strict ones, including the
+    Vercel AI SDK's openai-compatible provider, reject the stream outright.
+    """
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    id: str
+    object: Literal["chat.completion.chunk"] = "chat.completion.chunk"
+    created: int
+    model: str
+    choices: list[StreamingChoiceResponse]
     usage: Usage | None = None
     service_tier: str | None = None
 
