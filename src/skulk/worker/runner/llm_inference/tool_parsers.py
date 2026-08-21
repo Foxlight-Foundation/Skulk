@@ -1,7 +1,7 @@
 import json
 import math
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 from skulk.api.types import ToolCallItem
 
@@ -20,6 +20,14 @@ class ToolParser:
     start_parsing: str
     end_parsing: str
     _inner_parser: Callable[[str], list[ToolCallItem] | None]
+    extra_start_parsing: tuple[str, ...] = ()
+    """Further markers that also open a tool-call block.
+
+    A family can open a call more than one way. Llama writes the bare call
+    object most of the time but prefixes ``<|python_tag|>`` when it reaches for
+    a tool by name, and a marker that does not open the block is emitted to the
+    caller as content.
+    """
     unparsed_is_text: bool = False
     """Whether a block that fails to parse is content rather than a failure.
 
@@ -29,6 +37,12 @@ class ToolParser:
     of an unparsable block is that the model simply answered in JSON and the
     text should be delivered as content.
     """
+
+    @property
+    def start_markers(self) -> tuple[str, ...]:
+        """Every marker whose appearance opens a tool-call block."""
+
+        return (self.start_parsing, *self.extra_start_parsing)
 
     def parse(
         self, text: str, tools: list[dict[str, Any]] | None
@@ -286,6 +300,7 @@ def make_text_dialect_parser(tool_call_start: str, tool_call_end: str) -> ToolPa
         start_parsing=tool_call_start,
         end_parsing=tool_call_end,
         _inner_parser=lambda text: parse_tool_calls_from_text(text),
+        extra_start_parsing=("<|python_tag|>",),
         unparsed_is_text=True,
     )
 
@@ -295,3 +310,31 @@ def infer_tool_parser(chat_template: str) -> ToolParser | None:
     if "<tool_call>" in chat_template and "tool_call.name" in chat_template:
         return make_json_parser()
     return None
+
+
+def declared_tool_calls(
+    tool_calls: list[ToolCallItem], tools: list[dict[str, Any]] | None
+) -> list[ToolCallItem]:
+    """Keep only calls naming a tool the caller actually offered.
+
+    Some families reach for a built-in the caller never declared: Llama answers
+    a plain question with ``<|python_tag|>print("hello")``, which parses as a
+    call to ``print``. Surfacing that as a tool call hands the caller a name
+    they have no implementation for, so it is dropped here and the block is
+    delivered as content instead. With no tools declared nothing is filtered,
+    because there is no list to check against.
+    """
+
+    if tools is None:
+        return tool_calls
+    declared: set[str] = set()
+    for tool in tools:
+        function = tool.get("function")
+        if not isinstance(function, dict):
+            continue
+        name = cast("object", function.get("name"))  # pyright: ignore[reportUnknownMemberType]
+        if isinstance(name, str):
+            declared.add(name)
+    if not declared:
+        return tool_calls
+    return [call for call in tool_calls if call.name in declared]

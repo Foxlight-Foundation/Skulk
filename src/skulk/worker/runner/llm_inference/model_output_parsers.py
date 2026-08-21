@@ -32,7 +32,10 @@ from skulk.worker.engines.mlx.utils_mlx import (
     detect_thinking_prompt_suffix,
 )
 from skulk.worker.runner.bootstrap import logger
-from skulk.worker.runner.llm_inference.tool_parsers import ToolParser
+from skulk.worker.runner.llm_inference.tool_parsers import (
+    ToolParser,
+    declared_tool_calls,
+)
 
 _GEMMA4_THINK_START = "<|channel>thought\n"
 _GEMMA4_THINK_END = "<channel|>"
@@ -695,7 +698,7 @@ def parse_tool_calls(
             yield response
             continue
 
-        if not in_tool_call and response.text.startswith(tool_parser.start_parsing):
+        if not in_tool_call and response.text.startswith(tool_parser.start_markers):
             in_tool_call = True
 
         if not in_tool_call:
@@ -707,6 +710,20 @@ def parse_tool_calls(
             # parse the actual tool calls from the tool call text
             combined = "".join(tool_call_text_parts)
             parsed = tool_parser.parse(combined.strip(), tools=tools)
+            if parsed is not None:
+                kept = declared_tool_calls(parsed, tools)
+                if not kept:
+                    logger.info(
+                        "Block named no offered tool, emitting it as content "
+                        f"(parsed_calls={len(parsed)})"
+                    )
+                    in_tool_call = False
+                    tool_call_text_parts = []
+                    yield response.model_copy(
+                        update={"text": combined, "token": 0}
+                    )
+                    continue
+                parsed = kept
             logger.info(
                 "Parsed generated tool-call block "
                 f"(chunks={len(tool_call_text_parts)}, "
@@ -768,7 +785,15 @@ def parse_tool_calls(
             # error path, which is what truncation actually looks like.
             combined = "".join(tool_call_text_parts)
             parsed = tool_parser.parse(combined.strip(), tools=tools)
+            if parsed is not None and not declared_tool_calls(parsed, tools):
+                logger.info(
+                    "Block named no offered tool, emitting it as content "
+                    f"(parsed_calls={len(parsed)})"
+                )
+                yield response.model_copy(update={"text": combined, "token": 0})
+                break
             if parsed:
+                parsed = declared_tool_calls(parsed, tools)
                 logger.info(
                     "Parsed tool-call block closed by end of generation "
                     f"(generated_chars={len(combined)}, parsed_calls={len(parsed)})"
