@@ -767,3 +767,75 @@ def test_linux_gpu_metrics_round_trip_and_apply() -> None:
     assert acc.vendor == "amd"
     assert acc.vram_total_bytes == 68719476736
     assert acc.utilization_ratio == 0.42
+
+
+def test_unattributed_terminal_outcome_cannot_clear_a_live_attempt() -> None:
+    """An unattributed completion is ignored while a live attempt is identified.
+
+    This is the guard that made an already-staged model unloadable: the worker's
+    fast path emitted a terminal ``DownloadCompleted`` with no attempt id, this
+    branch treated it as an unorderable legacy replay, and the live ``Pending``
+    kept overlaying the durable completion. The planner then re-issued
+    ``DownloadModel`` every tick while the instance sat idle forever.
+
+    The guard itself is correct and stays; the fix is that live producers must
+    attribute their terminal outcomes. This pins the behaviour so the reason the
+    fast path carries an attempt id does not get lost.
+    """
+
+    node = NodeId("node-a")
+    shard = get_pipeline_shard_metadata(MODEL_A_ID, device_rank=0, world_size=1)
+    attempt = DownloadAttemptId("attempt-live")
+    pending = DownloadPending(node_id=node, shard_metadata=shard, attempt_id=attempt)
+
+    view = TelemetryView()
+    view.record_download_event(NodeDownloadProgress(download_progress=pending))
+    view.apply(NodeTelemetry(node_id=node, info=pending))
+    assert view.effective_downloads({})[node] == [pending]
+
+    unattributed = DownloadCompleted(
+        node_id=node,
+        shard_metadata=shard,
+        model_directory="/models/a",
+        total=Memory.from_mb(10),
+        read_only=True,
+    )
+    view.record_download_event(NodeDownloadProgress(download_progress=unattributed))
+
+    # The live pending survives, so a planner reading effective_downloads still
+    # believes the model is not present.
+    assert view.effective_downloads({})[node] == [pending]
+
+
+def test_attributed_terminal_outcome_clears_its_live_attempt() -> None:
+    """A completion carrying the live attempt id retires the pending overlay.
+
+    This is the shape the already-staged fast path now emits: it opens an
+    attempt and closes it, so the durable completion becomes visible to the
+    planner and the instance can progress to loading.
+    """
+
+    node = NodeId("node-a")
+    shard = get_pipeline_shard_metadata(MODEL_A_ID, device_rank=0, world_size=1)
+    attempt = DownloadAttemptId("attempt-live")
+    pending = DownloadPending(node_id=node, shard_metadata=shard, attempt_id=attempt)
+
+    view = TelemetryView()
+    view.record_download_event(NodeDownloadProgress(download_progress=pending))
+    view.apply(NodeTelemetry(node_id=node, info=pending))
+    assert view.effective_downloads({})[node] == [pending]
+
+    completed = DownloadCompleted(
+        node_id=node,
+        shard_metadata=shard,
+        model_directory="/models/a",
+        total=Memory.from_mb(10),
+        read_only=True,
+        attempt_id=attempt,
+    )
+    view.record_download_event(NodeDownloadProgress(download_progress=completed))
+
+    # No live overlay remains, so the durable terminal outcome is what the
+    # planner sees.
+    assert view.effective_downloads({}).get(node, []) == []
+    assert view.effective_downloads({node: [completed]})[node] == [completed]
