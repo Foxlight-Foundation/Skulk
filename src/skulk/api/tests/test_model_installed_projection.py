@@ -394,6 +394,53 @@ async def test_model_list_store_timeout_reuses_last_known_snapshot(
     )
 
 
+async def test_model_store_replacement_invalidates_installed_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Store convergence cannot retain another store's installed records."""
+
+    card = _card("a")
+    record = _installed_record(tmp_path, card)
+    first_store = _RegistryStoreClient(
+        [
+            {
+                "model_id": str(card.model_id),
+                "installed_card": record.model_dump(mode="json"),
+            }
+        ]
+    )
+    replacement_store = _RegistryStoreClient([])
+    _configure_model_list_test(
+        monkeypatch,
+        catalog_card=card,
+        current_registry_card_value=card,
+        local_record=None,
+    )
+
+    def refresh_capabilities(_api: API) -> None:
+        """Keep the runtime convergence test independent of provider state."""
+
+    monkeypatch.setattr(
+        API,
+        "refresh_config_dependent_capabilities",
+        refresh_capabilities,
+    )
+    api = _api_with_store(first_store)
+
+    first = await api.get_models(status=None)
+    api.set_model_store_runtime(
+        None,
+        cast(ModelStoreClient, cast(object, replacement_store)),
+    )
+    second = await api.get_models(status=None)
+
+    assert first.data[0].installed is True
+    assert second.data[0].installed is False
+    assert first_store.fetch_count == 1
+    assert replacement_store.fetch_count == 1
+
+
 def test_store_projection_rejects_mismatched_alias(
     tmp_path: Path,
 ) -> None:

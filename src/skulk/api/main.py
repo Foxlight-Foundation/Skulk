@@ -5580,6 +5580,12 @@ class API:
         """
 
         self._skulk_config = skulk_config
+        if store_client is not self._store_client:
+            # Last-known installation truth belongs to one authoritative store.
+            # Carrying it across config convergence could manufacture installed
+            # state when the replacement store is unavailable.
+            self._model_list_store_records_cache = {}
+            self._model_list_store_records_cached_at = 0.0
         self._store_client = store_client
         self.refresh_config_dependent_capabilities()
 
