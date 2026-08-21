@@ -1550,7 +1550,9 @@ Persists a complete operator-supplied card without fetching or regenerating
 Hub metadata. This is intended for exact pre-publication qualification and
 other trusted operator workflows. The endpoint preserves the pinned artifact
 contract but always forces unsigned custom-card semantics: `is_custom` becomes
-true and any supplied registry card ID, snapshot ID, or provenance is removed.
+true, `qualification_only` records temporary lifecycle ownership, and every
+supplied `registry_*` identity, provenance, architecture, format, or capability
+claim is removed. A full 40-character immutable `sourceRevision` is required.
 Repository code therefore retains the normal explicit model-level approval
 requirement. Like `/models/add`, this mutation accepts direct loopback access
 or an authenticated operator gateway with `operations:write`. A headless
@@ -1559,7 +1561,9 @@ registry qualification worker may instead present
 value in `SKULK_EXACT_CARD_QUALIFICATION_TOKEN`. That credential is deliberately
 valid only for this exact-card install and
 `DELETE /models/custom/{model_id}` cleanup; it grants no general model,
-inference, configuration, or operator authority.
+inference, configuration, or operator authority. The service bearer cannot
+replace or delete an operator-owned custom card; cleanup requires the
+server-assigned `qualification_only` marker.
 
 ### Per-node storage breakdown
 

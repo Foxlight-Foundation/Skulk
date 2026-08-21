@@ -46,7 +46,9 @@ decisions.
 Headless qualification may use a dedicated
 `SKULK_EXACT_CARD_QUALIFICATION_TOKEN` bearer for only the temporary install and
 cleanup operations. The token does not approve repository code and does not
-grant any wider operator or inference scope.
+grant any wider operator or inference scope. Skulk requires the immutable source
+revision, assigns a durable `qualification_only` marker, and refuses to replace
+or remove an operator-owned custom card through this service credential.
 
 The signed catalog also carries open `architecture` and `capability_claims`
 metadata beside the immutable card. Claims describe intrinsic model behavior

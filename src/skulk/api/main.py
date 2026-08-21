@@ -8671,16 +8671,20 @@ class API:
         cls._require_loopback_mutation(request)
 
     @classmethod
-    def _require_exact_card_qualification_mutation(cls, request: Request) -> None:
+    def _require_exact_card_qualification_mutation(cls, request: Request) -> bool:
         """Authorize the narrow exact-card lifecycle used by registry qualification.
 
         The long-lived service credential deliberately grants less authority than
         an operator access token: only the exact-card installation and matching
         custom-card cleanup handlers call this guard. Loopback and the authenticated
         operator gateway retain their normal access.
+
+        Returns:
+            ``True`` only when the narrow service credential authorized the call;
+            operator-gateway and loopback callers return ``False``.
         """
         if request.scope.get(OPERATOR_GATEWAY_AUTHORIZED_SCOPE_KEY) is True:
-            return
+            return False
         configured_token = os.environ.get(_EXACT_CARD_QUALIFICATION_TOKEN_ENV, "")
         authorization = request.headers.get("authorization", "")
         scheme, separator, presented_token = authorization.partition(" ")
@@ -8692,8 +8696,9 @@ class API:
             and hmac.compare_digest(configured_token, presented_token.strip())
         )
         if credential_matches:
-            return
+            return True
         cls._require_loopback_mutation(request)
+        return False
 
     async def add_custom_model(
         self, payload: AddCustomModelParams, request: Request
@@ -8758,10 +8763,18 @@ class API:
             Removes signed-registry trust claims and broadcasts a persistent
             custom-card mutation across the cluster.
         """
-        self._require_exact_card_qualification_mutation(request)
+        qualification_service = self._require_exact_card_qualification_mutation(
+            request
+        )
+        if payload.model_card.source_revision is None:
+            raise HTTPException(
+                status_code=422,
+                detail="Exact-card qualification requires an immutable source revision",
+            )
         card = payload.model_card.model_copy(
             update={
                 "is_custom": True,
+                "qualification_only": True,
                 "registry_card_id": None,
                 "registry_snapshot_id": None,
                 "registry_provenance": None,
@@ -8770,6 +8783,17 @@ class API:
                 "registry_capability_claims": (),
             }
         )
+        existing = get_card(card.model_id)
+        if (
+            qualification_service
+            and existing is not None
+            and existing.is_custom
+            and not existing.qualification_only
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Qualification cannot replace an operator-owned custom card",
+            )
         await self.command_sender.send(
             ForwarderCommand(
                 origin=self._system_id,
@@ -8782,10 +8806,17 @@ class API:
         self, model_id: ModelId, request: Request
     ) -> JSONResponse:
         """Delete a user-added custom model card and sync deletion across the cluster."""
-        self._require_exact_card_qualification_mutation(request)
+        qualification_service = self._require_exact_card_qualification_mutation(
+            request
+        )
         card = get_card(model_id)
         if card is None or not card.is_custom:
             raise HTTPException(status_code=404, detail="Custom model card not found")
+        if qualification_service and not card.qualification_only:
+            raise HTTPException(
+                status_code=403,
+                detail="Qualification can remove only its temporary custom cards",
+            )
 
         await self.command_sender.send(
             ForwarderCommand(

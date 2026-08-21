@@ -1813,6 +1813,12 @@ class ModelCard(CamelCaseModel):
     is_custom: bool = False
     """Marks an operator-added custom card (not from the curated catalog). Excluded
     from the persisted card file so it is recomputed per environment."""
+    qualification_only: bool = False
+    """Marks an unsigned custom card owned by the temporary qualification lifecycle.
+
+    The registry service credential may clean up only cards carrying this marker;
+    ordinary operator-owned custom cards remain outside its deletion authority.
+    """
     generator_revision: int | None = None
     """Revision of the machine card generator that produced this card
     (:data:`CARD_GENERATOR_REVISION` at generation time), persisted in the card
@@ -1983,7 +1989,10 @@ class ModelCard(CamelCaseModel):
 
     async def save(self, path: Path) -> None:
         async with await open_file(path, "w") as f:
-            py = self.model_dump(exclude_none=True, exclude={"is_custom"})
+            excluded_fields = {"is_custom"}
+            if not self.qualification_only:
+                excluded_fields.add("qualification_only")
+            py = self.model_dump(exclude_none=True, exclude=excluded_fields)
             data = tomlkit.dumps(py)  # pyright: ignore[reportUnknownMemberType]
             await f.write(data)
 

@@ -192,6 +192,7 @@ async def test_exact_custom_card_preserves_artifact_but_strips_registry_trust(
     persisted = forwarded.command.model_card
     assert result.id == "org/exact@q4_k_m"
     assert persisted.is_custom
+    assert persisted.qualification_only
     assert persisted.source_revision == "b" * 40
     assert persisted.gguf_file == "exact-Q4_K_M.gguf"
     assert persisted.registry_card_id is None
@@ -241,7 +242,9 @@ async def test_qualification_token_controls_exact_card_lifecycle(
     assert isinstance(added.command, AddCustomModelCard)
 
     def custom_card(_model_id: ModelId) -> ModelCard:
-        return supplied.model_copy(update={"is_custom": True})
+        return supplied.model_copy(
+            update={"is_custom": True, "qualification_only": True}
+        )
 
     monkeypatch.setattr(api_main, "get_card", custom_card)
     response = await api.delete_custom_model(
@@ -251,3 +254,61 @@ async def test_qualification_token_controls_exact_card_lifecycle(
     deleted = await receiver.receive()
     assert isinstance(deleted.command, api_main.DeleteCustomModelCard)
     assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_qualification_token_cannot_replace_or_delete_operator_custom_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The service lifecycle cannot collide with operator-owned custom truth."""
+    token = "q" * 48
+    monkeypatch.setenv("SKULK_EXACT_CARD_QUALIFICATION_TOKEN", token)
+    operator_card = ModelCard(
+        model_id=ModelId("org/operator-card"),
+        source_revision="b" * 40,
+        storage_size=Memory.from_bytes(1234),
+        n_layers=2,
+        hidden_size=16,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        is_custom=True,
+    )
+    def existing_operator_card(_model_id: ModelId) -> ModelCard:
+        return operator_card
+
+    monkeypatch.setattr(api_main, "get_card", existing_operator_card)
+    sender, _receiver = channel[ForwarderCommand]()
+    api = object.__new__(API)
+    object.__setattr__(api, "command_sender", sender)
+    object.__setattr__(api, "_system_id", NodeId("test-system"))
+
+    with pytest.raises(HTTPException, match="cannot replace"):
+        await api.add_exact_custom_model_card(
+            AddExactCustomModelCardParams(model_card=operator_card),
+            _remote_bearer_request(token),
+        )
+    with pytest.raises(HTTPException, match="temporary custom cards"):
+        await api.delete_custom_model(
+            operator_card.model_id,
+            _remote_bearer_request(token),
+        )
+
+
+@pytest.mark.asyncio
+async def test_exact_custom_card_requires_immutable_revision() -> None:
+    """Qualification evidence cannot resolve a mutable repository branch."""
+    supplied = ModelCard(
+        model_id=ModelId("org/mutable"),
+        storage_size=Memory.from_bytes(1234),
+        n_layers=2,
+        hidden_size=16,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+    )
+    api = object.__new__(API)
+
+    with pytest.raises(HTTPException, match="immutable source revision"):
+        await api.add_exact_custom_model_card(
+            AddExactCustomModelCardParams(model_card=supplied),
+            _authenticated_gateway_request(),
+        )

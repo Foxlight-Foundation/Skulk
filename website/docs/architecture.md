@@ -1367,7 +1367,9 @@ Model discovery feeds this card system. `GET /models/search` searches Hugging Fa
 Headless registry automation authenticates that temporary exact-card lifecycle
 with one high-entropy `SKULK_EXACT_CARD_QUALIFICATION_TOKEN` shared with Scout.
 Constant-time validation grants that token only the exact-card install and
-custom-card cleanup operations, not general cluster authority.
+its server-marked `qualification_only` custom-card cleanup operation, not
+general cluster authority. The service path rejects a collision with an
+operator-owned custom card and requires a full immutable source revision.
 
 ## API adapters
 

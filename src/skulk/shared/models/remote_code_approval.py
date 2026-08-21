@@ -80,7 +80,7 @@ def remote_code_trust_identity(card: ModelCard) -> str:
         return card.registry_card_id
     payload = card.model_dump(
         mode="json",
-        exclude={"registry_snapshot_id"},
+        exclude={"registry_snapshot_id", "qualification_only"},
     )
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     digest = base64.b32encode(hashlib.sha256(canonical).digest()).decode().lower()
