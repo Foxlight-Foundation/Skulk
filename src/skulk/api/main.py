@@ -9003,7 +9003,11 @@ class API:
             mutation_applied = custom_card_mutation_applied(mutation_command_id)
             if mutation_applied and current != expected_card:
                 return
-            if expected_card is not None and current != expected_card:
+            if (
+                expected_card is not None
+                and current is not None
+                and current != expected_card
+            ):
                 raise HTTPException(
                     status_code=409,
                     detail=(

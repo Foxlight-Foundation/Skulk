@@ -661,6 +661,17 @@ async def test_qualification_cleanup_requires_this_command_acknowledgement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An absent cached card cannot acknowledge a new cleanup command."""
+    expected = ModelCard(
+        model_id=ModelId("org/preexisting"),
+        source_revision="b" * 40,
+        storage_size=Memory.from_bytes(1),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        is_custom=True,
+        qualification_only=True,
+    )
 
     def missing_card(_model_id: ModelId) -> None:
         return None
@@ -676,5 +687,6 @@ async def test_qualification_cleanup_requires_this_command_acknowledgement(
         await API._wait_for_qualification_card_deletion(
             ModelId("org/preexisting"),
             CommandId(),
+            expected_card=expected,
             timeout_seconds=0.0,
         )
