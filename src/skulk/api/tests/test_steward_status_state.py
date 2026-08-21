@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING, cast
 
 import pytest
 from fastapi import HTTPException
-from starlette.requests import Request
 
 from skulk.api.main import (
     API,
@@ -26,30 +25,6 @@ from skulk.shared.types.telemetry import TelemetryView
 from skulk.shared.types.worker.downloads import DownloadOngoing, DownloadProgressData
 from skulk.shared.types.worker.instances import InstanceId
 from skulk.shared.types.worker.shards import PipelineShardMetadata
-
-
-def _http_request() -> Request:
-    """A minimal connected HTTP request for direct handler calls.
-
-    The handler watches for client disconnect while collecting a
-    non-streaming body, so it needs a request whose receive channel reports a
-    live connection rather than a disconnect.
-    """
-
-    async def receive() -> dict[str, object]:
-        return {"type": "http.request", "body": b"", "more_body": False}
-
-    return Request(
-        {
-            "type": "http",
-            "method": "POST",
-            "path": "/v1/chat/completions",
-            "headers": [],
-        },
-        receive=receive,
-    )
-
-
 
 if TYPE_CHECKING:
     from skulk.api.steward import StewardState
@@ -217,7 +192,7 @@ async def test_not_ready_steward_answers_503_with_the_status_payload(
     status = _status(state)
     with pytest.raises(HTTPException) as raised:
         await API._steward_chat_completions(  # pyright: ignore[reportPrivateUsage]
-            _stub_api(status), _request(), _http_request()
+            _stub_api(status), _request()
         )
     error = raised.value
     assert error.status_code == 503
@@ -235,7 +210,7 @@ async def test_disabled_mode_still_answers_404_not_503() -> None:
     """The disabled contract predates this preflight and does not change."""
     with pytest.raises(HTTPException) as raised:
         await API._steward_chat_completions(  # pyright: ignore[reportPrivateUsage]
-            _stub_api(_status("disabled", enabled=False)), _request(), _http_request()
+            _stub_api(_status("disabled", enabled=False)), _request()
         )
     assert raised.value.status_code == 404
 
@@ -249,7 +224,7 @@ async def test_malformed_conversation_is_still_a_400_before_the_503() -> None:
     )
     with pytest.raises(HTTPException) as raised:
         await API._steward_chat_completions(  # pyright: ignore[reportPrivateUsage]
-            _stub_api(_status("starting")), payload, _http_request()
+            _stub_api(_status("starting")), payload
         )
     assert raised.value.status_code == 400
 
