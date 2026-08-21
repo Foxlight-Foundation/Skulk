@@ -8780,7 +8780,7 @@ class API:
         card = payload.model_card.model_copy(
             update={
                 "is_custom": True,
-                "qualification_only": True,
+                "qualification_only": qualification_service,
                 "registry_card_id": None,
                 "registry_snapshot_id": None,
                 "registry_provenance": None,
@@ -8793,12 +8793,14 @@ class API:
         if (
             qualification_service
             and existing is not None
-            and existing.is_custom
             and not existing.qualification_only
         ):
             raise HTTPException(
                 status_code=409,
-                detail="Qualification cannot replace an operator-owned custom card",
+                detail=(
+                    "Qualification cannot replace an existing non-qualification "
+                    "model card"
+                ),
             )
         await self.command_sender.send(
             ForwarderCommand(

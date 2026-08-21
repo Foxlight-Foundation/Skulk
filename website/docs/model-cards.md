@@ -48,8 +48,9 @@ Headless qualification may use a dedicated
 cleanup operations. The token does not approve repository code and does not
 grant any wider operator or inference scope. Skulk requires the immutable source
 revision and immutable pins for every external companion repository, assigns a
-durable `qualification_only` marker, and refuses to replace or remove an
-operator-owned custom card through this service credential.
+durable `qualification_only` marker only to service-authenticated installs, and
+refuses to replace or remove any pre-existing non-qualification card through
+this service credential.
 
 The signed catalog also carries open `architecture` and `capability_claims`
 metadata beside the immutable card. Claims describe intrinsic model behavior

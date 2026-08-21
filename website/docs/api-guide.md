@@ -1550,9 +1550,10 @@ Persists a complete operator-supplied card without fetching or regenerating
 Hub metadata. This is intended for exact pre-publication qualification and
 other trusted operator workflows. The endpoint preserves the pinned artifact
 contract but always forces unsigned custom-card semantics: `is_custom` becomes
-true, `qualification_only` records temporary lifecycle ownership, and every
-supplied `registry_*` identity, provenance, architecture, format, or capability
-claim is removed. A full 40-character immutable `sourceRevision` is required.
+true, and every supplied `registry_*` identity, provenance, architecture,
+format, or capability claim is removed. Service-bearer installs additionally
+receive `qualification_only`; operator installs do not. A full 40-character
+immutable `sourceRevision` is required.
 Every external vision, MTP, assistant, or draft repository must also declare
 its matching immutable companion revision.
 Repository code therefore retains the normal explicit model-level approval

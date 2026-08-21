@@ -24,7 +24,8 @@ This project records release notes here and mirrors public-facing notes in
   still requires its normal model-level approval. Headless registry automation
   may use the narrowly scoped `SKULK_EXACT_CARD_QUALIFICATION_TOKEN` for only
   this immutable temporary install and server-owned custom-card cleanup
-  lifecycle; the credential cannot replace or delete operator-owned cards.
+  lifecycle; only service-authenticated installs receive the ownership marker,
+  and the credential cannot replace or delete any other card.
 
 - Signed registry-v2 cards can now describe one exact immutable artifact bundle
   inside a shared upstream repository. Skulk downloads only the required file

@@ -522,8 +522,9 @@ authenticated operator gateway's write scope. Exact pre-publication
 qualification may instead use `SKULK_EXACT_CARD_QUALIFICATION_TOKEN`; only
 `POST /models/add-card` and server-marked `qualification_only` custom-card
 cleanup accept it. The service path requires an immutable source revision and
-cannot replace or delete operator-owned custom cards; it never approves
-repository code. `PUT /config` rejects
+cannot replace or delete any pre-existing non-qualification card; operator
+installs never receive the marker, and the service never approves repository
+code. `PUT /config` rejects
 `model_trust` snapshots and directs authenticated callers to the dedicated
 master-ordered endpoints.
 The gateway records successful bearer validation in the internal ASGI scope,

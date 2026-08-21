@@ -1368,8 +1368,9 @@ Headless registry automation authenticates that temporary exact-card lifecycle
 with one high-entropy `SKULK_EXACT_CARD_QUALIFICATION_TOKEN` shared with Scout.
 Constant-time validation grants that token only the exact-card install and
 its server-marked `qualification_only` custom-card cleanup operation, not
-general cluster authority. The service path rejects a collision with an
-operator-owned custom card and requires a full immutable source revision.
+general cluster authority. Only service-authenticated installs receive that
+marker. The service path rejects a collision with any pre-existing
+non-qualification card and requires a full immutable source revision.
 
 ## API adapters
 

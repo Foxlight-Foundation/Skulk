@@ -20,7 +20,8 @@ does not pretend that unpublished content is signed. A dedicated high-entropy
 service bearer can authorize only the temporary install and cleanup calls for a
 headless registry worker; it grants no broader operator or inference access.
 Skulk requires an immutable source revision and marks lifecycle ownership so
-the worker cannot replace or delete an operator-owned custom card.
+the worker cannot replace or delete any pre-existing non-qualification card;
+operator installs do not receive that marker.
 
 ## Served GGUF vision
 

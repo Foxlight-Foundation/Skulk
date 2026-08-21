@@ -192,7 +192,7 @@ async def test_exact_custom_card_preserves_artifact_but_strips_registry_trust(
     persisted = forwarded.command.model_card
     assert result.id == "org/exact@q4_k_m"
     assert persisted.is_custom
-    assert persisted.qualification_only
+    assert not persisted.qualification_only
     assert persisted.source_revision == "b" * 40
     assert persisted.gguf_file == "exact-Q4_K_M.gguf"
     assert persisted.registry_card_id is None
@@ -282,7 +282,7 @@ async def test_qualification_token_cannot_replace_or_delete_operator_custom_card
     object.__setattr__(api, "command_sender", sender)
     object.__setattr__(api, "_system_id", NodeId("test-system"))
 
-    with pytest.raises(HTTPException, match="cannot replace"):
+    with pytest.raises(HTTPException, match="non-qualification"):
         await api.add_exact_custom_model_card(
             AddExactCustomModelCardParams(model_card=operator_card),
             _remote_bearer_request(token),
@@ -290,6 +290,80 @@ async def test_qualification_token_cannot_replace_or_delete_operator_custom_card
     with pytest.raises(HTTPException, match="temporary custom cards"):
         await api.delete_custom_model(
             operator_card.model_id,
+            _remote_bearer_request(token),
+        )
+
+
+@pytest.mark.asyncio
+async def test_qualification_token_cannot_replace_signed_registry_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A temporary candidate can never shadow an existing signed catalog alias."""
+    token = "q" * 48
+    monkeypatch.setenv("SKULK_EXACT_CARD_QUALIFICATION_TOKEN", token)
+    signed_card = ModelCard(
+        model_id=ModelId("org/signed-card"),
+        source_revision="b" * 40,
+        storage_size=Memory.from_bytes(1234),
+        n_layers=2,
+        hidden_size=16,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        registry_card_id=f"card_{'a' * 52}",
+    )
+    def existing_signed_card(_model_id: ModelId) -> ModelCard:
+        return signed_card
+
+    monkeypatch.setattr(api_main, "get_card", existing_signed_card)
+    sender, _receiver = channel[ForwarderCommand]()
+    api = object.__new__(API)
+    object.__setattr__(api, "command_sender", sender)
+    object.__setattr__(api, "_system_id", NodeId("test-system"))
+
+    with pytest.raises(HTTPException, match="non-qualification"):
+        await api.add_exact_custom_model_card(
+            AddExactCustomModelCardParams(model_card=signed_card),
+            _remote_bearer_request(token),
+        )
+
+
+@pytest.mark.asyncio
+async def test_operator_exact_card_remains_outside_service_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Operator-installed exact cards never become service-owned temporaries."""
+    token = "q" * 48
+    monkeypatch.setenv("SKULK_EXACT_CARD_QUALIFICATION_TOKEN", token)
+    supplied = ModelCard(
+        model_id=ModelId("org/operator-exact"),
+        source_revision="b" * 40,
+        storage_size=Memory.from_bytes(1234),
+        n_layers=2,
+        hidden_size=16,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+    )
+    sender, receiver = channel[ForwarderCommand]()
+    api = object.__new__(API)
+    object.__setattr__(api, "command_sender", sender)
+    object.__setattr__(api, "_system_id", NodeId("test-system"))
+
+    await api.add_exact_custom_model_card(
+        AddExactCustomModelCardParams(model_card=supplied),
+        _authenticated_gateway_request(),
+    )
+    added = await receiver.receive()
+    assert isinstance(added.command, AddCustomModelCard)
+    operator_exact_card = added.command.model_card
+    assert not operator_exact_card.qualification_only
+
+    def existing_operator_exact_card(_model_id: ModelId) -> ModelCard:
+        return operator_exact_card
+
+    monkeypatch.setattr(api_main, "get_card", existing_operator_exact_card)
+    with pytest.raises(HTTPException, match="temporary custom cards"):
+        await api.delete_custom_model(
+            supplied.model_id,
             _remote_bearer_request(token),
         )
 
