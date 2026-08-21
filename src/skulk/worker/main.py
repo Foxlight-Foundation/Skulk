@@ -2149,8 +2149,8 @@ class Worker:
                         logger.info(
                             f"Model {model_id} found in SKULK_MODELS_PATH at {found_path}"
                         )
-                        # This path never reaches the download coordinator, so
-                        # nothing stamps it with the attempt identity that
+                        # Attempt-identity stamping matters here; see
+                        # already_present_download_events.
                         for event in already_present_download_events(
                             node_id=self.node_id,
                             shard=shard,
