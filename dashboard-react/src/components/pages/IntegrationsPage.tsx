@@ -16,6 +16,7 @@ import {
   buildIntegrationSnippets,
   deriveDefaultTiers,
   deriveIntegrationModels,
+  partitionServingInstances,
   type IntegrationSnippet,
   type IntegrationToolId,
 } from '../../utils/integrationConfigs';
@@ -343,18 +344,15 @@ export function IntegrationsPage({ readyInstances }: IntegrationsPageProps) {
     };
   }, []);
 
-  // Guard the "ready" contract here rather than trusting the prop name: a
-  // model that is still loading cannot answer a request a pasted config makes.
-  const models = useMemo(
-    () =>
-      deriveIntegrationModels(
-        readyInstances.filter(
-          instance => instance.status === 'ready' || instance.status === 'running',
-        ),
-        catalog,
-      ),
-    [readyInstances, catalog],
-  );
+  // Serving status alone is not enough: these recipes configure chat clients,
+  // so a ready embedding or speech instance must not become a model choice.
+  const { models, embeddingModels } = useMemo(() => {
+    const partitioned = partitionServingInstances(readyInstances, catalog);
+    return {
+      models: deriveIntegrationModels(partitioned.chat, catalog),
+      embeddingModels: deriveIntegrationModels(partitioned.embedding, catalog),
+    };
+  }, [readyInstances, catalog]);
 
   const localUrl =
     remoteAccess.status === 'ok' ? remoteAccess.data.local.url : null;
@@ -383,6 +381,7 @@ export function IntegrationsPage({ readyInstances }: IntegrationsPageProps) {
     () => ({
       apiUrl,
       models,
+      embeddingModels,
       opusModelId: knownId(opusOverride, defaultTiers.opusModelId),
       sonnetModelId: knownId(sonnetOverride, defaultTiers.sonnetModelId),
       haikuModelId: knownId(haikuOverride, defaultTiers.haikuModelId),
@@ -393,6 +392,7 @@ export function IntegrationsPage({ readyInstances }: IntegrationsPageProps) {
     [
       apiUrl,
       models,
+      embeddingModels,
       opusOverride,
       sonnetOverride,
       haikuOverride,

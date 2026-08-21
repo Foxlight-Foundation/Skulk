@@ -1,6 +1,6 @@
 import type { SkulkTranslate } from '../i18n/tolgee';
 import type { InstanceCardData } from '../components/layout/InstancePanel';
-import type { ModelInfo } from '../types/models';
+import { modelSupportsTextChat, type ModelInfo } from '../types/models';
 
 /**
  * Connection recipes for external tools that talk to a Skulk cluster.
@@ -85,8 +85,20 @@ export interface IntegrationSnippet {
 export interface IntegrationOptions {
   /** Cluster API origin, reachable from other machines, no trailing slash. */
   readonly apiUrl: string;
-  /** Models with a ready instance, largest first. */
+  /**
+   * Text-chat models with a ready instance, largest first.
+   *
+   * Every recipe here configures a chat-completions client, so embedding and
+   * speech models are excluded: naming one would produce a config that fails
+   * on the first request.
+   */
   readonly models: readonly IntegrationModel[];
+  /**
+   * Embedding models with a ready instance.
+   *
+   * Only used by recipes that index documents, which is AnythingLLM today.
+   */
+  readonly embeddingModels: readonly IntegrationModel[];
   /** Model mapped onto Claude Code's Opus tier. */
   readonly opusModelId: string;
   /** Model mapped onto Claude Code's Sonnet tier. */
@@ -253,8 +265,43 @@ export function sortModelsBySize(models: readonly IntegrationModel[]): Integrati
   );
 }
 
+/** Whether an instance is actually able to answer a request right now. */
+function isServing(instance: InstanceCardData): boolean {
+  return instance.status === 'ready' || instance.status === 'running';
+}
+
 /**
- * Joins ready instances against the model catalog.
+ * Splits serving instances into the ones a chat client can use and the ones
+ * that answer embedding requests.
+ *
+ * The recipes on this page configure chat-completions clients, so a ready
+ * embedding or speech instance must never reach them: it would be offered as a
+ * model choice, could win the size sort and become the default, and the pasted
+ * config would then fail on its first request. This reuses the same capability
+ * truth the dashboard's own chat model picker uses.
+ */
+export function partitionServingInstances(
+  instances: readonly InstanceCardData[],
+  catalog: readonly ModelInfo[],
+): { chat: InstanceCardData[]; embedding: InstanceCardData[] } {
+  const byId = new Map(catalog.map(model => [model.id, model]));
+  const chat: InstanceCardData[] = [];
+  const embedding: InstanceCardData[] = [];
+  for (const instance of instances) {
+    if (!isServing(instance)) continue;
+    if (instance.isEmbedding) {
+      embedding.push(instance);
+      continue;
+    }
+    if (modelSupportsTextChat(byId.get(instance.modelId))) {
+      chat.push(instance);
+    }
+  }
+  return { chat, embedding };
+}
+
+/**
+ * Joins instances against the model catalog.
  *
  * An instance whose model is missing from the catalog still appears, with
  * conservative capability defaults, because the cluster can plainly serve it.
@@ -692,15 +739,29 @@ function buildAnythingLlmSnippets(
       id: 'embedder',
       title: t('integrations.anythingllm.embedder.title', 'Embed on the cluster too'),
       subtitle: 'Settings, AI Providers, Embedder',
-      description: t(
-        'integrations.anythingllm.embedder.description',
-        'AnythingLLM indexes documents with an embedding model. Skulk serves embeddings on the same surface, so the cluster can do that work as well. Mount an embedding model and use its id here.',
-      ),
+      description:
+        options.embeddingModels.length > 0
+          ? t(
+              'integrations.anythingllm.embedder.description',
+              'AnythingLLM indexes documents with an embedding model, and the cluster is serving one, so it can do that work as well.',
+            )
+          : t(
+              'integrations.anythingllm.embedder.descriptionNone',
+              'AnythingLLM indexes documents with an embedding model. Skulk serves embeddings on the same surface, so the cluster can do that work as well once you mount an embedding model.',
+            ),
       language: 'text',
       body: [
         `Embedding Engine: Generic OpenAI`,
         `Base URL: ${options.apiUrl}/v1`,
         `API Key: ${PLACEHOLDER_API_KEY}`,
+        `Embedding Model: ${
+          options.embeddingModels.length > 0
+            ? options.embeddingModels[0].id
+            : 'mount an embedding model, then use its id'
+        }`,
+        ...(options.embeddingModels.length > 0 && options.embeddingModels[0].contextLength > 0
+          ? [`Max embedding chunk length: ${options.embeddingModels[0].contextLength}`]
+          : []),
       ].join('\n'),
     },
   ];

@@ -10,6 +10,7 @@ import {
   deriveIntegrationModels,
   estimateParameterBillions,
   needsReasoningRoundTrip,
+  partitionServingInstances,
   toDockerReachableUrl,
   type IntegrationModel,
   type IntegrationOptions,
@@ -38,6 +39,7 @@ function options(overrides: Partial<IntegrationOptions> = {}): IntegrationOption
   return {
     apiUrl: 'http://192.168.1.50:52415',
     models,
+    embeddingModels: [],
     opusModelId: first,
     sonnetModelId: first,
     haikuModelId: first,
@@ -186,6 +188,79 @@ describe('deriveIntegrationModels', () => {
   });
 });
 
+describe('partitionServingInstances', () => {
+  const instance = (
+    modelId: string,
+    overrides: Partial<InstanceCardData> = {},
+  ): InstanceCardData =>
+    ({
+      instanceId: `instance-${modelId}`,
+      modelId,
+      sharding: 'Pipeline',
+      instanceType: 'MlxRing',
+      engine: 'mlx',
+      nodeStatuses: [],
+      status: 'ready',
+      ...overrides,
+    }) as InstanceCardData;
+
+  const catalogEntry = (id: string, tasks: string[], tags: string[] = []): ModelInfo =>
+    ({ id, tasks, tags }) as ModelInfo;
+
+  it('keeps text-generation models on the chat side', () => {
+    const { chat, embedding } = partitionServingInstances(
+      [instance('org/Chat-8B')],
+      [catalogEntry('org/Chat-8B', ['TextGeneration'])],
+    );
+    expect(chat.map(entry => entry.modelId)).toEqual(['org/Chat-8B']);
+    expect(embedding).toHaveLength(0);
+  });
+
+  it('routes embedding instances away from chat recipes', () => {
+    const { chat, embedding } = partitionServingInstances(
+      [instance('BAAI/bge-small-en-v1.5', { isEmbedding: true })],
+      [catalogEntry('BAAI/bge-small-en-v1.5', ['TextEmbedding'], ['embedding'])],
+    );
+    expect(chat).toHaveLength(0);
+    expect(embedding.map(entry => entry.modelId)).toEqual(['BAAI/bge-small-en-v1.5']);
+  });
+
+  it('excludes speech models from chat recipes even without the embedding flag', () => {
+    const { chat, embedding } = partitionServingInstances(
+      [instance('org/Voice-TTS'), instance('org/Ears-STT')],
+      [
+        catalogEntry('org/Voice-TTS', ['TextToSpeech'], ['tts']),
+        catalogEntry('org/Ears-STT', ['SpeechToText'], ['stt']),
+      ],
+    );
+    expect(chat).toHaveLength(0);
+    expect(embedding).toHaveLength(0);
+  });
+
+  it('drops instances that are not serving yet', () => {
+    const { chat } = partitionServingInstances(
+      [instance('org/Chat-8B', { status: 'loading' } as Partial<InstanceCardData>)],
+      [catalogEntry('org/Chat-8B', ['TextGeneration'])],
+    );
+    expect(chat).toHaveLength(0);
+  });
+
+  it('does not let a large embedding model win the chat default', () => {
+    const { chat } = partitionServingInstances(
+      [
+        instance('org/Embed-70B', { isEmbedding: true }),
+        instance('org/Chat-4B'),
+      ],
+      [
+        catalogEntry('org/Embed-70B', ['TextEmbedding'], ['embedding']),
+        catalogEntry('org/Chat-4B', ['TextGeneration']),
+      ],
+    );
+    const chatModels = deriveIntegrationModels(chat, []);
+    expect(chatModels.map(entry => entry.id)).toEqual(['org/Chat-4B']);
+  });
+});
+
 describe('buildIntegrationSnippets', () => {
   it('produces at least one snippet for every advertised tool', () => {
     for (const tool of INTEGRATION_TOOLS) {
@@ -274,6 +349,29 @@ describe('buildIntegrationSnippets', () => {
       "GENERIC_OPEN_AI_BASE_PATH='http://192.168.1.50:52415/v1'",
     );
     expect(docker.body).toContain('GENERIC_OPEN_AI_MODEL_TOKEN_LIMIT=131072');
+  });
+
+  it('names a serving embedding model in the AnythingLLM embedder block', () => {
+    const snippets = buildIntegrationSnippets(
+      'anythingllm',
+      options({
+        embeddingModels: [model({ id: 'BAAI/bge-small-en-v1.5', contextLength: 512 })],
+      }),
+      t,
+    );
+    const embedder = snippets.find(snippet => snippet.id === 'embedder');
+    expect(embedder?.body).toContain('BAAI/bge-small-en-v1.5');
+    expect(embedder?.body).toContain('512');
+    // The chat block must still name the chat model, not the embedding one.
+    const docker = snippets.find(snippet => snippet.id === 'docker');
+    expect(docker?.body).toContain('org/Big-70B');
+    expect(docker?.body).not.toContain('bge-small');
+  });
+
+  it('tells the operator to mount an embedding model when none is serving', () => {
+    const snippets = buildIntegrationSnippets('anythingllm', options(), t);
+    const embedder = snippets.find(snippet => snippet.id === 'embedder');
+    expect(embedder?.body).toContain('mount an embedding model');
   });
 
   it('rewrites loopback for the Docker-hosted recipes only', () => {
