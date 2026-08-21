@@ -140,8 +140,9 @@ class ModelListModel(BaseModel):
     artifact_repository: str = Field(
         default="",
         description=(
-            "Upstream repository containing the exact artifact; distinct from id "
-            "when multiple registry cards select files from one repository."
+            "Upstream repository containing the active installed artifact when one "
+            "exists, otherwise the effective catalog artifact; distinct from id when "
+            "multiple registry cards select files from one repository."
         ),
     )
     artifact_file: str | None = Field(
@@ -151,7 +152,10 @@ class ModelListModel(BaseModel):
     registry_card_id: str | None = Field(
         default=None,
         pattern=r"^card_[a-z2-7]{52}$",
-        description="Immutable signed-registry card id, or null for local cards.",
+        description=(
+            "Immutable signed identity of the active installed card when one exists, "
+            "otherwise the effective catalog card; null for local cards."
+        ),
     )
     registry_snapshot_id: str | None = Field(
         default=None,

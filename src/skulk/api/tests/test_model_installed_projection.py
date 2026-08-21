@@ -1,6 +1,7 @@
 # pyright: reportPrivateUsage=false
 """Cluster model listings project authoritative installed-card state."""
 
+import asyncio
 from pathlib import Path
 from typing import cast
 
@@ -26,11 +27,19 @@ class _RegistryStoreClient:
 
         self.entries = entries
         self.fetch_count = 0
+        self.block = False
 
-    async def fetch_registry(self) -> list[dict[str, object]]:
+    async def fetch_registry(
+        self,
+        *,
+        raise_on_error: bool = False,
+    ) -> list[dict[str, object]]:
         """Return one synthetic authoritative-store snapshot."""
 
+        del raise_on_error
         self.fetch_count += 1
+        if self.block:
+            await asyncio.Event().wait()
         return self.entries
 
 
@@ -89,13 +98,14 @@ def _custom_installed_record(tmp_path: Path) -> InstalledCardRecord:
 def _configure_model_list_test(
     monkeypatch: pytest.MonkeyPatch,
     *,
-    card: ModelCard,
+    catalog_card: ModelCard | None,
+    current_registry_card_value: ModelCard | None,
     local_record: InstalledCardRecord | None,
 ) -> None:
     """Install deterministic catalog and local-record effects for one test."""
 
     async def model_cards() -> list[ModelCard]:
-        return [card]
+        return [catalog_card] if catalog_card is not None else []
 
     def cluster_approvals(_api: API) -> frozenset[str]:
         return frozenset()
@@ -107,10 +117,10 @@ def _configure_model_list_test(
         return local_record
 
     def current_registry_card_id(_model_id: ModelId) -> str | None:
-        return card.registry_card_id
+        return None
 
-    def current_registry_card(_model_id: ModelId) -> ModelCard:
-        return card
+    def current_registry_card(_model_id: ModelId) -> ModelCard | None:
+        return current_registry_card_value
 
     def model_advisories(_card: ModelCard) -> tuple[()]:
         return ()
@@ -136,6 +146,17 @@ def _configure_model_list_test(
     )
 
 
+def _api_with_store(store_client: _RegistryStoreClient) -> API:
+    """Create the minimal API state needed by the model-list projection."""
+
+    api = object.__new__(API)
+    api._store_client = cast(ModelStoreClient, cast(object, store_client))
+    api._model_list_store_records_cache = {}
+    api._model_list_store_records_cached_at = 0.0
+    api._model_list_store_records_lock = asyncio.Lock()
+    return api
+
+
 async def test_models_use_cluster_store_installed_record(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -152,9 +173,13 @@ async def test_models_use_cluster_store_installed_record(
             }
         ]
     )
-    _configure_model_list_test(monkeypatch, card=card, local_record=None)
-    api = object.__new__(API)
-    api._store_client = cast(ModelStoreClient, cast(object, store_client))
+    _configure_model_list_test(
+        monkeypatch,
+        catalog_card=card,
+        current_registry_card_value=card,
+        local_record=None,
+    )
+    api = _api_with_store(store_client)
 
     response = await api.get_models(status=None)
 
@@ -178,11 +203,11 @@ async def test_models_fall_back_to_local_installed_record(
     store_client = _RegistryStoreClient([])
     _configure_model_list_test(
         monkeypatch,
-        card=current_card,
+        catalog_card=current_card,
+        current_registry_card_value=current_card,
         local_record=local_record,
     )
-    api = object.__new__(API)
-    api._store_client = cast(ModelStoreClient, cast(object, store_client))
+    api = _api_with_store(store_client)
 
     response = await api.get_models(status=None)
 
@@ -215,17 +240,124 @@ async def test_custom_card_keeps_local_installed_precedence(
     )
     _configure_model_list_test(
         monkeypatch,
-        card=custom_card,
+        catalog_card=custom_card,
+        current_registry_card_value=registry_card,
         local_record=local_record,
     )
-    api = object.__new__(API)
-    api._store_client = cast(ModelStoreClient, cast(object, store_client))
+    api = _api_with_store(store_client)
 
     response = await api.get_models(status=None)
 
     assert response.data[0].installed is True
     assert response.data[0].active_installed_identity == local_record.installed_identity
     assert response.data[0].installed_verification == "custom"
+
+
+async def test_store_generation_supplies_active_metadata_and_current_update(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Active fields describe installed A while update truth identifies current B."""
+
+    installed_card = _card("a")
+    current_card = _card("b")
+    store_record = _installed_record(tmp_path, installed_card)
+    store_client = _RegistryStoreClient(
+        [
+            {
+                "model_id": str(installed_card.model_id),
+                "installed_card": store_record.model_dump(mode="json"),
+            }
+        ]
+    )
+    _configure_model_list_test(
+        monkeypatch,
+        catalog_card=current_card,
+        current_registry_card_value=current_card,
+        local_record=None,
+    )
+    api = _api_with_store(store_client)
+
+    response = await api.get_models(status=None)
+
+    entry = response.data[0]
+    assert entry.registry_card_id == installed_card.registry_card_id
+    assert entry.active_installed_identity == installed_card.registry_card_id
+    assert entry.current_registry_identity == current_card.registry_card_id
+    assert entry.update_available is True
+
+
+async def test_store_only_installed_card_remains_in_model_list(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Registry removal must not hide a complete installed generation."""
+
+    installed_card = _card("a")
+    store_record = _installed_record(tmp_path, installed_card)
+    store_client = _RegistryStoreClient(
+        [
+            {
+                "model_id": str(installed_card.model_id),
+                "installed_card": store_record.model_dump(mode="json"),
+            }
+        ]
+    )
+    _configure_model_list_test(
+        monkeypatch,
+        catalog_card=None,
+        current_registry_card_value=None,
+        local_record=None,
+    )
+    api = _api_with_store(store_client)
+
+    response = await api.get_models(status=None)
+
+    assert len(response.data) == 1
+    assert response.data[0].id == str(installed_card.model_id)
+    assert response.data[0].installed is True
+    assert response.data[0].current_registry_identity is None
+    assert response.data[0].update_available is False
+
+
+async def test_model_list_store_timeout_reuses_last_known_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An unreachable store cannot stall or erase the last installed projection."""
+
+    card = _card("a")
+    record = _installed_record(tmp_path, card)
+    store_client = _RegistryStoreClient(
+        [
+            {
+                "model_id": str(card.model_id),
+                "installed_card": record.model_dump(mode="json"),
+            }
+        ]
+    )
+    _configure_model_list_test(
+        monkeypatch,
+        catalog_card=card,
+        current_registry_card_value=card,
+        local_record=None,
+    )
+    api = _api_with_store(store_client)
+    first = await api.get_models(status=None)
+    store_client.block = True
+    api._model_list_store_records_cached_at = 0.0
+    monkeypatch.setattr(api_main, "_MODEL_LIST_STORE_FETCH_TIMEOUT_SECONDS", 0.01)
+
+    second = await asyncio.wait_for(api.get_models(status=None), timeout=0.1)
+    third = await asyncio.wait_for(api.get_models(status=None), timeout=0.1)
+
+    assert store_client.fetch_count == 2
+    assert second.data[0].active_installed_identity == (
+        first.data[0].active_installed_identity
+    )
+    assert third.data[0].active_installed_identity == (
+        first.data[0].active_installed_identity
+    )
 
 
 def test_store_projection_rejects_mismatched_alias(

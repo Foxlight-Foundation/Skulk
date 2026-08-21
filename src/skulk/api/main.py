@@ -311,6 +311,7 @@ from skulk.shared.backends import engine_of
 from skulk.shared.constants import (
     DASHBOARD_DIR,
     SKULK_CACHE_HOME,
+    SKULK_ENABLE_IMAGE_MODELS,
     SKULK_EVENT_LOG_DIR,
     SKULK_IMAGE_CACHE_DIR,
     SKULK_IMAGE_TRANSPORT_DEBUG,
@@ -521,6 +522,8 @@ from skulk.store.peer_exports import ArtifactExportManager
 
 JsonObject = dict[str, object]
 _DEFAULT_OPTIMIZER_CANDIDATE_BITS = [4, 8]
+_MODEL_LIST_STORE_CACHE_TTL_SECONDS = 5.0
+_MODEL_LIST_STORE_FETCH_TIMEOUT_SECONDS = 1.0
 
 #: Chunk type flowing through the performance-envelope tap (duck-typed on
 #: ``text`` / ``stats`` / ``finish_reason``, like the field-telemetry tap).
@@ -1621,6 +1624,9 @@ class API:
         # hanging the caller. Bounded FIFO; consumed at stream registration.
         self._pending_stream_failures: dict[CommandId, ErrorChunk] = {}
         self._store_client = store_client
+        self._model_list_store_records_cache: dict[ModelId, InstalledCardRecord] = {}
+        self._model_list_store_records_cached_at = 0.0
+        self._model_list_store_records_lock = asyncio.Lock()
         self._artifact_exports = ArtifactExportManager()
         reconciliation_config = (
             skulk_config.model_store.reconciliation
@@ -8137,6 +8143,10 @@ class API:
         Returns:
             The public catalog projection for ``card``.
         """
+        catalog_card = card
+        installed_record = installed_record or get_installed_card_record(card.model_id)
+        if installed_record is not None:
+            card = installed_record.model_card
         remote_code_approval_required = remote_code_execution_requires_approval(card)
         if remote_code_approval_required and approved_remote_code_card_ids is None:
             approved_remote_code_card_ids = approved_remote_code_identities()
@@ -8149,9 +8159,14 @@ class API:
             "request-specific options such as tools may change prompt rendering "
             "and related resolved capability values."
         )
-        installed_record = installed_record or get_installed_card_record(card.model_id)
-        current_registry_identity = get_current_registry_card_id(card.model_id)
-        current_registry_card = get_current_registry_card(card.model_id)
+        current_registry_card = get_current_registry_card(catalog_card.model_id)
+        current_registry_identity = get_current_registry_card_id(
+            catalog_card.model_id
+        ) or (
+            current_registry_card.registry_card_id
+            if current_registry_card is not None
+            else None
+        )
         advisories_by_id = {
             advisory.advisory_id: advisory
             for advisory in [
@@ -8294,6 +8309,65 @@ class API:
             records[model_id] = record
         return records
 
+    async def _cached_store_installed_records(
+        self,
+    ) -> dict[ModelId, InstalledCardRecord]:
+        """Return responsive last-known installed truth from the central store.
+
+        Model listing is a user-facing read path, so it cannot inherit the
+        metadata client's 30-second timeout. A successful response, including
+        an empty registry, replaces the short-lived cache. Failure or timeout
+        retains the previous snapshot and lets node-local sidecars cover aliases
+        that have never been observed centrally.
+
+        Returns:
+            Valid base installed-card records keyed by exact model alias.
+        """
+
+        if self._store_client is None:
+            return {}
+        now = time.monotonic()
+        if (
+            now - self._model_list_store_records_cached_at
+            < _MODEL_LIST_STORE_CACHE_TTL_SECONDS
+        ):
+            return self._model_list_store_records_cache
+        async with self._model_list_store_records_lock:
+            now = time.monotonic()
+            if (
+                now - self._model_list_store_records_cached_at
+                < _MODEL_LIST_STORE_CACHE_TTL_SECONDS
+            ):
+                return self._model_list_store_records_cache
+            try:
+                entries = await asyncio.wait_for(
+                    self._store_client.fetch_registry(raise_on_error=True),
+                    timeout=_MODEL_LIST_STORE_FETCH_TIMEOUT_SECONDS,
+                )
+            except Exception as error:
+                logger.debug(
+                    "Model-list store projection retained its last-known snapshot: {}",
+                    error,
+                )
+                # Back off the user-facing path after failure as well as success;
+                # otherwise every dashboard refresh would pay the timeout again.
+                self._model_list_store_records_cached_at = time.monotonic()
+                return self._model_list_store_records_cache
+            self._model_list_store_records_cache = self._store_installed_records(
+                entries
+            )
+            self._model_list_store_records_cached_at = time.monotonic()
+            return self._model_list_store_records_cache
+
+    @staticmethod
+    def _model_list_card_visible(card: ModelCard) -> bool:
+        """Apply the catalog's existing image-model visibility policy."""
+
+        return SKULK_ENABLE_IMAGE_MODELS or not any(
+            task in {ModelTask.TextToImage, ModelTask.ImageToImage}
+            for task in card.tasks
+        )
+
     async def get_models(self, status: str | None = Query(default=None)) -> ModelList:
         """Return available models with cluster-authoritative installed state.
 
@@ -8308,6 +8382,15 @@ class API:
             Available catalog models and their effective installed state.
         """
         cards = await get_model_cards()
+        store_installed_records = await self._cached_store_installed_records()
+        cards_by_id = {card.model_id: card for card in cards}
+        for model_id, record in store_installed_records.items():
+            if model_id in cards_by_id or not self._model_list_card_visible(
+                record.model_card
+            ):
+                continue
+            cards.append(record.model_card)
+            cards_by_id[model_id] = record.model_card
 
         if status == "downloaded":
             downloaded_model_ids: set[str] = set()
@@ -8315,14 +8398,14 @@ class API:
                 for dl in node_downloads:
                     if isinstance(dl, DownloadCompleted):
                         downloaded_model_ids.add(dl.shard_metadata.model_card.model_id)
-            cards = [c for c in cards if c.model_id in downloaded_model_ids]
+            cards = [
+                card
+                for card in cards
+                if card.model_id in downloaded_model_ids
+                or card.model_id in store_installed_records
+            ]
 
         approved_remote_code_card_ids = self._cluster_remote_code_approvals()
-        store_installed_records = (
-            self._store_installed_records(await self._store_client.fetch_registry())
-            if self._store_client is not None
-            else {}
-        )
         entries = [
             self._model_list_entry(
                 card,
