@@ -524,7 +524,8 @@ qualification may instead use `SKULK_EXACT_CARD_QUALIFICATION_TOKEN`; only
 cleanup accept it. The service path requires an immutable source revision and
 cannot replace or delete any pre-existing non-qualification card; operator
 installs never receive the marker, and the service never approves repository
-code. `PUT /config` rejects
+code. The elected master rechecks the service ownership precondition in its
+serialized command order before emitting a card event. `PUT /config` rejects
 `model_trust` snapshots and directs authenticated callers to the dedicated
 master-ordered endpoints.
 The gateway records successful bearer validation in the internal ASGI scope,

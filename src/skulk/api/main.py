@@ -8805,7 +8805,10 @@ class API:
         await self.command_sender.send(
             ForwarderCommand(
                 origin=self._system_id,
-                command=AddCustomModelCard(model_card=card),
+                command=AddCustomModelCard(
+                    model_card=card,
+                    requires_qualification_ownership=qualification_service,
+                ),
             )
         )
         return self._model_list_entry(card)
@@ -8829,7 +8832,10 @@ class API:
         await self.command_sender.send(
             ForwarderCommand(
                 origin=self._system_id,
-                command=DeleteCustomModelCard(model_id=model_id),
+                command=DeleteCustomModelCard(
+                    model_id=model_id,
+                    requires_qualification_ownership=qualification_service,
+                ),
             )
         )
 

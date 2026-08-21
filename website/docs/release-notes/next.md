@@ -21,7 +21,8 @@ service bearer can authorize only the temporary install and cleanup calls for a
 headless registry worker; it grants no broader operator or inference access.
 Skulk requires an immutable source revision and marks lifecycle ownership so
 the worker cannot replace or delete any pre-existing non-qualification card;
-operator installs do not receive that marker.
+operator installs do not receive that marker. The elected master rechecks the
+ownership precondition when ordering every service mutation.
 
 ## Served GGUF vision
 

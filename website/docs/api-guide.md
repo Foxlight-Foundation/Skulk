@@ -1565,8 +1565,10 @@ value in `SKULK_EXACT_CARD_QUALIFICATION_TOKEN`. That credential is deliberately
 valid only for this exact-card install and
 `DELETE /models/custom/{model_id}` cleanup; it grants no general model,
 inference, configuration, or operator authority. The service bearer cannot
-replace or delete an operator-owned custom card; cleanup requires the
-server-assigned `qualification_only` marker.
+replace or delete any pre-existing non-qualification card; cleanup requires the
+server-assigned `qualification_only` marker. These ownership preconditions are
+rechecked by the elected master when it orders the mutation, so concurrent
+operator changes cannot be overwritten or deleted through stale API-node state.
 
 ### Per-node storage breakdown
 

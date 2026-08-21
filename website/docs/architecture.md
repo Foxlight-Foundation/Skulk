@@ -1370,7 +1370,11 @@ Constant-time validation grants that token only the exact-card install and
 its server-marked `qualification_only` custom-card cleanup operation, not
 general cluster authority. Only service-authenticated installs receive that
 marker. The service path rejects a collision with any pre-existing
-non-qualification card and requires a full immutable source revision.
+non-qualification card and requires a full immutable source revision. Service
+commands carry this ownership precondition to the elected master, whose
+serialized command processor rechecks and advances a local ordered card view
+before emitting the replicated event; API-node cache timing cannot authorize a
+stale overwrite or cleanup.
 
 ## API adapters
 

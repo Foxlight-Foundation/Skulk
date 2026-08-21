@@ -50,7 +50,9 @@ grant any wider operator or inference scope. Skulk requires the immutable source
 revision and immutable pins for every external companion repository, assigns a
 durable `qualification_only` marker only to service-authenticated installs, and
 refuses to replace or remove any pre-existing non-qualification card through
-this service credential.
+this service credential. The elected master rechecks that ownership at its
+serialized command-ordering boundary, closing races between different API
+nodes.
 
 The signed catalog also carries open `architecture` and `capability_claims`
 metadata beside the immutable card. Claims describe intrinsic model behavior
