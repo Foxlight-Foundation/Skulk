@@ -1,7 +1,7 @@
 # pyright: reportPrivateUsage=false
 """Cluster model trust resolves immutable IDs from the complete catalog."""
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from fastapi import HTTPException
@@ -16,6 +16,7 @@ from skulk.shared.models.registry import RegistryCapabilityClaim
 from skulk.shared.models.remote_code_approval import remote_code_trust_identity
 from skulk.shared.types.commands import AddCustomModelCard, ForwarderCommand
 from skulk.shared.types.common import CommandId, ModelId, NodeId
+from skulk.shared.types.events import CustomModelCardAdded
 from skulk.shared.types.memory import Memory
 from skulk.utils.channels import channel
 
@@ -323,6 +324,86 @@ async def test_qualification_token_cannot_replace_or_delete_operator_custom_card
             operator_card.model_id,
             _remote_bearer_request(token),
         )
+
+
+@pytest.mark.asyncio
+async def test_qualification_token_rejects_normalized_storage_collision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A distinct alias cannot overwrite an operator card's persistence file."""
+    token = "q" * 48
+    monkeypatch.setenv("SKULK_EXACT_CARD_QUALIFICATION_TOKEN", token)
+    operator_card = ModelCard(
+        model_id=ModelId("org/model"),
+        source_revision="b" * 40,
+        storage_size=Memory.from_bytes(1),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        is_custom=True,
+    )
+    candidate = operator_card.model_copy(
+        update={"model_id": ModelId("org--model"), "is_custom": False}
+    )
+
+    def storage_collision(_model_id: ModelId) -> ModelCard:
+        return operator_card
+
+    monkeypatch.setattr(
+        api_main,
+        "get_custom_card_storage_collision",
+        storage_collision,
+    )
+    api = object.__new__(API)
+
+    with pytest.raises(HTTPException, match="persisted storage key"):
+        await api.add_exact_custom_model_card(
+            AddExactCustomModelCardParams(model_card=candidate),
+            _remote_bearer_request(token),
+        )
+
+
+@pytest.mark.asyncio
+async def test_api_only_process_persists_and_acknowledges_exact_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A supported API-only node can complete exact-card convergence."""
+    card = ModelCard(
+        model_id=ModelId("org/api-only"),
+        source_revision="b" * 40,
+        storage_size=Memory.from_bytes(1),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        is_custom=True,
+        qualification_only=True,
+    )
+    mutation_command_id = CommandId()
+    saved_cards: list[ModelCard] = []
+    cache = Mock()
+    acknowledge = Mock()
+
+    async def save_card(saved_card: ModelCard) -> None:
+        saved_cards.append(saved_card)
+
+    monkeypatch.setattr(ModelCard, "save_to_custom_dir", save_card)
+    monkeypatch.setattr(api_main, "add_to_card_cache", cache)
+    monkeypatch.setattr(
+        api_main, "record_custom_card_mutation_applied", acknowledge
+    )
+
+    await API._apply_local_custom_card_mutation(
+        CustomModelCardAdded(
+            model_card=card,
+            mutation_command_id=mutation_command_id,
+        )
+    )
+
+    assert saved_cards == [card]
+    cache.assert_called_once_with(card)
+    acknowledge.assert_called_once_with(mutation_command_id)
 
 
 @pytest.mark.asyncio

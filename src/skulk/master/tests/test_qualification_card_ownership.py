@@ -73,6 +73,35 @@ def test_service_cannot_shadow_signed_card_at_authoritative_order(
     assert master._ordered_model_cards[existing.model_id] == existing  # pyright: ignore[reportPrivateUsage]
 
 
+def test_custom_card_storage_collision_is_rejected_at_authoritative_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Distinct aliases cannot share one normalized persistence path."""
+    _hide_signed_registry(monkeypatch)
+    existing = _card("org/model")
+    candidate = _card("org--model", qualification_only=True)
+
+    def storage_collision(_model_id: ModelId) -> ModelCard:
+        return existing
+
+    monkeypatch.setattr(
+        master_main,
+        "get_custom_card_storage_collision",
+        storage_collision,
+    )
+    master = _master()
+
+    event = master._order_custom_model_card_add(  # pyright: ignore[reportPrivateUsage]
+        AddCustomModelCard(
+            model_card=candidate,
+            requires_qualification_ownership=True,
+        )
+    )
+
+    assert event is None
+    assert candidate.model_id not in master._ordered_model_cards  # pyright: ignore[reportPrivateUsage]
+
+
 def test_operator_add_wins_before_stale_service_cleanup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -332,17 +332,21 @@ from skulk.shared.models.model_cards import (
     ModelCard,
     ModelId,
     ModelTask,
+    add_to_card_cache,
     custom_card_mutation_applied,
+    delete_custom_card,
     get_all_model_cards,
     get_bundled_card,
     get_card,
     get_current_registry_card,
     get_current_registry_card_id,
+    get_custom_card_storage_collision,
     get_installed_card_record,
     get_model_advisories,
     get_model_cards,
     get_model_engine_support,
     preserve_generated_card_constraints,
+    record_custom_card_mutation_applied,
 )
 from skulk.shared.models.registry import RegistryAdvisory
 from skulk.shared.models.remote_code_approval import (
@@ -437,6 +441,8 @@ from skulk.shared.types.diagnostics import (
     VisionMediaIngressDiagnostics,
 )
 from skulk.shared.types.events import (
+    CustomModelCardAdded,
+    CustomModelCardDeleted,
     Event,
     IndexedEvent,
     InstanceCreated,
@@ -1480,8 +1486,12 @@ class API:
         extensions: LoadedExtensions | None = None,
         enable_builtin_providers: bool = False,
         operator_pairing_service: OperatorPairingService | None = None,
+        apply_custom_card_mutations_locally: bool = False,
     ) -> None:
         self.state = State()
+        self._apply_custom_card_mutations_locally = (
+            apply_custom_card_mutations_locally
+        )
         self._operator_pairing_service = operator_pairing_service
         self._operator_relay_configuration: OperatorRelayConfiguration | None = None
         if operator_pairing_service is not None:
@@ -8792,6 +8802,15 @@ class API:
                 "registry_capability_claims": (),
             }
         )
+        collision = get_custom_card_storage_collision(card.model_id)
+        if collision is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Exact-card alias collides with the persisted storage key "
+                    f"owned by {collision.model_id}"
+                ),
+            )
         existing = get_card(card.model_id)
         if (
             qualification_service
@@ -9168,6 +9187,9 @@ class API:
                     self._maybe_compact_event_log()
                 self.state = apply(self.state, i_event)
 
+                if self._apply_custom_card_mutations_locally:
+                    await self._apply_local_custom_card_mutation(event)
+
                 if isinstance(event, (ModelTrustApprovalChanged, StateSnapshotHydrated)):
                     try:
                         self._skulk_config = persist_model_trust_config(
@@ -9237,6 +9259,39 @@ class API:
                         event.task_id,
                         "The request was cancelled because its instance was deleted",
                     )
+
+    @staticmethod
+    async def _apply_local_custom_card_mutation(event: Event) -> None:
+        """Persist one indexed card mutation when this API has no local worker.
+
+        Args:
+            event: Indexed event already accepted by the API state applier.
+
+        Side effects:
+            Updates the node-local custom-card file and cache, then records the
+            originating command acknowledgement only after persistence succeeds.
+        """
+        if isinstance(event, CustomModelCardAdded):
+            try:
+                await event.model_card.save_to_custom_dir()
+                add_to_card_cache(event.model_card)
+                if event.mutation_command_id is not None:
+                    record_custom_card_mutation_applied(event.mutation_command_id)
+            except Exception:
+                logger.exception(
+                    "Failed to save custom model card in API-only process "
+                    f"(model_id={event.model_card.model_id})"
+                )
+        elif isinstance(event, CustomModelCardDeleted):
+            try:
+                await delete_custom_card(event.model_id)
+                if event.mutation_command_id is not None:
+                    record_custom_card_mutation_applied(event.mutation_command_id)
+            except Exception:
+                logger.exception(
+                    "Failed to delete custom model card in API-only process "
+                    f"(model_id={event.model_id})"
+                )
 
     async def _apply_data(self) -> None:
         """Consume the data plane (#279 Phase 2): per-command output chunks.

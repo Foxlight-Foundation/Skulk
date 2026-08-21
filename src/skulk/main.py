@@ -767,6 +767,7 @@ class Node:
                 extensions=load_extensions(),
                 enable_builtin_providers=True,
                 operator_pairing_service=OperatorPairingService.from_default_paths(),
+                apply_custom_card_mutations_locally=args.no_worker,
             )
         else:
             api = None

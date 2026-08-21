@@ -2341,6 +2341,28 @@ def add_to_card_cache(card: "ModelCard") -> None:
     _card_cache[card.model_id] = card
 
 
+def get_custom_card_storage_collision(model_id: ModelId) -> "ModelCard | None":
+    """Return a distinct custom card that shares this alias's storage key.
+
+    Args:
+        model_id: Candidate alias whose normalized persistence key is being used.
+
+    Returns:
+        The conflicting custom card, or ``None`` when the key is unowned.
+    """
+    storage_key = model_id.normalize()
+    return next(
+        (
+            card
+            for card in _card_cache.values()
+            if card.is_custom
+            and card.model_id != model_id
+            and card.model_id.normalize() == storage_key
+        ),
+        None,
+    )
+
+
 async def delete_custom_card(model_id: ModelId) -> bool:
     """Delete a user-added custom model card. Returns True if deleted.
 
@@ -2350,6 +2372,11 @@ async def delete_custom_card(model_id: ModelId) -> bool:
     """
     card_path = _custom_cards_dir / (ModelId(model_id).normalize() + ".toml")
     if await card_path.exists():
+        stored_card = await ModelCard.load_from_path(card_path)
+        if stored_card.model_id != model_id:
+            raise ValueError(
+                "custom model-card storage key belongs to a different alias"
+            )
         await card_path.unlink()
         _card_cache.pop(model_id, None)
         await _refresh_card_cache()

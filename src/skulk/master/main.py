@@ -39,6 +39,7 @@ from skulk.shared.models.model_cards import (
     ModelId,
     get_card,
     get_current_registry_card,
+    get_custom_card_storage_collision,
     get_model_cards,
 )
 from skulk.shared.types.commands import (
@@ -877,6 +878,26 @@ class Master:
     ) -> CustomModelCardAdded | None:
         """Enforce service ownership before ordering a custom-card addition."""
         model_id = command.model_card.model_id
+        storage_collision = get_custom_card_storage_collision(model_id)
+        if storage_collision is None:
+            storage_collision = next(
+                (
+                    ordered
+                    for ordered_model_id, ordered in self._ordered_model_cards.items()
+                    if ordered is not None
+                    and ordered.is_custom
+                    and ordered_model_id != model_id
+                    and ordered_model_id.normalize() == model_id.normalize()
+                ),
+                None,
+            )
+        if storage_collision is not None:
+            logger.warning(
+                "Rejected custom model card whose persistence key belongs to "
+                f"another alias (model_id={model_id}, "
+                f"owner={storage_collision.model_id})"
+            )
+            return None
         existing = self._ordered_model_card(model_id)
         if (
             command.requires_qualification_ownership
