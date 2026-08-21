@@ -1371,10 +1371,11 @@ its server-marked `qualification_only` custom-card cleanup operation, not
 general cluster authority. Only service-authenticated installs receive that
 marker. The service path rejects a collision with any pre-existing
 non-qualification card and requires a full immutable source revision. Service
-commands carry this ownership precondition to the elected master, whose
-serialized command processor rechecks and advances a local ordered card view
+cleanup carries the complete expected temporary card to the elected master,
+whose serialized command processor requires exact equality and advances a local ordered card view
 before emitting the replicated event; API-node cache timing cannot authorize a
-stale overwrite or cleanup. Indexed event echoes do not rewrite that view,
+stale overwrite or let an older job delete a replacement under the same alias.
+Indexed event echoes do not rewrite that view,
 because an older echo may return after a newer command decision; a promoted
 master lazily seeds its fresh view from the converged local catalog.
 The add endpoint waits for that exact command ID's indexed event to persist and

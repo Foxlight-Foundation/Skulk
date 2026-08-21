@@ -10,7 +10,10 @@ from starlette.requests import Request
 from skulk.api import main as api_main
 from skulk.api.main import API
 from skulk.api.operator_gateway import OPERATOR_GATEWAY_AUTHORIZED_SCOPE_KEY
-from skulk.api.types import AddExactCustomModelCardParams
+from skulk.api.types import (
+    AddExactCustomModelCardParams,
+    DeleteExactCustomModelCardParams,
+)
 from skulk.shared.models.model_cards import ModelCard, ModelTask, VisionCardConfig
 from skulk.shared.models.registry import RegistryCapabilityClaim
 from skulk.shared.models.remote_code_approval import remote_code_trust_identity
@@ -28,9 +31,13 @@ async def _accept_exact_card_convergence(
 
 
 async def _accept_qualification_card_deletion(
-    _model_id: ModelId, _mutation_command_id: CommandId
+    _model_id: ModelId,
+    _mutation_command_id: CommandId,
+    *,
+    expected_card: ModelCard | None = None,
 ) -> None:
     """Stand in for an indexed cleanup round-trip in narrow endpoint tests."""
+    assert expected_card is not None
 
 
 def _loopback_operator_request() -> Request:
@@ -277,10 +284,58 @@ async def test_qualification_token_controls_exact_card_lifecycle(
     response = await api.delete_custom_model(
         supplied.model_id,
         _remote_bearer_request(token),
+        DeleteExactCustomModelCardParams(model_card=supplied),
     )
     deleted = await receiver.receive()
     assert isinstance(deleted.command, api_main.DeleteCustomModelCard)
+    assert deleted.command.expected_qualification_card == custom_card(
+        supplied.model_id
+    )
     assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_qualification_cleanup_cannot_delete_replacement_temporary_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An older job cannot remove a newer exact card sharing its alias."""
+    token = "q" * 48
+    monkeypatch.setenv("SKULK_EXACT_CARD_QUALIFICATION_TOKEN", token)
+    original = ModelCard(
+        model_id=ModelId("org/exact@q4_k_m"),
+        source_revision="a" * 40,
+        storage_size=Memory.from_bytes(1234),
+        n_layers=2,
+        hidden_size=16,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        gguf_file="original-Q4_K_M.gguf",
+    )
+    replacement = API._unsigned_exact_custom_card(
+        original.model_copy(
+            update={
+                "source_revision": "b" * 40,
+                "gguf_file": "replacement-Q4_K_M.gguf",
+            }
+        ),
+        qualification_only=True,
+    )
+
+    def replacement_card(_model_id: ModelId) -> ModelCard:
+        return replacement
+
+    monkeypatch.setattr(api_main, "get_card", replacement_card)
+    sender, _receiver = channel[ForwarderCommand]()
+    api = object.__new__(API)
+    object.__setattr__(api, "command_sender", sender)
+    object.__setattr__(api, "_system_id", NodeId("test-system"))
+
+    with pytest.raises(HTTPException, match="no longer owns"):
+        await api.delete_custom_model(
+            original.model_id,
+            _remote_bearer_request(token),
+            DeleteExactCustomModelCardParams(model_card=original),
+        )
 
 
 @pytest.mark.asyncio

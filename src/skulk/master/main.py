@@ -921,7 +921,10 @@ class Master:
         """Enforce service ownership before ordering a custom-card deletion."""
         existing = self._ordered_model_card(command.model_id)
         if command.requires_qualification_ownership and (
-            existing is None or not existing.qualification_only
+            existing is None
+            or not existing.qualification_only
+            or command.expected_qualification_card is None
+            or existing != command.expected_qualification_card
         ):
             logger.warning(
                 "Rejected qualification card deletion at authoritative ordering "

@@ -521,8 +521,10 @@ Trust mutations and ordinary custom-card creation require direct loopback or the
 authenticated operator gateway's write scope. Exact pre-publication
 qualification may instead use `SKULK_EXACT_CARD_QUALIFICATION_TOKEN`; only
 `POST /models/add-card` and server-marked `qualification_only` custom-card
-cleanup accept it. The service path requires an immutable source revision and
-cannot replace or delete any pre-existing non-qualification card; operator
+cleanup accept it. Cleanup supplies the complete original candidate and the
+elected master requires exact card equality, so an older job cannot delete a
+replacement under the same alias. The service path requires an immutable source
+revision and cannot replace or delete any pre-existing non-qualification card; operator
 installs never receive the marker, and the service never approves repository
 code. The elected master rechecks the service ownership precondition in its
 serialized command order before emitting a card event. `PUT /config` rejects

@@ -257,6 +257,8 @@ class DeleteCustomModelCard(BaseCommand):
     model_id: ModelId
     requires_qualification_ownership: bool = False
     """Require the existing alias to be service-owned at ordering time."""
+    expected_qualification_card: ModelCard | None = None
+    """Exact temporary card the service is authorized to remove."""
 
 
 DownloadCommand = (

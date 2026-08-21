@@ -171,6 +171,7 @@ from skulk.api.types import (
     CreateInstanceParams,
     CreateInstanceResponse,
     DeleteDownloadResponse,
+    DeleteExactCustomModelCardParams,
     DeleteInstanceResponse,
     DeleteTracesRequest,
     DeleteTracesResponse,
@@ -8790,17 +8791,9 @@ class API:
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        card = payload.model_card.model_copy(
-            update={
-                "is_custom": True,
-                "qualification_only": qualification_service,
-                "registry_card_id": None,
-                "registry_snapshot_id": None,
-                "registry_provenance": None,
-                "registry_architecture": None,
-                "registry_artifact_format": None,
-                "registry_capability_claims": (),
-            }
+        card = self._unsigned_exact_custom_card(
+            payload.model_card,
+            qualification_only=qualification_service,
         )
         collision = get_custom_card_storage_collision(card.model_id)
         if collision is not None:
@@ -8836,6 +8829,32 @@ class API:
         )
         await self._wait_for_exact_custom_card_convergence(card, mutation.command_id)
         return self._model_list_entry(card)
+
+    @staticmethod
+    def _unsigned_exact_custom_card(
+        card: ModelCard, *, qualification_only: bool
+    ) -> ModelCard:
+        """Normalize an exact supplied card to Skulk's unsigned custom trust.
+
+        Args:
+            card: Exact external card supplied by the operator workflow.
+            qualification_only: Whether the narrow service owns its lifecycle.
+
+        Returns:
+            The complete custom card persisted and compared at master ordering.
+        """
+        return card.model_copy(
+            update={
+                "is_custom": True,
+                "qualification_only": qualification_only,
+                "registry_card_id": None,
+                "registry_snapshot_id": None,
+                "registry_provenance": None,
+                "registry_architecture": None,
+                "registry_artifact_format": None,
+                "registry_capability_claims": (),
+            }
+        )
 
     @staticmethod
     async def _wait_for_exact_custom_card_convergence(
@@ -8878,24 +8897,67 @@ class API:
         )
 
     async def delete_custom_model(
-        self, model_id: ModelId, request: Request
+        self,
+        model_id: ModelId,
+        request: Request,
+        expected: DeleteExactCustomModelCardParams | None = None,
     ) -> JSONResponse:
-        """Delete a user-added custom model card and sync deletion across the cluster."""
+        """Delete an owned custom card and synchronize the exact deletion.
+
+        Args:
+            model_id: Alias whose custom card should be removed.
+            request: Operator or narrow qualification-service authorization.
+            expected: Exact candidate contract required for service cleanup.
+
+        Returns:
+            Confirmation after the service-owned deletion converges.
+
+        Raises:
+            HTTPException: If the caller does not own the current exact card.
+        """
         qualification_service = self._require_exact_card_qualification_mutation(
             request
         )
         card = get_card(model_id)
         if card is None or not card.is_custom:
             raise HTTPException(status_code=404, detail="Custom model card not found")
-        if qualification_service and not card.qualification_only:
-            raise HTTPException(
-                status_code=403,
-                detail="Qualification can remove only its temporary custom cards",
+        expected_card: ModelCard | None = None
+        if qualification_service:
+            if not card.qualification_only:
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        "Qualification can remove only its temporary custom cards"
+                    ),
+                )
+            if expected is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        "Qualification cleanup requires the exact candidate card"
+                    ),
+                )
+            if expected.model_card.model_id != model_id:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Qualification cleanup card does not match the path alias",
+                )
+            expected_card = self._unsigned_exact_custom_card(
+                expected.model_card,
+                qualification_only=True,
             )
+            if card != expected_card:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Qualification cleanup no longer owns the current exact card"
+                    ),
+                )
 
         mutation = DeleteCustomModelCard(
             model_id=model_id,
             requires_qualification_ownership=qualification_service,
+            expected_qualification_card=expected_card,
         )
         await self.command_sender.send(
             ForwarderCommand(
@@ -8905,7 +8967,9 @@ class API:
         )
         if qualification_service:
             await self._wait_for_qualification_card_deletion(
-                model_id, mutation.command_id
+                model_id,
+                mutation.command_id,
+                expected_card=expected_card,
             )
 
         return JSONResponse(
@@ -8917,6 +8981,7 @@ class API:
         model_id: ModelId,
         mutation_command_id: CommandId,
         *,
+        expected_card: ModelCard | None = None,
         timeout_seconds: float = _EXACT_CARD_CONVERGENCE_TIMEOUT_SECONDS,
     ) -> None:
         """Wait until this exact cleanup no longer exposes its temporary card.
@@ -8924,6 +8989,7 @@ class API:
         Args:
             model_id: Temporary model alias sent for cleanup.
             mutation_command_id: Exact delete command whose event must be applied.
+            expected_card: Exact service-owned card authorized for removal.
             timeout_seconds: Maximum event round-trip time before failing.
 
         Raises:
@@ -8934,21 +9000,20 @@ class API:
         current: ModelCard | None = None
         while True:
             current = get_card(model_id)
-            if custom_card_mutation_applied(mutation_command_id) and (
-                current is None or not current.qualification_only
-            ):
+            mutation_applied = custom_card_mutation_applied(mutation_command_id)
+            if mutation_applied and current != expected_card:
                 return
+            if expected_card is not None and current != expected_card:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Qualification-card cleanup lost authoritative ownership "
+                        "to a different exact card"
+                    ),
+                )
             if anyio.current_time() >= deadline:
                 break
             await anyio.sleep(_EXACT_CARD_CONVERGENCE_POLL_SECONDS)
-        if current is not None and not current.qualification_only:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "Qualification-card cleanup lost authoritative ordering to "
-                    "a different model card"
-                ),
-            )
         raise HTTPException(
             status_code=504,
             detail="Qualification-card cleanup did not converge before the deadline",

@@ -123,12 +123,39 @@ def test_operator_add_wins_before_stale_service_cleanup(
         DeleteCustomModelCard(
             model_id=operator.model_id,
             requires_qualification_ownership=True,
+            expected_qualification_card=temporary,
         )
     )
 
     assert operator_event is not None
     assert cleanup_event is None
     assert master._ordered_model_cards[operator.model_id] == operator  # pyright: ignore[reportPrivateUsage]
+
+
+def test_replacement_qualification_card_wins_before_stale_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Master refuses an older job's cleanup after exact temporary replacement."""
+    _hide_signed_registry(monkeypatch)
+    original = _card("org/model", qualification_only=True)
+    replacement = original.model_copy(update={"source_revision": "c" * 40})
+
+    def existing_card(_model_id: ModelId) -> ModelCard:
+        return replacement
+
+    monkeypatch.setattr(master_main, "get_card", existing_card)
+    master = _master()
+
+    cleanup_event = master._order_custom_model_card_delete(  # pyright: ignore[reportPrivateUsage]
+        DeleteCustomModelCard(
+            model_id=original.model_id,
+            requires_qualification_ownership=True,
+            expected_qualification_card=original,
+        )
+    )
+
+    assert cleanup_event is None
+    assert master._ordered_model_cards[original.model_id] == replacement  # pyright: ignore[reportPrivateUsage]
 
 
 def test_operator_add_wins_before_stale_service_overwrite(
