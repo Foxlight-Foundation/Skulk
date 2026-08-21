@@ -1306,13 +1306,6 @@ def test_installed_qualification_card_does_not_survive_lifecycle_cleanup(
     model_cards_module._installed_current_registry_ids.clear()
     model_cards_module._card_cache[card.model_id] = card
     try:
-        model_cards_module.register_installed_card_record(record)
-
-        assert model_cards_module.get_card(card.model_id) == card
-        model_cards_module._card_cache.pop(card.model_id)
-        assert model_cards_module.get_card(card.model_id) is None
-        assert model_cards_module.get_installed_card_record(card.model_id) == record
-
         model_cards_module._apply_installed_card_snapshot([record], 0)
 
         assert card.model_id not in model_cards_module._card_cache
@@ -1324,6 +1317,56 @@ def test_installed_qualification_card_does_not_survive_lifecycle_cleanup(
         model_cards_module._installed_card_cache.update(original_installed)
         model_cards_module._installed_current_registry_ids.clear()
         model_cards_module._installed_current_registry_ids.update(original_current)
+
+
+def test_late_qualification_install_registration_cannot_restore_deleted_card(
+    tmp_path: Path,
+) -> None:
+    """A late staging callback cannot outlive qualification-card cleanup."""
+    card = ModelCard(
+        model_id=ModelId("org/qualification-late-install"),
+        source_revision="b" * 40,
+        storage_size=Memory.from_bytes(1),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        is_custom=True,
+        qualification_only=True,
+    )
+    artifact = tmp_path / "artifact"
+    artifact.mkdir()
+    (artifact / "model.safetensors").write_bytes(b"weights")
+    record = build_installed_card_record(artifact, card)
+    original_cache = dict(model_cards_module._card_cache)
+    original_installed = dict(model_cards_module._installed_card_cache)
+    original_current = dict(model_cards_module._installed_current_registry_ids)
+    original_mutations = dict(model_cards_module._installed_card_mutation_versions)
+    original_version = cast(
+        "int", model_cards_module._installed_card_cache_version
+    )
+    model_cards_module._card_cache.clear()
+    model_cards_module._installed_card_cache.clear()
+    model_cards_module._installed_current_registry_ids.clear()
+    model_cards_module._installed_card_mutation_versions.clear()
+    try:
+        model_cards_module._card_cache[card.model_id] = card
+        model_cards_module._card_cache.pop(card.model_id)
+
+        model_cards_module.register_installed_card_record(record)
+
+        assert model_cards_module.get_card(card.model_id) is None
+        assert model_cards_module.get_installed_card_record(card.model_id) == record
+    finally:
+        model_cards_module._card_cache.clear()
+        model_cards_module._card_cache.update(original_cache)
+        model_cards_module._installed_card_cache.clear()
+        model_cards_module._installed_card_cache.update(original_installed)
+        model_cards_module._installed_current_registry_ids.clear()
+        model_cards_module._installed_current_registry_ids.update(original_current)
+        model_cards_module._installed_card_mutation_versions.clear()
+        model_cards_module._installed_card_mutation_versions.update(original_mutations)
+        model_cards_module._installed_card_cache_version = original_version
 
 
 @pytest.mark.asyncio
