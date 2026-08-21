@@ -569,10 +569,10 @@ memory:
 - After tokenization on the serving instance, a prompt that fills the window,
   or a prompt plus an explicit `max_tokens` that exceeds the limit, is
   rejected with an OpenAI-style `invalid_request_error` whose message starts
-  with `context_length_exceeded:`. For streaming requests this arrives as the
-  first SSE `data:` event; for non-streaming requests the response body is the
-  error envelope (the HTTP status is already committed when the rejection is
-  computed on the serving node).
+  with `context_length_exceeded:`. Non-streaming requests return this as
+  **400 Bad Request**. Streaming requests have already committed their status
+  by the time the rejection is computed on the serving node, so it arrives as
+  the first SSE `data:` event instead.
 - When `max_tokens` is omitted, the server default output budget is clamped to
   the remaining window, so generation ends with `finish_reason: "length"`
   instead of overrunning the context.
