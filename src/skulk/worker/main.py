@@ -2100,6 +2100,28 @@ class Worker:
                         logger.info(
                             f"Model {model_id} found in SKULK_MODELS_PATH at {found_path}"
                         )
+                        # This path never reaches the download coordinator, so
+                        # nothing stamps it with the attempt identity that
+                        # `_prepare_status` gives coordinator-routed statuses.
+                        # An unattributed terminal outcome is treated as a
+                        # legacy replay by `TelemetryView.record_download_event`
+                        # and ignored whenever a live attempt exists, which
+                        # leaves the live Pending overlaying the durable
+                        # completion forever: the planner never sees the model
+                        # as downloaded and re-issues DownloadModel every tick
+                        # while the instance sits idle. Open and close one
+                        # attempt of our own so the completion is attributable.
+                        already_present_attempt = DownloadAttemptId()
+                        await self.event_sender.send(
+                            NodeDownloadProgress(
+                                download_progress=DownloadPending(
+                                    node_id=self.node_id,
+                                    shard_metadata=shard,
+                                    model_directory=str(found_path),
+                                    attempt_id=already_present_attempt,
+                                )
+                            )
+                        )
                         await self.event_sender.send(
                             NodeDownloadProgress(
                                 download_progress=DownloadCompleted(
@@ -2108,6 +2130,7 @@ class Worker:
                                     model_directory=str(found_path),
                                     total=shard.model_card.storage_size,
                                     read_only=True,
+                                    attempt_id=already_present_attempt,
                                 )
                             )
                         )
