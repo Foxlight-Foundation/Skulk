@@ -88,7 +88,11 @@ from skulk.worker.runner.llm_inference.batch_generator import (
 )
 
 from .batch_generator import Cancelled, Finished
-from .tool_parsers import make_mlx_parser
+from .tool_parsers import (
+    UNMARKED_TOOL_DIALECT,
+    make_mlx_parser,
+    make_text_dialect_parser,
+)
 
 
 def _should_skip_llm_warmup(
@@ -796,11 +800,17 @@ class Builder:
             and self.tokenizer.tool_call_end
             and self.tokenizer.tool_parser  # type: ignore
         ):
-            tool_parser = make_mlx_parser(
-                self.tokenizer.tool_call_start,
-                self.tokenizer.tool_call_end,
-                self.tokenizer.tool_parser,  # type: ignore
-            )
+            if self.tokenizer.tool_parser == UNMARKED_TOOL_DIALECT:  # type: ignore
+                tool_parser = make_text_dialect_parser(
+                    self.tokenizer.tool_call_start,
+                    self.tokenizer.tool_call_end,
+                )
+            else:
+                tool_parser = make_mlx_parser(
+                    self.tokenizer.tool_call_start,
+                    self.tokenizer.tool_call_end,
+                    self.tokenizer.tool_parser,  # type: ignore
+                )
 
         kv_prefix_cache = KVPrefixCache(self.group)
 

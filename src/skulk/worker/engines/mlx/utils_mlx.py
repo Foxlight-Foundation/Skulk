@@ -1364,19 +1364,31 @@ def load_tokenizer_for_model_id(
     # this the model runs straight past the end of its own tool call: the
     # scaffolding detokenizes into visible content and a second call begins.
     # Upstream (Meta's reference, vLLM and llama.cpp) all stop on both.
+    # Detected by vocabulary rather than by the template mentioning the token:
+    # Llama 3.2's template never writes <|eom_id|> or <|python_tag|> literally,
+    # it only routes tool results through the "ipython" role, so a template
+    # substring check silently misses the family this exists for.
     llama_eom_id = _token_id_or_none(tokenizer, "<|eom_id|>")
-    if llama_eom_id is not None and "<|python_tag|>" in (
-        getattr(tokenizer, "chat_template", None) or ""
-    ):
+    if llama_eom_id is not None:
+        # <|eom_id|> is "end of message, handing off to a tool". Llama declares
+        # only <|eot_id|> as its stop token, so without this the model runs
+        # straight past the end of its tool call and generates the next turn's
+        # header, and the caller sees control tokens in the answer text.
         existing = list(tokenizer.eos_token_ids or [])
         if llama_eom_id not in existing:
             tokenizer.eos_token_ids = existing + [llama_eom_id]
         if not getattr(tokenizer, "tool_parser", None):
-            # Template truth decides, exactly as the generic branch below:
-            # a template that speaks <|python_tag|> gets the Llama dialect.
-            object.__setattr__(tokenizer, "_tool_call_start", "<|python_tag|>")
+            # Llama writes the call as a bare object with no opening marker, so
+            # the block opens on "{" and is closed by the end of the message
+            # rather than by a closing marker. The whole-block dialect parser
+            # reads both that form and the <|python_tag|> variant.
+            object.__setattr__(tokenizer, "_tool_call_start", "{")
             object.__setattr__(tokenizer, "_tool_call_end", "<|eom_id|>")
-            object.__setattr__(tokenizer, "_tool_parser", _parse_llama_tool_calls)
+            from skulk.worker.runner.llm_inference.tool_parsers import (
+                UNMARKED_TOOL_DIALECT,
+            )
+
+            object.__setattr__(tokenizer, "_tool_parser", UNMARKED_TOOL_DIALECT)
 
     if capability_profile.tool_call_format == ToolCallFormat.Gemma4:
         # mlx-lm exposes tool-call markers through read-only properties on
@@ -1819,25 +1831,6 @@ def _token_id_or_none(tokenizer: object, token: str) -> int | None:
     if token_id < 0 or (unknown is not None and token_id == unknown):
         return None
     return token_id
-
-
-def _parse_llama_tool_calls(text: str) -> list[dict[str, Any]]:
-    """Parse Llama ``<|python_tag|>`` tool calls from the block text.
-
-    Delegates to the shared text parser so the MLX lane recognizes exactly the
-    dialects the in-process llama.cpp lane does. Raising on an unrecognized
-    block routes the runner to its malformed-tool-call fallback rather than
-    fabricating an empty success, matching every other parser here.
-    """
-
-    from skulk.worker.runner.llm_inference.tool_text_parser import (
-        parse_tool_calls_from_text,
-    )
-
-    items = parse_tool_calls_from_text(f"<|python_tag|>{text}")
-    if not items:
-        raise ValueError("no recognized tool calls in block")
-    return [{"name": item.name, "arguments": item.arguments} for item in items]
 
 
 def _parse_generic_text_tool_calls(text: str) -> list[dict[str, Any]]:

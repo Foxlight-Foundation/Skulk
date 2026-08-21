@@ -716,6 +716,14 @@ def parse_tool_calls(
             in_tool_call = False
             tool_call_text_parts = []
 
+            if parsed is None and tool_parser.unparsed_is_text:
+                logger.info(
+                    "Unmarked block did not parse as a tool call, "
+                    f"emitting it as content (generated_chars={len(combined)})"
+                )
+                yield response.model_copy(update={"text": combined, "token": 0})
+                continue
+
             if parsed is None:
                 logger.warning(
                     "Tool-call parsing failed "
@@ -777,6 +785,13 @@ def parse_tool_calls(
                 yield ToolCallResponse(
                     tool_calls=parsed, usage=response.usage, stats=response.stats
                 )
+                break
+            if tool_parser.unparsed_is_text:
+                logger.info(
+                    "Unmarked block ended without parsing as a tool call, "
+                    f"emitting it as content (generated_chars={len(combined)})"
+                )
+                yield response.model_copy(update={"text": combined, "token": 0})
                 break
             logger.info(
                 "tool call parsing interrupted, yield partial tool call as text"

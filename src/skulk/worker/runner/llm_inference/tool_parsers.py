@@ -5,12 +5,30 @@ from typing import Any, Callable
 
 from skulk.api.types import ToolCallItem
 
+UNMARKED_TOOL_DIALECT = "skulk:unmarked-tool-dialect"
+"""Sentinel tool parser meaning "read the whole block with the text dialects".
+
+A tokenizer carries a callable in its tool-parser slot for marker-delimited
+families, and the runner strips the markers before calling it. Llama has no
+opening marker to strip, so the runner must build a different parser rather
+than call anything; this sentinel is how it tells the two cases apart.
+"""
+
 
 @dataclass
 class ToolParser:
     start_parsing: str
     end_parsing: str
     _inner_parser: Callable[[str], list[ToolCallItem] | None]
+    unparsed_is_text: bool = False
+    """Whether a block that fails to parse is content rather than a failure.
+
+    Marker-delimited dialects open on a token no ordinary answer emits, so a
+    block that will not parse is genuinely broken output. Unmarked dialects open
+    on ``{``, which a model asked for JSON also emits, so there the safe reading
+    of an unparsable block is that the model simply answered in JSON and the
+    text should be delivered as content.
+    """
 
     def parse(
         self, text: str, tools: list[dict[str, Any]] | None
@@ -245,6 +263,30 @@ def make_json_parser() -> ToolParser:
         start_parsing="<tool_call>",
         end_parsing="</tool_call>",
         _inner_parser=_parse_json_calls,
+    )
+
+
+def make_text_dialect_parser(tool_call_start: str, tool_call_end: str) -> ToolParser:
+    """Build a parser that reads the whole block with the cross-family dialects.
+
+    Unlike :func:`make_mlx_parser`, the markers are not stripped before parsing:
+    for several families the opening marker is part of the call itself (Llama
+    writes the bare call object, so its opening marker is ``{``), and the
+    dialect detection in :func:`parse_tool_calls_from_text` keys off the markers
+    that are present. A block that does not parse is treated as content.
+    """
+
+    # Imported at call time: tool_text_parser imports the schema coercion from
+    # this module, so a module-level import here would be circular.
+    from skulk.worker.runner.llm_inference.tool_text_parser import (
+        parse_tool_calls_from_text,
+    )
+
+    return ToolParser(
+        start_parsing=tool_call_start,
+        end_parsing=tool_call_end,
+        _inner_parser=lambda text: parse_tool_calls_from_text(text),
+        unparsed_is_text=True,
     )
 
 
