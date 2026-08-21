@@ -231,3 +231,142 @@ async def test_non_streaming_response_keeps_the_completion_discriminator() -> No
 
     assert payload["object"] == "chat.completion"
     assert "message" in _first_choice(payload)
+
+
+async def _empty_stream():
+    """A producer that ends without a token, a tool call or an error.
+
+    This is what a cancelled or timed-out task looks like from the adapter's
+    side: the chunk stream simply finishes having produced nothing.
+    """
+    return
+    yield  # pragma: no cover - unreachable, makes this an async generator
+
+
+@pytest.mark.anyio
+async def test_collected_response_never_returns_an_empty_body() -> None:
+    """A task that produced nothing must still yield a readable body.
+
+    This previously asserted, and because the status is committed before the
+    body streams, the assertion reached callers as HTTP 200 with zero bytes.
+    Every OpenAI client treats 2xx as success and then fails parsing, so the
+    real failure surfaced far from its cause.
+    """
+    import json
+
+    from skulk.api.adapters.chat_completions import collect_chat_response
+
+    body = "".join(
+        [part async for part in collect_chat_response(CommandId("cmd-empty"), _empty_stream())]
+    )
+
+    assert body.strip(), "a committed response must never have an empty body"
+    parsed = cast("object", json.loads(body))
+    assert isinstance(parsed, dict)
+    payload = cast("dict[str, object]", parsed)
+    error = cast("dict[str, object]", payload["error"])
+    message = error["message"]
+    assert isinstance(message, str)
+    assert message
+
+
+@pytest.mark.anyio
+async def test_stream_terminates_even_when_the_producer_stops_early() -> None:
+    """A stream that ends without a finish reason must still send [DONE].
+
+    Without a terminator a client cannot tell a finished turn from a dropped
+    connection, so it either hangs or reports a transport error instead of the
+    server's actual problem.
+    """
+    chunks = [
+        chunk
+        async for chunk in generate_chat_stream(CommandId("cmd-empty"), _empty_stream())
+    ]
+
+    assert chunks[-1] == "data: [DONE]\n\n"
+    payloads = _sse_payloads(chunks)
+    assert payloads, "expected an explanatory frame before the terminator"
+    error = cast("dict[str, object]", payloads[-1]["error"])
+    message = error["message"]
+    assert isinstance(message, str)
+    assert message
+
+
+async def _truncated_stream():
+    """A producer that emits text and then stops without a finish reason.
+
+    This is what cancellation mid-generation looks like: real output arrived,
+    but nothing ever marked the turn as ended.
+    """
+    yield TokenChunk(
+        model=ModelId("mlx-community/gemma-4-26b-a4b-it-4bit"),
+        text="partial answer",
+        token_id=1,
+        usage=None,
+        finish_reason=None,
+    )
+
+
+@pytest.mark.anyio
+async def test_truncated_generation_is_reported_rather_than_returned() -> None:
+    """Partial output with no finish reason must not look like a completion.
+
+    Returning it as a normal `chat.completion` hands the caller a silently
+    truncated answer, which is worse than an empty body because nothing marks
+    it incomplete. A finish reason is the producer's only end-of-turn signal;
+    the streaming path already refuses to send `[DONE]` without one.
+    """
+    import json
+
+    from skulk.api.adapters.chat_completions import collect_chat_response
+
+    body = "".join(
+        [
+            part
+            async for part in collect_chat_response(
+                CommandId("cmd-trunc"), _truncated_stream()
+            )
+        ]
+    )
+    parsed = cast("object", json.loads(body))
+    assert isinstance(parsed, dict)
+    payload = cast("dict[str, object]", parsed)
+
+    assert "choices" not in payload, "a truncated turn must not look successful"
+    error = cast("dict[str, object]", payload["error"])
+    message = error["message"]
+    assert isinstance(message, str)
+    assert "finish reason" in message
+
+
+@pytest.mark.anyio
+async def test_non_streaming_failure_carries_a_real_status_code() -> None:
+    """A non-streaming failure answers with a status, not a 200 plus an error.
+
+    Nothing forces a non-streaming request to commit its status before the
+    outcome is known: the body is one complete object produced once. Every
+    OpenAI client branches on status first, so reporting a failure only in the
+    body means the client treats it as success and discovers the problem later
+    through missing ``choices``.
+    """
+    from skulk.api.adapters.chat_completions import collect_chat_response_body
+
+    status, body = await collect_chat_response_body(
+        CommandId("cmd-empty"), _empty_stream()
+    )
+
+    assert status >= 400, "a failed generation must not answer 2xx"
+    assert body.strip()
+
+
+@pytest.mark.anyio
+async def test_non_streaming_success_still_answers_200() -> None:
+    """The status derivation must not turn ordinary completions into errors."""
+    from skulk.api.adapters.chat_completions import collect_chat_response_body
+
+    status, body = await collect_chat_response_body(
+        CommandId("cmd-ok"), _single_token_stream()
+    )
+
+    assert status == 200
+    assert '"chat.completion"' in body

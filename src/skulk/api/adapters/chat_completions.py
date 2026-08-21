@@ -1,10 +1,12 @@
 """OpenAI Chat Completions API adapter for converting requests/responses."""
 
 import base64
+import json
 import re
 import time
 from collections.abc import AsyncGenerator
-from typing import Any
+from http import HTTPStatus
+from typing import Any, cast
 
 from loguru import logger
 
@@ -408,6 +410,61 @@ async def generate_chat_stream(
                     yield "data: [DONE]\n\n"
                     return
 
+    # Falling out of the loop means the producer stopped without a finish
+    # reason and without an error: a cancelled or timed-out task that never
+    # reached a terminal chunk. Returning here would close the connection with
+    # no `data: [DONE]`, which a client reads as a truncated stream rather than
+    # as a failure, so say what happened and terminate properly (#872).
+    yield (
+        "data: "
+        + error_chunk_response(
+            "Generation ended without completing before the task finished"
+        ).model_dump_json()
+        + "\n\n"
+    )
+    yield "data: [DONE]\n\n"
+
+
+async def collect_chat_response_body(
+    command_id: CommandId,
+    chunk_stream: AsyncGenerator[
+        ErrorChunk | ToolCallChunk | TokenChunk | PrefillProgressChunk, None
+    ],
+) -> tuple[int, str]:
+    """Collect a non-streaming chat response and its HTTP status.
+
+    A non-streaming request has no reason to commit a status before the
+    outcome is known: the body is one complete object, produced once. Awaiting
+    it here lets a failure answer with a real status code, so a client that
+    branches on status, which is every OpenAI client, sees a failure as a
+    failure rather than discovering it later through missing `choices`.
+
+    The streaming path cannot do this and does not try: its status is committed
+    with the first byte, so it reports post-commit failures in band.
+
+    Returns:
+        The HTTP status to send and the serialized JSON body.
+    """
+
+    body = "".join([part async for part in collect_chat_response(command_id, chunk_stream)])
+    try:
+        parsed = cast("object", json.loads(body))
+    except ValueError:
+        # collect_chat_response always serializes a model, so this is
+        # unreachable in practice; answering 500 keeps an impossible state from
+        # masquerading as success.
+        return (HTTPStatus.INTERNAL_SERVER_ERROR.value, body)
+    if not isinstance(parsed, dict):
+        return (HTTPStatus.INTERNAL_SERVER_ERROR.value, body)
+    payload = cast("dict[str, object]", parsed)
+    error = payload.get("error")
+    if not isinstance(error, dict):
+        return (HTTPStatus.OK.value, body)
+    code = cast("dict[str, object]", error).get("code")
+    if isinstance(code, int) and not isinstance(code, bool) and 400 <= code <= 599:
+        return (code, body)
+    return (HTTPStatus.INTERNAL_SERVER_ERROR.value, body)
+
 
 async def collect_chat_response(
     command_id: CommandId,
@@ -483,7 +540,33 @@ async def collect_chat_response(
 
     combined_text = "".join(text_parts)
     combined_thinking = "".join(thinking_parts) if thinking_parts else None
-    assert model is not None
+
+    if model is None or finish_reason is None:
+        # The producer stopped without reaching a terminal chunk. Two shapes
+        # land here and both must be failures rather than successes:
+        #
+        # - Nothing at all was produced (`model is None`). This used to assert,
+        #   and because the status is committed before the body streams the
+        #   assertion reached callers as HTTP 200 with zero bytes, which every
+        #   client treats as success and then fails to parse (#872).
+        # - Some text arrived but no finish reason did, which is what
+        #   cancellation mid-generation looks like. Returning that as a normal
+        #   completion would hand the caller a silently truncated answer, which
+        #   is worse than an empty body because nothing marks it as incomplete.
+        #
+        # A finish reason is the producer's only signal that a turn ended; the
+        # streaming path already refuses to send `[DONE]` without one.
+        produced = len(combined_text)
+        detail = (
+            "Generation produced no output before the task ended"
+            if model is None
+            else (
+                "Generation ended without a finish reason after "
+                f"{produced} characters, so the response is incomplete"
+            )
+        )
+        yield error_chunk_response(detail).model_dump_json()
+        return
 
     yield ChatCompletionResponse(
         id=command_id,

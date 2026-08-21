@@ -9,6 +9,22 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- Chat completions never return an empty body, and streaming responses always
+  terminate. A task that ended without producing any output, for example after
+  being cancelled, previously tripped an assertion inside the response
+  generator; because the status is committed before the body streams, callers
+  received HTTP 200 with zero bytes and every OpenAI-compatible client failed
+  while parsing rather than reporting the real problem. The non-streaming path
+  now returns a real 4xx or 5xx status with the standard error object, since
+  nothing forces it to commit a status before the outcome is known, and the
+  streaming path, whose status is committed with its first byte, emits an
+  error frame followed by `data: [DONE]` instead of closing without a
+  terminator, which a client cannot distinguish from a dropped connection. A
+  turn that produced text but never reported a finish reason is also treated
+  as a failure rather than returned as a silently truncated completion.
+
+### Fixed
+
 - Streaming chat completions now carry `"object": "chat.completion.chunk"`.
   Every SSE frame previously carried `"chat.completion"`, the non-streaming
   discriminator, because one response model served both paths. Clients that

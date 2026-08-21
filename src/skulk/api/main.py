@@ -65,7 +65,7 @@ from starlette.datastructures import UploadFile as StarletteUploadFile
 import skulk.shared.types.tasks as task_types
 from skulk.api.adapters.chat_completions import (
     chat_request_to_text_generation,
-    collect_chat_response,
+    collect_chat_response_body,
     fetch_image_url,
     generate_chat_stream,
 )
@@ -1334,6 +1334,62 @@ def _coerce_json_object(value: object) -> JsonObject:
         return {}
     raw_dict = cast(dict[object, object], value)
     return {str(key): item for key, item in raw_dict.items()}
+
+
+DISCONNECT_POLL_INTERVAL_S = 0.5
+"""How often a non-streaming request checks whether its caller is still there."""
+
+CLIENT_DISCONNECTED_STATUS = 499
+"""Nginx's client-closed-request code. Nothing receives it; it exists so the
+handler returns a value rather than raising into the server's error path."""
+
+
+async def _wait_for_client_disconnect(request: Request) -> None:
+    """Resolve once the caller has gone away."""
+
+    while not await request.is_disconnected():
+        await asyncio.sleep(DISCONNECT_POLL_INTERVAL_S)
+
+
+async def collect_response_watching_disconnect(
+    request: Request,
+    collect: Awaitable[tuple[int, str]],
+) -> tuple[int, str]:
+    """Collect a non-streaming body without losing disconnect cancellation.
+
+    A `StreamingResponse` gets disconnect handling for free: Starlette cancels
+    the body generator when the caller goes away, the `CancelledError`
+    propagates into the chunk stream, and the API sends `TaskCancelled` so the
+    runner stops work nobody is waiting for. Awaiting the body directly, which
+    is what lets a non-streaming failure answer with a real status code, would
+    silently give that up and leave runners generating for callers that left;
+    repeated abandoned requests would then consume cluster capacity until they
+    finished naturally.
+
+    So watch for the disconnect explicitly and cancel the collection, which
+    reaches the same `CancelledError` handler by the same path.
+
+    Returns:
+        The status and body to send, or a client-disconnected status whose
+        response nobody will receive.
+    """
+
+    collect_task = asyncio.ensure_future(collect)
+    watcher = asyncio.ensure_future(_wait_for_client_disconnect(request))
+    try:
+        done, _ = await asyncio.wait(
+            {collect_task, watcher}, return_when=asyncio.FIRST_COMPLETED
+        )
+        if collect_task in done:
+            return collect_task.result()
+        collect_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await collect_task
+        return (CLIENT_DISCONNECTED_STATUS, "")
+    finally:
+        watcher.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await watcher
 
 
 async def _read_request_json_object(request: Request) -> JsonObject:
@@ -3518,8 +3574,8 @@ class API:
         return self.state.instances[instance_id]
 
     async def _steward_chat_completions(
-        self, payload: ChatCompletionRequest
-    ) -> StreamingResponse:
+        self, payload: ChatCompletionRequest, request: Request
+    ) -> StreamingResponse | Response:
         """Serve the steward through the standard chat-completions surface.
 
         The steward's tool surface belongs to the server, so client tool
@@ -3631,8 +3687,19 @@ class API:
                     "X-Accel-Buffering": "no",
                 },
             )
-        return StreamingResponse(
-            collect_chat_response(command_id, chunk_stream),
+        # A non-streaming request commits no status until the outcome is
+        # known, so a failure answers with a real status code rather than a
+        # 200 whose body happens to carry an error (#872). Collecting the body
+        # gives up the disconnect handling a StreamingResponse gets for free,
+        # so watch for it explicitly and cancel, which reaches the same
+        # TaskCancelled path and stops the runner working for a caller that
+        # has gone.
+        status_code, body = await collect_response_watching_disconnect(
+            request, collect_chat_response_body(command_id, chunk_stream)
+        )
+        return Response(
+            content=body,
+            status_code=status_code,
             media_type="application/json",
         )
 
@@ -5079,15 +5146,15 @@ class API:
         return command
 
     async def chat_completions(
-        self, payload: ChatCompletionRequest
-    ) -> ChatCompletionResponse | StreamingResponse:
+        self, payload: ChatCompletionRequest, request: Request
+    ) -> ChatCompletionResponse | StreamingResponse | Response:
         """OpenAI Chat Completions API - adapter."""
         if str(payload.model) == STEWARD_VIRTUAL_MODEL_ID:
             # The reserved steward id selects model-plus-harness: the
             # server-side investigation loop answers, with its tool trace
             # streamed as reasoning content. Checked before card resolution
             # so no repository of the same name can shadow it.
-            return await self._steward_chat_completions(payload)
+            return await self._steward_chat_completions(payload, request)
         resolved_model = await self._resolve_and_validate_text_model(payload.model)
         model_card = await self._get_running_model_card(resolved_model)
         task_params = await chat_request_to_text_generation(
@@ -5131,11 +5198,15 @@ class API:
                 },
             )
         else:
-            return StreamingResponse(
-                collect_chat_response(
-                    command.command_id,
-                    chunk_stream,
-                ),
+            # Same contract as the ordinary chat route, disconnect handling
+            # included (#872).
+            status_code, body = await collect_response_watching_disconnect(
+                request,
+                collect_chat_response_body(command.command_id, chunk_stream),
+            )
+            return Response(
+                content=body,
+                status_code=status_code,
                 media_type="application/json",
             )
 
