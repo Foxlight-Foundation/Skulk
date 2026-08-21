@@ -290,3 +290,50 @@ async def test_stream_terminates_even_when_the_producer_stops_early() -> None:
     message = error["message"]
     assert isinstance(message, str)
     assert message
+
+
+async def _truncated_stream():
+    """A producer that emits text and then stops without a finish reason.
+
+    This is what cancellation mid-generation looks like: real output arrived,
+    but nothing ever marked the turn as ended.
+    """
+    yield TokenChunk(
+        model=ModelId("mlx-community/gemma-4-26b-a4b-it-4bit"),
+        text="partial answer",
+        token_id=1,
+        usage=None,
+        finish_reason=None,
+    )
+
+
+@pytest.mark.anyio
+async def test_truncated_generation_is_reported_rather_than_returned() -> None:
+    """Partial output with no finish reason must not look like a completion.
+
+    Returning it as a normal `chat.completion` hands the caller a silently
+    truncated answer, which is worse than an empty body because nothing marks
+    it incomplete. A finish reason is the producer's only end-of-turn signal;
+    the streaming path already refuses to send `[DONE]` without one.
+    """
+    import json
+
+    from skulk.api.adapters.chat_completions import collect_chat_response
+
+    body = "".join(
+        [
+            part
+            async for part in collect_chat_response(
+                CommandId("cmd-trunc"), _truncated_stream()
+            )
+        ]
+    )
+    parsed = cast("object", json.loads(body))
+    assert isinstance(parsed, dict)
+    payload = cast("dict[str, object]", parsed)
+
+    assert "choices" not in payload, "a truncated turn must not look successful"
+    error = cast("dict[str, object]", payload["error"])
+    message = error["message"]
+    assert isinstance(message, str)
+    assert "finish reason" in message

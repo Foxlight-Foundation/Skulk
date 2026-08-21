@@ -658,8 +658,9 @@ carries the accumulated call and whose `finish_reason` is `tool_calls`.
 
 The HTTP status is committed before the body starts, so a failure that happens
 after that point cannot change the status code. It is reported in the body
-instead, using the same error object documented under
-[Error Handling](#error-handling):
+instead, as an object carrying an `error` with a `message`, `type` and
+`code`, the same shape returned by a request that is rejected before
+generation starts:
 
 - **Streaming**: a `data:` frame carrying an `error` object, followed by
   `data: [DONE]`. The stream always terminates with the sentinel, including
@@ -668,9 +669,11 @@ instead, using the same error object documented under
 - **Non-streaming**: the response body is the error object rather than a
   completion.
 
-A response body is never empty. If a request produced no output at all, for
-example because the task was cancelled before the first token, the body is an
-error object explaining that rather than zero bytes.
+A response body is never empty, and a partial answer is never presented as a
+complete one. A turn ends only when the model reports a finish reason, so a
+request that produced nothing, or that produced text and then stopped without
+one, returns an error object rather than zero bytes or a silently truncated
+completion.
 
 ### Common Request Fields
 

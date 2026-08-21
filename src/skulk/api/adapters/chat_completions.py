@@ -498,18 +498,31 @@ async def collect_chat_response(
     combined_text = "".join(text_parts)
     combined_thinking = "".join(thinking_parts) if thinking_parts else None
 
-    if model is None:
-        # The stream ended without a single token or tool call and without an
-        # error chunk, which happens when the task is cancelled or times out
-        # having produced nothing. This used to assert, and because the status
-        # is already committed the assertion surfaced to the caller as HTTP 200
-        # with a zero-byte body: the worst possible answer, since every client
-        # treats 2xx as success and then fails parsing far from the cause.
-        # Emit the same structured envelope the error path uses so the caller
-        # gets something it can read and report (#872).
-        yield error_chunk_response(
+    if model is None or finish_reason is None:
+        # The producer stopped without reaching a terminal chunk. Two shapes
+        # land here and both must be failures rather than successes:
+        #
+        # - Nothing at all was produced (`model is None`). This used to assert,
+        #   and because the status is committed before the body streams the
+        #   assertion reached callers as HTTP 200 with zero bytes, which every
+        #   client treats as success and then fails to parse (#872).
+        # - Some text arrived but no finish reason did, which is what
+        #   cancellation mid-generation looks like. Returning that as a normal
+        #   completion would hand the caller a silently truncated answer, which
+        #   is worse than an empty body because nothing marks it as incomplete.
+        #
+        # A finish reason is the producer's only signal that a turn ended; the
+        # streaming path already refuses to send `[DONE]` without one.
+        produced = len(combined_text)
+        detail = (
             "Generation produced no output before the task ended"
-        ).model_dump_json()
+            if model is None
+            else (
+                "Generation ended without a finish reason after "
+                f"{produced} characters, so the response is incomplete"
+            )
+        )
+        yield error_chunk_response(detail).model_dump_json()
         return
 
     yield ChatCompletionResponse(
