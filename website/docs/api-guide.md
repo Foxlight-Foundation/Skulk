@@ -654,6 +654,24 @@ Reasoning models place thinking text on `delta.reasoning_content` rather than
 without the reasoning. Tool calls arrive as a frame whose `delta.tool_calls`
 carries the accumulated call and whose `finish_reason` is `tool_calls`.
 
+#### When generation fails mid-response
+
+The HTTP status is committed before the body starts, so a failure that happens
+after that point cannot change the status code. It is reported in the body
+instead, using the same error object documented under
+[Error Handling](#error-handling):
+
+- **Streaming**: a `data:` frame carrying an `error` object, followed by
+  `data: [DONE]`. The stream always terminates with the sentinel, including
+  when the task is cancelled or ends without completing, so a client can
+  distinguish a finished turn from a dropped connection.
+- **Non-streaming**: the response body is the error object rather than a
+  completion.
+
+A response body is never empty. If a request produced no output at all, for
+example because the task was cancelled before the first token, the body is an
+error object explaining that rather than zero bytes.
+
 ### Common Request Fields
 
 | Field | Type | Notes |

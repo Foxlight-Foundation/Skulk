@@ -231,3 +231,62 @@ async def test_non_streaming_response_keeps_the_completion_discriminator() -> No
 
     assert payload["object"] == "chat.completion"
     assert "message" in _first_choice(payload)
+
+
+async def _empty_stream():
+    """A producer that ends without a token, a tool call or an error.
+
+    This is what a cancelled or timed-out task looks like from the adapter's
+    side: the chunk stream simply finishes having produced nothing.
+    """
+    return
+    yield  # pragma: no cover - unreachable, makes this an async generator
+
+
+@pytest.mark.anyio
+async def test_collected_response_never_returns_an_empty_body() -> None:
+    """A task that produced nothing must still yield a readable body.
+
+    This previously asserted, and because the status is committed before the
+    body streams, the assertion reached callers as HTTP 200 with zero bytes.
+    Every OpenAI client treats 2xx as success and then fails parsing, so the
+    real failure surfaced far from its cause.
+    """
+    import json
+
+    from skulk.api.adapters.chat_completions import collect_chat_response
+
+    body = "".join(
+        [part async for part in collect_chat_response(CommandId("cmd-empty"), _empty_stream())]
+    )
+
+    assert body.strip(), "a committed response must never have an empty body"
+    parsed = cast("object", json.loads(body))
+    assert isinstance(parsed, dict)
+    payload = cast("dict[str, object]", parsed)
+    error = cast("dict[str, object]", payload["error"])
+    message = error["message"]
+    assert isinstance(message, str)
+    assert message
+
+
+@pytest.mark.anyio
+async def test_stream_terminates_even_when_the_producer_stops_early() -> None:
+    """A stream that ends without a finish reason must still send [DONE].
+
+    Without a terminator a client cannot tell a finished turn from a dropped
+    connection, so it either hangs or reports a transport error instead of the
+    server's actual problem.
+    """
+    chunks = [
+        chunk
+        async for chunk in generate_chat_stream(CommandId("cmd-empty"), _empty_stream())
+    ]
+
+    assert chunks[-1] == "data: [DONE]\n\n"
+    payloads = _sse_payloads(chunks)
+    assert payloads, "expected an explanatory frame before the terminator"
+    error = cast("dict[str, object]", payloads[-1]["error"])
+    message = error["message"]
+    assert isinstance(message, str)
+    assert message

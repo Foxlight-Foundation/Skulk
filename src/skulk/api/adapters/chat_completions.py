@@ -408,6 +408,20 @@ async def generate_chat_stream(
                     yield "data: [DONE]\n\n"
                     return
 
+    # Falling out of the loop means the producer stopped without a finish
+    # reason and without an error: a cancelled or timed-out task that never
+    # reached a terminal chunk. Returning here would close the connection with
+    # no `data: [DONE]`, which a client reads as a truncated stream rather than
+    # as a failure, so say what happened and terminate properly (#872).
+    yield (
+        "data: "
+        + error_chunk_response(
+            "Generation ended without completing before the task finished"
+        ).model_dump_json()
+        + "\n\n"
+    )
+    yield "data: [DONE]\n\n"
+
 
 async def collect_chat_response(
     command_id: CommandId,
@@ -483,7 +497,20 @@ async def collect_chat_response(
 
     combined_text = "".join(text_parts)
     combined_thinking = "".join(thinking_parts) if thinking_parts else None
-    assert model is not None
+
+    if model is None:
+        # The stream ended without a single token or tool call and without an
+        # error chunk, which happens when the task is cancelled or times out
+        # having produced nothing. This used to assert, and because the status
+        # is already committed the assertion surfaced to the caller as HTTP 200
+        # with a zero-byte body: the worst possible answer, since every client
+        # treats 2xx as success and then fails parsing far from the cause.
+        # Emit the same structured envelope the error path uses so the caller
+        # gets something it can read and report (#872).
+        yield error_chunk_response(
+            "Generation produced no output before the task ended"
+        ).model_dump_json()
+        return
 
     yield ChatCompletionResponse(
         id=command_id,
