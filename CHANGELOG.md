@@ -45,8 +45,11 @@ This project records release notes here and mirrors public-facing notes in
   catalog truth rather than merely reuse its alias. The dashboard no longer
   exposes the redundant Model trust ceremony;
   its historical config, state, wire fields, and endpoints remain deprecated
-  and inert for rolling compatibility. Signed-card, revision, installed-sidecar,
-  and artifact-manifest verification still fail closed.
+  and inert for rolling compatibility. Historical executable custom cards with
+  no immutable revision fail closed until re-added, and ordinary model-add
+  responses now wait for their exact ordered catalog mutation before returning.
+  Signed-card, revision, installed-sidecar, and artifact-manifest verification
+  still fail closed.
 
 - Pre-publication qualification cleanup now names the complete temporary card
   it owns, and the elected master compares that exact card before deleting the

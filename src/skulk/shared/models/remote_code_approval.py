@@ -130,10 +130,20 @@ def require_remote_code_approval(
             compatibility. It no longer participates in authorization.
 
     Raises:
-        PermissionError: If signed registry truth references mutable executable
-            repository content.
+        PermissionError: If signed registry truth or an operator-added custom
+            card references mutable executable repository content.
     """
     del approved_identities
+    if (
+        card.is_custom
+        and (card.trust_remote_code or card.vision is not None)
+        and card.source_revision is None
+    ):
+        raise PermissionError(
+            f"{MODEL_TRUST_FAILURE_MARKER}: executable custom model card lacks "
+            "an immutable source revision; re-add the model through the "
+            f"operator flow: {card.model_id}"
+        )
     if (
         card.registry_card_id is not None
         and card.vision is not None

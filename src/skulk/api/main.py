@@ -2188,8 +2188,10 @@ class API:
                 "searchable and launchable. An optional gguf_file selects one exact "
                 "quant from a multi-quant GGUF repository. Mutable main is resolved "
                 "once to an immutable commit, and the explicit add action authorizes "
-                "repository code selected by that card. The mutation requires direct "
-                "loopback access or an authenticated operator-gateway credential."
+                "repository code selected by that card. Success waits until the exact "
+                "mutation is ordered and visible in the responding API's catalog. The "
+                "mutation requires direct loopback access or an authenticated "
+                "operator-gateway credential."
             ),
         )(self.add_custom_model)
         self.app.post(
@@ -2200,8 +2202,8 @@ class API:
                 "Persist a complete exact model card supplied by an authenticated "
                 "operator workflow without fetching or regenerating Hub metadata. "
                 "Skulk forces custom-card semantics and removes registry trust "
-                "claims; repository code still requires the card's normal explicit "
-                "model-level approval."
+                "claims; the explicit immutable-card add authorizes its selected "
+                "repository code without a second approval."
             ),
         )(self.add_exact_custom_model_card)
         self.app.delete(
@@ -8774,7 +8776,8 @@ class API:
             HTTPException: If the caller is not an operator or card generation fails.
 
         Side effects:
-            Fetches Hub metadata and broadcasts a persistent custom-card mutation.
+            Fetches Hub metadata, broadcasts a persistent custom-card mutation,
+            and waits for that exact mutation to converge into the local catalog.
         """
         self._require_operator_mutation(request)
         # Load curated truth before generating the override. A generated card
@@ -8793,12 +8796,11 @@ class API:
                 status_code=400, detail=f"Failed to fetch model: {exc}"
             ) from exc
 
+        mutation = AddCustomModelCard(model_card=card)
         await self.command_sender.send(
-            ForwarderCommand(
-                origin=self._system_id,
-                command=AddCustomModelCard(model_card=card),
-            )
+            ForwarderCommand(origin=self._system_id, command=mutation)
         )
+        await self._wait_for_exact_custom_card_convergence(card, mutation.command_id)
 
         return self._model_list_entry(card.model_copy(update={"is_custom": True}))
 

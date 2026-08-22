@@ -404,7 +404,7 @@ The system uses event sourcing for state management:
 - `src/skulk/shared/models/`: persisted model metadata and capability resolution
   - `model_cards.py`: declarative model cards plus remote-first signed-catalog loading; `ModelCard.load` is catalog-only so API reads and launches cannot implicitly authorize an unknown Hub repository, while trusted local tools opt into `load_or_fetch_from_hf`; registry artifact aliases are distinct from `source_repository`, bundled cards are transition fallback, and custom cards remain final overrides
   - `registry.py`: python-tuf client, embedded root trust, serialized 60-second refresh, and hash-bound last-known-good catalog
-  - `remote_code_approval.py`: repository-code authorization and immutable execution checks; signed publication, explicit addition, or bundled distribution authorizes the exact pinned card regardless of evidence provenance, while installed artifact identity remains independently verified
+  - `remote_code_approval.py`: repository-code authorization and immutable execution checks; signed publication, explicit addition, or bundled distribution authorizes the exact pinned card regardless of evidence provenance, legacy executable custom cards without immutable revisions fail closed until re-added, and installed artifact identity remains independently verified
   - `capabilities.py`: normalized runtime capability profiles derived from model cards plus conservative family defaults
 - `src/skulk/operator/`: stable operator identity, deterministic quorum
   certification, crash-fault consensus and recovery, bounded dormant proposal
@@ -515,7 +515,8 @@ never a placement axis. Placement still
 applies open backend preferences, locality, and capacity ranking adaptively, and
 the store plus runner remain final enforcement boundaries.
 Ordinary custom-card creation requires direct loopback or the
-authenticated operator gateway's write scope. Exact pre-publication
+authenticated operator gateway's write scope and waits for its exact ordered
+catalog mutation before acknowledging success. Exact pre-publication
 qualification may instead use `SKULK_EXACT_CARD_QUALIFICATION_TOKEN`; only
 `POST /models/add-card` and server-marked `qualification_only` custom-card
 cleanup accept it. Cleanup supplies the complete original candidate and the

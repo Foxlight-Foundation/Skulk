@@ -1550,8 +1550,12 @@ dashboard and operator API may call this through the normal cluster control
 surface only when the request is direct-loopback or has passed the authenticated
 operator gateway with `operations:write`. The explicit add action authorizes
 repository code selected by that card; there is no second approval step. A
-generated GGUF card is compatible with both llama.cpp
-engines and prefers
+successful response waits for the exact add command to be ordered, persisted,
+and visible in the responding API's catalog, so an immediate download or
+placement cannot race catalog convergence. Historical executable custom cards
+that lack an immutable source revision fail closed after upgrade; re-adding the
+model resolves and persists a pinned revision. A generated GGUF card is
+compatible with both llama.cpp engines and prefers
 the served `llama_server` tags, so on a node running llama-server it gets
 that engine's concurrency slots and is eligible for multi-node pooling via
 RPC; nodes without a served binary fall through to the in-process engine.

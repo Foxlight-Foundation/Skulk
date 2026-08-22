@@ -105,6 +105,22 @@ def test_explicitly_added_card_is_authorized_by_addition() -> None:
     require_remote_code_approval(changed, frozenset())
 
 
+def test_legacy_unpinned_executable_custom_card_is_blocked() -> None:
+    """Upgrade cannot turn a mutable historical custom card into authorization."""
+    card = _registry_card().model_copy(
+        update={
+            "source_revision": None,
+            "registry_card_id": None,
+            "registry_snapshot_id": None,
+            "registry_provenance": None,
+            "is_custom": True,
+        }
+    )
+
+    with pytest.raises(PermissionError, match="re-add the model"):
+        require_remote_code_approval(card, frozenset())
+
+
 def test_qualification_ownership_does_not_change_remote_code_identity() -> None:
     """The cleanup marker is platform state, not executable artifact identity."""
     card = _registry_card().model_copy(
