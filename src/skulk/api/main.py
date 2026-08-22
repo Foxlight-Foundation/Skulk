@@ -347,6 +347,7 @@ from skulk.shared.models.model_cards import (
     get_model_engine_support,
     preserve_generated_card_constraints,
     record_custom_card_mutation_applied,
+    same_authorized_model_card,
 )
 from skulk.shared.models.registry import RegistryAdvisory
 from skulk.shared.models.remote_code_approval import (
@@ -10306,7 +10307,9 @@ class API:
         authorized_card = await self._load_authorized_model_card(
             payload.shard_metadata.model_card.model_id
         )
-        if payload.shard_metadata.model_card != authorized_card:
+        if not same_authorized_model_card(
+            payload.shard_metadata.model_card, authorized_card
+        ):
             raise HTTPException(
                 status_code=409,
                 detail=(

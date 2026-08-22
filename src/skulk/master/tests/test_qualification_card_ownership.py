@@ -314,6 +314,55 @@ def test_quick_placement_rejects_card_replaced_before_master_order(
         master._require_ordered_place_instance_card(command)  # pyright: ignore[reportPrivateUsage]
 
 
+def test_quick_placement_accepts_same_card_from_new_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Snapshot publication provenance cannot invalidate unchanged card truth."""
+    _hide_signed_registry(monkeypatch)
+    original = _card("org/model").model_copy(
+        update={
+            "is_custom": False,
+            "registry_card_id": f"card_{'a' * 52}",
+            "registry_snapshot_id": "snapshot-old",
+        }
+    )
+    republished = original.model_copy(
+        update={"registry_snapshot_id": "snapshot-new"}
+    )
+    master = _master()
+    master._ordered_model_cards[original.model_id] = republished  # pyright: ignore[reportPrivateUsage]
+
+    master._require_ordered_place_instance_card(  # pyright: ignore[reportPrivateUsage]
+        PlaceInstance(
+            model_card=original,
+            sharding=Sharding.Pipeline,
+            instance_meta=InstanceMeta.MlxRing,
+            min_nodes=1,
+        )
+    )
+
+
+def test_deleted_custom_override_rehydrates_non_custom_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Master accepts fallback truth after local deletion convergence."""
+    _hide_signed_registry(monkeypatch)
+    custom = _card("org/model")
+    fallback = custom.model_copy(update={"is_custom": False})
+    current: dict[ModelId, ModelCard | None] = {custom.model_id: custom}
+    monkeypatch.setattr(master_main, "get_card", current.get)
+    master = _master()
+
+    assert master._ordered_model_card(custom.model_id) == custom  # pyright: ignore[reportPrivateUsage]
+    event = master._order_custom_model_card_delete(  # pyright: ignore[reportPrivateUsage]
+        DeleteCustomModelCard(model_id=custom.model_id)
+    )
+    assert event is not None
+
+    current[custom.model_id] = fallback
+    assert master._ordered_model_card(custom.model_id) == fallback  # pyright: ignore[reportPrivateUsage]
+
+
 def test_exact_placement_rejects_card_deleted_before_master_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

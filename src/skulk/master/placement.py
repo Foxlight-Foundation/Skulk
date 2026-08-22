@@ -30,6 +30,7 @@ from skulk.shared.models.model_cards import (
     ModelId,
     card_serves_speech,
     registry_supported_backends_for_node,
+    same_authorized_model_card,
 )
 from skulk.shared.models.remote_code_approval import (
     remote_code_approval_required,
@@ -493,7 +494,7 @@ def require_instance_model_card_identity(
             f"{expected_model_id} resolved to {authorized_card.model_id}."
         )
     if any(
-        shard.model_card != authorized_card
+        not same_authorized_model_card(shard.model_card, authorized_card)
         for shard in instance.shard_assignments.runner_to_shard.values()
     ):
         raise PlacementModelCardIdentityError(

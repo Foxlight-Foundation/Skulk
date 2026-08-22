@@ -58,6 +58,8 @@ This project records release notes here and mirrors public-facing notes in
   the operator deletes the custom card.
   The low-level explicit-download endpoint now requires operator authority and
   rejects shard cards that do not exactly match authorized catalog truth.
+  Authorization comparison ignores only the signed snapshot publication stamp,
+  and the master restores non-custom fallback truth after override deletion.
   Signed-card, revision, installed-sidecar, and artifact-manifest verification
   still fail closed.
 

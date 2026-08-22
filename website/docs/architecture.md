@@ -529,7 +529,10 @@ only the durable custom-card definition keeps an unsigned model selectable; a
 deleted custom card therefore cannot be recreated from retained model bytes.
 The low-level explicit-download route is operator-authenticated and compares
 its embedded shard card with the same authorized catalog before admitting bytes
-to a node.
+to a node. Exact comparison ignores only the TUF snapshot publication stamp;
+all executable, source, artifact, runtime, and capability truth still matches.
+After a custom override is deleted and local catalog application converges, the
+master rehydrates the effective non-custom fallback for subsequent placements.
 Custom-card creation accepts only a direct loopback request or an authenticated
 operator-gateway request with write scope; successful gateway validation is
 carried to the canonical route in the ASGI scope rather than through a

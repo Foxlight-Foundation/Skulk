@@ -716,6 +716,27 @@ def get_card(model_id: ModelId) -> "ModelCard | None":
     return _card_cache.get(model_id)
 
 
+def same_authorized_model_card(candidate: "ModelCard", authorized: "ModelCard") -> bool:
+    """Compare complete card truth while ignoring its publication snapshot.
+
+    A signed card can appear unchanged in multiple TUF snapshots. The snapshot
+    stamp proves where that already-immutable card was observed but is not part
+    of its executable or artifact identity. Every other field remains part of
+    authorization comparison, so copying a card ID onto altered content fails.
+
+    Args:
+        candidate: Card embedded by a placement or download request.
+        authorized: Effective card selected from trusted local catalog state.
+
+    Returns:
+        ``True`` only when all card fields other than ``registry_snapshot_id``
+        match exactly.
+    """
+    return candidate.model_dump(exclude={"registry_snapshot_id"}) == (
+        authorized.model_dump(exclude={"registry_snapshot_id"})
+    )
+
+
 def same_model_artifact(existing: "ModelCard", expected: "ModelCard") -> bool:
     """Return whether two cards identify the same downloadable artifact.
 
