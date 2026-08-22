@@ -3,7 +3,12 @@ from typing import Any, cast
 
 from mlx_lm.tokenizer_utils import TokenizerWrapper
 
-from skulk.api.types import ToolCallItem
+from skulk.api.types import (
+    CompletionTokensDetails,
+    PromptTokensDetails,
+    ToolCallItem,
+    Usage,
+)
 from skulk.shared.models.model_cards import (
     ModelCard,
     ModelTask,
@@ -755,3 +760,39 @@ class TestFamilyParsersHonourOfferedTools:
             item.text for item in results if isinstance(item, GenerationResponse)
         )
         assert "get_weather" in text
+
+    def test_several_rejected_calls_stay_readable_and_keep_accounting(self) -> None:
+        # Concatenating the rendered calls without a separator produced text a
+        # caller could not read back, and the fabricated fallback threw away
+        # the accounting the rejected response carried.
+        usage = Usage(
+            prompt_tokens=7,
+            completion_tokens=3,
+            total_tokens=10,
+            prompt_tokens_details=PromptTokensDetails(cached_tokens=0),
+            completion_tokens_details=CompletionTokensDetails(reasoning_tokens=0),
+        )
+
+        def source() -> Generator[GenerationResponse | ToolCallResponse | None]:
+            yield ToolCallResponse(
+                tool_calls=[ToolCallItem(name="first", arguments="{}")],
+                usage=None,
+                stats=None,
+            )
+            yield ToolCallResponse(
+                tool_calls=[ToolCallItem(name="second", arguments="{}")],
+                usage=usage,
+                stats=None,
+            )
+
+        results = [
+            item
+            for item in reject_unoffered_tool_calls(source(), None)
+            if item is not None
+        ]
+        assert len(results) == 1
+        final = results[0]
+        assert isinstance(final, GenerationResponse)
+        assert final.text.count("\n") == 1
+        assert "first" in final.text and "second" in final.text
+        assert final.usage == usage

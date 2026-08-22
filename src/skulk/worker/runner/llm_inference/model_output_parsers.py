@@ -710,6 +710,7 @@ def reject_unoffered_tool_calls(
 
     template: GenerationResponse | None = None
     pending_text = ""
+    rejected: ToolCallResponse | None = None
     for response in responses:
         if response is None:
             yield None
@@ -723,10 +724,16 @@ def reject_unoffered_tool_calls(
             # streams usually carry a terminal chunk after the call, and adding
             # a second terminal would end the stream at the consumer before the
             # real one arrives. If none follows, it is released at the end.
-            pending_text += "\n".join(
+            rendered = [
                 json.dumps({"name": call.name, "arguments": call.arguments})
                 for call in response.tool_calls
+            ]
+            # Separated, so several rejected calls in a row do not run together
+            # into text a caller cannot read back.
+            pending_text = "\n".join(
+                part for part in [pending_text, *rendered] if part
             )
+            rejected = response
             continue
         template = response
         if pending_text:
@@ -741,6 +748,8 @@ def reject_unoffered_tool_calls(
             continue
         yield response
     if pending_text:
+        # The rejected response's accounting is the message's accounting, so it
+        # is carried rather than replaced with a fabricated empty one.
         base = template or GenerationResponse(text="", token=0, usage=None)
         yield base.model_copy(
             update={
@@ -748,6 +757,8 @@ def reject_unoffered_tool_calls(
                 "token": 0,
                 "is_thinking": False,
                 "finish_reason": "stop",
+                "usage": rejected.usage if rejected is not None else base.usage,
+                "stats": rejected.stats if rejected is not None else base.stats,
             }
         )
 
