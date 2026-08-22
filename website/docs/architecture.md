@@ -256,7 +256,7 @@ client's own timeout.
 
 Instance failure is retained separately from the request that happened to
 expose it. A worker that gives up after repeated runner crashes, a wedge, an
-unresponsive spawn, or a model-trust rejection sends `FailInstance` instead of
+unresponsive spawn, or an immutable model-identity rejection sends `FailInstance` instead of
 an ordinary delete. The master emits `InstanceFailureRecorded` while the
 placement still exists and only then emits `InstanceDeleted`. Node-loss and
 terminal placement-recovery paths do the same. `State.instance_failures` keeps
@@ -500,27 +500,46 @@ check when it must use its node-local fallback. See the
 [AMD Strix Halo nodes](./amd-strix-halo-nodes.md) guide for bringing up a
 non-Mac node.
 
-Model trust is resolved before that admission pass. A revision-pinned
-Foxlight-provenance registry card is already Foxlight's exact trust decision.
-Agent/community registry cards and custom or unsigned cards that can execute
-repository code require one operator approval for their immutable card identity
-in cluster Settings. Approval and revocation are commands serialized by the
-elected master into indexed `ModelTrustApprovalChanged` events and replicated
-`State`; API and worker consumers persist the resulting complete set locally
-for runner startup and offline recovery. Generic config snapshots deliberately
-omit `model_trust`, preventing concurrent API nodes or unrelated Settings saves
-from replacing newer decisions. The same decision therefore reaches the
-canonical store and every serving node without making trust a placement axis.
-After approval, the planner applies backend preference, locality, and capacity
-normally and may fall through among any admissible candidates.
-Trust mutations and custom-card creation accept only a direct loopback request
-or an authenticated operator-gateway request with write scope; successful
-gateway validation is carried to the canonical route in the ASGI scope rather
-than through a caller-spoofable header. Secret-stripped config convergence
-merges each recipient's local Hugging Face token and retains its state-derived
-model-trust copy before atomically replacing its owner-only config file.
-`GET /instance/previews` explains a missing model decision without reserving a
-placement; `POST /place_instance` re-evaluates current facts at launch.
+Model authorization is resolved before that admission pass without a second
+approval ceremony. Publishing a revision-pinned signed registry card authorizes
+the exact repository content selected by that card regardless of whether its
+evidence provenance is Foxlight, agent, or community. Explicit model addition
+is the corresponding operator decision for a custom card; when the caller omits
+a revision, Skulk resolves `main` once and persists the immutable Hub commit.
+The add response waits for its exact ordered mutation to appear in the local
+catalog before acknowledging success. Historical executable custom cards with
+no immutable revision are not grandfathered into this authorization model;
+they fail closed until an operator re-adds them and thereby pins current truth.
+Bundled cards are authorized by the Skulk release that ships them. The planner
+therefore applies backend preference, locality, and capacity normally without a
+trust-based node or model filter. Historical `model_trust` configuration and
+approval endpoints remain inert compatibility surfaces for rolling upgrades.
+Card lookup is deliberately non-mutating: read and launch paths may refresh the
+signed registry but never synthesize or persist an unknown Hugging Face card.
+Only the authenticated add endpoints cross that boundary. A caller-specified
+exact placement must also reproduce the effective local catalog card byte for
+byte across its shard assignments; matching an alias alone cannot substitute
+caller-selected executable content. The elected master repeats that exact-card
+comparison against its command-ordered card view immediately before accepting
+either a quick or caller-specified exact placement, so a concurrent card
+replacement or deletion wins before stale repository code can launch.
+Bundled fallback cards that execute repository code require an immutable source
+revision. Installed custom-card sidecars remain artifact-integrity records, but
+only the durable custom-card definition keeps an unsigned model selectable; a
+deleted custom card therefore cannot be recreated from retained model bytes.
+Separately hosted processor, vision-weight, assistant, MTP, and speculative
+draft repositories require their own immutable companion revisions for signed,
+custom, and bundled cards alike.
+The low-level explicit-download route is operator-authenticated and compares
+its embedded shard card with the same authorized catalog before admitting bytes
+to a node. Exact comparison ignores only the TUF snapshot publication stamp;
+all executable, source, artifact, runtime, and capability truth still matches.
+Custom-card creation accepts only a direct loopback request or an authenticated
+operator-gateway request with write scope; successful gateway validation is
+carried to the canonical route in the ASGI scope rather than through a
+caller-spoofable header. Secret-stripped config convergence retains each
+recipient's local Hugging Face token before atomically replacing its owner-only
+config file. `POST /place_instance` re-evaluates current facts at launch.
 
 For GGUF text models the bundled cards use that preference order deliberately:
 they list both llama.cpp engines as compatible but rank the served
@@ -1338,43 +1357,31 @@ verification and recommendation policy rather than global catalog existence.
 Catalog provenance (`foxlight`, `agent`, or `community`) is signed metadata and
 does not participate in the content-derived `registry_card_id`.
 
-Repository-code trust follows the card's provenance. A TUF-verified, immutable,
-full-revision-pinned card with `registry_provenance=foxlight` is Foxlight's trust
-decision for that exact artifact and runs without a redundant operator
-approval. Agent/community registry cards and unsigned or custom cards remain
-blocked before download and runner load until their exact immutable trust
-identity appears in cluster `model_trust` Settings. Signed cards use
-`registry_card_id`; unsigned/custom cards use a digest of the complete effective
-card, so a changed revision or card definition must be approved again. Registry
-vision cards follow the same policy while the MLX processor path contains
-loaders that enable repository code internally; that is platform truth and does
-not rewrite the artifact card. These explicit decisions flow through the
-master's command/event log rather than replaceable config synchronization;
-failover state seeding carries them into the next master session and each node
-atomically persists the replicated set. The worker also gates runner creation
-and model loading directly against replicated State, so a failed local config
-write cannot leave a revoked identity launchable from stale YAML.
+Repository-code authorization follows the card's entry path, not provenance or
+vision capability. Every immutable card in a TUF-verified signed publication is
+authorized for the exact revision and files it selects; provenance remains
+evidence metadata. An explicit operator add authorizes the resulting custom
+card, and ordinary Hugging Face additions resolve mutable `main` to a full
+commit before metadata compilation. The MLX vision processor path may enable
+repository code internally, but vision capability alone no longer creates a
+separate permission prompt.
 When a card names any separately hosted companion—vision weights or processor,
 an MTP sidecar, an assistant model, or a served-engine/vLLM draft—its signed
 content must also name that repository's full immutable revision. Every download
 and loader receives the corresponding pin; a companion in the base artifact
-repository inherits `source_revision`. Approval therefore authorizes immutable
+repository inherits `source_revision`. The card therefore authorizes immutable
 processor code, not whatever its repository serves later, and qualification
 continues to identify exact companion bytes. Immediately before load, a runner
 rechecks that a signed card's installed sidecar, repository, revision marker,
-selected file, and manifest all identify that card. A deterministic trust
-denial reports `RunnerFailed` and tears down the instance without retrying the
-unchanged generation.
-The model-by-model decision is editable in dashboard Settings and travels as a
-master-indexed event. Ordinary cluster-config snapshots explicitly omit trust
-so a stale settings write cannot replace that ordered decision. A worker
-requesting a canonical-store download forwards the immutable card ID; the store
-host verifies it against its own signed catalog and applies the same converged
-trust policy before fetching bytes. Only immutable Foxlight provenance grants
-automatic trust; registry publication with agent or community provenance cannot
-do so.
+selected file, and manifest all identify that card. A deterministic identity
+failure reports `RunnerFailed` and tears down the instance without retrying the
+unchanged generation. A worker requesting a canonical-store download forwards
+the immutable card ID; the store host verifies it against its own signed catalog
+before fetching bytes. Installed-card sidecars, revision markers, selected
+files, manifests, and bundle identities remain independent integrity checks and
+are never weakened by execution authorization.
 
-Model discovery feeds this card system. `GET /models/search` searches Hugging Face repositories, and `POST /models/add` builds a custom card from repository metadata, detecting GGUF repositories (which `mlx-lm` cannot load) and giving them a llama.cpp card instead of the MLX default. `POST /models/add-card` is the narrower exact-card operator boundary: it accepts an already compiled immutable card, retains its bundle and artifact pins, strips registry identity and provenance, and persists it under unsigned custom trust. Registry qualification uses that path before publication, then exercises the normal store, placement, runner, and cleanup lifecycle without manufacturing a private signing channel. Hugging Face's search indexes repository metadata, not file manifests, so a pasted GGUF filename can come back empty even when the file exists somewhere on the Hub. Filename-shaped queries therefore get a bounded fallback: Skulk progressively broadens the model-name prefix, inspects a capped set of candidate repositories' file manifests, keeps only repositories containing the exact basename, and returns the matched repo-relative path alongside each result. Adding such a result pins that exact quant file on the generated card instead of applying the default quant preference, and the pin is honored end to end: the store download request names the pinned file, a staged directory that lacks the pinned quant (or its complete shard group) is not treated as a cache hit, and the store recovers a missing selected file before staging.
+Model discovery feeds this card system. `GET /models/search` searches Hugging Face repositories, and `POST /models/add` resolves the repository to an immutable commit and builds a custom card from its metadata, detecting GGUF repositories (which `mlx-lm` cannot load) and giving them a llama.cpp card instead of the MLX default. The ordinary add waits for command-correlated catalog convergence before acknowledging success. `POST /models/add-card` is the narrower exact-card operator boundary: it accepts an already compiled immutable card, retains its bundle and artifact pins, strips registry identity and provenance, and persists it as operator-authorized custom truth. Registry qualification uses that path before publication, then exercises the normal store, placement, runner, and cleanup lifecycle without manufacturing a private signing channel. Hugging Face's search indexes repository metadata, not file manifests, so a pasted GGUF filename can come back empty even when the file exists somewhere on the Hub. Filename-shaped queries therefore get a bounded fallback: Skulk progressively broadens the model-name prefix, inspects a capped set of candidate repositories' file manifests, keeps only repositories containing the exact basename, and returns the matched repo-relative path alongside each result. Adding such a result pins that exact quant file on the generated card instead of applying the default quant preference, and the pin is honored end to end: the store download request names the pinned file, a staged directory that lacks the pinned quant (or its complete shard group) is not treated as a cache hit, and the store recovers a missing selected file before staging.
 
 Headless registry automation authenticates that temporary exact-card lifecycle
 with one high-entropy `SKULK_EXACT_CARD_QUALIFICATION_TOKEN` shared with Scout.

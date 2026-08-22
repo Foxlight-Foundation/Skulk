@@ -347,6 +347,7 @@ from skulk.shared.models.model_cards import (
     get_model_engine_support,
     preserve_generated_card_constraints,
     record_custom_card_mutation_applied,
+    same_authorized_model_card,
 )
 from skulk.shared.models.registry import RegistryAdvisory
 from skulk.shared.models.remote_code_approval import (
@@ -2042,7 +2043,8 @@ class API:
                 "Create an instance from an already computed placement object "
                 "when you want exact control instead of Skulk picking the "
                 "placement. Every embedded shard card must identify the same "
-                "model alias as the assignment and satisfy current cluster trust."
+                "model alias as the assignment and exactly match the effective "
+                "card already present in the authorized local catalog."
             ),
         )(self.create_instance)
         self.app.post(
@@ -2081,6 +2083,9 @@ class API:
                 "several open backend tags in preference order; the planner filters current "
                 "trust, engine/build, topology, and capacity blockers before ranking and "
                 "automatically falls through to the next launchable candidate. Placement "
+                "accepts only models already present through signed publication, bundled "
+                "distribution, or an authenticated add; it never discovers an unknown "
+                "Hugging Face repository as a side effect. "
                 "failures retain a readable error message and expose a stable category in the "
                 "X-Skulk-Placement-Failure response header."
             ),
@@ -2138,44 +2143,42 @@ class API:
                 "OpenAI-style listing of Skulk's effective model catalog rather "
                 "than only running instances. Entries distinguish the active "
                 "installed generation from current signed registry truth and "
-                "report updates, verification, advisories, and cluster model trust."
+                "report updates, verification, advisories, and repository-code "
+                "authorization provenance."
             ),
         )(self.get_models)
         self.app.get(
             "/models/remote-code-approvals",
             tags=["Models"],
-            summary="List cluster model-code approvals",
+            summary="List legacy model-code approvals",
             description=(
-                "Lists immutable model-card identities the operator has approved "
-                "to execute repository Python across the cluster."
+                "Deprecated compatibility endpoint for approvals stored before "
+                "model publication and explicit addition became the repository-"
+                "code authorization boundaries. Returned identities are inert."
             ),
+            deprecated=True,
         )(self.list_remote_code_approvals)
         self.app.post(
             "/models/remote-code-approvals/{card_id}",
             tags=["Models"],
-            summary="Approve model repository code for the cluster",
+            summary="Approve model repository code (deprecated)",
             description=(
-                "Approves one exact signed-registry or content-derived custom-card "
-                "identity for download and execution across the cluster. The elected "
-                "master serializes the decision into replicated State; every node "
-                "then persists its local runner-facing copy. Success is returned "
-                "only after this API applies the indexed decision. "
-                "The mutation requires direct loopback access or an authenticated "
-                "operator-gateway credential."
+                "Deprecated compatibility endpoint. Valid signed registry cards "
+                "are authorized by publication and explicitly added models are "
+                "authorized by the add action, so current cards reject redundant "
+                "approval with HTTP 409."
             ),
+            deprecated=True,
         )(self.approve_remote_code)
         self.app.delete(
             "/models/remote-code-approvals/{card_id}",
             tags=["Models"],
-            summary="Revoke cluster model repository-code approval",
+            summary="Remove a legacy model repository-code approval",
             description=(
-                "Revokes the operator's cluster-wide approval for one immutable "
-                "model-card identity. Existing processes are not killed, but future "
-                "downloads and runner starts fail closed. Success is returned only "
-                "after this API applies the master-indexed decision. The mutation "
-                "requires direct "
-                "loopback access or an authenticated operator-gateway credential."
+                "Removes an inert approval retained from an older deployment. "
+                "This does not revoke a published or explicitly added model."
             ),
+            deprecated=True,
         )(self.revoke_remote_code)
         self.app.post(
             "/models/add",
@@ -2184,10 +2187,12 @@ class API:
             description=(
                 "Add a custom model card to Skulk's model catalog so it becomes "
                 "searchable and launchable. An optional gguf_file selects one exact "
-                "quant from a multi-quant GGUF repository. Cards that can execute "
-                "repository code remain blocked until the operator approves their "
-                "exact identity in cluster Settings. The mutation requires direct "
-                "loopback access or an authenticated operator-gateway credential."
+                "quant from a multi-quant GGUF repository. Mutable main is resolved "
+                "once to an immutable commit, and the explicit add action authorizes "
+                "repository code selected by that card. Success waits until the exact "
+                "mutation is ordered and visible in the responding API's catalog. The "
+                "mutation requires direct loopback access or an authenticated "
+                "operator-gateway credential."
             ),
         )(self.add_custom_model)
         self.app.post(
@@ -2198,8 +2203,8 @@ class API:
                 "Persist a complete exact model card supplied by an authenticated "
                 "operator workflow without fetching or regenerating Hub metadata. "
                 "Skulk forces custom-card semantics and removes registry trust "
-                "claims; repository code still requires the card's normal explicit "
-                "model-level approval."
+                "claims; the explicit immutable-card add authorizes its selected "
+                "repository code without a second approval."
             ),
         )(self.add_exact_custom_model_card)
         self.app.delete(
@@ -2260,6 +2265,10 @@ class API:
             "/v1/embeddings",
             tags=["Compatibility APIs"],
             summary="Generate embeddings",
+            description=(
+                "Generate embeddings with an already-cataloged, placed model that "
+                "declares TextEmbedding. Unknown or unplaced models return 404."
+            ),
         )(self.embeddings)
         self.app.post(
             "/v1/audio/speech",
@@ -2325,6 +2334,10 @@ class API:
             response_model=None,
             tags=["Images"],
             summary="Generate images",
+            description=(
+                "Generate images with an already-cataloged, placed image model. "
+                "Unknown or unplaced models return 404."
+            ),
         )(self.image_generations)
         self.app.post(
             "/bench/images/generations",
@@ -2492,7 +2505,10 @@ class API:
             "/download/start",
             tags=["Downloads"],
             summary="Start a node download",
-            description="Start a low-level node download for a specific shard on a specific node.",
+            description=(
+                "Start a low-level node download for an exact authorized catalog "
+                "card. Requires loopback or authenticated operator access."
+            ),
         )(self.start_download)
         self.app.delete(
             "/download/{node_id}/{model_id:path}",
@@ -2802,9 +2818,8 @@ class API:
             summary="Update cluster config",
             description=(
                 "Update cluster-wide config. Some changes apply to future launches immediately, "
-                "while model-store location changes still require a restart. model_trust is not "
-                "replaceable through this snapshot endpoint; authenticated operators must use "
-                "the dedicated master-ordered remote-code approval endpoints."
+                "while model-store location changes still require a restart. The deprecated "
+                "model_trust compatibility field is preserved but cannot be replaced."
             ),
         )(self.update_config)
         self.app.get(
@@ -2979,9 +2994,28 @@ class API:
             ),
         )(self.get_remote_access)
 
+    @staticmethod
+    async def _load_authorized_model_card(model_id: ModelId) -> ModelCard:
+        """Return catalog truth without turning lookup into model authorization.
+
+        Args:
+            model_id: Exact selectable alias requested by an API caller.
+
+        Returns:
+            The signed, bundled, installed, or explicitly added model card.
+
+        Raises:
+            HTTPException: With status 404 when the alias is not authorized in
+                the local catalog.
+        """
+        try:
+            return await ModelCard.load(model_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
     async def place_instance(self, payload: PlaceInstanceParams):
         command = PlaceInstance(
-            model_card=await ModelCard.load(payload.model_id),
+            model_card=await self._load_authorized_model_card(payload.model_id),
             sharding=payload.sharding,
             instance_meta=payload.instance_meta,
             min_nodes=payload.min_nodes,
@@ -3077,9 +3111,11 @@ class API:
                     "be created through this endpoint"
                 ),
             )
-        model_card = await ModelCard.load(instance.shard_assignments.model_id)
+        model_card = await self._load_authorized_model_card(
+            instance.shard_assignments.model_id
+        )
         try:
-            require_instance_model_card_identity(instance)
+            require_instance_model_card_identity(instance, model_card)
             require_instance_model_code_approval(
                 instance,
                 self._cluster_remote_code_approvals(),
@@ -3118,7 +3154,7 @@ class API:
         instance_meta: InstanceMeta = InstanceMeta.MlxRing,
         min_nodes: int = 1,
     ) -> Instance:
-        model_card = await ModelCard.load(model_id)
+        model_card = await self._load_authorized_model_card(model_id)
 
         try:
             placements = get_instance_placements(
@@ -3178,20 +3214,14 @@ class API:
             return PlacementPreviewResponse(previews=[])
 
         try:
-            model_card = await ModelCard.load(model_id)
+            model_card = await self._load_authorized_model_card(model_id)
+        except HTTPException:
+            raise
         except Exception as exc:
             raise HTTPException(
                 status_code=400, detail=f"Failed to load model card: {exc}"
             ) from exc
-        trust_identity = remote_code_trust_identity(model_card)
-        trust_requirement = (
-            "Repository code requires cluster operator approval for immutable "
-            f"model-card identity {trust_identity}. Open Settings and approve "
-            "this model before placing it."
-            if remote_code_execution_requires_approval(model_card)
-            and trust_identity not in self._cluster_remote_code_approvals()
-            else None
-        )
+        trust_requirement = None
         matching_engine_support = get_model_engine_support(model_card)
         supported_claim_ids = [
             claim.claim_id
@@ -5195,7 +5225,7 @@ class API:
                 card = self._model_card_for_instance(instance)
                 if card is not None:
                     return card
-        return await ModelCard.load(model_id)
+        return await self._load_authorized_model_card(model_id)
 
     @staticmethod
     def _model_card_for_instance(instance: Instance) -> ModelCard | None:
@@ -5222,7 +5252,7 @@ class API:
 
         Raises HTTPException 404 if no instance is found for the model.
         """
-        model_card = await ModelCard.load(model)
+        model_card = await self._load_authorized_model_card(model)
         resolved_model = model_card.model_id
         if not any(
             instance.shard_assignments.model_id == resolved_model
@@ -5241,7 +5271,7 @@ class API:
         """
         from skulk.shared.models.model_cards import ModelTask
 
-        model_card = await ModelCard.load(model_id)
+        model_card = await self._load_authorized_model_card(model_id)
         resolved = model_card.model_id
         if ModelTask.TextEmbedding not in model_card.tasks:
             raise HTTPException(
@@ -8182,7 +8212,8 @@ class API:
 
         Args:
             card: Effective catalog card exposed by the API.
-            approved_remote_code_card_ids: Cluster-wide remote-code approvals.
+            approved_remote_code_card_ids: Deprecated approvals accepted for
+                compatibility with older callers; current entries ignore them.
             installed_record: Authoritative central-store generation when one
                 exists. When omitted, the node-local installed-card cache keeps
                 air-gapped and store-unreachable operation self-describing.
@@ -8513,7 +8544,7 @@ class API:
         return ModelList(data=entries)
 
     async def list_remote_code_approvals(self) -> list[RemoteCodeApprovalView]:
-        """List immutable model-card identities approved across the cluster."""
+        """List inert model-code approvals retained for API compatibility."""
         return [
             RemoteCodeApprovalView(
                 card_id=card_id,
@@ -8610,21 +8641,23 @@ class API:
     async def approve_remote_code(
         self, card_id: str, request: Request
     ) -> RemoteCodeApprovalView:
-        """Persist approval for one immutable model card across the cluster.
+        """Reject redundant approval for an already authorized model card.
 
         Args:
             card_id: Signed card ID or content-derived local card identity.
             request: Incoming request proving a local or authenticated operator.
 
         Returns:
-            The cluster approval view for the newly approved card.
+            This endpoint has no successful response for current cards.
 
         Raises:
             HTTPException: If the caller is not an operator, the identifier is
-                malformed or unknown, or the card needs no repository-code approval.
+                malformed or unknown, or the card is already authorized by its
+                publication/addition boundary.
 
         Side effects:
-            Submits the decision for serialization in the master's event log.
+            None for current cards. Legacy callers receive an explicit conflict
+            instead of creating a meaningless new allow-list entry.
         """
         self._require_operator_mutation(request)
         if not re.fullmatch(r"(?:card|local)_[a-z2-7]{52}", card_id):
@@ -8654,7 +8687,7 @@ class API:
     async def revoke_remote_code(
         self, card_id: str, request: Request
     ) -> RemoteCodeApprovalView:
-        """Persist revocation for one immutable model card across the cluster.
+        """Remove an inert legacy approval from replicated cluster state.
 
         Args:
             card_id: Signed card ID or content-derived local card identity.
@@ -8668,8 +8701,8 @@ class API:
                 malformed.
 
         Side effects:
-            Submits the revocation for serialization in the master's event log,
-            preventing future downloads and runner starts after convergence.
+            Submits cleanup of the legacy replicated value. Publication and
+            explicit addition remain the active authorization boundaries.
         """
         self._require_operator_mutation(request)
         if not re.fullmatch(r"(?:card|local)_[a-z2-7]{52}", card_id):
@@ -8755,7 +8788,8 @@ class API:
             HTTPException: If the caller is not an operator or card generation fails.
 
         Side effects:
-            Fetches Hub metadata and broadcasts a persistent custom-card mutation.
+            Fetches Hub metadata, broadcasts a persistent custom-card mutation,
+            and waits for that exact mutation to converge into the local catalog.
         """
         self._require_operator_mutation(request)
         # Load curated truth before generating the override. A generated card
@@ -8774,12 +8808,11 @@ class API:
                 status_code=400, detail=f"Failed to fetch model: {exc}"
             ) from exc
 
+        mutation = AddCustomModelCard(model_card=card)
         await self.command_sender.send(
-            ForwarderCommand(
-                origin=self._system_id,
-                command=AddCustomModelCard(model_card=card),
-            )
+            ForwarderCommand(origin=self._system_id, command=mutation)
         )
+        await self._wait_for_exact_custom_card_convergence(card, mutation.command_id)
 
         return self._model_list_entry(card.model_copy(update={"is_custom": True}))
 
@@ -10255,8 +10288,35 @@ class API:
         )
 
     async def start_download(
-        self, payload: StartDownloadParams
+        self, payload: StartDownloadParams, request: Request
     ) -> StartDownloadResponse:
+        """Start one exact catalog-authorized shard download.
+
+        Args:
+            payload: Target node and shard metadata selected for download.
+            request: Incoming request proving local or authenticated operator access.
+
+        Returns:
+            The command identity after dispatch to the download plane.
+
+        Raises:
+            HTTPException: If the caller lacks operator authority, the model is
+                unknown, or the embedded card differs from catalog truth.
+        """
+        self._require_operator_mutation(request)
+        authorized_card = await self._load_authorized_model_card(
+            payload.shard_metadata.model_card.model_id
+        )
+        if not same_authorized_model_card(
+            payload.shard_metadata.model_card, authorized_card
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Download shard embeds model-card content that does not match "
+                    "the authorized catalog. Refresh model truth and retry."
+                ),
+            )
         command = StartDownload(
             target_node_id=payload.target_node_id,
             shard_metadata=payload.shard_metadata,
@@ -12330,8 +12390,8 @@ class API:
             raise HTTPException(
                 status_code=409,
                 detail=(
-                    "Model trust is master-ordered; use the dedicated "
-                    "/models/remote-code-approvals endpoints"
+                    "model_trust is a deprecated compatibility field and cannot "
+                    "be changed through the current API"
                 ),
             )
         requested_config = dict(config_data)

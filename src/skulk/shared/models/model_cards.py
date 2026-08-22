@@ -476,12 +476,11 @@ def _apply_installed_card_snapshot(
         _installed_current_registry_ids[model_id] = (
             current_card.registry_card_id if current_card is not None else None
         )
-        if record.model_card.qualification_only:
-            # Qualification downloads remain durable, self-describing store/cache
-            # artifacts after cleanup, but their unsigned temporary card must be
-            # supplied by the lifecycle-owned custom TOML.  Once that file is
-            # removed, an installed sidecar cannot resurrect the temporary card
-            # or shadow a later signed registry card.
+        if record.model_card.is_custom:
+            # Installed custom bytes remain durable and self-describing, but the
+            # custom TOML is the authorization record that makes them selectable.
+            # Once an operator deletes that record, its retained artifact sidecar
+            # must not resurrect the card or shadow registry/bundled truth.
             if existing == record.model_card:
                 _card_cache.pop(model_id, None)
             continue
@@ -533,11 +532,10 @@ def register_installed_card_record(record: "InstalledCardRecord") -> None:
     _installed_current_registry_ids[model_id] = (
         current_card.registry_card_id if current_card is not None else None
     )
-    if record.model_card.qualification_only:
-        # The lifecycle-owned custom TOML is the sole authority that makes an
-        # unsigned qualification card visible.  Retain its installed sidecar
-        # for offline artifact truth, but never let the live download path make
-        # that temporary card independently durable in the model catalog.
+    if record.model_card.is_custom:
+        # The custom TOML is the durable authorization record for every unsigned
+        # card. Retain the installed sidecar for artifact truth, but never let a
+        # download make the card independently durable in the live catalog.
         return
     existing = _card_cache.get(model_id)
     if existing is None or not existing.is_custom or record.verification == "custom":
@@ -716,6 +714,27 @@ def _is_image_card(card: "ModelCard") -> bool:
 def get_card(model_id: ModelId) -> "ModelCard | None":
     """Look up a single model card from the cache by ID."""
     return _card_cache.get(model_id)
+
+
+def same_authorized_model_card(candidate: "ModelCard", authorized: "ModelCard") -> bool:
+    """Compare complete card truth while ignoring its publication snapshot.
+
+    A signed card can appear unchanged in multiple TUF snapshots. The snapshot
+    stamp proves where that already-immutable card was observed but is not part
+    of its executable or artifact identity. Every other field remains part of
+    authorization comparison, so copying a card ID onto altered content fails.
+
+    Args:
+        candidate: Card embedded by a placement or download request.
+        authorized: Effective card selected from trusted local catalog state.
+
+    Returns:
+        ``True`` only when all card fields other than ``registry_snapshot_id``
+        match exactly.
+    """
+    return candidate.model_dump(exclude={"registry_snapshot_id"}) == (
+        authorized.model_dump(exclude={"registry_snapshot_id"})
+    )
 
 
 def same_model_artifact(existing: "ModelCard", expected: "ModelCard") -> bool:
@@ -1764,6 +1783,40 @@ class RuntimeCapabilityCardConfig(CamelCaseModel):
         return OutputParserType(value)
 
 
+async def _resolve_hf_source_revision(
+    model_id: ModelId,
+    source_revision: str | None,
+) -> str:
+    """Resolve a model request to one immutable Hugging Face commit.
+
+    Explicit model addition is the authorization decision for repository
+    content, so it must never silently continue following a mutable branch.
+    Existing full commit inputs are already validated by the API/card schema;
+    omitted revisions resolve ``main`` exactly once before any artifact probe.
+
+    Args:
+        model_id: Hugging Face repository identifier.
+        source_revision: Optional caller-supplied immutable commit.
+
+    Returns:
+        A lowercase 40-character Hub commit.
+
+    Raises:
+        ValueError: If the Hub does not return an immutable commit identity.
+    """
+    if source_revision is not None:
+        return source_revision
+    info = await to_thread.run_sync(lambda: model_info(model_id, revision="main"))
+    resolved_revision = getattr(info, "sha", None)
+    if not isinstance(resolved_revision, str) or re.fullmatch(
+        r"[0-9a-fA-F]{40}", resolved_revision
+    ) is None:
+        raise ValueError(
+            f"Hugging Face did not return an immutable revision for {model_id}"
+        )
+    return resolved_revision.lower()
+
+
 class ModelCard(CamelCaseModel):
     """The persisted, declarative metadata Skulk holds for one model.
 
@@ -2067,11 +2120,52 @@ class ModelCard(CamelCaseModel):
             py = tomlkit.loads(await f.read())
             return ModelCard.model_validate(py)
 
-    # Is it okay that model card.load defaults to network access if the card doesn't exist? do we want to be more explicit here?
     @staticmethod
     async def load(model_id: ModelId) -> "ModelCard":
-        if model_id not in _card_cache:
-            await _refresh_card_cache_if_due()
+        """Load an already-authorized card without discovering new Hub content.
+
+        Args:
+            model_id: Exact selectable model alias already present in the signed,
+                bundled, installed, or operator-added catalog.
+
+        Returns:
+            The effective catalog card for ``model_id``.
+
+        Raises:
+            ValueError: If the alias has not entered the catalog through an
+                authorization boundary.
+
+        Side effects:
+            May refresh signed registry metadata. It never fetches model metadata
+            from Hugging Face or persists an unknown custom card.
+        """
+        await _refresh_card_cache_if_due()
+        if (mc := _card_cache.get(model_id)) is not None:
+            return mc
+
+        raise ValueError(
+            f"Unknown model {model_id}; add it through POST /models/add before use"
+        )
+
+    @staticmethod
+    async def load_or_fetch_from_hf(model_id: ModelId) -> "ModelCard":
+        """Load a known card or explicitly discover and persist one from the Hub.
+
+        This helper is reserved for trusted local tooling. Network APIs must use
+        :meth:`load` so a read or launch request cannot silently become a model
+        authorization mutation.
+
+        Args:
+            model_id: Exact catalog alias or Hugging Face repository identifier.
+
+        Returns:
+            The existing card, or a newly generated immutable custom card.
+
+        Side effects:
+            For an unknown repository, reads bounded Hugging Face metadata and
+            persists the generated card in the custom-card directory.
+        """
+        await _refresh_card_cache_if_due()
         if (mc := _card_cache.get(model_id)) is not None:
             return mc
 
@@ -2100,7 +2194,9 @@ class ModelCard(CamelCaseModel):
             model_id: Hugging Face repository identifier.
             gguf_file: Optional exact repo-relative GGUF path to pin.
             source_revision: Optional immutable Hugging Face commit to inspect
-                and persist on the resulting card.
+                and persist on the resulting card. When omitted, resolve
+                ``main`` once and pin the returned commit before inspecting any
+                artifact metadata.
 
         Returns:
             A custom model card derived from repository metadata.
@@ -2109,11 +2205,14 @@ class ModelCard(CamelCaseModel):
             ValueError: The requested GGUF path is not a weight file in the repo,
                 or a GGUF path is supplied for a non-GGUF repository.
         """
-        # GGUF detection is a best-effort probe: it hits the HF model-info API,
-        # which the safetensors path below does NOT require (it has its own retry
-        # and local-file fallback). A transient/offline/rate-limited probe must
-        # therefore NOT block a safetensors card that could otherwise load from
-        # cache: treat any probe failure as "not proven GGUF" and fall through.
+        source_revision = await _resolve_hf_source_revision(
+            model_id,
+            source_revision,
+        )
+
+        # GGUF detection remains a best-effort probe after immutable revision
+        # resolution. A repository whose manifest cannot prove GGUF falls
+        # through to the safetensors metadata path for that same commit.
         try:
             gguf_files = gguf_weight_siblings(model_id, source_revision)
         except Exception as exc:  # noqa: BLE001  (best-effort probe, see above)
@@ -2132,17 +2231,9 @@ class ModelCard(CamelCaseModel):
             )
 
         # TODO: failure if files do not exist
-        config_data = (
-            await fetch_config_data(model_id, source_revision)
-            if source_revision is not None
-            else await fetch_config_data(model_id)
-        )
+        config_data = await fetch_config_data(model_id, source_revision)
         num_layers = config_data.layer_count
-        mem_size_bytes = (
-            await fetch_safetensors_size(model_id, source_revision)
-            if source_revision is not None
-            else await fetch_safetensors_size(model_id)
-        )
+        mem_size_bytes = await fetch_safetensors_size(model_id, source_revision)
 
         return ModelCard(
             model_id=ModelId(model_id),

@@ -402,9 +402,9 @@ The system uses event sourcing for state management:
     honoring them (searching with intent-plus-failed-nodes but stamping
     only the original intent, #658)
 - `src/skulk/shared/models/`: persisted model metadata and capability resolution
-  - `model_cards.py`: declarative model cards plus remote-first signed-catalog loading; registry artifact aliases are distinct from `source_repository`, bundled cards are transition fallback, and custom cards remain final overrides
+  - `model_cards.py`: declarative model cards plus remote-first signed-catalog loading; `ModelCard.load` is catalog-only so API reads and launches cannot implicitly authorize an unknown Hub repository, while trusted local tools opt into `load_or_fetch_from_hf`; registry artifact aliases are distinct from `source_repository`, bundled cards are transition fallback, and custom cards remain final overrides
   - `registry.py`: python-tuf client, embedded root trust, serialized 60-second refresh, and hash-bound last-known-good catalog
-  - `remote_code_approval.py`: provenance-aware repository-code trust; pinned Foxlight registry cards authorize their exact artifact, while agent/community and local cards use owner-only immutable-card approvals
+  - `remote_code_approval.py`: repository-code authorization and immutable execution checks; signed publication, explicit addition, or bundled distribution authorizes the exact pinned card regardless of evidence provenance, legacy executable custom cards without immutable revisions fail closed until re-added, and installed artifact identity remains independently verified
   - `capabilities.py`: normalized runtime capability profiles derived from model cards plus conservative family defaults
 - `src/skulk/operator/`: stable operator identity, deterministic quorum
   certification, crash-fault consensus and recovery, bounded dormant proposal
@@ -504,32 +504,43 @@ of truth; a store that cannot be reached at the transport level
 detection) falls back to DIRECT Hugging Face download on the node when
 `allow_hf_fallback` is on, preserving revision/GGUF pinning. The expected
 shape for store-unreachable remote members; a loud log cue elsewhere.
-For signed cards, the store request carries the immutable card ID and the
-store host independently applies the same provenance-aware remote-code trust
-policy before downloading. A pinned Foxlight-provenance card authorizes its
-exact artifact. For agent/community registry cards and custom or unsigned cards,
-the operator approves one exact immutable model-card identity in cluster
-`model_trust` Settings. The elected master serializes `SetModelTrustApproval`
-commands as indexed `ModelTrustApprovalChanged` events; the complete set lives
-in replicated `State`, survives master failover, and is persisted locally by
-API and worker consumers. Generic config convergence omits model trust so an
-unrelated Settings save cannot replace a newer decision. Trust is never a
-placement axis. Placement still
+For signed cards, the store request carries the immutable card ID and the store
+host independently validates the same signed, revision-pinned execution
+identity before downloading. Signed publication authorizes repository code for
+every registry provenance class; explicitly adding a pinned external card is
+the operator authorization, and bundled distribution is the release decision.
+The historical `model_trust` configuration, commands, events, and replicated
+state remain inert rolling-upgrade compatibility surfaces. Authorization is
+never a placement axis. Placement still
 applies open backend preferences, locality, and capacity ranking adaptively, and
 the store plus runner remain final enforcement boundaries.
-Trust mutations and ordinary custom-card creation require direct loopback or the
-authenticated operator gateway's write scope. Exact pre-publication
+Ordinary custom-card creation requires direct loopback or the
+authenticated operator gateway's write scope and waits for its exact ordered
+catalog mutation before acknowledging success. Exact pre-publication
 qualification may instead use `SKULK_EXACT_CARD_QUALIFICATION_TOKEN`; only
 `POST /models/add-card` and server-marked `qualification_only` custom-card
 cleanup accept it. Cleanup supplies the complete original candidate and the
 elected master requires exact card equality, so an older job cannot delete a
 replacement under the same alias. The service path requires an immutable source
 revision and cannot replace or delete any pre-existing non-qualification card; operator
-installs never receive the marker, and the service never approves repository
-code. The elected master rechecks the service ownership precondition in its
+installs never receive the marker. Adding the exact card authorizes its pinned
+repository code. The elected master rechecks the service ownership precondition in its
 serialized command order before emitting a card event. `PUT /config` rejects
-`model_trust` snapshots and directs authenticated callers to the dedicated
-master-ordered endpoints. An exact-card install succeeds only after the local
+deprecated `model_trust` snapshots; the historical approval endpoints remain
+inert for older clients. Quick and exact placement commands are also compared
+with the master's command-ordered card view immediately before placement,
+closing catalog replacement and deletion races after API-side validation. An
+executable bundled fallback card must pin its source revision, and an installed
+custom-card sidecar retains artifact truth without independently authorizing a
+card whose durable custom TOML was deleted. The low-level `/download/start`
+operator route likewise rejects any shard card that is not exact catalog truth.
+Every separately hosted processor, vision-weight, assistant, MTP, or served
+draft companion must carry its own immutable revision before download or launch.
+Exact comparison ignores only `registry_snapshot_id`, which identifies the TUF
+publication carrying an otherwise immutable card; every model, source, runtime,
+artifact, and capability field remains load-bearing.
+An
+exact-card install succeeds only after the local
 worker persists and caches the indexed event carrying that command's ID; card
 equality alone cannot acknowledge a new request. Service cleanup has the same
 command-correlated wait, and retained `qualification_only` installed sidecars
@@ -560,16 +571,18 @@ root, refreshes at most every 60 seconds, uses a hash-bound 30-day
 last-known-good cache during outages, and retains bundled cards only as the
 transition fallback. `SKULK_OFFLINE=true` suppresses registry network refreshes
 and uses bundled cards. `model_id` may be an artifact alias while
-`source_repository` is the byte origin. Revision-pinned Foxlight-provenance
-registry cards automatically authorize repository code for their exact
-immutable card. Agent/community registry cards and custom or unsigned cards
-require one exact cluster operator approval; registry vision cards follow the
-same rule while the MLX processor path can enable repository code internally.
-The model-by-model decision is exposed in dashboard Settings, ordered in the
-master event log, replicated through `State`, and retained in local
-`skulk.yaml` for offline enforcement. The gate runs before download and runner load, which also
-verifies the installed sidecar and artifact identity; deterministic trust denial
-is terminal for the unchanged instance. Every separately hosted companion artifact (vision weights or
+`source_repository` is the byte origin. Signed registry publication authorizes
+repository code for the exact immutable card regardless of whether provenance
+is Foxlight, agent, or community. Explicitly adding a pinned external card is
+the operator decision; when the caller omits a Hugging Face revision, Skulk
+resolves `main` once before creating the card. Bundled cards are authorized by
+the release that ships them. There is no secondary approval ceremony, and
+registry vision cards follow the same entry-path rule while the MLX processor
+path may enable repository code internally. Historical approval configuration
+and state remain inert for rolling compatibility. Before download and runner
+load, Skulk still verifies the signed card, immutable revisions, installed
+sidecar, and artifact identity; deterministic identity failure is terminal for
+the unchanged instance. Every separately hosted companion artifact (vision weights or
 processor, MTP sidecar, assistant model, served GGUF draft, or vLLM drafter)
 must carry its own full revision; companions in the base artifact repository
 inherit `source_revision`.

@@ -6,6 +6,7 @@ import json
 import threading
 from pathlib import Path
 from typing import cast
+from unittest.mock import AsyncMock
 
 import pytest
 from anyio import Path as AsyncPath
@@ -1153,6 +1154,27 @@ async def test_registry_refresh_helper_throttles_repeated_cache_misses(
 
 
 @pytest.mark.asyncio
+async def test_known_card_loads_check_registry_refresh_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Known aliases still observe the throttled signed-registry deadline."""
+    refresh = AsyncMock()
+    catalog = RegistryCatalog.model_validate_json(_catalog_payload(), strict=False)
+    card = registry_model_cards(catalog)[0]
+
+    monkeypatch.setitem(model_cards_module._card_cache, card.model_id, card)
+    monkeypatch.setattr(
+        model_cards_module,
+        "_refresh_card_cache_if_due",
+        refresh,
+    )
+
+    assert await ModelCard.load(card.model_id) == card
+    assert await ModelCard.load_or_fetch_from_hf(card.model_id) == card
+    assert refresh.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_registry_id_miss_forces_one_serialized_refresh(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1279,12 +1301,12 @@ async def test_installed_startup_selects_current_generation_deterministically(
         model_cards_module._registry_current_cards.update(original_current)
 
 
-def test_installed_qualification_card_does_not_survive_lifecycle_cleanup(
+def test_installed_custom_card_does_not_restore_deleted_catalog_authority(
     tmp_path: Path,
 ) -> None:
-    """A retained qualification sidecar cannot resurrect its unsigned card."""
+    """A retained custom sidecar cannot resurrect its deleted catalog card."""
     card = ModelCard(
-        model_id=ModelId("org/qualification-only"),
+        model_id=ModelId("org/custom-installed"),
         source_revision="b" * 40,
         storage_size=Memory.from_bytes(1),
         n_layers=1,
@@ -1292,7 +1314,6 @@ def test_installed_qualification_card_does_not_survive_lifecycle_cleanup(
         supports_tensor=False,
         tasks=[ModelTask.TextGeneration],
         is_custom=True,
-        qualification_only=True,
     )
     artifact = tmp_path / "artifact"
     artifact.mkdir()
@@ -1319,12 +1340,12 @@ def test_installed_qualification_card_does_not_survive_lifecycle_cleanup(
         model_cards_module._installed_current_registry_ids.update(original_current)
 
 
-def test_late_qualification_install_registration_cannot_restore_deleted_card(
+def test_late_custom_install_registration_cannot_restore_deleted_card(
     tmp_path: Path,
 ) -> None:
-    """A late staging callback cannot outlive qualification-card cleanup."""
+    """A late staging callback cannot outlive custom-card deletion."""
     card = ModelCard(
-        model_id=ModelId("org/qualification-late-install"),
+        model_id=ModelId("org/custom-late-install"),
         source_revision="b" * 40,
         storage_size=Memory.from_bytes(1),
         n_layers=1,
@@ -1332,7 +1353,6 @@ def test_late_qualification_install_registration_cannot_restore_deleted_card(
         supports_tensor=False,
         tasks=[ModelTask.TextGeneration],
         is_custom=True,
-        qualification_only=True,
     )
     artifact = tmp_path / "artifact"
     artifact.mkdir()

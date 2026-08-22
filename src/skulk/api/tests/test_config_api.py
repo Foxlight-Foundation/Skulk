@@ -242,7 +242,7 @@ def test_update_config_merges_latest_trust_inside_transaction(
 def test_update_config_rejects_model_trust_snapshot_on_loopback(
     tmp_path: Path,
 ) -> None:
-    """Even an operator must use the master-ordered trust endpoints."""
+    """The retired model-trust snapshot cannot be mutated by current clients."""
 
     api = _build_api()
     object.__setattr__(api, "_config_path", tmp_path / "skulk.yaml")
@@ -254,7 +254,7 @@ def test_update_config_rejects_model_trust_snapshot_on_loopback(
     )
 
     assert response.status_code == 409
-    assert "master-ordered" in response.json()["error"]["message"]
+    assert "deprecated compatibility field" in response.json()["error"]["message"]
 
 
 @pytest.mark.parametrize(

@@ -253,6 +253,15 @@ async def test_master():
         state_sync_sender=state_sync_sender,
         download_command_sender=fcds,
     )
+    placement_card = ModelCard(
+        model_id=ModelId("llama-3.2-1b"),
+        n_layers=16,
+        storage_size=Memory.from_bytes(678948),
+        hidden_size=7168,
+        supports_tensor=True,
+        tasks=[ModelTask.TextGeneration],
+    )
+    master._ordered_model_cards[placement_card.model_id] = placement_card  # pyright: ignore[reportPrivateUsage]
     logger.info("run the master")
     async with anyio.create_task_group() as tg:
         tg.start_soon(master.run)
@@ -297,14 +306,7 @@ async def test_master():
                 command=(
                     PlaceInstance(
                         command_id=CommandId(),
-                        model_card=ModelCard(
-                            model_id=ModelId("llama-3.2-1b"),
-                            n_layers=16,
-                            storage_size=Memory.from_bytes(678948),
-                            hidden_size=7168,
-                            supports_tensor=True,
-                            tasks=[ModelTask.TextGeneration],
-                        ),
+                        model_card=placement_card,
                         sharding=Sharding.Pipeline,
                         instance_meta=InstanceMeta.MlxRing,
                         min_nodes=1,

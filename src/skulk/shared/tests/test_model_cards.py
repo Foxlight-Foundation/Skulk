@@ -17,6 +17,7 @@ from skulk.shared.models.model_cards import (
     get_bundled_card,
     gguf_allow_patterns,
     preserve_generated_card_constraints,
+    same_authorized_model_card,
 )
 from skulk.shared.types.common import ModelId
 from skulk.shared.types.memory import Memory
@@ -51,6 +52,31 @@ def test_vision_projector_pin_is_atomic_and_path_safe() -> None:
         "model-Q4_K_M.gguf",
         "projectors/mmproj-f16.gguf",
     ]
+
+
+def test_authorized_card_comparison_ignores_only_snapshot_provenance() -> None:
+    """Republishing identical signed truth cannot change execution identity."""
+    card = ModelCard(
+        model_id=ModelId("org/signed-model"),
+        source_revision="a" * 40,
+        storage_size=Memory.from_bytes(1024),
+        n_layers=4,
+        hidden_size=64,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        registry_card_id="card_" + "d" * 52,
+        registry_snapshot_id="snapshot-old",
+    )
+
+    republished = card.model_copy(
+        update={"registry_snapshot_id": "snapshot-new"}
+    )
+    changed_source = republished.model_copy(
+        update={"source_revision": "b" * 40}
+    )
+
+    assert same_authorized_model_card(card, republished)
+    assert not same_authorized_model_card(card, changed_source)
 
 
 def test_model_card_binds_projector_to_immutable_gguf_revision() -> None:

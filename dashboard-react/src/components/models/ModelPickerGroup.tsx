@@ -320,20 +320,6 @@ function ModelGroupInfo({ group, title }: { group: ModelGroup; title: string }) 
             <span>{v.registry_provenance}</span>
           </>
         )}
-        {v.remote_code_approval_required && (
-          <>
-            <span style={{ color: theme.colors.textMuted }}>{t('modelInfo.remoteCode', 'Repository code')}</span>
-            <span style={{ color: v.remote_code_approved_for_cluster ? theme.colors.healthy : theme.colors.warning }}>
-              {v.remote_code_approved_for_cluster ? t('modelInfo.approvedForCluster', 'Approved for cluster') : t('modelInfo.approvalRequired', 'Operator approval required')}
-            </span>
-          </>
-        )}
-        {v.remote_code_automatically_trusted && (
-          <>
-            <span style={{ color: theme.colors.textMuted }}>{t('modelInfo.remoteCode', 'Repository code')}</span>
-            <span style={{ color: theme.colors.healthy }}>{t('modelInfo.signedTrust', 'Authorized by signed Foxlight card')}</span>
-          </>
-        )}
         <span style={{ color: theme.colors.textMuted }}>{t('modelPickerGroup.variants', 'Variants')}</span>
         <span>{group.variants.length}</span>
         <span style={{ color: theme.colors.textMuted }}>{t('modelPickerGroup.smallest', 'Smallest')}</span>

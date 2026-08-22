@@ -6,7 +6,6 @@ from skulk.master.placement import (
     PlacementError,
     PlacementInfoPendingError,
     PlacementModelCardIdentityError,
-    PlacementModelCodeApprovalError,
     add_instance_to_placements,
     fallback_command_for_refused_instance,
     get_transition_events,
@@ -35,7 +34,6 @@ from skulk.shared.models.registry import (
 from skulk.shared.models.remote_code_approval import (
     remote_code_approval_required as actual_remote_code_approval_required,
 )
-from skulk.shared.models.remote_code_approval import remote_code_trust_identity
 from skulk.shared.topology import Topology
 from skulk.shared.types.commands import CreateInstance, PlaceInstance
 from skulk.shared.types.common import CommandId, NodeId
@@ -1413,10 +1411,10 @@ def test_missing_node_resources_is_treated_as_eligible() -> None:
     assert len(placements) == 1
 
 
-def test_cluster_approved_card_remains_adaptively_placeable(
+def test_published_repository_code_card_is_adaptively_placeable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Trust is settled once and does not constrain planner node choice."""
+    """Publication authorization does not constrain planner node choice."""
     topology, _node_a, _node_b, node_memory, node_network = _two_node_topology()
     card = _small_model_card().model_copy(
         update={
@@ -1427,7 +1425,6 @@ def test_cluster_approved_card_remains_adaptively_placeable(
             "trust_remote_code": True,
         }
     )
-    trust_identity = remote_code_trust_identity(card)
     monkeypatch.setattr(
         placement_module,
         "remote_code_approval_required",
@@ -1440,16 +1437,16 @@ def test_cluster_approved_card_remains_adaptively_placeable(
         {},
         node_memory,
         node_network,
-        approved_remote_code_identities={trust_identity},
+        approved_remote_code_identities=frozenset(),
     )
 
     assert len(placements) == 1
 
 
-def test_placement_fails_actionably_without_cluster_model_approval(
+def test_placement_needs_no_secondary_model_approval(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An unapproved exact registry card is a model-level launch blocker."""
+    """An exact published registry card remains placeable with no allow-list."""
     topology, _node_a, _node_b, node_memory, node_network = _two_node_topology()
     card = _small_model_card().model_copy(
         update={
@@ -1460,33 +1457,28 @@ def test_placement_fails_actionably_without_cluster_model_approval(
             "trust_remote_code": True,
         }
     )
-    trust_identity = remote_code_trust_identity(card)
     monkeypatch.setattr(
         placement_module,
         "remote_code_approval_required",
         actual_remote_code_approval_required,
     )
 
-    with pytest.raises(
-        PlacementModelCodeApprovalError,
-        match=trust_identity,
-    ) as failure:
-        place_instance(
-            place_instance_command(card),
-            topology,
-            {},
-            node_memory,
-            node_network,
-            approved_remote_code_identities=frozenset(),
-        )
+    placements = place_instance(
+        place_instance_command(card),
+        topology,
+        {},
+        node_memory,
+        node_network,
+        approved_remote_code_identities=frozenset(),
+    )
 
-    assert failure.value.code == "model_code_approval_required"
+    assert len(placements) == 1
 
 
-def test_exact_instance_creation_enforces_cluster_model_approval(
+def test_exact_instance_creation_needs_no_secondary_model_approval(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The exact-placement path cannot bypass model-level trust admission."""
+    """The exact-placement path accepts publication-authorized shard cards."""
 
     node_id = NodeId()
     runner_id = RunnerId()
@@ -1499,7 +1491,6 @@ def test_exact_instance_creation_enforces_cluster_model_approval(
             "trust_remote_code": True,
         }
     )
-    trust_identity = remote_code_trust_identity(card)
     monkeypatch.setattr(
         placement_module,
         "remote_code_approval_required",
@@ -1518,21 +1509,12 @@ def test_exact_instance_creation_enforces_cluster_model_approval(
     command = CreateInstance(instance=instance)
     node_memory = {node_id: create_node_memory(Memory.from_gb(8).in_bytes)}
 
-    with pytest.raises(PlacementModelCodeApprovalError, match=trust_identity):
-        add_instance_to_placements(
-            command,
-            Topology(),
-            {},
-            node_memory,
-            approved_remote_code_identities=frozenset(),
-        )
-
     placements = add_instance_to_placements(
         command,
         Topology(),
         {},
         node_memory,
-        approved_remote_code_identities={trust_identity},
+        approved_remote_code_identities=frozenset(),
     )
     assert instance.instance_id in placements
 

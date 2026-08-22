@@ -30,6 +30,7 @@ from skulk.shared.models.model_cards import (
     ModelId,
     card_serves_speech,
     registry_supported_backends_for_node,
+    same_authorized_model_card,
 )
 from skulk.shared.models.remote_code_approval import (
     remote_code_approval_required,
@@ -161,7 +162,8 @@ def add_instance_to_placements(
         node_memory: Current node memory observations.
         node_vram: Current discrete-GPU memory observations.
         unified_memory_gpu_nodes: Nodes whose GPU allocations use system RAM.
-        approved_remote_code_identities: Authoritative cluster trust set.
+        approved_remote_code_identities: Deprecated legacy approval set retained
+            for compatibility with older call sites.
 
     Returns:
         Existing placements plus the validated, memory-stamped instance.
@@ -169,8 +171,6 @@ def add_instance_to_placements(
     Raises:
         PlacementModelCardIdentityError: If a shard card identifies a model
             other than the assignment alias.
-        PlacementModelCodeApprovalError: If any embedded shard card requires
-            repository-code approval that is absent from the cluster trust set.
     """
     # TODO: validate against topology
 
@@ -445,7 +445,7 @@ class PlacementInfoPendingError(PlacementError):
 
 
 class PlacementModelCodeApprovalError(PlacementError):
-    """The operator has not approved repository code for this exact card."""
+    """Legacy error retained for placement wire compatibility."""
 
     code: ClassVar[PlacementFailureCode] = "model_code_approval_required"
 
@@ -456,14 +456,20 @@ class PlacementModelCardIdentityError(PlacementError):
     code: ClassVar[PlacementFailureCode] = "model_card_identity_mismatch"
 
 
-def require_instance_model_card_identity(instance: Instance) -> None:
-    """Require every embedded shard card to match the assignment model alias.
+def require_instance_model_card_identity(
+    instance: Instance,
+    authorized_card: ModelCard | None = None,
+) -> None:
+    """Require embedded shard cards to match the assignment and catalog truth.
 
     Args:
         instance: Caller-specified exact placement containing shard cards.
+        authorized_card: Effective card loaded from the authorized local catalog.
+            When supplied, every embedded card must match it exactly.
 
     Raises:
-        PlacementModelCardIdentityError: If a shard identifies another model.
+        PlacementModelCardIdentityError: If a shard identifies another model or
+            differs from the authorized catalog card.
     """
 
     expected_model_id = instance.shard_assignments.model_id
@@ -479,6 +485,22 @@ def require_instance_model_card_identity(instance: Instance) -> None:
         raise PlacementModelCardIdentityError(
             "Exact placement model-card identity mismatch: assignment model "
             f"{expected_model_id} contains shard card(s) for {mismatches}."
+        )
+    if authorized_card is None:
+        return
+    if authorized_card.model_id != expected_model_id:
+        raise PlacementModelCardIdentityError(
+            "Exact placement catalog identity mismatch: assignment model "
+            f"{expected_model_id} resolved to {authorized_card.model_id}."
+        )
+    if any(
+        not same_authorized_model_card(shard.model_card, authorized_card)
+        for shard in instance.shard_assignments.runner_to_shard.values()
+    ):
+        raise PlacementModelCardIdentityError(
+            "Exact placement embeds model-card content that does not match the "
+            f"authorized catalog card for {expected_model_id}. Recompute the "
+            "placement from the current catalog before retrying."
         )
 
 
@@ -497,12 +519,15 @@ def require_instance_model_code_approval(
     instance: Instance,
     approved_remote_code_identities: AbstractSet[str] | None = None,
 ) -> None:
-    """Require repository-code approval for every card embedded in an instance.
+    """Apply the legacy model-approval hook to every embedded card.
+
+    Current publication/addition authorization makes this a no-op for valid
+    cards. The hook and error type remain during rolling compatibility with
+    older callers and response schemas.
 
     Args:
         instance: Caller-specified exact placement containing shard cards.
-        approved_remote_code_identities: Authoritative cluster trust set. When
-            omitted, the converged local configuration is used for compatibility.
+        approved_remote_code_identities: Deprecated legacy approval set.
 
     Raises:
         PlacementModelCodeApprovalError: If any distinct shard card is blocked.
