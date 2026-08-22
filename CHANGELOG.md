@@ -9,6 +9,17 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- gpt-oss and DeepSeek V3.2 no longer return a tool the caller never offered.
+  Those two families parse their calls out of the token stream themselves and
+  are selected before the marker path, so the offered-tools rule never saw
+  them: a gpt-oss request sending `tool_choice: "none"`, which removes the
+  tools, still came back with a call, and its name carried the model's own
+  namespace prefix. Their output now passes through the same rule, and a
+  rejected call is delivered as content so the caller sees what the model did
+  rather than a blank answer.
+
+### Fixed
+
 - A model's parallel tool calls all reach the caller. Several families write
   each call in its own block, and the stream consumer stops at the first chunk
   carrying a finish reason, so one response per block delivered the first call

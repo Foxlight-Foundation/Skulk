@@ -860,6 +860,10 @@ Four properties on `ToolParser` carry the family differences:
   answering in JSON.
 - `start_markers`: the read-side union of the primary and extra markers.
 
+`reject_unoffered_tool_calls` wraps `parse_gpt_oss` and `parse_deepseek_v32`,
+which decode their calls from the token stream themselves and are selected
+before the marker path, so they would otherwise bypass the rule below entirely;
+a call it rejects is re-serialized as content.
 `tool_parsers.declared_tool_calls` drops calls naming a tool the request did
 not offer, and a block left with no offered tool is delivered as content. On
 the llama.cpp path the same filter covers calls its bundled chat handlers

@@ -1,3 +1,4 @@
+import json
 from collections.abc import Generator
 from functools import cache
 from typing import Any
@@ -131,11 +132,17 @@ def apply_all_parsers(
     if capability_profile.output_parser == OutputParserType.GptOss or issubclass(
         model_type, GptOssModel
     ):
-        mlx_generator = parse_gpt_oss(mlx_generator)
+        # These two parse their own calls out of the token stream, so unlike
+        # the marker path they need the offered-tools rule applied downstream.
+        mlx_generator = reject_unoffered_tool_calls(
+            parse_gpt_oss(mlx_generator), tools
+        )
     elif capability_profile.output_parser == OutputParserType.DeepseekV32 or issubclass(
         model_type, DeepseekV32Model
     ):
-        mlx_generator = parse_deepseek_v32(mlx_generator)
+        mlx_generator = reject_unoffered_tool_calls(
+            parse_deepseek_v32(mlx_generator), tools
+        )
     elif tool_parser and tools:
         # The parser is wired from the tokenizer, which does not know whether
         # this request offered tools. Skipping it when none were offered is
@@ -683,6 +690,50 @@ def parse_thinking_models(
         yield response.model_copy(
             update={"text": "", "is_thinking": False, "finish_reason": response.finish_reason}
         )
+
+
+def reject_unoffered_tool_calls(
+    responses: Generator[ParserChunk], tools: list[dict[str, Any]] | None
+) -> Generator[ParserChunk]:
+    """Keep a family parser from returning a tool the caller never offered.
+
+    gpt-oss and DeepSeek V3.2 parse their calls from the token stream
+    themselves, so they never pass through the offered-tools filter the marker
+    path applies. Observed live on gpt-oss: a request sending
+    ``tool_choice: "none"``, which removes the tools, still came back with a
+    call, and its name carried the harmony namespace prefix as well.
+
+    The rejected call is delivered as content, which is what every other path
+    here does with a block naming no offered tool, so the caller sees what the
+    model did rather than an empty answer.
+    """
+
+    template: GenerationResponse | None = None
+    for response in responses:
+        if response is None:
+            yield None
+            continue
+        if isinstance(response, ToolCallResponse):
+            kept = declared_tool_calls(response.tool_calls, tools) if tools else []
+            if kept:
+                yield response.model_copy(update={"tool_calls": kept})
+                continue
+            rendered = "\n".join(
+                json.dumps({"name": call.name, "arguments": call.arguments})
+                for call in response.tool_calls
+            )
+            base = template or GenerationResponse(text="", token=0, usage=None)
+            yield base.model_copy(
+                update={
+                    "text": rendered,
+                    "token": 0,
+                    "is_thinking": False,
+                    "finish_reason": "stop",
+                }
+            )
+            continue
+        template = response
+        yield response
 
 
 def _block_start_index(

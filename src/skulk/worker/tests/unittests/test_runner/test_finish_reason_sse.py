@@ -3,6 +3,7 @@ from typing import Any, cast
 
 from mlx_lm.tokenizer_utils import TokenizerWrapper
 
+from skulk.api.types import ToolCallItem
 from skulk.shared.models.model_cards import (
     ModelCard,
     ModelTask,
@@ -30,6 +31,7 @@ from skulk.worker.runner.llm_inference.model_output_parsers import (
     parse_gemma4_thinking_channels,
     parse_thinking_models,
     parse_tool_calls,
+    reject_unoffered_tool_calls,
 )
 from skulk.worker.runner.llm_inference.tool_parsers import make_mlx_parser
 
@@ -447,7 +449,10 @@ class TestGemma4ThinkingChannels:
                 tokenizer=_no_thinking_tokenizer(),
                 model_type=Model,
                 model_id=ModelId("custom/deepseek-compatible"),
-                tools=None,
+                # The tool has to be offered: a request declaring none cannot
+                # produce a call on any path. What this covers is that the
+                # DeepSeek parser is selected from the family alone.
+                tools=[{"type": "function", "function": {"name": "get_weather"}}],
                 model_card=ModelCard(
                     model_id=ModelId("custom/deepseek-compatible"),
                     storage_size=Memory.from_bytes(1024),
@@ -649,3 +654,75 @@ class TestToolParsingRequiresOfferedTools:
             [{"type": "function", "function": {"name": "test_fn"}}]
         )
         assert any(isinstance(item, ToolCallResponse) for item in results)
+
+
+class TestFamilyParsersHonourOfferedTools:
+    """gpt-oss and DeepSeek parse their own calls, so they need the same rule.
+
+    Observed live on gpt-oss served by MLX: a request sending
+    `tool_choice: "none"`, which removes the tools, still came back with a
+    call, and its name carried the harmony namespace prefix as well. Those
+    parsers are selected before the marker path, so the offered-tools filter
+    the marker path applies never saw them. The guard is tested directly
+    rather than through a synthetic token stream, because these parsers decode
+    real harmony/DSML tokens and a hand-built stream would pass vacuously.
+    """
+
+    @staticmethod
+    def _run(
+        calls: list[str], tools: list[dict[str, Any]] | None
+    ) -> list[GenerationResponse | ToolCallResponse]:
+        def source() -> Generator[GenerationResponse | ToolCallResponse | None]:
+            yield _make_response("thinking about it", 0)
+            yield ToolCallResponse(
+                tool_calls=[
+                    ToolCallItem(name=name, arguments="{}") for name in calls
+                ],
+                usage=None,
+                stats=None,
+            )
+
+        return [
+            item
+            for item in reject_unoffered_tool_calls(source(), tools)
+            if item is not None
+        ]
+
+    def test_no_tools_offered_yields_no_call(self) -> None:
+        results = self._run(["get_weather"], None)
+        assert not any(isinstance(item, ToolCallResponse) for item in results)
+
+    def test_a_call_to_an_unoffered_tool_is_dropped(self) -> None:
+        results = self._run(
+            ["get_weather"],
+            [{"type": "function", "function": {"name": "something_else"}}],
+        )
+        assert not any(isinstance(item, ToolCallResponse) for item in results)
+
+    def test_an_offered_tool_still_produces_the_call(self) -> None:
+        results = self._run(
+            ["get_weather"],
+            [{"type": "function", "function": {"name": "get_weather"}}],
+        )
+        calls = [item for item in results if isinstance(item, ToolCallResponse)]
+        assert [c.name for c in calls[0].tool_calls] == ["get_weather"]
+
+    def test_only_the_unoffered_call_is_dropped(self) -> None:
+        results = self._run(
+            ["something_else", "get_weather"],
+            [{"type": "function", "function": {"name": "get_weather"}}],
+        )
+        calls = [item for item in results if isinstance(item, ToolCallResponse)]
+        assert [c.name for c in calls[0].tool_calls] == ["get_weather"]
+
+    def test_a_dropped_call_is_delivered_as_content(self) -> None:
+        # Dropping the only output would answer the request with a blank
+        # message, so the caller is shown what the model actually did.
+        results = self._run(["get_weather"], None)
+        text = "".join(
+            item.text for item in results if isinstance(item, GenerationResponse)
+        )
+        assert "get_weather" in text
+
+    def test_the_stream_still_terminates_when_a_call_is_dropped(self) -> None:
+        assert _got_finish(self._run(["get_weather"], None))
