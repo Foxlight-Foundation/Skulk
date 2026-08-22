@@ -1446,52 +1446,25 @@ air-gapped use. A hash-bound support matrix that was previously TUF-verified is
 also usable offline; it never converts an experimental or negative decision
 into placement permission.
 
-### Approve repository code for the cluster
+### Legacy repository-code approvals
 
 **GET** `/models/remote-code-approvals`
 
-Lists immutable model-card trust identities the operator has approved to
-execute repository-supplied Python across the cluster. Signed cards use
-`card_...` IDs; custom and unsigned cards use content-derived `local_...`
-identities. The elected master serializes each decision into the indexed event
-log and replicated `State`. Every API and worker persists that authoritative
-set under `model_trust` for runner startup and offline recovery; ordinary
-`skulk.yaml` snapshot synchronization never transports or replaces it.
-
-Trust is a model decision, not a node-placement attribute. Placement previews
-expose the exact identity in `trust_requirement` while the model is unapproved;
-after approval every otherwise-compatible node may participate normally.
-Foxlight-provenance cards with automatic signed trust return no such
-requirement. The canonical store and each runner independently re-read the
-converged decision before downloading or loading the exact artifact. Master
-failover carries the decision set into the next session.
+Deprecated compatibility endpoint. It lists approval identities retained from
+older deployments, but those values no longer participate in model execution.
+Signed publication, explicit model addition, and bundled distribution are the
+active repository-code authorization boundaries.
 
 **POST** `/models/remote-code-approvals/{card_id}`
 
-Approves an existing agent/community registry card, custom card, or unsigned
-card that can execute repository code. Approval is keyed to the immutable
-signed-card ID or the complete local card digest and applies to the whole
-cluster. Immutable, full-revision-pinned cards with Foxlight
-provenance from the TUF-verified registry are already Foxlight's trust decision
-and do not accept or require this second approval. Skulk fails closed before
-download and runner load when an explicit approval is required but absent.
-Approval lookup uses the complete catalog, independent of this node's
-image-model visibility setting. The dashboard exposes the same model-by-model
-decision in Settings.
-
-Approval and revocation are operator mutations. They accept a direct loopback
-request from the local dashboard or a request that has passed the authenticated
-operator gateway with `operations:write`; the unauthenticated fabric listener
-cannot change trust from a remote host. A successful mutation response means
-the submitting API has applied the elected master's indexed decision; failure
-to observe that decision within ten seconds returns HTTP 503 and clients should
-retry instead of assuming the requested state.
+Deprecated compatibility endpoint. Current cards return HTTP 409 because
+publication or addition already authorized them; Skulk does not create a
+redundant approval entry.
 
 **DELETE** `/models/remote-code-approvals/{card_id}`
 
-Revokes the cluster decision. Revocation prevents future downloads and runner
-starts on every node; it does not delete already downloaded bytes or kill an
-already-running instance.
+Removes an inert approval retained from an older deployment. It does not revoke
+a published, bundled, or explicitly added card.
 
 ### Search Hugging Face
 
@@ -1567,12 +1540,13 @@ opened.
 }
 ```
 
-Fetches metadata and adds a custom model card to the cluster catalog. The
+Resolves the repository to one immutable commit, fetches metadata, and adds a
+custom model card to the cluster catalog. The
 dashboard and operator API may call this through the normal cluster control
 surface only when the request is direct-loopback or has passed the authenticated
-operator gateway with `operations:write`. Generated cards that may execute
-repository code remain blocked until the operator approves their exact identity
-in Model trust Settings. A generated GGUF card is compatible with both llama.cpp
+operator gateway with `operations:write`. The explicit add action authorizes
+repository code selected by that card; there is no second approval step. A
+generated GGUF card is compatible with both llama.cpp
 engines and prefers
 the served `llama_server` tags, so on a node running llama-server it gets
 that engine's concurrency slots and is eligible for multi-node pooling via
@@ -1587,8 +1561,9 @@ an exact repo-relative GGUF weight path and the card pins that quant instead of
 using Skulk's default GGUF preference. If the selected quant is split, Skulk
 stores its first shard as the backend entrypoint while downloading the full
 shard group. `source_revision` is also optional; when supplied it must be a full
-40-character Hugging Face commit hash, and both card metadata and subsequent
-artifact downloads are pinned to that immutable revision.
+40-character Hugging Face commit hash. When omitted, Skulk resolves `main` once
+to the Hub's full commit. Card metadata and subsequent artifact downloads are
+therefore always pinned to an immutable revision.
 
 ### Add an exact unsigned model card
 
@@ -1620,8 +1595,8 @@ receive `qualification_only`; operator installs do not. A full 40-character
 immutable `sourceRevision` is required.
 Every external vision, MTP, assistant, or draft repository must also declare
 its matching immutable companion revision.
-Repository code therefore retains the normal explicit model-level approval
-requirement. Like `/models/add`, this mutation accepts direct loopback access
+The exact add action authorizes repository code selected by the temporary card.
+Like `/models/add`, this mutation accepts direct loopback access
 or an authenticated operator gateway with `operations:write`. A headless
 registry qualification worker may instead present
 `Authorization: Bearer <token>` when the node configures the same high-entropy
@@ -1754,8 +1729,8 @@ silently failing on the master:
 
 The request expresses intent, not a reservation of a prior preview. A card may
 declare any number of open backend tags plus an ordered preference. The planner
-first removes candidates blocked by participation policy, exact card trust,
-engine/build evidence, data-plane health, topology, or capacity; it then ranks
+first removes candidates blocked by participation policy, engine/build
+evidence, data-plane health, topology, or capacity; it then ranks
 what remains. If preference 1 is unavailable it automatically falls through to
 2, then 3, without requiring the client to select a concrete engine or host.
 An explicit `excluded_nodes` value remains an operator constraint, not the
@@ -1763,9 +1738,11 @@ normal selection mechanism.
 
 Placement failures preserve the human-readable `error.message` body and include
 a stable `X-Skulk-Placement-Failure` response header. Current categories are
-`no_valid_placement`, `placement_info_pending`, and
-`model_code_approval_required`; exact-placement requests may additionally
-return `model_card_identity_mismatch`.
+`no_valid_placement` and `placement_info_pending`; exact-placement requests may
+additionally return `model_card_identity_mismatch`.
+`model_code_approval_required` remains in the response schema only for
+compatibility with older nodes and is not emitted by current authorization
+policy.
 
 A successful response includes both `command_id` and `instance_id`. For
 `POST /place_instance` they contain the same stable value: the accepted command
@@ -1853,12 +1830,10 @@ Use this when you already have an `instance` object and want exact control. A
 successful response returns the accepted `command_id`, the submitted
 `instance_id`, and its `model_card`; clients can use that exact instance
 identity to correlate the acknowledgement with later runtime and failure truth.
-The API validates every embedded shard card against the cluster's exact model
-trust decisions and requires its `modelId` to match the assignment's canonical
-`modelId` before acknowledging creation. An unapproved repository-code card
+The API requires every embedded shard card's `modelId` to match the assignment's
+canonical `modelId` before acknowledging creation. An inconsistent shard card
 returns HTTP 400 with `X-Skulk-Placement-Failure:
-model_code_approval_required`; an inconsistent shard card returns
-`model_card_identity_mismatch`. No instance state is created in either case.
+model_card_identity_mismatch`, and no instance state is created.
 
 ### Inspect one instance
 
@@ -2309,11 +2284,11 @@ Important fields:
 | `current_registry_identity` | string or null | Current signed identity for the alias, which may differ from the active install |
 | `update_available` | boolean | A newer signed generation exists but is not active until transfer commits |
 | `advisories` | array | Active signed warn-only security notices affecting the installed or current card |
-| `remote_code_approval_required` | boolean | Whether the card or its selected platform loader can execute repository Python and is not automatically trusted, so the operator must decide for the exact model identity |
-| `remote_code_trust_identity` | string or null | Exact signed `card_...` or content-derived `local_...` identity shown in Settings and used for approval |
-| `remote_code_approved_for_cluster` | boolean | Whether cluster Settings approve that exact identity |
+| `remote_code_approval_required` | boolean | Deprecated compatibility field; current cards return `false` because publication, explicit addition, or bundled distribution is the authorization boundary |
+| `remote_code_trust_identity` | string or null | Deprecated identity from the retired secondary approval ceremony; current cards return `null` |
+| `remote_code_approved_for_cluster` | boolean | Deprecated compatibility state; current cards return `false` |
 | `remote_code_approved_on_this_node` | boolean | Deprecated compatibility alias for `remote_code_approved_for_cluster` |
-| `remote_code_automatically_trusted` | boolean | Whether signed Foxlight provenance authorizes repository code for this exact pinned registry card without a second operator decision |
+| `remote_code_automatically_trusted` | boolean | Whether repository code is authorized by signed publication, explicit addition, or bundled distribution for this exact card |
 | `audio` | object | Declared speech metadata from the model card, including `kind`, audio response formats, streaming/realtime flags, built-in `voices`, `default_voice`, voice/reference-audio flags, translation support, and sample rates |
 | `resolved_capabilities.supports_speech_synthesis` | boolean | Whether clients should treat the model as a text-to-speech model |
 | `resolved_capabilities.supports_transcription` | boolean | Whether clients should treat the model as a speech-to-text model |
@@ -2380,12 +2355,11 @@ ignored:
   any mounted card declaring `audio.supports_translation = true`, and this
   value is accepted but ignored.
 
-The optional `model_trust.approved_remote_code_identities` list contains the
-exact `card_...` and content-derived `local_...` identities the operator has
-approved to execute repository-supplied code. This is a cluster setting, not a
-per-node placement preference. The dashboard's Model trust section manages the
-list model by model; immutable Foxlight-provenance cards from the verified
-registry need no entry.
+The optional `model_trust.approved_remote_code_identities` list is deprecated
+compatibility state from the retired secondary repository-code approval
+ceremony. Strict config parsing still accepts and preserves the values during
+rolling upgrades, but current placement, store, and runner paths do not consult
+them. The dashboard no longer presents a Model trust editor.
 
 ### Update config
 
@@ -2396,19 +2370,18 @@ Updates cluster-wide config. Important behavior:
 - if you omit `hf_token`, Skulk preserves the existing value
 - if you omit `logging`, Skulk preserves the existing logging config
 - if you omit `experiments`, Skulk preserves the existing experiment toggles
-- if you omit `model_trust`, Skulk preserves existing exact-card decisions so
-  older operator clients cannot silently revoke them
-- `model_trust` cannot be replaced through `PUT /config`; even authenticated
-  operators receive `409` and must use the dedicated `POST`/`DELETE`
-  `/models/remote-code-approvals/{card_id}` operations
+- if you omit `model_trust`, Skulk preserves the deprecated compatibility state
+  during rolling upgrades
+- `model_trust` cannot be replaced through `PUT /config`; authenticated
+  operators receive `409` because the current API has no secondary model-trust
+  ceremony
 - `hf_token` is not broadcast over gossipsub; each receiving node merges its
   existing local token into the synchronized config before an atomic
   owner-only write
 - logging changes (enable/disable) take effect immediately on all nodes
 - inference changes affect future launches
-- model-trust changes are ordered by the elected master, replicated in `State`,
-  and persisted by the canonical store and every serving node; a changed card
-  identity or revision requires a separate operator decision
+- historical model-trust commands and state remain wire-compatible but have no
+  effect on current authorization
 - model-store location changes generally require restart
 
 ### Filesystem browse

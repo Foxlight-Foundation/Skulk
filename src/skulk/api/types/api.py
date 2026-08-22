@@ -217,25 +217,26 @@ class ModelListModel(BaseModel):
     )
     remote_code_approval_required: bool = Field(
         default=False,
+        deprecated=True,
         description=(
-            "Whether this card or its selected platform loader can execute "
-            "repository Python and is not automatically trusted by immutable "
-            "Foxlight provenance, requiring a cluster operator decision."
+            "Deprecated compatibility field. Current cards are authorized by "
+            "signed publication or explicit addition and return false."
         ),
     )
     remote_code_trust_identity: str | None = Field(
         default=None,
         pattern=r"^(?:card|local)_[a-z2-7]{52}$",
+        deprecated=True,
         description=(
-            "Exact identity the operator approves for repository-code execution, "
-            "or null when the model needs no explicit decision."
+            "Deprecated compatibility identity for the retired secondary "
+            "repository-code approval ceremony."
         ),
     )
     remote_code_approved_for_cluster: bool = Field(
         default=False,
+        deprecated=True,
         description=(
-            "Whether the operator approved this exact immutable model-card "
-            "identity for repository-code execution across the cluster."
+            "Deprecated compatibility state for a legacy cluster approval."
         ),
     )
     remote_code_approved_on_this_node: bool = Field(
@@ -249,8 +250,8 @@ class ModelListModel(BaseModel):
     remote_code_automatically_trusted: bool = Field(
         default=False,
         description=(
-            "Whether signed Foxlight provenance authorizes repository code for "
-            "this exact pinned registry card without a second operator decision."
+            "Whether repository code is authorized by the card's signed "
+            "publication, explicit addition, or bundled distribution boundary."
         ),
     )
     source_revision: str | None = Field(
@@ -1086,7 +1087,8 @@ class AddCustomModelParams(BaseModel):
         pattern=r"^[0-9a-f]{40}$",
         description=(
             "Immutable Hugging Face commit to inspect and persist on the custom "
-            "card. Omit to follow the repository's mutable main branch."
+            "card. When omitted, Skulk resolves main once and persists the "
+            "returned immutable commit."
         ),
     )
 
@@ -1629,14 +1631,17 @@ class PlacementPreview(BaseModel):
         default=None,
         description=(
             "Stable placement failure category, or null for a launchable preview. "
-            "Backend and hardware identifiers remain open strings elsewhere."
+            "model_code_approval_required is retained only for older nodes; "
+            "current authorization policy does not emit it. Backend and "
+            "hardware identifiers remain open strings elsewhere."
         ),
     )
     trust_requirement: str | None = Field(
         default=None,
+        deprecated=True,
         description=(
-            "Actionable immutable-card approval requirement that must hold on "
-            "each selected serving node, or null when card trust is automatic."
+            "Deprecated compatibility detail from the retired secondary "
+            "model-approval ceremony; current previews return null."
         ),
     )
     compatibility_source: Literal["card", "signed_engine_support"] | None = Field(

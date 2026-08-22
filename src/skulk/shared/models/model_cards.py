@@ -1764,6 +1764,40 @@ class RuntimeCapabilityCardConfig(CamelCaseModel):
         return OutputParserType(value)
 
 
+async def _resolve_hf_source_revision(
+    model_id: ModelId,
+    source_revision: str | None,
+) -> str:
+    """Resolve a model request to one immutable Hugging Face commit.
+
+    Explicit model addition is the authorization decision for repository
+    content, so it must never silently continue following a mutable branch.
+    Existing full commit inputs are already validated by the API/card schema;
+    omitted revisions resolve ``main`` exactly once before any artifact probe.
+
+    Args:
+        model_id: Hugging Face repository identifier.
+        source_revision: Optional caller-supplied immutable commit.
+
+    Returns:
+        A lowercase 40-character Hub commit.
+
+    Raises:
+        ValueError: If the Hub does not return an immutable commit identity.
+    """
+    if source_revision is not None:
+        return source_revision
+    info = await to_thread.run_sync(lambda: model_info(model_id, revision="main"))
+    resolved_revision = getattr(info, "sha", None)
+    if not isinstance(resolved_revision, str) or re.fullmatch(
+        r"[0-9a-fA-F]{40}", resolved_revision
+    ) is None:
+        raise ValueError(
+            f"Hugging Face did not return an immutable revision for {model_id}"
+        )
+    return resolved_revision.lower()
+
+
 class ModelCard(CamelCaseModel):
     """The persisted, declarative metadata Skulk holds for one model.
 
@@ -2100,7 +2134,9 @@ class ModelCard(CamelCaseModel):
             model_id: Hugging Face repository identifier.
             gguf_file: Optional exact repo-relative GGUF path to pin.
             source_revision: Optional immutable Hugging Face commit to inspect
-                and persist on the resulting card.
+                and persist on the resulting card. When omitted, resolve
+                ``main`` once and pin the returned commit before inspecting any
+                artifact metadata.
 
         Returns:
             A custom model card derived from repository metadata.
@@ -2109,11 +2145,14 @@ class ModelCard(CamelCaseModel):
             ValueError: The requested GGUF path is not a weight file in the repo,
                 or a GGUF path is supplied for a non-GGUF repository.
         """
-        # GGUF detection is a best-effort probe: it hits the HF model-info API,
-        # which the safetensors path below does NOT require (it has its own retry
-        # and local-file fallback). A transient/offline/rate-limited probe must
-        # therefore NOT block a safetensors card that could otherwise load from
-        # cache: treat any probe failure as "not proven GGUF" and fall through.
+        source_revision = await _resolve_hf_source_revision(
+            model_id,
+            source_revision,
+        )
+
+        # GGUF detection remains a best-effort probe after immutable revision
+        # resolution. A repository whose manifest cannot prove GGUF falls
+        # through to the safetensors metadata path for that same commit.
         try:
             gguf_files = gguf_weight_siblings(model_id, source_revision)
         except Exception as exc:  # noqa: BLE001  (best-effort probe, see above)
@@ -2132,17 +2171,9 @@ class ModelCard(CamelCaseModel):
             )
 
         # TODO: failure if files do not exist
-        config_data = (
-            await fetch_config_data(model_id, source_revision)
-            if source_revision is not None
-            else await fetch_config_data(model_id)
-        )
+        config_data = await fetch_config_data(model_id, source_revision)
         num_layers = config_data.layer_count
-        mem_size_bytes = (
-            await fetch_safetensors_size(model_id, source_revision)
-            if source_revision is not None
-            else await fetch_safetensors_size(model_id)
-        )
+        mem_size_bytes = await fetch_safetensors_size(model_id, source_revision)
 
         return ModelCard(
             model_id=ModelId(model_id),

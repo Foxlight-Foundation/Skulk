@@ -118,11 +118,15 @@ export interface ModelInfo {
   capability_claims?: RegistryCapabilityClaim[];
   engine_support?: RegistryEngineSupportClaim[];
   catalog_source?: 'registry' | 'bundled' | 'custom';
+  /** @deprecated Current cards are authorized by publication, addition, or bundled distribution. */
   remote_code_approval_required?: boolean;
+  /** @deprecated Identity from the retired secondary approval ceremony. */
   remote_code_trust_identity?: string | null;
+  /** @deprecated Legacy compatibility state with no execution effect. */
   remote_code_approved_for_cluster?: boolean;
   /** @deprecated Use remote_code_approved_for_cluster. */
   remote_code_approved_on_this_node?: boolean;
+  /** Whether the card entry path authorizes its selected repository code. */
   remote_code_automatically_trusted?: boolean;
   quantization?: string;
   supports_tensor?: boolean;
@@ -292,7 +296,7 @@ export interface PlacementPreview {
     | 'placement_info_pending'
     | 'model_code_approval_required'
     | null;
-  /** Exact cluster model-trust decision required before placement. */
+  /** @deprecated Compatibility detail emitted only by older Skulk nodes. */
   trust_requirement?: string | null;
   /** Whether card compatibility or the signed engine matrix admitted the backend. */
   compatibility_source?: 'card' | 'signed_engine_support' | null;

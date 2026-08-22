@@ -384,8 +384,9 @@ class SkulkConfig(FrozenModel):
             operator has never been asked (nothing is queued or sent).
         intelligent_fabric: Intelligent-fabric (resident steward) settings.
             ``None`` means the mode is off.
-        model_trust: Cluster-wide operator decisions authorizing exact model
-            card identities to execute repository-supplied Python.
+        model_trust: Deprecated persisted compatibility state from the retired
+            secondary repository-code approval ceremony. Current execution
+            authorization does not consult it.
         hf_token: HuggingFace API token.  Stripped from ``GET /config``
             responses for security.
     """
@@ -404,17 +405,16 @@ class SkulkConfig(FrozenModel):
 
 @final
 class ModelTrustConfig(FrozenModel):
-    """Cluster-wide trust decisions for repository-supplied model code.
+    """Deprecated exact-card approval state retained for compatibility.
 
-    The operator approves an immutable model-card identity once for the whole
-    fabric. Cluster configuration convergence persists the same decision on
-    every serving node and the canonical store host, so placement never treats
-    trust as a node-selection axis. A changed card or source revision produces
-    a different identity and therefore requires a new decision.
+    Signed publication, explicit model addition, or bundled distribution is the
+    current repository-code authorization boundary. Older nodes and clients may
+    still persist this structure during a rolling upgrade, so the strict config
+    reader accepts and preserves it without consulting it for execution.
 
     Attributes:
-        approved_remote_code_identities: Exact signed ``card_...`` or
-            content-derived ``local_...`` identities approved by the operator.
+        approved_remote_code_identities: Historical signed ``card_...`` or
+            content-derived ``local_...`` identities retained during upgrade.
     """
 
     approved_remote_code_identities: list[str] = Field(default_factory=list)
@@ -637,11 +637,11 @@ def persist_model_trust_config(
     path: Path,
     approved_identities: Iterable[str],
 ) -> SkulkConfig:
-    """Persist master-ordered trust while preserving every other local setting.
+    """Persist legacy approval state while preserving every other setting.
 
     Args:
         path: Destination ``skulk.yaml`` path.
-        approved_identities: Complete authoritative set from replicated State.
+        approved_identities: Complete legacy set from replicated State.
 
     Returns:
         The validated complete configuration written to disk.

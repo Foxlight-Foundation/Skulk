@@ -161,7 +161,8 @@ def add_instance_to_placements(
         node_memory: Current node memory observations.
         node_vram: Current discrete-GPU memory observations.
         unified_memory_gpu_nodes: Nodes whose GPU allocations use system RAM.
-        approved_remote_code_identities: Authoritative cluster trust set.
+        approved_remote_code_identities: Deprecated legacy approval set retained
+            for compatibility with older call sites.
 
     Returns:
         Existing placements plus the validated, memory-stamped instance.
@@ -169,8 +170,6 @@ def add_instance_to_placements(
     Raises:
         PlacementModelCardIdentityError: If a shard card identifies a model
             other than the assignment alias.
-        PlacementModelCodeApprovalError: If any embedded shard card requires
-            repository-code approval that is absent from the cluster trust set.
     """
     # TODO: validate against topology
 
@@ -445,7 +444,7 @@ class PlacementInfoPendingError(PlacementError):
 
 
 class PlacementModelCodeApprovalError(PlacementError):
-    """The operator has not approved repository code for this exact card."""
+    """Legacy error retained for placement wire compatibility."""
 
     code: ClassVar[PlacementFailureCode] = "model_code_approval_required"
 
@@ -497,12 +496,15 @@ def require_instance_model_code_approval(
     instance: Instance,
     approved_remote_code_identities: AbstractSet[str] | None = None,
 ) -> None:
-    """Require repository-code approval for every card embedded in an instance.
+    """Apply the legacy model-approval hook to every embedded card.
+
+    Current publication/addition authorization makes this a no-op for valid
+    cards. The hook and error type remain during rolling compatibility with
+    older callers and response schemas.
 
     Args:
         instance: Caller-specified exact placement containing shard cards.
-        approved_remote_code_identities: Authoritative cluster trust set. When
-            omitted, the converged local configuration is used for compatibility.
+        approved_remote_code_identities: Deprecated legacy approval set.
 
     Raises:
         PlacementModelCodeApprovalError: If any distinct shard card is blocked.

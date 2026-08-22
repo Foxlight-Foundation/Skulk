@@ -94,7 +94,7 @@ Empirical load and feature claims are pinned to the exact card tested. Model
 APIs, placement previews, and the dashboard expose the evidence source and
 actionable compatibility gaps.
 
-## Adaptive placement and model-scoped trust
+## Adaptive placement and model authorization
 
 Models may advertise several compatible engines and an ordered preference;
 Skulk keeps the final choice in the planner and falls through to another
@@ -102,14 +102,13 @@ currently admissible engine or node when the preferred option is unavailable.
 Placement failures retain readable messages and now expose a stable category
 for operator clients.
 
-Repository-code trust is now one operator decision per exact immutable model
-card, managed in cluster Settings rather than repeated on individual nodes.
-Revision-pinned Foxlight-provenance cards from the signed registry are already
-Foxlight's trust decision. Agent, community, custom, and unsigned cards remain
-loadable after explicit approval, and any changed card identity must be
-evaluated again. Trust and custom-card mutations require the direct-local
-dashboard or an authenticated operator-gateway credential. Config convergence
-also preserves each node's private Hugging Face token and owner-only config
-permissions. Approval and revocation are serialized by the elected master and
-replicated as durable cluster state, so concurrent operator actions and
-unrelated Settings saves cannot overwrite or resurrect trust decisions.
+Repository-code authorization now follows the action that introduced the exact
+card. Signed registry publication authorizes every provenance class, explicitly
+adding an external model authorizes its pinned card, and bundled cards are
+authorized by the Skulk release. A Hugging Face addition without an explicit
+revision resolves `main` once to a full immutable commit before creating the
+card. There is no second Model trust ceremony in Settings, and vision metadata
+alone no longer creates an approval blocker. Historical approval config, state,
+wire fields, and endpoints remain deprecated and inert for rolling upgrades.
+The runner still verifies signed-card identity, immutable revisions, installed
+sidecars, and artifact manifests before executing repository code.

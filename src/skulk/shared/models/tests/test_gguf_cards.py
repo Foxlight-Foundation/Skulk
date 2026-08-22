@@ -78,9 +78,19 @@ def _mem_fetch(blob: bytes) -> "Callable[[int, int], Awaitable[bytes]]":
 def _fake_model_info(filenames: list[str]):
     """A stand-in for huggingface_hub.model_info with files_metadata=True."""
 
-    def _factory(_model_id: object, files_metadata: bool = False) -> object:
+    def _factory(
+        _model_id: object,
+        *,
+        revision: str | None = None,
+        files_metadata: bool = False,
+    ) -> object:
+        del revision, files_metadata
         siblings = [SimpleNamespace(rfilename=name, size=100) for name in filenames]
-        return SimpleNamespace(siblings=siblings, safetensors=None)
+        return SimpleNamespace(
+            siblings=siblings,
+            safetensors=None,
+            sha="d" * 40,
+        )
 
     return _factory
 
@@ -136,7 +146,10 @@ async def test_fetch_gguf_card_stamps_both_llama_engines(
 ) -> None:
     monkeypatch.setattr(model_cards, "model_info", _fake_model_info(["model-q4.gguf"]))
 
-    async def _fake_config(_model_id: object) -> object:
+    async def _fake_config(
+        _model_id: object,
+        _revision: str | None = None,
+    ) -> object:
         return SimpleNamespace(
             layer_count=32,
             hidden_size=4096,
@@ -147,6 +160,7 @@ async def test_fetch_gguf_card_stamps_both_llama_engines(
     monkeypatch.setattr(model_cards, "fetch_config_data", _fake_config)
 
     card = await ModelCard.fetch_from_hf(ModelId("some/gguf-repo"))
+    assert card.source_revision == "d" * 40
     # Both llama.cpp engines, served first (mirrors the bundled GGUF cards,
     # #607): only llama_server pools multiple nodes via RPC, and a
     # llama_cpp-only card would be silently ineligible for every multi-node
@@ -179,7 +193,10 @@ async def test_fetch_gguf_card_honors_requested_file(
         _fake_model_info(["model-Q4_K_M.gguf", requested]),
     )
 
-    async def _fake_config(_model_id: object) -> object:
+    async def _fake_config(
+        _model_id: object,
+        _revision: str | None = None,
+    ) -> object:
         return SimpleNamespace(
             layer_count=32,
             hidden_size=4096,
@@ -229,7 +246,10 @@ async def test_fetch_gguf_card_reads_header_when_no_config(
     # GGUF binary header instead (#327), rather than failing or fabricating them.
     monkeypatch.setattr(model_cards, "model_info", _fake_model_info(["model-q4.gguf"]))
 
-    async def _raises(_model_id: object) -> object:
+    async def _raises(
+        _model_id: object,
+        _revision: str | None = None,
+    ) -> object:
         raise FileNotFoundError("no config.json in this bare GGUF repo")
 
     monkeypatch.setattr(model_cards, "fetch_config_data", _raises)
@@ -267,7 +287,10 @@ async def test_fetch_gguf_card_reads_header_when_config_unusable(
     # must still kick in rather than letting the ValidationError abort the build.
     monkeypatch.setattr(model_cards, "model_info", _fake_model_info(["model-q4.gguf"]))
 
-    async def _bad_config(_model_id: object) -> object:
+    async def _bad_config(
+        _model_id: object,
+        _revision: str | None = None,
+    ) -> object:
         # Raises a genuine pydantic ValidationError (layer_count is required).
         model_cards.ConfigData.model_validate({"hidden_size": 1})
         raise AssertionError("unreachable")
@@ -465,7 +488,10 @@ async def test_gguf_card_pins_selected_quant(monkeypatch: pytest.MonkeyPatch) ->
         _fake_model_info(["model-BF16.gguf", "model-Q4_K_M.gguf"]),
     )
 
-    async def _cfg(_m: object) -> object:
+    async def _cfg(
+        _m: object,
+        _revision: str | None = None,
+    ) -> object:
         return SimpleNamespace(
             layer_count=16,
             hidden_size=2048,

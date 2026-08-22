@@ -137,10 +137,10 @@ async def test_store_host_rejects_a_changed_artifact_bundle(
 
 
 @pytest.mark.anyio
-async def test_store_host_requires_cluster_remote_code_approval(
+async def test_store_host_accepts_repository_code_authorized_by_publication(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The canonical store enforces the converged cluster trust decision."""
+    """The canonical store treats signed publication as authorization."""
     card = _registry_card()
 
     async def cards() -> list[ModelCard]:
@@ -153,28 +153,15 @@ async def test_store_host_requires_cluster_remote_code_approval(
         _no_cluster_approvals,
     )
 
-    with pytest.raises(web.HTTPForbidden, match=card.registry_card_id or ""):
-        await ModelStoreServer._require_remote_code_download_approval(
-            str(card.model_id),
-            card.registry_card_id,
-            source_repository=None,
-            source_revision=card.source_revision,
-            pinned_gguf=None,
-        )
-
-    assert card.registry_card_id is not None
-    monkeypatch.setattr(
-        approval_module,
-        "approved_remote_code_identities",
-        _cluster_approvals_for(card.registry_card_id),
-    )
-    await ModelStoreServer._require_remote_code_download_approval(
+    retained = await ModelStoreServer._require_remote_code_download_approval(
         str(card.model_id),
         card.registry_card_id,
         source_repository=None,
         source_revision=card.source_revision,
         pinned_gguf=None,
     )
+
+    assert retained == card
 
 
 @pytest.mark.anyio

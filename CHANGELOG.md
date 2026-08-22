@@ -35,6 +35,16 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- Model execution authorization now follows the action that introduced the
+  exact card. Signed registry publication authorizes repository code for every
+  provenance class, explicit external-model addition authorizes its pinned
+  card, and bundled cards remain authorized by the Skulk release. Hugging Face
+  additions that omit a revision resolve `main` once to a full immutable
+  commit. The dashboard no longer exposes the redundant Model trust ceremony;
+  its historical config, state, wire fields, and endpoints remain deprecated
+  and inert for rolling compatibility. Signed-card, revision, installed-sidecar,
+  and artifact-manifest verification still fail closed.
+
 - Pre-publication qualification cleanup now names the complete temporary card
   it owns, and the elected master compares that exact card before deleting the
   alias. An older or retried job can no longer remove a newer qualification
@@ -51,8 +61,8 @@ This project records release notes here and mirrors public-facing notes in
 - Authenticated operator workflows can now install one complete pinned model
   card through `POST /models/add-card` for pre-publication qualification. Skulk
   preserves the exact artifact bundle while stripping registry identity and
-  provenance, so testing cannot impersonate signed trust and repository code
-  still requires its normal model-level approval. Headless registry automation
+  provenance, so testing cannot impersonate signed registry truth; the explicit
+  exact-card add authorizes its pinned repository code. Headless registry automation
   may use the narrowly scoped `SKULK_EXACT_CARD_QUALIFICATION_TOKEN` for only
   this immutable temporary install and server-owned custom-card cleanup
   lifecycle; only service-authenticated installs receive the ownership marker,

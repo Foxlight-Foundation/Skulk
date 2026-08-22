@@ -1,14 +1,11 @@
 """Tests for cluster-wide model repository-code trust enforcement."""
 
 from pathlib import Path
-from typing import cast
 
 import pytest
 
 import skulk.download.download_utils as download_utils_module
-import skulk.shared.models.remote_code_approval as approval_module
 from skulk.download.download_utils import download_shard
-from skulk.download.shard_downloader import NoopShardDownloader
 from skulk.shared.models.model_cards import ModelCard, ModelTask, VisionCardConfig
 from skulk.shared.models.remote_code_approval import (
     approved_remote_code_identities,
@@ -22,8 +19,7 @@ from skulk.shared.types.common import ModelId
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.worker.downloads import RepoDownloadProgress
 from skulk.shared.types.worker.shards import PipelineShardMetadata, ShardMetadata
-from skulk.store.config import ModelTrustConfig, SkulkConfig, StagingNodeConfig
-from skulk.store.model_store_client import ModelStoreClient, ModelStoreDownloader
+from skulk.store.config import ModelTrustConfig, SkulkConfig
 
 
 def _registry_card() -> ModelCard:
@@ -42,11 +38,6 @@ def _registry_card() -> ModelCard:
     )
 
 
-def _no_cluster_approvals(_config: SkulkConfig | None = None) -> frozenset[str]:
-    """Return an explicitly empty injected cluster trust set."""
-    return frozenset()
-
-
 def test_cluster_config_exposes_approved_exact_identities() -> None:
     """Every node derives the same decisions from converged cluster config."""
     identity = f"card_{'a' * 52}"
@@ -61,38 +52,34 @@ def test_cluster_config_exposes_approved_exact_identities() -> None:
     assert config.model_trust.approved_remote_code_identities == [identity]
 
 
-def test_approval_is_immutable_card_scoped_for_the_cluster() -> None:
-    """One exact card identity permits execution throughout the cluster."""
+def test_signed_agent_card_is_authorized_by_publication() -> None:
+    """Signed publication authorizes repository code regardless of provenance."""
     card = _registry_card()
-    trust_identity = remote_code_trust_identity(card)
 
-    with pytest.raises(PermissionError, match=trust_identity):
-        require_remote_code_approval(card, frozenset())
-
-    require_remote_code_approval(card, frozenset({trust_identity}))
+    assert remote_code_is_automatically_trusted(card)
+    assert not remote_code_execution_requires_approval(card)
+    require_remote_code_approval(card, frozenset())
 
 
-def test_unsigned_cards_require_content_scoped_cluster_approval() -> None:
-    """Unsigned repository code cannot bypass the operator decision."""
+def test_explicitly_added_card_is_authorized_by_addition() -> None:
+    """Persisting a custom card is the operator's execution decision."""
     card = _registry_card().model_copy(
         update={
             "registry_card_id": None,
             "registry_snapshot_id": None,
             "registry_provenance": None,
+            "is_custom": True,
         }
     )
 
     trust_identity = remote_code_trust_identity(card)
     assert trust_identity.startswith("local_")
-    with pytest.raises(PermissionError, match=trust_identity):
-        require_remote_code_approval(card, frozenset())
-
+    assert remote_code_is_automatically_trusted(card)
     require_remote_code_approval(card, frozenset({trust_identity}))
 
     changed = card.model_copy(update={"source_revision": "c" * 40})
     assert remote_code_trust_identity(changed) != trust_identity
-    with pytest.raises(PermissionError):
-        require_remote_code_approval(changed, frozenset({trust_identity}))
+    require_remote_code_approval(changed, frozenset())
 
 
 def test_qualification_ownership_does_not_change_remote_code_identity() -> None:
@@ -111,8 +98,8 @@ def test_qualification_ownership_does_not_change_remote_code_identity() -> None:
     ) == remote_code_trust_identity(card)
 
 
-def test_foxlight_signed_pinned_card_is_the_remote_code_trust_decision() -> None:
-    """Curated signed provenance needs no redundant operator approval."""
+def test_foxlight_signed_pinned_card_is_authorized_by_publication() -> None:
+    """Foxlight provenance remains authorized without special treatment."""
     card = _registry_card().model_copy(update={"registry_provenance": "foxlight"})
 
     assert remote_code_is_automatically_trusted(card)
@@ -120,47 +107,51 @@ def test_foxlight_signed_pinned_card_is_the_remote_code_trust_decision() -> None
     require_remote_code_approval(card, frozenset())
 
 
-def test_custom_card_cannot_copy_foxlight_metadata_to_gain_automatic_trust() -> None:
-    """Only cards actually installed from signed registry truth are automatic."""
+def test_custom_card_authorization_does_not_depend_on_copied_provenance() -> None:
+    """The explicit add action, not copied provenance, authorizes a custom card."""
     card = _registry_card().model_copy(
         update={"registry_provenance": "foxlight", "is_custom": True}
     )
 
-    assert not remote_code_is_automatically_trusted(card)
-    assert remote_code_execution_requires_approval(card)
+    assert remote_code_is_automatically_trusted(card)
+    assert not remote_code_execution_requires_approval(card)
     assert remote_code_trust_identity(card).startswith("local_")
     assert remote_code_trust_identity(card) != card.registry_card_id
 
 
-@pytest.mark.parametrize(
-    "update",
-    [
-        {"registry_snapshot_id": None},
-        {"registry_provenance": "community"},
-        {"source_revision": None},
-    ],
-)
-def test_incomplete_or_non_foxlight_registry_evidence_requires_approval(
-    update: dict[str, str | None],
-) -> None:
-    """Copied provenance or mutable artifacts never gain automatic trust."""
+def test_community_registry_card_is_authorized_by_publication() -> None:
+    """Provenance records evidence quality rather than runtime permission."""
     card = _registry_card().model_copy(
-        update={"registry_provenance": "foxlight", **update}
+        update={"registry_provenance": "community"}
     )
 
+    assert remote_code_is_automatically_trusted(card)
+    assert not remote_code_execution_requires_approval(card)
+    require_remote_code_approval(card, frozenset())
+
+
+@pytest.mark.parametrize("missing_field", ["registry_snapshot_id", "source_revision"])
+def test_signed_repository_code_requires_immutable_publication_identity(
+    missing_field: str,
+) -> None:
+    """A malformed signed card cannot authorize mutable executable content."""
+    card = _registry_card().model_copy(update={missing_field: None})
+
     assert not remote_code_is_automatically_trusted(card)
-    assert remote_code_execution_requires_approval(card)
+    assert not remote_code_execution_requires_approval(card)
+    with pytest.raises(PermissionError, match="immutable signed execution identity"):
+        require_remote_code_approval(card, frozenset())
 
 
-def test_registry_vision_card_requires_approval_for_platform_loader() -> None:
-    """A vision loader that enables remote code cannot bypass card approval."""
+def test_registry_vision_card_is_authorized_by_publication() -> None:
+    """Vision capability alone never creates a second approval ceremony."""
     card = _registry_card().model_copy(
         update={"trust_remote_code": False, "vision": VisionCardConfig()}
     )
 
-    assert remote_code_execution_requires_approval(card)
-    with pytest.raises(PermissionError, match=card.registry_card_id or ""):
-        require_remote_code_approval(card, frozenset())
+    assert remote_code_is_automatically_trusted(card)
+    assert not remote_code_execution_requires_approval(card)
+    require_remote_code_approval(card, frozenset())
 
 
 def test_approval_cannot_authorize_unpinned_processor_repository() -> None:
@@ -209,48 +200,18 @@ def test_operator_mutations_reject_forwarded_loopback_requests(
     )
 
 
-@pytest.mark.asyncio
-async def test_store_backed_download_fails_before_any_store_access(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The common store wrapper enforces approval before staging or fetching."""
-
-    class UntouchedStore:
-        def __getattr__(self, name: str) -> object:
-            raise AssertionError(f"store must not be accessed before approval: {name}")
-
-    monkeypatch.setattr(
-        approval_module,
-        "approved_remote_code_identities",
-        _no_cluster_approvals,
-    )
+def test_empty_legacy_allow_list_does_not_block_published_card() -> None:
+    """Publication remains sufficient when the retired allow-list is empty."""
     card = _registry_card()
-    shard = PipelineShardMetadata(
-        model_card=card,
-        device_rank=0,
-        world_size=1,
-        start_layer=0,
-        end_layer=card.n_layers,
-        n_layers=card.n_layers,
-    )
-    downloader = ModelStoreDownloader(
-        inner=NoopShardDownloader(),
-        store_client=cast(ModelStoreClient, cast(object, UntouchedStore())),
-        staging_config=StagingNodeConfig(
-            enabled=True,
-            node_cache_path=str(tmp_path / "staging"),
-        ),
-    )
 
-    with pytest.raises(PermissionError, match=card.registry_card_id or ""):
-        await downloader.ensure_shard(shard)
+    require_remote_code_approval(card, frozenset())
 
 
 @pytest.mark.asyncio
-async def test_status_only_probe_does_not_raise_for_unapproved_card(
+async def test_status_only_probe_does_not_recheck_publication_authorization(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Approval gates transfers, not the coordinator's read-only status probe."""
+    """A read-only status probe does not re-evaluate card authorization."""
 
     async def ignore_progress(
         _shard: ShardMetadata, _progress: RepoDownloadProgress

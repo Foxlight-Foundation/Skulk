@@ -1,4 +1,4 @@
-"""Cluster-wide trust policy for model artifacts that execute repository code."""
+"""Authorization and immutable-identity checks for repository model code."""
 
 import base64
 import hashlib
@@ -17,15 +17,15 @@ MODEL_TRUST_FAILURE_MARKER = "model_trust_denied"
 def approved_remote_code_identities(
     config: SkulkConfig | None = None,
 ) -> frozenset[str]:
-    """Return exact model-card identities approved for the whole cluster.
+    """Return legacy exact-card approvals retained for compatibility.
 
     Args:
         config: Parsed cluster configuration. When omitted, read the converged
             local ``skulk.yaml`` copy used by every node and runner process.
 
     Returns:
-        The operator-approved immutable identities. Missing or unreadable
-        configuration fails closed as an empty set.
+        Historical immutable identities. Current authorization does not consult
+        this set. Missing or unreadable configuration yields an empty set.
     """
     if config is None:
         try:
@@ -38,43 +38,55 @@ def approved_remote_code_identities(
 
 
 def remote_code_execution_requires_approval(card: ModelCard) -> bool:
-    """Return whether repository Python needs an explicit operator decision.
+    """Return whether repository Python needs a second operator decision.
 
-    MLX vision processor discovery currently includes loaders that enable
-    ``trust_remote_code`` internally. Treat that platform behavior as an
-    execution risk even when the artifact card itself does not request remote
-    code. An immutable Foxlight-provenance card from the signed registry is the
-    trust decision for its exact pinned artifact; agent, community, custom and
-    unsigned cards retain an explicit model-by-model cluster approval boundary.
+    Model entry is now the authorization boundary: publishing an immutable
+    signed registry card or explicitly adding a model authorizes the executable
+    repository content selected by that card. The historical cluster allow-list
+    remains readable for wire/configuration compatibility, but no valid catalog
+    card requires a second approval ceremony.
+
+    Args:
+        card: Effective card selected for download or execution.
+
+    Returns:
+        Always ``False``. Artifact and revision integrity are enforced
+        separately by :func:`require_remote_code_approval` and installed-card
+        verification.
     """
-    return (
-        card.trust_remote_code or card.vision is not None
-    ) and not remote_code_is_automatically_trusted(card)
+    del card
+    return False
 
 
 def remote_code_is_automatically_trusted(card: ModelCard) -> bool:
-    """Return whether signed Foxlight provenance authorizes the pinned card.
+    """Return whether the card's entry path authorizes repository code.
 
-    All four fields are load-bearing. In particular, copied provenance text or
-    a mutable repository revision cannot acquire automatic execution authority.
-    A changed immutable card receives a different ``registry_card_id`` and is
-    therefore evaluated independently.
+    Signed registry publication authorizes every provenance class; provenance
+    describes how truth was established, not whether the runtime may execute
+    it. Operator-added cards are authorized by the add action, and bundled cards
+    are authorized by the Skulk release that ships them.
+
+    Args:
+        card: Effective card selected for download or execution.
+
+    Returns:
+        ``True`` when a card that may execute repository code was authorized by
+        registry publication, explicit addition, or bundled distribution.
     """
-    return (
-        not card.is_custom
-        and card.registry_card_id is not None
-        and card.registry_snapshot_id is not None
-        and card.registry_provenance == "foxlight"
-        and card.source_revision is not None
-    )
+    may_execute_repository_code = card.trust_remote_code or card.vision is not None
+    if not may_execute_repository_code:
+        return False
+    if card.is_custom or card.registry_card_id is None:
+        return True
+    return card.registry_snapshot_id is not None and card.source_revision is not None
 
 
 def remote_code_trust_identity(card: ModelCard) -> str:
-    """Return the immutable identity used by cluster model-trust settings.
+    """Return the legacy immutable identity exposed to older clients.
 
     Signed cards use their registry identity. Unsigned and custom cards use a
-    digest of the complete effective card, so a revision or policy change
-    cannot inherit approval from an earlier definition.
+    digest of the complete effective card. Current authorization does not
+    consult this identity, but it remains stable for wire compatibility.
     """
     if not card.is_custom and card.registry_card_id is not None:
         return card.registry_card_id
@@ -91,7 +103,7 @@ def remote_code_approval_required(
     card: ModelCard,
     approved_identities: AbstractSet[str] | None = None,
 ) -> bool:
-    """Return whether repository code is blocked on cluster approval.
+    """Return whether repository code is blocked on legacy cluster approval.
 
     Args:
         card: Exact effective model card being downloaded or launched.
@@ -99,34 +111,29 @@ def remote_code_approval_required(
             the converged local cluster configuration.
 
     Returns:
-        ``True`` when the card can execute repository code and its exact
-        identity has not been approved by the operator.
+        Always ``False``. Publication/addition is the authorization decision;
+        the allow-list argument is accepted only for call-site compatibility.
     """
-    approvals = (
-        approved_remote_code_identities()
-        if approved_identities is None
-        else approved_identities
-    )
-    return remote_code_execution_requires_approval(card) and (
-        remote_code_trust_identity(card) not in approvals
-    )
+    del approved_identities
+    return remote_code_execution_requires_approval(card)
 
 
 def require_remote_code_approval(
     card: ModelCard,
     approved_identities: AbstractSet[str] | None = None,
 ) -> None:
-    """Fail closed before downloading or executing unapproved repository code.
+    """Validate immutable execution identity before repository code can run.
 
     Args:
         card: Exact effective model card being downloaded or launched.
-        approved_identities: Injectable cluster allow-list. When omitted, read
-            the converged local cluster configuration.
+        approved_identities: Deprecated cluster allow-list retained for source
+            compatibility. It no longer participates in authorization.
 
     Raises:
-        PermissionError: If a signed card references mutable processor code or
-            the operator has not approved the exact card identity.
+        PermissionError: If signed registry truth references mutable executable
+            repository content.
     """
+    del approved_identities
     if (
         card.registry_card_id is not None
         and card.vision is not None
@@ -138,12 +145,18 @@ def require_remote_code_approval(
             "unpinned vision processor repository: "
             f"{card.registry_card_id}"
         )
-    if remote_code_approval_required(card, approved_identities):
-        trust_identity = remote_code_trust_identity(card)
+    if (
+        card.registry_card_id is not None
+        and (card.trust_remote_code or card.vision is not None)
+        and (
+            card.registry_snapshot_id is None
+            or card.source_revision is None
+        )
+    ):
         raise PermissionError(
-            f"{MODEL_TRUST_FAILURE_MARKER}: model card requires cluster "
-            "operator approval for repository code: "
-            f"{trust_identity}"
+            f"{MODEL_TRUST_FAILURE_MARKER}: published model card lacks an "
+            "immutable signed execution identity: "
+            f"{card.registry_card_id}"
         )
 
 

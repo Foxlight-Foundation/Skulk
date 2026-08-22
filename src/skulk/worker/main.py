@@ -345,20 +345,19 @@ def _model_load_trust_failure_message(error: Exception) -> str:
     )
 
 
-def _require_worker_model_code_approval(card: ModelCard, state: State) -> None:
-    """Enforce repository-code trust from authoritative replicated State.
+def _require_worker_model_execution_identity(card: ModelCard, state: State) -> None:
+    """Validate immutable repository-code identity before runner creation.
 
-    The runner process also reads the durable config as a defense in depth.
-    This parent-process gate is required for revocations: if persisting the new
-    set fails, a stale YAML approval must not authorize a newly created or
-    newly loaded runner.
+    Publication or explicit model addition already authorizes execution. The
+    retained State argument preserves the rolling-upgrade call contract; its
+    legacy approval values do not participate in the decision.
 
     Args:
         card: Exact shard card the worker is about to create or load.
-        state: Current replicated cluster State.
+        state: Current replicated cluster State, retained for compatibility.
 
     Raises:
-        PermissionError: If the exact card is not currently approved.
+        PermissionError: If signed executable repository content is mutable.
     """
 
     require_remote_code_approval(
@@ -2583,7 +2582,7 @@ class Worker:
         """Validate and register one planned runner under the staging guard."""
 
         try:
-            _require_worker_model_code_approval(
+            _require_worker_model_execution_identity(
                 task.bound_instance.bound_shard.model_card,
                 self.state,
             )
@@ -2648,7 +2647,10 @@ class Worker:
             runner = self.runners[runner_id]
             if isinstance(task, LoadModel) and shard is not None:
                 try:
-                    _require_worker_model_code_approval(shard.model_card, self.state)
+                    _require_worker_model_execution_identity(
+                        shard.model_card,
+                        self.state,
+                    )
                     model_directory = build_model_path(
                         shard.model_card.model_id,
                         shard.model_card.source_revision,
