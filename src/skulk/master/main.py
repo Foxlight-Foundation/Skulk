@@ -876,6 +876,39 @@ class Master:
             self._ordered_model_cards[model_id] = registry_card
         return self._ordered_model_cards[model_id]
 
+    def _ordered_placement_model_card(self, model_id: ModelId) -> ModelCard | None:
+        """Return authorized card truth for a placement at command order.
+
+        Registry publication can advance from generation A to B while complete
+        installed bytes deliberately keep A active until B has been staged.
+        ``get_card`` exposes that effective installed generation. Preserve it
+        for placement revalidation without letting an out-of-band custom card
+        bypass the master's ordered add/delete ownership boundary.
+
+        Args:
+            model_id: Alias whose placement card is being revalidated.
+
+        Returns:
+            The command-ordered custom card, active signed installed card, or
+            current authorized catalog card; ``None`` after an ordered removal.
+        """
+        ordered_card = self._ordered_model_card(model_id)
+        if (
+            ordered_card is None
+            or ordered_card.is_custom
+            or ordered_card.qualification_only
+        ):
+            return ordered_card
+
+        effective_card = get_card(model_id)
+        if (
+            effective_card is not None
+            and not effective_card.is_custom
+            and effective_card.registry_card_id is not None
+        ):
+            return effective_card
+        return ordered_card
+
     def _order_custom_model_card_add(
         self, command: AddCustomModelCard
     ) -> CustomModelCardAdded | None:
@@ -950,7 +983,9 @@ class Master:
             PlacementModelCardIdentityError: If the card was removed or replaced
                 before the command reached the master's serialized order.
         """
-        ordered_card = self._ordered_model_card(command.model_card.model_id)
+        ordered_card = self._ordered_placement_model_card(
+            command.model_card.model_id
+        )
         if ordered_card is None or not same_authorized_model_card(
             command.model_card, ordered_card
         ):
@@ -971,7 +1006,7 @@ class Master:
                 before the command reached the master's serialized order.
         """
         model_id = command.instance.shard_assignments.model_id
-        ordered_card = self._ordered_model_card(model_id)
+        ordered_card = self._ordered_placement_model_card(model_id)
         if ordered_card is None:
             raise PlacementModelCardIdentityError(
                 "Exact placement model-card identity is no longer present in "

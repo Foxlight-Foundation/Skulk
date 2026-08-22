@@ -342,6 +342,62 @@ def test_quick_placement_accepts_same_card_from_new_snapshot(
     )
 
 
+def test_placement_preserves_active_installed_registry_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A newly published card cannot invalidate the installed generation."""
+    installed = _card("org/model").model_copy(
+        update={
+            "is_custom": False,
+            "registry_card_id": f"card_{'a' * 52}",
+            "registry_snapshot_id": "snapshot-installed",
+        }
+    )
+    current = installed.model_copy(
+        update={
+            "source_revision": "c" * 40,
+            "registry_card_id": f"card_{'b' * 52}",
+            "registry_snapshot_id": "snapshot-current",
+        }
+    )
+
+    def effective_card(_model_id: ModelId) -> ModelCard:
+        return installed
+
+    def current_registry_card(_model_id: ModelId) -> ModelCard:
+        return current
+
+    monkeypatch.setattr(master_main, "get_card", effective_card)
+    monkeypatch.setattr(
+        master_main,
+        "get_current_registry_card",
+        current_registry_card,
+    )
+    master = _master()
+
+    master._require_ordered_place_instance_card(  # pyright: ignore[reportPrivateUsage]
+        PlaceInstance(
+            model_card=installed,
+            sharding=Sharding.Pipeline,
+            instance_meta=InstanceMeta.MlxRing,
+            min_nodes=1,
+        )
+    )
+    master._require_ordered_create_instance_card(  # pyright: ignore[reportPrivateUsage]
+        CreateInstance(instance=_instance(installed))
+    )
+
+    with pytest.raises(PlacementModelCardIdentityError, match="no longer matches"):
+        master._require_ordered_place_instance_card(  # pyright: ignore[reportPrivateUsage]
+            PlaceInstance(
+                model_card=current,
+                sharding=Sharding.Pipeline,
+                instance_meta=InstanceMeta.MlxRing,
+                min_nodes=1,
+            )
+        )
+
+
 def test_exact_placement_rejects_card_deleted_before_master_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
