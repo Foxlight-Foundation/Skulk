@@ -121,6 +121,28 @@ async def test_quick_launch_rejects_unknown_model_without_hub_discovery(
     fetch.assert_not_awaited()
 
 
+async def test_preview_preserves_unknown_model_not_found_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GET /instance/previews preserves the catalog lookup's HTTP 404."""
+
+    api = _build_api()
+    client = TestClient(api.app)
+    api.state.topology.add_node(NodeId("preview-node"))
+
+    async def _unknown(_model_id: object) -> ModelCard:
+        raise ValueError("Unknown model attacker/repository; add it first")
+
+    monkeypatch.setattr(ModelCard, "load", staticmethod(_unknown))
+    response = client.get(
+        "/instance/previews",
+        params={"model_id": "attacker/repository"},
+    )
+
+    assert response.status_code == 404
+    assert "Unknown model attacker/repository" in response.json()["error"]["message"]
+
+
 async def test_exact_instance_creation_accepts_publication_authorization(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

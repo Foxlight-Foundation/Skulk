@@ -3201,6 +3201,8 @@ class API:
 
         try:
             model_card = await self._load_authorized_model_card(model_id)
+        except HTTPException:
+            raise
         except Exception as exc:
             raise HTTPException(
                 status_code=400, detail=f"Failed to load model card: {exc}"
