@@ -6,6 +6,7 @@ import json
 import threading
 from pathlib import Path
 from typing import cast
+from unittest.mock import AsyncMock
 
 import pytest
 from anyio import Path as AsyncPath
@@ -1150,6 +1151,27 @@ async def test_registry_refresh_helper_throttles_repeated_cache_misses(
     finally:
         model_cards_module._card_cache.clear()
         model_cards_module._card_cache.update(original_cache)
+
+
+@pytest.mark.asyncio
+async def test_known_card_loads_check_registry_refresh_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Known aliases still observe the throttled signed-registry deadline."""
+    refresh = AsyncMock()
+    catalog = RegistryCatalog.model_validate_json(_catalog_payload(), strict=False)
+    card = registry_model_cards(catalog)[0]
+
+    monkeypatch.setitem(model_cards_module._card_cache, card.model_id, card)
+    monkeypatch.setattr(
+        model_cards_module,
+        "_refresh_card_cache_if_due",
+        refresh,
+    )
+
+    assert await ModelCard.load(card.model_id) == card
+    assert await ModelCard.load_or_fetch_from_hf(card.model_id) == card
+    assert refresh.await_count == 2
 
 
 @pytest.mark.asyncio

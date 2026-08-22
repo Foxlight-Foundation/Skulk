@@ -2139,8 +2139,7 @@ class ModelCard(CamelCaseModel):
             May refresh signed registry metadata. It never fetches model metadata
             from Hugging Face or persists an unknown custom card.
         """
-        if model_id not in _card_cache:
-            await _refresh_card_cache_if_due()
+        await _refresh_card_cache_if_due()
         if (mc := _card_cache.get(model_id)) is not None:
             return mc
 
@@ -2166,8 +2165,7 @@ class ModelCard(CamelCaseModel):
             For an unknown repository, reads bounded Hugging Face metadata and
             persists the generated card in the custom-card directory.
         """
-        if model_id not in _card_cache:
-            await _refresh_card_cache_if_due()
+        await _refresh_card_cache_if_due()
         if (mc := _card_cache.get(model_id)) is not None:
             return mc
 
