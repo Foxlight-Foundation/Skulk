@@ -136,7 +136,12 @@ def apply_all_parsers(
         model_type, DeepseekV32Model
     ):
         mlx_generator = parse_deepseek_v32(mlx_generator)
-    elif tool_parser:
+    elif tool_parser and tools:
+        # The parser is wired from the tokenizer, which does not know whether
+        # this request offered tools. Skipping it when none were offered is
+        # what keeps a model that spontaneously writes something call-shaped
+        # from returning tool calls to a caller who asked for none, and is
+        # what makes tool_choice "none" hold, since that removes the tools.
         mlx_generator = parse_tool_calls(
             mlx_generator,
             tool_parser,

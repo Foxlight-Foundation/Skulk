@@ -602,3 +602,50 @@ class TestBatchGeneratorSingleNext:
         assert _got_finish(collected), (
             f"No finish_reason in collected: {[(type(r).__name__, getattr(r, 'finish_reason', None) if isinstance(r, GenerationResponse) else 'tool') for r in collected]}"
         )
+
+
+class TestToolParsingRequiresOfferedTools:
+    """A request that declared no tools must not come back with a tool call.
+
+    The tool parser is wired from the tokenizer, which does not know what this
+    request asked for, so without gating on the request a model that
+    spontaneously writes something call-shaped (exactly what a request asking
+    for JSON output invites) returns `tool_calls` to a caller who offered none.
+    It is also what makes `tool_choice: "none"` hold, since resolving that
+    choice removes the tools from the request.
+    """
+
+    @staticmethod
+    def _run(
+        tools: list[dict[str, Any]] | None,
+    ) -> list[GenerationResponse | ToolCallResponse]:
+        tokens = [
+            _make_response("<tool_call>", 200),
+            _make_response("anything", 201),
+            _make_response("</tool_call>", 202, finish_reason="stop"),
+        ]
+        return _step_until_finish(
+            apply_all_parsers(
+                _queue_source(tokens),
+                prompt="",
+                tool_parser=_dummy_parser,
+                tokenizer=_no_thinking_tokenizer(),
+                model_type=Model,
+                model_id=ModelId("mlx-community/does-not-matter"),
+                tools=tools,
+            )
+        )
+
+    def test_no_tools_offered_yields_no_tool_call(self) -> None:
+        results = self._run(None)
+        assert not any(isinstance(item, ToolCallResponse) for item in results)
+
+    def test_an_empty_tools_list_yields_no_tool_call(self) -> None:
+        results = self._run([])
+        assert not any(isinstance(item, ToolCallResponse) for item in results)
+
+    def test_offering_a_tool_still_yields_the_call(self) -> None:
+        results = self._run(
+            [{"type": "function", "function": {"name": "test_fn"}}]
+        )
+        assert any(isinstance(item, ToolCallResponse) for item in results)

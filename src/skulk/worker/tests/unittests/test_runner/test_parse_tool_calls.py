@@ -191,7 +191,8 @@ class TestParseToolCalls:
 
         # The tool is offered but declares no parameter schema, which is the
         # case this covers. A call naming a tool that was never offered at all
-        # is a different matter and is dropped, see the test below.
+        # is a different matter and is dropped, see
+        # test_a_call_naming_no_offered_tool_becomes_content above.
         tools = [{"type": "function", "function": {"name": "process"}}]
 
         results = list(

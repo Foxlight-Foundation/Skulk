@@ -54,8 +54,10 @@ This project records release notes here and mirrors public-facing notes in
 - A model reaching for one of its own built-ins no longer surfaces as a tool
   call. Llama answers some plain questions with a call to `print`, and gpt-oss
   has `python` and `browser`; a caller has no implementation for those names,
-  so a response naming no offered tool is now returned as ordinary content.
-  Requests that declare no tools are unaffected. Relatedly, text that opens
+  so a response naming no offered tool is now returned as ordinary content. A
+  request that declares no tools is not parsed for calls at all, so a model
+  writing something call-shaped, which is what a request asking for JSON output
+  invites, cannot return `tool_calls` to a caller who offered none. Relatedly, text that opens
   like a call but does not parse as one, which is what a model answering in
   JSON looks like when tools are also offered, is returned as content instead
   of being reported as a generation error.

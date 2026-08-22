@@ -1266,7 +1266,7 @@ class Runner(ServedConcurrentDispatch):
         visible_text = "".join(text for text, is_thinking in emissions if not is_thinking)
 
         tool_calls = tool_calls_from_message(message)
-        if not tool_calls:
+        if not tool_calls and task.task_params.tools:
             # llama.cpp only fills structured tool_calls for formats its bundled
             # chat handlers recognize. A reasoning model emits the call as text,
             # so recover it from the string (#416). Source selection matters:

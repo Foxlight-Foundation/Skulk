@@ -792,7 +792,7 @@ Inventory snapshot; see #130 for consolidation plan.
 | NemotronH | ~210 | `NemotronHShardingStrategy` + Mamba2 hybrid cache |
 | GPT-OSS | ~180 | MLX: `parse_gpt_oss` (token-level Harmony parser via `openai_harmony`) + `GptOssShardingStrategy`. llama.cpp: `HarmonyTextParser` in `harmony_text_parser.py` reparses the harmony channel markers from llama.cpp's detokenized *string* deltas (the engine exposes no token ids), splitting `analysis`→reasoning / `final`→content and stripping markers; wired in `llama_cpp/runner._generate`, gated on `OutputParserType.GptOss`, and dependency-free (no MLX/openai_harmony) so it runs on non-Mac GPU nodes. |
 | Step 3.5 | ~95 | Sliding-window cache tracking in `auto_parallel.py:639-650` |
-| Llama / Ministral | ~70 | `LlamaShardingStrategy` (default); the unmarked tool dialect (`<|eom_id|>` stop token plus `{`/`<|python_tag|>` block opening) in `utils_mlx.py` and `tool_parsers.make_text_dialect_parser` |
+| Llama / Ministral | ~70 | `LlamaShardingStrategy` (default); the unmarked tool dialect (end-of-message stop token plus bare-object block opening, see "In-process tool-call dialects" below) in `utils_mlx.py` and `tool_parsers.make_text_dialect_parser` |
 
 ## In-process tool-call dialects
 

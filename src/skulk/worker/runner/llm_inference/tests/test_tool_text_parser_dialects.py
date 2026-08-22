@@ -175,9 +175,16 @@ class TestOfferedToolsOnly:
         assert calls is not None
         assert [call.name for call in calls] == ["get_weather"]
 
-    def test_nothing_is_filtered_when_no_tools_were_declared(self) -> None:
+    def test_an_absent_tools_list_is_not_a_statement_that_nothing_may_be_called(
+        self,
+    ) -> None:
+        # This is a shared helper: the steward parses its own turns through the
+        # same dialects without passing a tools list. Whether a request that
+        # declared no tools may return a call is decided by the caller, which
+        # is the only place that knows.
         calls = parse_tool_calls_from_text(
             '<|python_tag|>{"name": "print", "parameters": {"value": "hi"}}'
         )
         assert calls is not None
         assert [call.name for call in calls] == ["print"]
+

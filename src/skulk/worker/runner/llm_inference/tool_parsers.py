@@ -321,13 +321,18 @@ def declared_tool_calls(
     a plain question with ``<|python_tag|>print("hello")``, which parses as a
     call to ``print``. Surfacing that as a tool call hands the caller a name
     they have no implementation for, so it is dropped here and the block is
-    delivered as content instead. With no tools declared nothing is filtered,
-    because there is no list to check against.
+    delivered as content instead.
+
+    ``tools`` of ``None`` means the caller had no list to check against, not
+    that nothing may be called: this is a shared helper, and the steward parses
+    its own turns through the same dialects without passing one. Whether a
+    request that declared no tools may return a call is decided by the caller,
+    which is the only place that knows.
     """
 
+    declared: set[str] = set()
     if tools is None:
         return tool_calls
-    declared: set[str] = set()
     for tool in tools:
         function = tool.get("function")
         if not isinstance(function, dict):
@@ -336,5 +341,7 @@ def declared_tool_calls(
         if isinstance(name, str):
             declared.add(name)
     if not declared:
+        # Tools were offered but none is usably named, which is the caller's
+        # malformed input rather than a statement that nothing may be called.
         return tool_calls
     return [call for call in tool_calls if call.name in declared]
