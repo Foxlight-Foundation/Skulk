@@ -836,10 +836,17 @@ def parse_tool_calls(
                     )
                     in_tool_call = False
                     tool_call_text_parts = []
+                    # The remainder stays with the scan rather than being
+                    # emitted here, so a further call in the trailing text is
+                    # still found.
                     yield response.model_copy(
-                        update={"text": combined + held_text, "token": 0}
+                        update={"text": combined, "token": 0}
                     )
-                    held_text = ""
+                    if held_text and response.finish_reason is not None:
+                        yield response.model_copy(
+                            update={"text": held_text, "token": 0}
+                        )
+                        held_text = ""
                     continue
                 parsed = kept
             logger.info(
@@ -857,9 +864,13 @@ def parse_tool_calls(
                     f"emitting it as content (generated_chars={len(combined)})"
                 )
                 yield response.model_copy(
-                    update={"text": combined + held_text, "token": 0}
+                    update={"text": combined, "token": 0}
                 )
-                held_text = ""
+                if held_text and response.finish_reason is not None:
+                    yield response.model_copy(
+                        update={"text": held_text, "token": 0}
+                    )
+                    held_text = ""
                 continue
 
             if parsed is None:

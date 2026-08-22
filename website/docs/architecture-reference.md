@@ -802,8 +802,12 @@ Recognized dialects, tried in order: harmony `to=functions.NAME` channels
 (gpt-oss); `<tool_call>` blocks carrying Hermes JSON, Qwen3 XML, or GLM
 `<arg_key>`/`<arg_value>` pairs; Llama `<|python_tag|>` calls (which use
 `parameters` rather than `arguments` and may chain several with `;`); Mistral
-`[TOOL_CALLS]` arrays; and, strictly, an unmarked call object that is the
-entire message. The served engines (`llama_server`, `vllm`) do not use this
+`[TOOL_CALLS]` arrays; and an unmarked call object opening the message, which
+the model may keep writing after. The unmarked rule is deliberately narrow,
+since it is otherwise indistinguishable from a model answering in JSON: the
+message must begin with the object, the object must carry a `name` alongside an
+`arguments` or `parameters` value, and the offered-tools filter below removes
+anything naming a tool the caller did not offer. The served engines (`llama_server`, `vllm`) do not use this
 path: their servers parse tool calls themselves and return structured
 `tool_calls`.
 
@@ -817,8 +821,11 @@ could still become a marker. That run is shorter than the longest marker, so
 ordinary answers stream with at most a few characters of latency and nothing
 is held for a message containing no call. The scan does not stop once ordinary
 text has been released, so a model that writes a sentence before calling still
-has its call found. A block closes when the accumulated block ends with
-`end_parsing`, or at the end of generation. Reasoning chunks
+has its call found. A block closes at the first `end_parsing` found in the accumulated block, or at
+the end of generation. The marker is located rather than matched at the end so
+that text the model writes after the call ("`</tool_call>` Done.") returns to
+the opening scan as ordinary text, where a second call in the same message is
+still found. Reasoning chunks
 (`is_thinking=True`) pass straight through and take no part in the scan, which
 both keeps a thinking preamble from hiding the call and stops a call the model
 only contemplated from being executed.

@@ -338,3 +338,34 @@ class TestTextAfterTheCall:
         )
         assert calls_of(chunks) == ["get_weather", "get_weather"]
         assert "and then" in text_of(chunks)
+
+
+class TestTailAfterADroppedBlock:
+    """A block that named no offered tool must not swallow what follows.
+
+    Emitting the trailing text along with the dropped block would keep a real
+    call in that tail from ever being scanned.
+    """
+
+    def test_a_real_call_after_a_dropped_block_is_still_found(self) -> None:
+        chunks = feed(
+            [
+                "<tool_call><function=print><parameter=value>hi</parameter></function></tool_call>",
+                " then ",
+                "<tool_call><function=get_weather></function></tool_call>",
+            ],
+            generic_parser(),
+        )
+        assert calls_of(chunks) == ["get_weather"]
+
+    def test_the_dropped_block_still_reaches_the_caller_as_content(self) -> None:
+        chunks = feed(
+            [
+                "<tool_call><function=print><parameter=value>hi</parameter></function></tool_call>",
+                " done.",
+            ],
+            generic_parser(),
+        )
+        assert calls_of(chunks) == []
+        assert "print" in text_of(chunks)
+        assert "done." in text_of(chunks)

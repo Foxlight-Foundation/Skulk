@@ -304,7 +304,8 @@ def parse_tool_calls_from_text(
     - Llama ``<|python_tag|>`` calls, which use ``parameters`` rather than
       ``arguments`` and may chain several with ``;``
     - Mistral ``[TOOL_CALLS]`` arrays
-    - an unmarked call object, accepted only when it is the entire message
+    - an unmarked call object opening the message, which the model may keep
+      writing after
 
     When ``tools`` is given, calls naming a tool the caller did not offer are
     dropped, because a model reaching for one of its own built-ins has not
@@ -325,9 +326,11 @@ def parse_tool_calls_from_text(
     if not calls and "[TOOL_CALLS]" in text:
         calls = _mistral_calls(text)
     if not calls:
-        # Last resort, and deliberately strict: only when the whole message is
-        # one call object. Unmarked dialects are indistinguishable from a model
-        # answering in JSON, so anything looser invents tool calls from prose.
+        # Last resort, and deliberately narrow: the message must begin with the
+        # call object. Unmarked dialects are otherwise indistinguishable from a
+        # model answering in JSON, so anything looser invents tool calls from
+        # prose. The object must also carry a name alongside arguments, and the
+        # caller's tools are checked afterwards.
         calls = _bare_json_call(text)
     if not calls:
         return None
