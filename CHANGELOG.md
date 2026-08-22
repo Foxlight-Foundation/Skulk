@@ -9,6 +9,16 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- A tool call handed back as content no longer carries the model's control
+  tokens. When a call names no offered tool it is delivered as text so the
+  caller can see what the model did, but the block was handed back verbatim, so
+  `<|python_tag|>` and `<tool_call>` markers ended up in the answer. The
+  markers are stripped from an answer; a response already flagged as an error
+  still carries the raw block, since there it is the evidence of what was
+  malformed.
+
+### Fixed
+
 - gpt-oss and DeepSeek V3.2 no longer return a tool the caller never offered.
   Those two families parse their calls out of the token stream themselves and
   are selected before the marker path, so the offered-tools rule never saw

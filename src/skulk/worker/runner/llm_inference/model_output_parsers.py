@@ -763,6 +763,27 @@ def reject_unoffered_tool_calls(
         )
 
 
+def _block_as_content(text: str, tool_parser: ToolParser) -> str:
+    """Strip a dialect's markers from a block being delivered as content.
+
+    A block that named no offered tool, or that did not parse but reads as an
+    answer, is handed back to the caller as content. Handing it back verbatim
+    puts the dialect's control tokens in their answer text, which is the leak
+    this whole path exists to prevent: `<|python_tag|>` reached a caller that
+    way, found by the harness's tool-contract suite.
+
+    The error path deliberately does NOT use this. There the raw block is the
+    evidence of what was malformed, and the response is already flagged as an
+    error rather than offered as an answer.
+    """
+
+    stripped = text
+    for marker in (*tool_parser.start_markers, tool_parser.end_parsing):
+        if marker and marker != "{":
+            stripped = stripped.replace(marker, "")
+    return stripped
+
+
 def _block_start_index(
     text: str, tool_parser: ToolParser, *, at_message_start: bool
 ) -> int | None:
@@ -1040,7 +1061,7 @@ def parse_tool_calls(
                     # still found.
                     yield response.model_copy(
                         update={
-                            "text": combined,
+                            "text": _block_as_content(combined, tool_parser),
                             "token": 0,
                             "finish_reason": None,
                         }
@@ -1063,7 +1084,11 @@ def parse_tool_calls(
                     f"emitting it as content (generated_chars={len(combined)})"
                 )
                 yield response.model_copy(
-                    update={"text": combined, "token": 0, "finish_reason": None}
+                    update={
+                        "text": _block_as_content(combined, tool_parser),
+                        "token": 0,
+                        "finish_reason": None,
+                    }
                 )
                 yield from _finish_message(response)
                 continue
@@ -1125,7 +1150,11 @@ def parse_tool_calls(
                     f"(parsed_calls={len(parsed)})"
                 )
                 yield response.model_copy(
-                    update={"text": combined, "token": 0, "finish_reason": None}
+                    update={
+                        "text": _block_as_content(combined, tool_parser),
+                        "token": 0,
+                        "finish_reason": None,
+                    }
                 )
                 yield from _finish_message(response)
                 break
@@ -1153,7 +1182,11 @@ def parse_tool_calls(
                     f"emitting it as content (generated_chars={len(combined)})"
                 )
                 yield response.model_copy(
-                    update={"text": combined, "token": 0, "finish_reason": None}
+                    update={
+                        "text": _block_as_content(combined, tool_parser),
+                        "token": 0,
+                        "finish_reason": None,
+                    }
                 )
                 yield from _finish_message(response)
                 break
@@ -1166,7 +1199,11 @@ def parse_tool_calls(
                 # finish reason is withheld here or the consumer stops on this
                 # chunk and never sees them.
                 yield response.model_copy(
-                    update={"text": combined, "token": 0, "finish_reason": None}
+                    update={
+                        "text": _block_as_content(combined, tool_parser),
+                        "token": 0,
+                        "finish_reason": None,
+                    }
                 )
                 yield from _finish_message(response)
                 break

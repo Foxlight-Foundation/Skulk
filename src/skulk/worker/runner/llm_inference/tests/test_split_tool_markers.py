@@ -601,3 +601,44 @@ class TestTruncationIsNotACall:
         # block, so a normal stop must still produce the call.
         chunks = self.truncated("stop")
         assert calls_of(chunks) == ["get_weather"]
+
+
+class TestRejectedBlockDoesNotLeakMarkers:
+    """A block handed back as content must not carry its dialect's markers.
+
+    Found by the harness's tool-contract suite: a Llama model called a tool
+    that a named tool_choice had narrowed away, the call was correctly
+    rejected, and the caller received `<|python_tag|>` in the answer text.
+    """
+
+    def test_an_unmarked_rejected_call_loses_its_marker(self) -> None:
+        chunks = feed(
+            [
+                '<|python_tag|>{"name": "print", ',
+                '"parameters": {"value": "hi"}}',
+            ],
+            make_text_dialect_parser("{", "<|eom_id|>"),
+        )
+        assert calls_of(chunks) == []
+        answer = text_of(chunks)
+        assert "<|python_tag|>" not in answer
+        # The call itself is still shown, so the caller can see what happened.
+        assert "print" in answer
+
+    def test_a_marked_rejected_call_loses_its_markers(self) -> None:
+        chunks = feed(
+            ["<tool_call><function=print></function></tool_call>"],
+            generic_parser(),
+        )
+        assert calls_of(chunks) == []
+        answer = text_of(chunks)
+        assert "<tool_call>" not in answer
+        assert "</tool_call>" not in answer
+        assert "print" in answer
+
+    def test_an_accepted_call_is_unaffected(self) -> None:
+        chunks = feed(
+            ["<tool_call><function=get_weather></function></tool_call>"],
+            generic_parser(),
+        )
+        assert calls_of(chunks) == ["get_weather"]
