@@ -874,14 +874,6 @@ class Master:
             # replacing an operator-owned custom override.  Signed truth always
             # supersedes a lifecycle-owned temporary card for future mutations.
             self._ordered_model_cards[model_id] = registry_card
-        elif ordered is None:
-            fallback = get_card(model_id)
-            if fallback is not None and not fallback.is_custom:
-                # Deleting a custom override is ordered before each process
-                # applies the indexed deletion and rebuilds its local catalog.
-                # Once that happens, allow the effective signed, installed, or
-                # bundled fallback to re-enter command-ordered truth.
-                self._ordered_model_cards[model_id] = fallback
         return self._ordered_model_cards[model_id]
 
     def _order_custom_model_card_add(

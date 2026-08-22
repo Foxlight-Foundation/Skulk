@@ -536,9 +536,7 @@ card whose durable custom TOML was deleted. The low-level `/download/start`
 operator route likewise rejects any shard card that is not exact catalog truth.
 Exact comparison ignores only `registry_snapshot_id`, which identifies the TUF
 publication carrying an otherwise immutable card; every model, source, runtime,
-artifact, and capability field remains load-bearing. After custom deletion, the
-master admits the effective non-custom fallback once local catalog application
-has converged.
+artifact, and capability field remains load-bearing.
 An
 exact-card install succeeds only after the local
 worker persists and caches the indexed event carrying that command's ID; card

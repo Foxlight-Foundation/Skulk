@@ -127,7 +127,6 @@ restore catalog authorization after an operator deletes the custom card.
 The explicit low-level download route now requires operator access and rejects
 embedded shard cards that differ from current authorized catalog truth.
 Snapshot-only republication no longer rejects an otherwise identical signed
-card, and deleting a custom override restores its effective non-custom fallback
-for subsequent master-ordered placement.
+card during master-ordered placement.
 The runner still verifies signed-card identity, immutable revisions, installed
 sidecars, and artifact manifests before executing repository code.
