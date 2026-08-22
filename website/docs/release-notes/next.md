@@ -6,6 +6,13 @@ sidebar_position: 0
 
 ## Tool calling across more model families
 
+Tool calls are now recognized when a model's opening marker arrives split
+across several streamed pieces, which is the normal case rather than the
+exception. Previously the caller received the raw markup as message content
+with an ordinary stop reason, so a well formed call from the model looked like
+a refusal to call anything.
+
+
 Tool calling now works for Llama models served by the MLX engine, and Skulk
 recognizes the ways more model families write a call. Llama ends a message that
 hands off to a tool with a token it does not declare as a stop token, so

@@ -9,6 +9,21 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- Tool calls whose markers arrive split across chunks are now recognized. A
+  generation chunk is whatever the streaming detokenizer could resolve that
+  step, not a token, so an opening marker that is a single token id still
+  reaches the parser in pieces: `<tool`, `_`, `c`, `all>`. The parser tested
+  each chunk on its own, so for most models the block never opened and the
+  caller received the raw markup as message content with a `stop` finish
+  reason. Observed on a Qwen model served by the MLX engine, where the model
+  emitted a perfectly well formed call. The decision is now made against the
+  text accumulated from the start of the message, and the closing marker is
+  matched the same way. Only the leading chunks are held back, and only until
+  the text either matches a marker or can no longer become one, so ordinary
+  answers stream as they did before.
+
+### Fixed
+
 - Tool calling now works for Llama models on the MLX engine, and the shared
   text parser recognizes the dialects the other families write. Llama declares
   only its end-of-turn token as a stop token, not `<|eom_id|>`, which is how it

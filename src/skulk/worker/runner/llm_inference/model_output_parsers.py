@@ -690,6 +690,17 @@ def parse_tool_calls(
 ) -> Generator[ParserChunk]:
     in_tool_call = False
     tool_call_text_parts: list[str] = []
+    # A chunk is whatever the streaming detokenizer could resolve this step, not
+    # a token: an opening marker that is one token id still arrives split across
+    # chunks ("<tool", "_", "c", "all>"). Testing each chunk on its own would
+    # therefore miss the marker for most models, so the decision is made against
+    # the text accumulated from the start of the message. Only the leading
+    # chunks are held back, and only until the text either matches a marker or
+    # can no longer become one, so ordinary answers stream as before.
+    opening_settled = False
+    pending_responses: list[GenerationResponse] = []
+    pending_text = ""
+    opening_budget = max(len(marker) for marker in tool_parser.start_markers) + 16
     for response in responses:
         if response is None:
             yield None
@@ -698,15 +709,49 @@ def parse_tool_calls(
             yield response
             continue
 
-        if not in_tool_call and response.text.startswith(tool_parser.start_markers):
-            in_tool_call = True
+        just_opened = False
+        if not in_tool_call and not opening_settled:
+            pending_responses.append(response)
+            pending_text += response.text
+            candidate = pending_text.lstrip()
+            if candidate.startswith(tool_parser.start_markers):
+                in_tool_call = True
+                just_opened = True
+                opening_settled = True
+                tool_call_text_parts.append(pending_text)
+                pending_responses = []
+                pending_text = ""
+            elif (
+                candidate
+                and not any(
+                    marker.startswith(candidate)
+                    for marker in tool_parser.start_markers
+                )
+            ) or len(pending_text) > opening_budget:
+                opening_settled = True
+                for buffered in pending_responses:
+                    yield buffered
+                pending_responses = []
+                pending_text = ""
+                continue
+            else:
+                if response.finish_reason is not None:
+                    opening_settled = True
+                    for buffered in pending_responses:
+                        yield buffered
+                    pending_responses = []
+                    pending_text = ""
+                continue
 
         if not in_tool_call:
             yield response
             continue
 
-        tool_call_text_parts.append(response.text)
-        if response.text.endswith(tool_parser.end_parsing):
+        if not just_opened:
+            tool_call_text_parts.append(response.text)
+        # The closing marker splits across chunks for the same reason the
+        # opening one does, so match it against the accumulated block.
+        if "".join(tool_call_text_parts).rstrip().endswith(tool_parser.end_parsing):
             # parse the actual tool calls from the tool call text
             combined = "".join(tool_call_text_parts)
             parsed = tool_parser.parse(combined.strip(), tools=tools)
@@ -718,6 +763,7 @@ def parse_tool_calls(
                         f"(parsed_calls={len(parsed)})"
                     )
                     in_tool_call = False
+                    opening_settled = False
                     tool_call_text_parts = []
                     yield response.model_copy(
                         update={"text": combined, "token": 0}
@@ -731,6 +777,7 @@ def parse_tool_calls(
                 f"parsed_calls={len(parsed) if parsed is not None else 0})"
             )
             in_tool_call = False
+            opening_settled = False
             tool_call_text_parts = []
 
             if parsed is None and tool_parser.unparsed_is_text:
