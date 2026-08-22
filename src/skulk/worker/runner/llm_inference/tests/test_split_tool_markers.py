@@ -204,3 +204,94 @@ class TestThinkingBeforeTheCall:
 
         chunks = list(parse_tool_calls(source(), generic_parser(), tools=WEATHER))
         assert calls_of(chunks) == []
+
+
+class TestVisiblePreamble:
+    """A sentence before the call must not hide it.
+
+    Models routinely announce what they are about to do ("I'll check that.")
+    and then call. The opening scan therefore has to keep looking after
+    ordinary text has been released, not decide once and stop.
+    """
+
+    def test_a_call_after_a_visible_preamble_is_parsed(self) -> None:
+        chunks = feed(
+            [
+                "I'll check ",
+                "that for you. ",
+                "<tool_call>",
+                "<function=get_weather><parameter=location>Denver</parameter></function>",
+                "</tool_call>",
+            ],
+            generic_parser(),
+        )
+        assert calls_of(chunks) == ["get_weather"]
+
+    def test_the_preamble_still_reaches_the_caller(self) -> None:
+        chunks = feed(
+            [
+                "I'll check that. ",
+                "<tool_call><function=get_weather></function></tool_call>",
+            ],
+            generic_parser(),
+        )
+        assert "I'll check that." in text_of(chunks)
+
+    def test_a_preamble_and_a_split_marker_together(self) -> None:
+        chunks = feed(
+            [
+                "Sure thing. ",
+                "<tool",
+                "_call><function=get_weather></function>",
+                "</tool_call>",
+            ],
+            generic_parser(),
+        )
+        assert calls_of(chunks) == ["get_weather"]
+        assert "Sure thing." in text_of(chunks)
+
+    def test_two_calls_in_one_message_are_both_parsed(self) -> None:
+        chunks = feed(
+            [
+                "<tool_call><function=get_weather></function></tool_call>",
+                " and also ",
+                "<tool_call><function=get_weather></function></tool_call>",
+            ],
+            generic_parser(),
+        )
+        assert calls_of(chunks) == ["get_weather", "get_weather"]
+
+
+class TestUnmarkedDialectStaysAnchored:
+    """The unmarked dialect opens on `{`, so it must only open at the start.
+
+    Letting a brace open a block anywhere would turn any answer that mentions
+    one into a tool call.
+    """
+
+    def test_a_brace_mid_answer_is_not_a_call(self) -> None:
+        chunks = feed(
+            ["The set is ", '{"name": "get_weather", "parameters": {}}'],
+            make_text_dialect_parser("{", "<|eom_id|>"),
+        )
+        assert calls_of(chunks) == []
+        assert "The set is" in text_of(chunks)
+
+    def test_a_call_at_the_start_still_opens(self) -> None:
+        chunks = feed(
+            ['{"name": "get_weather", ', '"parameters": {"location": "Denver"}}'],
+            make_text_dialect_parser("{", "<|eom_id|>"),
+        )
+        assert calls_of(chunks) == ["get_weather"]
+
+    def test_the_distinctive_marker_still_opens_after_a_preamble(self) -> None:
+        # <|python_tag|> is unambiguous, so unlike the brace it may appear
+        # after a sentence and still open the call.
+        chunks = feed(
+            [
+                "Let me look that up. ",
+                '<|python_tag|>{"name": "get_weather", "parameters": {}}',
+            ],
+            make_text_dialect_parser("{", "<|eom_id|>"),
+        )
+        assert calls_of(chunks) == ["get_weather"]

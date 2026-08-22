@@ -685,6 +685,53 @@ def parse_thinking_models(
         )
 
 
+def _block_start_index(
+    text: str, tool_parser: ToolParser, *, at_message_start: bool
+) -> int | None:
+    """Index in ``text`` where a tool-call block begins, or ``None``.
+
+    Distinctive markers open a block wherever they appear, because models
+    routinely write a sentence before calling ("I'll check that." then the
+    call). The unmarked dialect's opening marker is ``{``, which appears in
+    ordinary prose and JSON answers, so it opens a block only at the start of
+    the message, which is the only place the families using it write a call.
+    """
+
+    earliest: int | None = None
+    for marker in tool_parser.extra_start_parsing:
+        found = text.find(marker)
+        if found != -1 and (earliest is None or found < earliest):
+            earliest = found
+
+    if not tool_parser.anchored:
+        found = text.find(tool_parser.start_parsing)
+        if found != -1 and (earliest is None or found < earliest):
+            earliest = found
+    elif at_message_start:
+        stripped = text.lstrip()
+        if stripped.startswith(tool_parser.start_parsing):
+            found = len(text) - len(stripped)
+            if earliest is None or found < earliest:
+                earliest = found
+    return earliest
+
+
+def _partial_marker_suffix_length(text: str, markers: tuple[str, ...]) -> int:
+    """Length of the trailing run of ``text`` that could still become a marker.
+
+    Held back rather than emitted, so a marker split across chunks is still
+    recognized. Bounded by the longest marker, so this is a few characters of
+    latency at most and never an unbounded buffer.
+    """
+
+    longest = max(len(marker) for marker in markers) - 1
+    for length in range(min(longest, len(text)), 0, -1):
+        tail = text[-length:]
+        if any(marker.startswith(tail) for marker in markers):
+            return length
+    return 0
+
+
 def parse_tool_calls(
     responses: Generator[ParserChunk],
     tool_parser: ToolParser,
@@ -697,15 +744,14 @@ def parse_tool_calls(
     tool_call_text_parts: list[str] = []
     # A chunk is whatever the streaming detokenizer could resolve this step, not
     # a token: an opening marker that is one token id still arrives split across
-    # chunks ("<tool", "_", "c", "all>"). Testing each chunk on its own would
-    # therefore miss the marker for most models, so the decision is made against
-    # the text accumulated from the start of the message. Only the leading
-    # chunks are held back, and only until the text either matches a marker or
-    # can no longer become one, so ordinary answers stream as before.
-    opening_settled = False
-    pending_responses: list[GenerationResponse] = []
-    pending_text = ""
-    opening_budget = max(len(marker) for marker in tool_parser.start_markers) + 16
+    # chunks ("<tool", "_", "c", "all>"). Testing each chunk on its own misses
+    # the marker for most models, so text is scanned across chunk boundaries by
+    # carrying forward only the trailing run that could still become a marker.
+    # That run is shorter than the longest marker, so ordinary answers stream
+    # with at most a few characters of latency and nothing is ever held for a
+    # message that turns out not to contain a call.
+    held_text = ""
+    at_message_start = True
     for response in responses:
         if response is None:
             yield None
@@ -725,42 +771,44 @@ def parse_tool_calls(
             continue
 
         just_opened = False
-        if not in_tool_call and not opening_settled:
-            pending_responses.append(response)
-            pending_text += response.text
-            candidate = pending_text.lstrip()
-            if candidate.startswith(tool_parser.start_markers):
+        if not in_tool_call:
+            scanned = held_text + response.text
+            start = _block_start_index(
+                scanned, tool_parser, at_message_start=at_message_start
+            )
+            if start is not None:
+                preamble = scanned[:start]
+                if preamble:
+                    yield response.model_copy(
+                        update={
+                            "text": preamble,
+                            "token": 0,
+                            "finish_reason": None,
+                        }
+                    )
                 in_tool_call = True
                 just_opened = True
-                opening_settled = True
-                tool_call_text_parts.append(pending_text)
-                pending_responses = []
-                pending_text = ""
-            elif (
-                candidate
-                and not any(
-                    marker.startswith(candidate)
-                    for marker in tool_parser.start_markers
-                )
-            ) or len(pending_text) > opening_budget:
-                opening_settled = True
-                for buffered in pending_responses:
-                    yield buffered
-                pending_responses = []
-                pending_text = ""
-                continue
+                held_text = ""
+                at_message_start = False
+                tool_call_text_parts.append(scanned[start:])
             else:
+                keep = _partial_marker_suffix_length(
+                    scanned, tool_parser.start_markers
+                )
                 if response.finish_reason is not None:
-                    opening_settled = True
-                    for buffered in pending_responses:
-                        yield buffered
-                    pending_responses = []
-                    pending_text = ""
+                    # Nothing more is coming, so a partial marker is just text.
+                    keep = 0
+                emitted = scanned[: len(scanned) - keep]
+                held_text = scanned[len(scanned) - keep :]
+                if emitted.strip():
+                    at_message_start = False
+                if emitted == response.text and not held_text:
+                    yield response
+                elif emitted or response.finish_reason is not None:
+                    yield response.model_copy(
+                        update={"text": emitted, "token": 0}
+                    )
                 continue
-
-        if not in_tool_call:
-            yield response
-            continue
 
         if not just_opened:
             tool_call_text_parts.append(response.text)
@@ -778,7 +826,6 @@ def parse_tool_calls(
                         f"(parsed_calls={len(parsed)})"
                     )
                     in_tool_call = False
-                    opening_settled = False
                     tool_call_text_parts = []
                     yield response.model_copy(
                         update={"text": combined, "token": 0}
@@ -792,7 +839,6 @@ def parse_tool_calls(
                 f"parsed_calls={len(parsed) if parsed is not None else 0})"
             )
             in_tool_call = False
-            opening_settled = False
             tool_call_text_parts = []
 
             if parsed is None and tool_parser.unparsed_is_text:

@@ -28,6 +28,15 @@ class ToolParser:
     a tool by name, and a marker that does not open the block is emitted to the
     caller as content.
     """
+    anchored: bool = False
+    """Whether the primary marker opens a block only at the start of a message.
+
+    A distinctive marker opens a block wherever it appears, because models
+    routinely write a sentence before calling. The unmarked dialect's marker is
+    ``{``, which also appears in prose and in JSON answers, so letting it open
+    a block anywhere would turn any brace mid-answer into a call. The families
+    using it write the call as the whole message, so anchoring loses nothing.
+    """
     unparsed_is_text: bool = False
     """Whether a block that fails to parse is content rather than a failure.
 
@@ -301,6 +310,7 @@ def make_text_dialect_parser(tool_call_start: str, tool_call_end: str) -> ToolPa
         end_parsing=tool_call_end,
         _inner_parser=lambda text: parse_tool_calls_from_text(text),
         extra_start_parsing=("<|python_tag|>",),
+        anchored=True,
         unparsed_is_text=True,
     )
 
