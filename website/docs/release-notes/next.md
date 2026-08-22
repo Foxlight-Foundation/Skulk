@@ -124,6 +124,8 @@ race after API lookup also prevents stale content from launching.
 Executable bundled fallback cards must pin their repository revision. Retained
 installed sidecars continue to describe custom artifacts, but they no longer
 restore catalog authorization after an operator deletes the custom card.
+External processor, vision-weight, assistant, MTP, and speculative-draft
+repositories likewise require their own immutable companion revisions.
 The explicit low-level download route now requires operator access and rejects
 embedded shard cards that differ from current authorized catalog truth.
 Snapshot-only republication no longer rejects an otherwise identical signed

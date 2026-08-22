@@ -220,11 +220,30 @@ def test_approval_cannot_authorize_unpinned_processor_repository() -> None:
         }
     )
 
-    with pytest.raises(PermissionError, match="unpinned vision processor"):
+    assert not remote_code_is_automatically_trusted(card)
+    with pytest.raises(PermissionError, match="mutable external companion"):
         require_remote_code_approval(
             card,
             frozenset({remote_code_trust_identity(card)}),
         )
+
+
+def test_custom_card_cannot_authorize_unpinned_processor_repository() -> None:
+    """Explicit base-model addition cannot authorize mutable companion code."""
+    card = _registry_card().model_copy(
+        update={
+            "registry_card_id": None,
+            "registry_snapshot_id": None,
+            "registry_provenance": None,
+            "is_custom": True,
+            "trust_remote_code": False,
+            "vision": VisionCardConfig(processor_repo="org/processor"),
+        }
+    )
+
+    assert not remote_code_is_automatically_trusted(card)
+    with pytest.raises(PermissionError, match="vision.processor_revision"):
+        require_remote_code_approval(card, frozenset())
 
 
 @pytest.mark.parametrize(

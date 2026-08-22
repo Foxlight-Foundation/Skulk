@@ -78,6 +78,12 @@ def remote_code_is_automatically_trusted(card: ModelCard) -> bool:
         return False
     if card.source_revision is None:
         return False
+    try:
+        card.require_immutable_external_companions(
+            context="executable model cards"
+        )
+    except ValueError:
+        return False
     if card.is_custom or card.registry_card_id is None:
         return True
     return card.registry_snapshot_id is not None
@@ -157,17 +163,15 @@ def require_remote_code_approval(
             "an immutable source revision; use the signed registry card or "
             f"update the bundled definition: {card.model_id}"
         )
-    if (
-        card.registry_card_id is not None
-        and card.vision is not None
-        and card.vision.processor_repo is not None
-        and card.vision.processor_revision is None
-    ):
-        raise PermissionError(
-            f"{MODEL_TRUST_FAILURE_MARKER}: signed model card references an "
-            "unpinned vision processor repository: "
-            f"{card.registry_card_id}"
+    try:
+        card.require_immutable_external_companions(
+            context="executable model cards"
         )
+    except ValueError as exc:
+        raise PermissionError(
+            f"{MODEL_TRUST_FAILURE_MARKER}: model card references a mutable "
+            f"external companion: {exc}"
+        ) from exc
     if (
         card.registry_card_id is not None
         and (card.trust_remote_code or card.vision is not None)

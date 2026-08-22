@@ -56,6 +56,8 @@ This project records release notes here and mirrors public-facing notes in
   Executable bundled fallback cards must pin an immutable source revision, and
   installed custom-card sidecars no longer recreate catalog authorization after
   the operator deletes the custom card.
+  Separate processor, vision-weight, assistant, and speculative-draft
+  repositories must also carry their matching immutable revisions.
   The low-level explicit-download endpoint now requires operator authority and
   rejects shard cards that do not exactly match authorized catalog truth.
   Authorization comparison ignores only the signed snapshot publication stamp.

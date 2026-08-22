@@ -33,6 +33,7 @@ from skulk.store.model_store_client import ModelStoreClient, ModelStoreDownloade
 
 _BASE_MODEL = "mlx-community/Qwen-test-9B-4bit"
 _SIDECAR_REPO = "FoxlightAI/qwen-test-9b-mtp"
+_SIDECAR_REVISION = "c" * 40
 
 
 class _UnusedInnerDownloader(ShardDownloader):
@@ -74,8 +75,34 @@ class _RecordingStoreClient:
     async def is_model_available(
         self, model_id: str, source_revision: str | None = None
     ) -> bool:
-        assert source_revision is None
+        expected_revision = _SIDECAR_REVISION if model_id == _SIDECAR_REPO else None
+        assert source_revision == expected_revision
         return model_id in self.available
+
+    async def request_and_wait_for_download(
+        self,
+        model_id: str,
+        *,
+        pinned_gguf: str | None = None,
+        extra_pinned_gguf: list[str] | None = None,
+        source_revision: str | None = None,
+        source_repository: str | None = None,
+        registry_card_id: str | None = None,
+        owner_model_id: str | None = None,
+        owner_registry_card_id: str | None = None,
+        artifact_role: str = "base",
+    ) -> bool:
+        """Accept the exact pinned companion request before staging it."""
+        assert model_id == _SIDECAR_REPO
+        assert pinned_gguf is None
+        assert not extra_pinned_gguf
+        assert source_revision == _SIDECAR_REVISION
+        assert source_repository == _SIDECAR_REPO
+        assert registry_card_id is None
+        assert owner_model_id == _BASE_MODEL
+        assert owner_registry_card_id is None
+        assert artifact_role == "mtp_sidecar"
+        return True
 
     async def stage_shard(
         self,
@@ -85,7 +112,8 @@ class _RecordingStoreClient:
         source_revision: str | None = None,
         capacity_preflight: Callable[[int], Awaitable[None]] | None = None,
     ) -> Path:
-        assert source_revision is None
+        expected_revision = _SIDECAR_REVISION if model_id == _SIDECAR_REPO else None
+        assert source_revision == expected_revision
         if model_id in self.fail_staging:
             raise RuntimeError(f"simulated staging failure for {model_id}")
         if capacity_preflight is not None:
@@ -110,6 +138,7 @@ def _shard_with_sidecar() -> PipelineShardMetadata:
             runtime=RuntimeCapabilityCardConfig(
                 mtp_heads=True,
                 mtp_sidecar_repo=_SIDECAR_REPO,
+                mtp_sidecar_revision=_SIDECAR_REVISION,
             ),
         ),
         device_rank=0,

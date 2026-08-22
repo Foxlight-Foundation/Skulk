@@ -534,6 +534,8 @@ executable bundled fallback card must pin its source revision, and an installed
 custom-card sidecar retains artifact truth without independently authorizing a
 card whose durable custom TOML was deleted. The low-level `/download/start`
 operator route likewise rejects any shard card that is not exact catalog truth.
+Every separately hosted processor, vision-weight, assistant, MTP, or served
+draft companion must carry its own immutable revision before download or launch.
 Exact comparison ignores only `registry_snapshot_id`, which identifies the TUF
 publication carrying an otherwise immutable card; every model, source, runtime,
 artifact, and capability field remains load-bearing.
