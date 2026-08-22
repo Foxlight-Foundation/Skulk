@@ -796,8 +796,16 @@ Inventory snapshot; see #130 for consolidation plan.
 
 ## In-process tool-call dialects
 
-Both in-process engines (`mlx`, `llama_cpp`) recover tool calls from generated
-text through `worker/runner/llm_inference/tool_text_parser.parse_tool_calls_from_text`.
+`worker/runner/llm_inference/tool_text_parser.parse_tool_calls_from_text` is
+the shared dialect reader. The `llama_cpp` runner calls it directly for every
+call its bundled chat handlers did not already parse. The `mlx` engine reaches
+it only through the parsers wired onto the tokenizer in `utils_mlx`: the
+generic `<tool_call>` dialect (`_parse_generic_text_tool_calls`) and the
+unmarked dialect (`make_text_dialect_parser`) delegate to it, while a family
+parser the tokenizer supplies itself is wrapped by `make_mlx_parser` and called
+directly, and gpt-oss and DeepSeek V3.2 bypass it entirely for their own
+token-level parsers (`parse_gpt_oss`, `parse_deepseek_v32`). Adding a dialect
+here therefore reaches llama.cpp and those two MLX paths, not every MLX model.
 Recognized dialects, tried in order: harmony `to=functions.NAME` channels
 (gpt-oss); `<tool_call>` blocks carrying Hermes JSON, Qwen3 XML, or GLM
 `<arg_key>`/`<arg_value>` pairs; Llama `<|python_tag|>` calls (which use
