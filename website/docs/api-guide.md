@@ -810,8 +810,9 @@ tools from the request, which is the only way to guarantee the documented
 behavior that the model does not call one: a model handed a tool and asked for
 it will call it whatever the request said. Naming a single function narrows the
 offered tools to that one, so the model cannot call a different tool than you
-asked for; a name matching none of your tools is reported by the engine rather
-than silently sending no tools. `"auto"` and `"required"` pass through, and
+asked for. A name matching none of your tools is left in the request rather
+than silently emptying it, so the model answers from the full list; check the
+returned call rather than assuming the name you forced. `"auto"` and `"required"` pass through, and
 `"required"` is a best-effort instruction on the in-process engines rather than
 a guarantee, because forcing a call there would need constrained decoding.
 

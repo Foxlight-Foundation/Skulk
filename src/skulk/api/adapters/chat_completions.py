@@ -150,8 +150,11 @@ def resolve_tool_choice(
         if isinstance(tool.get("function"), dict)
         and cast("dict[str, Any]", tool["function"]).get("name") == name
     ]
-    # A name matching nothing is the caller's error and is left for the engine
-    # to report, rather than being turned into a silent no-tools request here.
+    # A name matching nothing is the caller's error. Emptying the list here
+    # would turn it into a silent prose answer, so the request is passed
+    # through whole: a served engine reports it, and an in-process engine
+    # answers from the full list. Rejecting it outright at this boundary is a
+    # follow-up, since only served engines report it today.
     return (named or tools), tool_choice
 
 
