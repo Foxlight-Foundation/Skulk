@@ -2042,7 +2042,8 @@ class API:
                 "Create an instance from an already computed placement object "
                 "when you want exact control instead of Skulk picking the "
                 "placement. Every embedded shard card must identify the same "
-                "model alias as the assignment and satisfy current cluster trust."
+                "model alias as the assignment and exactly match the effective "
+                "card already present in the authorized local catalog."
             ),
         )(self.create_instance)
         self.app.post(
@@ -2081,6 +2082,9 @@ class API:
                 "several open backend tags in preference order; the planner filters current "
                 "trust, engine/build, topology, and capacity blockers before ranking and "
                 "automatically falls through to the next launchable candidate. Placement "
+                "accepts only models already present through signed publication, bundled "
+                "distribution, or an authenticated add; it never discovers an unknown "
+                "Hugging Face repository as a side effect. "
                 "failures retain a readable error message and expose a stable category in the "
                 "X-Skulk-Placement-Failure response header."
             ),
@@ -2976,9 +2980,28 @@ class API:
             ),
         )(self.get_remote_access)
 
+    @staticmethod
+    async def _load_authorized_model_card(model_id: ModelId) -> ModelCard:
+        """Return catalog truth without turning lookup into model authorization.
+
+        Args:
+            model_id: Exact selectable alias requested by an API caller.
+
+        Returns:
+            The signed, bundled, installed, or explicitly added model card.
+
+        Raises:
+            HTTPException: With status 404 when the alias is not authorized in
+                the local catalog.
+        """
+        try:
+            return await ModelCard.load(model_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
     async def place_instance(self, payload: PlaceInstanceParams):
         command = PlaceInstance(
-            model_card=await ModelCard.load(payload.model_id),
+            model_card=await self._load_authorized_model_card(payload.model_id),
             sharding=payload.sharding,
             instance_meta=payload.instance_meta,
             min_nodes=payload.min_nodes,
@@ -3074,9 +3097,11 @@ class API:
                     "be created through this endpoint"
                 ),
             )
-        model_card = await ModelCard.load(instance.shard_assignments.model_id)
+        model_card = await self._load_authorized_model_card(
+            instance.shard_assignments.model_id
+        )
         try:
-            require_instance_model_card_identity(instance)
+            require_instance_model_card_identity(instance, model_card)
             require_instance_model_code_approval(
                 instance,
                 self._cluster_remote_code_approvals(),
@@ -3115,7 +3140,7 @@ class API:
         instance_meta: InstanceMeta = InstanceMeta.MlxRing,
         min_nodes: int = 1,
     ) -> Instance:
-        model_card = await ModelCard.load(model_id)
+        model_card = await self._load_authorized_model_card(model_id)
 
         try:
             placements = get_instance_placements(
@@ -3175,7 +3200,7 @@ class API:
             return PlacementPreviewResponse(previews=[])
 
         try:
-            model_card = await ModelCard.load(model_id)
+            model_card = await self._load_authorized_model_card(model_id)
         except Exception as exc:
             raise HTTPException(
                 status_code=400, detail=f"Failed to load model card: {exc}"

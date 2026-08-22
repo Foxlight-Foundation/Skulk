@@ -8,6 +8,7 @@ planner per remaining host and surfaces the viable single-node options.
 
 from datetime import datetime, timezone
 from typing import cast
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -96,6 +97,30 @@ def _single_node_instance(
     )
 
 
+async def test_quick_launch_rejects_unknown_model_without_hub_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """POST /place_instance cannot turn an arbitrary alias into authorization."""
+
+    api = _build_api()
+    client = TestClient(api.app)
+    fetch = AsyncMock()
+
+    async def _unknown(_model_id: object) -> ModelCard:
+        raise ValueError("Unknown model attacker/repository; add it first")
+
+    monkeypatch.setattr(ModelCard, "load", staticmethod(_unknown))
+    monkeypatch.setattr(ModelCard, "fetch_from_hf", fetch)
+    response = client.post(
+        "/place_instance",
+        json={"model_id": "attacker/repository"},
+    )
+
+    assert response.status_code == 404
+    assert "Unknown model attacker/repository" in response.json()["error"]["message"]
+    fetch.assert_not_awaited()
+
+
 async def test_exact_instance_creation_accepts_publication_authorization(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -163,6 +188,51 @@ async def test_exact_instance_creation_rejects_mismatched_shard_card(
         == "model_card_identity_mismatch"
     )
     assert "other-org/other-model" in response.json()["error"]["message"]
+
+
+async def test_exact_instance_creation_rejects_forged_same_alias_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """POST /instance accepts only the exact card held by the local catalog."""
+
+    api = _build_api()
+    client = TestClient(api.app)
+    canonical_card = _card().model_copy(
+        update={
+            "source_revision": "a" * 40,
+            "registry_card_id": "card_" + "d" * 52,
+            "registry_snapshot_id": "snapshot-test",
+            "trust_remote_code": True,
+        }
+    )
+    forged_card = canonical_card.model_copy(
+        update={
+            "source_repository": ModelId("attacker/repository"),
+            "source_revision": "b" * 40,
+            "registry_card_id": None,
+            "registry_snapshot_id": None,
+            "is_custom": True,
+        }
+    )
+    instance = _single_node_instance("forged-node", model_card=forged_card)
+
+    async def _load(_model_id: object) -> ModelCard:
+        return canonical_card
+
+    monkeypatch.setattr(ModelCard, "load", staticmethod(_load))
+    response = client.post(
+        "/instance",
+        json={"instance": instance.model_dump(mode="json")},
+    )
+
+    assert response.status_code == 400
+    assert (
+        response.headers["X-Skulk-Placement-Failure"]
+        == "model_card_identity_mismatch"
+    )
+    assert "does not match the authorized catalog card" in response.json()[
+        "error"
+    ]["message"]
 
 
 async def test_preview_exposes_exact_signed_engine_support(

@@ -1455,6 +1455,10 @@ older deployments, but those values no longer participate in model execution.
 Signed publication, explicit model addition, and bundled distribution are the
 active repository-code authorization boundaries.
 
+Ordinary reads and launch endpoints never fetch an unknown Hugging Face
+repository or persist a card implicitly. An external repository must first
+enter through authenticated `POST /models/add` or `POST /models/add-card`.
+
 **POST** `/models/remote-code-approvals/{card_id}`
 
 Deprecated compatibility endpoint. Current cards return HTTP 409 because
@@ -1707,7 +1711,7 @@ curl -X POST http://localhost:52415/place_instance \
 
 | Field | Meaning |
 |-------|---------|
-| `model_id` | Hugging Face-style model ID |
+| `model_id` | Exact alias already present in the signed, bundled, installed, or operator-added catalog |
 | `sharding` | `Pipeline` or `Tensor` |
 | `instance_meta` | `MlxRing`, `MlxJaccl`, or `LlamaRpc` (multi-node GGUF pooling: one driver node holds the model and each donor node lends GPU memory over the network) |
 | `min_nodes` | Minimum nodes required for the placement |
@@ -1717,6 +1721,9 @@ The placement is validated against the current cluster state **before** the
 command is forwarded, so an impossible placement fails at the API instead of
 silently failing on the master:
 
+- **404** when `model_id` is not already present in the authorized local
+  catalog. Use the authenticated model-add flow first; launch never performs
+  implicit Hub discovery.
 - **400** with the specific reason: no connected cycle of `min_nodes` nodes,
   exclusions removed every candidate, every candidate has a positively known
   isolated Zenoh inference data plane, the model does not support Tensor
@@ -1743,6 +1750,11 @@ additionally return `model_card_identity_mismatch`.
 `model_code_approval_required` remains in the response schema only for
 compatibility with older nodes and is not emitted by current authorization
 policy.
+
+`POST /instance` additionally requires every caller-embedded shard card to
+match the current effective catalog card exactly, not merely reuse its alias.
+This prevents an otherwise valid signed or operator-added identity from being
+attached to caller-selected repository code or artifact fields.
 
 A successful response includes both `command_id` and `instance_id`. For
 `POST /place_instance` they contain the same stable value: the accepted command

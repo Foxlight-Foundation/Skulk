@@ -402,7 +402,7 @@ The system uses event sourcing for state management:
     honoring them (searching with intent-plus-failed-nodes but stamping
     only the original intent, #658)
 - `src/skulk/shared/models/`: persisted model metadata and capability resolution
-  - `model_cards.py`: declarative model cards plus remote-first signed-catalog loading; registry artifact aliases are distinct from `source_repository`, bundled cards are transition fallback, and custom cards remain final overrides
+  - `model_cards.py`: declarative model cards plus remote-first signed-catalog loading; `ModelCard.load` is catalog-only so API reads and launches cannot implicitly authorize an unknown Hub repository, while trusted local tools opt into `load_or_fetch_from_hf`; registry artifact aliases are distinct from `source_repository`, bundled cards are transition fallback, and custom cards remain final overrides
   - `registry.py`: python-tuf client, embedded root trust, serialized 60-second refresh, and hash-bound last-known-good catalog
   - `remote_code_approval.py`: repository-code authorization and immutable execution checks; signed publication, explicit addition, or bundled distribution authorizes the exact pinned card regardless of evidence provenance, while installed artifact identity remains independently verified
   - `capabilities.py`: normalized runtime capability profiles derived from model cards plus conservative family defaults

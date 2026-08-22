@@ -510,6 +510,12 @@ Bundled cards are authorized by the Skulk release that ships them. The planner
 therefore applies backend preference, locality, and capacity normally without a
 trust-based node or model filter. Historical `model_trust` configuration and
 approval endpoints remain inert compatibility surfaces for rolling upgrades.
+Card lookup is deliberately non-mutating: read and launch paths may refresh the
+signed registry but never synthesize or persist an unknown Hugging Face card.
+Only the authenticated add endpoints cross that boundary. A caller-specified
+exact placement must also reproduce the effective local catalog card byte for
+byte across its shard assignments; matching an alias alone cannot substitute
+caller-selected executable content.
 Custom-card creation accepts only a direct loopback request or an authenticated
 operator-gateway request with write scope; successful gateway validation is
 carried to the canonical route in the ASGI scope rather than through a

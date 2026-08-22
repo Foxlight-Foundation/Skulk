@@ -158,6 +158,7 @@ node in a cluster must run the same Skulk version.
 - `trust_remote_code`
   - whether the artifact requires repository-supplied Python; signed publication authorizes the exact immutable registry card regardless of provenance
   - explicitly adding an external model authorizes its pinned card, and an omitted Hugging Face revision is resolved to one immutable commit before the card is created; bundled cards are authorized by the Skulk release that ships them
+  - ordinary catalog reads and placement requests never fetch or persist an unknown Hub card; callers must use an authenticated add flow first, and exact-placement payloads must match that effective catalog card completely
   - this field controls the loader's repository-code behavior, not a second operator approval ceremony; artifact identity and immutable revision checks still fail closed
 - `uses_cfg`
   - whether the model uses classifier-free guidance (relevant to some image/diffusion models)

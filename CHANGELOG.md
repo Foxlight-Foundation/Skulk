@@ -40,7 +40,10 @@ This project records release notes here and mirrors public-facing notes in
   provenance class, explicit external-model addition authorizes its pinned
   card, and bundled cards remain authorized by the Skulk release. Hugging Face
   additions that omit a revision resolve `main` once to a full immutable
-  commit. The dashboard no longer exposes the redundant Model trust ceremony;
+  commit. Read and launch paths no longer fetch or persist unknown Hub cards as
+  a side effect, and caller-specified exact placements must match current
+  catalog truth rather than merely reuse its alias. The dashboard no longer
+  exposes the redundant Model trust ceremony;
   its historical config, state, wire fields, and endpoints remain deprecated
   and inert for rolling compatibility. Signed-card, revision, installed-sidecar,
   and artifact-manifest verification still fail closed.

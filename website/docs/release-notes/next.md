@@ -107,7 +107,10 @@ card. Signed registry publication authorizes every provenance class, explicitly
 adding an external model authorizes its pinned card, and bundled cards are
 authorized by the Skulk release. A Hugging Face addition without an explicit
 revision resolves `main` once to a full immutable commit before creating the
-card. There is no second Model trust ceremony in Settings, and vision metadata
+card. Read and launch requests cannot implicitly fetch an unknown Hub card, and
+fully specified placements must carry the exact current catalog card rather
+than caller-selected content under a matching alias. There is no second Model
+trust ceremony in Settings, and vision metadata
 alone no longer creates an approval blocker. Historical approval config, state,
 wire fields, and endpoints remain deprecated and inert for rolling upgrades.
 The runner still verifies signed-card identity, immutable revisions, installed

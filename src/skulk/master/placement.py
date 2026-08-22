@@ -455,14 +455,20 @@ class PlacementModelCardIdentityError(PlacementError):
     code: ClassVar[PlacementFailureCode] = "model_card_identity_mismatch"
 
 
-def require_instance_model_card_identity(instance: Instance) -> None:
-    """Require every embedded shard card to match the assignment model alias.
+def require_instance_model_card_identity(
+    instance: Instance,
+    authorized_card: ModelCard | None = None,
+) -> None:
+    """Require embedded shard cards to match the assignment and catalog truth.
 
     Args:
         instance: Caller-specified exact placement containing shard cards.
+        authorized_card: Effective card loaded from the authorized local catalog.
+            When supplied, every embedded card must match it exactly.
 
     Raises:
-        PlacementModelCardIdentityError: If a shard identifies another model.
+        PlacementModelCardIdentityError: If a shard identifies another model or
+            differs from the authorized catalog card.
     """
 
     expected_model_id = instance.shard_assignments.model_id
@@ -478,6 +484,22 @@ def require_instance_model_card_identity(instance: Instance) -> None:
         raise PlacementModelCardIdentityError(
             "Exact placement model-card identity mismatch: assignment model "
             f"{expected_model_id} contains shard card(s) for {mismatches}."
+        )
+    if authorized_card is None:
+        return
+    if authorized_card.model_id != expected_model_id:
+        raise PlacementModelCardIdentityError(
+            "Exact placement catalog identity mismatch: assignment model "
+            f"{expected_model_id} resolved to {authorized_card.model_id}."
+        )
+    if any(
+        shard.model_card != authorized_card
+        for shard in instance.shard_assignments.runner_to_shard.values()
+    ):
+        raise PlacementModelCardIdentityError(
+            "Exact placement embeds model-card content that does not match the "
+            f"authorized catalog card for {expected_model_id}. Recompute the "
+            "placement from the current catalog before retrying."
         )
 
 

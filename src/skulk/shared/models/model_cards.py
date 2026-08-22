@@ -2101,9 +2101,52 @@ class ModelCard(CamelCaseModel):
             py = tomlkit.loads(await f.read())
             return ModelCard.model_validate(py)
 
-    # Is it okay that model card.load defaults to network access if the card doesn't exist? do we want to be more explicit here?
     @staticmethod
     async def load(model_id: ModelId) -> "ModelCard":
+        """Load an already-authorized card without discovering new Hub content.
+
+        Args:
+            model_id: Exact selectable model alias already present in the signed,
+                bundled, installed, or operator-added catalog.
+
+        Returns:
+            The effective catalog card for ``model_id``.
+
+        Raises:
+            ValueError: If the alias has not entered the catalog through an
+                authorization boundary.
+
+        Side effects:
+            May refresh signed registry metadata. It never fetches model metadata
+            from Hugging Face or persists an unknown custom card.
+        """
+        if model_id not in _card_cache:
+            await _refresh_card_cache_if_due()
+        if (mc := _card_cache.get(model_id)) is not None:
+            return mc
+
+        raise ValueError(
+            f"Unknown model {model_id}; add it through POST /models/add before use"
+        )
+
+    @staticmethod
+    async def load_or_fetch_from_hf(model_id: ModelId) -> "ModelCard":
+        """Load a known card or explicitly discover and persist one from the Hub.
+
+        This helper is reserved for trusted local tooling. Network APIs must use
+        :meth:`load` so a read or launch request cannot silently become a model
+        authorization mutation.
+
+        Args:
+            model_id: Exact catalog alias or Hugging Face repository identifier.
+
+        Returns:
+            The existing card, or a newly generated immutable custom card.
+
+        Side effects:
+            For an unknown repository, reads bounded Hugging Face metadata and
+            persists the generated card in the custom-card directory.
+        """
         if model_id not in _card_cache:
             await _refresh_card_cache_if_due()
         if (mc := _card_cache.get(model_id)) is not None:

@@ -1,6 +1,7 @@
 """Tests for cluster-wide model repository-code trust enforcement."""
 
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -59,6 +60,28 @@ def test_signed_agent_card_is_authorized_by_publication() -> None:
     assert remote_code_is_automatically_trusted(card)
     assert not remote_code_execution_requires_approval(card)
     require_remote_code_approval(card, frozenset())
+
+
+@pytest.mark.asyncio
+async def test_unknown_card_load_never_becomes_implicit_hub_authorization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A read or launch lookup cannot persist an attacker-selected Hub model."""
+    model_id = ModelId("untrusted/unknown-model")
+    fetch = AsyncMock()
+
+    async def no_refresh() -> None:
+        return None
+
+    monkeypatch.setattr(
+        "skulk.shared.models.model_cards._refresh_card_cache_if_due",
+        no_refresh,
+    )
+    monkeypatch.setattr(ModelCard, "fetch_from_hf", fetch)
+    with pytest.raises(ValueError, match="add it through POST /models/add"):
+        await ModelCard.load(model_id)
+
+    fetch.assert_not_awaited()
 
 
 def test_explicitly_added_card_is_authorized_by_addition() -> None:

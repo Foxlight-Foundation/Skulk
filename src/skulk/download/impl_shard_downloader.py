@@ -148,7 +148,7 @@ def skulk_shard_downloader(
 
 
 async def build_base_shard(model_id: ModelId) -> ShardMetadata:
-    model_card = await ModelCard.load(model_id)
+    model_card = await ModelCard.load_or_fetch_from_hf(model_id)
     return PipelineShardMetadata(
         model_card=model_card,
         device_rank=0,
