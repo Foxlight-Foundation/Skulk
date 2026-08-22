@@ -257,6 +257,56 @@ async def test_exact_instance_creation_rejects_forged_same_alias_card(
     ]["message"]
 
 
+async def test_explicit_download_rejects_forged_same_alias_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """POST /download/start cannot ingest caller-selected repository code."""
+
+    api = _build_api()
+    client = TestClient(api.app, client=("127.0.0.1", 50000))
+    canonical_card = _card().model_copy(
+        update={
+            "source_revision": "a" * 40,
+            "registry_card_id": "card_" + "d" * 52,
+            "registry_snapshot_id": "snapshot-test",
+            "trust_remote_code": True,
+        }
+    )
+    forged_card = canonical_card.model_copy(
+        update={
+            "source_repository": ModelId("attacker/repository"),
+            "source_revision": "b" * 40,
+            "registry_card_id": None,
+            "registry_snapshot_id": None,
+        }
+    )
+    shard = PipelineShardMetadata(
+        model_card=forged_card,
+        device_rank=0,
+        world_size=1,
+        start_layer=0,
+        end_layer=8,
+        n_layers=8,
+    )
+
+    async def _load(_model_id: object) -> ModelCard:
+        return canonical_card
+
+    monkeypatch.setattr(ModelCard, "load", staticmethod(_load))
+    response = client.post(
+        "/download/start",
+        json={
+            "targetNodeId": "download-target",
+            "shardMetadata": shard.model_dump(mode="json"),
+        },
+    )
+
+    assert response.status_code == 409
+    assert "does not match the authorized catalog" in response.json()["error"][
+        "message"
+    ]
+
+
 async def test_preview_exposes_exact_signed_engine_support(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

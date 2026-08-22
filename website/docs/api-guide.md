@@ -1997,7 +1997,11 @@ automatically).
 
 **POST** `/download/start`
 
-Lower-level endpoint for explicit node download control.
+Lower-level endpoint for explicit node download control. It accepts a target
+node and shard metadata only from direct loopback callers or an authenticated
+operator gateway. The embedded model card must exactly match current authorized
+catalog truth; unknown aliases return `404`, and stale or forged cards return
+`409` without dispatching a download.
 
 ### Delete a node download
 

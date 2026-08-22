@@ -2504,7 +2504,10 @@ class API:
             "/download/start",
             tags=["Downloads"],
             summary="Start a node download",
-            description="Start a low-level node download for a specific shard on a specific node.",
+            description=(
+                "Start a low-level node download for an exact authorized catalog "
+                "card. Requires loopback or authenticated operator access."
+            ),
         )(self.start_download)
         self.app.delete(
             "/download/{node_id}/{model_id:path}",
@@ -10284,8 +10287,33 @@ class API:
         )
 
     async def start_download(
-        self, payload: StartDownloadParams
+        self, payload: StartDownloadParams, request: Request
     ) -> StartDownloadResponse:
+        """Start one exact catalog-authorized shard download.
+
+        Args:
+            payload: Target node and shard metadata selected for download.
+            request: Incoming request proving local or authenticated operator access.
+
+        Returns:
+            The command identity after dispatch to the download plane.
+
+        Raises:
+            HTTPException: If the caller lacks operator authority, the model is
+                unknown, or the embedded card differs from catalog truth.
+        """
+        self._require_operator_mutation(request)
+        authorized_card = await self._load_authorized_model_card(
+            payload.shard_metadata.model_card.model_id
+        )
+        if payload.shard_metadata.model_card != authorized_card:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Download shard embeds model-card content that does not match "
+                    "the authorized catalog. Refresh model truth and retry."
+                ),
+            )
         command = StartDownload(
             target_node_id=payload.target_node_id,
             shard_metadata=payload.shard_metadata,

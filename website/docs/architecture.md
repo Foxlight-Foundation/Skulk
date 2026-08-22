@@ -527,6 +527,9 @@ Bundled fallback cards that execute repository code require an immutable source
 revision. Installed custom-card sidecars remain artifact-integrity records, but
 only the durable custom-card definition keeps an unsigned model selectable; a
 deleted custom card therefore cannot be recreated from retained model bytes.
+The low-level explicit-download route is operator-authenticated and compares
+its embedded shard card with the same authorized catalog before admitting bytes
+to a node.
 Custom-card creation accepts only a direct loopback request or an authenticated
 operator-gateway request with write scope; successful gateway validation is
 carried to the canonical route in the ASGI scope rather than through a

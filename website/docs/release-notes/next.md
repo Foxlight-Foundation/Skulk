@@ -124,5 +124,7 @@ race after API lookup also prevents stale content from launching.
 Executable bundled fallback cards must pin their repository revision. Retained
 installed sidecars continue to describe custom artifacts, but they no longer
 restore catalog authorization after an operator deletes the custom card.
+The explicit low-level download route now requires operator access and rejects
+embedded shard cards that differ from current authorized catalog truth.
 The runner still verifies signed-card identity, immutable revisions, installed
 sidecars, and artifact manifests before executing repository code.

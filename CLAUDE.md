@@ -532,7 +532,9 @@ with the master's command-ordered card view immediately before placement,
 closing catalog replacement and deletion races after API-side validation. An
 executable bundled fallback card must pin its source revision, and an installed
 custom-card sidecar retains artifact truth without independently authorizing a
-card whose durable custom TOML was deleted. An
+card whose durable custom TOML was deleted. The low-level `/download/start`
+operator route likewise rejects any shard card that is not exact catalog truth.
+An
 exact-card install succeeds only after the local
 worker persists and caches the indexed event carrying that command's ID; card
 equality alone cannot acknowledge a new request. Service cleanup has the same
