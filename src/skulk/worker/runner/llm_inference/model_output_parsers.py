@@ -709,6 +709,7 @@ def reject_unoffered_tool_calls(
     """
 
     template: GenerationResponse | None = None
+    pending_text = ""
     for response in responses:
         if response is None:
             yield None
@@ -718,22 +719,37 @@ def reject_unoffered_tool_calls(
             if kept:
                 yield response.model_copy(update={"tool_calls": kept})
                 continue
-            rendered = "\n".join(
+            # Held rather than emitted with a finish reason of its own: these
+            # streams usually carry a terminal chunk after the call, and adding
+            # a second terminal would end the stream at the consumer before the
+            # real one arrives. If none follows, it is released at the end.
+            pending_text += "\n".join(
                 json.dumps({"name": call.name, "arguments": call.arguments})
                 for call in response.tool_calls
             )
-            base = template or GenerationResponse(text="", token=0, usage=None)
-            yield base.model_copy(
-                update={
-                    "text": rendered,
-                    "token": 0,
-                    "is_thinking": False,
-                    "finish_reason": "stop",
-                }
-            )
             continue
         template = response
+        if pending_text:
+            yield response.model_copy(
+                update={
+                    "text": pending_text + response.text,
+                    "token": 0,
+                    "is_thinking": False,
+                }
+            )
+            pending_text = ""
+            continue
         yield response
+    if pending_text:
+        base = template or GenerationResponse(text="", token=0, usage=None)
+        yield base.model_copy(
+            update={
+                "text": pending_text,
+                "token": 0,
+                "is_thinking": False,
+                "finish_reason": "stop",
+            }
+        )
 
 
 def _block_start_index(

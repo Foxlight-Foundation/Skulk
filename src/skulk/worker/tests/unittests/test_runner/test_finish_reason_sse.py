@@ -726,3 +726,32 @@ class TestFamilyParsersHonourOfferedTools:
 
     def test_the_stream_still_terminates_when_a_call_is_dropped(self) -> None:
         assert _got_finish(self._run(["get_weather"], None))
+
+    def test_a_terminal_chunk_after_the_call_is_not_duplicated(self) -> None:
+        # These streams usually carry a terminal chunk after the call. Adding a
+        # second terminal would end the stream at the consumer before the real
+        # one arrives.
+        def source() -> Generator[GenerationResponse | ToolCallResponse | None]:
+            yield ToolCallResponse(
+                tool_calls=[ToolCallItem(name="get_weather", arguments="{}")],
+                usage=None,
+                stats=None,
+            )
+            yield _make_response("", 1, finish_reason="stop")
+
+        results = [
+            item
+            for item in reject_unoffered_tool_calls(source(), None)
+            if item is not None
+        ]
+        terminals = [
+            item
+            for item in results
+            if isinstance(item, ToolCallResponse) or item.finish_reason is not None
+        ]
+        assert len(terminals) == 1
+        assert terminals[0] is results[-1]
+        text = "".join(
+            item.text for item in results if isinstance(item, GenerationResponse)
+        )
+        assert "get_weather" in text
