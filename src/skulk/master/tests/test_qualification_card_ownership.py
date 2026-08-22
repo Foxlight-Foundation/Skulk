@@ -4,13 +4,27 @@ import pytest
 
 from skulk.master import main as master_main
 from skulk.master.main import Master
+from skulk.master.placement import PlacementModelCardIdentityError
 from skulk.shared.models.model_cards import ModelCard, ModelTask
-from skulk.shared.types.commands import AddCustomModelCard, DeleteCustomModelCard
-from skulk.shared.types.common import ModelId
+from skulk.shared.types.commands import (
+    AddCustomModelCard,
+    CreateInstance,
+    DeleteCustomModelCard,
+    PlaceInstance,
+)
+from skulk.shared.types.common import ModelId, NodeId
 from skulk.shared.types.events import CustomModelCardAdded, IndexedEvent
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.state import State
 from skulk.shared.types.telemetry import TelemetryView
+from skulk.shared.types.worker.instances import (
+    InstanceId,
+    InstanceMeta,
+    MlxRingInstance,
+    ShardAssignments,
+)
+from skulk.shared.types.worker.runners import RunnerId
+from skulk.shared.types.worker.shards import PipelineShardMetadata, Sharding
 
 
 def _card(model_id: str, *, qualification_only: bool = False) -> ModelCard:
@@ -35,6 +49,31 @@ def _master() -> Master:
     object.__setattr__(master, "state", State())
     object.__setattr__(master, "_telemetry_view", TelemetryView())
     return master
+
+
+def _instance(card: ModelCard) -> MlxRingInstance:
+    """Return one minimal exact placement embedding the supplied card."""
+    node_id = NodeId("node-1")
+    runner_id = RunnerId("runner-1")
+    return MlxRingInstance(
+        instance_id=InstanceId("instance-1"),
+        shard_assignments=ShardAssignments(
+            model_id=card.model_id,
+            runner_to_shard={
+                runner_id: PipelineShardMetadata(
+                    model_card=card,
+                    device_rank=0,
+                    world_size=1,
+                    start_layer=0,
+                    end_layer=1,
+                    n_layers=1,
+                )
+            },
+            node_to_runner={node_id: runner_id},
+        ),
+        hosts_by_node={node_id: []},
+        ephemeral_port=52415,
+    )
 
 
 def _hide_signed_registry(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -252,3 +291,39 @@ def test_signed_registry_refresh_supersedes_stale_qualification_view(
 
     assert service_event is None
     assert master._ordered_model_cards[signed.model_id] == signed  # pyright: ignore[reportPrivateUsage]
+
+
+def test_quick_placement_rejects_card_replaced_before_master_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A queued API placement cannot outrun an ordered card replacement."""
+    _hide_signed_registry(monkeypatch)
+    original = _card("org/model")
+    replacement = original.model_copy(update={"source_revision": "c" * 40})
+    master = _master()
+    master._ordered_model_cards[original.model_id] = replacement  # pyright: ignore[reportPrivateUsage]
+
+    command = PlaceInstance(
+        model_card=original,
+        sharding=Sharding.Pipeline,
+        instance_meta=InstanceMeta.MlxRing,
+        min_nodes=1,
+    )
+
+    with pytest.raises(PlacementModelCardIdentityError, match="no longer matches"):
+        master._require_ordered_place_instance_card(command)  # pyright: ignore[reportPrivateUsage]
+
+
+def test_exact_placement_rejects_card_deleted_before_master_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A queued exact placement cannot launch a card deleted before ordering."""
+    _hide_signed_registry(monkeypatch)
+    original = _card("org/model")
+    master = _master()
+    master._ordered_model_cards[original.model_id] = None  # pyright: ignore[reportPrivateUsage]
+
+    command = CreateInstance(instance=_instance(original))
+
+    with pytest.raises(PlacementModelCardIdentityError, match="no longer present"):
+        master._require_ordered_create_instance_card(command)  # pyright: ignore[reportPrivateUsage]

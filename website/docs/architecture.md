@@ -519,7 +519,10 @@ signed registry but never synthesize or persist an unknown Hugging Face card.
 Only the authenticated add endpoints cross that boundary. A caller-specified
 exact placement must also reproduce the effective local catalog card byte for
 byte across its shard assignments; matching an alias alone cannot substitute
-caller-selected executable content.
+caller-selected executable content. The elected master repeats that exact-card
+comparison against its command-ordered card view immediately before accepting
+either a quick or caller-specified exact placement, so a concurrent card
+replacement or deletion wins before stale repository code can launch.
 Custom-card creation accepts only a direct loopback request or an authenticated
 operator-gateway request with write scope; successful gateway validation is
 carried to the canonical route in the ASGI scope rather than through a

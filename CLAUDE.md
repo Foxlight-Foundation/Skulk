@@ -527,7 +527,10 @@ installs never receive the marker. Adding the exact card authorizes its pinned
 repository code. The elected master rechecks the service ownership precondition in its
 serialized command order before emitting a card event. `PUT /config` rejects
 deprecated `model_trust` snapshots; the historical approval endpoints remain
-inert for older clients. An exact-card install succeeds only after the local
+inert for older clients. Quick and exact placement commands are also compared
+with the master's command-ordered card view immediately before placement,
+closing catalog replacement and deletion races after API-side validation. An
+exact-card install succeeds only after the local
 worker persists and caches the indexed event carrying that command's ID; card
 equality alone cannot acknowledge a new request. Service cleanup has the same
 command-correlated wait, and retained `qualification_only` installed sidecars

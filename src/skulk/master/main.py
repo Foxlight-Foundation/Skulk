@@ -14,6 +14,7 @@ from loguru import logger
 from skulk.master.placement import (
     PlacementError,
     PlacementInfoPendingError,
+    PlacementModelCardIdentityError,
     add_instance_to_placements,
     cancel_unnecessary_downloads,
     delete_instance,
@@ -22,6 +23,7 @@ from skulk.master.placement import (
     place_instance,
     replacement_command_for_download_failed_instance,
     replacement_command_for_refused_instance,
+    require_instance_model_card_identity,
 )
 from skulk.master.placement_utils import (
     unified_memory_gpu_node_ids,
@@ -936,6 +938,44 @@ class Master:
             model_id=command.model_id,
             mutation_command_id=command.command_id,
         )
+
+    def _require_ordered_place_instance_card(self, command: PlaceInstance) -> None:
+        """Require a quick-placement command to match master-ordered card truth.
+
+        Args:
+            command: Placement command carrying the API node's selected card.
+
+        Raises:
+            PlacementModelCardIdentityError: If the card was removed or replaced
+                before the command reached the master's serialized order.
+        """
+        ordered_card = self._ordered_model_card(command.model_card.model_id)
+        if ordered_card != command.model_card:
+            raise PlacementModelCardIdentityError(
+                "Placement model-card identity no longer matches the authorized "
+                f"catalog card for {command.model_card.model_id}. Refresh model "
+                "truth and retry."
+            )
+
+    def _require_ordered_create_instance_card(self, command: CreateInstance) -> None:
+        """Require an exact placement to match master-ordered card truth.
+
+        Args:
+            command: Exact placement command containing embedded shard cards.
+
+        Raises:
+            PlacementModelCardIdentityError: If the card was removed or replaced
+                before the command reached the master's serialized order.
+        """
+        model_id = command.instance.shard_assignments.model_id
+        ordered_card = self._ordered_model_card(model_id)
+        if ordered_card is None:
+            raise PlacementModelCardIdentityError(
+                "Exact placement model-card identity is no longer present in "
+                f"the authorized catalog for {model_id}. Refresh model truth "
+                "and retry."
+            )
+        require_instance_model_card_identity(command.instance, ordered_card)
 
     def _record_freed_instance(self, instance: Instance) -> None:
         """Record a deleted instance's per-node footprint for the grace window.
@@ -1862,6 +1902,7 @@ class Master:
                                     )
                                 generated_events.extend(transition_events)
                         case PlaceInstance():
+                            self._require_ordered_place_instance_card(command)
                             # node_memory/node_vram come from the telemetry plane
                             # (#279 slice 2). Recently-freed credit is pruned
                             # here and disabled by default (#314); the usable-GPU
@@ -1892,6 +1933,7 @@ class Master:
                             )
                             generated_events.extend(transition_events)
                         case CreateInstance():
+                            self._require_ordered_create_instance_card(command)
                             # Placement inputs come from telemetry (#279 slice 2);
                             # the recently-freed bookkeeping path is pruned here
                             # and normally contributes no speculative credit.

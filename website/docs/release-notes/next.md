@@ -118,5 +118,8 @@ alone no longer creates an approval blocker. Historical approval config, state,
 wire fields, and endpoints remain deprecated and inert for rolling upgrades.
 Image, embedding, and speech inference requests for an unknown catalog alias
 return HTTP 404 rather than an internal server error.
+The elected master repeats exact-card validation at command ordering for quick
+and caller-specified placements, so a card replacement or deletion that wins a
+race after API lookup also prevents stale content from launching.
 The runner still verifies signed-card identity, immutable revisions, installed
 sidecars, and artifact manifests before executing repository code.

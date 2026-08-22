@@ -50,6 +50,9 @@ This project records release notes here and mirrors public-facing notes in
   responses now wait for their exact ordered catalog mutation before returning.
   Image, embedding, and speech inference endpoints translate an unknown catalog
   alias to HTTP 404 instead of leaking the strict lookup failure as HTTP 500.
+  The elected master also revalidates quick and exact placement cards against
+  command-ordered catalog truth, closing replacement/deletion races after an
+  API node has prepared a placement.
   Signed-card, revision, installed-sidecar, and artifact-manifest verification
   still fail closed.
 
