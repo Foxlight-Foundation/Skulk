@@ -813,10 +813,19 @@ def parse_tool_calls(
         if not just_opened:
             tool_call_text_parts.append(response.text)
         # The closing marker splits across chunks for the same reason the
-        # opening one does, so match it against the accumulated block.
-        if "".join(tool_call_text_parts).rstrip().endswith(tool_parser.end_parsing):
-            # parse the actual tool calls from the tool call text
-            combined = "".join(tool_call_text_parts)
+        # opening one does, so it is located in the accumulated block rather
+        # than tested against one chunk. Locating rather than matching the end
+        # also matters because a model may keep writing after the call ("...
+        # </tool_call> Done."): everything past the marker is ordinary text and
+        # goes back to the opening scan, where a second call in the same
+        # message is still found.
+        block_so_far = "".join(tool_call_text_parts)
+        end_index = block_so_far.find(tool_parser.end_parsing)
+        if end_index != -1:
+            end_of_block = end_index + len(tool_parser.end_parsing)
+            combined = block_so_far[:end_of_block]
+            held_text = block_so_far[end_of_block:]
+            tool_call_text_parts = [combined]
             parsed = tool_parser.parse(combined.strip(), tools=tools)
             if parsed is not None:
                 kept = declared_tool_calls(parsed, tools)
@@ -828,8 +837,9 @@ def parse_tool_calls(
                     in_tool_call = False
                     tool_call_text_parts = []
                     yield response.model_copy(
-                        update={"text": combined, "token": 0}
+                        update={"text": combined + held_text, "token": 0}
                     )
+                    held_text = ""
                     continue
                 parsed = kept
             logger.info(
@@ -846,7 +856,10 @@ def parse_tool_calls(
                     "Unmarked block did not parse as a tool call, "
                     f"emitting it as content (generated_chars={len(combined)})"
                 )
-                yield response.model_copy(update={"text": combined, "token": 0})
+                yield response.model_copy(
+                    update={"text": combined + held_text, "token": 0}
+                )
+                held_text = ""
                 continue
 
             if parsed is None:
@@ -880,6 +893,10 @@ def parse_tool_calls(
             yield ToolCallResponse(
                 tool_calls=parsed, usage=response.usage, stats=response.stats
             )
+            if held_text and response.finish_reason is not None:
+                # Trailing text with no further chunk coming to carry it.
+                yield response.model_copy(update={"text": held_text, "token": 0})
+                held_text = ""
             continue
 
         if response.finish_reason is not None:

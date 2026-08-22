@@ -295,3 +295,46 @@ class TestUnmarkedDialectStaysAnchored:
             make_text_dialect_parser("{", "<|eom_id|>"),
         )
         assert calls_of(chunks) == ["get_weather"]
+
+
+class TestTextAfterTheCall:
+    """A model may keep writing after closing the call.
+
+    Requiring the block to end at the closing marker swallowed everything that
+    followed, so trailing text was lost and a second call in the same message
+    was folded into the first block.
+    """
+
+    def test_trailing_text_after_the_call_is_delivered(self) -> None:
+        chunks = feed(
+            [
+                "<tool_call><function=get_weather></function></tool_call>",
+                " Done.",
+            ],
+            generic_parser(),
+        )
+        assert calls_of(chunks) == ["get_weather"]
+        assert "Done." in text_of(chunks)
+
+    def test_trailing_text_in_the_closing_chunk_is_delivered(self) -> None:
+        chunks = feed(
+            [
+                "<tool_call><function=get_weather></function>",
+                "</tool_call> Done.",
+            ],
+            generic_parser(),
+        )
+        assert calls_of(chunks) == ["get_weather"]
+        assert "Done." in text_of(chunks)
+
+    def test_a_second_call_after_trailing_text_is_also_parsed(self) -> None:
+        chunks = feed(
+            [
+                "<tool_call><function=get_weather></function></tool_call>",
+                " and then ",
+                "<tool_call><function=get_weather></function></tool_call>",
+            ],
+            generic_parser(),
+        )
+        assert calls_of(chunks) == ["get_weather", "get_weather"]
+        assert "and then" in text_of(chunks)

@@ -48,7 +48,9 @@ This project records release notes here and mirrors public-facing notes in
   calling ("I'll check that.") still has its call recognized. The unmarked
   dialect opens on a brace, which also appears in prose, so there a call is
   recognized only at the start of the message; its distinctive marker still
-  opens one anywhere.
+  opens one anywhere. Text the model writes after closing a call is delivered
+  rather than swallowed into the block, and a second call in the same message
+  is recognized.
 
 ### Fixed
 
