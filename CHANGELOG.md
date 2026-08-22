@@ -9,6 +9,16 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- A model's parallel tool calls all reach the caller. Several families write
+  each call in its own block, and the stream consumer stops at the first chunk
+  carrying a finish reason, so one response per block delivered the first call
+  and dropped the rest. The calls of every block in a message are now coalesced
+  into a single response carrying a `tool_calls` array, which is the shape
+  OpenAI clients expect, and any text after the calls is released without a
+  finish reason so the tool response stays the terminal chunk.
+
+### Fixed
+
 - Reasoning no longer hides a tool call on the MLX engine. Tool parsing runs
   downstream of the thinking parser, so a model that reasons before calling a
   tool sent its reasoning through the tool parser first; that text decided the

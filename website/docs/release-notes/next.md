@@ -6,6 +6,10 @@ sidebar_position: 0
 
 ## Tool calling across more model families
 
+A model that calls several tools at once now returns all of them. Models that
+write each call separately previously came back with only the first.
+
+
 A model that reasons before calling a tool now has its call recognized. Its
 reasoning previously made the request look like an ordinary answer, so the call
 that followed was returned as raw markup in the message content. A call a model

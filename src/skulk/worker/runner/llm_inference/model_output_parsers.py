@@ -740,7 +740,22 @@ def parse_tool_calls(
     trace_task_id: str | None = None,
     trace_rank: int = 0,
 ) -> Generator[ParserChunk]:
+    """Recover tool calls from the generated stream, one response per message.
+
+    The calls of every block in a message are coalesced into a single
+    ``ToolCallResponse``. That is the OpenAI shape, where one assistant message
+    carries a ``tool_calls`` array, and it is what makes a model's parallel
+    calls survive: several families write each call in its own block, and the
+    consumer of this stream stops at the first chunk carrying a finish reason,
+    so a response per block would deliver the first call and drop the rest.
+    """
+
     in_tool_call = False
+    # Held until the message ends rather than emitted per block, so several
+    # blocks arrive as one response. The stream does not end when generation
+    # does (the source keeps idling), so the terminal chunk is the signal.
+    accumulated_calls: list[ToolCallItem] = []
+    last_response: GenerationResponse | None = None
     tool_call_text_parts: list[str] = []
     # A chunk is whatever the streaming detokenizer could resolve this step, not
     # a token: an opening marker that is one token id still arrives split across
@@ -770,6 +785,7 @@ def parse_tool_calls(
             yield response
             continue
 
+        last_response = response
         just_opened = False
         if not in_tool_call:
             scanned = held_text + response.text
@@ -802,6 +818,25 @@ def parse_tool_calls(
                 held_text = scanned[len(scanned) - keep :]
                 if emitted.strip():
                     at_message_start = False
+                if response.finish_reason is not None and accumulated_calls:
+                    # A call was found earlier in this message and the tool
+                    # response has to be the terminal chunk, so this trailing
+                    # text is released without the finish reason.
+                    if emitted:
+                        yield response.model_copy(
+                            update={
+                                "text": emitted,
+                                "token": 0,
+                                "finish_reason": None,
+                            }
+                        )
+                    yield ToolCallResponse(
+                        tool_calls=accumulated_calls,
+                        usage=response.usage,
+                        stats=response.stats,
+                    )
+                    accumulated_calls = []
+                    continue
                 if emitted == response.text and not held_text:
                     yield response
                 elif emitted or response.finish_reason is not None:
@@ -901,13 +936,22 @@ def parse_tool_calls(
                     tags=["tool_call"],
                     attrs={"tool_call_count": len(parsed)},
                 )
-            yield ToolCallResponse(
-                tool_calls=parsed, usage=response.usage, stats=response.stats
-            )
-            if held_text and response.finish_reason is not None:
+            accumulated_calls.extend(parsed)
+            if response.finish_reason is None:
+                # More of the message may follow, including a second call.
+                continue
+            if held_text:
                 # Trailing text with no further chunk coming to carry it.
-                yield response.model_copy(update={"text": held_text, "token": 0})
+                yield response.model_copy(
+                    update={"text": held_text, "token": 0, "finish_reason": None}
+                )
                 held_text = ""
+            yield ToolCallResponse(
+                tool_calls=accumulated_calls,
+                usage=response.usage,
+                stats=response.stats,
+            )
+            accumulated_calls = []
             continue
 
         if response.finish_reason is not None:
@@ -943,9 +987,13 @@ def parse_tool_calls(
                         tags=["tool_call"],
                         attrs={"tool_call_count": len(parsed)},
                     )
+                accumulated_calls.extend(parsed)
                 yield ToolCallResponse(
-                    tool_calls=parsed, usage=response.usage, stats=response.stats
+                    tool_calls=accumulated_calls,
+                    usage=response.usage,
+                    stats=response.stats,
                 )
+                accumulated_calls = []
                 break
             if tool_parser.unparsed_is_text:
                 logger.info(
@@ -965,3 +1013,12 @@ def parse_tool_calls(
                 }
             )
             yield response
+
+    if accumulated_calls and last_response is not None:
+        # A finite source can end without ever carrying a finish reason, so the
+        # calls held for coalescing are released here rather than dropped.
+        yield ToolCallResponse(
+            tool_calls=accumulated_calls,
+            usage=last_response.usage,
+            stats=last_response.stats,
+        )

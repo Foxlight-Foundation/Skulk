@@ -822,7 +822,13 @@ ordinary answers stream with at most a few characters of latency and nothing
 is held for a message containing no call. The scan does not stop once ordinary
 text has been released, so a model that writes a sentence before calling still
 has its call found. A block closes at the first `end_parsing` found in the accumulated block, or at
-the end of generation. The marker is located rather than matched at the end so
+the end of generation. The calls of every block in one message are coalesced
+into a single `ToolCallResponse`, which is the OpenAI shape and is what makes
+parallel calls survive: several families write each call in its own block, and
+`API._token_chunk_stream` stops at the first chunk carrying a finish reason, so
+a response per block would deliver the first call and drop the rest. Trailing
+text is therefore released without its finish reason and the tool response is
+the terminal chunk. The marker is located rather than matched at the end so
 that text the model writes after the call ("`</tool_call>` Done.") returns to
 the opening scan as ordinary text, where a second call in the same message is
 still found. Reasoning chunks

@@ -369,3 +369,61 @@ class TestTailAfterADroppedBlock:
         assert calls_of(chunks) == []
         assert "print" in text_of(chunks)
         assert "done." in text_of(chunks)
+
+
+class TestParallelCallsReachTheCaller:
+    """Several blocks in one message must arrive as one response.
+
+    The consumer of this stream stops at the first chunk carrying a finish
+    reason, so a response per block would deliver the first call and drop the
+    rest. Families that write each parallel call in its own block would lose
+    every call after the first.
+    """
+
+    @staticmethod
+    def tool_responses(chunks: list[ParserChunk]) -> list[ToolCallResponse]:
+        return [item for item in chunks if isinstance(item, ToolCallResponse)]
+
+    def test_two_blocks_arrive_as_one_response_carrying_both_calls(self) -> None:
+        chunks = feed(
+            [
+                "<tool_call><function=get_weather><parameter=location>Denver</parameter></function></tool_call>",
+                "<tool_call><function=get_weather><parameter=location>Boston</parameter></function></tool_call>",
+            ],
+            generic_parser(),
+        )
+        responses = self.tool_responses(chunks)
+        assert len(responses) == 1
+        assert len(responses[0].tool_calls) == 2
+
+    def test_nothing_terminates_the_stream_before_the_calls(self) -> None:
+        # A text chunk carrying a finish reason would end the stream at the
+        # consumer, so the trailing text is released without one and the tool
+        # response is the terminal chunk.
+        chunks = feed(
+            [
+                "<tool_call><function=get_weather></function></tool_call>",
+                " and then ",
+                "<tool_call><function=get_weather></function></tool_call>",
+                " done.",
+            ],
+            generic_parser(),
+        )
+        index = next(
+            i for i, item in enumerate(chunks) if isinstance(item, ToolCallResponse)
+        )
+        assert all(
+            getattr(item, "finish_reason", None) is None
+            for item in chunks[:index]
+            if item is not None
+        )
+        assert len(self.tool_responses(chunks)[0].tool_calls) == 2
+
+    def test_a_single_call_is_unchanged(self) -> None:
+        chunks = feed(
+            ["<tool_call><function=get_weather></function></tool_call>"],
+            generic_parser(),
+        )
+        responses = self.tool_responses(chunks)
+        assert len(responses) == 1
+        assert len(responses[0].tool_calls) == 1
