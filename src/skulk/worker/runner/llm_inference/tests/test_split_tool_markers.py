@@ -41,8 +41,19 @@ WEATHER = [
 ]
 
 
-def chunk(text: str, finish_reason: FinishReason | None = None) -> GenerationResponse:
-    return GenerationResponse(text=text, token=1, finish_reason=finish_reason, usage=None)
+def chunk(
+    text: str,
+    finish_reason: FinishReason | None = None,
+    *,
+    thinking: bool = False,
+) -> GenerationResponse:
+    return GenerationResponse(
+        text=text,
+        token=1,
+        finish_reason=finish_reason,
+        usage=None,
+        is_thinking=thinking,
+    )
 
 
 def feed(pieces: list[str], parser: ToolParser) -> list[ParserChunk]:
@@ -141,3 +152,55 @@ class TestOrdinaryAnswersStillStream:
         chunks = feed(["<tool"], generic_parser())
         assert calls_of(chunks) == []
         assert text_of(chunks) == "<tool"
+
+
+class TestThinkingBeforeTheCall:
+    """Reasoning must not settle the opening decision.
+
+    This parser runs downstream of the thinking parser, so a thinking model
+    that reasons before calling a tool sends its reasoning through here first.
+    Letting that text decide the opening would mean the later marker is never
+    examined and the caller receives raw tool markup as content, which is the
+    failure this whole change exists to remove.
+    """
+
+    @staticmethod
+    def run_with_reasoning(pieces: list[str]) -> list[ParserChunk]:
+        def source() -> Generator[ParserChunk]:
+            yield chunk("Let me think about which tool fits.", thinking=True)
+            yield chunk(" Probably the weather one.", thinking=True)
+            for piece in pieces[:-1]:
+                yield chunk(piece)
+            yield chunk(pieces[-1], finish_reason="stop")
+
+        return list(parse_tool_calls(source(), generic_parser(), tools=WEATHER))
+
+    def test_a_call_after_reasoning_is_still_parsed(self) -> None:
+        chunks = self.run_with_reasoning(
+            [
+                "<tool",
+                "_call>",
+                "<function=get_weather><parameter=location>Denver</parameter></function>",
+                "</tool_call>",
+            ]
+        )
+        assert calls_of(chunks) == ["get_weather"]
+
+    def test_the_reasoning_still_reaches_the_caller(self) -> None:
+        chunks = self.run_with_reasoning(
+            ["<tool_call>", "<function=get_weather></function>", "</tool_call>"]
+        )
+        reasoning = "".join(
+            item.text
+            for item in chunks
+            if isinstance(item, GenerationResponse) and item.is_thinking
+        )
+        assert "Let me think" in reasoning
+
+    def test_a_call_only_contemplated_in_reasoning_is_not_executed(self) -> None:
+        def source() -> Generator[ParserChunk]:
+            yield chunk("<tool_call><function=get_weather></function></tool_call>", thinking=True)
+            yield chunk("I will not call it.", finish_reason="stop")
+
+        chunks = list(parse_tool_calls(source(), generic_parser(), tools=WEATHER))
+        assert calls_of(chunks) == []

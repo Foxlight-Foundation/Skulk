@@ -9,6 +9,17 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- Reasoning no longer hides a tool call on the MLX engine. Tool parsing runs
+  downstream of the thinking parser, so a model that reasons before calling a
+  tool sent its reasoning through the tool parser first; that text decided the
+  message was not a call, and the marker that followed was never examined, so
+  the caller received the raw markup as content. Reasoning chunks now pass
+  straight through without taking part in that decision. This also means a call
+  a model only contemplated inside its reasoning is no longer executed, matching
+  the behavior the llama.cpp engine already had.
+
+### Fixed
+
 - `tool_choice` is now honored on the in-process engines. Only the served
   engines forwarded it to a server that acts on it, so an MLX or llama.cpp
   model ignored it entirely: a request sending `"none"` and asking for the tool

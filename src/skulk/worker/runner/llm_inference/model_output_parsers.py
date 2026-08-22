@@ -714,6 +714,16 @@ def parse_tool_calls(
             yield response
             continue
 
+        # Reasoning is never part of a tool-call block: this parser runs
+        # downstream of the thinking parser, and a call a model only
+        # contemplated inside its reasoning must not be executed. Passing those
+        # chunks straight through also keeps them out of the opening decision,
+        # so a thinking model that reasons before calling still has its marker
+        # examined when the visible answer begins.
+        if response.is_thinking:
+            yield response
+            continue
+
         just_opened = False
         if not in_tool_call and not opening_settled:
             pending_responses.append(response)

@@ -6,6 +6,12 @@ sidebar_position: 0
 
 ## Tool calling across more model families
 
+A model that reasons before calling a tool now has its call recognized. Its
+reasoning previously made the request look like an ordinary answer, so the call
+that followed was returned as raw markup in the message content. A call a model
+only thought about while reasoning is also no longer carried out.
+
+
 The `tool_choice` option now behaves the same way whichever engine serves the
 model. It previously reached only the engines that run an inference server of
 their own, so a request that sent `"none"` could still come back with a tool
