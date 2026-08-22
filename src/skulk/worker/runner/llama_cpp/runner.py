@@ -64,6 +64,7 @@ from skulk.worker.runner.generation_stats import (
 )
 from skulk.worker.runner.llm_inference.harmony_text_parser import HarmonyTextParser
 from skulk.worker.runner.llm_inference.think_text_parser import ThinkTextParser
+from skulk.worker.runner.llm_inference.tool_parsers import declared_tool_calls
 from skulk.worker.runner.llm_inference.tool_text_parser import (
     parse_tool_calls_from_text,
 )
@@ -448,6 +449,24 @@ def tool_calls_from_message(message: dict[str, Any]) -> list[ToolCallItem]:
             item_kwargs["id"] = call["id"]
         items.append(ToolCallItem(**item_kwargs))
     return items
+
+
+def offered_tool_calls_from_message(
+    message: dict[str, Any], tools: list[dict[str, Any]] | None
+) -> list[ToolCallItem]:
+    """Native structured calls from llama.cpp, limited to the offered tools.
+
+    llama.cpp's bundled chat handlers fill ``tool_calls`` themselves for the
+    formats they recognize, and nothing there checks the name against the
+    request. A model reaching for one of its own built-ins would otherwise
+    reach the caller as a call they cannot run, which is the same rule the
+    text-recovered path applies, and a request that offered no tools cannot
+    produce one at all.
+    """
+
+    if not tools:
+        return []
+    return declared_tool_calls(tool_calls_from_message(message), tools)
 
 
 def _logprob_fields(
@@ -1265,7 +1284,7 @@ class Runner(ServedConcurrentDispatch):
         )
         visible_text = "".join(text for text, is_thinking in emissions if not is_thinking)
 
-        tool_calls = tool_calls_from_message(message)
+        tool_calls = offered_tool_calls_from_message(message, task.task_params.tools)
         if not tool_calls and task.task_params.tools:
             # llama.cpp only fills structured tool_calls for formats its bundled
             # chat handlers recognize. A reasoning model emits the call as text,
