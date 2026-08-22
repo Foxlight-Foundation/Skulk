@@ -1076,8 +1076,12 @@ def parse_tool_calls(
             )
             if accumulated_calls:
                 # An earlier block in this message did produce calls, so they
-                # are delivered rather than lost to the truncated one.
-                yield response.model_copy(update={"text": combined, "token": 0})
+                # are delivered rather than lost to the truncated one. The
+                # finish reason is withheld here or the consumer stops on this
+                # chunk and never sees them.
+                yield response.model_copy(
+                    update={"text": combined, "token": 0, "finish_reason": None}
+                )
                 yield from _finish_message(response)
                 break
             yield response.model_copy(

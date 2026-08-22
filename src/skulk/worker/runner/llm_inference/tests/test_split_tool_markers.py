@@ -526,6 +526,23 @@ class TestBlockClosedByEndOfGeneration:
     the same rules as a marker-closed block.
     """
 
+    @staticmethod
+    def assert_reaches_the_consumer(chunks: list[ParserChunk]) -> None:
+        """The consumer stops at the first chunk carrying a finish reason.
+
+        Checking the whole list is not enough: calls yielded after something
+        terminal never reach a caller.
+        """
+
+        index = next(
+            i for i, item in enumerate(chunks) if isinstance(item, ToolCallResponse)
+        )
+        assert all(
+            getattr(item, "finish_reason", None) is None
+            for item in chunks[:index]
+            if item is not None
+        )
+
     def test_an_earlier_call_survives_a_final_unoffered_block(self) -> None:
         chunks = feed(
             [
@@ -535,6 +552,7 @@ class TestBlockClosedByEndOfGeneration:
             generic_parser(),
         )
         assert calls_of(chunks) == ["get_weather"]
+        self.assert_reaches_the_consumer(chunks)
 
     def test_an_earlier_call_survives_a_final_truncated_block(self) -> None:
         chunks = feed(
@@ -545,6 +563,7 @@ class TestBlockClosedByEndOfGeneration:
             generic_parser(),
         )
         assert calls_of(chunks) == ["get_weather"]
+        self.assert_reaches_the_consumer(chunks)
 
     def test_a_truncated_block_alone_is_still_an_error(self) -> None:
         chunks = feed(["<tool_call><func"], generic_parser())
