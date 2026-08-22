@@ -805,6 +805,16 @@ no tool you offered is returned as ordinary content with its normal
 implementation to run. Check `finish_reason` rather than assuming a response is
 a call.
 
+**`tool_choice` means the same thing on every engine.** `"none"` removes the
+tools from the request, which is the only way to guarantee the documented
+behavior that the model does not call one: a model handed a tool and asked for
+it will call it whatever the request said. Naming a single function narrows the
+offered tools to that one, so the model cannot call a different tool than you
+asked for; a name matching none of your tools is reported by the engine rather
+than silently sending no tools. `"auto"` and `"required"` pass through, and
+`"required"` is a best-effort instruction on the in-process engines rather than
+a guarantee, because forcing a call there would need constrained decoding.
+
 **A JSON answer stays an answer.** Several model families write a tool call as
 a bare JSON object, so a request that both offers tools and asks for JSON output
 is ambiguous on the wire. Skulk resolves it in favor of the answer: text that

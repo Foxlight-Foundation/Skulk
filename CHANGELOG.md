@@ -9,6 +9,18 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- `tool_choice` is now honored on the in-process engines. Only the served
+  engines forwarded it to a server that acts on it, so an MLX or llama.cpp
+  model ignored it entirely: a request sending `"none"` and asking for the tool
+  by name returned the tool call on every attempt. The option is now applied
+  before dispatch, so it means the same thing on every engine. `"none"` removes
+  the tools from the request, and naming a single function narrows the offered
+  tools to that one so the model cannot call a different tool than the caller
+  asked for. `"required"` remains a best-effort instruction on the in-process
+  engines, since forcing a call there would need constrained decoding.
+
+### Fixed
+
 - Tool calls whose markers arrive split across chunks are now recognized. A
   generation chunk is whatever the streaming detokenizer could resolve that
   step, not a token, so an opening marker that is a single token id still

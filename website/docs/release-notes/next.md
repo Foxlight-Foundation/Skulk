@@ -6,6 +6,13 @@ sidebar_position: 0
 
 ## Tool calling across more model families
 
+The `tool_choice` option now behaves the same way whichever engine serves the
+model. It previously reached only the engines that run an inference server of
+their own, so a request that sent `"none"` could still come back with a tool
+call. Sending `"none"` now guarantees no call, and naming a single function
+guarantees the model cannot call a different one.
+
+
 Tool calls are now recognized when a model's opening marker arrives split
 across several streamed pieces, which is the normal case rather than the
 exception. Previously the caller received the raw markup as message content
