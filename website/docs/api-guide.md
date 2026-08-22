@@ -959,7 +959,8 @@ curl -X POST http://localhost:52415/v1/responses \
 Generates embeddings with a mounted embedding model. The model must be placed
 and running, and its card must declare `TextEmbedding`: a non-embedding model
 returns **400 Bad Request**, and an unplaced model returns **404 No instance
-found**.
+found**. An alias absent from the authorized model catalog also returns **404**;
+inference never discovers it from Hugging Face as a side effect.
 
 ```bash
 curl -X POST http://localhost:52415/v1/embeddings \
@@ -989,7 +990,8 @@ order, the resolved `model`, and `usage` with prompt and total token counts.
 
 Generates speech audio from a mounted text-to-speech model. The model must be
 placed and running, and its resolved capabilities must include
-`supports_speech_synthesis`.
+`supports_speech_synthesis`. An alias absent from the authorized model catalog
+returns **404** rather than triggering Hub discovery.
 
 ```bash
 curl -X POST http://localhost:52415/v1/audio/speech \
@@ -1256,6 +1258,10 @@ requires setting that environment variable before launching one.
 ### Generate images
 
 **POST** `/v1/images/generations`
+
+The requested image model must already exist in the authorized catalog and be
+placed. Unknown and unplaced aliases return **404**; inference never discovers
+or persists Hub metadata as a side effect.
 
 ```bash
 curl -X POST http://localhost:52415/v1/images/generations \

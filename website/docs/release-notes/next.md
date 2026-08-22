@@ -116,5 +116,7 @@ than caller-selected content under a matching alias. There is no second Model
 trust ceremony in Settings, and vision metadata
 alone no longer creates an approval blocker. Historical approval config, state,
 wire fields, and endpoints remain deprecated and inert for rolling upgrades.
+Image, embedding, and speech inference requests for an unknown catalog alias
+return HTTP 404 rather than an internal server error.
 The runner still verifies signed-card identity, immutable revisions, installed
 sidecars, and artifact manifests before executing repository code.

@@ -2264,6 +2264,10 @@ class API:
             "/v1/embeddings",
             tags=["Compatibility APIs"],
             summary="Generate embeddings",
+            description=(
+                "Generate embeddings with an already-cataloged, placed model that "
+                "declares TextEmbedding. Unknown or unplaced models return 404."
+            ),
         )(self.embeddings)
         self.app.post(
             "/v1/audio/speech",
@@ -2329,6 +2333,10 @@ class API:
             response_model=None,
             tags=["Images"],
             summary="Generate images",
+            description=(
+                "Generate images with an already-cataloged, placed image model. "
+                "Unknown or unplaced models return 404."
+            ),
         )(self.image_generations)
         self.app.post(
             "/bench/images/generations",
@@ -5213,7 +5221,7 @@ class API:
                 card = self._model_card_for_instance(instance)
                 if card is not None:
                     return card
-        return await ModelCard.load(model_id)
+        return await self._load_authorized_model_card(model_id)
 
     @staticmethod
     def _model_card_for_instance(instance: Instance) -> ModelCard | None:
@@ -5240,7 +5248,7 @@ class API:
 
         Raises HTTPException 404 if no instance is found for the model.
         """
-        model_card = await ModelCard.load(model)
+        model_card = await self._load_authorized_model_card(model)
         resolved_model = model_card.model_id
         if not any(
             instance.shard_assignments.model_id == resolved_model
@@ -5259,7 +5267,7 @@ class API:
         """
         from skulk.shared.models.model_cards import ModelTask
 
-        model_card = await ModelCard.load(model_id)
+        model_card = await self._load_authorized_model_card(model_id)
         resolved = model_card.model_id
         if ModelTask.TextEmbedding not in model_card.tasks:
             raise HTTPException(

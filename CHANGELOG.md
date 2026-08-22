@@ -48,6 +48,8 @@ This project records release notes here and mirrors public-facing notes in
   and inert for rolling compatibility. Historical executable custom cards with
   no immutable revision fail closed until re-added, and ordinary model-add
   responses now wait for their exact ordered catalog mutation before returning.
+  Image, embedding, and speech inference endpoints translate an unknown catalog
+  alias to HTTP 404 instead of leaking the strict lookup failure as HTTP 500.
   Signed-card, revision, installed-sidecar, and artifact-manifest verification
   still fail closed.
 
