@@ -1038,7 +1038,10 @@ def parse_tool_calls(
                     "Block named no offered tool, emitting it as content "
                     f"(parsed_calls={len(parsed)})"
                 )
-                yield response.model_copy(update={"text": combined, "token": 0})
+                yield response.model_copy(
+                    update={"text": combined, "token": 0, "finish_reason": None}
+                )
+                yield from _finish_message(response)
                 break
             if parsed:
                 parsed = declared_tool_calls(parsed, tools)
@@ -1056,31 +1059,34 @@ def parse_tool_calls(
                         attrs={"tool_call_count": len(parsed)},
                     )
                 accumulated_calls.extend(parsed)
-                yield ToolCallResponse(
-                    tool_calls=accumulated_calls,
-                    usage=response.usage,
-                    stats=response.stats,
-                )
-                accumulated_calls = []
+                yield from _finish_message(response)
                 break
             if tool_parser.unparsed_is_text:
                 logger.info(
                     "Unmarked block ended without parsing as a tool call, "
                     f"emitting it as content (generated_chars={len(combined)})"
                 )
-                yield response.model_copy(update={"text": combined, "token": 0})
+                yield response.model_copy(
+                    update={"text": combined, "token": 0, "finish_reason": None}
+                )
+                yield from _finish_message(response)
                 break
             logger.info(
                 "tool call parsing interrupted, yield partial tool call as text"
             )
-            response = response.model_copy(
+            if accumulated_calls:
+                # An earlier block in this message did produce calls, so they
+                # are delivered rather than lost to the truncated one.
+                yield response.model_copy(update={"text": combined, "token": 0})
+                yield from _finish_message(response)
+                break
+            yield response.model_copy(
                 update={
                     "text": combined,
                     "token": 0,
                     "finish_reason": "error",
                 }
             )
-            yield response
 
     if accumulated_calls and last_response is not None:
         # A finite source can end without ever carrying a finish reason, so the

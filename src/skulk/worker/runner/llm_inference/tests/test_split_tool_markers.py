@@ -516,3 +516,41 @@ class TestEverythingInOneTerminalChunk:
             ]
             assert len(terminals) == 1, pieces
             assert terminals[0] is chunks[-1], pieces
+
+
+class TestBlockClosedByEndOfGeneration:
+    """A block the model never closed must not lose the calls before it.
+
+    Several families end a tool-calling message rather than emitting a closing
+    marker, so this path is normal rather than exceptional, and it has to hold
+    the same rules as a marker-closed block.
+    """
+
+    def test_an_earlier_call_survives_a_final_unoffered_block(self) -> None:
+        chunks = feed(
+            [
+                "<tool_call><function=get_weather></function></tool_call>",
+                "<tool_call><function=print></function>",
+            ],
+            generic_parser(),
+        )
+        assert calls_of(chunks) == ["get_weather"]
+
+    def test_an_earlier_call_survives_a_final_truncated_block(self) -> None:
+        chunks = feed(
+            [
+                "<tool_call><function=get_weather></function></tool_call>",
+                "<tool_call><func",
+            ],
+            generic_parser(),
+        )
+        assert calls_of(chunks) == ["get_weather"]
+
+    def test_a_truncated_block_alone_is_still_an_error(self) -> None:
+        chunks = feed(["<tool_call><func"], generic_parser())
+        assert calls_of(chunks) == []
+        assert any(
+            getattr(item, "finish_reason", None) == "error"
+            for item in chunks
+            if item is not None
+        )
