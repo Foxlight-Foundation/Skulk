@@ -39,11 +39,16 @@ This project records release notes here and mirrors public-facing notes in
   each chunk on its own, so for most models the block never opened and the
   caller received the raw markup as message content with a `stop` finish
   reason. Observed on a Qwen model served by the MLX engine, where the model
-  emitted a perfectly well formed call. The decision is now made against the
-  text accumulated from the start of the message, and the closing marker is
-  matched the same way. Only the leading chunks are held back, and only until
-  the text either matches a marker or can no longer become one, so ordinary
-  answers stream as they did before.
+  emitted a perfectly well formed call. Text is now scanned across chunk
+  boundaries by carrying forward only the trailing run that could still become
+  a marker, and the closing marker is matched against the accumulated block.
+  That run is shorter than the longest marker, so ordinary answers stream with
+  at most a few characters of latency, and the scan keeps looking after
+  ordinary text has been released, so a model that writes a sentence before
+  calling ("I'll check that.") still has its call recognized. The unmarked
+  dialect opens on a brace, which also appears in prose, so there a call is
+  recognized only at the start of the message; its distinctive marker still
+  opens one anywhere.
 
 ### Fixed
 

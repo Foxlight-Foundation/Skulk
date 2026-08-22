@@ -21,9 +21,10 @@ guarantees the model cannot call a different one.
 
 Tool calls are now recognized when a model's opening marker arrives split
 across several streamed pieces, which is the normal case rather than the
-exception. Previously the caller received the raw markup as message content
-with an ordinary stop reason, so a well formed call from the model looked like
-a refusal to call anything.
+exception, and when the model writes a sentence before calling ("I'll check
+that.") rather than opening with the call. Previously the caller received the
+raw markup as message content with an ordinary stop reason, so a well formed
+call from the model looked like a refusal to call anything.
 
 
 Tool calling now works for Llama models served by the MLX engine, and Skulk
