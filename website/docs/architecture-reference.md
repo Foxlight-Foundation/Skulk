@@ -807,25 +807,52 @@ entire message. The served engines (`llama_server`, `vllm`) do not use this
 path: their servers parse tool calls themselves and return structured
 `tool_calls`.
 
-The `mlx` engine drives this through a marker state machine
-(`model_output_parsers.parse_tool_calls`): a block opens when a chunk starts
-with one of `ToolParser.start_markers` and closes on `end_parsing` or on the
-end of generation. Three properties on `ToolParser` carry the family
-differences:
+The `mlx` engine drives this through a rolling marker scan
+(`model_output_parsers.parse_tool_calls`). A generation chunk is whatever the
+streaming detokenizer resolved that step, not a token, so a marker that is one
+token id still arrives split (`<tool`, `_`, `c`, `all>`). `_block_start_index`
+therefore searches the accumulated text rather than each chunk, and
+`_partial_marker_suffix_length` carries forward only the trailing run that
+could still become a marker. That run is shorter than the longest marker, so
+ordinary answers stream with at most a few characters of latency and nothing
+is held for a message containing no call. The scan does not stop once ordinary
+text has been released, so a model that writes a sentence before calling still
+has its call found. A block closes when the accumulated block ends with
+`end_parsing`, or at the end of generation. Reasoning chunks
+(`is_thinking=True`) pass straight through and take no part in the scan, which
+both keeps a thinking preamble from hiding the call and stops a call the model
+only contemplated from being executed.
+
+Four properties on `ToolParser` carry the family differences:
 
 - `extra_start_parsing`: further markers that also open a block. Llama writes
   the bare call object but prefixes `<|python_tag|>` when it names a tool, and
   a marker that does not open the block reaches the caller as content.
+- `anchored`: whether the primary marker opens a block only at the start of a
+  message. Set for the unmarked dialect, whose marker is `{`: distinctive
+  markers may open a block anywhere, but a brace also appears in prose and in
+  JSON answers. The families writing that dialect put the call in the whole
+  message, so anchoring costs nothing, and their `<|python_tag|>` marker still
+  opens a call after a preamble.
 - `unparsed_is_text`: a block that fails to parse is content, not a failure.
   Set for unmarked dialects, which open on `{` and therefore also catch a model
   answering in JSON.
-- `start_markers`: the read-side union of the above.
+- `start_markers`: the read-side union of the primary and extra markers.
 
 `tool_parsers.declared_tool_calls` drops calls naming a tool the request did
-not offer, and a block left with no offered tool is delivered as content. This
+not offer, and a block left with no offered tool is delivered as content. On
+the llama.cpp path the same filter covers calls its bundled chat handlers
+parsed natively (`offered_tool_calls_from_message`); since the handler consumes
+the raw markup while parsing, a dropped native call is re-serialized as content
+(`dropped_call_text`) rather than leaving a blank answer. This
 is what keeps a model's own built-ins (Llama `print`, gpt-oss `python` /
-`browser`) from reaching a caller that has no implementation for them. Nothing
-is filtered when the request declares no tools.
+`browser`) from reaching a caller that has no implementation for them. A
+request that declared no tools is not parsed for calls at all: `apply_all_parsers`
+skips the tool parser and the llama.cpp runner skips its recovery branch, since
+the parser is wired from the tokenizer and cannot see what the request asked
+for. `declared_tool_calls` itself treats a `None` tools list as "no list to
+check against" rather than "nothing may be called", because the steward parses
+its own turns through the same dialects without passing one.
 
 `utils_mlx.load_mlx_items` adds `<|eom_id|>` to `eos_token_ids` for any
 tokenizer whose vocabulary has it. Llama declares only `<|eot_id|>`, so without

@@ -17,6 +17,7 @@ cleanly on nodes (e.g. Macs) where the binding is not installed.
 """
 
 import inspect
+import json
 import os
 import time
 from collections.abc import Callable
@@ -449,6 +450,23 @@ def tool_calls_from_message(message: dict[str, Any]) -> list[ToolCallItem]:
             item_kwargs["id"] = call["id"]
         items.append(ToolCallItem(**item_kwargs))
     return items
+
+
+def dropped_call_text(message: dict[str, Any]) -> str:
+    """Render native calls as text, for calls that named no offered tool.
+
+    When llama.cpp's own handler parses a call, the raw markup is gone from the
+    message and ``content`` is null. Dropping such a call without putting
+    anything in its place would answer the request with a successful blank
+    message, so the call is re-serialized and delivered as content, which is
+    what the text-recovered path does with a block naming no offered tool.
+    """
+
+    rendered = [
+        json.dumps({"name": call.name, "arguments": call.arguments})
+        for call in tool_calls_from_message(message)
+    ]
+    return "\n".join(rendered)
 
 
 def offered_tool_calls_from_message(
@@ -1285,6 +1303,13 @@ class Runner(ServedConcurrentDispatch):
         visible_text = "".join(text for text, is_thinking in emissions if not is_thinking)
 
         tool_calls = offered_tool_calls_from_message(message, task.task_params.tools)
+        if not tool_calls and not visible_text.strip():
+            # The handler consumed the raw markup while parsing, so a call that
+            # named no offered tool leaves nothing to say. Put the call back as
+            # text rather than answering with a successful blank message.
+            visible_text = dropped_call_text(message)
+            if visible_text:
+                emissions = emissions + [(visible_text, False)]
         if not tool_calls and task.task_params.tools:
             # llama.cpp only fills structured tool_calls for formats its bundled
             # chat handlers recognize. A reasoning model emits the call as text,
