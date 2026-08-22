@@ -573,3 +573,31 @@ class TestBlockClosedByEndOfGeneration:
             for item in chunks
             if item is not None
         )
+
+
+class TestTruncationIsNotACall:
+    """A call cut off at max_tokens must not be handed to the caller.
+
+    Several families end a tool-calling message without a closing marker, so an
+    unclosed block is parsed rather than discarded. Truncation looks identical
+    at the parser, and a marker dialect's inner parser strips the closing
+    marker only if it is present, so the finish reason is what separates them.
+    """
+
+    @staticmethod
+    def truncated(finish_reason: FinishReason) -> list[ParserChunk]:
+        def source() -> Generator[ParserChunk]:
+            yield chunk("<tool_call><function=get_weather>")
+            yield chunk("<parameter=location>Denver</parameter></function>", finish_reason)
+
+        return list(parse_tool_calls(source(), generic_parser(), tools=WEATHER))
+
+    def test_a_block_cut_off_at_max_tokens_is_not_a_call(self) -> None:
+        chunks = self.truncated("length")
+        assert calls_of(chunks) == []
+
+    def test_the_same_block_ended_normally_is_a_call(self) -> None:
+        # The families this exists for end the message rather than closing the
+        # block, so a normal stop must still produce the call.
+        chunks = self.truncated("stop")
+        assert calls_of(chunks) == ["get_weather"]

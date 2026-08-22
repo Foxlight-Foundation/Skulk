@@ -1032,7 +1032,15 @@ def parse_tool_calls(
             # only a block that genuinely does not parse falls through to the
             # error path, which is what truncation actually looks like.
             combined = "".join(tool_call_text_parts)
-            parsed = tool_parser.parse(combined.strip(), tools=tools)
+            # Truncation is the one case where an unclosed block must not be
+            # read as a call. A marker dialect's inner parser only strips the
+            # closing marker if it is there, so a call cut off at max_tokens
+            # would otherwise parse and be handed to the caller to execute.
+            parsed = (
+                None
+                if response.finish_reason == "length"
+                else tool_parser.parse(combined.strip(), tools=tools)
+            )
             if parsed is not None and not declared_tool_calls(parsed, tools):
                 logger.info(
                     "Block named no offered tool, emitting it as content "
