@@ -76,9 +76,11 @@ def remote_code_is_automatically_trusted(card: ModelCard) -> bool:
     may_execute_repository_code = card.trust_remote_code or card.vision is not None
     if not may_execute_repository_code:
         return False
+    if card.source_revision is None:
+        return False
     if card.is_custom or card.registry_card_id is None:
         return True
-    return card.registry_snapshot_id is not None and card.source_revision is not None
+    return card.registry_snapshot_id is not None
 
 
 def remote_code_trust_identity(card: ModelCard) -> str:
@@ -143,6 +145,17 @@ def require_remote_code_approval(
             f"{MODEL_TRUST_FAILURE_MARKER}: executable custom model card lacks "
             "an immutable source revision; re-add the model through the "
             f"operator flow: {card.model_id}"
+        )
+    if (
+        not card.is_custom
+        and card.registry_card_id is None
+        and (card.trust_remote_code or card.vision is not None)
+        and card.source_revision is None
+    ):
+        raise PermissionError(
+            f"{MODEL_TRUST_FAILURE_MARKER}: executable bundled model card lacks "
+            "an immutable source revision; use the signed registry card or "
+            f"update the bundled definition: {card.model_id}"
         )
     if (
         card.registry_card_id is not None

@@ -1279,12 +1279,12 @@ async def test_installed_startup_selects_current_generation_deterministically(
         model_cards_module._registry_current_cards.update(original_current)
 
 
-def test_installed_qualification_card_does_not_survive_lifecycle_cleanup(
+def test_installed_custom_card_does_not_restore_deleted_catalog_authority(
     tmp_path: Path,
 ) -> None:
-    """A retained qualification sidecar cannot resurrect its unsigned card."""
+    """A retained custom sidecar cannot resurrect its deleted catalog card."""
     card = ModelCard(
-        model_id=ModelId("org/qualification-only"),
+        model_id=ModelId("org/custom-installed"),
         source_revision="b" * 40,
         storage_size=Memory.from_bytes(1),
         n_layers=1,
@@ -1292,7 +1292,6 @@ def test_installed_qualification_card_does_not_survive_lifecycle_cleanup(
         supports_tensor=False,
         tasks=[ModelTask.TextGeneration],
         is_custom=True,
-        qualification_only=True,
     )
     artifact = tmp_path / "artifact"
     artifact.mkdir()
@@ -1319,12 +1318,12 @@ def test_installed_qualification_card_does_not_survive_lifecycle_cleanup(
         model_cards_module._installed_current_registry_ids.update(original_current)
 
 
-def test_late_qualification_install_registration_cannot_restore_deleted_card(
+def test_late_custom_install_registration_cannot_restore_deleted_card(
     tmp_path: Path,
 ) -> None:
-    """A late staging callback cannot outlive qualification-card cleanup."""
+    """A late staging callback cannot outlive custom-card deletion."""
     card = ModelCard(
-        model_id=ModelId("org/qualification-late-install"),
+        model_id=ModelId("org/custom-late-install"),
         source_revision="b" * 40,
         storage_size=Memory.from_bytes(1),
         n_layers=1,
@@ -1332,7 +1331,6 @@ def test_late_qualification_install_registration_cannot_restore_deleted_card(
         supports_tensor=False,
         tasks=[ModelTask.TextGeneration],
         is_custom=True,
-        qualification_only=True,
     )
     artifact = tmp_path / "artifact"
     artifact.mkdir()

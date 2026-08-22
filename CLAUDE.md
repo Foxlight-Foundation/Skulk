@@ -530,6 +530,9 @@ deprecated `model_trust` snapshots; the historical approval endpoints remain
 inert for older clients. Quick and exact placement commands are also compared
 with the master's command-ordered card view immediately before placement,
 closing catalog replacement and deletion races after API-side validation. An
+executable bundled fallback card must pin its source revision, and an installed
+custom-card sidecar retains artifact truth without independently authorizing a
+card whose durable custom TOML was deleted. An
 exact-card install succeeds only after the local
 worker persists and caches the indexed event carrying that command's ID; card
 equality alone cannot acknowledge a new request. Service cleanup has the same

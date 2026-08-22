@@ -476,12 +476,11 @@ def _apply_installed_card_snapshot(
         _installed_current_registry_ids[model_id] = (
             current_card.registry_card_id if current_card is not None else None
         )
-        if record.model_card.qualification_only:
-            # Qualification downloads remain durable, self-describing store/cache
-            # artifacts after cleanup, but their unsigned temporary card must be
-            # supplied by the lifecycle-owned custom TOML.  Once that file is
-            # removed, an installed sidecar cannot resurrect the temporary card
-            # or shadow a later signed registry card.
+        if record.model_card.is_custom:
+            # Installed custom bytes remain durable and self-describing, but the
+            # custom TOML is the authorization record that makes them selectable.
+            # Once an operator deletes that record, its retained artifact sidecar
+            # must not resurrect the card or shadow registry/bundled truth.
             if existing == record.model_card:
                 _card_cache.pop(model_id, None)
             continue
@@ -533,11 +532,10 @@ def register_installed_card_record(record: "InstalledCardRecord") -> None:
     _installed_current_registry_ids[model_id] = (
         current_card.registry_card_id if current_card is not None else None
     )
-    if record.model_card.qualification_only:
-        # The lifecycle-owned custom TOML is the sole authority that makes an
-        # unsigned qualification card visible.  Retain its installed sidecar
-        # for offline artifact truth, but never let the live download path make
-        # that temporary card independently durable in the model catalog.
+    if record.model_card.is_custom:
+        # The custom TOML is the durable authorization record for every unsigned
+        # card. Retain the installed sidecar for artifact truth, but never let a
+        # download make the card independently durable in the live catalog.
         return
     existing = _card_cache.get(model_id)
     if existing is None or not existing.is_custom or record.verification == "custom":

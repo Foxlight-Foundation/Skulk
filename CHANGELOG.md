@@ -53,6 +53,9 @@ This project records release notes here and mirrors public-facing notes in
   The elected master also revalidates quick and exact placement cards against
   command-ordered catalog truth, closing replacement/deletion races after an
   API node has prepared a placement.
+  Executable bundled fallback cards must pin an immutable source revision, and
+  installed custom-card sidecars no longer recreate catalog authorization after
+  the operator deletes the custom card.
   Signed-card, revision, installed-sidecar, and artifact-manifest verification
   still fail closed.
 

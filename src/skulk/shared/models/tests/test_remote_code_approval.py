@@ -117,7 +117,25 @@ def test_legacy_unpinned_executable_custom_card_is_blocked() -> None:
         }
     )
 
+    assert not remote_code_is_automatically_trusted(card)
     with pytest.raises(PermissionError, match="re-add the model"):
+        require_remote_code_approval(card, frozenset())
+
+
+def test_unpinned_executable_bundled_card_is_blocked() -> None:
+    """A Skulk release cannot authorize a mutable bundled repository ref."""
+    card = _registry_card().model_copy(
+        update={
+            "source_revision": None,
+            "registry_card_id": None,
+            "registry_snapshot_id": None,
+            "registry_provenance": None,
+        }
+    )
+
+    assert not card.is_custom
+    assert not remote_code_is_automatically_trusted(card)
+    with pytest.raises(PermissionError, match="executable bundled model card"):
         require_remote_code_approval(card, frozenset())
 
 

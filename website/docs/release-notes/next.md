@@ -121,5 +121,8 @@ return HTTP 404 rather than an internal server error.
 The elected master repeats exact-card validation at command ordering for quick
 and caller-specified placements, so a card replacement or deletion that wins a
 race after API lookup also prevents stale content from launching.
+Executable bundled fallback cards must pin their repository revision. Retained
+installed sidecars continue to describe custom artifacts, but they no longer
+restore catalog authorization after an operator deletes the custom card.
 The runner still verifies signed-card identity, immutable revisions, installed
 sidecars, and artifact manifests before executing repository code.
