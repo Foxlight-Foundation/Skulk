@@ -471,3 +471,48 @@ class TestDroppedBlockOnTheTerminalChunk:
         )
         assert calls_of(chunks) == []
         assert "done." in text_of(chunks)
+
+
+class TestEverythingInOneTerminalChunk:
+    """The whole message can arrive as a single terminal chunk.
+
+    There is no next chunk to drive the streaming scan there, so the rest of
+    the message has to be parsed in place. Each exit from the close site used
+    to decide this for itself, and each got it wrong differently.
+    """
+
+    def test_two_calls_in_one_terminal_chunk_are_both_delivered(self) -> None:
+        chunks = feed(
+            [
+                "<tool_call><function=get_weather><parameter=location>Denver</parameter></function></tool_call>"
+                "<tool_call><function=get_weather><parameter=location>Boston</parameter></function></tool_call>",
+            ],
+            generic_parser(),
+        )
+        responses = [c for c in chunks if isinstance(c, ToolCallResponse)]
+        assert len(responses) == 1
+        assert len(responses[0].tool_calls) == 2
+
+    def test_a_call_then_text_in_one_terminal_chunk(self) -> None:
+        chunks = feed(
+            ["<tool_call><function=get_weather></function></tool_call> Done."],
+            generic_parser(),
+        )
+        assert calls_of(chunks) == ["get_weather"]
+        assert "Done." in text_of(chunks)
+
+    def test_exactly_one_chunk_carries_the_finish_reason(self) -> None:
+        for pieces in (
+            ["<tool_call><function=get_weather></function></tool_call> Done."],
+            ["<tool_call><function=print></function></tool_call> Done."],
+            ["The weather is fine."],
+        ):
+            chunks = feed(pieces, generic_parser())
+            terminals = [
+                c
+                for c in chunks
+                if isinstance(c, ToolCallResponse)
+                or (c is not None and c.finish_reason is not None)
+            ]
+            assert len(terminals) == 1, pieces
+            assert terminals[0] is chunks[-1], pieces

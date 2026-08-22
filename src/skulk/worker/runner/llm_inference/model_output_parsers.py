@@ -805,6 +805,54 @@ def parse_tool_calls(
     # message that turns out not to contain a call.
     held_text = ""
     at_message_start = True
+    def _finish_message(
+        response: GenerationResponse,
+    ) -> Generator[ParserChunk]:
+        """Close out a message once a block has been dealt with.
+
+        Every exit from the close site routes through here so the same three
+        rules hold whatever the block turned out to be: the rest of the message
+        is parsed rather than emitted whole (no further chunk will arrive to
+        drive the streaming scan), the calls found across the whole message are
+        delivered as one response, and exactly one chunk carries the finish
+        reason, since the consumer stops at the first one that does.
+        """
+
+        nonlocal held_text, accumulated_calls
+        if response.finish_reason is None:
+            return
+        terminal_sent = False
+        if held_text:
+            more_calls, leftover = _scan_remaining_blocks(
+                held_text, tool_parser, tools
+            )
+            accumulated_calls.extend(more_calls)
+            held_text = ""
+            if leftover:
+                carries_finish = not accumulated_calls
+                yield response.model_copy(
+                    update={
+                        "text": leftover,
+                        "token": 0,
+                        "finish_reason": response.finish_reason
+                        if carries_finish
+                        else None,
+                    }
+                )
+                terminal_sent = carries_finish
+        if accumulated_calls:
+            yield ToolCallResponse(
+                tool_calls=accumulated_calls,
+                usage=response.usage,
+                stats=response.stats,
+            )
+            accumulated_calls = []
+            return
+        if not terminal_sent:
+            # The block's own content went out without the finish reason, so
+            # something still has to end the stream.
+            yield response.model_copy(update={"text": "", "token": 0})
+
     for response in responses:
         if response is None:
             yield None
@@ -911,46 +959,15 @@ def parse_tool_calls(
                     tool_call_text_parts = []
                     # The remainder stays with the scan rather than being
                     # emitted here, so a further call in the trailing text is
-                    # still found. The finish reason is withheld while anything
-                    # remains, since the consumer stops at the first chunk
-                    # carrying one and would never see the rest.
-                    remainder_follows = bool(held_text) or bool(accumulated_calls)
+                    # still found.
                     yield response.model_copy(
                         update={
                             "text": combined,
                             "token": 0,
-                            "finish_reason": None
-                            if remainder_follows
-                            else response.finish_reason,
+                            "finish_reason": None,
                         }
                     )
-                    if response.finish_reason is None:
-                        continue
-                    if held_text:
-                        # No further chunk will drive the scan, so the rest of
-                        # the message is parsed here rather than emitted whole.
-                        more_calls, leftover = _scan_remaining_blocks(
-                            held_text, tool_parser, tools
-                        )
-                        accumulated_calls.extend(more_calls)
-                        held_text = ""
-                        if leftover:
-                            yield response.model_copy(
-                                update={
-                                    "text": leftover,
-                                    "token": 0,
-                                    "finish_reason": None
-                                    if accumulated_calls
-                                    else response.finish_reason,
-                                }
-                            )
-                    if accumulated_calls:
-                        yield ToolCallResponse(
-                            tool_calls=accumulated_calls,
-                            usage=response.usage,
-                            stats=response.stats,
-                        )
-                        accumulated_calls = []
+                    yield from _finish_message(response)
                     continue
                 parsed = kept
             logger.info(
@@ -968,13 +985,9 @@ def parse_tool_calls(
                     f"emitting it as content (generated_chars={len(combined)})"
                 )
                 yield response.model_copy(
-                    update={"text": combined, "token": 0}
+                    update={"text": combined, "token": 0, "finish_reason": None}
                 )
-                if held_text and response.finish_reason is not None:
-                    yield response.model_copy(
-                        update={"text": held_text, "token": 0}
-                    )
-                    held_text = ""
+                yield from _finish_message(response)
                 continue
 
             if parsed is None:
@@ -1006,21 +1019,7 @@ def parse_tool_calls(
                     attrs={"tool_call_count": len(parsed)},
                 )
             accumulated_calls.extend(parsed)
-            if response.finish_reason is None:
-                # More of the message may follow, including a second call.
-                continue
-            if held_text:
-                # Trailing text with no further chunk coming to carry it.
-                yield response.model_copy(
-                    update={"text": held_text, "token": 0, "finish_reason": None}
-                )
-                held_text = ""
-            yield ToolCallResponse(
-                tool_calls=accumulated_calls,
-                usage=response.usage,
-                stats=response.stats,
-            )
-            accumulated_calls = []
+            yield from _finish_message(response)
             continue
 
         if response.finish_reason is not None:
