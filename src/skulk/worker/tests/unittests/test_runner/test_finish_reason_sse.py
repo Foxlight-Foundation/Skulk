@@ -654,6 +654,17 @@ class TestToolParsingRequiresOfferedTools:
         results = self._run([])
         assert not any(isinstance(item, ToolCallResponse) for item in results)
 
+    def test_no_tools_offered_still_strips_the_markers(self) -> None:
+        # Skipping the scan entirely left the dialect's markers in the answer,
+        # which a caller saw. The block is recognized either way; only whether
+        # it may become a call depends on the request.
+        results = self._run(None)
+        text = "".join(
+            item.text for item in results if isinstance(item, GenerationResponse)
+        )
+        assert "<tool_call>" not in text
+        assert "</tool_call>" not in text
+
     def test_offering_a_tool_still_yields_the_call(self) -> None:
         results = self._run(
             [{"type": "function", "function": {"name": "test_fn"}}]

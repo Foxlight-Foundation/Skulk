@@ -9,6 +9,12 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- A request offering no tools still has its markers stripped. Skipping the scan
+  entirely when none were offered, which is what keeps `tool_choice: "none"`
+  from producing a call, also meant nothing recognized a block the model wrote
+  anyway, so its markers went straight to the caller. The block is now always
+  recognized; whether it may become a call is what depends on the request.
+
 - A tool call handed back as content no longer carries the model's control
   tokens. When a call names no offered tool it is delivered as text so the
   caller can see what the model did, but the block was handed back verbatim, so

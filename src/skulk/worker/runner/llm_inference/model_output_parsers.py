@@ -143,16 +143,17 @@ def apply_all_parsers(
         mlx_generator = reject_unoffered_tool_calls(
             parse_deepseek_v32(mlx_generator), tools
         )
-    elif tool_parser and tools:
-        # The parser is wired from the tokenizer, which does not know whether
-        # this request offered tools. Skipping it when none were offered is
-        # what keeps a model that spontaneously writes something call-shaped
-        # from returning tool calls to a caller who asked for none, and is
-        # what makes tool_choice "none" hold, since that removes the tools.
+    elif tool_parser:
+        # Always scan, even with no tools offered. The parser is wired from the
+        # tokenizer and cannot see the request, so `emit_calls` carries that:
+        # with no tools nothing may be returned as a call, which is what makes
+        # tool_choice "none" hold, but the block is still recognized so its
+        # markers are stripped rather than delivered to the caller.
         mlx_generator = parse_tool_calls(
             mlx_generator,
             tool_parser,
             tools,
+            emit_calls=bool(tools),
             trace_task_id=trace_task_id,
             trace_rank=trace_rank,
         )
@@ -874,6 +875,7 @@ def parse_tool_calls(
     tool_parser: ToolParser,
     tools: list[dict[str, Any]] | None,
     *,
+    emit_calls: bool = True,
     trace_task_id: str | None = None,
     trace_rank: int = 0,
 ) -> Generator[ParserChunk]:
@@ -1048,7 +1050,10 @@ def parse_tool_calls(
             tool_call_text_parts = [combined]
             parsed = tool_parser.parse(combined.strip(), tools=tools)
             if parsed is not None:
-                kept = declared_tool_calls(parsed, tools)
+                # With no tools offered nothing may be called, but the block
+                # still has to be recognized: skipping the scan entirely left
+                # the markers in the answer, which is what a caller saw.
+                kept = declared_tool_calls(parsed, tools) if emit_calls else []
                 if not kept:
                     logger.info(
                         "Block named no offered tool, emitting it as content "
@@ -1144,7 +1149,9 @@ def parse_tool_calls(
                 if response.finish_reason == "length"
                 else tool_parser.parse(combined.strip(), tools=tools)
             )
-            if parsed is not None and not declared_tool_calls(parsed, tools):
+            if parsed is not None and (
+                not emit_calls or not declared_tool_calls(parsed, tools)
+            ):
                 logger.info(
                     "Block named no offered tool, emitting it as content "
                     f"(parsed_calls={len(parsed)})"
@@ -1158,7 +1165,7 @@ def parse_tool_calls(
                 )
                 yield from _finish_message(response)
                 break
-            if parsed:
+            if parsed and emit_calls:
                 parsed = declared_tool_calls(parsed, tools)
                 logger.info(
                     "Parsed tool-call block closed by end of generation "
