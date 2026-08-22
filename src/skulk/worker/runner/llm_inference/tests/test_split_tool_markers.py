@@ -427,3 +427,47 @@ class TestParallelCallsReachTheCaller:
         responses = self.tool_responses(chunks)
         assert len(responses) == 1
         assert len(responses[0].tool_calls) == 1
+
+
+class TestDroppedBlockOnTheTerminalChunk:
+    """A dropped block must not end the stream while more is coming.
+
+    The consumer stops at the first chunk carrying a finish reason, so a
+    dropped block emitted with one would hide everything after it, including a
+    real call in the same message.
+    """
+
+    def test_a_real_call_after_a_dropped_block_in_the_last_chunk(self) -> None:
+        chunks = feed(
+            [
+                "<tool_call><function=print></function></tool_call>"
+                "<tool_call><function=get_weather></function></tool_call>",
+            ],
+            generic_parser(),
+        )
+        assert calls_of(chunks) == ["get_weather"]
+
+    def test_the_dropped_block_does_not_carry_the_finish_reason(self) -> None:
+        chunks = feed(
+            [
+                "<tool_call><function=print></function></tool_call>"
+                "<tool_call><function=get_weather></function></tool_call>",
+            ],
+            generic_parser(),
+        )
+        index = next(
+            i for i, item in enumerate(chunks) if isinstance(item, ToolCallResponse)
+        )
+        assert all(
+            getattr(item, "finish_reason", None) is None
+            for item in chunks[:index]
+            if item is not None
+        )
+
+    def test_trailing_text_after_a_dropped_block_still_arrives(self) -> None:
+        chunks = feed(
+            ["<tool_call><function=print></function></tool_call> done."],
+            generic_parser(),
+        )
+        assert calls_of(chunks) == []
+        assert "done." in text_of(chunks)

@@ -732,6 +732,44 @@ def _partial_marker_suffix_length(text: str, markers: tuple[str, ...]) -> int:
     return 0
 
 
+def _scan_remaining_blocks(
+    text: str, tool_parser: ToolParser, tools: list[dict[str, Any]] | None
+) -> tuple[list[ToolCallItem], str]:
+    """Parse every remaining block in a complete text.
+
+    Used once generation has ended, where there is no further chunk to drive
+    the streaming scan and the rest of the message is already in hand. Returns
+    the calls found and the text that was not part of any block, so a message
+    that puts a call the caller cannot run before one they can still delivers
+    the second call and the surrounding prose.
+    """
+
+    calls: list[ToolCallItem] = []
+    leftover: list[str] = []
+    remaining = text
+    while remaining:
+        start = _block_start_index(remaining, tool_parser, at_message_start=False)
+        if start is None:
+            leftover.append(remaining)
+            break
+        end = remaining.find(tool_parser.end_parsing, start)
+        if end == -1:
+            leftover.append(remaining)
+            break
+        end_of_block = end + len(tool_parser.end_parsing)
+        block = remaining[start:end_of_block]
+        parsed = tool_parser.parse(block.strip(), tools=tools)
+        kept = declared_tool_calls(parsed, tools) if parsed is not None else []
+        if kept:
+            leftover.append(remaining[:start])
+            calls.extend(kept)
+        else:
+            # Not a call the caller can run, so it is text like any other.
+            leftover.append(remaining[:end_of_block])
+        remaining = remaining[end_of_block:]
+    return calls, "".join(leftover)
+
+
 def parse_tool_calls(
     responses: Generator[ParserChunk],
     tool_parser: ToolParser,
@@ -873,15 +911,46 @@ def parse_tool_calls(
                     tool_call_text_parts = []
                     # The remainder stays with the scan rather than being
                     # emitted here, so a further call in the trailing text is
-                    # still found.
+                    # still found. The finish reason is withheld while anything
+                    # remains, since the consumer stops at the first chunk
+                    # carrying one and would never see the rest.
+                    remainder_follows = bool(held_text) or bool(accumulated_calls)
                     yield response.model_copy(
-                        update={"text": combined, "token": 0}
+                        update={
+                            "text": combined,
+                            "token": 0,
+                            "finish_reason": None
+                            if remainder_follows
+                            else response.finish_reason,
+                        }
                     )
-                    if held_text and response.finish_reason is not None:
-                        yield response.model_copy(
-                            update={"text": held_text, "token": 0}
+                    if response.finish_reason is None:
+                        continue
+                    if held_text:
+                        # No further chunk will drive the scan, so the rest of
+                        # the message is parsed here rather than emitted whole.
+                        more_calls, leftover = _scan_remaining_blocks(
+                            held_text, tool_parser, tools
                         )
+                        accumulated_calls.extend(more_calls)
                         held_text = ""
+                        if leftover:
+                            yield response.model_copy(
+                                update={
+                                    "text": leftover,
+                                    "token": 0,
+                                    "finish_reason": None
+                                    if accumulated_calls
+                                    else response.finish_reason,
+                                }
+                            )
+                    if accumulated_calls:
+                        yield ToolCallResponse(
+                            tool_calls=accumulated_calls,
+                            usage=response.usage,
+                            stats=response.stats,
+                        )
+                        accumulated_calls = []
                     continue
                 parsed = kept
             logger.info(

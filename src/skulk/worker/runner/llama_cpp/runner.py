@@ -1307,9 +1307,14 @@ class Runner(ServedConcurrentDispatch):
             # The handler consumed the raw markup while parsing, so a call that
             # named no offered tool leaves nothing to say. Put the call back as
             # text rather than answering with a successful blank message.
-            visible_text = dropped_call_text(message)
-            if visible_text:
-                emissions = emissions + [(visible_text, False)]
+            restored = dropped_call_text(message)
+            if restored:
+                visible_text = restored
+                emissions = emissions + [(restored, False)]
+                # The plain-model branch below emits `content`, which the
+                # handler emptied when it parsed the call, so it needs the
+                # restored text too or the answer is still blank.
+                content = restored
         if not tool_calls and task.task_params.tools:
             # llama.cpp only fills structured tool_calls for formats its bundled
             # chat handlers recognize. A reasoning model emits the call as text,
