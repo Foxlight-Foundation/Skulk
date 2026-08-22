@@ -188,3 +188,59 @@ class TestOfferedToolsOnly:
         assert calls is not None
         assert [call.name for call in calls] == ["print"]
 
+
+
+class TestUnmarkedCallFollowedByText:
+    """A model may keep writing after an unmarked call.
+
+    Observed live: a Llama model asked to call a tool and then say a word wrote
+    `{"name": ...}Done`. Requiring the object to be the entire message dropped
+    a perfectly good call and returned it as content.
+    """
+
+    WEATHER = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"location": {"type": "string"}},
+                },
+            },
+        }
+    ]
+
+    def test_a_leading_call_object_with_trailing_text_is_a_call(self) -> None:
+        calls = parse_tool_calls_from_text(
+            '{"name": "get_weather", "parameters": {"location": "Denver"}}Done',
+            self.WEATHER,
+        )
+        assert calls is not None
+        assert [call.name for call in calls] == ["get_weather"]
+
+    def test_prose_before_the_object_is_still_not_a_call(self) -> None:
+        assert (
+            parse_tool_calls_from_text(
+                'Here is some JSON: {"name": "get_weather", "parameters": {}}',
+                self.WEATHER,
+            )
+            is None
+        )
+
+    def test_a_json_answer_is_still_not_a_call(self) -> None:
+        assert (
+            parse_tool_calls_from_text(
+                '{"city": "Denver", "population": 715522}', self.WEATHER
+            )
+            is None
+        )
+
+    def test_an_object_naming_no_offered_tool_is_still_not_a_call(self) -> None:
+        assert (
+            parse_tool_calls_from_text(
+                '{"name": "report", "parameters": {"n": 1}} and more text',
+                self.WEATHER,
+            )
+            is None
+        )

@@ -191,11 +191,19 @@ def _mistral_calls(text: str) -> list[ToolCallItem]:
 
 
 def _bare_json_call(text: str) -> list[ToolCallItem]:
-    """Parse an unmarked call that is the entire message.
+    """Parse an unmarked call that opens the message.
 
     Llama omits ``<|python_tag|>`` in some templates and simply emits the call
-    object. Accepted only when the whole message is that one object, so a model
-    answering a question *with* JSON is never mistaken for calling a tool.
+    object. The message must *begin* with that object, so prose containing JSON
+    is never read as a call, but the model may keep writing after it: a call
+    followed by a closing remark is still a call, and requiring the object to
+    be the entire message lost it.
+
+    Two things keep this from mistaking a JSON answer for a call. The object
+    must carry a ``name`` alongside an ``arguments`` or ``parameters`` value,
+    which an answer rarely has; and the caller's tools are checked afterwards,
+    so an object naming nothing the caller offered is dropped and delivered as
+    content.
     """
 
     stripped = text.strip()
@@ -203,10 +211,8 @@ def _bare_json_call(text: str) -> list[ToolCallItem]:
         return []
     decoder = json.JSONDecoder()
     try:
-        obj, end = decoder.raw_decode(stripped)
+        obj, _ = decoder.raw_decode(stripped)
     except ValueError:
-        return []
-    if stripped[end:].strip():
         return []
     if not isinstance(obj, dict):
         return []
