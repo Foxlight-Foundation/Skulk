@@ -1,17 +1,35 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 import importlib.util
+import os
+import re
 import shutil
+import subprocess
+import tomllib
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_submodules, copy_metadata
 
-PROJECT_ROOT = Path.cwd()
+# PyInstaller exposes SPECPATH while evaluating a spec file. Resolving from the
+# spec instead of the caller's working directory keeps release builds stable in
+# CI and when invoked from a desktop-packaging repository.
+PROJECT_ROOT = Path(SPECPATH).resolve().parents[1]
 SOURCE_ROOT = PROJECT_ROOT / "src"
 ENTRYPOINT = SOURCE_ROOT / "skulk" / "__main__.py"
-DASHBOARD_DIR = PROJECT_ROOT / "dashboard" / "build"
+DASHBOARD_DIR = PROJECT_ROOT / "dashboard-react" / "dist"
 RESOURCES_DIR = PROJECT_ROOT / "resources"
+APP_ICON = PROJECT_ROOT / "packaging" / "macos" / "Skulk.icns"
 SKULK_SHARED_MODELS_DIR = SOURCE_ROOT / "skulk" / "shared" / "models"
+
+with (PROJECT_ROOT / "pyproject.toml").open("rb") as pyproject_file:
+    PROJECT_VERSION = tomllib.load(pyproject_file)["project"]["version"]
+
+BUNDLE_IDENTIFIER = os.environ.get(
+    "SKULK_MACOS_BUNDLE_IDENTIFIER",
+    "foundation.foxlight.skulk.desktop.probe",
+)
+BUNDLE_VERSION = os.environ.get("SKULK_MACOS_BUNDLE_VERSION", "1")
+CODESIGN_IDENTITY = os.environ.get("SKULK_CODESIGN_IDENTITY") or None
 
 if not ENTRYPOINT.is_file():
     raise SystemExit(f"Unable to locate Skulk entrypoint: {ENTRYPOINT}")
@@ -21,6 +39,9 @@ if not DASHBOARD_DIR.is_dir():
 
 if not RESOURCES_DIR.is_dir():
     raise SystemExit(f"Resource assets are missing: {RESOURCES_DIR}")
+
+if not APP_ICON.is_file():
+    raise SystemExit(f"macOS app icon is missing: {APP_ICON}")
 
 if not SKULK_SHARED_MODELS_DIR.is_dir():
     raise SystemExit(f"Shared model assets are missing: {SKULK_SHARED_MODELS_DIR}")
@@ -67,11 +88,45 @@ DATAS: list[tuple[str, str]] = [
     (str(SKULK_SHARED_MODELS_DIR), "skulk/shared/models"),
 ]
 
+# Skulk and its inference engines inspect installed distribution versions at
+# runtime. PyInstaller does not retain package metadata unless the spec asks
+# for it explicitly.
+for distribution_name in (
+    "skulk",
+    "mlx",
+    "mlx-lm",
+    "mlx-vlm",
+    "mlx-audio",
+    "transformers",
+):
+    DATAS.extend(copy_metadata(distribution_name))
+
 MACTOP_PATH = shutil.which("mactop")
 if MACTOP_PATH is None:
     raise SystemExit(
         "mactop binary not found in PATH. "
         "Install it via: brew install mactop"
+    )
+
+# mactop 2.1.3–2.1.4 initialized its optional FPS capture path even in
+# headless mode, causing macOS to attribute an unnecessary Screen Recording
+# request to Skulk. Upstream fixed the regression in 2.1.5.
+MACTOP_MINIMUM_VERSION = (2, 1, 5)
+mactop_version_output = subprocess.run(
+    [MACTOP_PATH, "--version"],
+    check=True,
+    capture_output=True,
+    text=True,
+).stdout.strip()
+mactop_version_match = re.search(r"\bv?(\d+)\.(\d+)\.(\d+)\b", mactop_version_output)
+if mactop_version_match is None:
+    raise SystemExit(f"Unable to parse mactop version: {mactop_version_output!r}")
+mactop_version = tuple(int(part) for part in mactop_version_match.groups())
+if mactop_version < MACTOP_MINIMUM_VERSION:
+    minimum_version = ".".join(str(part) for part in MACTOP_MINIMUM_VERSION)
+    raise SystemExit(
+        f"mactop {minimum_version} or newer is required; found "
+        f"{mactop_version_output!r}. Run: brew upgrade mactop"
     )
 
 BINARIES: list[tuple[str, str]] = [
@@ -84,7 +139,7 @@ a = Analysis(
     binaries=BINARIES,
     datas=DATAS,
     hiddenimports=HIDDEN_IMPORTS,
-    hookspath=[],
+    hookspath=[str(PROJECT_ROOT / "packaging" / "pyinstaller" / "hooks")],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[],
@@ -98,7 +153,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="skulk",
+    name="Skulk",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -106,8 +161,8 @@ exe = EXE(
     console=True,
     disable_windowed_traceback=False,
     argv_emulation=False,
-    target_arch=None,
-    codesign_identity=None,
+    target_arch="arm64",
+    codesign_identity=CODESIGN_IDENTITY,
     entitlements_file=None,
 )
 coll = COLLECT(
@@ -118,6 +173,25 @@ coll = COLLECT(
     strip=False,
     upx=False,
     upx_exclude=[],
-    name="skulk",
+    name="Skulk",
 )
 
+app = BUNDLE(
+    coll,
+    name="Skulk.app",
+    icon=str(APP_ICON),
+    bundle_identifier=BUNDLE_IDENTIFIER,
+    version=PROJECT_VERSION,
+    info_plist={
+        "CFBundleDisplayName": "Skulk",
+        "CFBundleName": "Skulk",
+        "CFBundleShortVersionString": PROJECT_VERSION,
+        "CFBundleVersion": BUNDLE_VERSION,
+        "LSMinimumSystemVersion": "15.0",
+        "NSHighResolutionCapable": True,
+        "NSLocalNetworkUsageDescription": (
+            "Skulk uses the local network to discover and connect to nearby "
+            "Skulk nodes, including Thunderbolt-connected peers."
+        ),
+    },
+)

@@ -35,3 +35,41 @@ def test_find_dashboard_optional_returns_found_path(
     monkeypatch.setattr(dashboard_path, "_find_dashboard_in_bundle", lambda: None)
     assert dashboard_path.find_dashboard_optional() == tmp_path
     assert dashboard_path.find_dashboard() == tmp_path
+
+
+def test_find_dashboard_optional_prefers_frozen_bundle(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    bundled = tmp_path / "bundled"
+    repository = tmp_path / "repository"
+    monkeypatch.setattr(
+        dashboard_path,
+        "_find_dashboard_in_bundle",
+        lambda: bundled,
+    )
+    monkeypatch.setattr(
+        dashboard_path,
+        "_find_react_dashboard_in_repo",
+        lambda: repository,
+    )
+
+    assert dashboard_path.find_dashboard_optional() == bundled
+
+
+def test_find_resources_prefers_frozen_bundle(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    bundled = tmp_path / "bundled"
+    repository = tmp_path / "repository"
+    monkeypatch.setattr(
+        dashboard_path,
+        "_find_resources_in_bundle",
+        lambda: bundled,
+    )
+    monkeypatch.setattr(
+        dashboard_path,
+        "_find_resources_in_repo",
+        lambda: repository,
+    )
+
+    assert dashboard_path.find_resources() == bundled
