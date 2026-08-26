@@ -20,6 +20,9 @@ reinstalling dashboard dependencies when its existing output is current:
 ./packaging/macos/build-frozen-app.sh --skip-dashboard
 ```
 
+The bundle uses `packaging/macos/Skulk.icns`, derived from the canonical
+1024-pixel Skulk application artwork.
+
 The default bundle identifier is
 `foundation.foxlight.skulk.desktop.probe`. Release automation may provide
 `SKULK_MACOS_BUNDLE_IDENTIFIER`, `SKULK_MACOS_BUNDLE_VERSION`, and

@@ -16,6 +16,7 @@ SOURCE_ROOT = PROJECT_ROOT / "src"
 ENTRYPOINT = SOURCE_ROOT / "skulk" / "__main__.py"
 DASHBOARD_DIR = PROJECT_ROOT / "dashboard-react" / "dist"
 RESOURCES_DIR = PROJECT_ROOT / "resources"
+APP_ICON = PROJECT_ROOT / "packaging" / "macos" / "Skulk.icns"
 SKULK_SHARED_MODELS_DIR = SOURCE_ROOT / "skulk" / "shared" / "models"
 
 with (PROJECT_ROOT / "pyproject.toml").open("rb") as pyproject_file:
@@ -36,6 +37,9 @@ if not DASHBOARD_DIR.is_dir():
 
 if not RESOURCES_DIR.is_dir():
     raise SystemExit(f"Resource assets are missing: {RESOURCES_DIR}")
+
+if not APP_ICON.is_file():
+    raise SystemExit(f"macOS app icon is missing: {APP_ICON}")
 
 if not SKULK_SHARED_MODELS_DIR.is_dir():
     raise SystemExit(f"Shared model assets are missing: {SKULK_SHARED_MODELS_DIR}")
@@ -152,6 +156,7 @@ coll = COLLECT(
 app = BUNDLE(
     coll,
     name="Skulk.app",
+    icon=str(APP_ICON),
     bundle_identifier=BUNDLE_IDENTIFIER,
     version=PROJECT_VERSION,
     info_plist={
