@@ -53,6 +53,8 @@ Skulk is built with a mix of Rust, Python, TypeScript (React for the dashboard),
 - `resources/speech_model_cards/` — Speech model metadata TOML files
 - `resources/speech_reference_voices/` — Checksummed bundled TTS conditioning audio and exact transcripts
 - `deployment/logging/` — VictoriaLogs + Grafana stack and Vector config
+- `packaging/macos/` — Apple Silicon frozen-app probe build and verification
+- `packaging/pyinstaller/` — PyInstaller specification and package hooks
 - `docs/` — Technical documentation
 - `docs/model-runtime-notes/` — Internal per-model clustered runtime notes
 
@@ -93,6 +95,23 @@ This starts a Vite dev server on port 3000 with hot reload. The dev server proxi
   or ordinary events.
 - `src/skulk/shared/` — Shared types, constants, topology
 - `website/docs/` — Docusaurus documentation source, including API guide and model-capability docs
+
+### macOS Frozen-App Probe
+
+The disposable macOS application probe validates Skulk's bundle identity,
+assets, native dependencies, and packaged runtime without changing a cluster.
+It requires Apple Silicon macOS, Xcode command-line tools, the normal `uv` and
+Node/npm development prerequisites, and `mactop` 2.1.5 or newer.
+
+```bash
+./packaging/macos/build-frozen-app.sh
+```
+
+Use `--skip-dashboard` only when `dashboard-react/dist/` is already current.
+The output is `dist/macos/Skulk.app`. Build-only overrides are
+`SKULK_MACOS_BUNDLE_IDENTIFIER`, `SKULK_MACOS_BUNDLE_VERSION`, and
+`SKULK_CODESIGN_IDENTITY`; see `packaging/macos/README.md` for their defaults
+and the isolated launch procedure.
 
 ## Development Guidelines
 
