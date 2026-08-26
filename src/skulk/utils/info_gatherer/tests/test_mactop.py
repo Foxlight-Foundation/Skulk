@@ -127,27 +127,6 @@ def test_find_mactop_path_prefers_path_lookup():
     )
 
 
-def test_find_mactop_path_prefers_frozen_bundle():
-    checked_paths: list[str] = []
-
-    def fake_which(_name: str) -> str | None:
-        raise AssertionError("PATH lookup must not run when bundled mactop exists")
-
-    def fake_is_executable(path: str) -> bool:
-        checked_paths.append(path)
-        return path == "/bundle/Frameworks/mactop"
-
-    assert (
-        find_mactop_path(
-            which=fake_which,
-            is_executable=fake_is_executable,
-            bundle_root="/bundle/Frameworks",
-        )
-        == "/bundle/Frameworks/mactop"
-    )
-    assert checked_paths == ["/bundle/Frameworks/mactop"]
-
-
 def test_find_mactop_path_falls_back_to_homebrew_prefix():
     checked_paths: list[str] = []
 

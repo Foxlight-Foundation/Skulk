@@ -1010,22 +1010,6 @@ resolution, like the source-built GPU llama.cpp wheel the wrapper already
 preserves); setting `SKULK_PRESERVE_VENV_EXTRAS=1` in the node's environment
 switches that sync to `uv sync --inexact` so such plugins survive restarts.
 
-### The macOS frozen-runtime probe
-
-`packaging/macos/build-frozen-app.sh` produces a disposable Apple Silicon
-`Skulk.app` with PyInstaller. The probe bundles the built dashboard, model
-resources, MLX libraries, Python distribution metadata, and `mactop` 2.1.5 or
-newer. Frozen runtime lookup prefers those bundle-owned assets and tools over a
-source checkout or host `PATH`, so the app exercises the artifact it would
-actually ship. The build validates the bundle property list and its complete
-code-signing graph but does not publish, notarize, submit, or deploy it.
-
-Three build-only environment variables control the artifact identity:
-`SKULK_MACOS_BUNDLE_IDENTIFIER` overrides the disposable probe identifier,
-`SKULK_MACOS_BUNDLE_VERSION` sets `CFBundleVersion`, and
-`SKULK_CODESIGN_IDENTITY` selects a signing identity (unset uses ad-hoc
-signing). They affect packaging only and are not node-runtime configuration.
-
 ## The inference engine
 
 Inference happens entirely inside the runner subprocess. Skulk wraps MLX (and the upstream mlx-lm model implementations) in a layer that handles distributed coordination, family-specific behavior, and operator-controlled knobs.

@@ -82,26 +82,16 @@ def find_mactop_path(
     *,
     which: Callable[[str], str | None] = shutil.which,
     is_executable: Callable[[str], bool] = _is_executable_file,
-    bundle_root: str | None = None,
 ) -> str | None:
-    """Return the bundled or installed mactop executable path.
+    """Return the mactop executable path, including standard Homebrew prefixes.
 
     Args:
         which: Executable lookup function, injectable for tests.
         is_executable: Predicate used for absolute fallback candidates.
-        bundle_root: PyInstaller extraction root override, injectable for tests.
 
     Returns:
         The path to an executable ``mactop`` binary, or ``None`` when unavailable.
     """
-    resolved_bundle_root = (
-        bundle_root if bundle_root is not None else getattr(sys, "_MEIPASS", None)
-    )
-    if isinstance(resolved_bundle_root, str):
-        bundled_candidate = os.path.join(resolved_bundle_root, "mactop")
-        if is_executable(bundled_candidate):
-            return bundled_candidate
-
     found = which("mactop")
     if found is not None:
         return found
