@@ -2,7 +2,9 @@
 
 import importlib.util
 import os
+import re
 import shutil
+import subprocess
 import tomllib
 from pathlib import Path
 
@@ -104,6 +106,27 @@ if MACTOP_PATH is None:
     raise SystemExit(
         "mactop binary not found in PATH. "
         "Install it via: brew install mactop"
+    )
+
+# mactop 2.1.3–2.1.4 initialized its optional FPS capture path even in
+# headless mode, causing macOS to attribute an unnecessary Screen Recording
+# request to Skulk. Upstream fixed the regression in 2.1.5.
+MACTOP_MINIMUM_VERSION = (2, 1, 5)
+mactop_version_output = subprocess.run(
+    [MACTOP_PATH, "--version"],
+    check=True,
+    capture_output=True,
+    text=True,
+).stdout.strip()
+mactop_version_match = re.search(r"\bv?(\d+)\.(\d+)\.(\d+)\b", mactop_version_output)
+if mactop_version_match is None:
+    raise SystemExit(f"Unable to parse mactop version: {mactop_version_output!r}")
+mactop_version = tuple(int(part) for part in mactop_version_match.groups())
+if mactop_version < MACTOP_MINIMUM_VERSION:
+    minimum_version = ".".join(str(part) for part in MACTOP_MINIMUM_VERSION)
+    raise SystemExit(
+        f"mactop {minimum_version} or newer is required; found "
+        f"{mactop_version_output!r}. Run: brew upgrade mactop"
     )
 
 BINARIES: list[tuple[str, str]] = [

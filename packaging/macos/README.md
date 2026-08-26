@@ -7,7 +7,8 @@ identity. It is a packaging probe, not the eventual desktop supervisor.
 ## Build
 
 Requirements are Apple Silicon macOS, `uv`, Node/npm, Xcode command-line tools,
-and `mactop` on `PATH`.
+and `mactop` 2.1.5 or newer on `PATH`. Earlier `mactop` releases can trigger an
+unnecessary Screen Recording request while running headlessly.
 
 ```bash
 ./packaging/macos/build-frozen-app.sh
