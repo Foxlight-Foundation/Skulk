@@ -22,9 +22,6 @@ uv run skulk -v   # or -vv for more verbose
 # Run with centralized logging (requires Vector + VictoriaLogs)
 uv run skulk 2>/dev/tty | vector --config deployment/logging/vector.yaml
 
-# Build the disposable Apple Silicon frozen-runtime probe (.app)
-./packaging/macos/build-frozen-app.sh
-
 # Run tests (excludes slow tests by default)
 uv run pytest
 

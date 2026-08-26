@@ -4,19 +4,7 @@ from typing import cast
 
 
 def find_resources() -> Path:
-    """Locate Skulk's immutable resources for the active runtime.
-
-    Frozen applications prefer their sealed bundle resources even when a
-    developer launches the app from inside a source checkout. Source runtimes
-    fall back to the repository tree because ``sys._MEIPASS`` is absent.
-
-    Returns:
-        Directory containing Skulk's bundled model cards and registry root.
-
-    Raises:
-        FileNotFoundError: If neither bundled nor repository resources exist.
-    """
-    resources = _find_resources_in_bundle() or _find_resources_in_repo()
+    resources = _find_resources_in_repo() or _find_resources_in_bundle()
     if resources is None:
         raise FileNotFoundError(
             "Unable to locate resources. Did you clone the repo properly?"
@@ -51,7 +39,7 @@ def find_dashboard_optional() -> Path | None:
     must not be fatal. Callers that can run without the UI use this and skip
     serving it; callers that require the UI use :func:`find_dashboard`.
     """
-    return _find_dashboard_in_bundle() or _find_react_dashboard_in_repo()
+    return _find_react_dashboard_in_repo() or _find_dashboard_in_bundle()
 
 
 def find_dashboard() -> Path:

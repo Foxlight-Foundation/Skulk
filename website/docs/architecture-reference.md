@@ -829,9 +829,6 @@ Only `SKULK_*` names are read. The legacy `EXO_*` deprecation runway was removed
 
 | Var | What |
 |---|---|
-| `SKULK_MACOS_BUNDLE_IDENTIFIER` | Build-only override for the disposable PyInstaller probe's bundle identifier. Defaults to `foundation.foxlight.skulk.desktop.probe`; read by `packaging/pyinstaller/skulk.spec`, not by a running node. |
-| `SKULK_MACOS_BUNDLE_VERSION` | Build-only `CFBundleVersion` override for the macOS frozen-runtime probe. Defaults to `1`; the user-facing short version comes from `pyproject.toml`. |
-| `SKULK_CODESIGN_IDENTITY` | Build-only signing identity for the macOS frozen-runtime probe. Unset selects ad-hoc signing; the build verifies the completed bundle with `codesign --verify --deep --strict`. |
 | `SKULK_HOME` / `SKULK_HOME` | Override the base data directory used to derive `SKULK_DATA_HOME` (and from there `SKULK_MODELS_DIR`, `SKULK_CUSTOM_MODEL_CARDS_DIR`, `SKULK_EVENT_LOG_DIR`). Default base: XDG-derived `~/.local/share/skulk` on Linux; `~/.skulk` on non-Linux. See `src/skulk/shared/constants.py:34-149`. |
 | `SKULK_FAST_SYNCH` / `SKULK_FAST_SYNCH` | Force `MLX_METAL_FAST_SYNCH` on (`"on"`) or off (`"off"`); overrides per-model card. Resolution order: operator override → card `metal_fast_synch` pin → OFF for speculative-decoding cards (`mtp_heads` / `mtp_sidecar_repo` / `assistant_model_repo`; FAST_SYNCH collapses the MTP loop ~46x, measured 2026-06-06) → cluster default (OFF since #261) |
 | `SKULK_PIPELINE_EVAL_TIMEOUT_SECONDS` | Per-eval timeout in pipeline collectives (default 60s) |
