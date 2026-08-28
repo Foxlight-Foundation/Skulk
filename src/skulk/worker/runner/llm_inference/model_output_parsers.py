@@ -833,7 +833,11 @@ def _partial_marker_suffix_length(text: str, markers: tuple[str, ...]) -> int:
 
 
 def _scan_remaining_blocks(
-    text: str, tool_parser: ToolParser, tools: list[dict[str, Any]] | None
+    text: str,
+    tool_parser: ToolParser,
+    tools: list[dict[str, Any]] | None,
+    *,
+    emit_calls: bool,
 ) -> tuple[list[ToolCallItem], str]:
     """Parse every remaining block in a complete text.
 
@@ -842,6 +846,11 @@ def _scan_remaining_blocks(
     the calls found and the text that was not part of any block, so a message
     that puts a call the caller cannot run before one they can still delivers
     the second call and the surrounding prose.
+
+    A block met here follows the same rules as one met by the streaming scan:
+    ``emit_calls`` of ``False`` keeps every call out of the result no matter
+    how the block parses, and a block delivered as content has its dialect
+    markers stripped rather than being handed back verbatim.
     """
 
     calls: list[ToolCallItem] = []
@@ -859,13 +868,18 @@ def _scan_remaining_blocks(
         end_of_block = end + len(tool_parser.end_parsing)
         block = remaining[start:end_of_block]
         parsed = tool_parser.parse(block.strip(), tools=tools)
-        kept = declared_tool_calls(parsed, tools) if parsed is not None else []
+        kept = (
+            declared_tool_calls(parsed, tools)
+            if parsed is not None and emit_calls
+            else []
+        )
+        leftover.append(remaining[:start])
         if kept:
-            leftover.append(remaining[:start])
             calls.extend(kept)
         else:
-            # Not a call the caller can run, so it is text like any other.
-            leftover.append(remaining[:end_of_block])
+            # Not a call the caller may run, so it is content like any other
+            # rejected block, markers stripped the same way.
+            leftover.append(_block_as_content(block, tool_parser))
         remaining = remaining[end_of_block:]
     return calls, "".join(leftover)
 
@@ -925,7 +939,7 @@ def parse_tool_calls(
         terminal_sent = False
         if held_text:
             more_calls, leftover = _scan_remaining_blocks(
-                held_text, tool_parser, tools
+                held_text, tool_parser, tools, emit_calls=emit_calls
             )
             accumulated_calls.extend(more_calls)
             held_text = ""

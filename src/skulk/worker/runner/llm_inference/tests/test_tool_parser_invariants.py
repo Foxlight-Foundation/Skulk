@@ -13,10 +13,14 @@ The invariants:
    consumer stops at the first chunk carrying a finish reason, so anything
    after a terminal chunk is invisible to the caller.
 2. The calls delivered do not depend on where the message was split.
-3. The markup of an accepted call never reaches the caller as content. A
-   block naming a tool the caller did not offer is a deliberate exception: it
-   is delivered verbatim so the caller can see what the model did, which is
-   why those messages opt out of this one.
+3. Dialect markup never reaches the caller as content. A block naming a tool
+   the caller did not offer is still delivered as content so the caller can
+   see what the model did, but with its markers stripped, the same as any
+   other block handed back. Only the error path keeps the raw block, as
+   evidence of what was malformed.
+4. When the request permits no calls (``emit_calls`` of ``False``, the
+   ``tool_choice: "none"`` path), no chunk is ever a call, however many
+   complete blocks the message contains and wherever it is split.
 """
 
 from __future__ import annotations
@@ -56,28 +60,38 @@ CALL = "<tool_call><function=get_weather><parameter=location>Denver</parameter><
 
 DROPPED = "<tool_call><function=print></function></tool_call>"
 
-# message, expected call names, whether content may carry markup
-MARKED_MESSAGES: list[tuple[str, list[str], bool]] = [
-    ("The weather is fine.", [], False),
-    (CALL, ["get_weather"], False),
-    (f"I'll check. {CALL}", ["get_weather"], False),
-    (f"{CALL} Done.", ["get_weather"], False),
-    (f"{CALL}{CALL}", ["get_weather", "get_weather"], False),
-    (f"{CALL} and then {CALL}", ["get_weather", "get_weather"], False),
-    (DROPPED, [], True),
-    (f"{DROPPED}{CALL}", ["get_weather"], True),
-    ("Braces {like this} are fine.", [], False),
+# message, expected call names
+MARKED_MESSAGES: list[tuple[str, list[str]]] = [
+    ("The weather is fine.", []),
+    (CALL, ["get_weather"]),
+    (f"I'll check. {CALL}", ["get_weather"]),
+    (f"{CALL} Done.", ["get_weather"]),
+    (f"{CALL}{CALL}", ["get_weather", "get_weather"]),
+    (f"{CALL} and then {CALL}", ["get_weather", "get_weather"]),
+    (DROPPED, []),
+    (f"{DROPPED}{CALL}", ["get_weather"]),
+    # The rejected block arriving AFTER the accepted one lands in the
+    # terminal-suffix scan rather than the streaming scan, which once handed
+    # it back verbatim, markers and all.
+    (f"{CALL}{DROPPED}", ["get_weather"]),
+    ("Braces {like this} are fine.", []),
 ]
 
 UNMARKED_CALL = '{"name": "get_weather", "parameters": {"location": "Denver"}}'
-UNMARKED_MESSAGES: list[tuple[str, list[str], bool]] = [
-    ("Just an answer.", [], False),
-    (UNMARKED_CALL, ["get_weather"], False),
-    (f"{UNMARKED_CALL} Done.", ["get_weather"], False),
-    ('{"city": "Denver", "population": 715522}', [], False),
-    ("The set is {1, 2, 3}.", [], False),
-    (f"Let me look. <|python_tag|>{UNMARKED_CALL}", ["get_weather"], False),
+UNMARKED_MESSAGES: list[tuple[str, list[str]]] = [
+    ("Just an answer.", []),
+    (UNMARKED_CALL, ["get_weather"]),
+    (f"{UNMARKED_CALL} Done.", ["get_weather"]),
+    ('{"city": "Denver", "population": 715522}', []),
+    ("The set is {1, 2, 3}.", []),
+    (f"Let me look. <|python_tag|>{UNMARKED_CALL}", ["get_weather"]),
+    # A model reaching for its own built-in is dropped and delivered as
+    # content, with the dialect's markers stripped.
+    ('{"name": "print", "parameters": {}}', []),
 ]
+
+MARKED_MARKERS = ("<tool_call>", "</tool_call>", "<|python_tag|>")
+UNMARKED_MARKERS = ("<|python_tag|>", "<|eom_id|>")
 
 
 def generic_parser() -> ToolParser:
@@ -101,13 +115,21 @@ def chunk(text: str, finish_reason: FinishReason | None = None) -> GenerationRes
     )
 
 
-def run(pieces: list[str], parser: ToolParser) -> list[ParserChunk]:
+def run(
+    pieces: list[str],
+    parser: ToolParser,
+    *,
+    tools: list[dict[str, Any]] | None = WEATHER,
+    emit_calls: bool = True,
+) -> list[ParserChunk]:
     def source() -> Generator[ParserChunk]:
         for piece in pieces[:-1]:
             yield chunk(piece)
         yield chunk(pieces[-1], finish_reason="stop")
 
-    return list(parse_tool_calls(source(), parser, tools=WEATHER))
+    return list(
+        parse_tool_calls(source(), parser, tools=tools, emit_calls=emit_calls)
+    )
 
 
 def splits(message: str) -> list[list[str]]:
@@ -147,10 +169,16 @@ def terminals(chunks: list[ParserChunk]) -> list[ParserChunk]:
 
 
 def check_message(
-    message: str, expected: list[str], parser: ToolParser, markup_ok: bool
+    message: str,
+    expected: list[str],
+    parser: ToolParser,
+    markers: tuple[str, ...],
+    *,
+    tools: list[dict[str, Any]] | None = WEATHER,
+    emit_calls: bool = True,
 ) -> None:
     for pieces in splits(message):
-        chunks = run(pieces, parser)
+        chunks = run(pieces, parser, tools=tools, emit_calls=emit_calls)
         where = f"{message!r} split as {pieces!r}"
 
         found = terminals(chunks)
@@ -159,21 +187,44 @@ def check_message(
 
         assert call_names(chunks) == expected, f"calls differ for {where}"
 
-        if expected and not markup_ok:
-            answer = content(chunks)
-            assert "<tool_call>" not in answer, f"markup leaked for {where}"
-            assert "<|python_tag|>" not in answer, f"markup leaked for {where}"
+        answer = content(chunks)
+        for marker in markers:
+            assert marker not in answer, f"{marker!r} leaked for {where}"
 
 
 class TestMarkedDialectInvariants:
     def test_every_split_of_every_message(self) -> None:
         parser = generic_parser()
-        for message, expected, markup_ok in MARKED_MESSAGES:
-            check_message(message, expected, parser, markup_ok)
+        for message, expected in MARKED_MESSAGES:
+            check_message(message, expected, parser, MARKED_MARKERS)
 
 
 class TestUnmarkedDialectInvariants:
     def test_every_split_of_every_message(self) -> None:
         parser = make_text_dialect_parser("{", "<|eom_id|>")
-        for message, expected, markup_ok in UNMARKED_MESSAGES:
-            check_message(message, expected, parser, markup_ok)
+        for message, expected in UNMARKED_MESSAGES:
+            check_message(message, expected, parser, UNMARKED_MARKERS)
+
+
+class TestNoCallsAllowedInvariants:
+    """``tool_choice: "none"`` reaches the parser as no tools and no emission.
+
+    However many complete, well-formed blocks the message carries, none may
+    come back as a call, and every one of them is delivered as content with
+    its markers stripped. The two-blocks-in-one-terminal-chunk shape matters:
+    the first block is met by the streaming scan but the second only by the
+    terminal-suffix scan, and the two paths must agree.
+    """
+
+    def test_every_split_of_every_message(self) -> None:
+        parser = generic_parser()
+        for message in (
+            CALL,
+            f"I'll check. {CALL}",
+            f"{CALL}{CALL}",
+            f"{CALL} and then {CALL}",
+            DROPPED,
+        ):
+            check_message(
+                message, [], parser, MARKED_MARKERS, tools=None, emit_calls=False
+            )
