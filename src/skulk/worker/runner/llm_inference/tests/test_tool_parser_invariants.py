@@ -21,6 +21,10 @@ The invariants:
 4. When the request permits no calls (``emit_calls`` of ``False``, the
    ``tool_choice: "none"`` path), no chunk is ever a call, however many
    complete blocks the message contains and wherever it is split.
+5. A closed marked block that does not parse errors the message wherever the
+   split put it, with the raw block as the terminal chunk's evidence and no
+   call delivered, so a caller never executes half of a message that also
+   carried garbage.
 """
 
 from __future__ import annotations
@@ -59,6 +63,8 @@ WEATHER: list[dict[str, Any]] = [
 CALL = "<tool_call><function=get_weather><parameter=location>Denver</parameter></function></tool_call>"
 
 DROPPED = "<tool_call><function=print></function></tool_call>"
+
+MALFORMED = "<tool_call>this is not a call</tool_call>"
 
 # message, expected call names
 MARKED_MESSAGES: list[tuple[str, list[str]]] = [
@@ -204,6 +210,43 @@ class TestUnmarkedDialectInvariants:
         parser = make_text_dialect_parser("{", "<|eom_id|>")
         for message, expected in UNMARKED_MESSAGES:
             check_message(message, expected, parser, UNMARKED_MARKERS)
+
+
+class TestMalformedBlockInvariants:
+    """A closed marked block that does not parse errors the whole message.
+
+    The streaming close path and the terminal-suffix scan must agree, or
+    chunk boundaries would decide whether an earlier valid call is returned
+    and executed or the message errors. The terminal chunk carries
+    ``finish_reason: "error"`` with the raw block as evidence, and no call
+    from anywhere in the message is delivered.
+    """
+
+    def test_every_split_of_every_message(self) -> None:
+        parser = generic_parser()
+        for message in (
+            MALFORMED,
+            f"I'll check. {MALFORMED}",
+            f"{CALL}{MALFORMED}",
+            f"{MALFORMED} Done.",
+        ):
+            for pieces in splits(message):
+                chunks = run(pieces, parser)
+                where = f"{message!r} split as {pieces!r}"
+
+                found = terminals(chunks)
+                assert len(found) == 1, f"{len(found)} terminal chunks for {where}"
+                assert found[0] is chunks[-1], (
+                    f"terminal chunk is not last for {where}"
+                )
+                assert call_names(chunks) == [], f"calls delivered for {where}"
+                last = chunks[-1]
+                assert isinstance(last, GenerationResponse), (
+                    f"terminal is not an error chunk for {where}"
+                )
+                assert last.finish_reason == "error", (
+                    f"finish_reason {last.finish_reason!r} for {where}"
+                )
 
 
 class TestNoCallsAllowedInvariants:

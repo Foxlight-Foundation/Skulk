@@ -872,12 +872,19 @@ the raw markup while parsing, a dropped native call is re-serialized as content
 (`dropped_call_text`) rather than leaving a blank answer. This
 is what keeps a model's own built-ins (Llama `print`, gpt-oss `python` /
 `browser`) from reaching a caller that has no implementation for them. A
-request that declared no tools is not parsed for calls at all: `apply_all_parsers`
-skips the tool parser and the llama.cpp runner skips its recovery branch, since
-the parser is wired from the tokenizer and cannot see what the request asked
-for. `declared_tool_calls` itself treats a `None` tools list as "no list to
+request that declared no tools is still scanned on the MLX path:
+`apply_all_parsers` wires the tool parser whenever the tokenizer provides one
+and passes `emit_calls=bool(tools)`, so nothing may come back as a call but a
+recognized block is still converted to content with its markers stripped.
+That is what makes `tool_choice: "none"` hold on the in-process engines, at
+the cost that a no-tools response opening a block is buffered until the block
+resolves. The llama.cpp runner does skip its recovery branch with no tools
+offered, since its native handler only produces calls when tools are passed.
+`declared_tool_calls` itself treats a `None` tools list as "no list to
 check against" rather than "nothing may be called", because the steward parses
-its own turns through the same dialects without passing one.
+its own turns through the same dialects without passing one; whether a
+no-tools request may return a call is decided where the request is visible,
+by `emit_calls`.
 
 `utils_mlx.load_mlx_items` adds `<|eom_id|>` to `eos_token_ids` for any
 tokenizer whose vocabulary has it. Llama declares only `<|eot_id|>`, so without

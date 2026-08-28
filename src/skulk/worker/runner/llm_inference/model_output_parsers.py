@@ -838,19 +838,23 @@ def _scan_remaining_blocks(
     tools: list[dict[str, Any]] | None,
     *,
     emit_calls: bool,
-) -> tuple[list[ToolCallItem], str]:
+) -> tuple[list[ToolCallItem], str, str | None]:
     """Parse every remaining block in a complete text.
 
     Used once generation has ended, where there is no further chunk to drive
     the streaming scan and the rest of the message is already in hand. Returns
-    the calls found and the text that was not part of any block, so a message
-    that puts a call the caller cannot run before one they can still delivers
-    the second call and the surrounding prose.
+    the calls found, the text that was not part of any block, and the raw
+    malformed block if one was met, so a message that puts a call the caller
+    cannot run before one they can still delivers the second call and the
+    surrounding prose.
 
     A block met here follows the same rules as one met by the streaming scan:
     ``emit_calls`` of ``False`` keeps every call out of the result no matter
-    how the block parses, and a block delivered as content has its dialect
-    markers stripped rather than being handed back verbatim.
+    how the block parses, a block delivered as content has its dialect markers
+    stripped rather than being handed back verbatim, and a closed marked block
+    that does not parse is the same failure it is mid-stream. The malformed
+    block ends the scan and is returned raw, as evidence, because whether a
+    message errors must not depend on where its chunks were split.
     """
 
     calls: list[ToolCallItem] = []
@@ -868,6 +872,9 @@ def _scan_remaining_blocks(
         end_of_block = end + len(tool_parser.end_parsing)
         block = remaining[start:end_of_block]
         parsed = tool_parser.parse(block.strip(), tools=tools)
+        if parsed is None and not tool_parser.unparsed_is_text:
+            leftover.append(remaining[:start])
+            return calls, "".join(leftover), block
         kept = (
             declared_tool_calls(parsed, tools)
             if parsed is not None and emit_calls
@@ -881,7 +888,7 @@ def _scan_remaining_blocks(
             # rejected block, markers stripped the same way.
             leftover.append(_block_as_content(block, tool_parser))
         remaining = remaining[end_of_block:]
-    return calls, "".join(leftover)
+    return calls, "".join(leftover), None
 
 
 def parse_tool_calls(
@@ -938,11 +945,42 @@ def parse_tool_calls(
             return
         terminal_sent = False
         if held_text:
-            more_calls, leftover = _scan_remaining_blocks(
+            more_calls, leftover, malformed = _scan_remaining_blocks(
                 held_text, tool_parser, tools, emit_calls=emit_calls
             )
-            accumulated_calls.extend(more_calls)
             held_text = ""
+            if malformed is not None:
+                # The same failure the streaming close path reports: a closed
+                # marked block that does not parse errors the message, calls
+                # and all, so the outcome does not depend on where the chunks
+                # were split. The raw block is the evidence, unstripped.
+                logger.warning(
+                    "Tool-call parsing failed in terminal suffix "
+                    f"(generated_chars={len(malformed)})"
+                )
+                if trace_task_id is not None:
+                    record_trace_marker(
+                        "tool_call_parse_error",
+                        trace_rank,
+                        category="tooling",
+                        task_id=trace_task_id,
+                        tags=["tool_call", "error"],
+                        attrs={"raw_length": len(malformed)},
+                    )
+                accumulated_calls = []
+                if leftover:
+                    yield response.model_copy(
+                        update={
+                            "text": leftover,
+                            "token": 0,
+                            "finish_reason": None,
+                        }
+                    )
+                yield response.model_copy(
+                    update={"text": malformed, "token": 0, "finish_reason": "error"}
+                )
+                return
+            accumulated_calls.extend(more_calls)
             if leftover:
                 carries_finish = not accumulated_calls
                 yield response.model_copy(
@@ -1126,6 +1164,10 @@ def parse_tool_calls(
                         tags=["tool_call", "error"],
                         attrs={"raw_length": len(combined)},
                     )
+                # The error chunk is the stream's one terminal: calls held
+                # from earlier blocks in this message are dropped rather than
+                # released after it, where the consumer would never look.
+                accumulated_calls = []
                 yield response.model_copy(
                     update={"text": combined, "token": 0, "finish_reason": "error"}
                 )
