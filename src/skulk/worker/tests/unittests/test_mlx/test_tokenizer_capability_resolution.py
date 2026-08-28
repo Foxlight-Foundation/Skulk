@@ -299,16 +299,20 @@ def _mistral_tool_parser() -> Callable[[str], list[dict[str, object]]]:
     )
 
 
-def test_mistral_template_wires_the_tool_calls_dialect(
+def test_mistral_template_overrides_the_preinstalled_parser(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """A [TOOL_CALLS] template gets the Mistral whole-block parser.
 
-    Mistral writes the call as `[TOOL_CALLS] [{...}]` and ends the message
-    rather than closing a marker, so the wiring uses the family EOS literal as
-    the end marker (never present in detokenized text) and relies on the
-    streaming parser's end-of-generation close, the same mechanism as Llama's
+    Production-faithful: the pinned mlx-lm auto-assigns its own Mistral
+    parser (which reads the `NAME[ARGS]{...}` form) to any template
+    containing [TOOL_CALLS], so the wiring must REPLACE an existing parser,
+    not only fill an empty slot. The override reads the JSON-array form the
+    2410-era instruct models emit, and delegates back to the displaced
+    parser when the array form does not parse, so upstream-form models keep
+    working. The end marker is the family EOS literal (never present in
+    detokenized text); the block closes at end of generation like Llama's
     unmarked dialect.
     """
     card = ModelCard(
@@ -323,13 +327,22 @@ def test_mistral_template_wires_the_tool_calls_dialect(
         tooling=ToolingCardConfig(tool_call_format=ToolCallFormat.Generic),
     )
 
+    upstream_calls: list[str] = []
+
+    def _upstream_mistral(text: str) -> list[dict[str, object]]:
+        upstream_calls.append(text)
+        return [{"name": "upstream_form", "arguments": "{}"}]
+
     def _fake_load_tokenizer(*_args: object, **_kwargs: object) -> TokenizerWrapper:
         backend = _TokenizerBackend()
         backend.chat_template = (  # pyright: ignore[reportAttributeAccessIssue]
             "{% if tools %}[AVAILABLE_TOOLS]{{ tools }}[/AVAILABLE_TOOLS]"
             "{% endif %}[TOOL_CALLS]"
         )
-        return TokenizerWrapper(backend)
+        wrapper = TokenizerWrapper(backend)
+        # Replicate mlx-lm's auto-assignment for [TOOL_CALLS] templates.
+        object.__setattr__(wrapper, "_tool_parser", _upstream_mistral)
+        return wrapper
 
     monkeypatch.setattr(
         "skulk.worker.engines.mlx.utils_mlx.load_tokenizer",
@@ -343,7 +356,21 @@ def test_mistral_template_wires_the_tool_calls_dialect(
     )
     assert tokenizer.tool_call_start == "[TOOL_CALLS]"
     assert tokenizer.tool_call_end == "</s>"
-    assert cast(object, tokenizer.tool_parser) is _mistral_tool_parser()
+    parser = cast(
+        Callable[[str], list[dict[str, object]]],
+        cast(object, tokenizer.tool_parser),
+    )
+    assert parser is not _upstream_mistral
+
+    # The array form the 2410-era models emit is read by our dialect...
+    calls = parser(' [{"name": "get_weather", "arguments": {"location": "X"}}]')
+    assert [call["name"] for call in calls] == ["get_weather"]
+    assert upstream_calls == []
+
+    # ...and a block ours cannot read is delegated to the displaced parser.
+    calls = parser("get_weather[ARGS]{}")
+    assert [call["name"] for call in calls] == ["upstream_form"]
+    assert upstream_calls == ["get_weather[ARGS]{}"]
 
 
 def test_mistral_parser_reads_a_tool_calls_array() -> None:

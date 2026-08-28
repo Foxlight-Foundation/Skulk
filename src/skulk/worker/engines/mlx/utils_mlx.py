@@ -1399,21 +1399,39 @@ def load_tokenizer_for_model_id(
         object.__setattr__(tokenizer, "_tool_call_end", "<tool_call|>")
         object.__setattr__(tokenizer, "_tool_parser", _parse_gemma4_tool_calls)
 
-    if (
-        capability_profile.tool_call_format == ToolCallFormat.Generic
-        and not getattr(tokenizer, "tool_parser", None)
-        and "[TOOL_CALLS]" in (getattr(tokenizer, "chat_template", None) or "")
+    if capability_profile.tool_call_format == ToolCallFormat.Generic and (
+        "[TOOL_CALLS]" in (getattr(tokenizer, "chat_template", None) or "")
     ):
         # Mistral writes `[TOOL_CALLS] [{...}]` and closes the call by ending
         # the message, not with a closing marker, so the end marker is the
         # family's EOS literal: it never appears in detokenized text, and the
         # streaming parser's end-of-generation path parses the still-open
         # block when the message finishes, the same mechanism that closes
-        # Llama's unmarked dialect. Template truth decides, as with the
-        # `<tool_call>` wiring below.
+        # Llama's unmarked dialect.
+        #
+        # This wiring deliberately REPLACES a parser mlx-lm already assigned:
+        # the pinned mlx-lm auto-installs its own Mistral parser for any
+        # template containing [TOOL_CALLS], and that parser reads the
+        # `NAME[ARGS]{...}` form, rejecting the JSON-array form the 2410-era
+        # instruct models actually emit. The override tries the array form
+        # first and delegates to the displaced parser on a miss, so models
+        # writing the upstream form keep working.
+        displaced = cast(
+            "Callable[[str], list[dict[str, Any]]] | None",
+            getattr(tokenizer, "tool_parser", None),
+        )
+
+        def _mistral_with_fallback(text: str) -> list[dict[str, Any]]:
+            try:
+                return _parse_mistral_tool_calls(text)
+            except ValueError:
+                if displaced is None:
+                    raise
+                return displaced(text)
+
         object.__setattr__(tokenizer, "_tool_call_start", "[TOOL_CALLS]")
         object.__setattr__(tokenizer, "_tool_call_end", "</s>")
-        object.__setattr__(tokenizer, "_tool_parser", _parse_mistral_tool_calls)
+        object.__setattr__(tokenizer, "_tool_parser", _mistral_with_fallback)
 
     if (
         capability_profile.tool_call_format == ToolCallFormat.Generic
