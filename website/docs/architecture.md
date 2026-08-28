@@ -643,6 +643,16 @@ built-ins (Llama answers some plain questions with a call to `print`, gpt-oss
 has `python` and `browser`), and a caller has no implementation for those, so
 those blocks come back as content too.
 
+A request that offered no tools gets the same protection on every engine. The
+MLX parser scans anyway and delivers recognized blocks as marker-stripped
+content, and the engines whose parsers never run without tools (the served
+`llama_server` and `vllm` runners, whose servers only parse when tools are in
+the request, and the llama.cpp runner's recovery branch) stream their content
+through a shared scaffolding scrub instead: the cross-dialect marker
+vocabulary is removed, with partial markers held across chunk boundaries, so
+a model that writes a call nobody asked for cannot leak control markup to the
+caller as answer text.
+
 The llama.cpp runner serves GGUF models single-node and matches the MLX runner
 on the capabilities llama.cpp supports natively: per-token logprobs (with the
 top alternatives) and tool calling. A tool-enabled request runs unstreamed so
