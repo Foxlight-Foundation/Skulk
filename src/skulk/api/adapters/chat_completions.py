@@ -4,7 +4,7 @@ import base64
 import re
 import time
 from collections.abc import AsyncGenerator
-from typing import Any
+from typing import Any, cast
 
 from loguru import logger
 
@@ -102,6 +102,60 @@ async def fetch_image_url(url: str) -> str:
         resp.raise_for_status()
         data = await resp.read()
         return base64.b64encode(data).decode("ascii")
+
+
+def resolve_tool_choice(
+    tools: list[dict[str, Any]] | None,
+    tool_choice: str | dict[str, Any] | None,
+) -> tuple[list[dict[str, Any]] | None, str | dict[str, Any] | None]:
+    """Apply ``tool_choice`` to the offered tools before dispatch.
+
+    Only the served engines forward ``tool_choice`` to a server that acts on
+    it. The in-process engines render whatever tools they are given and parse
+    whatever the model writes, so applying the caller's choice here is what
+    makes the option mean the same thing on every engine.
+
+    ``"none"`` removes the tools entirely, which is the only way to guarantee
+    the documented behavior that the model does not call one; a model handed a
+    tool and asked for it will call it whatever the request said. Naming a
+    single function narrows the offered tools to that one, so the model cannot
+    call a different tool than the caller asked for. ``"auto"``, ``"required"``
+    and an unrecognized value pass through untouched: ``required`` is a
+    best-effort instruction to the model in-process, since forcing a call would
+    need constrained decoding.
+
+    Returns the tools and the tool_choice to dispatch with.
+    """
+
+    if tool_choice is None or not tools:
+        return tools, tool_choice
+
+    if isinstance(tool_choice, str):
+        if tool_choice == "none":
+            # Dropping the choice with the tools keeps a served engine from
+            # being handed a tool_choice with nothing to choose from.
+            return None, None
+        return tools, tool_choice
+
+    function = tool_choice.get("function")
+    if not isinstance(function, dict):
+        return tools, tool_choice
+    name = cast("object", function.get("name"))  # pyright: ignore[reportUnknownMemberType]
+    if not isinstance(name, str):
+        return tools, tool_choice
+
+    named = [
+        tool
+        for tool in tools
+        if isinstance(tool.get("function"), dict)
+        and cast("dict[str, Any]", tool["function"]).get("name") == name
+    ]
+    # A name matching nothing is the caller's error. Emptying the list here
+    # would turn it into a silent prose answer, so the request is passed
+    # through whole: a served engine reports it, and an in-process engine
+    # answers from the full list. Rejecting it outright at this boundary is a
+    # follow-up, since only served engines report it today.
+    return (named or tools), tool_choice
 
 
 async def chat_request_to_text_generation(
@@ -214,6 +268,14 @@ async def chat_request_to_text_generation(
         else request.top_logprobs is not None
     )
 
+    # Resolve tool_choice at the boundary for the same reason as logprobs: only
+    # the served engines forward it to a server that understands it, so an
+    # in-process engine would otherwise ignore it entirely and answer a "none"
+    # request with a tool call.
+    resolved_tools, resolved_tool_choice = resolve_tool_choice(
+        request.tools, request.tool_choice
+    )
+
     return TextGenerationTaskParams(
         model=request.model,
         input=input_messages
@@ -227,8 +289,8 @@ async def chat_request_to_text_generation(
         stop=request.stop,
         seed=request.seed,
         stream=request.stream,
-        tools=request.tools,
-        tool_choice=request.tool_choice,
+        tools=resolved_tools,
+        tool_choice=resolved_tool_choice,
         reasoning_effort=resolved_effort,
         enable_thinking=resolved_thinking,
         chat_template_messages=chat_template_messages

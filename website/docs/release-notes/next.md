@@ -4,6 +4,50 @@ title: Next release
 sidebar_position: 0
 ---
 
+## Tool calling across more model families
+
+A model that calls several tools at once now returns all of them. Models that
+write each call separately previously came back with only the first.
+
+
+A model that reasons before calling a tool now has its call recognized. Its
+reasoning previously made the request look like an ordinary answer, so the call
+that followed was returned as raw markup in the message content. A call a model
+only thought about while reasoning is also no longer carried out.
+
+
+The `tool_choice` option now behaves the same way whichever engine serves the
+model. It previously reached only the engines that run an inference server of
+their own, so a request that sent `"none"` could still come back with a tool
+call. Sending `"none"` now guarantees no call, and naming a single function
+guarantees the model cannot call a different one.
+
+
+Tool calls are now recognized when a model's opening marker arrives split
+across several streamed pieces, which is the normal case rather than the
+exception, and when the model writes a sentence before calling ("I'll check
+that.") rather than opening with the call. Previously the caller received the
+raw markup as message content with an ordinary stop reason, so a well formed
+call from the model looked like a refusal to call anything.
+
+
+Tool calling now works for Llama models served by the MLX engine, and Skulk
+recognizes the ways more model families write a call. Llama ends a message that
+hands off to a tool with a token it does not declare as a stop token, so
+generation used to continue past the end of the call and write the next turn's
+opening into the answer. It also writes the call as a plain JSON object with no
+opening marker, which nothing recognized as a call, so a request that offered a
+tool came back with JSON in the message content and no tool call at all. Both
+are fixed, and the recognized formats now cover Llama calls, Mistral tool-call
+arrays, and GLM argument pairs alongside the formats already supported.
+
+Two rules make the result predictable when you send tools. A response that
+names no tool you offered comes back as ordinary content rather than as a tool
+call, because models sometimes reach for a built-in of their own that you have
+no implementation for. And text that opens like a call but does not parse as
+one, which is what a model answering in JSON looks like when tools are also
+available, is returned as content rather than reported as a generation error.
+
 ## Exact artifact bundles
 
 Signed registry-v2 cards may now identify one complete executable artifact or

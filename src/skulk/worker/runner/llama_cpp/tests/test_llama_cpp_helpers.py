@@ -2,6 +2,7 @@
 """Tests for the pure helpers of the llama.cpp runner (no llama_cpp needed)."""
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -18,11 +19,13 @@ from skulk.worker.runner.llama_cpp.runner import (
     _logprob_fields,
     _sanitize_harmony_assistant_messages,
     _splice_images_into_messages,
+    dropped_call_text,
     find_mmproj_file,
     generation_kwargs,
     logprobs_unavailable_error,
     map_finish_reason,
     messages_for_llama,
+    offered_tool_calls_from_message,
     select_gguf_file,
     serving_n_ctx,
     tool_calls_from_message,
@@ -424,3 +427,56 @@ def test_vision_handler_map_defaults_to_mtmd() -> None:
     assert _VISION_HANDLER_BY_MODEL_TYPE["qwen2.5-vl"] == "Qwen25VLChatHandler"
     assert _VISION_HANDLER_BY_MODEL_TYPE.get("some-new-vlm") is None
     assert _DEFAULT_VISION_HANDLER == "MTMDChatHandler"
+
+
+WEATHER_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {"name": "get_weather", "parameters": {"type": "object"}},
+}
+NATIVE_WEATHER_CALL: dict[str, Any] = {
+    "tool_calls": [
+        {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "get_weather", "arguments": "{}"},
+        }
+    ]
+}
+NATIVE_BUILTIN_CALL: dict[str, Any] = {
+    "tool_calls": [
+        {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "python", "arguments": "{}"},
+        }
+    ]
+}
+
+
+def test_offered_tool_calls_keeps_a_call_to_an_offered_tool() -> None:
+    items = offered_tool_calls_from_message(NATIVE_WEATHER_CALL, [WEATHER_TOOL])
+    assert [item.name for item in items] == ["get_weather"]
+
+
+def test_offered_tool_calls_drops_a_call_to_a_tool_nobody_offered() -> None:
+    # llama.cpp's bundled chat handlers fill tool_calls themselves and nothing
+    # there checks the name against the request, so a model reaching for one of
+    # its own built-ins would otherwise reach the caller as a call to run.
+    assert offered_tool_calls_from_message(NATIVE_BUILTIN_CALL, [WEATHER_TOOL]) == []
+
+
+def test_offered_tool_calls_returns_nothing_when_no_tools_were_offered() -> None:
+    assert offered_tool_calls_from_message(NATIVE_WEATHER_CALL, None) == []
+    assert offered_tool_calls_from_message(NATIVE_WEATHER_CALL, []) == []
+
+
+def test_dropped_call_text_renders_the_call_so_the_answer_is_not_blank() -> None:
+    # The handler consumed the raw markup while parsing, so dropping the call
+    # without putting anything in its place would answer a request with a
+    # successful blank message.
+    text = dropped_call_text(NATIVE_BUILTIN_CALL)
+    assert "python" in text
+
+
+def test_dropped_call_text_is_empty_when_there_was_no_call() -> None:
+    assert dropped_call_text({"content": "hi"}) == ""

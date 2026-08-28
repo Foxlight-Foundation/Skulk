@@ -23,3 +23,9 @@ weights_repo = "mlx-community/Qwen3.6-35B-A3B-nvfp4"
 
 [storage_size]
 in_bytes = 20401929952
+
+# Tool calling is MODEL truth and does not vary by quantization: the sibling
+# cards for this base model declare it, so silence here would resolve to
+# "no tools" for the same model.
+[tooling]
+supports_tool_calling = true

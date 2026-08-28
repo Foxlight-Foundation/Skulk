@@ -619,6 +619,30 @@ needs editing when Skulk catches up.
 Speech serving is the largest current example of that gating and has its own
 section below.
 
+Model families do not agree on how a tool call is written, so the in-process
+engines read the call out of the generated text with a shared set of dialects.
+The llama.cpp runner uses that set for every call its own chat handlers did not
+already parse; the MLX engine reaches it through two of the parsers it wires
+onto a tokenizer, while a family parser the tokenizer supplies is used directly
+and gpt-oss and DeepSeek keep their own token-level parsers.
+Some families wrap the call in markers: a `<tool_call>` block carrying Hermes
+JSON, Qwen3 XML, or GLM `<arg_key>`/`<arg_value>` pairs, a harmony
+`to=functions.NAME` channel, or a Mistral `[TOOL_CALLS]` array. Llama uses no
+opening marker at all: it writes the call object directly, sometimes prefixed
+with `<|python_tag|>`, and ends the message with `<|eom_id|>` rather than a
+closing marker. Skulk adds `<|eom_id|>` to the stop tokens for any model whose
+vocabulary has it, because Llama declares only its end-of-turn token and
+without that the model runs past the end of its own call and starts writing the
+next turn.
+
+Two rules keep the unmarked case honest. A block that opens on `{` may just be
+a model answering in JSON, so a block that does not parse as a call is
+delivered as content rather than reported as a failure. And a call is only a
+call if it names a tool the request offered: models reach for their own
+built-ins (Llama answers some plain questions with a call to `print`, gpt-oss
+has `python` and `browser`), and a caller has no implementation for those, so
+those blocks come back as content too.
+
 The llama.cpp runner serves GGUF models single-node and matches the MLX runner
 on the capabilities llama.cpp supports natively: per-token logprobs (with the
 top alternatives) and tool calling. A tool-enabled request runs unstreamed so

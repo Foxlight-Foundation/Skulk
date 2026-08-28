@@ -792,7 +792,106 @@ Inventory snapshot; see #130 for consolidation plan.
 | NemotronH | ~210 | `NemotronHShardingStrategy` + Mamba2 hybrid cache |
 | GPT-OSS | ~180 | MLX: `parse_gpt_oss` (token-level Harmony parser via `openai_harmony`) + `GptOssShardingStrategy`. llama.cpp: `HarmonyTextParser` in `harmony_text_parser.py` reparses the harmony channel markers from llama.cpp's detokenized *string* deltas (the engine exposes no token ids), splitting `analysis`→reasoning / `final`→content and stripping markers; wired in `llama_cpp/runner._generate`, gated on `OutputParserType.GptOss`, and dependency-free (no MLX/openai_harmony) so it runs on non-Mac GPU nodes. |
 | Step 3.5 | ~95 | Sliding-window cache tracking in `auto_parallel.py:639-650` |
-| Llama / Ministral | ~70 | `LlamaShardingStrategy` (default) |
+| Llama / Ministral | ~70 | `LlamaShardingStrategy` (default); the unmarked tool dialect (end-of-message stop token plus bare-object block opening, see "In-process tool-call dialects" below) in `utils_mlx.py` and `tool_parsers.make_text_dialect_parser` |
+
+## In-process tool-call dialects
+
+`worker/runner/llm_inference/tool_text_parser.parse_tool_calls_from_text` is
+the shared dialect reader. The `llama_cpp` runner calls it directly for every
+call its bundled chat handlers did not already parse. The `mlx` engine reaches
+it only through the parsers wired onto the tokenizer in `utils_mlx`: the
+generic `<tool_call>` dialect (`_parse_generic_text_tool_calls`) and the
+unmarked dialect (`make_text_dialect_parser`) delegate to it, while a family
+parser the tokenizer supplies itself is wrapped by `make_mlx_parser` and called
+directly, and gpt-oss and DeepSeek V3.2 bypass it entirely for their own
+token-level parsers (`parse_gpt_oss`, `parse_deepseek_v32`). Adding a dialect
+here therefore reaches llama.cpp and those two MLX paths, not every MLX model.
+Recognized dialects, tried in order: harmony `to=functions.NAME` channels
+(gpt-oss); `<tool_call>` blocks carrying Hermes JSON, Qwen3 XML, or GLM
+`<arg_key>`/`<arg_value>` pairs; Llama `<|python_tag|>` calls (which use
+`parameters` rather than `arguments` and may chain several with `;`); Mistral
+`[TOOL_CALLS]` arrays; and an unmarked call object opening the message, which
+the model may keep writing after. The unmarked rule is deliberately narrow,
+since it is otherwise indistinguishable from a model answering in JSON: the
+message must begin with the object, the object must carry a `name` alongside an
+`arguments` or `parameters` value, and the offered-tools filter below removes
+anything naming a tool the caller did not offer. The served engines (`llama_server`, `vllm`) do not use this
+path: their servers parse tool calls themselves and return structured
+`tool_calls`.
+
+The `mlx` engine drives this through a rolling marker scan
+(`model_output_parsers.parse_tool_calls`). A generation chunk is whatever the
+streaming detokenizer resolved that step, not a token, so a marker that is one
+token id still arrives split (`<tool`, `_`, `c`, `all>`). `_block_start_index`
+therefore searches the accumulated text rather than each chunk, and
+`_partial_marker_suffix_length` carries forward only the trailing run that
+could still become a marker. That run is shorter than the longest marker, so
+ordinary answers stream with at most a few characters of latency and nothing
+is held for a message containing no call. The scan does not stop once ordinary
+text has been released, so a model that writes a sentence before calling still
+has its call found. A block closes at the first `end_parsing` found in the accumulated block, or at
+the end of generation. The calls of every block in one message are coalesced
+into a single `ToolCallResponse`, which is the OpenAI shape and is what makes
+parallel calls survive: several families write each call in its own block, and
+`API._token_chunk_stream` stops at the first chunk carrying a finish reason, so
+a response per block would deliver the first call and drop the rest. Trailing
+text is therefore released without its finish reason and the tool response is
+the terminal chunk. The marker is located rather than matched at the end so
+that text the model writes after the call ("`</tool_call>` Done.") returns to
+the opening scan as ordinary text, where a second call in the same message is
+still found. Reasoning chunks
+(`is_thinking=True`) pass straight through and take no part in the scan, which
+both keeps a thinking preamble from hiding the call and stops a call the model
+only contemplated from being executed.
+
+Four properties on `ToolParser` carry the family differences:
+
+- `extra_start_parsing`: further markers that also open a block. Llama writes
+  the bare call object but prefixes `<|python_tag|>` when it names a tool, and
+  a marker that does not open the block reaches the caller as content.
+- `anchored`: whether the primary marker opens a block only at the start of a
+  message. Set for the unmarked dialect, whose marker is `{`: distinctive
+  markers may open a block anywhere, but a brace also appears in prose and in
+  JSON answers. The families writing that dialect put the call in the whole
+  message, so anchoring costs nothing, and their `<|python_tag|>` marker still
+  opens a call after a preamble.
+- `unparsed_is_text`: a block that fails to parse is content, not a failure.
+  Set for unmarked dialects, which open on `{` and therefore also catch a model
+  answering in JSON.
+- `start_markers`: the read-side union of the primary and extra markers.
+
+`reject_unoffered_tool_calls` wraps `parse_gpt_oss` and `parse_deepseek_v32`,
+which decode their calls from the token stream themselves and are selected
+before the marker path, so they would otherwise bypass the rule below entirely;
+a call it rejects is re-serialized as content.
+`tool_parsers.declared_tool_calls` drops calls naming a tool the request did
+not offer, and a block left with no offered tool is delivered as content. On
+the llama.cpp path the same filter covers calls its bundled chat handlers
+parsed natively (`offered_tool_calls_from_message`); since the handler consumes
+the raw markup while parsing, a dropped native call is re-serialized as content
+(`dropped_call_text`) rather than leaving a blank answer. This
+is what keeps a model's own built-ins (Llama `print`, gpt-oss `python` /
+`browser`) from reaching a caller that has no implementation for them. A
+request that declared no tools is still scanned on the MLX path:
+`apply_all_parsers` wires the tool parser whenever the tokenizer provides one
+and passes `emit_calls=bool(tools)`, so nothing may come back as a call but a
+recognized block is still converted to content with its markers stripped.
+That is what makes `tool_choice: "none"` hold on the in-process engines, at
+the cost that a no-tools response opening a block is buffered until the block
+resolves. The llama.cpp runner does skip its recovery branch with no tools
+offered, since its native handler only produces calls when tools are passed.
+`declared_tool_calls` itself treats a `None` tools list as "no list to
+check against" rather than "nothing may be called", because the steward parses
+its own turns through the same dialects without passing one; whether a
+no-tools request may return a call is decided where the request is visible,
+by `emit_calls`.
+
+`utils_mlx.load_mlx_items` adds `<|eom_id|>` to `eos_token_ids` for any
+tokenizer whose vocabulary has it. Llama declares only `<|eot_id|>`, so without
+this the model generates past the end of its own tool call and emits the next
+turn's header into the answer. Detection is by vocabulary, not by the chat
+template mentioning the token: Llama's template routes tool results through the
+`ipython` role and never writes `<|eom_id|>` or `<|python_tag|>` literally.
 
 ## KV cache backends
 

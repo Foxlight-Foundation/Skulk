@@ -17,6 +17,7 @@ cleanly on nodes (e.g. Macs) where the binding is not installed.
 """
 
 import inspect
+import json
 import os
 import time
 from collections.abc import Callable
@@ -64,6 +65,7 @@ from skulk.worker.runner.generation_stats import (
 )
 from skulk.worker.runner.llm_inference.harmony_text_parser import HarmonyTextParser
 from skulk.worker.runner.llm_inference.think_text_parser import ThinkTextParser
+from skulk.worker.runner.llm_inference.tool_parsers import declared_tool_calls
 from skulk.worker.runner.llm_inference.tool_text_parser import (
     parse_tool_calls_from_text,
 )
@@ -448,6 +450,41 @@ def tool_calls_from_message(message: dict[str, Any]) -> list[ToolCallItem]:
             item_kwargs["id"] = call["id"]
         items.append(ToolCallItem(**item_kwargs))
     return items
+
+
+def dropped_call_text(message: dict[str, Any]) -> str:
+    """Render native calls as text, for calls that named no offered tool.
+
+    When llama.cpp's own handler parses a call, the raw markup is gone from the
+    message and ``content`` is null. Dropping such a call without putting
+    anything in its place would answer the request with a successful blank
+    message, so the call is re-serialized and delivered as content, which is
+    what the text-recovered path does with a block naming no offered tool.
+    """
+
+    rendered = [
+        json.dumps({"name": call.name, "arguments": call.arguments})
+        for call in tool_calls_from_message(message)
+    ]
+    return "\n".join(rendered)
+
+
+def offered_tool_calls_from_message(
+    message: dict[str, Any], tools: list[dict[str, Any]] | None
+) -> list[ToolCallItem]:
+    """Native structured calls from llama.cpp, limited to the offered tools.
+
+    llama.cpp's bundled chat handlers fill ``tool_calls`` themselves for the
+    formats they recognize, and nothing there checks the name against the
+    request. A model reaching for one of its own built-ins would otherwise
+    reach the caller as a call they cannot run, which is the same rule the
+    text-recovered path applies, and a request that offered no tools cannot
+    produce one at all.
+    """
+
+    if not tools:
+        return []
+    return declared_tool_calls(tool_calls_from_message(message), tools)
 
 
 def _logprob_fields(
@@ -1265,8 +1302,20 @@ class Runner(ServedConcurrentDispatch):
         )
         visible_text = "".join(text for text, is_thinking in emissions if not is_thinking)
 
-        tool_calls = tool_calls_from_message(message)
-        if not tool_calls:
+        tool_calls = offered_tool_calls_from_message(message, task.task_params.tools)
+        if not tool_calls and not visible_text.strip():
+            # The handler consumed the raw markup while parsing, so a call that
+            # named no offered tool leaves nothing to say. Put the call back as
+            # text rather than answering with a successful blank message.
+            restored = dropped_call_text(message)
+            if restored:
+                visible_text = restored
+                emissions = emissions + [(restored, False)]
+                # The plain-model branch below emits `content`, which the
+                # handler emptied when it parsed the call, so it needs the
+                # restored text too or the answer is still blank.
+                content = restored
+        if not tool_calls and task.task_params.tools:
             # llama.cpp only fills structured tool_calls for formats its bundled
             # chat handlers recognize. A reasoning model emits the call as text,
             # so recover it from the string (#416). Source selection matters:

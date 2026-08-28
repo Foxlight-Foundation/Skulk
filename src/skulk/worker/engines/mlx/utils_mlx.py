@@ -1357,6 +1357,39 @@ def load_tokenizer_for_model_id(
         else:
             tokenizer.eos_token_ids = [gemma_eos_id, gemma_end_of_turn_id]
 
+    # Llama 3.1+ ends a tool-calling turn with <|eom_id|> ("end of message",
+    # handing off to a tool) and a user-facing turn with <|eot_id|> ("end of
+    # turn"). Only <|eot_id|> reaches us from tokenizer_config, because
+    # generation_config carries no eos_token_id for these repos, so without
+    # this the model runs straight past the end of its own tool call: the
+    # scaffolding detokenizes into visible content and a second call begins.
+    # Upstream (Meta's reference, vLLM and llama.cpp) all stop on both.
+    # Detected by vocabulary rather than by the template mentioning the token:
+    # Llama 3.2's template never writes <|eom_id|> or <|python_tag|> literally,
+    # it only routes tool results through the "ipython" role, so a template
+    # substring check silently misses the family this exists for.
+    llama_eom_id = _token_id_or_none(tokenizer, "<|eom_id|>")
+    if llama_eom_id is not None:
+        # <|eom_id|> is "end of message, handing off to a tool". Llama declares
+        # only <|eot_id|> as its stop token, so without this the model runs
+        # straight past the end of its tool call and generates the next turn's
+        # header, and the caller sees control tokens in the answer text.
+        existing = list(tokenizer.eos_token_ids or [])
+        if llama_eom_id not in existing:
+            tokenizer.eos_token_ids = existing + [llama_eom_id]
+        if not getattr(tokenizer, "tool_parser", None):
+            # Llama writes the call as a bare object with no opening marker, so
+            # the block opens on "{" and is closed by the end of the message
+            # rather than by a closing marker. The whole-block dialect parser
+            # reads both that form and the <|python_tag|> variant.
+            object.__setattr__(tokenizer, "_tool_call_start", "{")
+            object.__setattr__(tokenizer, "_tool_call_end", "<|eom_id|>")
+            from skulk.worker.runner.llm_inference.tool_parsers import (
+                UNMARKED_TOOL_DIALECT,
+            )
+
+            object.__setattr__(tokenizer, "_tool_parser", UNMARKED_TOOL_DIALECT)
+
     if capability_profile.tool_call_format == ToolCallFormat.Gemma4:
         # mlx-lm exposes tool-call markers through read-only properties on
         # TokenizerWrapper. Configure the internal fields directly so Gemma 4
@@ -1776,6 +1809,28 @@ def mx_barrier(group: Group | None):
             "mx_barrier", {"group_size": group.size()}, is_prefill=False
         ),
     )
+
+
+def _token_id_or_none(tokenizer: object, token: str) -> int | None:
+    """Return a special token's id, or None when the tokenizer lacks it.
+
+    Vocabularies differ across quantizations and conversions, so a missing
+    token is normal and must not raise.
+    """
+
+    convert = getattr(tokenizer, "convert_tokens_to_ids", None)
+    if convert is None:
+        return None
+    try:
+        token_id = cast("object", convert(token))
+    except Exception:  # noqa: BLE001 - tokenizer implementations vary
+        return None
+    if not isinstance(token_id, int):
+        return None
+    unknown = getattr(tokenizer, "unk_token_id", None)
+    if token_id < 0 or (unknown is not None and token_id == unknown):
+        return None
+    return token_id
 
 
 def _parse_generic_text_tool_calls(text: str) -> list[dict[str, Any]]:

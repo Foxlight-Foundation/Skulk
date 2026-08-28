@@ -9,6 +9,118 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- A request offering no tools still has its markers stripped. Skipping the scan
+  entirely when none were offered, which is what keeps `tool_choice: "none"`
+  from producing a call, also meant nothing recognized a block the model wrote
+  anyway, so its markers went straight to the caller. The block is now always
+  recognized; whether it may become a call is what depends on the request.
+
+- A tool call handed back as content no longer carries the model's control
+  tokens. When a call names no offered tool it is delivered as text so the
+  caller can see what the model did, but the block was handed back verbatim, so
+  `<|python_tag|>` and `<tool_call>` markers ended up in the answer. The
+  markers are stripped from an answer; a response already flagged as an error
+  still carries the raw block, since there it is the evidence of what was
+  malformed.
+
+### Fixed
+
+- gpt-oss and DeepSeek V3.2 no longer return a tool the caller never offered.
+  Those two families parse their calls out of the token stream themselves and
+  are selected before the marker path, so the offered-tools rule never saw
+  them: a gpt-oss request sending `tool_choice: "none"`, which removes the
+  tools, still came back with a call, and its name carried the model's own
+  namespace prefix. Their output now passes through the same rule, and a
+  rejected call is delivered as content so the caller sees what the model did
+  rather than a blank answer.
+
+### Fixed
+
+- A model's parallel tool calls all reach the caller. Several families write
+  each call in its own block, and the stream consumer stops at the first chunk
+  carrying a finish reason, so one response per block delivered the first call
+  and dropped the rest. The calls of every block in a message are now coalesced
+  into a single response carrying a `tool_calls` array, which is the shape
+  OpenAI clients expect, and any text after the calls is released without a
+  finish reason so the tool response stays the terminal chunk.
+
+### Fixed
+
+- Reasoning no longer hides a tool call on the MLX engine. Tool parsing runs
+  downstream of the thinking parser, so a model that reasons before calling a
+  tool sent its reasoning through the tool parser first; that text decided the
+  message was not a call, and the marker that followed was never examined, so
+  the caller received the raw markup as content. Reasoning chunks now pass
+  straight through without taking part in that decision. This also means a call
+  a model only contemplated inside its reasoning is no longer executed, matching
+  the behavior the llama.cpp engine already had.
+
+### Fixed
+
+- `tool_choice` is now honored on the in-process engines. Only the served
+  engines forwarded it to a server that acts on it, so an MLX or llama.cpp
+  model ignored it entirely: a request sending `"none"` and asking for the tool
+  by name returned the tool call on every attempt. The option is now applied
+  before dispatch, so it means the same thing on every engine. `"none"` removes
+  the tools from the request, and naming a single function narrows the offered
+  tools to that one so the model cannot call a different tool than the caller
+  asked for. `"required"` remains a best-effort instruction on the in-process
+  engines, since forcing a call there would need constrained decoding.
+
+### Fixed
+
+- Tool calls whose markers arrive split across chunks are now recognized. A
+  generation chunk is whatever the streaming detokenizer could resolve that
+  step, not a token, so an opening marker that is a single token id still
+  reaches the parser in pieces: `<tool`, `_`, `c`, `all>`. The parser tested
+  each chunk on its own, so for most models the block never opened and the
+  caller received the raw markup as message content with a `stop` finish
+  reason. Observed on a Qwen model served by the MLX engine, where the model
+  emitted a perfectly well formed call. Text is now scanned across chunk
+  boundaries by carrying forward only the trailing run that could still become
+  a marker, and the closing marker is matched against the accumulated block.
+  That run is shorter than the longest marker, so ordinary answers stream with
+  at most a few characters of latency, and the scan keeps looking after
+  ordinary text has been released, so a model that writes a sentence before
+  calling ("I'll check that.") still has its call recognized. The unmarked
+  dialect opens on a brace, which also appears in prose, so there a call is
+  recognized only at the start of the message; its distinctive marker still
+  opens one anywhere. Text the model writes after closing a call is delivered
+  rather than swallowed into the block, and a second call in the same message
+  is recognized.
+
+### Fixed
+
+- Tool calling now works for Llama models on the MLX engine, and the shared
+  text parser recognizes the dialects the other families write. Llama declares
+  only its end-of-turn token as a stop token, not `<|eom_id|>`, which is how it
+  ends a message that hands off to a tool, so generation ran past the end of
+  the call and wrote the next turn's header into the answer text. Llama also
+  writes the call as a bare JSON object with no opening marker, so nothing
+  recognized it as a call at all: a caller offering a tool received JSON in
+  `content`, `finish_reason` of `stop`, and no `tool_calls`. Skulk now stops at
+  the message boundary for any model whose vocabulary has that token, and reads
+  the whole block with a set of cross-family dialects covering Llama
+  `<|python_tag|>` calls, Mistral `[TOOL_CALLS]` arrays, GLM
+  `<arg_key>`/`<arg_value>` pairs, and an unmarked call object that is the
+  entire message, alongside the harmony channels and `<tool_call>` blocks
+  already supported.
+
+- A model reaching for one of its own built-ins no longer surfaces as a tool
+  call. Llama answers some plain questions with a call to `print`, and gpt-oss
+  has `python` and `browser`; a caller has no implementation for those names,
+  so a response naming no offered tool is now returned as ordinary content. A
+  request that declares no tools may never receive `tool_calls`: the response
+  is still scanned so a recognized block's dialect markers are stripped rather
+  than delivered, but nothing comes back as a call, so a model writing
+  something call-shaped, which is what a request asking for JSON output
+  invites, cannot return `tool_calls` to a caller who offered none. Relatedly, text that opens
+  like a call but does not parse as one, which is what a model answering in
+  JSON looks like when tools are also offered, is returned as content instead
+  of being reported as a generation error.
+
+### Fixed
+
 - Chat completions never return an empty body, and streaming responses always
   terminate. A task that ended without producing any output, for example after
   being cancelled, previously tripped an assertion inside the response
