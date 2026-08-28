@@ -31,6 +31,11 @@ MESSAGES: list[str] = [
     "<|python_tag|>print('hello')",
     '[TOOL_CALLS] [{"name": "get_weather"}]',
     "<｜tool▁calls▁begin｜>x<｜tool▁calls▁end｜>",
+    (
+        '<｜DSML｜function_calls><｜DSML｜invoke name="get_weather">'
+        '<｜DSML｜parameter name="location">Denver</｜DSML｜parameter>'
+        "</｜DSML｜invoke></｜DSML｜function_calls>"
+    ),
     "Braces {like this} and <angles> are fine.",
     "A lone < at the end",
     "Ends with a partial marker <tool_ca",
@@ -90,3 +95,13 @@ class TestBlockingStrip:
     def test_every_marker_is_stripped(self) -> None:
         for marker in SCAFFOLDING_MARKERS:
             assert strip_scaffolding(f"a{marker}b") == "ab"
+
+    def test_dsml_namespace_never_reaches_the_caller(self) -> None:
+        """DSML control tokens are stripped; attribute debris may remain."""
+        leak = (
+            '<｜DSML｜function_calls><｜DSML｜invoke name="get_weather">'
+            "</｜DSML｜invoke></｜DSML｜function_calls>"
+        )
+        result = strip_scaffolding(leak)
+        assert "｜DSML｜" not in result
+        assert result == 'invoke name="get_weather">'

@@ -48,11 +48,25 @@ SCAFFOLDING_MARKERS: Final[tuple[str, ...]] = (
     "<tool_call|>",
     "<|tool_response>",
     "<tool_response|>",
-    # DeepSeek DSML block containers.
+    # DeepSeek V3/R1 block containers (the pre-DSML wire format).
     "<｜tool▁calls▁begin｜>",
     "<｜tool▁calls▁end｜>",
     "<｜tool▁call▁begin｜>",
     "<｜tool▁call▁end｜>",
+    # DeepSeek V3.2 DSML scaffolding (`dsml_encoding.py`). The containers and
+    # closing tags are fixed strings; the invoke/parameter OPENING tags carry
+    # attributes (`<｜DSML｜invoke name="...">`), which a fixed-string marker
+    # cannot cover, so the namespace prefixes are stripped on their own. That
+    # leaves attribute debris (`invoke name="...">`) as plain text, which is
+    # the accepted trade: the control namespace never reaches the caller, and
+    # a bounded fixed-string vocabulary is what keeps the streaming hold-back
+    # bounded.
+    "<｜DSML｜function_calls>",
+    "</｜DSML｜function_calls>",
+    "</｜DSML｜invoke>",
+    "</｜DSML｜parameter>",
+    "<｜DSML｜",
+    "</｜DSML｜",
 )
 
 _MARKERS_LONGEST_FIRST: Final = tuple(
@@ -104,16 +118,30 @@ class StreamingScaffoldingScrub:
         self._held = ""
 
     def feed(self, text: str) -> str:
-        """Scrub ``text`` (plus any held tail) and return the emittable part."""
+        """Scrub ``text`` (plus any held tail) and return the emittable part.
 
-        combined = strip_scaffolding(self._held + text)
+        The hold-back is computed on the RAW combined text, before stripping:
+        some markers are strict prefixes of longer ones (the bare DSML
+        namespace inside its container tags), and stripping a completed short
+        marker eagerly would make the result depend on where the stream was
+        split, because the longer marker could never match across the
+        boundary its prefix was consumed at.
+        """
+
+        combined = self._held + text
         keep = _partial_marker_suffix_length(combined)
         self._held = combined[len(combined) - keep :] if keep else ""
-        return combined[: len(combined) - keep] if keep else combined
+        emittable = combined[: len(combined) - keep] if keep else combined
+        return strip_scaffolding(emittable)
 
     def flush(self) -> str:
-        """Return the held tail at end of stream; nothing more is coming."""
+        """Return the held tail at end of stream; nothing more is coming.
+
+        Stripped once more on the way out: the tail may be a complete short
+        marker held because a longer marker extends it. A genuine partial
+        lookalike survives the strip and is returned as ordinary text.
+        """
 
         held = self._held
         self._held = ""
-        return held
+        return strip_scaffolding(held)
