@@ -1402,6 +1402,22 @@ def load_tokenizer_for_model_id(
     if (
         capability_profile.tool_call_format == ToolCallFormat.Generic
         and not getattr(tokenizer, "tool_parser", None)
+        and "[TOOL_CALLS]" in (getattr(tokenizer, "chat_template", None) or "")
+    ):
+        # Mistral writes `[TOOL_CALLS] [{...}]` and closes the call by ending
+        # the message, not with a closing marker, so the end marker is the
+        # family's EOS literal: it never appears in detokenized text, and the
+        # streaming parser's end-of-generation path parses the still-open
+        # block when the message finishes, the same mechanism that closes
+        # Llama's unmarked dialect. Template truth decides, as with the
+        # `<tool_call>` wiring below.
+        object.__setattr__(tokenizer, "_tool_call_start", "[TOOL_CALLS]")
+        object.__setattr__(tokenizer, "_tool_call_end", "</s>")
+        object.__setattr__(tokenizer, "_tool_parser", _parse_mistral_tool_calls)
+
+    if (
+        capability_profile.tool_call_format == ToolCallFormat.Generic
+        and not getattr(tokenizer, "tool_parser", None)
         and "<tool_call>" in (getattr(tokenizer, "chat_template", None) or "")
     ):
         # #728: tokenizers that reach this path without mlx-lm's inferred
@@ -1851,6 +1867,28 @@ def _parse_generic_text_tool_calls(text: str) -> list[dict[str, Any]]:
         # Raising routes the runner to its malformed-tool-call fallback
         # (raw text with finish_reason="error"), matching the behavior of
         # every other parser instead of fabricating an empty success.
+        raise ValueError("no recognized tool calls in block")
+    return [{"name": item.name, "arguments": item.arguments} for item in items]
+
+
+def _parse_mistral_tool_calls(text: str) -> list[dict[str, Any]]:
+    """Parse Mistral ``[TOOL_CALLS]`` arrays from model output.
+
+    Receives the text after the ``[TOOL_CALLS]`` marker (the runner's marker
+    mechanism strips it) and delegates to the shared text parser's Mistral
+    branch, so the MLX lane recognizes exactly the format the llama_cpp
+    engine's recovery path does. Argument values arrive as JSON strings, the
+    shape ``ToolCallItem`` validation expects.
+    """
+    from skulk.worker.runner.llm_inference.tool_text_parser import (
+        parse_tool_calls_from_text,
+    )
+
+    items = parse_tool_calls_from_text(f"[TOOL_CALLS]{text}")
+    if not items:
+        # Raising routes the runner to its malformed-tool-call fallback (raw
+        # text with finish_reason="error"), matching every other parser
+        # instead of fabricating an empty success.
         raise ValueError("no recognized tool calls in block")
     return [{"name": item.name, "arguments": item.arguments} for item in items]
 

@@ -1,0 +1,26 @@
+# Ministral 8B Instruct 2410 (mlx-community 4bit): the small Mistral-family
+# text model that fits a 24GB MLX node, added so the Mistral [TOOL_CALLS]
+# dialect has a live-testable card. The chat template speaks
+# [TOOL_CALLS]/[AVAILABLE_TOOLS] (v3 tekken), not the <tool_call> marker
+# dialect, so the MLX engine wires the Mistral whole-block parser for it.
+# Architecture facts from the repo's config.json; context_length is
+# max_position_embeddings (32768). Tool calling is on: the family writes
+# `[TOOL_CALLS] [{...}]` arrays, the Mistral branch of the shared text parser.
+model_id = "mlx-community/Ministral-8B-Instruct-2410-4bit"
+n_layers = 36
+hidden_size = 4096
+num_key_value_heads = 8
+supports_tensor = true
+tasks = ["TextGeneration"]
+family = "mistral"
+quantization = "4bit"
+base_model = "Ministral 8B Instruct 2410"
+capabilities = ["text"]
+context_length = 32768
+
+[storage_size]
+in_bytes = 4543802547
+
+[tooling]
+supports_tool_calling = true
+tool_call_format = "generic"

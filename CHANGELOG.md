@@ -9,6 +9,18 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- The Mistral tool-call dialect now works on the MLX engine. The shared text
+  parser has read `[TOOL_CALLS]` arrays since they were added, but no MLX
+  tokenizer wiring selected it: Mistral templates carry no `<tool_call>`
+  marker, so requests fell through every wiring branch and the model's calls
+  leaked as content. Templates speaking `[TOOL_CALLS]` now wire the Mistral
+  whole-block parser, closed at end of generation the way the unmarked
+  dialect closes. A bundled card for a small Mistral
+  (`mlx-community/Ministral-8B-Instruct-2410-4bit`) makes the dialect
+  live-testable on a 24GB node.
+
+### Fixed
+
 - A request offering no tools still has its markers stripped. Skipping the scan
   entirely when none were offered, which is what keeps `tool_choice: "none"`
   from producing a call, also meant nothing recognized a block the model wrote

@@ -289,3 +289,67 @@ def test_generic_format_leaves_other_template_dialects_alone(
         model_card=card,
     )
     assert cast(object, tokenizer.tool_parser) is None
+
+
+def _mistral_tool_parser() -> Callable[[str], list[dict[str, object]]]:
+    module_dict = cast(dict[str, object], utils_mlx_module.__dict__)
+    return cast(
+        Callable[[str], list[dict[str, object]]],
+        module_dict["_parse_mistral_tool_calls"],
+    )
+
+
+def test_mistral_template_wires_the_tool_calls_dialect(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A [TOOL_CALLS] template gets the Mistral whole-block parser.
+
+    Mistral writes the call as `[TOOL_CALLS] [{...}]` and ends the message
+    rather than closing a marker, so the wiring uses the family EOS literal as
+    the end marker (never present in detokenized text) and relies on the
+    streaming parser's end-of-generation close, the same mechanism as Llama's
+    unmarked dialect.
+    """
+    card = ModelCard(
+        model_id=ModelId("mlx-community/Ministral-8B-Instruct-2410-4bit"),
+        storage_size=Memory.from_mb(100),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        capabilities=["text"],
+        family="mistral",
+        tooling=ToolingCardConfig(tool_call_format=ToolCallFormat.Generic),
+    )
+
+    def _fake_load_tokenizer(*_args: object, **_kwargs: object) -> TokenizerWrapper:
+        backend = _TokenizerBackend()
+        backend.chat_template = (  # pyright: ignore[reportAttributeAccessIssue]
+            "{% if tools %}[AVAILABLE_TOOLS]{{ tools }}[/AVAILABLE_TOOLS]"
+            "{% endif %}[TOOL_CALLS]"
+        )
+        return TokenizerWrapper(backend)
+
+    monkeypatch.setattr(
+        "skulk.worker.engines.mlx.utils_mlx.load_tokenizer",
+        _fake_load_tokenizer,
+    )
+
+    tokenizer = load_tokenizer_for_model_id(
+        card.model_id,
+        tmp_path,
+        model_card=card,
+    )
+    assert tokenizer.tool_call_start == "[TOOL_CALLS]"
+    assert tokenizer.tool_call_end == "</s>"
+    assert cast(object, tokenizer.tool_parser) is _mistral_tool_parser()
+
+
+def test_mistral_parser_reads_a_tool_calls_array() -> None:
+    """The callable digests the marker-stripped block via the shared parser."""
+    parser = _mistral_tool_parser()
+    calls = parser(' [{"name": "get_weather", "arguments": {"location": "Denver"}}]')
+    assert [call["name"] for call in calls] == ["get_weather"]
+    with pytest.raises(ValueError):
+        parser(" this is not a call ")
