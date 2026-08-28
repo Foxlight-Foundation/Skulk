@@ -53,6 +53,7 @@ SCAFFOLDING_MARKERS: Final[tuple[str, ...]] = (
     "<｜tool▁calls▁end｜>",
     "<｜tool▁call▁begin｜>",
     "<｜tool▁call▁end｜>",
+    "<｜tool▁sep｜>",
     # DeepSeek V3.2 DSML scaffolding (`dsml_encoding.py`). The containers and
     # closing tags are fixed strings; the invoke/parameter OPENING tags carry
     # attributes (`<｜DSML｜invoke name="...">`), which a fixed-string marker
