@@ -19,7 +19,14 @@ This project records release notes here and mirrors public-facing notes in
   (`mlx-community/Ministral-8B-Instruct-2410-4bit`) makes the dialect
   live-testable on a 24GB node.
 
-### Fixed
+- The no-tools marker protection now covers every engine. The scan below was
+  in-process MLX only: the served engines' servers never parse without tools
+  in the request, and the llama.cpp recovery branch is likewise skipped, so a
+  model that wrote a call anyway leaked its dialect markers to the caller as
+  content (observed live with a gemma card and `tool_choice: "none"`). The
+  `llama_server`, `vllm`, and `llama_cpp` runners now stream no-tools content
+  through a shared scaffolding scrub that removes the cross-dialect marker
+  vocabulary, holding partial markers across chunk boundaries.
 
 - A request offering no tools still has its markers stripped. Skipping the scan
   entirely when none were offered, which is what keeps `tool_choice: "none"`

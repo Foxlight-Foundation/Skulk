@@ -23,6 +23,13 @@ call. Sending `"none"` now guarantees no call, and naming a single function
 guarantees the model cannot call a different one.
 
 
+A request that offers no tools can no longer receive tool-call control markup
+as answer text, whichever engine serves the model. Models sometimes write a
+call nobody asked for; on the engines whose tool parsing only runs when tools
+are in the request, that markup previously passed straight through to the
+caller. The markers are now removed from the answer on every engine.
+
+
 Tool calls are now recognized when a model's opening marker arrives split
 across several streamed pieces, which is the normal case rather than the
 exception, and when the model writes a sentence before calling ("I'll check

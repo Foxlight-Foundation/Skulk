@@ -64,6 +64,9 @@ from skulk.worker.runner.generation_stats import (
     resolve_stream_token_counts,
 )
 from skulk.worker.runner.llm_inference.harmony_text_parser import HarmonyTextParser
+from skulk.worker.runner.llm_inference.scaffolding_scrub import (
+    StreamingScaffoldingScrub,
+)
 from skulk.worker.runner.llm_inference.think_text_parser import ThinkTextParser
 from skulk.worker.runner.llm_inference.tool_parsers import declared_tool_calls
 from skulk.worker.runner.llm_inference.tool_text_parser import (
@@ -1039,6 +1042,17 @@ class Runner(ServedConcurrentDispatch):
                 )
 
             emitted_finish = False
+            # With no tools offered neither llama.cpp's native handler nor the
+            # text-recovery branch runs, so a model writing a call anyway would
+            # leak its dialect markers as content (#889); scrub them, the same
+            # invariant the MLX path enforces with emit_calls=False. Logprobs
+            # requests are exempt: rewriting a token chunk's text would detach
+            # it from the per-token logprob it carries.
+            scrub = (
+                StreamingScaffoldingScrub()
+                if not task.task_params.tools and not want_logprobs
+                else None
+            )
             for chunk in stream:
                 if self._is_cancelled(task.task_id):
                     logger.info(f"llama.cpp generation cancelled: {task.task_id}")
@@ -1057,17 +1071,29 @@ class Runner(ServedConcurrentDispatch):
 
                 if reasoning_parser is not None:
                     for clean_text, is_thinking in reasoning_parser.feed(text):
+                        if not is_thinking and scrub is not None:
+                            clean_text = scrub.feed(clean_text)
+                            if not clean_text:
+                                continue
                         self._send_token_chunk(
                             command_id, model_id, clean_text, is_thinking=is_thinking
                         )
                     if finish is not None:
                         for clean_text, is_thinking in reasoning_parser.flush():
+                            if not is_thinking and scrub is not None:
+                                clean_text = scrub.feed(clean_text)
+                                if not clean_text:
+                                    continue
                             self._send_token_chunk(
                                 command_id,
                                 model_id,
                                 clean_text,
                                 is_thinking=is_thinking,
                             )
+                        if scrub is not None:
+                            tail = scrub.flush()
+                            if tail:
+                                self._send_token_chunk(command_id, model_id, tail)
                         emitted_finish = True
                         self._send_token_chunk(
                             command_id,
@@ -1078,6 +1104,10 @@ class Runner(ServedConcurrentDispatch):
                         )
                     continue
 
+                if scrub is not None:
+                    text = scrub.feed(text)
+                    if finish is not None:
+                        text += scrub.flush()
                 if not text and finish is None and logprob is None:
                     continue
                 emitted_finish = emitted_finish or finish is not None
@@ -1104,9 +1134,17 @@ class Runner(ServedConcurrentDispatch):
                 # so a stream that ends without a finish_reason doesn't truncate.
                 if reasoning_parser is not None:
                     for clean_text, is_thinking in reasoning_parser.flush():
+                        if not is_thinking and scrub is not None:
+                            clean_text = scrub.feed(clean_text)
+                            if not clean_text:
+                                continue
                         self._send_token_chunk(
                             command_id, model_id, clean_text, is_thinking=is_thinking
                         )
+                if scrub is not None:
+                    tail = scrub.flush()
+                    if tail:
+                        self._send_token_chunk(command_id, model_id, tail)
                 self.event_sender.send(
                     ChunkGenerated(
                         command_id=command_id,

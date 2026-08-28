@@ -92,6 +92,9 @@ from skulk.worker.runner.llama_cpp.runner import (
 from skulk.worker.runner.llama_server.channel_text_parser import (
     GemmaChannelTextParser,
 )
+from skulk.worker.runner.llm_inference.scaffolding_scrub import (
+    StreamingScaffoldingScrub,
+)
 from skulk.worker.runner.served_concurrency import ServedConcurrentDispatch
 
 
@@ -1282,6 +1285,16 @@ class Runner(ServedConcurrentDispatch):
         # Gemma 4 emits its reasoning as literal <|channel> markers in content;
         # reparse them here (llama-server can't) into reasoning/content chunks.
         parser = GemmaChannelTextParser() if self._uses_channel_parser else None
+        # With no tools offered the server's own tool parser never runs, so a
+        # model that writes a call anyway would leak its dialect markers to the
+        # caller as content (#889). Scrub them here, the same invariant the
+        # MLX path enforces in parse_tool_calls with emit_calls=False.
+        scrub = (
+            StreamingScaffoldingScrub() if not task.task_params.tools else None
+        )
+
+        def _content_pieces(text: str) -> str:
+            return scrub.feed(text) if scrub is not None else text
         # No read timeout: generation can pause between tokens on a busy GPU. The
         # connection is closed (aborting server generation) when we break out.
         timeout = httpx.Timeout(connect=15.0, read=None, write=30.0, pool=None)
@@ -1313,17 +1326,27 @@ class Runner(ServedConcurrentDispatch):
                 if delta.content:
                     if parser is not None:
                         for text, is_thinking in parser.feed(delta.content):
-                            self._send_token(
-                                command_id, model_id, text, is_thinking=is_thinking
-                            )
+                            emit = text if is_thinking else _content_pieces(text)
+                            if emit or is_thinking:
+                                self._send_token(
+                                    command_id, model_id, emit, is_thinking=is_thinking
+                                )
                     else:
-                        self._send_token(command_id, model_id, delta.content)
+                        emit = _content_pieces(delta.content)
+                        if emit:
+                            self._send_token(command_id, model_id, emit)
                 if delta.finish is not None:
                     if parser is not None:
                         for text, is_thinking in parser.flush():
-                            self._send_token(
-                                command_id, model_id, text, is_thinking=is_thinking
-                            )
+                            emit = text if is_thinking else _content_pieces(text)
+                            if emit or is_thinking:
+                                self._send_token(
+                                    command_id, model_id, emit, is_thinking=is_thinking
+                                )
+                    if scrub is not None:
+                        tail = scrub.flush()
+                        if tail:
+                            self._send_token(command_id, model_id, tail)
                     self._send_token(
                         command_id,
                         model_id,
@@ -1337,9 +1360,15 @@ class Runner(ServedConcurrentDispatch):
         if not emitted_finish and not self._is_cancelled(task.task_id):
             if parser is not None:
                 for text, is_thinking in parser.flush():
-                    self._send_token(
-                        command_id, model_id, text, is_thinking=is_thinking
-                    )
+                    emit = text if is_thinking else _content_pieces(text)
+                    if emit or is_thinking:
+                        self._send_token(
+                            command_id, model_id, emit, is_thinking=is_thinking
+                        )
+            if scrub is not None:
+                tail = scrub.flush()
+                if tail:
+                    self._send_token(command_id, model_id, tail)
             self._send_token(
                 command_id, model_id, "", finish_reason="stop", stats=final_stats()
             )
