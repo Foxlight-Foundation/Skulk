@@ -110,8 +110,10 @@ This project records release notes here and mirrors public-facing notes in
   call. Llama answers some plain questions with a call to `print`, and gpt-oss
   has `python` and `browser`; a caller has no implementation for those names,
   so a response naming no offered tool is now returned as ordinary content. A
-  request that declares no tools is not parsed for calls at all, so a model
-  writing something call-shaped, which is what a request asking for JSON output
+  request that declares no tools may never receive `tool_calls`: the response
+  is still scanned so a recognized block's dialect markers are stripped rather
+  than delivered, but nothing comes back as a call, so a model writing
+  something call-shaped, which is what a request asking for JSON output
   invites, cannot return `tool_calls` to a caller who offered none. Relatedly, text that opens
   like a call but does not parse as one, which is what a model answering in
   JSON looks like when tools are also offered, is returned as content instead
