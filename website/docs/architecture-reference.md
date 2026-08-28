@@ -879,7 +879,15 @@ recognized block is still converted to content with its markers stripped.
 That is what makes `tool_choice: "none"` hold on the in-process engines, at
 the cost that a no-tools response opening a block is buffered until the block
 resolves. The llama.cpp runner does skip its recovery branch with no tools
-offered, since its native handler only produces calls when tools are passed.
+offered, since its native handler only produces calls when tools are passed;
+what covers that engine, and the served engines whose server-side parsers
+also never run without tools, is `scaffolding_scrub.py`: on a no-tools
+request the `llama_cpp`, `llama_server`, and `vllm` runners stream content
+through `StreamingScaffoldingScrub`, which strips the cross-dialect marker
+vocabulary while holding back partial markers across chunk boundaries, so a
+model writing a call anyway cannot leak control markup to the caller.
+Logprobs requests on `llama_cpp` are exempt, because rewriting a token
+chunk's text would detach it from its per-token logprob.
 `declared_tool_calls` itself treats a `None` tools list as "no list to
 check against" rather than "nothing may be called", because the steward parses
 its own turns through the same dialects without passing one; whether a

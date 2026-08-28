@@ -108,6 +108,9 @@ from skulk.worker.runner.llama_cpp.runner import (
     tool_calls_from_message,
     wants_logprobs,
 )
+from skulk.worker.runner.llm_inference.scaffolding_scrub import (
+    StreamingScaffoldingScrub,
+)
 from skulk.worker.runner.served_concurrency import ServedConcurrentDispatch
 from skulk.worker.runner.vllm.orphan_sweep import sweep_orphaned_vllm_engines
 
@@ -1038,6 +1041,12 @@ class Runner(ServedConcurrentDispatch):
             return self.stamp_runner_stats(base, admission_in_flight)
 
         finish_reason: Literal["stop", "length", "content_filter"] | None = None
+        # With no tools offered the server's tool parser never runs, so a model
+        # writing a call anyway would leak dialect markers as content (#889).
+        # Same invariant the MLX path enforces with emit_calls=False.
+        scrub = (
+            StreamingScaffoldingScrub() if not task.task_params.tools else None
+        )
         # No read timeout: generation can pause between tokens on a busy GPU. The
         # connection is closed (aborting server generation) when we break out.
         timeout = httpx.Timeout(connect=15.0, read=None, write=30.0, pool=None)
@@ -1067,7 +1076,13 @@ class Runner(ServedConcurrentDispatch):
                         command_id, model_id, delta.reasoning, is_thinking=True
                     )
                 if delta.content:
-                    self._send_token(command_id, model_id, delta.content)
+                    emit = (
+                        scrub.feed(delta.content)
+                        if scrub is not None
+                        else delta.content
+                    )
+                    if emit:
+                        self._send_token(command_id, model_id, emit)
                 if delta.finish is not None:
                     # The terminal chunk is deferred past the loop: the
                     # include_usage counts arrive AFTER the finish_reason
@@ -1077,6 +1092,10 @@ class Runner(ServedConcurrentDispatch):
         # fully drained, whether or not the server sent an explicit
         # finish_reason.
         if not self._is_cancelled(task.task_id):
+            if scrub is not None:
+                tail = scrub.flush()
+                if tail:
+                    self._send_token(command_id, model_id, tail)
             self._send_token(
                 command_id,
                 model_id,
