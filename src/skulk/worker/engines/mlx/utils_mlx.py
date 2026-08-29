@@ -1453,6 +1453,38 @@ def load_tokenizer_for_model_id(
     return tokenizer
 
 
+def _mistral_tool_call_id(raw: str) -> str:
+    """Map any tool-call id onto Mistral's required nine-alphanumeric form.
+
+    Mistral's chat template hard-fails rendering ("Tool call IDs should be
+    alphanumeric strings with length 9!") on any other shape, and Skulk mints
+    UUID-style ids, so a tool-result round trip could never render: the
+    template raised and killed the runner, observed live at the first
+    round-trip request. The mapping is deterministic, so the id on the
+    assistant's recorded call and the tool result that echoes it land on the
+    same value within a request.
+    """
+    cleaned = "".join(ch for ch in raw if ch.isalnum())
+    return cleaned[:9].ljust(9, "0")
+
+
+def _normalize_mistral_tool_call_ids(messages: list[dict[str, Any]]) -> None:
+    """Rewrite tool-call ids in history messages for a Mistral template."""
+    for msg in messages:
+        tool_calls = msg.get("tool_calls")
+        if isinstance(tool_calls, list):
+            for tool_call in tool_calls:  # pyright: ignore[reportUnknownVariableType]
+                if isinstance(tool_call, dict) and isinstance(
+                    tool_call.get("id"), str  # pyright: ignore[reportUnknownMemberType]
+                ):
+                    tool_call["id"] = _mistral_tool_call_id(
+                        cast("str", tool_call["id"])
+                    )
+        tool_call_id = msg.get("tool_call_id")
+        if isinstance(tool_call_id, str):
+            msg["tool_call_id"] = _mistral_tool_call_id(tool_call_id)
+
+
 def _normalize_tool_calls(msg_dict: dict[str, Any]) -> None:
     """Normalize tool_calls in a message dict.
 
@@ -1626,6 +1658,9 @@ def apply_chat_template(
 
     for msg in formatted_messages:
         _normalize_tool_calls(msg)
+
+    if "[TOOL_CALLS]" in (getattr(tokenizer, "chat_template", None) or ""):
+        _normalize_mistral_tool_call_ids(formatted_messages)
 
     extra_kwargs: dict[str, Any] = {}
     if task_params.enable_thinking is not None:

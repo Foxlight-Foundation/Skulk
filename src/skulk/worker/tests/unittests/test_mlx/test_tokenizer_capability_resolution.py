@@ -380,3 +380,36 @@ def test_mistral_parser_reads_a_tool_calls_array() -> None:
     assert [call["name"] for call in calls] == ["get_weather"]
     with pytest.raises(ValueError):
         parser(" this is not a call ")
+
+
+def test_mistral_tool_call_id_normalization() -> None:
+    """UUID-style ids map deterministically onto nine alphanumerics.
+
+    Mistral's template raises on any other shape, which killed the runner at
+    the first tool-result round trip; both the assistant's recorded call and
+    the echoing tool message must map to the same value.
+    """
+    module_dict = cast(dict[str, object], utils_mlx_module.__dict__)
+    to_id = cast(
+        Callable[[str], str],
+        module_dict["_mistral_tool_call_id"],
+    )
+    normalize = cast(
+        Callable[[list[dict[str, object]]], None],
+        module_dict["_normalize_mistral_tool_call_ids"],
+    )
+
+    raw = "99cf7e1d-3708-4063-a647-e27843a8b15f"
+    mapped = to_id(raw)
+    assert len(mapped) == 9 and mapped.isalnum()
+    assert to_id(raw) == mapped
+    assert to_id("ab") == "ab0000000"
+
+    messages: list[dict[str, object]] = [
+        {"role": "assistant", "tool_calls": [{"id": raw, "function": {}}]},
+        {"role": "tool", "tool_call_id": raw, "content": "68F"},
+    ]
+    normalize(messages)
+    calls = cast(list[dict[str, object]], messages[0]["tool_calls"])
+    assert calls[0]["id"] == mapped
+    assert messages[1]["tool_call_id"] == mapped
