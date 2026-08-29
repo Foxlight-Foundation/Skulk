@@ -812,7 +812,8 @@ it will call it whatever the request said. Naming a single function narrows the
 offered tools to that one, so the model cannot call a different tool than you
 asked for. A name matching none of your tools rejects the request with a
 `400`, on every engine, because your forced choice cannot be honored and any
-answer would be a guess at what you meant.
+answer would be a guess at what you meant; forcing a name while offering no
+tools at all is rejected the same way.
 `"auto"` and `"required"` pass through, and
 `"required"` is a best-effort instruction on the in-process engines rather than
 a guarantee, because forcing a call there would need constrained decoding.

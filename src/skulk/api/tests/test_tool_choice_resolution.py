@@ -80,6 +80,16 @@ class TestNamedFunction:
         assert names(tools) == ["get_weather", "get_time"]
         assert choice == {"type": "function"}
 
+    def test_a_named_object_without_the_type_field_passes_through(self) -> None:
+        # Only the well-formed OpenAI shape forces a name; a dict that skips
+        # the "type" discriminator is left for the engine to interpret rather
+        # than narrowed or rejected here.
+        tools, choice = resolve_tool_choice(
+            BOTH, {"function": {"name": "get_time"}}
+        )
+        assert names(tools) == ["get_weather", "get_time"]
+        assert choice == {"function": {"name": "get_time"}}
+
 
 class TestPassThrough:
     def test_auto_is_untouched(self) -> None:

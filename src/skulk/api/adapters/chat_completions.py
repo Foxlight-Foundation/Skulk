@@ -117,6 +117,8 @@ def _forced_function_name(
 
     if not isinstance(tool_choice, dict):
         return None
+    if tool_choice.get("type") != "function":
+        return None
     function = tool_choice.get("function")
     if not isinstance(function, dict):
         return None
