@@ -36,6 +36,7 @@ from skulk.worker.runner.bootstrap import logger
 from skulk.worker.runner.llm_inference.tool_parsers import (
     ToolParser,
     declared_tool_calls,
+    find_close_marker,
 )
 
 _GEMMA4_THINK_START = "<|channel>thought\n"
@@ -787,14 +788,19 @@ def _block_as_content(text: str, tool_parser: ToolParser) -> str:
 
 def _block_start_index(
     text: str, tool_parser: ToolParser, *, at_message_start: bool
-) -> int | None:
-    """Index in ``text`` where a tool-call block begins, or ``None``.
+) -> tuple[int, bool] | None:
+    """Where a tool-call block begins in ``text``, or ``None``.
 
     Distinctive markers open a block wherever they appear, because models
     routinely write a sentence before calling ("I'll check that." then the
     call). The unmarked dialect's opening marker is ``{``, which appears in
     ordinary prose and JSON answers, so it opens a block only at the start of
     the message, which is the only place the families using it write a call.
+
+    Returns the index plus whether the anchored primary marker is what opens
+    there: that opening is provisional (the tentative classification in
+    :func:`parse_tool_calls` decides whether it is a call or a JSON answer),
+    while a distinctive marker commits the block immediately.
     """
 
     earliest: int | None = None
@@ -803,6 +809,7 @@ def _block_start_index(
         if found != -1 and (earliest is None or found < earliest):
             earliest = found
 
+    anchored_open = False
     if not tool_parser.anchored:
         found = text.find(tool_parser.start_parsing)
         if found != -1 and (earliest is None or found < earliest):
@@ -813,7 +820,154 @@ def _block_start_index(
             found = len(text) - len(stripped)
             if earliest is None or found < earliest:
                 earliest = found
-    return earliest
+                anchored_open = True
+    if earliest is None:
+        return None
+    return earliest, anchored_open
+
+
+_ANCHORED_CALL_KEYS = frozenset({"name", "arguments", "parameters"})
+# Keys some Llama variants add around the call signature without changing
+# what the object is; they neither make the object a call nor rule it out.
+_ANCHORED_NEUTRAL_KEYS = frozenset({"type", "id"})
+
+
+def _skip_json_value(text: str, index: int) -> int | None:
+    """Position just past the JSON value starting at ``index``, or ``None``.
+
+    ``None`` means the value is still incomplete in the buffered prefix. A
+    scalar running to the end of the buffer is also incomplete, because more
+    of it may still arrive.
+    """
+
+    length = len(text)
+    char = text[index]
+    if char == '"':
+        escaped = False
+        for position in range(index + 1, length):
+            current = text[position]
+            if escaped:
+                escaped = False
+            elif current == "\\":
+                escaped = True
+            elif current == '"':
+                return position + 1
+        return None
+    if char in "{[":
+        depth = 0
+        in_string = False
+        escaped = False
+        for position in range(index, length):
+            current = text[position]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif current == "\\":
+                    escaped = True
+                elif current == '"':
+                    in_string = False
+                continue
+            if current == '"':
+                in_string = True
+            elif current in "{[":
+                depth += 1
+            elif current in "}]":
+                depth -= 1
+                if depth == 0:
+                    return position + 1
+        return None
+    for position in range(index, length):
+        if text[position] in ",}]" or text[position].isspace():
+            return position
+    return None
+
+
+def _classify_anchored_prefix(text: str) -> str:
+    """Decide whether a message-opening ``{`` prefix is a call or an answer.
+
+    Returns ``"call"``, ``"content"``, or ``"undecided"``. The unmarked
+    dialect's block opens on ``{``, which a model asked for JSON also emits,
+    and its closing token is a generation stop that never arrives as text, so
+    without this the whole message was held until the terminal chunk and a
+    plain JSON answer lost incremental streaming entirely. The prefix is a
+    call once a top-level ``"name"`` string and an ``"arguments"`` or
+    ``"parameters"`` value are both distinguishable, and content the moment
+    it can no longer be one: a top-level key outside the call shape, a
+    non-string name, an argument value that is neither an object nor the
+    string-encoded form the OpenAI wire shape allows, malformed JSON, or
+    the object closing without the signature. The hold is therefore bounded
+    by the first decisive key rather than by the message.
+    """
+
+    length = len(text)
+    index = 0
+    while index < length and text[index].isspace():
+        index += 1
+    if index >= length:
+        return "undecided"
+    if text[index] != "{":
+        return "content"
+    index += 1
+    has_name = False
+    has_args = False
+    while True:
+        while index < length and text[index].isspace():
+            index += 1
+        if index >= length:
+            return "undecided"
+        char = text[index]
+        if char == "}":
+            return "call" if has_name and has_args else "content"
+        if char != '"':
+            return "content"
+        key_end = _skip_json_value(text, index)
+        if key_end is None:
+            return "undecided"
+        key = text[index + 1 : key_end - 1]
+        if (
+            key not in _ANCHORED_CALL_KEYS
+            and key not in _ANCHORED_NEUTRAL_KEYS
+        ):
+            return "content"
+        index = key_end
+        while index < length and text[index].isspace():
+            index += 1
+        if index >= length:
+            return "undecided"
+        if text[index] != ":":
+            return "content"
+        index += 1
+        while index < length and text[index].isspace():
+            index += 1
+        if index >= length:
+            return "undecided"
+        value_start = text[index]
+        if key == "name":
+            if value_start != '"':
+                return "content"
+            has_name = True
+        elif key in _ANCHORED_CALL_KEYS:
+            # Arguments must be an object, or the JSON-encoded string form
+            # the OpenAI wire shape allows; anything else is not a call.
+            if value_start not in '{"':
+                return "content"
+            has_args = True
+        if has_name and has_args:
+            return "call"
+        value_end = _skip_json_value(text, index)
+        if value_end is None:
+            return "undecided"
+        index = value_end
+        while index < length and text[index].isspace():
+            index += 1
+        if index >= length:
+            return "undecided"
+        if text[index] == ",":
+            index += 1
+            continue
+        if text[index] == "}":
+            return "call" if has_name and has_args else "content"
+        return "content"
 
 
 def _partial_marker_suffix_length(text: str, markers: tuple[str, ...]) -> int:
@@ -861,11 +1015,14 @@ def _scan_remaining_blocks(
     leftover: list[str] = []
     remaining = text
     while remaining:
-        start = _block_start_index(remaining, tool_parser, at_message_start=False)
-        if start is None:
+        found = _block_start_index(remaining, tool_parser, at_message_start=False)
+        if found is None:
             leftover.append(remaining)
             break
-        end = remaining.find(tool_parser.end_parsing, start)
+        start, _ = found
+        end = find_close_marker(
+            remaining, tool_parser.end_parsing, tool_parser.close_scan, start=start
+        )
         if end == -1:
             leftover.append(remaining)
             break
@@ -927,6 +1084,78 @@ def parse_tool_calls(
     # message that turns out not to contain a call.
     held_text = ""
     at_message_start = True
+    # An anchored open (the unmarked dialect's message-opening "{") is
+    # provisional: the block is held only until the buffered prefix is
+    # distinguishably a call or distinguishably not one, so a plain JSON
+    # answer streams incrementally instead of losing all output to a hold
+    # that could only resolve at the terminal chunk.
+    tentative = False
+
+    def _scan_outside_block(
+        scanned: str, response: GenerationResponse
+    ) -> Generator[ParserChunk]:
+        """Scan text while no block is open; may open one (possibly tentative).
+
+        Also the re-entry point for a tentative block that turned out to be
+        content: the released text goes back through this same scan, so a
+        distinctive marker later in it still opens a real block and the rest
+        streams out under the usual partial-marker holding.
+        """
+
+        nonlocal in_tool_call, tentative, held_text, at_message_start
+        nonlocal accumulated_calls
+        found = _block_start_index(
+            scanned, tool_parser, at_message_start=at_message_start
+        )
+        if found is not None:
+            start, anchored_open = found
+            preamble = scanned[:start]
+            if preamble:
+                yield response.model_copy(
+                    update={
+                        "text": preamble,
+                        "token": 0,
+                        "finish_reason": None,
+                    }
+                )
+            in_tool_call = True
+            tentative = anchored_open
+            held_text = ""
+            at_message_start = False
+            tool_call_text_parts.append(scanned[start:])
+            return
+        keep = _partial_marker_suffix_length(scanned, tool_parser.start_markers)
+        if response.finish_reason is not None:
+            # Nothing more is coming, so a partial marker is just text.
+            keep = 0
+        emitted = scanned[: len(scanned) - keep]
+        held_text = scanned[len(scanned) - keep :]
+        if emitted.strip():
+            at_message_start = False
+        if response.finish_reason is not None and accumulated_calls:
+            # A call was found earlier in this message and the tool
+            # response has to be the terminal chunk, so this trailing
+            # text is released without the finish reason.
+            if emitted:
+                yield response.model_copy(
+                    update={
+                        "text": emitted,
+                        "token": 0,
+                        "finish_reason": None,
+                    }
+                )
+            yield ToolCallResponse(
+                tool_calls=accumulated_calls,
+                usage=response.usage,
+                stats=response.stats,
+            )
+            accumulated_calls = []
+            return
+        if emitted == response.text and not held_text:
+            yield response
+        elif emitted or response.finish_reason is not None:
+            yield response.model_copy(update={"text": emitted, "token": 0})
+
     def _finish_message(
         response: GenerationResponse,
     ) -> Generator[ParserChunk]:
@@ -1025,76 +1254,48 @@ def parse_tool_calls(
             continue
 
         last_response = response
-        just_opened = False
-        if not in_tool_call:
-            scanned = held_text + response.text
-            start = _block_start_index(
-                scanned, tool_parser, at_message_start=at_message_start
-            )
-            if start is not None:
-                preamble = scanned[:start]
-                if preamble:
-                    yield response.model_copy(
-                        update={
-                            "text": preamble,
-                            "token": 0,
-                            "finish_reason": None,
-                        }
-                    )
-                in_tool_call = True
-                just_opened = True
-                held_text = ""
-                at_message_start = False
-                tool_call_text_parts.append(scanned[start:])
-            else:
-                keep = _partial_marker_suffix_length(
-                    scanned, tool_parser.start_markers
-                )
-                if response.finish_reason is not None:
-                    # Nothing more is coming, so a partial marker is just text.
-                    keep = 0
-                emitted = scanned[: len(scanned) - keep]
-                held_text = scanned[len(scanned) - keep :]
-                if emitted.strip():
-                    at_message_start = False
-                if response.finish_reason is not None and accumulated_calls:
-                    # A call was found earlier in this message and the tool
-                    # response has to be the terminal chunk, so this trailing
-                    # text is released without the finish reason.
-                    if emitted:
-                        yield response.model_copy(
-                            update={
-                                "text": emitted,
-                                "token": 0,
-                                "finish_reason": None,
-                            }
-                        )
-                    yield ToolCallResponse(
-                        tool_calls=accumulated_calls,
-                        usage=response.usage,
-                        stats=response.stats,
-                    )
-                    accumulated_calls = []
-                    continue
-                if emitted == response.text and not held_text:
-                    yield response
-                elif emitted or response.finish_reason is not None:
-                    yield response.model_copy(
-                        update={"text": emitted, "token": 0}
-                    )
-                continue
-
-        if not just_opened:
+        if in_tool_call:
             tool_call_text_parts.append(response.text)
+        else:
+            yield from _scan_outside_block(held_text + response.text, response)
+            if not in_tool_call:
+                continue
+        if tentative:
+            verdict = _classify_anchored_prefix("".join(tool_call_text_parts))
+            if verdict == "call":
+                tentative = False
+            elif verdict == "content":
+                released = "".join(tool_call_text_parts)
+                tentative = False
+                in_tool_call = False
+                tool_call_text_parts = []
+                yield from _scan_outside_block(released, response)
+                if not in_tool_call:
+                    continue
+                # A distinctive marker inside the released text opened a
+                # real block; it cannot be tentative again (the anchored
+                # marker only opens at message start), so fall through to
+                # the closing scan.
+            elif response.finish_reason is None:
+                # Still consistent with both readings: keep holding. The
+                # hold is bounded by the first decisive key, not by the
+                # message.
+                continue
+            # Undecided on the terminal chunk falls through: the
+            # end-of-generation parse decides what the block was, exactly
+            # as it did before the tentative open existed.
         # The closing marker splits across chunks for the same reason the
         # opening one does, so it is located in the accumulated block rather
         # than tested against one chunk. Locating rather than matching the end
         # also matters because a model may keep writing after the call ("...
         # </tool_call> Done."): everything past the marker is ordinary text and
         # goes back to the opening scan, where a second call in the same
-        # message is still found.
+        # message is still found. The quote-aware modes keep a closing marker
+        # inside a quoted argument value from truncating the block.
         block_so_far = "".join(tool_call_text_parts)
-        end_index = block_so_far.find(tool_parser.end_parsing)
+        end_index = find_close_marker(
+            block_so_far, tool_parser.end_parsing, tool_parser.close_scan
+        )
         if end_index != -1:
             end_of_block = end_index + len(tool_parser.end_parsing)
             combined = block_so_far[:end_of_block]
@@ -1200,10 +1401,13 @@ def parse_tool_calls(
             # read as a call. A marker dialect's inner parser only strips the
             # closing marker if it is there, so a call cut off at max_tokens
             # would otherwise parse and be handed to the caller to execute.
-            parsed = (
-                None
+            # The split parse also reports visible text the model wrote after
+            # its call, which only the dialect itself can find here: there is
+            # no closing marker in the text to split at.
+            parsed, trailing_text = (
+                (None, "")
                 if response.finish_reason == "length"
-                else tool_parser.parse(combined.strip(), tools=tools)
+                else tool_parser.parse_split(combined.strip(), tools=tools)
             )
             if parsed is not None and (
                 not emit_calls or not declared_tool_calls(parsed, tools)
@@ -1223,6 +1427,11 @@ def parse_tool_calls(
                 break
             if parsed and emit_calls:
                 parsed = declared_tool_calls(parsed, tools)
+                # Trailing prose after the call rejoins the message-finishing
+                # scan, the same path text after a closing marker takes, so it
+                # reaches the caller as content and the tool response stays
+                # the terminal chunk.
+                held_text = trailing_text
                 logger.info(
                     "Parsed tool-call block closed by end of generation "
                     f"(generated_chars={len(combined)}, parsed_calls={len(parsed)})"
