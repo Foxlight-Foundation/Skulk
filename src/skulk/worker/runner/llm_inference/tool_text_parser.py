@@ -291,10 +291,41 @@ def _toolcall_block_calls(text: str) -> list[ToolCallItem]:
     return calls
 
 
-# A complete Gemma 4 marker-delimited block; the recovery dispatch parses
-# only these, while the MLX marker mechanism bounds blocks by tokenizer
-# markers before its family parser sees the text.
-_GEMMA_BLOCK_RE = re.compile(r"(?s)<\|tool_call>(.*?)<tool_call\|>")
+def _gemma_blocks(text: str) -> list[str]:
+    """Extract complete Gemma 4 marker-delimited blocks, quote-aware.
+
+    A quoted argument may contain the closing marker itself (a tool result or
+    user text echoed into a string), so a regex split would end the outer
+    block at the quoted closer and mint the quoted remainder as a separate
+    executable call. The scan therefore skips ``<|"|>`` spans while looking
+    for the closer, exactly as the argument-body scan does. A block without a
+    real closer is truncated generation and yields nothing. The recovery
+    dispatch parses only these blocks; the MLX marker mechanism bounds blocks
+    by tokenizer markers before its family parser sees the text.
+    """
+    blocks: list[str] = []
+    position = 0
+    while True:
+        opener = text.find("<|tool_call>", position)
+        if opener == -1:
+            return blocks
+        index = opener + len("<|tool_call>")
+        closer = -1
+        while index < len(text):
+            if text.startswith('<|"|>', index):
+                closing_quote = text.find('<|"|>', index + 5)
+                if closing_quote == -1:
+                    return blocks
+                index = closing_quote + 5
+                continue
+            if text.startswith("<tool_call|>", index):
+                closer = index
+                break
+            index += 1
+        if closer == -1:
+            return blocks
+        blocks.append(text[opener + len("<|tool_call>") : closer])
+        position = closer + len("<tool_call|>")
 
 
 def gemma4_calls(text: str) -> list[ToolCallItem]:
@@ -414,22 +445,25 @@ def parse_tool_calls_from_text(
     if not text:
         return None
     calls: list[ToolCallItem] = []
-    if "to=functions." in text:
-        calls = _harmony_tool_calls(text)
-    if not calls and "<|tool_call>" in text:
-        # Gemma's opener is the most specific marker present, and its
-        # dialect is EXCLUSIVE: a quoted Gemma argument may legitimately
-        # carry text shaped like another dialect's block (a tool result or
-        # user text echoed into a string), and letting the generic branch
-        # scan the same message would mint an executable call from that
-        # quoted content. Only COMPLETE marker-delimited blocks are parsed:
-        # prose that merely mentions the opener or a call:NAME{...} shape
-        # outside the markers is text, and a block truncated before its
-        # closer is not a call. Returning here, calls or none, is the guard.
+    gemma_blocks = _gemma_blocks(text) if "<|tool_call>" in text else []
+    if gemma_blocks:
+        # Gemma dispatch is FIRST and EXCLUSIVE when a complete block exists:
+        # a quoted Gemma argument may legitimately carry text shaped like any
+        # other dialect (harmony channels, a generic block, a bare call), and
+        # letting a later branch scan the same message would mint an
+        # executable call from quoted content. Prose that merely mentions the
+        # opener, and a block truncated before its closer, produce no blocks
+        # and fall through as text. The symmetric hijack (another dialect's
+        # quoted argument carrying a complete Gemma block) is accepted
+        # residual risk: it requires a fabricated two-marker pair inside a
+        # string, and choosing the more structured dialect first is the
+        # smaller attack surface.
         block_calls: list[ToolCallItem] = []
-        for block in _GEMMA_BLOCK_RE.findall(text):
+        for block in gemma_blocks:
             block_calls.extend(gemma4_calls(block))
         return _finish(block_calls, tools)
+    if "to=functions." in text:
+        calls = _harmony_tool_calls(text)
     if not calls and "<tool_call>" in text:
         calls = _toolcall_block_calls(text)
     if not calls and "<|python_tag|>" in text:
