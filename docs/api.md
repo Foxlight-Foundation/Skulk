@@ -55,6 +55,9 @@ If you want your first successful API call, use this flow:
 
 ### 1. Start Skulk
 
+Packaged users choose **Start Skulk** in the desktop app. From a source
+checkout, run:
+
 ```bash
 uv run skulk
 ```
