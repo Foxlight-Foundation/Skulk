@@ -194,7 +194,12 @@ dependency: nothing optional may be load-bearing.
 A model card's `placement.compatible_backends` selects which engine serves it
 (`bootstrap._resolve_text_engine`, backend tags in `src/skulk/shared/backends.py`):
 - **`mlx`** (`worker/engines/mlx/`): in-process MLX on Apple Silicon; owns the
-  generation loop, the multi-node ring, and MTP/speculative decoding. Single-node
+  generation loop, the multi-node ring, and MTP/speculative decoding. Tool-call
+  recovery wires per-dialect parsers onto the tokenizer by template truth
+  (generic `<tool_call>`, Llama's unmarked form, gemma4, and Mistral
+  `[TOOL_CALLS]`, which replaces mlx-lm's preinstalled family parser and falls
+  back to it for the upstream call form; ids are digest-normalized to
+  Mistral's nine-alphanumeric template requirement at render time). Single-node
   bundled vision models load through their native `mlx-vlm` family implementation
   so processor-specific image grids and multimodal positional encoding are
   preserved without routing supported native processors through PyTorch or

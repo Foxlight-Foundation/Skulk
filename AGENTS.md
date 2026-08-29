@@ -108,7 +108,12 @@ A single Skulk `Node` (src/skulk/main.py) runs multiple components:
 A model card's `placement.compatible_backends` selects which engine serves it
 (`bootstrap._resolve_text_engine`, backend tags in `src/skulk/shared/backends.py`):
 - **`mlx`**: in-process MLX on Apple Silicon; owns the generation loop,
-  multi-node ring, and MTP/speculative decoding.
+  multi-node ring, and MTP/speculative decoding. Tool-call recovery wires
+  per-dialect parsers onto the tokenizer by template truth (generic
+  `<tool_call>`, Llama's unmarked form, gemma4, and Mistral `[TOOL_CALLS]`,
+  which replaces mlx-lm's preinstalled family parser and falls back to it for
+  the upstream call form; ids are digest-normalized to Mistral's
+  nine-alphanumeric template requirement at render time).
 - **`mlx_audio`**: single-node speech backend vocabulary for upstream
   `mlx-audio` TTS/STT models. Skulk probes and advertises `mlx_audio` /
   `mlx_audio-metal` when `mlx_audio` imports on macOS. Mounted TTS models serve

@@ -622,9 +622,12 @@ section below.
 Model families do not agree on how a tool call is written, so the in-process
 engines read the call out of the generated text with a shared set of dialects.
 The llama.cpp runner uses that set for every call its own chat handlers did not
-already parse; the MLX engine reaches it through two of the parsers it wires
-onto a tokenizer, while a family parser the tokenizer supplies is used directly
-and gpt-oss and DeepSeek keep their own token-level parsers.
+already parse; the MLX engine reaches it through three of the parsers it wires
+onto a tokenizer (the generic marker dialect, the unmarked dialect, and the
+Mistral dialect, which deliberately replaces the tokenizer-supplied family
+parser and falls back to it for the upstream call form), while any other
+family parser the tokenizer supplies is used directly and gpt-oss and
+DeepSeek keep their own token-level parsers.
 Some families wrap the call in markers: a `<tool_call>` block carrying Hermes
 JSON, Qwen3 XML, or GLM `<arg_key>`/`<arg_value>` pairs, a harmony
 `to=functions.NAME` channel, or a Mistral `[TOOL_CALLS]` array. Llama uses no

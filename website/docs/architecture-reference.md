@@ -800,12 +800,16 @@ Inventory snapshot; see #130 for consolidation plan.
 the shared dialect reader. The `llama_cpp` runner calls it directly for every
 call its bundled chat handlers did not already parse. The `mlx` engine reaches
 it only through the parsers wired onto the tokenizer in `utils_mlx`: the
-generic `<tool_call>` dialect (`_parse_generic_text_tool_calls`) and the
-unmarked dialect (`make_text_dialect_parser`) delegate to it, while a family
-parser the tokenizer supplies itself is wrapped by `make_mlx_parser` and called
-directly, and gpt-oss and DeepSeek V3.2 bypass it entirely for their own
-token-level parsers (`parse_gpt_oss`, `parse_deepseek_v32`). Adding a dialect
-here therefore reaches llama.cpp and those two MLX paths, not every MLX model.
+generic `<tool_call>` dialect (`_parse_generic_text_tool_calls`), the Mistral
+dialect (`_parse_mistral_tool_calls`, wired when the chat template speaks
+`[TOOL_CALLS]`; the end marker is an impossible sentinel rather than the EOS
+literal, since `</s>` can occur inside generated arguments, so the block
+closes only at end of generation, the same way the unmarked dialect closes), and the unmarked dialect (`make_text_dialect_parser`)
+delegate to it, while a family parser the tokenizer supplies itself is wrapped
+by `make_mlx_parser` and called directly, and gpt-oss and DeepSeek V3.2 bypass
+it entirely for their own token-level parsers (`parse_gpt_oss`,
+`parse_deepseek_v32`). Adding a dialect here therefore reaches llama.cpp and
+those MLX paths, not every MLX model.
 Recognized dialects, tried in order: harmony `to=functions.NAME` channels
 (gpt-oss); `<tool_call>` blocks carrying Hermes JSON, Qwen3 XML, or GLM
 `<arg_key>`/`<arg_value>` pairs; Llama `<|python_tag|>` calls (which use

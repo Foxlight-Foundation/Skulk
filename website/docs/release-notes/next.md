@@ -183,3 +183,9 @@ Snapshot-only republication no longer rejects an otherwise identical signed
 card during master-ordered placement.
 The runner still verifies signed-card identity, immutable revisions, installed
 sidecars, and artifact manifests before executing repository code.
+
+Mistral-family models can now call tools on Apple Silicon. Their chat
+templates write calls as `[TOOL_CALLS]` arrays rather than `<tool_call>`
+blocks, which the engine previously did not recognize, so the call arrived as
+raw markup in the answer. A card for Ministral 8B is bundled so smaller
+machines can serve a tool-calling Mistral out of the box.

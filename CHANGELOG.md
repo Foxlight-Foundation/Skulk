@@ -9,6 +9,16 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- The Mistral tool-call dialect now works on the MLX engine. The shared text
+  parser has read `[TOOL_CALLS]` arrays since they were added, but no MLX
+  tokenizer wiring selected it: Mistral templates carry no `<tool_call>`
+  marker, so requests fell through every wiring branch and the model's calls
+  leaked as content. Templates speaking `[TOOL_CALLS]` now wire the Mistral
+  whole-block parser, closed at end of generation the way the unmarked
+  dialect closes. A bundled card for a small Mistral
+  (`mlx-community/Ministral-8B-Instruct-2410-4bit`) makes the dialect
+  live-testable on a 24GB node.
+
 - The Qwen3.6 FP8 cards now enable tool calling on the vLLM engine. Qwen3.6
   emits the XML function format, which vLLM's `qwen3_xml` parser reads; the
   parser name was validated live on an A100-class GPU with the full served

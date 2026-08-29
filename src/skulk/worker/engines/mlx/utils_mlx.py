@@ -1399,6 +1399,48 @@ def load_tokenizer_for_model_id(
         object.__setattr__(tokenizer, "_tool_call_end", "<tool_call|>")
         object.__setattr__(tokenizer, "_tool_parser", _parse_gemma4_tool_calls)
 
+    if capability_profile.tool_call_format == ToolCallFormat.Generic and (
+        "[TOOL_CALLS]" in (getattr(tokenizer, "chat_template", None) or "")
+    ):
+        # Mistral writes `[TOOL_CALLS] [{...}]` and closes the call by ending
+        # the message, not with a closing marker, so the end marker is an
+        # impossible sentinel that never appears in detokenized text, and the
+        # streaming parser's end-of-generation path parses the still-open
+        # block when the message finishes, the same mechanism that closes
+        # Llama's unmarked dialect.
+        #
+        # This wiring deliberately REPLACES a parser mlx-lm already assigned:
+        # the pinned mlx-lm auto-installs its own Mistral parser for any
+        # template containing [TOOL_CALLS], and that parser reads the
+        # `NAME[ARGS]{...}` form, rejecting the JSON-array form the 2410-era
+        # instruct models actually emit. The override tries the array form
+        # first and delegates to the displaced parser on a miss, so models
+        # writing the upstream form keep working.
+        displaced = cast(
+            "Callable[[str], list[dict[str, Any]]] | None",
+            getattr(tokenizer, "tool_parser", None),
+        )
+
+        def _mistral_with_fallback(text: str) -> list[dict[str, Any]]:
+            try:
+                return _parse_mistral_tool_calls(text)
+            except ValueError:
+                if displaced is None:
+                    raise
+                return displaced(text)
+
+        object.__setattr__(tokenizer, "_tool_call_start", "[TOOL_CALLS]")
+        # The end marker is an impossible sentinel, not the EOS literal: the
+        # streaming scanner closes a block at the FIRST occurrence of the end
+        # marker in accumulated text, and a model can emit a literal "</s>"
+        # inside arguments or prose, which would truncate a valid call. The
+        # sentinel can never occur in detokenized text, so the block closes
+        # only at end of generation.
+        object.__setattr__(
+            tokenizer, "_tool_call_end", _MISTRAL_IMPOSSIBLE_END
+        )
+        object.__setattr__(tokenizer, "_tool_parser", _mistral_with_fallback)
+
     if (
         capability_profile.tool_call_format == ToolCallFormat.Generic
         and not getattr(tokenizer, "tool_parser", None)
@@ -1417,6 +1459,45 @@ def load_tokenizer_for_model_id(
         object.__setattr__(tokenizer, "_tool_parser", _parse_generic_text_tool_calls)
 
     return tokenizer
+
+
+# Never occurs in detokenized text; see the wiring comment above.
+_MISTRAL_IMPOSSIBLE_END = "\x00skulk:mistral:end-of-message\x00"
+
+
+def _mistral_tool_call_id(raw: str) -> str:
+    """Map any tool-call id onto Mistral's required nine-alphanumeric form.
+
+    Mistral's chat template hard-fails rendering ("Tool call IDs should be
+    alphanumeric strings with length 9!") on any other shape, and Skulk mints
+    UUID-style ids, so a tool-result round trip could never render: the
+    template raised and killed the runner, observed live at the first
+    round-trip request. A digest rather than a truncation: ids differing only
+    past the ninth character (parallel calls with sequential caller-minted
+    ids) must not collide, and the mapping must be deterministic ACROSS
+    requests, because callers echo ids back in later turns, which rules out
+    request-local bijections.
+    """
+    import hashlib
+
+    return hashlib.sha256(raw.encode()).hexdigest()[:9]
+
+
+def _normalize_mistral_tool_call_ids(messages: list[dict[str, Any]]) -> None:
+    """Rewrite tool-call ids in history messages for a Mistral template."""
+    for msg in messages:
+        tool_calls = msg.get("tool_calls")
+        if isinstance(tool_calls, list):
+            for tool_call in tool_calls:  # pyright: ignore[reportUnknownVariableType]
+                if isinstance(tool_call, dict) and isinstance(
+                    tool_call.get("id"), str  # pyright: ignore[reportUnknownMemberType]
+                ):
+                    tool_call["id"] = _mistral_tool_call_id(
+                        cast("str", tool_call["id"])
+                    )
+        tool_call_id = msg.get("tool_call_id")
+        if isinstance(tool_call_id, str):
+            msg["tool_call_id"] = _mistral_tool_call_id(tool_call_id)
 
 
 def _normalize_tool_calls(msg_dict: dict[str, Any]) -> None:
@@ -1592,6 +1673,9 @@ def apply_chat_template(
 
     for msg in formatted_messages:
         _normalize_tool_calls(msg)
+
+    if "[TOOL_CALLS]" in (getattr(tokenizer, "chat_template", None) or ""):
+        _normalize_mistral_tool_call_ids(formatted_messages)
 
     extra_kwargs: dict[str, Any] = {}
     if task_params.enable_thinking is not None:
@@ -1851,6 +1935,28 @@ def _parse_generic_text_tool_calls(text: str) -> list[dict[str, Any]]:
         # Raising routes the runner to its malformed-tool-call fallback
         # (raw text with finish_reason="error"), matching the behavior of
         # every other parser instead of fabricating an empty success.
+        raise ValueError("no recognized tool calls in block")
+    return [{"name": item.name, "arguments": item.arguments} for item in items]
+
+
+def _parse_mistral_tool_calls(text: str) -> list[dict[str, Any]]:
+    """Parse Mistral ``[TOOL_CALLS]`` arrays from model output.
+
+    Receives the text after the ``[TOOL_CALLS]`` marker (the runner's marker
+    mechanism strips it) and delegates to the shared text parser's Mistral
+    branch, so the MLX lane recognizes exactly the format the llama_cpp
+    engine's recovery path does. Argument values arrive as JSON strings, the
+    shape ``ToolCallItem`` validation expects.
+    """
+    from skulk.worker.runner.llm_inference.tool_text_parser import (
+        parse_tool_calls_from_text,
+    )
+
+    items = parse_tool_calls_from_text(f"[TOOL_CALLS]{text}")
+    if not items:
+        # Raising routes the runner to its malformed-tool-call fallback (raw
+        # text with finish_reason="error"), matching every other parser
+        # instead of fabricating an empty success.
         raise ValueError("no recognized tool calls in block")
     return [{"name": item.name, "arguments": item.arguments} for item in items]
 
