@@ -9,6 +9,14 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- Gemma 4 models can now call tools on the in-process llama.cpp engine. The
+  engine's bundled chat handler does not parse Gemma 4's call format, and the
+  text-recovery path had no dialect for it, so well-formed calls streamed to
+  the caller as raw markup (observed live on the GGUF card with tools
+  offered). The shared text parser gains the dialect, backed by the same
+  implementation the MLX engine already used, so both engines read it
+  identically.
+
 - An enabled model store with a blank `store_host` or `store_path` is now
   refused loudly at config validation instead of running crippled. The blank
   shape matches no node, so no store server ever started while every client

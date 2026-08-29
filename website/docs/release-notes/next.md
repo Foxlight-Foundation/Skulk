@@ -195,3 +195,9 @@ A cluster configured with the model store enabled but no store host named now
 refuses to start with a message that says what to fix, and the dashboard
 refuses to save that shape. Previously such a cluster looked healthy while no
 node could download any model that was not already staged.
+
+
+Gemma 4 models now call tools on the in-process llama.cpp engine. Their call
+format was previously unreadable on that engine, so calls arrived as raw
+markup in the answer; the format is now recognized by the same parser the
+Apple Silicon engine uses.

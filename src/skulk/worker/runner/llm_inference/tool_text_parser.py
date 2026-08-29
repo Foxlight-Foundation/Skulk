@@ -29,6 +29,7 @@ import re
 from typing import Any, cast
 
 from skulk.api.types import ToolCallItem
+from skulk.worker.runner.bootstrap import logger
 from skulk.worker.runner.llm_inference.tool_parsers import (
     coerce_tool_calls_to_schema,
     declared_tool_calls,
@@ -290,6 +291,52 @@ def _toolcall_block_calls(text: str) -> list[ToolCallItem]:
     return calls
 
 
+def gemma4_calls(text: str) -> list[ToolCallItem]:
+    """Parse Gemma 4 ``call:NAME{...}`` blocks (the ``<|tool_call>`` dialect).
+
+    Gemma 4 emits ``call:FUNCTION{key1:value1,key2:<|"|>string<|"|>}`` where
+    ``<|"|>`` delimits string values; bare values keep their JSON type. Uses
+    the three-phase approach from ollama PR #15306: extract quoted strings
+    into placeholders, quote bare keys, then restore the strings through
+    ``json.dumps`` for correct escaping. Shared by the MLX family parser and
+    this module's text recovery, so both engines read the same dialect.
+    """
+    _call_re = re.compile(r"call:(\w+)\{(.*?)\}", re.DOTALL)
+    _gemma_quote_re = re.compile(r'(?s)<\|"\|>(.*?)<\|"\|>')
+    _bare_key_re = re.compile(r"([,{])(\w+):")
+
+    def _args_to_json(raw_args: str) -> str:
+        extracted: list[str] = []
+
+        def _replace_quoted(match: "re.Match[str]") -> str:
+            extracted.append(match.group(1))
+            return f"\x00{len(extracted) - 1}\x00"
+
+        skeleton = _gemma_quote_re.sub(_replace_quoted, raw_args)
+        skeleton = "{" + skeleton
+        skeleton = _bare_key_re.sub(r'\1"\2":', skeleton)
+        skeleton = skeleton[1:]
+        for index, value in enumerate(extracted):
+            skeleton = skeleton.replace(f"\x00{index}\x00", json.dumps(value))
+        return skeleton
+
+    calls: list[ToolCallItem] = []
+    for match in _call_re.finditer(text):
+        args_json = "{" + _args_to_json(match.group(2)) + "}"
+        try:
+            json.loads(args_json)
+        except json.JSONDecodeError:
+            logger.warning(
+                "Failed to parse Gemma 4 tool call arguments "
+                f"(argument_chars={len(args_json)})"
+            )
+            args_json = "{}"
+        calls.append(
+            ToolCallItem(name=match.group(1), arguments=args_json)
+        )
+    return calls
+
+
 def parse_tool_calls_from_text(
     text: str, tools: list[dict[str, Any]] | None = None
 ) -> list[ToolCallItem] | None:
@@ -304,6 +351,7 @@ def parse_tool_calls_from_text(
     - Llama ``<|python_tag|>`` calls, which use ``parameters`` rather than
       ``arguments`` and may chain several with ``;``
     - Mistral ``[TOOL_CALLS]`` arrays
+    - Gemma 4 ``<|tool_call>call:NAME{...}<tool_call|>`` blocks
     - an unmarked call object opening the message, which the model may keep
       writing after
 
@@ -321,6 +369,8 @@ def parse_tool_calls_from_text(
         calls = _harmony_tool_calls(text)
     if not calls and "<tool_call>" in text:
         calls = _toolcall_block_calls(text)
+    if not calls and "<|tool_call>" in text:
+        calls = gemma4_calls(text)
     if not calls and "<|python_tag|>" in text:
         calls = _python_tag_calls(text)
     if not calls and "[TOOL_CALLS]" in text:

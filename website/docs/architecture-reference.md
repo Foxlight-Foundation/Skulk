@@ -814,7 +814,10 @@ Recognized dialects, tried in order: harmony `to=functions.NAME` channels
 (gpt-oss); `<tool_call>` blocks carrying Hermes JSON, Qwen3 XML, or GLM
 `<arg_key>`/`<arg_value>` pairs; Llama `<|python_tag|>` calls (which use
 `parameters` rather than `arguments` and may chain several with `;`); Mistral
-`[TOOL_CALLS]` arrays; and an unmarked call object opening the message, which
+`[TOOL_CALLS]` arrays; Gemma 4 `<|tool_call>call:NAME{...}<tool_call|>` blocks
+(shared with the MLX family parser, so both engines read one implementation;
+added when llama.cpp's in-process chat handler proved unable to parse the
+format live); and an unmarked call object opening the message, which
 the model may keep writing after. The unmarked rule is deliberately narrow,
 since it is otherwise indistinguishable from a model answering in JSON: the
 message must begin with the object, the object must carry a `name` alongside an

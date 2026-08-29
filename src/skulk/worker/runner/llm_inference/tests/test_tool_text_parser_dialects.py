@@ -244,3 +244,41 @@ class TestUnmarkedCallFollowedByText:
             )
             is None
         )
+
+
+class TestGemma4Dialect:
+    """The `<|tool_call>` dialect in the shared text parser.
+
+    llama.cpp's in-process chat handler does not parse Gemma 4's call format
+    (observed live: well-formed calls streamed to the caller as raw markup
+    with tools offered), so the recovery path must read it. The shared
+    implementation also backs the MLX family parser.
+    """
+
+    def test_reads_the_live_leak_shape(self) -> None:
+        text = '<|tool_call>call:get_weather{location:<|"|>Denver, CO<|"|>}<tool_call|>'
+        calls = parse_tool_calls_from_text(text)
+        assert calls is not None
+        assert [(c.name, c.arguments) for c in calls] == [
+            ("get_weather", '{"location":"Denver, CO"}')
+        ]
+
+    def test_bare_values_keep_their_json_types(self) -> None:
+        text = "<|tool_call>call:set_limit{count:3,strict:true}<tool_call|>"
+        calls = parse_tool_calls_from_text(text)
+        assert calls is not None
+        import json
+
+        assert json.loads(calls[0].arguments) == {"count": 3, "strict": True}
+
+    def test_multiple_calls_parse_in_order(self) -> None:
+        text = (
+            '<|tool_call>call:a{x:<|"|>1<|"|>}<tool_call|> and '
+            '<|tool_call>call:b{y:<|"|>2<|"|>}<tool_call|>'
+        )
+        calls = parse_tool_calls_from_text(text)
+        assert calls is not None
+        assert [c.name for c in calls] == ["a", "b"]
+
+    def test_prose_with_marker_but_no_call_is_not_a_call(self) -> None:
+        assert parse_tool_calls_from_text("<|tool_call> nothing here <tool_call|>") is None
