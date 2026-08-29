@@ -812,13 +812,15 @@ by `make_mlx_parser` and called directly, and gpt-oss and DeepSeek V3.2 bypass
 it entirely for their own token-level parsers (`parse_gpt_oss`,
 `parse_deepseek_v32`). Adding a dialect here therefore reaches llama.cpp and
 those MLX paths, not every MLX model.
-Recognized dialects, tried in order: harmony `to=functions.NAME` channels
-(gpt-oss); Gemma 4 `<|tool_call>call:NAME{...}<tool_call|>` blocks, which are
-EXCLUSIVE when their opener is present (part of the cross-dialect injection
-guard: a quoted Gemma argument may carry another dialect's shape, so no later
-branch may scan the same message; only complete marker-delimited blocks
-parse, shared with the MLX family parser so both engines read one
-implementation); `<tool_call>` blocks carrying Hermes JSON, Qwen3 XML, or GLM
+The dialect is selected by the EARLIEST recognized marker in the text and
+parsed exclusively (the cross-dialect injection guard: a quoted argument may
+carry another dialect's shape in either direction, so the outermost structure
+decides and no later branch rescans the message; a selected dialect that
+parses nothing yields no call rather than a fallback scan). Recognized
+dialects: harmony `to=functions.NAME` channels (gpt-oss); Gemma 4
+`<|tool_call>call:NAME{...}<tool_call|>` blocks (only complete, quote-aware
+marker-delimited blocks parse, shared with the MLX family parser so both
+engines read one implementation); `<tool_call>` blocks carrying Hermes JSON, Qwen3 XML, or GLM
 `<arg_key>`/`<arg_value>` pairs; Llama `<|python_tag|>` calls (which use
 `parameters` rather than `arguments` and may chain several with `;`); Mistral
 `[TOOL_CALLS]` arrays; and an unmarked call object opening the message, which

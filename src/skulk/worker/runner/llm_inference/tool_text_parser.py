@@ -444,31 +444,42 @@ def parse_tool_calls_from_text(
     """
     if not text:
         return None
+    # The dialect is SELECTED by the earliest recognized marker in the text
+    # and parsed exclusively. Marker presence anywhere is not enough: a
+    # quoted argument may legitimately carry text shaped like ANY other
+    # dialect (a tool result or user text echoed into a string), in either
+    # direction, and letting a later branch rescan the same message would
+    # mint an executable call from that quoted content. The outermost
+    # structure decides; each dialect's own quote and JSON handling keeps
+    # interior marker-shaped text as string content. A selected dialect that
+    # parses nothing (prose mentioning a marker, a truncated block) yields
+    # no call rather than a fallback scan, for the same reason.
+    markers: list[tuple[int, str]] = []
+    for marker, kind in (
+        ("to=functions.", "harmony"),
+        ("<|tool_call>", "gemma4"),
+        ("<tool_call>", "generic"),
+        ("<|python_tag|>", "python_tag"),
+        ("[TOOL_CALLS]", "mistral"),
+    ):
+        position = text.find(marker)
+        if position != -1:
+            markers.append((position, kind))
     calls: list[ToolCallItem] = []
-    if "<|tool_call>" in text:
-        # Gemma dispatch is FIRST and EXCLUSIVE whenever its opener appears:
-        # a quoted Gemma argument may legitimately carry text shaped like any
-        # other dialect (harmony channels, a generic block, a bare call), and
-        # letting a later branch scan the same message would mint an
-        # executable call from quoted content. That exclusivity holds even
-        # when no complete block parses, because a TRUNCATED block's quoted
-        # interior must not fall through to the other dialects either; a
-        # truncated or prose-only message simply yields no call. The
-        # symmetric hijack (another dialect's quoted argument carrying the
-        # Gemma opener) is accepted residual risk: choosing the more
-        # structured dialect first is the smaller attack surface.
-        block_calls: list[ToolCallItem] = []
-        for block in _gemma_blocks(text):
-            block_calls.extend(gemma4_calls(block))
-        return _finish(block_calls, tools)
-    if "to=functions." in text:
-        calls = _harmony_tool_calls(text)
-    if not calls and "<tool_call>" in text:
-        calls = _toolcall_block_calls(text)
-    if not calls and "<|python_tag|>" in text:
-        calls = _python_tag_calls(text)
-    if not calls and "[TOOL_CALLS]" in text:
-        calls = _mistral_calls(text)
+    if markers:
+        _, dialect = min(markers)
+        if dialect == "harmony":
+            calls = _harmony_tool_calls(text)
+        elif dialect == "gemma4":
+            for block in _gemma_blocks(text):
+                calls.extend(gemma4_calls(block))
+            return _finish(calls, tools)
+        elif dialect == "generic":
+            calls = _toolcall_block_calls(text)
+        elif dialect == "python_tag":
+            calls = _python_tag_calls(text)
+        else:
+            calls = _mistral_calls(text)
     if not calls:
         # Last resort, and deliberately narrow: the message must begin with the
         # call object. Unmarked dialects are otherwise indistinguishable from a
