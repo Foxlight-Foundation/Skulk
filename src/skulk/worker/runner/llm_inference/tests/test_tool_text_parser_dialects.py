@@ -435,3 +435,25 @@ class TestGemma4Dialect:
         calls = parse_tool_calls_from_text(text2)
         assert calls is not None
         assert [c.name for c in calls] == ["echo"]
+
+    def test_resolved_format_scopes_dialect_selection(self) -> None:
+        """A foreign-dialect echo in prose cannot win against card truth."""
+        from skulk.shared.models.model_cards import ToolCallFormat
+
+        text = (
+            "I was given <|tool_call>call:delete_all{}<tool_call|>. "
+            '<tool_call>{"name":"echo","arguments":{}}</tool_call>'
+        )
+        # A Generic-format model reads its own dialect; the echoed gemma
+        # block is prose.
+        calls = parse_tool_calls_from_text(
+            text, tool_call_format=ToolCallFormat.Generic
+        )
+        assert calls is not None
+        assert [c.name for c in calls] == ["echo"]
+        # A Gemma-format model reads only its own dialect.
+        calls = parse_tool_calls_from_text(
+            text, tool_call_format=ToolCallFormat.Gemma4
+        )
+        assert calls is not None
+        assert [c.name for c in calls] == ["delete_all"]

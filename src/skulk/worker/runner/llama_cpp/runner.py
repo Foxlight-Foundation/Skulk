@@ -1380,8 +1380,21 @@ class Runner(ServedConcurrentDispatch):
                 if isinstance(reasoning_parser, HarmonyTextParser)
                 else visible_text
             )
+            resolved_format = None
+            try:
+                card = self.shard_metadata.model_card
+                resolved_format = resolve_model_capability_profile(
+                    card.model_id, model_card=card
+                ).tool_call_format
+            except Exception:  # noqa: BLE001 - no profile means text inference
+                pass
+            # Card truth scopes the recovery dialect (#897 review): a model's
+            # resolved format decides how its output is read, so a foreign
+            # dialect echoed in prose can never be minted as a call.
             tool_calls = parse_tool_calls_from_text(
-                tool_source, task.task_params.tools
+                tool_source,
+                task.task_params.tools,
+                tool_call_format=resolved_format,
             )
         if tool_calls:
             self.event_sender.send(

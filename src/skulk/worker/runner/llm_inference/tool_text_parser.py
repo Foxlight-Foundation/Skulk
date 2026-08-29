@@ -26,9 +26,12 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from skulk.api.types import ToolCallItem
+
+if TYPE_CHECKING:
+    from skulk.shared.models.model_cards import ToolCallFormat
 from skulk.worker.runner.bootstrap import logger
 from skulk.worker.runner.llm_inference.tool_parsers import (
     coerce_tool_calls_to_schema,
@@ -428,7 +431,9 @@ def gemma4_calls(text: str) -> list[ToolCallItem]:
 
 
 def parse_tool_calls_from_text(
-    text: str, tools: list[dict[str, Any]] | None = None
+    text: str,
+    tools: list[dict[str, Any]] | None = None,
+    tool_call_format: "ToolCallFormat | None" = None,
 ) -> list[ToolCallItem] | None:
     """Recover tool calls a reasoning model emitted as text (llama.cpp engine).
 
@@ -479,7 +484,28 @@ def parse_tool_calls_from_text(
     # interior marker-shaped text as string content. A selected dialect that
     # parses nothing (prose mentioning a marker, a truncated block) yields
     # no call rather than a fallback scan, for the same reason.
+    # When the caller knows the model's resolved format, dialect selection is
+    # card truth rather than text inference: a Gemma-format model parses only
+    # its own dialect, and any OTHER format can never have Gemma or harmony
+    # shapes minted from echoed prose (a foreign-dialect block quoted in a
+    # preamble is content, not a call). Text inference remains only within
+    # the genuinely ambiguous Generic family, whose templates legitimately
+    # vary, and for callers with no profile.
+    if tool_call_format is not None:
+        from skulk.shared.models.model_cards import ToolCallFormat as _Format
+
+        if tool_call_format == _Format.Gemma4:
+            gemma_calls: list[ToolCallItem] = []
+            for block in _gemma_blocks(text):
+                gemma_calls.extend(gemma4_calls(block))
+            return _finish(gemma_calls, tools)
+        if tool_call_format == _Format.GptOss:
+            return _finish(_harmony_tool_calls(text), tools)
+
     markers: list[tuple[int, str]] = []
+    excluded_kinds = (
+        {"gemma4", "harmony"} if tool_call_format is not None else set()
+    )
     for marker, kind in (
         # Harmony is selected by its outer channel carrier, not only by the
         # commentary header: a gpt-oss response begins with <|channel|>
@@ -493,6 +519,8 @@ def parse_tool_calls_from_text(
         ("<|python_tag|>", "python_tag"),
         ("[TOOL_CALLS]", "mistral"),
     ):
+        if kind in excluded_kinds:
+            continue
         position = text.find(marker)
         if position != -1:
             markers.append((position, kind))
