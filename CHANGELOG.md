@@ -9,6 +9,18 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- An enabled model store with a blank `store_host` or `store_path` is now
+  refused loudly at config validation instead of running crippled. The blank
+  shape matches no node, so no store server ever started while every client
+  built unusable `http://:12415` URLs, and the resulting failure was
+  misclassified as "model not in store", starving downloads against a host
+  that can never answer instead of taking the direct Hugging Face fallback.
+  The refusal covers node startup and the Settings save (the dashboard also
+  blocks the save with a visible message), and a URL that cannot even be
+  requested now classifies as store-unreachable immediately, with no retry
+  delay, so the fallback engages even if a bad address reaches the client
+  through another path.
+
 - The Mistral tool-call dialect now works on the MLX engine. The shared text
   parser has read `[TOOL_CALLS]` arrays since they were added, but no MLX
   tokenizer wiring selected it: Mistral templates carry no `<tool_call>`

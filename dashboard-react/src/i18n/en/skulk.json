@@ -843,6 +843,7 @@
   "settings.title": "Settings",
   "settings.toasts.saved": "Settings saved - KV cache change takes effect on next model launch",
   "settings.toasts.saveFailed": "Failed to save settings",
+  "settings.toasts.storeIdentityRequired": "Model store is enabled but the store host or store path is blank - name them, or disable the store",
   "stewardChat.disabled.body": "Enable Intelligent Fabric in Settings to make Skulk available here. You can then ask the fabric about its health, models, and diagnostics.",
   "stewardChat.disabled.title": "Intelligent Fabric is off",
   "stewardChat.empty.body": "Ask Skulk about its health, why a download failed, what a node is doing, or whether something looks slow. I investigate before answering; this interface observes and advises but cannot change the cluster.",

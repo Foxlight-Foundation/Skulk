@@ -319,6 +319,20 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
   }, []);
 
   const handleSave = useCallback(async () => {
+    // An enabled store with a blank host or path is refused by the server
+    // (an empty host interpolates into unusable store URLs and once shipped
+    // a fleet that could not place any new model), so surface the problem
+    // here instead of persisting a config the API will 422.
+    if (draft?.enabled && (!draft.store_host.trim() || !draft.store_path.trim())) {
+      addToast({
+        type: 'error',
+        message: t(
+          'settings.toasts.storeIdentityRequired',
+          'Model store is enabled but the store host or store path is blank - name them, or disable the store',
+        ),
+      });
+      return;
+    }
     // Base on the last fetched config to avoid dropping sections
     const updated: FullConfig = { ...(fullConfig ?? {}) };
     if (draft) updated.model_store = draft;

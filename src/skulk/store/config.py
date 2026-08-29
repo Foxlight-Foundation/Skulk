@@ -78,7 +78,7 @@ from pathlib import Path
 from typing import Final, Literal, cast, final
 
 import yaml
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 
 from skulk.utils.pydantic_ext import FrozenModel
 
@@ -275,6 +275,29 @@ class ModelStoreConfig(FrozenModel):
     staging: StagingNodeConfig = StagingNodeConfig()
     reconciliation: ReconciliationStoreConfig = ReconciliationStoreConfig()
     node_overrides: dict[str, NodeOverrideConfig] = {}
+
+    @model_validator(mode="after")
+    def _enabled_requires_identity(self) -> "ModelStoreConfig":  # pyright: ignore[reportUnusedFunction]
+        """Refuse an enabled store whose identity fields are blank.
+
+        ``store_host: ''`` matches no node, so no store server ever starts,
+        and every client interpolates the empty host into ``http://:12415``
+        URLs whose failure defeated the direct-HF fallback: nothing on the
+        cluster could place a model that was not already staged, while every
+        node looked healthy (#888). The shape reached real fleets through a
+        dashboard settings save that materialized empty defaults, so the
+        refusal fires at validation, which is both node startup and the
+        Settings API's pre-persist check. Disagreement is loud by doctrine;
+        running without a store is spelled ``enabled: false``.
+        """
+        if self.enabled and (not self.store_host.strip() or not self.store_path.strip()):
+            raise ValueError(
+                "model_store.enabled is true but "
+                + ("store_host" if not self.store_host.strip() else "store_path")
+                + " is empty. Name the store host and its store_path, or set "
+                "model_store.enabled: false to run without a store."
+            )
+        return self
 
 
 @final

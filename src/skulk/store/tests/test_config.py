@@ -224,3 +224,36 @@ def test_intelligent_fabric_config_defaults() -> None:
 
     default_section = IntelligentFabricConfig()
     assert not default_section.enabled
+
+
+def test_enabled_store_refuses_blank_host() -> None:
+    """The installer-shaped brokenness fails loudly at validation (#888).
+
+    ``store_host: ''`` matches no node, so no store server ever starts and
+    every client builds ``http://:12415`` URLs; a fleet shipped in this shape
+    could not place any model that was not already staged.
+    """
+    import pytest
+    from pydantic import ValidationError
+
+    from skulk.store.config import ModelStoreConfig
+
+    with pytest.raises(ValidationError, match="store_host"):
+        ModelStoreConfig(enabled=True, store_host="", store_path="/models")
+    with pytest.raises(ValidationError, match="store_path"):
+        ModelStoreConfig(enabled=True, store_host="kite", store_path="  ")
+
+
+def test_disabled_store_permits_blank_identity() -> None:
+    """Running without a store is spelled enabled: false, and stays valid."""
+    from skulk.store.config import ModelStoreConfig
+
+    config = ModelStoreConfig(enabled=False, store_host="", store_path="")
+    assert config.enabled is False
+
+
+def test_enabled_store_with_identity_is_valid() -> None:
+    from skulk.store.config import ModelStoreConfig
+
+    config = ModelStoreConfig(enabled=True, store_host="kite", store_path="/models")
+    assert config.store_host == "kite"

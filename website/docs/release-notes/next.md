@@ -189,3 +189,9 @@ templates write calls as `[TOOL_CALLS]` arrays rather than `<tool_call>`
 blocks, which the engine previously did not recognize, so the call arrived as
 raw markup in the answer. A card for Ministral 8B is bundled so smaller
 machines can serve a tool-calling Mistral out of the box.
+
+
+A cluster configured with the model store enabled but no store host named now
+refuses to start with a message that says what to fix, and the dashboard
+refuses to save that shape. Previously such a cluster looked healthy while no
+node could download any model that was not already staged.

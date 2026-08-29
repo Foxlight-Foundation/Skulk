@@ -147,6 +147,15 @@ _STORE_CONNECTION_ERRORS = (
     aiohttp.ClientPayloadError,
     TimeoutError,
     asyncio.TimeoutError,
+    # A URL that cannot even be requested (an empty configured store host
+    # interpolates into ``http://:12415/...``) is MORE unreachable than a
+    # refused connection, not a store that answered badly. Left unclassified
+    # it fell through the availability probe's generic handler as "not in
+    # store", sending the downloader to starve against a host that can never
+    # answer instead of taking the direct-HF fallback (#888). Config
+    # validation refuses the empty-host shape at startup; this covers any
+    # bad address that reaches the client through another path.
+    aiohttp.InvalidURL,
 )
 _T = TypeVar("_T")
 StagingCapacityPreflight = Callable[[int], Awaitable[None]]
@@ -442,6 +451,12 @@ async def _retry_store_http(
         try:
             return await operation()
         except (aiohttp.ClientError, TimeoutError, asyncio.TimeoutError) as error:
+            if isinstance(error, aiohttp.InvalidURL):
+                # No request was attempted and none ever can be; retrying an
+                # impossible URL only delays the fallback decision (#888).
+                raise StoreUnreachableError(
+                    f"store host unreachable during {description}: {error}"
+                ) from error
             if attempt == attempts:
                 # Retry treats the whole ClientError family as transient (a
                 # proxy 502 or truncated body can be a blip worth retrying),
