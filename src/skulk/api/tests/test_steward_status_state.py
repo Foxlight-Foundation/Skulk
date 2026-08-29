@@ -215,6 +215,27 @@ async def test_disabled_mode_still_answers_404_not_503() -> None:
     assert raised.value.status_code == 404
 
 
+async def test_a_forced_tool_choice_is_a_400_on_the_steward_surface() -> None:
+    """The reserved id branches before the ordinary tool_choice resolution.
+
+    The steward accepts no client tools, so a forced function choice can
+    never be honored; it gets the same 400 the documented boundary gives
+    rather than a steward answer that silently ignored the choice.
+    """
+    payload = ChatCompletionRequest(
+        model=ModelId("skulk/steward"),
+        messages=[ChatCompletionMessage(role="user", content="is the fleet ok?")],
+        tool_choice={"type": "function", "function": {"name": "get_weather"}},
+        stream=True,
+    )
+    with pytest.raises(HTTPException) as raised:
+        await API._steward_chat_completions(  # pyright: ignore[reportPrivateUsage]
+            _stub_api(_status("ready")), payload
+        )
+    assert raised.value.status_code == 400
+    assert "get_weather" in str(raised.value.detail)
+
+
 async def test_malformed_conversation_is_still_a_400_before_the_503() -> None:
     """A client error stays a client error even while the steward is starting."""
     payload = ChatCompletionRequest(
