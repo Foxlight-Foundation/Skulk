@@ -305,8 +305,15 @@ def _detect_vision_from_config(model_id: ModelId) -> "VisionCardConfig | None":
     return None
 
 
-async def _load_cards_from_dir(directory: Path, *, is_custom: bool) -> None:
+async def _load_cards_from_dir(
+    directory: Path, *, is_custom: bool, only_missing: bool = False
+) -> None:
     """Load all TOML model cards from a directory into the cache.
+
+    With ``only_missing`` the pass adds only ids the cache does not already
+    hold: the per-id fallback under a loaded registry snapshot (#893), where
+    the registry stays authoritative for every id it carries and the bundle
+    serves the ids it has never seen.
 
     Within a load pass the first card for a model id wins (duplicate ids in
     the builtin dirs, or among custom files, keep their existing precedence).
@@ -328,6 +335,8 @@ async def _load_cards_from_dir(directory: Path, *, is_custom: bool) -> None:
     async for toml_file in directory.rglob("*.toml"):
         try:
             card = await ModelCard.load_from_path(toml_file)
+            if only_missing and card.model_id in _card_cache:
+                continue
             if is_custom:
                 card = card.model_copy(update={"is_custom": True})
                 if card.model_id in loaded_in_this_pass:
@@ -399,9 +408,19 @@ async def _refresh_card_cache() -> None:
     # while retaining the newer signed card as update information.
     await _refresh_installed_cards()
     registry_loaded = await _load_cards_from_registry()
-    if not registry_loaded:
-        for path in _BUILTIN_CARD_DIRS:
-            await _load_cards_from_dir(path, is_custom=False)
+    # The registry is authoritative for every id its snapshot carries, but a
+    # snapshot has no opinion on an id it has never seen, so bundled cards
+    # for registry-unknown ids stay servable rather than vanishing behind the
+    # snapshot (#893). Before this, shipping a new bundled card did nothing
+    # for any registry-connected fleet: the snapshot wholesale replaced the
+    # catalog, and the only ways to reach the card were a registry publish or
+    # a registry outage. Execution trust is unchanged: the model-trust policy
+    # still gates bundled cards (immutable source revision required) exactly
+    # as it does when the bundle serves as the whole catalog.
+    for path in _BUILTIN_CARD_DIRS:
+        await _load_cards_from_dir(
+            path, is_custom=False, only_missing=registry_loaded
+        )
     await _refresh_installed_cards()
     await _load_cards_from_dir(_custom_cards_dir, is_custom=True)
     _last_registry_refresh = time.monotonic()

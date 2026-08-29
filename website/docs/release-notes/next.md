@@ -195,3 +195,9 @@ A cluster configured with the model store enabled but no store host named now
 refuses to start with a message that says what to fix, and the dashboard
 refuses to save that shape. Previously such a cluster looked healthy while no
 node could download any model that was not already staged.
+
+
+New model cards shipped with Skulk now appear in the catalog even when the
+signed registry is in use. Previously the registry snapshot replaced the
+whole catalog, so a newly bundled model was invisible until the registry
+separately published it; the registry still wins for every model it lists.

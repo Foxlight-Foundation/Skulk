@@ -9,6 +9,12 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- A bundled model card for a model the signed registry has never seen is now
+  reachable on registry-connected clusters. The snapshot previously replaced
+  the whole catalog, so a card shipped in the repo for a new model was
+  unreachable until a registry publish independently carried it; the registry
+  remains authoritative for every id its snapshot does carry.
+
 - An enabled model store with a blank `store_host` or `store_path` is now
   refused loudly at config validation instead of running crippled. The blank
   shape matches no node, so no store server ever started while every client

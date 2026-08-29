@@ -657,8 +657,10 @@ async def test_air_gap_restart_loads_installed_card_without_registry_lkg(
     async def _registry_unavailable() -> bool:
         return False
 
-    async def _no_cards(_path: object, *, is_custom: bool) -> None:
-        del is_custom
+    async def _no_cards(
+        _path: object, *, is_custom: bool, only_missing: bool = False
+    ) -> None:
+        del is_custom, only_missing
 
     original_cache = dict(model_cards_module._card_cache)
     original_installed = dict(model_cards_module._installed_card_cache)
@@ -1439,3 +1441,93 @@ async def test_downloader_fetches_source_repository_under_alias_directory(
 
     assert observed == [ModelId("org/multi")]
     assert path.name == "org--multi@q4"
+
+
+@pytest.mark.anyio
+async def test_bundled_cards_serve_ids_the_registry_snapshot_lacks(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A loaded snapshot no longer hides bundled card additions (#893).
+
+    The registry stays authoritative for every id its snapshot carries; a
+    bundled card for an id the snapshot has never seen is added rather than
+    vanishing behind the snapshot, which previously made shipping a new card
+    in the repo a no-op for every registry-connected fleet.
+    """
+    catalog = RegistryCatalog.model_validate_json(_catalog_payload(), strict=False)
+    registry_card = registry_model_cards(catalog)[0]
+
+    bundled_dir = tmp_path / "bundled"
+    bundled_dir.mkdir()
+    shadow = (
+        f'model_id = "{registry_card.model_id}"\n'
+        "n_layers = 99\n"
+        "hidden_size = 1\n"
+        "supports_tensor = false\n"
+        'tasks = ["TextGeneration"]\n'
+        'capabilities = ["text"]\n'
+        "[storage_size]\n"
+        "in_bytes = 1\n"
+    )
+    (bundled_dir / "shadow.toml").write_text(shadow)
+    addition = (
+        'model_id = "org/bundle-only-model"\n'
+        "n_layers = 2\n"
+        "hidden_size = 8\n"
+        "supports_tensor = false\n"
+        'tasks = ["TextGeneration"]\n'
+        'capabilities = ["text"]\n'
+        "[storage_size]\n"
+        "in_bytes = 2048\n"
+    )
+    (bundled_dir / "addition.toml").write_text(addition)
+
+    class CatalogClient:
+        def load_catalog(self, _catalog_validator: object = None) -> RegistryCatalog:
+            return catalog
+
+        def load_advisories(self) -> RegistryAdvisories:
+            return RegistryAdvisories.model_validate_json(
+                _advisories_payload(), strict=False
+            )
+
+        def load_engine_support(self) -> RegistryEngineSupport:
+            return RegistryEngineSupport.model_validate_json(
+                _engine_support_payload(), strict=False
+            )
+
+    async def no_installed_cards() -> None:
+        return None
+
+    empty_custom = tmp_path / "custom"
+    empty_custom.mkdir()
+
+    original_card_cache = dict(model_cards_module._card_cache)
+    original_current = dict(model_cards_module._registry_current_cards)
+    model_cards_module._card_cache.clear()
+    monkeypatch.setattr(model_cards_module, "_registry_enabled", lambda: True)
+    monkeypatch.setattr(model_cards_module, "_registry_client", CatalogClient())
+    monkeypatch.setattr(
+        model_cards_module, "_refresh_installed_cards", no_installed_cards
+    )
+    monkeypatch.setattr(
+        model_cards_module,
+        "_BUILTIN_CARD_DIRS",
+        (AsyncPath(bundled_dir),),
+    )
+    monkeypatch.setattr(
+        model_cards_module, "_custom_cards_dir", AsyncPath(empty_custom)
+    )
+    try:
+        await model_cards_module._refresh_card_cache()
+        served = model_cards_module._card_cache[registry_card.model_id]
+        assert served.n_layers == registry_card.n_layers
+        assert served.n_layers != 99, "bundled shadow overrode the snapshot"
+        bundle_only = model_cards_module._card_cache[ModelId("org/bundle-only-model")]
+        assert bundle_only.n_layers == 2
+    finally:
+        model_cards_module._card_cache.clear()
+        model_cards_module._card_cache.update(original_card_cache)
+        model_cards_module._registry_current_cards.clear()
+        model_cards_module._registry_current_cards.update(original_current)
