@@ -390,6 +390,16 @@ def gemma4_calls(text: str) -> list[ToolCallItem]:
         match = _call_start_re.search(text, position)
         if match is None:
             break
+        # The opener search is quote-aware too: a quoted span at the block's
+        # top level (before any real call) may carry call-shaped content,
+        # and matching inside it would mint that content as executable.
+        quote = text.find('<|"|>', position)
+        if quote != -1 and quote < match.start():
+            closing_quote = text.find('<|"|>', quote + 5)
+            if closing_quote == -1:
+                break
+            position = closing_quote + 5
+            continue
         balanced = _balanced_args(match.end())
         if balanced is None:
             # Unterminated body (truncated generation): nothing after it can

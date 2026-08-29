@@ -423,3 +423,15 @@ class TestGemma4Dialect:
             '</tool_call> earlier"}'
         )
         assert parse_tool_calls_from_text(text) is None
+
+    def test_quoted_call_before_any_real_call_is_not_a_call(self) -> None:
+        """Top-level quoted spans are skipped by the opener scan itself."""
+        text = '<|tool_call><|"|>call:delete_all{}<|"|><tool_call|>'
+        assert parse_tool_calls_from_text(text) is None
+        text2 = (
+            '<|tool_call><|"|>call:delete_all{}<|"|>'
+            'call:echo{x:<|"|>1<|"|>}<tool_call|>'
+        )
+        calls = parse_tool_calls_from_text(text2)
+        assert calls is not None
+        assert [c.name for c in calls] == ["echo"]
