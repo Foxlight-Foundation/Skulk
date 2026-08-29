@@ -480,3 +480,179 @@ def test_dropped_call_text_renders_the_call_so_the_answer_is_not_blank() -> None
 
 def test_dropped_call_text_is_empty_when_there_was_no_call() -> None:
     assert dropped_call_text({"content": "hi"}) == ""
+
+
+class TestTemplateKwargFormatter:
+    """The per-request slot that carries thinking control into the render.
+
+    create_chat_completion has no channel for chat-template kwargs, so the
+    runner wraps the default GGUF-template formatter and mutates this slot
+    between (strictly serial) requests.
+    """
+
+    def test_the_slot_is_injected_into_the_render(self) -> None:
+        from skulk.worker.runner.llama_cpp.runner import TemplateKwargFormatter
+
+        seen: dict[str, Any] = {}
+
+        def inner(**kwargs: Any) -> str:
+            seen.update(kwargs)
+            return "rendered"
+
+        formatter = TemplateKwargFormatter(inner)
+        formatter.template_kwargs = {"enable_thinking": False}
+        assert formatter(messages=[{"role": "user"}]) == "rendered"
+        assert seen["enable_thinking"] is False
+        assert seen["messages"] == [{"role": "user"}]
+
+    def test_the_handlers_own_arguments_win_on_collision(self) -> None:
+        from skulk.worker.runner.llama_cpp.runner import TemplateKwargFormatter
+
+        seen: dict[str, Any] = {}
+
+        def inner(**kwargs: Any) -> None:
+            seen.update(kwargs)
+
+        formatter = TemplateKwargFormatter(inner)
+        formatter.template_kwargs = {"messages": "stale", "enable_thinking": True}
+        formatter(messages="fresh")
+        assert seen["messages"] == "fresh"
+        assert seen["enable_thinking"] is True
+
+    def test_an_empty_slot_is_a_pure_passthrough(self) -> None:
+        from skulk.worker.runner.llama_cpp.runner import TemplateKwargFormatter
+
+        seen: dict[str, Any] = {}
+
+        def inner(**kwargs: Any) -> None:
+            seen.update(kwargs)
+
+        formatter = TemplateKwargFormatter(inner)
+        formatter(tools=None)
+        assert seen == {"tools": None}
+
+
+class TestInstallTemplateKwargFormatter:
+    """The installer swaps only the default Jinja handler, and only when safe."""
+
+    class _FakeInnerModel:
+        @staticmethod
+        def token_get_text(token_id: int) -> str:
+            return f"<tok{token_id}>"
+
+    def _fake_model(
+        self,
+        *,
+        chat_format: str = "chat_template.default",
+        template: str | None = "{% if enable_thinking is false %}off{% endif %}",
+    ) -> Any:
+        class _FakeModel:
+            def __init__(self, outer: Any) -> None:
+                self.chat_format = chat_format
+                self.metadata: dict[str, Any] = (
+                    {"tokenizer.chat_template": template}
+                    if template is not None
+                    else {}
+                )
+                self._chat_handlers: dict[str, Any] = {
+                    "chat_template.default": "original-handler"
+                }
+                self._model = outer._FakeInnerModel()
+
+            @staticmethod
+            def token_eos() -> int:
+                return 2
+
+            @staticmethod
+            def token_bos() -> int:
+                return 1
+
+        return _FakeModel(type(self))
+
+    @staticmethod
+    def _fake_chat_format_module(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+        import sys
+        import types
+
+        captured: dict[str, Any] = {}
+
+        module = types.ModuleType("llama_cpp.llama_chat_format")
+
+        class _FakeJinja2ChatFormatter:
+            def __init__(self, **kwargs: Any) -> None:
+                captured["formatter_kwargs"] = kwargs
+
+            def __call__(self, **kwargs: Any) -> str:
+                captured["render_kwargs"] = kwargs
+                return "rendered"
+
+        def _to_handler(formatter: Any) -> Any:
+            captured["wrapped"] = formatter
+            return ("handler", formatter)
+
+        module.Jinja2ChatFormatter = _FakeJinja2ChatFormatter  # pyright: ignore[reportAttributeAccessIssue]
+        module.chat_formatter_to_chat_completion_handler = _to_handler  # pyright: ignore[reportAttributeAccessIssue]
+        package = types.ModuleType("llama_cpp")
+        package.llama_chat_format = module  # pyright: ignore[reportAttributeAccessIssue]
+        monkeypatch.setitem(sys.modules, "llama_cpp", package)
+        monkeypatch.setitem(sys.modules, "llama_cpp.llama_chat_format", module)
+        return captured
+
+    def test_a_thinking_template_gets_the_wrapped_handler(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from skulk.worker.runner.llama_cpp.runner import (
+            TemplateKwargFormatter,
+            install_template_kwarg_formatter,
+        )
+
+        captured = self._fake_chat_format_module(monkeypatch)
+        model = self._fake_model()
+        wrapper = install_template_kwarg_formatter(model)
+        assert isinstance(wrapper, TemplateKwargFormatter)
+        # The rebuilt formatter mirrors upstream __init__: same template,
+        # eos/bos token text, and stop token id.
+        assert captured["formatter_kwargs"]["eos_token"] == "<tok2>"
+        assert captured["formatter_kwargs"]["bos_token"] == "<tok1>"
+        assert captured["formatter_kwargs"]["stop_token_ids"] == [2]
+        assert model._chat_handlers["chat_template.default"] == ("handler", wrapper)
+        # The slot reaches the render through the wrapper.
+        wrapper.template_kwargs = {"enable_thinking": False}
+        wrapper(messages=[])
+        assert captured["render_kwargs"]["enable_thinking"] is False
+
+    def test_a_guessed_family_format_is_left_alone(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from skulk.worker.runner.llama_cpp.runner import (
+            install_template_kwarg_formatter,
+        )
+
+        self._fake_chat_format_module(monkeypatch)
+        model = self._fake_model(chat_format="chatml-function-calling")
+        assert install_template_kwarg_formatter(model) is None
+        assert model._chat_handlers["chat_template.default"] == "original-handler"
+
+    def test_a_template_without_the_control_is_left_alone(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from skulk.worker.runner.llama_cpp.runner import (
+            install_template_kwarg_formatter,
+        )
+
+        self._fake_chat_format_module(monkeypatch)
+        model = self._fake_model(template="{{ messages }}")
+        assert install_template_kwarg_formatter(model) is None
+        assert model._chat_handlers["chat_template.default"] == "original-handler"
+
+    def test_internals_that_do_not_match_degrade_to_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from skulk.worker.runner.llama_cpp.runner import (
+            install_template_kwarg_formatter,
+        )
+
+        self._fake_chat_format_module(monkeypatch)
+        model = self._fake_model()
+        model._chat_handlers = "not-a-dict"
+        assert install_template_kwarg_formatter(model) is None

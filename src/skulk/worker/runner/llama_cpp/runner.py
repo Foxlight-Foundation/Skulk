@@ -22,7 +22,7 @@ import os
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Final, Literal
+from typing import Any, Final, Literal, cast, final
 
 from skulk.api.types import GenerationStats, ToolCallItem, TopLogprobItem
 from skulk.shared.models.capabilities import resolve_model_capability_profile
@@ -406,6 +406,95 @@ def _sanitize_harmony_assistant_messages(
     return sanitized
 
 
+@final
+class TemplateKwargFormatter:
+    """Inject chat-template kwargs into llama-cpp-python's Jinja render.
+
+    ``create_chat_completion`` offers no channel for template kwargs (the
+    served engines forward ``chat_template_kwargs`` to their servers; the
+    in-process binding has no equivalent parameter), but the library's
+    ``Jinja2ChatFormatter.__call__`` forwards its own ``**kwargs`` into the
+    template render. Wrapping the formatter therefore gives the runner a
+    per-request slot for controls the template itself defines, such as
+    ``enable_thinking``. The runner's dispatch is strictly serial (width 1),
+    so mutating the slot between requests is race-free.
+
+    A kwarg the template never reads is inert in the render, so injecting
+    into a template that ignores it changes nothing; the installer still
+    gates on the template actually mentioning the control, to keep the
+    handler swap off every model that cannot use it.
+    """
+
+    def __init__(self, inner: Callable[..., Any]) -> None:
+        self._inner = inner
+        self.template_kwargs: dict[str, Any] = {}
+
+    def __call__(self, **kwargs: Any) -> Any:
+        # The handler's own arguments (messages, tools, ...) must win over
+        # the injected slot on any collision.
+        return self._inner(**{**self.template_kwargs, **kwargs})
+
+
+def install_template_kwarg_formatter(model: Any) -> TemplateKwargFormatter | None:
+    """Install a kwarg-injecting default chat handler on a loaded ``Llama``.
+
+    Rebuilds the model's default GGUF-template formatter exactly the way
+    llama-cpp-python's own ``__init__`` does (same template, eos/bos token
+    text, and stop token id), wrapped with the injection slot, and installs
+    it as the ``chat_template.default`` handler. Only the default Jinja path
+    is touched: a guessed family chat format or an explicit chat handler
+    (vision) is never overridden, and a template that does not mention
+    ``enable_thinking`` is left alone. Returns the wrapper whose
+    ``template_kwargs`` the runner sets per request, or ``None`` when the
+    model takes none of this (or the library's internals do not match, in
+    which case the runner degrades loudly to the previous behavior).
+    """
+
+    try:
+        import llama_cpp.llama_chat_format as llama_chat_format
+
+        if getattr(model, "chat_format", None) != "chat_template.default":
+            return None
+        metadata = getattr(model, "metadata", None)
+        if not isinstance(metadata, dict):
+            return None
+        template = cast("dict[str, Any]", metadata).get("tokenizer.chat_template")
+        if not isinstance(template, str) or "enable_thinking" not in template:
+            return None
+        eos_token_id = int(model.token_eos())
+        bos_token_id = int(model.token_bos())
+        eos_token = (
+            model._model.token_get_text(eos_token_id)  # noqa: SLF001 - mirrors upstream __init__
+            if eos_token_id != -1
+            else ""
+        )
+        bos_token = (
+            model._model.token_get_text(bos_token_id)  # noqa: SLF001 - mirrors upstream __init__
+            if bos_token_id != -1
+            else ""
+        )
+        formatter = llama_chat_format.Jinja2ChatFormatter(
+            template=template,
+            eos_token=eos_token,
+            bos_token=bos_token,
+            stop_token_ids=[eos_token_id],
+        )
+        wrapper = TemplateKwargFormatter(formatter)
+        handlers = getattr(model, "_chat_handlers", None)
+        if not isinstance(handlers, dict):
+            return None
+        cast("dict[str, Any]", handlers)["chat_template.default"] = (
+            llama_chat_format.chat_formatter_to_chat_completion_handler(wrapper)
+        )
+        return wrapper
+    except Exception as error:  # noqa: BLE001 - degrade to the previous behavior
+        logger.warning(
+            "Thinking control unavailable on this llama.cpp build; "
+            f"enable_thinking will be ignored in-process ({error})"
+        )
+        return None
+
+
 def generation_kwargs(task_params: TextGenerationTaskParams) -> dict[str, Any]:
     """Translate Skulk task params into llama.cpp ``create_chat_completion`` kwargs."""
     kwargs: dict[str, Any] = {}
@@ -727,6 +816,10 @@ class Runner(ServedConcurrentDispatch):
         self.cancelled_tasks: set[TaskId] = set()
         self.seen: set[TaskId] = set()
         self.model: Any = None
+        # Set at load for text models whose GGUF template reads
+        # enable_thinking; carries per-request thinking control into the
+        # template render (see TemplateKwargFormatter).
+        self._thinking_formatter: TemplateKwargFormatter | None = None
         self.current_status: RunnerStatus = RunnerIdle()
         # Width 1: the in-process Llama object cannot generate concurrently.
         # The mixin still bounds admitted work and stamps admission concurrency.
@@ -896,6 +989,10 @@ class Runner(ServedConcurrentDispatch):
                 verbose=False,
                 chat_handler=chat_handler,
             )
+        if chat_handler is None:
+            # Text path only: a vision chat handler owns its own rendering
+            # and must not be swapped out from under the projector.
+            self._thinking_formatter = install_template_kwarg_formatter(self.model)
         self.current_status = RunnerReady()
         record_runner_phase("idle", event="runner_ready", task_id=task.task_id)
         logger.info(
@@ -930,6 +1027,16 @@ class Runner(ServedConcurrentDispatch):
         if self._is_harmony_model():
             messages = _sanitize_harmony_assistant_messages(messages)
         kwargs = generation_kwargs(task.task_params)
+        if self._thinking_formatter is not None:
+            # Set (or cleared) for every request, so one request's thinking
+            # control can never leak into the next. Covers the tools path
+            # too: _generate_with_tools renders through the same handler.
+            enable_thinking = task.task_params.enable_thinking
+            self._thinking_formatter.template_kwargs = (
+                {"enable_thinking": enable_thinking}
+                if enable_thinking is not None
+                else {}
+            )
 
         want_logprobs = wants_logprobs(
             task.task_params.logprobs, task.task_params.top_logprobs

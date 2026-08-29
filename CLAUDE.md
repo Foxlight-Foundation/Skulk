@@ -268,7 +268,13 @@ A model card's `placement.compatible_backends` selects which engine serves it
   serial (the `Llama` object requires it) but admission is bounded, the
   supervisor task channel is bounded at 256, and every generation stamps
   serving node/backend and admission concurrency so the performance-envelope
-  registry can observe this path.
+  registry can observe this path. `enable_thinking` is honored on text models
+  whose GGUF template reads it: `create_chat_completion` has no template-kwarg
+  channel, so the runner wraps the default Jinja formatter
+  (`TemplateKwargFormatter`) with a per-request slot the serial dispatch makes
+  race-free; guessed family formats, vision handlers, and templates without
+  the control are untouched, and an internals mismatch degrades loudly to the
+  previous ignore-the-toggle behavior.
 - **`llama_server`** (`worker/runner/llama_server/`): served-backend engine; the
   worker launches an external `llama-server` subprocess and proxies its OpenAI
   HTTP API. The only path to llama.cpp's **native MTP** (`--spec-type draft-mtp`),

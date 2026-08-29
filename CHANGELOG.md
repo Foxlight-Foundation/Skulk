@@ -9,6 +9,15 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- `enable_thinking` is honored on the in-process llama.cpp engine for text
+  models whose GGUF chat template reads it (the Qwen3-family shape). The
+  binding's `create_chat_completion` offers no template-kwarg channel, so
+  the control was silently ignored and a thinking-default model reasoned on
+  every request regardless; the runner now wraps the default Jinja
+  formatter with a per-request slot. Guessed family formats, vision
+  handlers, and templates without the control are untouched, and an
+  unexpected library shape degrades loudly to the previous behavior.
+
 - A `tool_choice` that forces a function name matching none of the offered
   tools (or arrives with no tools at all) is now rejected with a 400 at the
   API boundary, on every engine. The in-process engines never see
