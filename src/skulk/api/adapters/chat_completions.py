@@ -6,6 +6,7 @@ import time
 from collections.abc import AsyncGenerator
 from typing import Any, cast
 
+from fastapi import HTTPException
 from loguru import logger
 
 from skulk.api.types import (
@@ -104,6 +105,27 @@ async def fetch_image_url(url: str) -> str:
         return base64.b64encode(data).decode("ascii")
 
 
+def _forced_function_name(
+    tool_choice: str | dict[str, Any] | None,
+) -> str | None:
+    """The function name a ``tool_choice`` object forces, or ``None``.
+
+    Only the well-formed OpenAI shape ``{"type": "function", "function":
+    {"name": ...}}`` forces a name; a malformed object forces nothing and is
+    passed through for the engine to interpret.
+    """
+
+    if not isinstance(tool_choice, dict):
+        return None
+    if tool_choice.get("type") != "function":
+        return None
+    function = tool_choice.get("function")
+    if not isinstance(function, dict):
+        return None
+    name = cast("object", function.get("name"))  # pyright: ignore[reportUnknownMemberType]
+    return name if isinstance(name, str) else None
+
+
 def resolve_tool_choice(
     tools: list[dict[str, Any]] | None,
     tool_choice: str | dict[str, Any] | None,
@@ -119,15 +141,30 @@ def resolve_tool_choice(
     the documented behavior that the model does not call one; a model handed a
     tool and asked for it will call it whatever the request said. Naming a
     single function narrows the offered tools to that one, so the model cannot
-    call a different tool than the caller asked for. ``"auto"``, ``"required"``
-    and an unrecognized value pass through untouched: ``required`` is a
-    best-effort instruction to the model in-process, since forcing a call would
-    need constrained decoding.
+    call a different tool than the caller asked for; a name matching none of
+    the offered tools rejects the request with a 400, on every engine, because
+    the caller's forced choice cannot be honored and any answer would be a
+    guess at what they meant. ``"auto"``, ``"required"`` and an unrecognized
+    value pass through untouched: ``required`` is a best-effort instruction to
+    the model in-process, since forcing a call would need constrained decoding.
 
     Returns the tools and the tool_choice to dispatch with.
+
+    Raises:
+        HTTPException: 400 when the choice forces a function name that is not
+            among the offered tools (or when no tools were offered at all).
     """
 
+    forced_name = _forced_function_name(tool_choice)
     if tool_choice is None or not tools:
+        if forced_name is not None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"tool_choice forces function {forced_name!r}, "
+                    "but the request offers no tools"
+                ),
+            )
         return tools, tool_choice
 
     if isinstance(tool_choice, str):
@@ -137,25 +174,28 @@ def resolve_tool_choice(
             return None, None
         return tools, tool_choice
 
-    function = tool_choice.get("function")
-    if not isinstance(function, dict):
-        return tools, tool_choice
-    name = cast("object", function.get("name"))  # pyright: ignore[reportUnknownMemberType]
-    if not isinstance(name, str):
+    if forced_name is None:
         return tools, tool_choice
 
     named = [
         tool
         for tool in tools
         if isinstance(tool.get("function"), dict)
-        and cast("dict[str, Any]", tool["function"]).get("name") == name
+        and cast("dict[str, Any]", tool["function"]).get("name") == forced_name
     ]
-    # A name matching nothing is the caller's error. Emptying the list here
-    # would turn it into a silent prose answer, so the request is passed
-    # through whole: a served engine reports it, and an in-process engine
-    # answers from the full list. Rejecting it outright at this boundary is a
-    # follow-up, since only served engines report it today.
-    return (named or tools), tool_choice
+    if not named:
+        # The caller's forced choice cannot be honored. The in-process engines
+        # never see tool_choice, so passing the request through answered from
+        # the full list with no report of the mismatch; rejecting here is what
+        # makes the outcome the same on every engine.
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"tool_choice forces function {forced_name!r}, "
+                "which is not among the offered tools"
+            ),
+        )
+    return named, tool_choice
 
 
 async def chat_request_to_text_generation(
@@ -163,6 +203,14 @@ async def chat_request_to_text_generation(
     *,
     model_card: ModelCard | None = None,
 ) -> TextGenerationTaskParams:
+    # Resolved before message normalization on purpose: normalization may
+    # fetch HTTP images, and a request whose forced tool choice is invalid
+    # must get its documented 400 without first paying (or failing on) that
+    # outbound I/O.
+    resolved_tools, resolved_tool_choice = resolve_tool_choice(
+        request.tools, request.tool_choice
+    )
+
     instructions: str | None = None
     input_messages: list[InputMessage] = []
     chat_template_messages: list[dict[str, Any]] = []
@@ -268,14 +316,11 @@ async def chat_request_to_text_generation(
         else request.top_logprobs is not None
     )
 
-    # Resolve tool_choice at the boundary for the same reason as logprobs: only
-    # the served engines forward it to a server that understands it, so an
-    # in-process engine would otherwise ignore it entirely and answer a "none"
-    # request with a tool call.
-    resolved_tools, resolved_tool_choice = resolve_tool_choice(
-        request.tools, request.tool_choice
-    )
-
+    # tool_choice is resolved at the boundary for the same reason as logprobs:
+    # only the served engines forward it to a server that understands it, so
+    # an in-process engine would otherwise ignore it entirely and answer a
+    # "none" request with a tool call. The resolution itself runs at the top
+    # of this function, before any image I/O.
     return TextGenerationTaskParams(
         model=request.model,
         input=input_messages

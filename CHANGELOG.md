@@ -9,6 +9,13 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- A `tool_choice` that forces a function name matching none of the offered
+  tools (or arrives with no tools at all) is now rejected with a 400 at the
+  API boundary, on every engine. The in-process engines never see
+  `tool_choice`, so such a request previously answered from the full tool
+  list with no report of the mismatch, and only the served engines surfaced
+  the caller's error.
+
 - A plain JSON answer from an unmarked-dialect model (Llama on MLX) streams
   incrementally again. The message-opening brace provisionally opens a
   tool-call block whose closing token is a generation stop that never arrives

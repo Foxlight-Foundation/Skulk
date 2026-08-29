@@ -68,6 +68,7 @@ from skulk.api.adapters.chat_completions import (
     collect_chat_response,
     fetch_image_url,
     generate_chat_stream,
+    resolve_tool_choice,
 )
 from skulk.api.adapters.claude import (
     claude_request_to_text_generation,
@@ -3560,9 +3561,11 @@ class API:
         over the harness's chunk stream.
 
         Refusals happen before the response begins, in this order: 400 for
-        client tool definitions, 404 when intelligent-fabric mode is off,
-        400 for a conversation with no question to answer, then 503 with the
-        steward status payload while no steward is ready to answer.
+        client tool definitions, 400 for a tool_choice forcing a function
+        (the steward accepts no client tools, so a forced choice can never
+        be honored), 404 when intelligent-fabric mode is off, 400 for a
+        conversation with no question to answer, then 503 with the steward
+        status payload while no steward is ready to answer.
 
         Raises:
             HTTPException: 400, 404, or 503 per the order above.
@@ -3579,6 +3582,12 @@ class API:
                     "definitions are not accepted for this model"
                 ),
             )
+        # The reserved id branches before the ordinary tool_choice
+        # resolution, so the forced-name rejection has to be repeated here:
+        # a caller forcing a function at a model that accepts no client
+        # tools gets the same 400 the documented boundary gives, not a
+        # steward answer that silently ignored the choice.
+        resolve_tool_choice(payload.tools, payload.tool_choice)
         if not self._intelligent_fabric_enabled():
             raise HTTPException(
                 status_code=404,
