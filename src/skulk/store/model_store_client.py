@@ -442,6 +442,22 @@ async def _retry_store_http(
         try:
             return await operation()
         except (aiohttp.ClientError, TimeoutError, asyncio.TimeoutError) as error:
+            if isinstance(error, aiohttp.InvalidURL) and not isinstance(
+                error, aiohttp.InvalidUrlRedirectClientError
+            ):
+                # A URL that cannot even be requested (an empty configured
+                # store host interpolates into ``http://:12415/...``) is MORE
+                # unreachable than a refused connection: no request was
+                # attempted and none ever can be, so retrying only delays the
+                # fallback decision (#888). Config validation refuses the
+                # empty-host shape at startup; this covers a bad address that
+                # reaches the client through another path. The redirect
+                # subclass is excluded deliberately: a malformed redirect
+                # means the store ANSWERED, which is a store defect under the
+                # response-level-error policy above, not unreachability.
+                raise StoreUnreachableError(
+                    f"store host unreachable during {description}: {error}"
+                ) from error
             if attempt == attempts:
                 # Retry treats the whole ClientError family as transient (a
                 # proxy 502 or truncated body can be a blip worth retrying),

@@ -277,3 +277,57 @@ async def test_store_file_download_replaces_metadata_without_stale_resume(
     assert sidecar.read_bytes() == b"new"
     assert not partial.exists()
     assert factory.requests == [{}]
+
+
+@pytest.mark.anyio
+async def test_invalid_url_is_unreachable_without_retries() -> None:
+    """An impossible URL classifies as unreachable on the first attempt (#888).
+
+    An empty configured store host interpolates into ``http://:12415/...``;
+    no request can ever be attempted, so retrying only delays the fallback
+    decision, and falling through the availability probe's generic handler
+    misreported the model as "not in store", starving the downloader against
+    a host that can never answer instead of taking the direct-HF fallback.
+    """
+
+    calls = 0
+
+    async def impossible_url() -> str:
+        nonlocal calls
+        calls += 1
+        raise aiohttp.InvalidURL("http://:12415/models/org%2Fmodel/files")
+
+    with pytest.raises(model_store_client.StoreUnreachableError):
+        await model_store_client._retry_store_http(
+            impossible_url,
+            description="availability probe for org/model",
+            attempts=12,
+        )
+    assert calls == 1
+
+
+@pytest.mark.anyio
+async def test_malformed_redirect_is_a_store_failure_not_unreachability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A malformed redirect means the store ANSWERED; no fallback diversion.
+
+    ``InvalidUrlRedirectClientError`` subclasses ``InvalidURL`` but is raised
+    only after a response arrived, so it must keep the response-level-error
+    policy: surface the store defect rather than silently bypassing the
+    central store onto the direct-HF path.
+    """
+
+    async def bad_redirect() -> str:
+        raise aiohttp.InvalidUrlRedirectClientError(
+            "http://store/models/x", "malformed redirect location"
+        )
+
+    monkeypatch.setattr(model_store_client.asyncio, "sleep", _no_sleep)
+
+    with pytest.raises(aiohttp.InvalidUrlRedirectClientError):
+        await model_store_client._retry_store_http(
+            bad_redirect,
+            description="availability probe for org/model",
+            attempts=2,
+        )
