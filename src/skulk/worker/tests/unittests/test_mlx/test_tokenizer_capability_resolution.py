@@ -355,7 +355,8 @@ def test_mistral_template_overrides_the_preinstalled_parser(
         model_card=card,
     )
     assert tokenizer.tool_call_start == "[TOOL_CALLS]"
-    assert tokenizer.tool_call_end == "</s>"
+    end = tokenizer.tool_call_end
+    assert end is not None and "\x00" in end
     parser = cast(
         Callable[[str], list[dict[str, object]]],
         cast(object, tokenizer.tool_parser),
@@ -403,7 +404,9 @@ def test_mistral_tool_call_id_normalization() -> None:
     mapped = to_id(raw)
     assert len(mapped) == 9 and mapped.isalnum()
     assert to_id(raw) == mapped
-    assert to_id("ab") == "ab0000000"
+    # Ids differing only past the ninth character must not collide (parallel
+    # calls with sequential caller-minted ids).
+    assert to_id("call_000000001") != to_id("call_000000002")
 
     messages: list[dict[str, object]] = [
         {"role": "assistant", "tool_calls": [{"id": raw, "function": {}}]},

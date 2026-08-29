@@ -1430,7 +1430,15 @@ def load_tokenizer_for_model_id(
                 return displaced(text)
 
         object.__setattr__(tokenizer, "_tool_call_start", "[TOOL_CALLS]")
-        object.__setattr__(tokenizer, "_tool_call_end", "</s>")
+        # The end marker is an impossible sentinel, not the EOS literal: the
+        # streaming scanner closes a block at the FIRST occurrence of the end
+        # marker in accumulated text, and a model can emit a literal "</s>"
+        # inside arguments or prose, which would truncate a valid call. The
+        # sentinel can never occur in detokenized text, so the block closes
+        # only at end of generation.
+        object.__setattr__(
+            tokenizer, "_tool_call_end", _MISTRAL_IMPOSSIBLE_END
+        )
         object.__setattr__(tokenizer, "_tool_parser", _mistral_with_fallback)
 
     if (
@@ -1453,6 +1461,10 @@ def load_tokenizer_for_model_id(
     return tokenizer
 
 
+# Never occurs in detokenized text; see the wiring comment above.
+_MISTRAL_IMPOSSIBLE_END = "\x00skulk:mistral:end-of-message\x00"
+
+
 def _mistral_tool_call_id(raw: str) -> str:
     """Map any tool-call id onto Mistral's required nine-alphanumeric form.
 
@@ -1460,12 +1472,15 @@ def _mistral_tool_call_id(raw: str) -> str:
     alphanumeric strings with length 9!") on any other shape, and Skulk mints
     UUID-style ids, so a tool-result round trip could never render: the
     template raised and killed the runner, observed live at the first
-    round-trip request. The mapping is deterministic, so the id on the
-    assistant's recorded call and the tool result that echoes it land on the
-    same value within a request.
+    round-trip request. A digest rather than a truncation: ids differing only
+    past the ninth character (parallel calls with sequential caller-minted
+    ids) must not collide, and the mapping must be deterministic ACROSS
+    requests, because callers echo ids back in later turns, which rules out
+    request-local bijections.
     """
-    cleaned = "".join(ch for ch in raw if ch.isalnum())
-    return cleaned[:9].ljust(9, "0")
+    import hashlib
+
+    return hashlib.sha256(raw.encode()).hexdigest()[:9]
 
 
 def _normalize_mistral_tool_call_ids(messages: list[dict[str, Any]]) -> None:
