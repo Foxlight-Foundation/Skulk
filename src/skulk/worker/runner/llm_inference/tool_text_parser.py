@@ -459,6 +459,28 @@ def parse_tool_calls_from_text(
     """
     if not text:
         return None
+    # When the caller knows the model's resolved format, dialect selection is
+    # card truth rather than text inference: a Gemma-format model parses only
+    # its own dialect, and any OTHER format can never have Gemma or harmony
+    # shapes minted from echoed prose (a foreign-dialect block quoted in a
+    # preamble is content, not a call). Text inference remains only within
+    # the genuinely ambiguous Generic family, whose templates legitimately
+    # vary, and for callers with no profile. This dispatch runs BEFORE the
+    # leading-object branch below, so a specialized-format model echoing a
+    # bare JSON object cannot have the unmarked dialect minted against card
+    # truth; the leading-object branch itself only serves formats that
+    # actually speak the unmarked dialect.
+    if tool_call_format is not None:
+        from skulk.shared.models.model_cards import ToolCallFormat as _Format
+
+        if tool_call_format == _Format.Gemma4:
+            gemma_calls: list[ToolCallItem] = []
+            for block in _gemma_blocks(text):
+                gemma_calls.extend(gemma4_calls(block))
+            return _finish(gemma_calls, tools)
+        if tool_call_format == _Format.GptOss:
+            return _finish(_harmony_tool_calls(text), tools)
+
     # A message that OPENS with a valid JSON object is the unmarked dialect,
     # selected first and exclusively: the outermost structure is JSON, so a
     # dialect marker inside one of its string values (a tool result or user
@@ -484,24 +506,6 @@ def parse_tool_calls_from_text(
     # interior marker-shaped text as string content. A selected dialect that
     # parses nothing (prose mentioning a marker, a truncated block) yields
     # no call rather than a fallback scan, for the same reason.
-    # When the caller knows the model's resolved format, dialect selection is
-    # card truth rather than text inference: a Gemma-format model parses only
-    # its own dialect, and any OTHER format can never have Gemma or harmony
-    # shapes minted from echoed prose (a foreign-dialect block quoted in a
-    # preamble is content, not a call). Text inference remains only within
-    # the genuinely ambiguous Generic family, whose templates legitimately
-    # vary, and for callers with no profile.
-    if tool_call_format is not None:
-        from skulk.shared.models.model_cards import ToolCallFormat as _Format
-
-        if tool_call_format == _Format.Gemma4:
-            gemma_calls: list[ToolCallItem] = []
-            for block in _gemma_blocks(text):
-                gemma_calls.extend(gemma4_calls(block))
-            return _finish(gemma_calls, tools)
-        if tool_call_format == _Format.GptOss:
-            return _finish(_harmony_tool_calls(text), tools)
-
     markers: list[tuple[int, str]] = []
     excluded_kinds = (
         {"gemma4", "harmony"} if tool_call_format is not None else set()

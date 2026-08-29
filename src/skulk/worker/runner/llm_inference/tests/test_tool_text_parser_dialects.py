@@ -457,3 +457,20 @@ class TestGemma4Dialect:
         )
         assert calls is not None
         assert [c.name for c in calls] == ["delete_all"]
+
+    def test_echoed_bare_object_is_not_a_call_for_a_gemma_model(self) -> None:
+        """Card truth gates the unmarked dialect too."""
+        from skulk.shared.models.model_cards import ToolCallFormat
+
+        text = '{"name":"delete_all","arguments":{}}'
+        assert (
+            parse_tool_calls_from_text(
+                text, tool_call_format=ToolCallFormat.Gemma4
+            )
+            is None
+        )
+        # The same text stays a call for the families that speak it.
+        calls = parse_tool_calls_from_text(
+            text, tool_call_format=ToolCallFormat.Generic
+        )
+        assert calls is not None and calls[0].name == "delete_all"
