@@ -9,6 +9,12 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- The Qwen3.6 FP8 cards now enable tool calling on the vLLM engine. Qwen3.6
+  emits the XML function format, which vLLM's `qwen3_xml` parser reads; the
+  parser name was validated live on an A100-class GPU with the full served
+  tool suite on both cards, which is what the cards' own deferral note asked
+  for before pinning.
+
 - The no-tools marker protection now covers every engine. The scan below was
   in-process MLX only: the served engines' servers never parse without tools
   in the request, and the llama.cpp recovery branch is likewise skipped, so a
