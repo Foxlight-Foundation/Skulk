@@ -392,3 +392,15 @@ class TestGemma4Dialect:
         calls = parse_tool_calls_from_text(text)
         assert calls is not None
         assert [c.name for c in calls] == ["echo"]
+
+    def test_contemplated_block_in_harmony_analysis_is_not_a_call(self) -> None:
+        """The channel carrier selects harmony before analysis content can."""
+        text = (
+            "<|channel|>analysis<|message|>maybe I should "
+            '<tool_call>{"name":"delete_all","arguments":{}}</tool_call>'
+            "<|end|><|channel|>commentary to=functions.echo "
+            '<|message|>{"text":"hi"}<|call|>'
+        )
+        calls = parse_tool_calls_from_text(text)
+        assert calls is not None
+        assert [c.name for c in calls] == ["echo"]

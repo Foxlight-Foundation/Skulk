@@ -456,6 +456,12 @@ def parse_tool_calls_from_text(
     # no call rather than a fallback scan, for the same reason.
     markers: list[tuple[int, str]] = []
     for marker, kind in (
+        # Harmony is selected by its outer channel carrier, not only by the
+        # commentary header: a gpt-oss response begins with <|channel|>
+        # (analysis first), and to=functions. appears later, so a
+        # contemplated block inside analysis would otherwise sit earlier in
+        # the text and win the selection for a different dialect.
+        ("<|channel|>", "harmony"),
         ("to=functions.", "harmony"),
         ("<|tool_call>", "gemma4"),
         ("<tool_call>", "generic"),
@@ -467,19 +473,23 @@ def parse_tool_calls_from_text(
             markers.append((position, kind))
     calls: list[ToolCallItem] = []
     if markers:
+        # Uniformly exclusive: the selected dialect's result is final, and
+        # the unmarked-object fallback below never runs for a marker-bearing
+        # message, so no dialect's quoted or contemplated interior can be
+        # rescanned by anything.
         _, dialect = min(markers)
         if dialect == "harmony":
             calls = _harmony_tool_calls(text)
         elif dialect == "gemma4":
             for block in _gemma_blocks(text):
                 calls.extend(gemma4_calls(block))
-            return _finish(calls, tools)
         elif dialect == "generic":
             calls = _toolcall_block_calls(text)
         elif dialect == "python_tag":
             calls = _python_tag_calls(text)
         else:
             calls = _mistral_calls(text)
+        return _finish(calls, tools)
     if not calls:
         # Last resort, and deliberately narrow: the message must begin with the
         # call object. Unmarked dialects are otherwise indistinguishable from a
