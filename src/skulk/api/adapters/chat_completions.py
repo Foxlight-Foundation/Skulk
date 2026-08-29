@@ -203,6 +203,14 @@ async def chat_request_to_text_generation(
     *,
     model_card: ModelCard | None = None,
 ) -> TextGenerationTaskParams:
+    # Resolved before message normalization on purpose: normalization may
+    # fetch HTTP images, and a request whose forced tool choice is invalid
+    # must get its documented 400 without first paying (or failing on) that
+    # outbound I/O.
+    resolved_tools, resolved_tool_choice = resolve_tool_choice(
+        request.tools, request.tool_choice
+    )
+
     instructions: str | None = None
     input_messages: list[InputMessage] = []
     chat_template_messages: list[dict[str, Any]] = []
@@ -308,14 +316,11 @@ async def chat_request_to_text_generation(
         else request.top_logprobs is not None
     )
 
-    # Resolve tool_choice at the boundary for the same reason as logprobs: only
-    # the served engines forward it to a server that understands it, so an
-    # in-process engine would otherwise ignore it entirely and answer a "none"
-    # request with a tool call.
-    resolved_tools, resolved_tool_choice = resolve_tool_choice(
-        request.tools, request.tool_choice
-    )
-
+    # tool_choice is resolved at the boundary for the same reason as logprobs:
+    # only the served engines forward it to a server that understands it, so
+    # an in-process engine would otherwise ignore it entirely and answer a
+    # "none" request with a tool call. The resolution itself runs at the top
+    # of this function, before any image I/O.
     return TextGenerationTaskParams(
         model=request.model,
         input=input_messages
