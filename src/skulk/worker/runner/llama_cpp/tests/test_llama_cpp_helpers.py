@@ -480,3 +480,264 @@ def test_dropped_call_text_renders_the_call_so_the_answer_is_not_blank() -> None
 
 def test_dropped_call_text_is_empty_when_there_was_no_call() -> None:
     assert dropped_call_text({"content": "hi"}) == ""
+
+
+class TestTemplateKwargFormatter:
+    """The per-request slot that carries thinking control into the render.
+
+    create_chat_completion has no channel for chat-template kwargs, so the
+    runner wraps the default GGUF-template formatter and mutates this slot
+    between (strictly serial) requests.
+    """
+
+    def test_the_slot_is_injected_into_the_render(self) -> None:
+        from skulk.worker.runner.llama_cpp.runner import TemplateKwargFormatter
+
+        seen: dict[str, Any] = {}
+
+        def inner(**kwargs: Any) -> str:
+            seen.update(kwargs)
+            return "rendered"
+
+        formatter = TemplateKwargFormatter(inner)
+        formatter.template_kwargs = {"enable_thinking": False}
+        assert formatter(messages=[{"role": "user"}]) == "rendered"
+        assert seen["enable_thinking"] is False
+        assert seen["messages"] == [{"role": "user"}]
+
+    def test_the_handlers_own_arguments_win_on_collision(self) -> None:
+        from skulk.worker.runner.llama_cpp.runner import TemplateKwargFormatter
+
+        seen: dict[str, Any] = {}
+
+        def inner(**kwargs: Any) -> None:
+            seen.update(kwargs)
+
+        formatter = TemplateKwargFormatter(inner)
+        formatter.template_kwargs = {"messages": "stale", "enable_thinking": True}
+        formatter(messages="fresh")
+        assert seen["messages"] == "fresh"
+        assert seen["enable_thinking"] is True
+
+    def test_an_empty_slot_is_a_pure_passthrough(self) -> None:
+        from skulk.worker.runner.llama_cpp.runner import TemplateKwargFormatter
+
+        seen: dict[str, Any] = {}
+
+        def inner(**kwargs: Any) -> None:
+            seen.update(kwargs)
+
+        formatter = TemplateKwargFormatter(inner)
+        formatter(tools=None)
+        assert seen == {"tools": None}
+
+
+class TestInstallTemplateKwargFormatter:
+    """The installer swaps only the default Jinja handler, and only when safe."""
+
+    class _FakeInnerModel:
+        @staticmethod
+        def token_get_text(token_id: int) -> str:
+            return f"<tok{token_id}>"
+
+    def _fake_model(
+        self,
+        *,
+        chat_format: str = "chat_template.default",
+        template: str | None = "{% if enable_thinking is false %}off{% endif %}",
+    ) -> Any:
+        class _FakeModel:
+            def __init__(self, outer: Any) -> None:
+                self.chat_format = chat_format
+                self.metadata: dict[str, Any] = (
+                    {"tokenizer.chat_template": template}
+                    if template is not None
+                    else {}
+                )
+                self._chat_handlers: dict[str, Any] = {
+                    "chat_template.default": "original-handler"
+                }
+                self._model = outer._FakeInnerModel()
+
+            @staticmethod
+            def token_eos() -> int:
+                return 2
+
+            @staticmethod
+            def token_bos() -> int:
+                return 1
+
+        return _FakeModel(type(self))
+
+    @staticmethod
+    def _fake_chat_format_module(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+        import sys
+        import types
+
+        captured: dict[str, Any] = {}
+
+        module = types.ModuleType("llama_cpp.llama_chat_format")
+
+        class _FakeJinja2ChatFormatter:
+            def __init__(self, **kwargs: Any) -> None:
+                captured["formatter_kwargs"] = kwargs
+
+            def __call__(self, **kwargs: Any) -> str:
+                captured["render_kwargs"] = kwargs
+                return "rendered"
+
+        def _to_handler(formatter: Any) -> Any:
+            captured["wrapped"] = formatter
+            return ("handler", formatter)
+
+        module.Jinja2ChatFormatter = _FakeJinja2ChatFormatter  # pyright: ignore[reportAttributeAccessIssue]
+        module.chat_formatter_to_chat_completion_handler = _to_handler  # pyright: ignore[reportAttributeAccessIssue]
+        package = types.ModuleType("llama_cpp")
+        package.llama_chat_format = module  # pyright: ignore[reportAttributeAccessIssue]
+        monkeypatch.setitem(sys.modules, "llama_cpp", package)
+        monkeypatch.setitem(sys.modules, "llama_cpp.llama_chat_format", module)
+        return captured
+
+    def test_a_thinking_template_gets_the_wrapped_handler(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from skulk.worker.runner.llama_cpp.runner import (
+            TemplateKwargFormatter,
+            install_template_kwarg_formatter,
+        )
+
+        captured = self._fake_chat_format_module(monkeypatch)
+        model = self._fake_model()
+        wrapper = install_template_kwarg_formatter(model)
+        assert isinstance(wrapper, TemplateKwargFormatter)
+        # The rebuilt formatter mirrors upstream __init__: same template,
+        # eos/bos token text, and stop token id.
+        assert captured["formatter_kwargs"]["eos_token"] == "<tok2>"
+        assert captured["formatter_kwargs"]["bos_token"] == "<tok1>"
+        assert captured["formatter_kwargs"]["stop_token_ids"] == [2]
+        assert model._chat_handlers["chat_template.default"] == ("handler", wrapper)
+        # The slot reaches the render through the wrapper.
+        wrapper.template_kwargs = {"enable_thinking": False}
+        wrapper(messages=[])
+        assert captured["render_kwargs"]["enable_thinking"] is False
+
+    def test_a_guessed_family_format_is_left_alone(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from skulk.worker.runner.llama_cpp.runner import (
+            install_template_kwarg_formatter,
+        )
+
+        self._fake_chat_format_module(monkeypatch)
+        model = self._fake_model(chat_format="chatml-function-calling")
+        assert install_template_kwarg_formatter(model) is None
+        assert model._chat_handlers["chat_template.default"] == "original-handler"
+
+    def test_a_template_without_the_control_is_left_alone(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from skulk.worker.runner.llama_cpp.runner import (
+            install_template_kwarg_formatter,
+        )
+
+        self._fake_chat_format_module(monkeypatch)
+        model = self._fake_model(template="{{ messages }}")
+        assert install_template_kwarg_formatter(model) is None
+        assert model._chat_handlers["chat_template.default"] == "original-handler"
+
+    def test_internals_that_do_not_match_degrade_to_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from skulk.worker.runner.llama_cpp.runner import (
+            install_template_kwarg_formatter,
+        )
+
+        self._fake_chat_format_module(monkeypatch)
+        model = self._fake_model()
+        model._chat_handlers = "not-a-dict"
+        assert install_template_kwarg_formatter(model) is None
+
+
+class TestThinkingDisabledFlag:
+    """The reasoning parser must know when the prompt pre-closed the block.
+
+    With thinking disabled through the template, the generation starts
+    OUTSIDE the think block; a parser assuming the usual mid-reasoning start
+    misroutes the whole plain answer into reasoning_content and starves tool
+    recovery of its visible text (observed live on the den before this
+    check existed).
+    """
+
+    @staticmethod
+    def _params(enable_thinking: bool | None) -> TextGenerationTaskParams:
+        return TextGenerationTaskParams(
+            model=ModelId("unsloth/Qwen3.5-4B-GGUF"),
+            input=[InputMessage(role="user", content="hi")],
+            enable_thinking=enable_thinking,
+        )
+
+    def test_disabled_only_when_installed_and_requested(self) -> None:
+        from types import SimpleNamespace
+        from typing import cast
+
+        from skulk.worker.runner.llama_cpp.runner import Runner
+
+        with_formatter = cast("Any", SimpleNamespace(_thinking_formatter=object()))
+        without_formatter = cast("Any", SimpleNamespace(_thinking_formatter=None))
+        disabled = Runner._thinking_disabled_for
+        assert disabled(with_formatter, self._params(False)) is True
+        # The request asked for off, but the template has no control: the
+        # prompt still opens the block, so the parser must not be flipped.
+        assert disabled(without_formatter, self._params(False)) is False
+        assert disabled(with_formatter, self._params(True)) is False
+        assert disabled(with_formatter, self._params(None)) is False
+
+
+class TestReasoningParserFollowsTheToggle:
+    """The selected parser starts in the mode the rendered prompt implies."""
+
+    @staticmethod
+    def _parser(thinking_disabled: bool) -> Any:
+        from types import SimpleNamespace
+        from typing import cast
+        from unittest.mock import patch
+
+        from skulk.shared.models.model_cards import ReasoningFormat
+        from skulk.worker.runner.llama_cpp.runner import Runner
+
+        profile = SimpleNamespace(
+            output_parser=None,
+            thinking_format=ReasoningFormat.TokenDelimited,
+        )
+        fake_self = cast(
+            "Any",
+            SimpleNamespace(
+                shard_metadata=SimpleNamespace(
+                    model_card=SimpleNamespace(model_id="unsloth/Qwen3.5-4B-GGUF")
+                )
+            ),
+        )
+        with patch(
+            "skulk.worker.runner.llama_cpp.runner."
+            "resolve_model_capability_profile",
+            return_value=profile,
+        ):
+            return Runner._reasoning_text_parser(
+                fake_self, thinking_disabled=thinking_disabled
+            )
+
+    def test_thinking_off_starts_in_content_mode(self) -> None:
+        # The prompt pre-closed the think block, so a plain answer must reach
+        # content, not reasoning_content (the live regression this pins).
+        parser = self._parser(thinking_disabled=True)
+        emissions = parser.feed("The answer is 391.") + parser.flush()
+        assert emissions == [("The answer is 391.", False)]
+
+    def test_thinking_on_starts_mid_reasoning(self) -> None:
+        # The prompt opened the block, so the stream begins mid-reasoning and
+        # only the closing marker appears in the output.
+        parser = self._parser(thinking_disabled=False)
+        emissions = parser.feed("chain of thought</think>The answer.")
+        emissions += parser.flush()
+        assert ("chain of thought", True) in emissions
+        assert ("The answer.", False) in emissions
