@@ -1403,8 +1403,8 @@ def load_tokenizer_for_model_id(
         "[TOOL_CALLS]" in (getattr(tokenizer, "chat_template", None) or "")
     ):
         # Mistral writes `[TOOL_CALLS] [{...}]` and closes the call by ending
-        # the message, not with a closing marker, so the end marker is the
-        # family's EOS literal: it never appears in detokenized text, and the
+        # the message, not with a closing marker, so the end marker is an
+        # impossible sentinel that never appears in detokenized text, and the
         # streaming parser's end-of-generation path parses the still-open
         # block when the message finishes, the same mechanism that closes
         # Llama's unmarked dialect.

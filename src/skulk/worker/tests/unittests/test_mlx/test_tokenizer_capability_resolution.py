@@ -311,9 +311,10 @@ def test_mistral_template_overrides_the_preinstalled_parser(
     not only fill an empty slot. The override reads the JSON-array form the
     2410-era instruct models emit, and delegates back to the displaced
     parser when the array form does not parse, so upstream-form models keep
-    working. The end marker is the family EOS literal (never present in
-    detokenized text); the block closes at end of generation like Llama's
-    unmarked dialect.
+    working. The end marker is an impossible NUL-containing sentinel (never
+    present in detokenized text; an EOS literal like "</s>" can occur inside
+    generated arguments and would close the block early); the block closes at
+    end of generation like Llama's unmarked dialect.
     """
     card = ModelCard(
         model_id=ModelId("mlx-community/Ministral-8B-Instruct-2410-4bit"),
