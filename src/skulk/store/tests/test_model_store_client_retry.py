@@ -304,3 +304,30 @@ async def test_invalid_url_is_unreachable_without_retries() -> None:
             attempts=12,
         )
     assert calls == 1
+
+
+@pytest.mark.anyio
+async def test_malformed_redirect_is_a_store_failure_not_unreachability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A malformed redirect means the store ANSWERED; no fallback diversion.
+
+    ``InvalidUrlRedirectClientError`` subclasses ``InvalidURL`` but is raised
+    only after a response arrived, so it must keep the response-level-error
+    policy: surface the store defect rather than silently bypassing the
+    central store onto the direct-HF path.
+    """
+
+    async def bad_redirect() -> str:
+        raise aiohttp.InvalidUrlRedirectClientError(
+            "http://store/models/x", "malformed redirect location"
+        )
+
+    monkeypatch.setattr(model_store_client.asyncio, "sleep", _no_sleep)
+
+    with pytest.raises(aiohttp.InvalidUrlRedirectClientError):
+        await model_store_client._retry_store_http(
+            bad_redirect,
+            description="availability probe for org/model",
+            attempts=2,
+        )
