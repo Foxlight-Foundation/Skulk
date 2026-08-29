@@ -336,3 +336,23 @@ class TestGemma4Dialect:
         calls = parse_tool_calls_from_text(text)
         assert calls is not None
         assert [c.name for c in calls] == ["echo"]
+
+    def test_prose_mentioning_a_call_outside_markers_is_not_a_call(self) -> None:
+        """Only complete marker-delimited blocks may produce calls."""
+        text = "The opener is <|tool_call>; do not call:delete_all{}"
+        assert parse_tool_calls_from_text(text) is None
+
+    def test_whitespace_after_commas_parses_correctly(self) -> None:
+        import json
+
+        text = (
+            '<|tool_call>call:send{recipient:<|"|>alice<|"|>, '
+            'body:<|"|>hi<|"|>}<tool_call|>'
+        )
+        calls = parse_tool_calls_from_text(text)
+        assert calls is not None
+        assert json.loads(calls[0].arguments) == {"recipient": "alice", "body": "hi"}
+
+    def test_unparseable_body_drops_the_call_not_its_arguments(self) -> None:
+        text = "<|tool_call>call:send{:::garbage:::}<tool_call|>"
+        assert parse_tool_calls_from_text(text) is None

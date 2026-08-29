@@ -191,12 +191,15 @@ def test_gemma4_parser_logs_and_errors_only_shape() -> None:
     no_call = f"ordinary generated text {_PAYLOAD_SENTINEL}"
 
     with _captured_logs() as captured:
-        parsed = utils_mlx_module._parse_gemma4_tool_calls(invalid_args)  # pyright: ignore[reportPrivateUsage]
+        # An unparseable body DROPS the call rather than fabricating empty
+        # arguments (a side-effecting tool invoked with silently discarded
+        # required arguments is worse than no call), so both shapes raise.
+        with pytest.raises(ValueError):
+            utils_mlx_module._parse_gemma4_tool_calls(invalid_args)  # pyright: ignore[reportPrivateUsage]
         with pytest.raises(ValueError) as error:
             utils_mlx_module._parse_gemma4_tool_calls(no_call)  # pyright: ignore[reportPrivateUsage]
 
     logs = captured.getvalue()
-    assert parsed[0]["arguments"] == {}
     assert _PAYLOAD_SENTINEL not in logs
     assert _PAYLOAD_SENTINEL not in str(error.value)
     assert "argument_chars=" in logs

@@ -291,6 +291,12 @@ def _toolcall_block_calls(text: str) -> list[ToolCallItem]:
     return calls
 
 
+# A complete Gemma 4 marker-delimited block; the recovery dispatch parses
+# only these, while the MLX marker mechanism bounds blocks by tokenizer
+# markers before its family parser sees the text.
+_GEMMA_BLOCK_RE = re.compile(r"(?s)<\|tool_call>(.*?)<tool_call\|>")
+
+
 def gemma4_calls(text: str) -> list[ToolCallItem]:
     """Parse Gemma 4 ``call:NAME{...}`` blocks (the ``<|tool_call>`` dialect).
 
@@ -303,7 +309,7 @@ def gemma4_calls(text: str) -> list[ToolCallItem]:
     """
     _call_start_re = re.compile(r"call:([\w.-]+)\{")
     _gemma_quote_re = re.compile(r'(?s)<\|"\|>(.*?)<\|"\|>')
-    _bare_key_re = re.compile(r"([,{])([\w.-]+):")
+    _bare_key_re = re.compile(r"([,{])\s*([\w.-]+):")
 
     def _balanced_args(start: int) -> tuple[str, int] | None:
         """Return the argument body from ``start`` (past the opening brace).
@@ -367,11 +373,15 @@ def gemma4_calls(text: str) -> list[ToolCallItem]:
         try:
             json.loads(args_json)
         except json.JSONDecodeError:
+            # Drop the call rather than fabricating empty arguments: a
+            # side-effecting offered tool invoked with silently discarded
+            # required arguments is worse than no call, and the harmony
+            # branch already treats a malformed non-empty body this way.
             logger.warning(
-                "Failed to parse Gemma 4 tool call arguments "
+                "Dropping unparseable Gemma 4 tool call "
                 f"(argument_chars={len(args_json)})"
             )
-            args_json = "{}"
+            continue
         calls.append(ToolCallItem(name=match.group(1), arguments=args_json))
     return calls
 
@@ -412,9 +422,14 @@ def parse_tool_calls_from_text(
         # carry text shaped like another dialect's block (a tool result or
         # user text echoed into a string), and letting the generic branch
         # scan the same message would mint an executable call from that
-        # quoted content. gemma4_calls consumes balanced bodies and skips
-        # quoted spans, so returning here, calls or none, is the guard.
-        return _finish(gemma4_calls(text), tools)
+        # quoted content. Only COMPLETE marker-delimited blocks are parsed:
+        # prose that merely mentions the opener or a call:NAME{...} shape
+        # outside the markers is text, and a block truncated before its
+        # closer is not a call. Returning here, calls or none, is the guard.
+        block_calls: list[ToolCallItem] = []
+        for block in _GEMMA_BLOCK_RE.findall(text):
+            block_calls.extend(gemma4_calls(block))
+        return _finish(block_calls, tools)
     if not calls and "<tool_call>" in text:
         calls = _toolcall_block_calls(text)
     if not calls and "<|python_tag|>" in text:
