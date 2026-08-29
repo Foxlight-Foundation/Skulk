@@ -457,9 +457,14 @@ def install_template_kwarg_formatter(model: Any) -> TemplateKwargFormatter | Non
             return None
         metadata = getattr(model, "metadata", None)
         if not isinstance(metadata, dict):
-            return None
+            # An internals mismatch, not a not-applicable model: the default
+            # Jinja path was chosen, so metadata must exist. Raising routes
+            # it through the loud degradation below.
+            raise RuntimeError("Llama.metadata is not a dict")
         template = cast("dict[str, Any]", metadata).get("tokenizer.chat_template")
-        if not isinstance(template, str) or "enable_thinking" not in template:
+        if not isinstance(template, str):
+            raise RuntimeError("tokenizer.chat_template missing from metadata")
+        if "enable_thinking" not in template:
             return None
         eos_token_id = int(model.token_eos())
         bos_token_id = int(model.token_bos())
@@ -482,7 +487,7 @@ def install_template_kwarg_formatter(model: Any) -> TemplateKwargFormatter | Non
         wrapper = TemplateKwargFormatter(formatter)
         handlers = getattr(model, "_chat_handlers", None)
         if not isinstance(handlers, dict):
-            return None
+            raise RuntimeError("Llama._chat_handlers is not a dict")
         cast("dict[str, Any]", handlers)["chat_template.default"] = (
             llama_chat_format.chat_formatter_to_chat_completion_handler(wrapper)
         )
