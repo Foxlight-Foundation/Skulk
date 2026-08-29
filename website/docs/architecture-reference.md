@@ -800,7 +800,9 @@ Inventory snapshot; see #130 for consolidation plan.
 the shared dialect reader. The `llama_cpp` runner calls it directly for every
 call its bundled chat handlers did not already parse. The `mlx` engine reaches
 it only through the parsers wired onto the tokenizer in `utils_mlx`: the
-generic `<tool_call>` dialect (`_parse_generic_text_tool_calls`), the Mistral
+generic `<tool_call>` dialect (`_parse_generic_text_tool_calls`), the Gemma 4
+dialect (`_parse_gemma4_tool_calls`, delegating to the shared
+`gemma4_calls`), the Mistral
 dialect (`_parse_mistral_tool_calls`, wired when the chat template speaks
 `[TOOL_CALLS]`; the end marker is an impossible sentinel rather than the EOS
 literal, since `</s>` can occur inside generated arguments, so the block
@@ -810,8 +812,22 @@ by `make_mlx_parser` and called directly, and gpt-oss and DeepSeek V3.2 bypass
 it entirely for their own token-level parsers (`parse_gpt_oss`,
 `parse_deepseek_v32`). Adding a dialect here therefore reaches llama.cpp and
 those MLX paths, not every MLX model.
-Recognized dialects, tried in order: harmony `to=functions.NAME` channels
-(gpt-oss); `<tool_call>` blocks carrying Hermes JSON, Qwen3 XML, or GLM
+When the caller passes the model's resolved `tool_call_format`, dialect
+selection is card truth first: a Gemma-format model parses only its dialect, a
+gpt-oss model only harmony, and any other specialized format gets no text
+inference at all (its foreign-marker or bare-object echoes are content). Only
+the Generic family, and callers with no profile, fall to text inference:
+there, a message opening with a valid JSON object is the unmarked dialect,
+selected first and exclusively (the outermost structure is JSON, so markers
+inside its string values are content), and otherwise the dialect is selected
+by the EARLIEST recognized marker in the text and parsed exclusively (the cross-dialect injection guard: a quoted argument may
+carry another dialect's shape in either direction, so the outermost structure
+decides and no later branch rescans the message; a selected dialect that
+parses nothing yields no call rather than a fallback scan). Recognized
+dialects: harmony `to=functions.NAME` channels (gpt-oss); Gemma 4
+`<|tool_call>call:NAME{...}<tool_call|>` blocks (only complete, quote-aware
+marker-delimited blocks parse, shared with the MLX family parser so both
+engines read one implementation); `<tool_call>` blocks carrying Hermes JSON, Qwen3 XML, or GLM
 `<arg_key>`/`<arg_value>` pairs; Llama `<|python_tag|>` calls (which use
 `parameters` rather than `arguments` and may chain several with `;`); Mistral
 `[TOOL_CALLS]` arrays; and an unmarked call object opening the message, which

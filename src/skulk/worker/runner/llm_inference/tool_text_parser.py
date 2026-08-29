@@ -26,9 +26,13 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from skulk.api.types import ToolCallItem
+
+if TYPE_CHECKING:
+    from skulk.shared.models.model_cards import ToolCallFormat
+from skulk.worker.runner.bootstrap import logger
 from skulk.worker.runner.llm_inference.tool_parsers import (
     coerce_tool_calls_to_schema,
     declared_tool_calls,
@@ -290,8 +294,146 @@ def _toolcall_block_calls(text: str) -> list[ToolCallItem]:
     return calls
 
 
+def _gemma_blocks(text: str) -> list[str]:
+    """Extract complete Gemma 4 marker-delimited blocks, quote-aware.
+
+    A quoted argument may contain the closing marker itself (a tool result or
+    user text echoed into a string), so a regex split would end the outer
+    block at the quoted closer and mint the quoted remainder as a separate
+    executable call. The scan therefore skips ``<|"|>`` spans while looking
+    for the closer, exactly as the argument-body scan does. A block without a
+    real closer is truncated generation and yields nothing. The recovery
+    dispatch parses only these blocks; the MLX marker mechanism bounds blocks
+    by tokenizer markers before its family parser sees the text.
+    """
+    blocks: list[str] = []
+    position = 0
+    while True:
+        opener = text.find("<|tool_call>", position)
+        if opener == -1:
+            return blocks
+        index = opener + len("<|tool_call>")
+        closer = -1
+        while index < len(text):
+            if text.startswith('<|"|>', index):
+                closing_quote = text.find('<|"|>', index + 5)
+                if closing_quote == -1:
+                    return blocks
+                index = closing_quote + 5
+                continue
+            if text.startswith("<tool_call|>", index):
+                closer = index
+                break
+            index += 1
+        if closer == -1:
+            return blocks
+        blocks.append(text[opener + len("<|tool_call>") : closer])
+        position = closer + len("<tool_call|>")
+
+
+def gemma4_calls(text: str) -> list[ToolCallItem]:
+    """Parse Gemma 4 ``call:NAME{...}`` blocks (the ``<|tool_call>`` dialect).
+
+    Gemma 4 emits ``call:FUNCTION{key1:value1,key2:<|"|>string<|"|>}`` where
+    ``<|"|>`` delimits string values; bare values keep their JSON type. Uses
+    the three-phase approach from ollama PR #15306: extract quoted strings
+    into placeholders, quote bare keys, then restore the strings through
+    ``json.dumps`` for correct escaping. Shared by the MLX family parser and
+    this module's text recovery, so both engines read the same dialect.
+    """
+    _call_start_re = re.compile(r"call:([\w.-]+)\{")
+    _gemma_quote_re = re.compile(r'(?s)<\|"\|>(.*?)<\|"\|>')
+    _bare_key_re = re.compile(r"([,{])\s*([\w.-]+):")
+
+    def _balanced_args(start: int) -> tuple[str, int] | None:
+        """Return the argument body from ``start`` (past the opening brace).
+
+        Walks the text tracking brace depth so nested objects survive, and
+        skips ``<|"|>``-delimited string spans entirely so a brace inside a
+        quoted value cannot close the call. Returns ``None`` for an
+        unterminated body (truncated generation), which is not a call.
+        """
+        depth = 1
+        index = start
+        while index < len(text):
+            if text.startswith('<|"|>', index):
+                closing = text.find('<|"|>', index + 5)
+                if closing == -1:
+                    return None
+                index = closing + 5
+                continue
+            char = text[index]
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start:index], index
+            index += 1
+        return None
+
+    def _args_to_json(raw_args: str) -> str:
+        extracted: list[str] = []
+
+        def _replace_quoted(match: "re.Match[str]") -> str:
+            extracted.append(match.group(1))
+            return f"\x00{len(extracted) - 1}\x00"
+
+        skeleton = _gemma_quote_re.sub(_replace_quoted, raw_args)
+        skeleton = "{" + skeleton
+        skeleton = _bare_key_re.sub(r'\1"\2":', skeleton)
+        skeleton = skeleton[1:]
+        for index, value in enumerate(extracted):
+            skeleton = skeleton.replace(f"\x00{index}\x00", json.dumps(value))
+        return skeleton
+
+    calls: list[ToolCallItem] = []
+    position = 0
+    while True:
+        match = _call_start_re.search(text, position)
+        if match is None:
+            break
+        # The opener search is quote-aware too: a quoted span at the block's
+        # top level (before any real call) may carry call-shaped content,
+        # and matching inside it would mint that content as executable.
+        quote = text.find('<|"|>', position)
+        if quote != -1 and quote < match.start():
+            closing_quote = text.find('<|"|>', quote + 5)
+            if closing_quote == -1:
+                break
+            position = closing_quote + 5
+            continue
+        balanced = _balanced_args(match.end())
+        if balanced is None:
+            # Unterminated body (truncated generation): nothing after it can
+            # be a complete call either.
+            break
+        raw_args, body_end = balanced
+        # Resume AFTER the consumed body: call-shaped text inside a quoted
+        # argument (a tool result or user text echoed into a string) must
+        # never be recovered as a second executable call.
+        position = body_end + 1
+        args_json = "{" + _args_to_json(raw_args) + "}"
+        try:
+            json.loads(args_json)
+        except json.JSONDecodeError:
+            # Drop the call rather than fabricating empty arguments: a
+            # side-effecting offered tool invoked with silently discarded
+            # required arguments is worse than no call, and the harmony
+            # branch already treats a malformed non-empty body this way.
+            logger.warning(
+                "Dropping unparseable Gemma 4 tool call "
+                f"(argument_chars={len(args_json)})"
+            )
+            continue
+        calls.append(ToolCallItem(name=match.group(1), arguments=args_json))
+    return calls
+
+
 def parse_tool_calls_from_text(
-    text: str, tools: list[dict[str, Any]] | None = None
+    text: str,
+    tools: list[dict[str, Any]] | None = None,
+    tool_call_format: "ToolCallFormat | None" = None,
 ) -> list[ToolCallItem] | None:
     """Recover tool calls a reasoning model emitted as text (llama.cpp engine).
 
@@ -301,6 +443,7 @@ def parse_tool_calls_from_text(
     - harmony ``to=functions.`` channels (gpt-oss)
     - ``<tool_call>`` blocks carrying Hermes JSON, Qwen3 XML, or GLM
       ``<arg_key>``/``<arg_value>`` pairs
+    - Gemma 4 ``<|tool_call>call:NAME{...}<tool_call|>`` blocks
     - Llama ``<|python_tag|>`` calls, which use ``parameters`` rather than
       ``arguments`` and may chain several with ``;``
     - Mistral ``[TOOL_CALLS]`` arrays
@@ -316,15 +459,105 @@ def parse_tool_calls_from_text(
     """
     if not text:
         return None
+    # When the caller knows the model's resolved format, dialect selection is
+    # card truth rather than text inference: a Gemma-format model parses only
+    # its own dialect, and any OTHER format can never have Gemma or harmony
+    # shapes minted from echoed prose (a foreign-dialect block quoted in a
+    # preamble is content, not a call). Text inference remains only within
+    # the genuinely ambiguous Generic family, whose templates legitimately
+    # vary, and for callers with no profile. This dispatch runs BEFORE the
+    # leading-object branch below, so a specialized-format model echoing a
+    # bare JSON object cannot have the unmarked dialect minted against card
+    # truth; the leading-object branch itself only serves formats that
+    # actually speak the unmarked dialect.
+    if tool_call_format is not None:
+        from skulk.shared.models.model_cards import ToolCallFormat as _Format
+
+        if tool_call_format == _Format.Gemma4:
+            gemma_calls: list[ToolCallItem] = []
+            for block in _gemma_blocks(text):
+                gemma_calls.extend(gemma4_calls(block))
+            return _finish(gemma_calls, tools)
+        if tool_call_format == _Format.GptOss:
+            return _finish(_harmony_tool_calls(text), tools)
+        if tool_call_format != _Format.Generic:
+            # A specialized format with no text dialect here (DSML parses at
+            # the token level elsewhere) gets NO text inference at all:
+            # foreign markers or a bare object in its prose are content.
+            return None
+
+    # A message that OPENS with a valid JSON object is the unmarked dialect,
+    # selected first and exclusively: the outermost structure is JSON, so a
+    # dialect marker inside one of its string values (a tool result or user
+    # text echoed into an argument) is content, and letting the marker scan
+    # below run on such a message would mint an executable call from that
+    # string. A leading brace that does not decode as an object is just
+    # prose and falls through to marker selection.
+    stripped = text.lstrip()
+    if stripped.startswith("{"):
+        try:
+            json.JSONDecoder().raw_decode(stripped)
+        except ValueError:
+            pass
+        else:
+            return _finish(_bare_json_call(text), tools)
+    # The dialect is SELECTED by the earliest recognized marker in the text
+    # and parsed exclusively. Marker presence anywhere is not enough: a
+    # quoted argument may legitimately carry text shaped like ANY other
+    # dialect (a tool result or user text echoed into a string), in either
+    # direction, and letting a later branch rescan the same message would
+    # mint an executable call from that quoted content. The outermost
+    # structure decides; each dialect's own quote and JSON handling keeps
+    # interior marker-shaped text as string content. A selected dialect that
+    # parses nothing (prose mentioning a marker, a truncated block) yields
+    # no call rather than a fallback scan, for the same reason.
+    markers: list[tuple[int, str]] = []
+    # Reaching the marker scan with a non-null format means Generic: the
+    # specialized formats returned above. Generic families never write the
+    # gemma or harmony shapes, so those cannot be minted from echoed prose;
+    # distinguishing WITHIN the Generic family (a Hermes model echoing a
+    # Mistral array) needs template truth this seam does not have and is
+    # tracked as a follow-up.
+    excluded_kinds = (
+        {"gemma4", "harmony"} if tool_call_format is not None else set()
+    )
+    for marker, kind in (
+        # Harmony is selected by its outer channel carrier, not only by the
+        # commentary header: a gpt-oss response begins with <|channel|>
+        # (analysis first), and to=functions. appears later, so a
+        # contemplated block inside analysis would otherwise sit earlier in
+        # the text and win the selection for a different dialect.
+        ("<|channel|>", "harmony"),
+        ("to=functions.", "harmony"),
+        ("<|tool_call>", "gemma4"),
+        ("<tool_call>", "generic"),
+        ("<|python_tag|>", "python_tag"),
+        ("[TOOL_CALLS]", "mistral"),
+    ):
+        if kind in excluded_kinds:
+            continue
+        position = text.find(marker)
+        if position != -1:
+            markers.append((position, kind))
     calls: list[ToolCallItem] = []
-    if "to=functions." in text:
-        calls = _harmony_tool_calls(text)
-    if not calls and "<tool_call>" in text:
-        calls = _toolcall_block_calls(text)
-    if not calls and "<|python_tag|>" in text:
-        calls = _python_tag_calls(text)
-    if not calls and "[TOOL_CALLS]" in text:
-        calls = _mistral_calls(text)
+    if markers:
+        # Uniformly exclusive: the selected dialect's result is final, and
+        # the unmarked-object fallback below never runs for a marker-bearing
+        # message, so no dialect's quoted or contemplated interior can be
+        # rescanned by anything.
+        _, dialect = min(markers)
+        if dialect == "harmony":
+            calls = _harmony_tool_calls(text)
+        elif dialect == "gemma4":
+            for block in _gemma_blocks(text):
+                calls.extend(gemma4_calls(block))
+        elif dialect == "generic":
+            calls = _toolcall_block_calls(text)
+        elif dialect == "python_tag":
+            calls = _python_tag_calls(text)
+        else:
+            calls = _mistral_calls(text)
+        return _finish(calls, tools)
     if not calls:
         # Last resort, and deliberately narrow: the message must begin with the
         # call object. Unmarked dialects are otherwise indistinguishable from a
@@ -332,13 +565,22 @@ def parse_tool_calls_from_text(
         # prose. The object must also carry a name alongside arguments, and the
         # caller's tools are checked afterwards.
         calls = _bare_json_call(text)
+    return _finish(calls, tools)
+
+
+def _finish(
+    calls: list[ToolCallItem], tools: list[dict[str, Any]] | None
+) -> list[ToolCallItem] | None:
+    """Apply the shared offered-tools filter and schema coercion to a result.
+
+    A model may reach for one of its own built-ins: Llama answers some plain
+    questions with a call to ``print``, and gpt-oss has ``python`` and
+    ``browser``. Those name nothing the caller can run, so a block left with
+    no offered tool reads as prose and the caller gets the text instead.
+    """
     if not calls:
         return None
     if tools is not None:
-        # A model may reach for one of its own built-ins: Llama answers some
-        # plain questions with a call to `print`, and gpt-oss has `python` and
-        # `browser`. Those name nothing the caller can run, so a block left with
-        # no offered tool reads as prose and the caller gets the text instead.
         calls = declared_tool_calls(calls, tools)
         if not calls:
             return None

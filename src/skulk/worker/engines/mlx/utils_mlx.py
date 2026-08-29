@@ -1964,58 +1964,17 @@ def _parse_mistral_tool_calls(text: str) -> list[dict[str, Any]]:
 def _parse_gemma4_tool_calls(text: str) -> list[dict[str, Any]]:
     """Parse Gemma 4 tool calls from model output.
 
-    Gemma 4 emits ``call:FUNCTION{key1:value1,key2:<|"|>string<|"|>}``
-    where ``<|"|>`` delimits string values. Bare values keep their JSON
-    type (number, boolean, null); quoted values are always strings.
-
-    Uses the three-phase approach from ollama PR #15306:
-    1. Extract ``<|"|>``-delimited strings into placeholders
-    2. Quote bare keys
-    3. Restore strings via ``json.dumps()`` for correct escaping
+    Delegates to the shared text parser's Gemma 4 dialect
+    (``tool_text_parser.gemma4_calls``), so the MLX lane and the llama_cpp
+    recovery path read exactly the same format, and converts the JSON-string
+    arguments back to the dict shape this engine's marker mechanism expects.
     """
-    import regex as re
+    from skulk.worker.runner.llm_inference.tool_text_parser import gemma4_calls
 
-    _call_re = re.compile(r"call:(\w+)\{(.*?)\}", re.DOTALL)
-    _gemma_quote_re = re.compile(r'(?s)<\|"\|>(.*?)<\|"\|>')
-    _bare_key_re = re.compile(r"([,{])(\w+):")
-
-    def _args_to_json(raw_args: str) -> str:
-        # Phase 1: extract <|"|>-quoted strings into placeholders.
-        extracted: list[str] = []
-
-        def _replace_quoted(m: re.Match[str]) -> str:
-            extracted.append(m.group(1))
-            return f"\x00{len(extracted) - 1}\x00"
-
-        skeleton = _gemma_quote_re.sub(_replace_quoted, raw_args)
-
-        # Phase 2: quote bare keys — {key: or ,key: → {"key": or ,"key":
-        skeleton = "{" + skeleton  # ensure leading { for regex
-        skeleton = _bare_key_re.sub(r'\1"\2":', skeleton)
-        skeleton = skeleton[1:]  # remove added {
-
-        # Phase 3: restore extracted strings with proper JSON escaping.
-        for i, value in enumerate(extracted):
-            escaped = json.dumps(value)  # json.dumps handles all escaping
-            skeleton = skeleton.replace(f"\x00{i}\x00", escaped)
-
-        return skeleton
-
-    results: list[dict[str, Any]] = []
-    for match in _call_re.finditer(text):
-        func_name = match.group(1)
-        raw_args = match.group(2)
-        args_json = "{" + _args_to_json(raw_args) + "}"
-        try:
-            args_dict = cast(dict[str, object], json.loads(args_json))
-        except json.JSONDecodeError:
-            logger.warning(
-                "Failed to parse Gemma 4 tool call arguments "
-                f"(argument_chars={len(args_json)})"
-            )
-            args_dict = {}
-        results.append(dict(name=func_name, arguments=args_dict))
-
+    results: list[dict[str, Any]] = [
+        {"name": item.name, "arguments": cast(dict[str, object], json.loads(item.arguments))}
+        for item in gemma4_calls(text)
+    ]
     if not results:
         raise ValueError(
             f"No Gemma 4 tool calls found in generated text ({len(text)} chars)"
