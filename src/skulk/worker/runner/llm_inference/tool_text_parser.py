@@ -406,10 +406,17 @@ def parse_tool_calls_from_text(
     calls: list[ToolCallItem] = []
     if "to=functions." in text:
         calls = _harmony_tool_calls(text)
+    if not calls and "<|tool_call>" in text:
+        # Gemma's opener is the most specific marker present, and its
+        # dialect is EXCLUSIVE: a quoted Gemma argument may legitimately
+        # carry text shaped like another dialect's block (a tool result or
+        # user text echoed into a string), and letting the generic branch
+        # scan the same message would mint an executable call from that
+        # quoted content. gemma4_calls consumes balanced bodies and skips
+        # quoted spans, so returning here, calls or none, is the guard.
+        return _finish(gemma4_calls(text), tools)
     if not calls and "<tool_call>" in text:
         calls = _toolcall_block_calls(text)
-    if not calls and "<|tool_call>" in text:
-        calls = gemma4_calls(text)
     if not calls and "<|python_tag|>" in text:
         calls = _python_tag_calls(text)
     if not calls and "[TOOL_CALLS]" in text:
@@ -421,13 +428,22 @@ def parse_tool_calls_from_text(
         # prose. The object must also carry a name alongside arguments, and the
         # caller's tools are checked afterwards.
         calls = _bare_json_call(text)
+    return _finish(calls, tools)
+
+
+def _finish(
+    calls: list[ToolCallItem], tools: list[dict[str, Any]] | None
+) -> list[ToolCallItem] | None:
+    """Apply the shared offered-tools filter and schema coercion to a result.
+
+    A model may reach for one of its own built-ins: Llama answers some plain
+    questions with a call to ``print``, and gpt-oss has ``python`` and
+    ``browser``. Those name nothing the caller can run, so a block left with
+    no offered tool reads as prose and the caller gets the text instead.
+    """
     if not calls:
         return None
     if tools is not None:
-        # A model may reach for one of its own built-ins: Llama answers some
-        # plain questions with a call to `print`, and gpt-oss has `python` and
-        # `browser`. Those name nothing the caller can run, so a block left with
-        # no offered tool reads as prose and the caller gets the text instead.
         calls = declared_tool_calls(calls, tools)
         if not calls:
             return None

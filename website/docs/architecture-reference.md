@@ -800,7 +800,9 @@ Inventory snapshot; see #130 for consolidation plan.
 the shared dialect reader. The `llama_cpp` runner calls it directly for every
 call its bundled chat handlers did not already parse. The `mlx` engine reaches
 it only through the parsers wired onto the tokenizer in `utils_mlx`: the
-generic `<tool_call>` dialect (`_parse_generic_text_tool_calls`), the Mistral
+generic `<tool_call>` dialect (`_parse_generic_text_tool_calls`), the Gemma 4
+dialect (`_parse_gemma4_tool_calls`, delegating to the shared
+`gemma4_calls`), the Mistral
 dialect (`_parse_mistral_tool_calls`, wired when the chat template speaks
 `[TOOL_CALLS]`; the end marker is an impossible sentinel rather than the EOS
 literal, since `</s>` can occur inside generated arguments, so the block
