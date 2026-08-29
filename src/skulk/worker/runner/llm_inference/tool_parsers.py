@@ -99,15 +99,20 @@ class ToolParser:
         dialect itself is the only thing that knows where the call ends. The
         remainder is meaningful only when calls were parsed; a dialect without
         a split-aware parser returns the whole-block result and no remainder.
+
+        A split parser that finds no call defers to the whole-block parser
+        rather than answering ``None`` itself: the split reading is an
+        overlay, and forms only the inner parser reads (Mistral's displaced
+        upstream ``NAME[ARGS]`` fallback) must keep parsing exactly as they
+        did before a split parser existed.
         """
-        if self._split_parser is None:
-            return self.parse(text, tools), ""
-        parsed, remainder = self._split_parser(text)
-        if parsed is None:
-            return None, ""
-        if tools is not None:
-            parsed = coerce_tool_calls_to_schema(parsed, tools)
-        return parsed, remainder
+        if self._split_parser is not None:
+            parsed, remainder = self._split_parser(text)
+            if parsed is not None:
+                if tools is not None:
+                    parsed = coerce_tool_calls_to_schema(parsed, tools)
+                return parsed, remainder
+        return self.parse(text, tools), ""
 
 
 def _json_type_matches(value: Any, expected_type: str) -> bool:  # pyright: ignore[reportAny]
@@ -373,11 +378,29 @@ def make_mlx_parser(
         except Exception:
             return None
 
+    split_parser: (
+        Callable[[str], tuple[list[ToolCallItem] | None, str]] | None
+    ) = None
+    if tool_call_start == "[TOOL_CALLS]":
+        # The marker uniquely identifies the whole-block Mistral dialect at
+        # this seam, and the shared text parser knows where its array ends,
+        # so trailing assistant text after the array can be reported rather
+        # than swallowed. A miss (the displaced upstream NAME[ARGS] form)
+        # defers to the inner parser through parse_split's fallback.
+        # Imported at call time: tool_text_parser imports the schema
+        # coercion from this module, so a module-level import is circular.
+        from skulk.worker.runner.llm_inference.tool_text_parser import (
+            parse_tool_calls_with_remainder,
+        )
+
+        split_parser = lambda text: parse_tool_calls_with_remainder(text)  # noqa: E731
+
     return ToolParser(
         start_parsing=tool_call_start,
         end_parsing=tool_call_end,
         _inner_parser=parse_tool_calls,
         close_scan=close_scan,
+        _split_parser=split_parser,
     )
 
 

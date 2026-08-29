@@ -837,10 +837,14 @@ Mistral
 the model may keep writing after. For the two dialects that know where their
 markup ends (the unmarked object and the Mistral array),
 `parse_tool_calls_with_remainder` also reports the visible text around the
-call, which the llama.cpp recovery path delivers as content alongside the
-`ToolCallChunk`; the remainder is empty whenever no call survives, so a
-non-call message still falls back to the whole content. The unmarked rule is
-deliberately narrow,
+call: the llama.cpp recovery path delivers it as content alongside the
+`ToolCallChunk`, and the MLX terminal path routes it through the
+message-finishing scan via `ToolParser.parse_split` (`make_mlx_parser`
+attaches the split overlay for the `[TOOL_CALLS]` opener; a split miss
+defers to the inner parser, so Mistral's displaced upstream `NAME[ARGS]`
+form keeps parsing whole-block). The remainder is empty whenever no call
+survives, so a non-call message still falls back to the whole content. The
+unmarked rule is deliberately narrow,
 since it is otherwise indistinguishable from a model answering in JSON: the
 message must begin with the object, the object must carry a `name` alongside an
 `arguments` or `parameters` value, and the offered-tools filter below removes

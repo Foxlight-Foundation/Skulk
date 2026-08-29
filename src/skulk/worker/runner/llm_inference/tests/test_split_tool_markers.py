@@ -826,3 +826,48 @@ class TestClosingMarkerInsideArguments:
             parser,
         )
         assert calls_of(chunks) == ["get_weather"]
+
+
+class TestTextAroundAMistralArray:
+    """Mistral trailing text on the MLX streaming path.
+
+    Mistral closes its call by ending the message (the wired end marker is an
+    impossible sentinel), so the block resolves on the end-of-generation path
+    and only the split-aware text parser knows where the array ends. The
+    split reading is an overlay: the displaced upstream ``NAME[ARGS]`` form
+    still parses through the inner parser, with no remainder.
+    """
+
+    _SENTINEL = "\x00test:mistral:end\x00"
+
+    def _mistral_parser(self) -> ToolParser:
+        def inner(text: str) -> list[dict[str, object]]:
+            # Stands in for the displaced upstream parser: reads the
+            # NAME[ARGS] form only.
+            stripped = text.strip()
+            if not stripped.startswith("upstream_form"):
+                raise ValueError("not the upstream form")
+            return [{"name": "get_weather", "arguments": "{}"}]
+
+        return make_mlx_parser("[TOOL_CALLS]", self._SENTINEL, inner)
+
+    def test_trailing_text_after_the_array_is_delivered(self) -> None:
+        chunks = feed(
+            [
+                "[TOOL_CALLS] ",
+                '[{"name": "get_weather", "arguments": {"location": "Paris"}}]',
+                " I will check that.",
+            ],
+            self._mistral_parser(),
+        )
+        assert calls_of(chunks) == ["get_weather"]
+        assert "I will check that." in text_of(chunks)
+        last = [item for item in chunks if item is not None][-1]
+        assert isinstance(last, ToolCallResponse)
+
+    def test_the_displaced_upstream_form_still_parses(self) -> None:
+        chunks = feed(
+            ["[TOOL_CALLS]", "upstream_form"],
+            self._mistral_parser(),
+        )
+        assert calls_of(chunks) == ["get_weather"]

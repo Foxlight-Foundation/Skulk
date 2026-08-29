@@ -893,9 +893,10 @@ def _classify_anchored_prefix(text: str) -> str:
     call once a top-level ``"name"`` string and an ``"arguments"`` or
     ``"parameters"`` value are both distinguishable, and content the moment
     it can no longer be one: a top-level key outside the call shape, a
-    non-string name, a non-object argument value, malformed JSON, or the
-    object closing without the signature. The hold is therefore bounded by
-    the first decisive key rather than by the message.
+    non-string name, an argument value that is neither an object nor the
+    string-encoded form the OpenAI wire shape allows, malformed JSON, or
+    the object closing without the signature. The hold is therefore bounded
+    by the first decisive key rather than by the message.
     """
 
     length = len(text)

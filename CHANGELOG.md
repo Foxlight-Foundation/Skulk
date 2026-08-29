@@ -31,8 +31,10 @@ This project records release notes here and mirrors public-facing notes in
 - Visible text a model writes around its call is delivered as content
   alongside the tool calls, instead of being swallowed with the markup, for
   the dialects that know where their markup ends: the unmarked call object
-  (MLX streaming and llama.cpp text recovery) and the Mistral `[TOOL_CALLS]`
-  array (llama.cpp text recovery).
+  and the Mistral `[TOOL_CALLS]` array, on both the MLX streaming path and
+  the llama.cpp text-recovery path. Mistral's displaced upstream
+  `NAME[ARGS]` form keeps parsing through the inner parser, with no
+  remainder.
 
 - Gemma 4 models can now call tools on the in-process llama.cpp engine. The
   engine's bundled chat handler does not parse Gemma 4's call format, and the
