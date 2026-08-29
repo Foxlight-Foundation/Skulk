@@ -691,3 +691,53 @@ class TestThinkingDisabledFlag:
         assert disabled(without_formatter, self._params(False)) is False
         assert disabled(with_formatter, self._params(True)) is False
         assert disabled(with_formatter, self._params(None)) is False
+
+
+class TestReasoningParserFollowsTheToggle:
+    """The selected parser starts in the mode the rendered prompt implies."""
+
+    @staticmethod
+    def _parser(thinking_disabled: bool) -> Any:
+        from types import SimpleNamespace
+        from typing import cast
+        from unittest.mock import patch
+
+        from skulk.shared.models.model_cards import ReasoningFormat
+        from skulk.worker.runner.llama_cpp.runner import Runner
+
+        profile = SimpleNamespace(
+            output_parser=None,
+            thinking_format=ReasoningFormat.TokenDelimited,
+        )
+        fake_self = cast(
+            "Any",
+            SimpleNamespace(
+                shard_metadata=SimpleNamespace(
+                    model_card=SimpleNamespace(model_id="unsloth/Qwen3.5-4B-GGUF")
+                )
+            ),
+        )
+        with patch(
+            "skulk.worker.runner.llama_cpp.runner."
+            "resolve_model_capability_profile",
+            return_value=profile,
+        ):
+            return Runner._reasoning_text_parser(
+                fake_self, thinking_disabled=thinking_disabled
+            )
+
+    def test_thinking_off_starts_in_content_mode(self) -> None:
+        # The prompt pre-closed the think block, so a plain answer must reach
+        # content, not reasoning_content (the live regression this pins).
+        parser = self._parser(thinking_disabled=True)
+        emissions = parser.feed("The answer is 391.") + parser.flush()
+        assert emissions == [("The answer is 391.", False)]
+
+    def test_thinking_on_starts_mid_reasoning(self) -> None:
+        # The prompt opened the block, so the stream begins mid-reasoning and
+        # only the closing marker appears in the output.
+        parser = self._parser(thinking_disabled=False)
+        emissions = parser.feed("chain of thought</think>The answer.")
+        emissions += parser.flush()
+        assert ("chain of thought", True) in emissions
+        assert ("The answer.", False) in emissions
