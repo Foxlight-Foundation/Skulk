@@ -445,21 +445,20 @@ def parse_tool_calls_from_text(
     if not text:
         return None
     calls: list[ToolCallItem] = []
-    gemma_blocks = _gemma_blocks(text) if "<|tool_call>" in text else []
-    if gemma_blocks:
-        # Gemma dispatch is FIRST and EXCLUSIVE when a complete block exists:
+    if "<|tool_call>" in text:
+        # Gemma dispatch is FIRST and EXCLUSIVE whenever its opener appears:
         # a quoted Gemma argument may legitimately carry text shaped like any
         # other dialect (harmony channels, a generic block, a bare call), and
         # letting a later branch scan the same message would mint an
-        # executable call from quoted content. Prose that merely mentions the
-        # opener, and a block truncated before its closer, produce no blocks
-        # and fall through as text. The symmetric hijack (another dialect's
-        # quoted argument carrying a complete Gemma block) is accepted
-        # residual risk: it requires a fabricated two-marker pair inside a
-        # string, and choosing the more structured dialect first is the
-        # smaller attack surface.
+        # executable call from quoted content. That exclusivity holds even
+        # when no complete block parses, because a TRUNCATED block's quoted
+        # interior must not fall through to the other dialects either; a
+        # truncated or prose-only message simply yields no call. The
+        # symmetric hijack (another dialect's quoted argument carrying the
+        # Gemma opener) is accepted residual risk: choosing the more
+        # structured dialect first is the smaller attack surface.
         block_calls: list[ToolCallItem] = []
-        for block in gemma_blocks:
+        for block in _gemma_blocks(text):
             block_calls.extend(gemma4_calls(block))
         return _finish(block_calls, tools)
     if "to=functions." in text:
