@@ -348,11 +348,21 @@ def gemma4_calls(text: str) -> list[ToolCallItem]:
         return skeleton
 
     calls: list[ToolCallItem] = []
-    for match in _call_start_re.finditer(text):
+    position = 0
+    while True:
+        match = _call_start_re.search(text, position)
+        if match is None:
+            break
         balanced = _balanced_args(match.end())
         if balanced is None:
-            continue
-        raw_args, _ = balanced
+            # Unterminated body (truncated generation): nothing after it can
+            # be a complete call either.
+            break
+        raw_args, body_end = balanced
+        # Resume AFTER the consumed body: call-shaped text inside a quoted
+        # argument (a tool result or user text echoed into a string) must
+        # never be recovered as a second executable call.
+        position = body_end + 1
         args_json = "{" + _args_to_json(raw_args) + "}"
         try:
             json.loads(args_json)
