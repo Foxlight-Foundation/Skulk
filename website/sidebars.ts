@@ -20,6 +20,7 @@ const sidebars: SidebarsConfig = {
       label: "Guides",
       collapsed: false,
       items: [
+        "install",
         "build-and-runtime",
         "node-doctor",
         "human-release-qualification",

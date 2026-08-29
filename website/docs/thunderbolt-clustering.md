@@ -8,9 +8,10 @@ is required; that is covered separately in
 
 The happy path is deliberately small:
 
-1. Install Skulk on each node.
-2. **Grant macOS Local Network access** (the one step people miss; see below).
-3. Run `uv run skulk` on each node.
+1. Install the signed Skulk app on each node.
+2. Open the app, choose **Start Skulk**, and grant **Local Network** access when
+   macOS asks.
+3. Confirm every node appears in the dashboard.
 
 Skulk discovers peers automatically over mDNS on your local network, and the
 inference data plane automatically prefers Thunderbolt links when present.
@@ -20,9 +21,19 @@ inference data plane automatically prefers Thunderbolt links when present.
 - Two or more Apple-silicon Macs.
 - The Macs on the **same local network** (any of: a shared Ethernet/Wi-Fi LAN,
   or a Thunderbolt Bridge; see [Thunderbolt wiring](#thunderbolt-wiring)).
-- [`uv`](https://docs.astral.sh/uv/) and Node.js installed on each node.
+- The [signed Skulk app](install#macos) installed on each node. A source
+  checkout, `uv`, and Node.js are needed only when following the development
+  path below.
 
 ## 2. Install (each node)
+
+For normal use, install the app:
+
+```bash
+brew install --cask Foxlight-Foundation/skulk/skulk
+```
+
+The source-development alternative is:
 
 ```bash
 git clone https://github.com/Foxlight-Foundation/Skulk.git

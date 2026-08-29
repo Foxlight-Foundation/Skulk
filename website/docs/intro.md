@@ -17,36 +17,28 @@ endpoint, so you can run models far larger than any single machine could hold.
 
 ## Get started
 
-1. On each machine, run the one-command installer:
+1. Install Skulk on each machine. The packaged apps are the recommended path:
+
+   **Apple Silicon macOS 15 or newer**
 
    ```bash
-   curl -fsSL https://raw.githubusercontent.com/Foxlight-Foundation/Skulk/main/install.sh | bash
+   brew install --cask Foxlight-Foundation/skulk/skulk
    ```
 
-   The installer targets the stable branch (`main`) regardless of which docs
-   channel you are reading. To install the development branch instead
-   (matching the `/next/` docs), pass a ref:
+   Open **Skulk** from Applications and choose **Start Skulk**.
+
+   **Ubuntu or Debian desktop (`amd64` or `arm64`)**
 
    ```bash
-   curl -fsSL https://raw.githubusercontent.com/Foxlight-Foundation/Skulk/main/install.sh | bash -s -- --ref dev
+   curl -fLO https://apt.foxlight.ai/foxlight-archive-keyring.deb
+   sudo apt install ./foxlight-archive-keyring.deb
+   sudo apt update
+   sudo apt install skulk
    ```
 
-   It installs prerequisites, builds the node, writes a `skulk.yaml` with
-   bootstrap [model store](./model-store.md) defaults (only when none exists),
-   and finishes with `skulk doctor --fix`, which audits the machine (GPUs,
-   inference engines, storage) and fixes what it safely can. A single node
-   serves its own store immediately; several fresh nodes converge on the
-   elected master's store when their cluster forms. Then start Skulk from the
-   install directory:
-
-   ```bash
-   cd ~/skulk && uv run skulk
-   ```
-
-   See [build and runtime paths](build-and-runtime) for the manual development
-   setup, [Node doctor](node-doctor) to audit a node at any time, and
-   [run as a service](run-skulk-as-a-service) to keep Skulk running across
-   reboots.
+   Open **Skulk** from the application menu and choose **Start Skulk**. See the
+   complete [installation guide](install) for updates, headless Linux, cluster
+   namespaces, other Linux distributions, and development builds.
 2. Open the dashboard (default `http://localhost:52415`), pick a model, and
    launch it. Skulk places it across the cluster and starts serving when it is
    ready.
@@ -60,7 +52,9 @@ hands-free voice loop, while the cluster serves OpenAI-compatible
 transcription WebSocket at `/v1/realtime`
 ([speech guide](speech-fabric-realtime)).
 
-For the runtime details, see [build and runtime paths](build-and-runtime) and
+For source and runtime internals, see
+[source builds and runtime paths](build-and-runtime). For advanced service
+configuration around a source checkout, see
 [run as a service](run-skulk-as-a-service).
 
 ## Why Skulk

@@ -9,7 +9,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-4c72b0?style=flat-square)](LICENSE)
 
 [![Documentation](https://img.shields.io/badge/docs-documentation-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/)
-[![Build & Runtime Paths](https://img.shields.io/badge/docs-build_%26_runtime-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/build-and-runtime/)
+[![Install Skulk](https://img.shields.io/badge/docs-install_skulk-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/install/)
 [![Release Notes](https://img.shields.io/badge/release_notes-v1.5.0-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/release-notes/1.5.0/)
 [![Architecture](https://img.shields.io/badge/docs-architecture-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/architecture/)
 
@@ -48,15 +48,45 @@ On top of that, Skulk adds:
 
 ## Install
 
-One command takes a fresh macOS or Linux machine to a working node:
+The packaged Skulk apps are the recommended installation path. They include the
+matching runtime, dashboard, and native components and give you a menu-bar or
+desktop control for starting the node, opening the dashboard, and viewing logs.
+
+**Apple Silicon macOS 15 or newer:**
+
+```bash
+brew install --cask Foxlight-Foundation/skulk/skulk
+```
+
+**Ubuntu or Debian desktop (`amd64` or `arm64`):**
+
+```bash
+curl -fLO https://apt.foxlight.ai/foxlight-archive-keyring.deb
+sudo apt install ./foxlight-archive-keyring.deb
+sudo apt update
+sudo apt install skulk
+```
+
+Open **Skulk**, choose **Start Skulk**, and then open the dashboard from the app.
+See the [installation guide](https://foxlight-foundation.github.io/Skulk/install/)
+for updates, headless Linux, cluster namespaces, and removal.
+
+For contributors, development builds, unsupported Linux distributions, and
+operators who need a source checkout, use the source installer:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Foxlight-Foundation/Skulk/main/install.sh | bash
 ```
 
-The installer fetches the toolchain (git, a C compiler, rustup, uv), clones the repo, syncs the environment, builds the dashboard with Skulk's bundled cross-platform Node.js runtime (falling back to a compatible host toolchain if necessary), and installs the right inference engine for the hardware it finds: NVIDIA Linux nodes get the CUDA `llama-server` wheel, AMD Linux nodes get the Vulkan one, and macOS needs nothing extra (in-process MLX). It finishes with `skulk doctor --fix`, which audits the node (GPU detection, engine availability, storage headroom) and applies safe remediations, printing the consequence and fix for anything it cannot repair. Capability comes from detection, not configuration: no environment variables are required. Re-running the installer is safe; every step is idempotent. Pass `--headless` only when you intentionally want an API-only node without the dashboard.
+The source installer fetches the toolchain, clones the repo, syncs the
+environment, builds the dashboard, provisions an inference engine for detected
+hardware, and finishes with `skulk doctor --fix`. Re-running it is safe. Pass
+`--headless` only when you intentionally want a source-based API-only node.
 
-For the manual development setup and what the installer does in detail, see [Build & Runtime Paths](https://foxlight-foundation.github.io/Skulk/build-and-runtime/); to audit a node at any later point, see [Node doctor](https://foxlight-foundation.github.io/Skulk/node-doctor/).
+For manual development setup and what the source installer does in detail, see
+[Source Builds & Runtime Paths](https://foxlight-foundation.github.io/Skulk/build-and-runtime/);
+to audit a node at any later point, see
+[Node doctor](https://foxlight-foundation.github.io/Skulk/node-doctor/).
 
 ## Why Skulk
 
@@ -152,7 +182,9 @@ Why would you use Skulk over another solution? What does it get you?
 
 ## Prerequisites
 
-The [one-command installer](#install) handles all of this automatically. Install these manually only when you want to develop on Skulk or control each step yourself.
+Packaged app users do not need these tools. Install them only when you want to
+develop Skulk or control a source build yourself; the [source installer](#install)
+can also provision them automatically.
 
 ### macOS
 
@@ -183,7 +215,17 @@ rustup toolchain install nightly
 
 ## Getting Started
 
-If you are brand new to Skulk, run the [one-command installer](#install) and skip to step 5. For the from-source path, follow this order:
+If you are brand new to Skulk:
+
+1. Follow the [packaged installation path](#install) for each machine.
+2. Open **Skulk** and choose **Start Skulk**.
+3. Open the dashboard from the app.
+4. Confirm your node or cluster appears in the topology view.
+5. Launch a model from the Model Store view, or place one through the API.
+6. Wait until the model is placed and ready.
+7. Chat in the dashboard or send API requests.
+
+For a source build, follow this order:
 
 1. Install the prerequisites for your platform.
 2. Clone the repo.
@@ -216,8 +258,9 @@ Build/runtime note:
 
 ## Choose Your Path
 
-- **I want the fastest first success**: follow [Single-Node Quick Start](#single-node-quick-start).
-- **I want a multi-node cluster**: follow [Cluster Quick Start](#cluster-quick-start).
+- **I want the fastest first success**: follow the [app installation guide](https://foxlight-foundation.github.io/Skulk/install/).
+- **I want to build from source**: follow [Source-Based Single-Node Quick Start](#source-based-single-node-quick-start).
+- **I want a multi-node cluster**: install the app on every supported machine, then follow [Cluster Quick Start](#cluster-quick-start).
 - **I want shared storage and fewer duplicate downloads**: read [Model Store](#model-store) after the cluster quick start.
 - **I want to integrate with code**: jump to [API Guide](#api-guide) and then [docs/api.md](docs/api.md).
 
@@ -277,9 +320,10 @@ The normal dashboard flow is: confirm topology, launch a model, wait for it to b
 </p>
 <p align="center"><em>Debugging a distributed request: the observability panel's Traces tab shows one request's prefill and decode phases across every rank of a pipelined placement, inline, without the trace data ever leaving the cluster.</em></p>
 
-## Single-Node Quick Start
+## Source-Based Single-Node Quick Start
 
-This path is for getting one machine working end-to-end from zero.
+This path is for contributors and advanced operators who need a source checkout.
+For ordinary use, the [packaged apps](#install) provide the faster path.
 
 ### 1. Install Prerequisites
 
@@ -353,9 +397,10 @@ If you get `404 No instance found for model ...`, the model has not been placed 
 
 Use this path when you want more than one machine in the cluster.
 
-1. Install Skulk on each node.
-2. Build the dashboard on each node if you are running from source.
-3. Start `uv run skulk` on each machine.
+1. Install the same Skulk version on each node.
+2. Start Skulk from the desktop app on packaged machines, or run
+   `uv run skulk` on source-based machines.
+3. Build the dashboard first only on nodes that run from source.
 4. Open the dashboard on one node and confirm the cluster topology looks correct.
 5. Use placement preview or the placement manager to launch a model.
 6. Send chat requests through the dashboard or API.
@@ -642,7 +687,8 @@ The full documentation site is published at
 [foxlight-foundation.github.io/Skulk](https://foxlight-foundation.github.io/Skulk/).
 Highlights:
 
-- [Build & runtime paths](https://foxlight-foundation.github.io/Skulk/build-and-runtime) (the one-command installer and engine provisioning) and [Node doctor](https://foxlight-foundation.github.io/Skulk/node-doctor)
+- [Install Skulk](https://foxlight-foundation.github.io/Skulk/install/) (recommended macOS and Linux apps, headless Linux, and source/development paths)
+- [Source builds & runtime paths](https://foxlight-foundation.github.io/Skulk/build-and-runtime) (source installer and engine provisioning) and [Node doctor](https://foxlight-foundation.github.io/Skulk/node-doctor)
 - [AMD / Strix Halo node guide](https://foxlight-foundation.github.io/Skulk/amd-strix-halo-nodes) (heterogeneous clusters, the llama.cpp engine)
 - [Speech providers and realtime transcription](https://foxlight-foundation.github.io/Skulk/speech-fabric-realtime) (TTS, STT, and the realtime WebSocket)
 - [Cluster communication](https://foxlight-foundation.github.io/Skulk/cluster-communication) (the control, telemetry, and data planes; the Zenoh transport)
@@ -651,7 +697,7 @@ Highlights:
 - [Thunderbolt clustering](https://foxlight-foundation.github.io/Skulk/thunderbolt-clustering) and [RDMA on macOS](https://foxlight-foundation.github.io/Skulk/build-and-runtime)
 - [Speculative decoding](https://foxlight-foundation.github.io/Skulk/speculative-decoding)
 - [API guide](https://foxlight-foundation.github.io/Skulk/api-guide) and [architecture](https://foxlight-foundation.github.io/Skulk/architecture)
-- [Release notes](https://foxlight-foundation.github.io/Skulk/release-notes/1.4.1/)
+- [Release notes](https://foxlight-foundation.github.io/Skulk/release-notes/1.5.0/)
 - [CONTRIBUTING.md](CONTRIBUTING.md)
 
 ## Contributing
