@@ -10,10 +10,11 @@
 #   ({mlx, llama_cpp} in shared/backends.py) would make a vision-declaring
 #   vllm-only card unplaceable, so this card claims text serving only.
 #   Restore the vision declaration when the vllm runner gains image input.
-# - Tool calling stays off on this engine for now: Qwen3.6 emits the XML
-#   function format (not Hermes JSON), so it needs the matching vLLM
-#   parser pinned via runtime.vllm_tool_call_parser once that parser name
-#   is validated on a pod; a wrong parser fails at request time.
+# - Tool calling is on: Qwen3.6 emits the XML function format (not Hermes
+#   JSON), read by vLLM's qwen3_xml parser. Validated live on an A100-80GB
+#   pod (2026-08-28): full tool-served suite pass on this card and its
+#   sibling, structured dispatchable calls, tool_choice "none" enforcement,
+#   and the tool-result round trip.
 # Architecture facts from the repo's config.json; context_length is the
 # config max_position_embeddings. storage_size is the full staging set.
 # `supports_tensor = false`: vLLM runs single-node in Skulk.
@@ -31,6 +32,7 @@ context_length = 262144
 trust_remote_code = false
 
 [runtime]
+vllm_tool_call_parser = "qwen3_xml"
 # Native MTP through vLLM's unified "mtp" method: the checkpoint's own
 # prediction head (mtp_num_hidden_layers=1) drafts, no separate model.
 # Probe-measured on A100-80GB, 512-token greedy decode: 27B-FP8 2.01x
@@ -41,7 +43,7 @@ vllm_spec_method = "mtp"
 vllm_spec_num_tokens = 2
 
 [tooling]
-supports_tool_calling = false
+supports_tool_calling = true
 
 [placement]
 compatible_backends = ["vllm-cuda", "vllm-rocm"]

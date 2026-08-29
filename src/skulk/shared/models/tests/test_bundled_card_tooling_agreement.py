@@ -26,18 +26,14 @@ CARD_DIRECTORY = (
 )
 
 # Contradictions that exist today and are tracked for the signed registry
-# rather than fixed here. The vLLM-only cards under-declare: those models do
-# call tools, but the vLLM runner resolves a parser only from an explicit
-# `runtime.vllm_tool_call_parser` pin and rejects a tools request without one,
-# so flipping the flag alone would advertise a capability that fails at request
-# time. Pinning a parser has to be validated on GPU hardware first. Anything
-# NOT listed here is a new contradiction and fails.
-KNOWN_CONTRADICTIONS: frozenset[str] = frozenset(
-    {
-        "Qwen3.6 27B",
-        "Qwen3.6 35B A3B",
-    }
-)
+# rather than fixed here. The vLLM-only cards under-declare when a model does
+# call tools but no `runtime.vllm_tool_call_parser` pin has been validated on
+# GPU hardware yet: the vLLM runner rejects a tools request without a pin, so
+# flipping the flag alone would advertise a capability that fails at request
+# time. Anything NOT listed here is a new contradiction and fails. The Qwen3.6
+# FP8 entries left this list when their `qwen3_xml` pin was validated live on
+# an A100-class pod.
+KNOWN_CONTRADICTIONS: frozenset[str] = frozenset()
 
 
 def load_cards() -> dict[str, dict[str, Any]]:
