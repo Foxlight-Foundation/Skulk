@@ -11,6 +11,9 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+from fastapi import HTTPException
+
 from skulk.api.adapters.chat_completions import resolve_tool_choice
 
 WEATHER: dict[str, Any] = {
@@ -47,13 +50,30 @@ class TestNamedFunction:
         # The choice still travels, so a served engine enforces it server-side.
         assert choice == {"type": "function", "function": {"name": "get_time"}}
 
-    def test_a_name_matching_nothing_is_left_for_the_engine_to_report(self) -> None:
-        # Silently sending no tools would turn the caller's mistake into a
-        # confusing prose answer instead of an error.
-        tools, _ = resolve_tool_choice(
-            BOTH, {"type": "function", "function": {"name": "nope"}}
-        )
-        assert names(tools) == ["get_weather", "get_time"]
+    def test_a_name_matching_nothing_is_rejected_with_a_400(self) -> None:
+        # The in-process engines never see tool_choice, so passing the request
+        # through answered from the full list with no report of the mismatch.
+        # Rejecting at the boundary makes the outcome the same on every engine.
+        with pytest.raises(HTTPException) as error:
+            resolve_tool_choice(
+                BOTH, {"type": "function", "function": {"name": "nope"}}
+            )
+        assert error.value.status_code == 400
+        assert "nope" in str(error.value.detail)
+
+    def test_a_forced_name_with_no_tools_is_rejected_with_a_400(self) -> None:
+        with pytest.raises(HTTPException) as error:
+            resolve_tool_choice(
+                None, {"type": "function", "function": {"name": "get_time"}}
+            )
+        assert error.value.status_code == 400
+
+    def test_a_forced_name_with_an_empty_tool_list_is_rejected(self) -> None:
+        with pytest.raises(HTTPException) as error:
+            resolve_tool_choice(
+                [], {"type": "function", "function": {"name": "get_time"}}
+            )
+        assert error.value.status_code == 400
 
     def test_a_malformed_choice_object_passes_through(self) -> None:
         tools, choice = resolve_tool_choice(BOTH, {"type": "function"})

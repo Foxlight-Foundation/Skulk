@@ -9,6 +9,13 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- A `tool_choice` that forces a function name matching none of the offered
+  tools (or arrives with no tools at all) is now rejected with a 400 at the
+  API boundary, on every engine. The in-process engines never see
+  `tool_choice`, so such a request previously answered from the full tool
+  list with no report of the mismatch, and only the served engines surfaced
+  the caller's error.
+
 - Gemma 4 models can now call tools on the in-process llama.cpp engine. The
   engine's bundled chat handler does not parse Gemma 4's call format, and the
   text-recovery path had no dialect for it, so well-formed calls streamed to
