@@ -11,6 +11,7 @@ import json
 
 from skulk.worker.runner.llm_inference.tool_text_parser import (
     parse_tool_calls_from_text,
+    parse_tool_calls_with_remainder,
 )
 
 
@@ -490,3 +491,125 @@ class TestGemma4Dialect:
                 )
                 is None
             )
+
+
+class TestSemicolonsInsideArguments:
+    """Chained Llama calls must not be split inside a quoted argument.
+
+    Several calls in one ``<|python_tag|>`` body are separated by ``;``, but a
+    semicolon is also ordinary data in shell commands, SQL, and prose. The old
+    ``split(";")`` divided the JSON string itself, both fragments failed the
+    balanced-object parse, and the valid call disappeared into content
+    (deferred #879 review finding).
+    """
+
+    SHELL = [
+        {
+            "type": "function",
+            "function": {
+                "name": "run_shell",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"cmd": {"type": "string"}},
+                },
+            },
+        }
+    ]
+
+    def test_a_semicolon_inside_a_quoted_argument_survives(self) -> None:
+        text = (
+            '<|python_tag|>{"name": "run_shell", '
+            '"parameters": {"cmd": "echo a; echo b"}}<|eom_id|>'
+        )
+        calls = parse_tool_calls_from_text(text, self.SHELL)
+        assert calls is not None
+        assert [call.name for call in calls] == ["run_shell"]
+        assert json.loads(calls[0].arguments) == {"cmd": "echo a; echo b"}
+
+    def test_chained_calls_with_semicolons_in_both_strings_survive(self) -> None:
+        text = (
+            '<|python_tag|>{"name": "a", "parameters": {"x": "1;2"}};'
+            '{"name": "b", "parameters": {"y": ";"}}<|eom_id|>'
+        )
+        calls = parse_tool_calls_from_text(text)
+        assert calls is not None
+        assert [call.name for call in calls] == ["a", "b"]
+        assert json.loads(calls[0].arguments) == {"x": "1;2"}
+        assert json.loads(calls[1].arguments) == {"y": ";"}
+
+    def test_an_escaped_quote_does_not_derail_the_object_scan(self) -> None:
+        text = (
+            '<|python_tag|>{"name": "run_shell", '
+            '"parameters": {"cmd": "say \\"hi; bye\\""}}<|eom_id|>'
+        )
+        calls = parse_tool_calls_from_text(text, self.SHELL)
+        assert calls is not None
+        assert json.loads(calls[0].arguments) == {"cmd": 'say "hi; bye"'}
+
+
+class TestRemainderPreservation:
+    """The remainder-preserving variant reports visible text around a call.
+
+    A model may keep writing after its call, and only the dialect knows where
+    the markup ends. The remainder is meaningful only when calls are returned:
+    with no call, or every call dropped by the offered-tools rule, the caller
+    falls back to emitting the whole content, so the remainder must be empty.
+    """
+
+    WEATHER = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"location": {"type": "string"}},
+                },
+            },
+        }
+    ]
+
+    def test_text_after_an_unmarked_call_is_the_remainder(self) -> None:
+        calls, remainder = parse_tool_calls_with_remainder(
+            '{"name": "get_weather", "parameters": {"location": "Denver"}} Done.',
+            self.WEATHER,
+        )
+        assert calls is not None
+        assert [call.name for call in calls] == ["get_weather"]
+        assert remainder == "Done."
+
+    def test_a_call_that_is_the_whole_message_has_no_remainder(self) -> None:
+        calls, remainder = parse_tool_calls_with_remainder(
+            '{"name": "get_weather", "parameters": {}}', self.WEATHER
+        )
+        assert calls is not None
+        assert remainder == ""
+
+    def test_text_around_a_mistral_array_is_the_remainder(self) -> None:
+        calls, remainder = parse_tool_calls_with_remainder(
+            "Sure. [TOOL_CALLS] "
+            '[{"name": "get_weather", "arguments": {"location": "Paris"}}] '
+            "I will check that.",
+            self.WEATHER,
+        )
+        assert calls is not None
+        assert [call.name for call in calls] == ["get_weather"]
+        assert "Sure." in remainder
+        assert "I will check that." in remainder
+        assert "[TOOL_CALLS]" not in remainder
+
+    def test_a_dropped_call_reports_no_remainder(self) -> None:
+        # The whole message is content when the offered-tools rule drops the
+        # call, so a remainder that excludes the markup would be wrong.
+        calls, remainder = parse_tool_calls_with_remainder(
+            '{"name": "report", "parameters": {}} trailing', self.WEATHER
+        )
+        assert calls is None
+        assert remainder == ""
+
+    def test_prose_reports_no_remainder(self) -> None:
+        calls, remainder = parse_tool_calls_with_remainder(
+            "There is no call here.", self.WEATHER
+        )
+        assert calls is None
+        assert remainder == ""

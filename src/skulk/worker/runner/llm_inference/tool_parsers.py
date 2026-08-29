@@ -1,9 +1,18 @@
 import json
 import math
 from dataclasses import dataclass
-from typing import Any, Callable, cast
+from typing import Any, Callable, Literal, cast
 
 from skulk.api.types import ToolCallItem
+
+CloseScan = Literal["plain", "json_strings", "gemma_quotes"]
+"""How the streaming scanner locates a block's closing marker.
+
+``plain`` matches the first occurrence. ``json_strings`` matches only outside
+JSON string values, so an argument like ``{"html": "</tool_call>"}`` does not
+truncate the block at the quoted marker. ``gemma_quotes`` skips Gemma 4's
+``<|"|>``-delimited string spans the same way.
+"""
 
 UNMARKED_TOOL_DIALECT = "skulk:unmarked-tool-dialect"
 """Sentinel tool parser meaning "read the whole block with the text dialects".
@@ -46,6 +55,23 @@ class ToolParser:
     of an unparsable block is that the model simply answered in JSON and the
     text should be delivered as content.
     """
+    close_scan: CloseScan = "plain"
+    """How the streaming scanner locates this dialect's closing marker.
+
+    Set only where the block interior's quoting rules are actually known (see
+    :func:`infer_close_scan`); the plain scan is the safe default because
+    tracking JSON strings over a non-JSON interior hides a real closer behind
+    an odd quote count, which is worse than the truncation it prevents.
+    """
+    _split_parser: (
+        Callable[[str], tuple[list[ToolCallItem] | None, str]] | None
+    ) = None
+    """Optional variant of the inner parser that also reports trailing text.
+
+    Only a dialect that knows where its markup ends can report a remainder;
+    parsers without one read the whole block as the call, which matches the
+    previous behavior everywhere.
+    """
 
     @property
     def start_markers(self) -> tuple[str, ...]:
@@ -62,6 +88,26 @@ class ToolParser:
         if tools is not None:
             parsed = coerce_tool_calls_to_schema(parsed, tools)
         return parsed
+
+    def parse_split(
+        self, text: str, tools: list[dict[str, Any]] | None
+    ) -> tuple[list[ToolCallItem] | None, str]:
+        """Parse ``text``, also returning any visible text after the calls.
+
+        A model may keep writing after its call (``{"name": ...} Done.``), and
+        an end-of-generation block has no closing marker to split at, so the
+        dialect itself is the only thing that knows where the call ends. The
+        remainder is meaningful only when calls were parsed; a dialect without
+        a split-aware parser returns the whole-block result and no remainder.
+        """
+        if self._split_parser is None:
+            return self.parse(text, tools), ""
+        parsed, remainder = self._split_parser(text)
+        if parsed is None:
+            return None, ""
+        if tools is not None:
+            parsed = coerce_tool_calls_to_schema(parsed, tools)
+        return parsed, remainder
 
 
 def _json_type_matches(value: Any, expected_type: str) -> bool:  # pyright: ignore[reportAny]
@@ -235,10 +281,84 @@ def coerce_tool_calls_to_schema(
     return coerced_calls
 
 
+def find_close_marker(
+    text: str, marker: str, close_scan: CloseScan, *, start: int = 0
+) -> int:
+    """Index of the block-closing ``marker`` in ``text``, or ``-1``.
+
+    ``close_scan`` decides what counts as an occurrence: the quote-aware modes
+    skip the dialect's quoted string spans, because a quoted argument may
+    legitimately contain the closing marker (an HTML-writing tool passing
+    ``"</tool_call>"``), and matching it there truncates the block and turns a
+    valid call into a parse error. An unterminated string span means the
+    block is still incomplete, so no closer is reported and the block closes
+    at end of generation instead, where the whole message is in hand.
+    """
+
+    if close_scan == "plain":
+        return text.find(marker, start)
+    if close_scan == "gemma_quotes":
+        index = start
+        while True:
+            closer = text.find(marker, index)
+            if closer == -1:
+                return -1
+            quote = text.find('<|"|>', index)
+            if quote == -1 or closer < quote:
+                return closer
+            closing_quote = text.find('<|"|>', quote + 5)
+            if closing_quote == -1:
+                return -1
+            index = closing_quote + 5
+    in_string = False
+    escaped = False
+    index = start
+    while index < len(text):
+        if not in_string and text.startswith(marker, index):
+            return index
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        index += 1
+    return -1
+
+
+def infer_close_scan(tool_call_start: str, chat_template: str) -> CloseScan:
+    """Choose the close-marker scan mode from what the wiring actually knows.
+
+    Quoting rules are dialect-specific, and the interior dialect of a
+    ``<tool_call>`` block is not knowable from the markers alone (Qwen3 XML
+    and Hermes JSON share them), so the mode comes from template truth at the
+    wiring seam: the Gemma opener identifies its dialect outright, a template
+    carrying the Qwen3 XML form keeps the plain scan (XML parameter values
+    carry unbalanced ``"`` characters freely, and tracking JSON strings over
+    them would hide a real closer), and a template that renders arguments as
+    JSON gets the JSON-string-aware scan. Unknown interiors keep the plain
+    scan, which is the previous behavior.
+    """
+
+    if tool_call_start == "<|tool_call>":
+        return "gemma_quotes"
+    if "<function=" in chat_template:
+        return "plain"
+    if "tool_call.arguments" in chat_template or "tojson" in chat_template:
+        return "json_strings"
+    return "plain"
+
+
 def make_mlx_parser(
     tool_call_start: str,
     tool_call_end: str,
     tool_parser: Callable[[str], dict[str, Any] | list[dict[str, Any]]],
+    *,
+    close_scan: CloseScan = "plain",
 ) -> ToolParser:
     def parse_tool_calls(text: str) -> list[ToolCallItem] | None:
         try:
@@ -257,6 +377,7 @@ def make_mlx_parser(
         start_parsing=tool_call_start,
         end_parsing=tool_call_end,
         _inner_parser=parse_tool_calls,
+        close_scan=close_scan,
     )
 
 
@@ -286,6 +407,9 @@ def make_json_parser() -> ToolParser:
         start_parsing="<tool_call>",
         end_parsing="</tool_call>",
         _inner_parser=_parse_json_calls,
+        # The interior is JSON by construction here, so the closer scan may
+        # safely skip its string values.
+        close_scan="json_strings",
     )
 
 
@@ -303,6 +427,7 @@ def make_text_dialect_parser(tool_call_start: str, tool_call_end: str) -> ToolPa
     # this module, so a module-level import here would be circular.
     from skulk.worker.runner.llm_inference.tool_text_parser import (
         parse_tool_calls_from_text,
+        parse_tool_calls_with_remainder,
     )
 
     return ToolParser(
@@ -312,6 +437,11 @@ def make_text_dialect_parser(tool_call_start: str, tool_call_end: str) -> ToolPa
         extra_start_parsing=("<|python_tag|>",),
         anchored=True,
         unparsed_is_text=True,
+        # The anchored block is a JSON object by construction, and the text
+        # dialects know where their markup ends, so trailing prose after the
+        # call ("{...} Done.") can be reported rather than swallowed.
+        close_scan="json_strings",
+        _split_parser=lambda text: parse_tool_calls_with_remainder(text),
     )
 
 

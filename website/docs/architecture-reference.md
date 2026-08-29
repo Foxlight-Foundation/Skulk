@@ -829,9 +829,18 @@ dialects: harmony `to=functions.NAME` channels (gpt-oss); Gemma 4
 marker-delimited blocks parse, shared with the MLX family parser so both
 engines read one implementation); `<tool_call>` blocks carrying Hermes JSON, Qwen3 XML, or GLM
 `<arg_key>`/`<arg_value>` pairs; Llama `<|python_tag|>` calls (which use
-`parameters` rather than `arguments` and may chain several with `;`); Mistral
+`parameters` rather than `arguments` and may chain several with `;`; the
+chained objects are read as successive balanced JSON spans, string-aware, so
+a semicolon inside a quoted argument is data rather than a split point);
+Mistral
 `[TOOL_CALLS]` arrays; and an unmarked call object opening the message, which
-the model may keep writing after. The unmarked rule is deliberately narrow,
+the model may keep writing after. For the two dialects that know where their
+markup ends (the unmarked object and the Mistral array),
+`parse_tool_calls_with_remainder` also reports the visible text around the
+call, which the llama.cpp recovery path delivers as content alongside the
+`ToolCallChunk`; the remainder is empty whenever no call survives, so a
+non-call message still falls back to the whole content. The unmarked rule is
+deliberately narrow,
 since it is otherwise indistinguishable from a model answering in JSON: the
 message must begin with the object, the object must carry a `name` alongside an
 `arguments` or `parameters` value, and the offered-tools filter below removes
@@ -847,10 +856,28 @@ therefore searches the accumulated text rather than each chunk, and
 `_partial_marker_suffix_length` carries forward only the trailing run that
 could still become a marker. That run is shorter than the longest marker, so
 ordinary answers stream with at most a few characters of latency and nothing
-is held for a message containing no call. The scan does not stop once ordinary
+is held for a message containing no call. The one longer hold is the anchored
+dialect's message-opening `{`, which opens a block only provisionally:
+`_classify_anchored_prefix` releases the buffered prefix the moment it can no
+longer be a call (a top-level key outside the call signature, a non-string
+name, malformed JSON, or the object closing without the signature) and commits
+the block once a `"name"` plus `"arguments"`/`"parameters"` signature is
+distinguishable, so a plain JSON answer streams after a delay bounded by its
+first decisive key rather than losing all incremental output to a hold that
+could only resolve at the terminal chunk (the unmarked dialect's closing token
+is a generation stop that never arrives as text). Released text rejoins the
+ordinary scan, so a distinctive marker later in it still opens a real block.
+The scan does not stop once ordinary
 text has been released, so a model that writes a sentence before calling still
-has its call found. A block closes at the first `end_parsing` found in the accumulated block, or at
-the end of generation. The calls of every block in one message are coalesced
+has its call found. A block closes at the first `end_parsing` found in the
+accumulated block (`find_close_marker`, whose `ToolParser.close_scan` mode
+skips the dialect's quoted string spans where the wiring knows the interior's
+quoting rules: `infer_close_scan` selects Gemma-quote awareness from the Gemma
+opener and JSON-string awareness from a template that renders arguments as
+JSON, keeping the plain scan for Qwen3 XML and unknown interiors, whose values
+carry unbalanced quote characters freely), or at
+the end of generation, where `ToolParser.parse_split` also reports visible
+text the model wrote after its call so it reaches the caller as content. The calls of every block in one message are coalesced
 into a single `ToolCallResponse`, which is the OpenAI shape and is what makes
 parallel calls survive: several families write each call in its own block, and
 `API._token_chunk_stream` stops at the first chunk carrying a finish reason, so
