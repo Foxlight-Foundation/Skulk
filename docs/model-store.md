@@ -55,7 +55,8 @@ an unrelated outbound connection cannot claim it before Skulk starts.
 
 This is the simplest path for most people.
 
-1. Start Skulk on all nodes with `uv run skulk`.
+1. Start Skulk on all nodes from the desktop app or, for source checkouts, with
+   `uv run skulk`.
 2. Open the dashboard on the node you want to become the store host.
 3. Go to **Settings**.
 4. Enable the store host toggle.

@@ -748,10 +748,21 @@ different binary would hide the configuration error.
 `SKULK_NO_ENGINE_AUTOPROVISION=1` opts a node out; provisioning failure (for
 example, no network) degrades to a warning rather than blocking node startup.
 
-### The installer
+### Packaged apps and the source installer
 
-`install.sh` at the repo root is the one-command path from a fresh macOS or
-Linux machine to a working node:
+The recommended desktop distribution freezes one reviewed Skulk commit with
+its dashboard, dependencies, and native components. The signed and notarized
+Apple Silicon app owns that embedded runtime behind one macOS application
+identity. On Ubuntu and Debian, the `skulk` meta-package exact-depends on the
+same release of `skulk-desktop` and `skulk-runtime`; the latter also supplies
+the user systemd unit and can be installed alone on a headless node. This keeps
+the UI, controller, and runtime on one version boundary.
+
+Package managers are the current update path: Homebrew upgrades the macOS cask,
+and APT upgrades the Linux packages. See [Install Skulk](install).
+
+`install.sh` remains the source-based path from a fresh macOS or Linux machine
+to a working node:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Foxlight-Foundation/Skulk/main/install.sh | bash
