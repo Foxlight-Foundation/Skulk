@@ -63,6 +63,9 @@ from skulk.worker.runner.generation_stats import (
     blocking_call_stats,
     resolve_stream_token_counts,
 )
+from skulk.worker.runner.llama_server.channel_text_parser import (
+    GemmaChannelTextParser,
+)
 from skulk.worker.runner.llm_inference.harmony_text_parser import HarmonyTextParser
 from skulk.worker.runner.llm_inference.scaffolding_scrub import (
     StreamingScaffoldingScrub,
@@ -1212,14 +1215,20 @@ class Runner(ServedConcurrentDispatch):
             return False
         return profile.output_parser == OutputParserType.GptOss
 
-    def _reasoning_text_parser(self) -> HarmonyTextParser | ThinkTextParser | None:
+    def _reasoning_text_parser(
+        self,
+    ) -> HarmonyTextParser | ThinkTextParser | GemmaChannelTextParser | None:
         """Pick the string reasoning parser for this model's output format.
 
         llama.cpp hands back already-detokenized strings, so the reasoning/content
         split the MLX engine does at the token level must be redone here from
         text. gpt-oss (harmony channel markers) uses :class:`HarmonyTextParser`; a
         token-delimited ``<think>``/``</think>`` reasoning model (e.g. Qwen3.5)
-        uses :class:`ThinkTextParser`; anything else returns ``None`` so the text
+        uses :class:`ThinkTextParser`; a channel-delimited reasoning model
+        (Gemma 4) uses :class:`GemmaChannelTextParser`, without which its
+        thought channel reaches ``visible_text`` and a call the model only
+        contemplated could be recovered as executable; anything else returns
+        ``None`` so the text
         passes through untouched. A card we cannot resolve is treated as
         unparsed (logged, never raised) so generation stays best-effort.
         """
@@ -1234,6 +1243,8 @@ class Runner(ServedConcurrentDispatch):
             return None
         if profile.output_parser == OutputParserType.GptOss:
             return HarmonyTextParser()
+        if profile.thinking_format == ReasoningFormat.ChannelDelimited:
+            return GemmaChannelTextParser()
         if profile.thinking_format == ReasoningFormat.TokenDelimited:
             # The reasoning chat template pre-fills the opening <think> in the
             # prompt (not the output), so the stream begins mid-reasoning and only

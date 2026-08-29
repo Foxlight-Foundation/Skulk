@@ -301,9 +301,36 @@ def gemma4_calls(text: str) -> list[ToolCallItem]:
     ``json.dumps`` for correct escaping. Shared by the MLX family parser and
     this module's text recovery, so both engines read the same dialect.
     """
-    _call_re = re.compile(r"call:(\w+)\{(.*?)\}", re.DOTALL)
+    _call_start_re = re.compile(r"call:([\w.-]+)\{")
     _gemma_quote_re = re.compile(r'(?s)<\|"\|>(.*?)<\|"\|>')
-    _bare_key_re = re.compile(r"([,{])(\w+):")
+    _bare_key_re = re.compile(r"([,{])([\w.-]+):")
+
+    def _balanced_args(start: int) -> tuple[str, int] | None:
+        """Return the argument body from ``start`` (past the opening brace).
+
+        Walks the text tracking brace depth so nested objects survive, and
+        skips ``<|"|>``-delimited string spans entirely so a brace inside a
+        quoted value cannot close the call. Returns ``None`` for an
+        unterminated body (truncated generation), which is not a call.
+        """
+        depth = 1
+        index = start
+        while index < len(text):
+            if text.startswith('<|"|>', index):
+                closing = text.find('<|"|>', index + 5)
+                if closing == -1:
+                    return None
+                index = closing + 5
+                continue
+            char = text[index]
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start:index], index
+            index += 1
+        return None
 
     def _args_to_json(raw_args: str) -> str:
         extracted: list[str] = []
@@ -321,8 +348,12 @@ def gemma4_calls(text: str) -> list[ToolCallItem]:
         return skeleton
 
     calls: list[ToolCallItem] = []
-    for match in _call_re.finditer(text):
-        args_json = "{" + _args_to_json(match.group(2)) + "}"
+    for match in _call_start_re.finditer(text):
+        balanced = _balanced_args(match.end())
+        if balanced is None:
+            continue
+        raw_args, _ = balanced
+        args_json = "{" + _args_to_json(raw_args) + "}"
         try:
             json.loads(args_json)
         except json.JSONDecodeError:
@@ -331,9 +362,7 @@ def gemma4_calls(text: str) -> list[ToolCallItem]:
                 f"(argument_chars={len(args_json)})"
             )
             args_json = "{}"
-        calls.append(
-            ToolCallItem(name=match.group(1), arguments=args_json)
-        )
+        calls.append(ToolCallItem(name=match.group(1), arguments=args_json))
     return calls
 
 
@@ -348,10 +377,10 @@ def parse_tool_calls_from_text(
     - harmony ``to=functions.`` channels (gpt-oss)
     - ``<tool_call>`` blocks carrying Hermes JSON, Qwen3 XML, or GLM
       ``<arg_key>``/``<arg_value>`` pairs
+    - Gemma 4 ``<|tool_call>call:NAME{...}<tool_call|>`` blocks
     - Llama ``<|python_tag|>`` calls, which use ``parameters`` rather than
       ``arguments`` and may chain several with ``;``
     - Mistral ``[TOOL_CALLS]`` arrays
-    - Gemma 4 ``<|tool_call>call:NAME{...}<tool_call|>`` blocks
     - an unmarked call object opening the message, which the model may keep
       writing after
 

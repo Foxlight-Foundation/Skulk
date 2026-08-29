@@ -282,3 +282,32 @@ class TestGemma4Dialect:
 
     def test_prose_with_marker_but_no_call_is_not_a_call(self) -> None:
         assert parse_tool_calls_from_text("<|tool_call> nothing here <tool_call|>") is None
+
+    def test_nested_objects_survive_balanced_scanning(self) -> None:
+        """A lazy first-brace match once emptied side-effecting calls' args."""
+        import json
+
+        text = "<|tool_call>call:submit{payload:{count:3},dry:false}<tool_call|>"
+        calls = parse_tool_calls_from_text(text)
+        assert calls is not None
+        assert json.loads(calls[0].arguments) == {
+            "payload": {"count": 3},
+            "dry": False,
+        }
+
+    def test_quoted_brace_does_not_close_the_call(self) -> None:
+        text = '<|tool_call>call:render{template:<|"|>x } y<|"|>}<tool_call|>'
+        calls = parse_tool_calls_from_text(text)
+        assert calls is not None
+        import json
+
+        assert json.loads(calls[0].arguments) == {"template": "x } y"}
+
+    def test_dashed_and_dotted_tool_names_parse(self) -> None:
+        text = '<|tool_call>call:my-tool.v2{x:<|"|>1<|"|>}<tool_call|>'
+        calls = parse_tool_calls_from_text(text)
+        assert calls is not None
+        assert calls[0].name == "my-tool.v2"
+
+    def test_unterminated_call_body_is_not_a_call(self) -> None:
+        assert parse_tool_calls_from_text("<|tool_call>call:a{x:1") is None
