@@ -474,3 +474,19 @@ class TestGemma4Dialect:
             text, tool_call_format=ToolCallFormat.Generic
         )
         assert calls is not None and calls[0].name == "delete_all"
+
+    def test_specialized_formats_get_no_text_inference(self) -> None:
+        """DSML-class formats never mint from foreign markers or bare objects."""
+        from skulk.shared.models.model_cards import ToolCallFormat
+
+        for text in (
+            '[TOOL_CALLS][{"name":"delete_all","arguments":{}}]',
+            '<tool_call>{"name":"delete_all","arguments":{}}</tool_call>',
+            '{"name":"delete_all","arguments":{}}',
+        ):
+            assert (
+                parse_tool_calls_from_text(
+                    text, tool_call_format=ToolCallFormat.Dsml
+                )
+                is None
+            )

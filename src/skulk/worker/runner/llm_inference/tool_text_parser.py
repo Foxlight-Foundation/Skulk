@@ -480,6 +480,11 @@ def parse_tool_calls_from_text(
             return _finish(gemma_calls, tools)
         if tool_call_format == _Format.GptOss:
             return _finish(_harmony_tool_calls(text), tools)
+        if tool_call_format != _Format.Generic:
+            # A specialized format with no text dialect here (DSML parses at
+            # the token level elsewhere) gets NO text inference at all:
+            # foreign markers or a bare object in its prose are content.
+            return None
 
     # A message that OPENS with a valid JSON object is the unmarked dialect,
     # selected first and exclusively: the outermost structure is JSON, so a
@@ -507,6 +512,12 @@ def parse_tool_calls_from_text(
     # parses nothing (prose mentioning a marker, a truncated block) yields
     # no call rather than a fallback scan, for the same reason.
     markers: list[tuple[int, str]] = []
+    # Reaching the marker scan with a non-null format means Generic: the
+    # specialized formats returned above. Generic families never write the
+    # gemma or harmony shapes, so those cannot be minted from echoed prose;
+    # distinguishing WITHIN the Generic family (a Hermes model echoing a
+    # Mistral array) needs template truth this seam does not have and is
+    # tracked as a follow-up.
     excluded_kinds = (
         {"gemma4", "harmony"} if tool_call_format is not None else set()
     )
