@@ -11,6 +11,7 @@ detokenizer actually splits them.
 from __future__ import annotations
 
 from collections.abc import Generator
+from typing import cast
 
 from skulk.api.types import FinishReason, ToolCallItem
 from skulk.shared.types.worker.runner_response import (
@@ -640,5 +641,233 @@ class TestRejectedBlockDoesNotLeakMarkers:
         chunks = feed(
             ["<tool_call><function=get_weather></function></tool_call>"],
             generic_parser(),
+        )
+        assert calls_of(chunks) == ["get_weather"]
+
+
+class TestAJsonAnswerStreamsIncrementally:
+    """A message-opening brace no longer holds the whole answer.
+
+    The unmarked dialect's closing token is a generation stop that never
+    arrives as text, so an anchored open used to hold every chunk until the
+    terminal one: a plain JSON answer lost all incremental output and
+    time-to-first-token grew to the full generation time (deferred #879
+    review finding). The open is now provisional, and the buffered prefix is
+    released the moment it can no longer be a call.
+    """
+
+    def test_a_json_answer_is_released_at_the_first_decisive_key(self) -> None:
+        chunks = feed(
+            ['{"result": ', '{"answer": 42', ', "unit": "mm"}}'],
+            make_text_dialect_parser("{", "<|eom_id|>"),
+        )
+        assert calls_of(chunks) == []
+        assert text_of(chunks) == '{"result": {"answer": 42, "unit": "mm"}}'
+        streamed_early = [
+            item
+            for item in chunks
+            if isinstance(item, GenerationResponse)
+            and item.text
+            and item.finish_reason is None
+        ]
+        # Held-to-terminal behavior would produce one terminal blob; the
+        # released answer streams across several non-terminal chunks.
+        assert len(streamed_early) >= 2
+
+    def test_a_name_first_answer_is_released_at_the_second_key(self) -> None:
+        chunks = feed(
+            ['{"name": "John"', ', "age": 30}'],
+            make_text_dialect_parser("{", "<|eom_id|>"),
+        )
+        assert calls_of(chunks) == []
+        assert text_of(chunks) == '{"name": "John", "age": 30}'
+
+    def test_a_brace_that_is_not_json_is_released_immediately(self) -> None:
+        chunks = feed(
+            ["{oops, this is prose", " that keeps going"],
+            make_text_dialect_parser("{", "<|eom_id|>"),
+        )
+        assert calls_of(chunks) == []
+        assert text_of(chunks) == "{oops, this is prose that keeps going"
+        # Released as content, never reported as a parse failure.
+        assert all(
+            item.finish_reason != "error"
+            for item in chunks
+            if isinstance(item, GenerationResponse)
+        )
+
+    def test_a_reversed_key_order_call_still_parses(self) -> None:
+        chunks = feed(
+            [
+                '{"parameters": {"location": "Denver"}',
+                ', "name": "get_weather"}',
+            ],
+            make_text_dialect_parser("{", "<|eom_id|>"),
+        )
+        assert calls_of(chunks) == ["get_weather"]
+
+    def test_a_llama_type_wrapper_key_still_parses(self) -> None:
+        # Some Llama variants wrap the signature with a "type" key; it
+        # neither makes the object a call nor rules one out.
+        chunks = feed(
+            [
+                '{"type": "function", "name": "get_weather", ',
+                '"parameters": {"location": "Denver"}}',
+            ],
+            make_text_dialect_parser("{", "<|eom_id|>"),
+        )
+        assert calls_of(chunks) == ["get_weather"]
+
+    def test_a_released_answer_still_yields_a_later_marker_call(self) -> None:
+        chunks = feed(
+            [
+                '{"a": 1} ',
+                '<|python_tag|>{"name": "get_weather", "parameters": {}}',
+            ],
+            make_text_dialect_parser("{", "<|eom_id|>"),
+        )
+        assert calls_of(chunks) == ["get_weather"]
+        assert '{"a": 1}' in text_of(chunks)
+
+    def test_release_and_marker_call_in_one_terminal_chunk(self) -> None:
+        chunks = feed(
+            [
+                '{"a": 1} <|python_tag|>'
+                '{"name": "get_weather", "parameters": {}}'
+            ],
+            make_text_dialect_parser("{", "<|eom_id|>"),
+        )
+        assert calls_of(chunks) == ["get_weather"]
+        assert '{"a": 1}' in text_of(chunks)
+
+
+class TestTextAfterAnUnmarkedCall:
+    """Trailing prose after an anchored call reaches the caller as content."""
+
+    def test_a_remark_after_the_call_is_delivered(self) -> None:
+        chunks = feed(
+            ['{"name": "get_weather", "parameters": {}}', " Done."],
+            make_text_dialect_parser("{", "<|eom_id|>"),
+        )
+        assert calls_of(chunks) == ["get_weather"]
+        assert "Done." in text_of(chunks)
+
+    def test_the_tool_response_stays_the_terminal_chunk(self) -> None:
+        chunks = feed(
+            ['{"name": "get_weather", "parameters": {}} All set.'],
+            make_text_dialect_parser("{", "<|eom_id|>"),
+        )
+        assert calls_of(chunks) == ["get_weather"]
+        assert "All set." in text_of(chunks)
+        last = [item for item in chunks if item is not None][-1]
+        assert isinstance(last, ToolCallResponse)
+
+
+class TestClosingMarkerInsideArguments:
+    """A quoted argument may contain the dialect's own closing marker.
+
+    An HTML-writing tool passing "</tool_call>" used to end the block at the
+    quoted marker: the truncated block failed parsing and the caller received
+    a generation error instead of the call (deferred #879 review finding).
+    The scan mode comes from the wiring, which is the only place the block
+    interior's quoting rules are known.
+    """
+
+    @staticmethod
+    def _hermes_json_parser() -> ToolParser:
+        import json as json_module
+
+        def inner(text: str) -> dict[str, object]:
+            payload = cast("dict[str, object]", json_module.loads(text))
+            return {
+                "name": payload["name"],
+                "arguments": json_module.dumps(payload["arguments"]),
+            }
+
+        return make_mlx_parser(
+            "<tool_call>", "</tool_call>", inner, close_scan="json_strings"
+        )
+
+    def test_a_quoted_closer_does_not_truncate_a_json_block(self) -> None:
+        chunks = feed(
+            [
+                '<tool_call>{"name": "get_weather", ',
+                '"arguments": {"location": "</tool_call>"}}',
+                "</tool_call> after",
+            ],
+            self._hermes_json_parser(),
+        )
+        assert calls_of(chunks) == ["get_weather"]
+        assert "after" in text_of(chunks)
+
+    def test_a_gemma_quoted_closer_does_not_truncate(self) -> None:
+        from skulk.worker.runner.llm_inference.tool_text_parser import (
+            gemma4_calls,
+        )
+
+        def inner(text: str) -> list[dict[str, object]]:
+            items = gemma4_calls(text)
+            if not items:
+                raise ValueError("no tool calls")
+            return [
+                {"name": item.name, "arguments": item.arguments}
+                for item in items
+            ]
+
+        parser = make_mlx_parser(
+            "<|tool_call>", "<tool_call|>", inner, close_scan="gemma_quotes"
+        )
+        chunks = feed(
+            [
+                "<|tool_call>call:get_weather{location:",
+                '<|"|>a<tool_call|>b<|"|>}',
+                "<tool_call|>",
+            ],
+            parser,
+        )
+        assert calls_of(chunks) == ["get_weather"]
+
+
+class TestTextAroundAMistralArray:
+    """Mistral trailing text on the MLX streaming path.
+
+    Mistral closes its call by ending the message (the wired end marker is an
+    impossible sentinel), so the block resolves on the end-of-generation path
+    and only the split-aware text parser knows where the array ends. The
+    split reading is an overlay: the displaced upstream ``NAME[ARGS]`` form
+    still parses through the inner parser, with no remainder.
+    """
+
+    _SENTINEL = "\x00test:mistral:end\x00"
+
+    def _mistral_parser(self) -> ToolParser:
+        def inner(text: str) -> list[dict[str, object]]:
+            # Stands in for the displaced upstream parser: reads the
+            # NAME[ARGS] form only.
+            stripped = text.strip()
+            if not stripped.startswith("upstream_form"):
+                raise ValueError("not the upstream form")
+            return [{"name": "get_weather", "arguments": "{}"}]
+
+        return make_mlx_parser("[TOOL_CALLS]", self._SENTINEL, inner)
+
+    def test_trailing_text_after_the_array_is_delivered(self) -> None:
+        chunks = feed(
+            [
+                "[TOOL_CALLS] ",
+                '[{"name": "get_weather", "arguments": {"location": "Paris"}}]',
+                " I will check that.",
+            ],
+            self._mistral_parser(),
+        )
+        assert calls_of(chunks) == ["get_weather"]
+        assert "I will check that." in text_of(chunks)
+        last = [item for item in chunks if item is not None][-1]
+        assert isinstance(last, ToolCallResponse)
+
+    def test_the_displaced_upstream_form_still_parses(self) -> None:
+        chunks = feed(
+            ["[TOOL_CALLS]", "upstream_form"],
+            self._mistral_parser(),
         )
         assert calls_of(chunks) == ["get_weather"]

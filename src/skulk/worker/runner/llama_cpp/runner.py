@@ -73,7 +73,7 @@ from skulk.worker.runner.llm_inference.scaffolding_scrub import (
 from skulk.worker.runner.llm_inference.think_text_parser import ThinkTextParser
 from skulk.worker.runner.llm_inference.tool_parsers import declared_tool_calls
 from skulk.worker.runner.llm_inference.tool_text_parser import (
-    parse_tool_calls_from_text,
+    parse_tool_calls_with_remainder,
 )
 from skulk.worker.runner.served_concurrency import ServedConcurrentDispatch
 
@@ -1391,11 +1391,17 @@ class Runner(ServedConcurrentDispatch):
             # Card truth scopes the recovery dialect (#897 review): a model's
             # resolved format decides how its output is read, so a foreign
             # dialect echoed in prose can never be minted as a call.
-            tool_calls = parse_tool_calls_from_text(
+            tool_calls, trailing_text = parse_tool_calls_with_remainder(
                 tool_source,
                 task.task_params.tools,
                 tool_call_format=resolved_format,
             )
+            if tool_calls and trailing_text:
+                # The model kept writing after its call ("{...} Done."). That
+                # is the assistant's content, delivered alongside the calls
+                # rather than swallowed with the markup; the tool response
+                # stays the terminal chunk.
+                self._send_token_chunk(command_id, model_id, trailing_text)
         if tool_calls:
             self.event_sender.send(
                 ChunkGenerated(

@@ -161,47 +161,113 @@ def _call_from_json_object(obj: object) -> ToolCallItem | None:
     return ToolCallItem(name=str(payload["name"]), arguments=args_str)
 
 
+def _successive_json_objects(text: str) -> list[dict[str, Any]]:
+    """Every top-level balanced JSON object in ``text``, in order.
+
+    Llama chains several ``<|python_tag|>`` calls in one body separated by
+    ``;``, but a semicolon is also ordinary data inside a quoted argument
+    (shell commands, SQL, prose), so splitting on the separator divided the
+    JSON string itself and lost the call. The objects are instead read as
+    successive balanced spans, string-aware, and whatever separates them is
+    skipped rather than interpreted. A balanced span that is not valid JSON
+    is skipped whole rather than rescanned from inside, so its interior
+    braces cannot mint an object; an unterminated span is truncated
+    generation, and nothing after it can be complete either.
+    """
+
+    objects: list[dict[str, Any]] = []
+    position = 0
+    while True:
+        start = text.find("{", position)
+        if start == -1:
+            return objects
+        depth = 0
+        in_string = False
+        escaped = False
+        end = -1
+        for index in range(start, len(text)):
+            char = text[index]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+                continue
+            if char == '"':
+                in_string = True
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    end = index
+                    break
+        if end == -1:
+            return objects
+        try:
+            decoded = json.loads(text[start : end + 1])
+        except ValueError:
+            decoded = None
+        if isinstance(decoded, dict):
+            objects.append(cast("dict[str, Any]", decoded))
+        position = end + 1
+
+
 def _python_tag_calls(text: str) -> list[ToolCallItem]:
     """Parse Llama 3.1+ ``<|python_tag|>`` calls."""
 
     calls: list[ToolCallItem] = []
     for match in _PYTHON_TAG_RE.finditer(text):
-        for chunk in match.group(1).split(";"):
-            call = _call_from_json_object(_first_json_object(chunk))
+        for obj in _successive_json_objects(match.group(1)):
+            call = _call_from_json_object(obj)
             if call is not None:
                 calls.append(call)
     return calls
 
 
-def _mistral_calls(text: str) -> list[ToolCallItem]:
-    """Parse Mistral ``[TOOL_CALLS] [...]`` arrays."""
+def _mistral_calls(text: str) -> tuple[list[ToolCallItem], str]:
+    """Parse Mistral ``[TOOL_CALLS] [...]`` arrays.
+
+    Returns the calls plus the visible text around the array: the model may
+    write a preamble before the marker and keep writing after the array
+    (``[TOOL_CALLS] [...] I will check that.``), and both are the assistant's
+    content rather than markup. The remainder is empty when nothing parsed,
+    so a message that is not a call is left whole for the caller.
+    """
 
     match = _MISTRAL_RE.search(text)
     if match is None:
-        return []
+        return [], ""
     decoder = json.JSONDecoder()
+    body = match.group(1).strip()
     try:
-        array, _ = decoder.raw_decode(match.group(1).strip())
+        array, consumed = decoder.raw_decode(body)
     except ValueError:
-        return []
+        return [], ""
     if not isinstance(array, list):
-        return []
+        return [], ""
     calls: list[ToolCallItem] = []
     for entry in array:
         call = _call_from_json_object(entry)
         if call is not None:
             calls.append(call)
-    return calls
+    if not calls:
+        return [], ""
+    remainder = (text[: match.start()] + " " + body[consumed:]).strip()
+    return calls, remainder
 
 
-def _bare_json_call(text: str) -> list[ToolCallItem]:
+def _bare_json_call(text: str) -> tuple[list[ToolCallItem], str]:
     """Parse an unmarked call that opens the message.
 
     Llama omits ``<|python_tag|>`` in some templates and simply emits the call
     object. The message must *begin* with that object, so prose containing JSON
     is never read as a call, but the model may keep writing after it: a call
-    followed by a closing remark is still a call, and requiring the object to
-    be the entire message lost it.
+    followed by a closing remark is still a call, and the remark is returned
+    as the remainder so it reaches the caller as content rather than being
+    swallowed with the markup.
 
     Two things keep this from mistaking a JSON answer for a call. The object
     must carry a ``name`` alongside an ``arguments`` or ``parameters`` value,
@@ -212,21 +278,23 @@ def _bare_json_call(text: str) -> list[ToolCallItem]:
 
     stripped = text.strip()
     if not stripped.startswith("{"):
-        return []
+        return [], ""
     decoder = json.JSONDecoder()
     try:
-        obj, _ = decoder.raw_decode(stripped)
+        obj, consumed = decoder.raw_decode(stripped)
     except ValueError:
-        return []
+        return [], ""
     if not isinstance(obj, dict):
-        return []
+        return [], ""
     payload = cast("dict[str, Any]", obj)
     if "name" not in payload:
-        return []
+        return [], ""
     if not isinstance(payload.get("arguments", payload.get("parameters")), (dict, str)):
-        return []
+        return [], ""
     call = _call_from_json_object(payload)
-    return [call] if call is not None else []
+    if call is None:
+        return [], ""
+    return [call], stripped[consumed:].strip()
 
 
 def _harmony_tool_calls(text: str) -> list[ToolCallItem]:
@@ -437,6 +505,25 @@ def parse_tool_calls_from_text(
 ) -> list[ToolCallItem] | None:
     """Recover tool calls a reasoning model emitted as text (llama.cpp engine).
 
+    The whole-block form of :func:`parse_tool_calls_with_remainder`: same
+    dispatch and same result, with any trailing visible text discarded.
+    Callers that can deliver content alongside calls should use the
+    remainder-preserving variant instead.
+    """
+
+    calls, _ = parse_tool_calls_with_remainder(
+        text, tools, tool_call_format=tool_call_format
+    )
+    return calls
+
+
+def parse_tool_calls_with_remainder(
+    text: str,
+    tools: list[dict[str, Any]] | None = None,
+    tool_call_format: "ToolCallFormat | None" = None,
+) -> tuple[list[ToolCallItem] | None, str]:
+    """Recover tool calls a reasoning model emitted as text (llama.cpp engine).
+
     Detects the dialect from the markers present and parses the calls, then
     coerces argument types to the tool schema. Recognized dialects:
 
@@ -454,11 +541,15 @@ def parse_tool_calls_from_text(
     dropped, because a model reaching for one of its own built-ins has not
     called anything the caller can run.
 
-    Returns ``None`` when no tool call is present (the model answered in prose),
-    so the caller can fall back to emitting the content.
+    Returns the calls plus the visible text around the call markup for the
+    dialects that know where their markup ends (the unmarked object and the
+    Mistral array); other dialects report no remainder. The remainder is
+    meaningful only when calls were returned: with no call (or every call
+    dropped by the offered-tools rule) the result is ``(None, "")`` and the
+    caller falls back to emitting the whole content, exactly as before.
     """
     if not text:
-        return None
+        return None, ""
     # When the caller knows the model's resolved format, dialect selection is
     # card truth rather than text inference: a Gemma-format model parses only
     # its own dialect, and any OTHER format can never have Gemma or harmony
@@ -477,14 +568,14 @@ def parse_tool_calls_from_text(
             gemma_calls: list[ToolCallItem] = []
             for block in _gemma_blocks(text):
                 gemma_calls.extend(gemma4_calls(block))
-            return _finish(gemma_calls, tools)
+            return _finish(gemma_calls, tools), ""
         if tool_call_format == _Format.GptOss:
-            return _finish(_harmony_tool_calls(text), tools)
+            return _finish(_harmony_tool_calls(text), tools), ""
         if tool_call_format != _Format.Generic:
             # A specialized format with no text dialect here (DSML parses at
             # the token level elsewhere) gets NO text inference at all:
             # foreign markers or a bare object in its prose are content.
-            return None
+            return None, ""
 
     # A message that OPENS with a valid JSON object is the unmarked dialect,
     # selected first and exclusively: the outermost structure is JSON, so a
@@ -500,7 +591,8 @@ def parse_tool_calls_from_text(
         except ValueError:
             pass
         else:
-            return _finish(_bare_json_call(text), tools)
+            leading_calls, leading_remainder = _bare_json_call(text)
+            return _finish_with_remainder(leading_calls, leading_remainder, tools)
     # The dialect is SELECTED by the earliest recognized marker in the text
     # and parsed exclusively. Marker presence anywhere is not enough: a
     # quoted argument may legitimately carry text shaped like ANY other
@@ -556,16 +648,16 @@ def parse_tool_calls_from_text(
         elif dialect == "python_tag":
             calls = _python_tag_calls(text)
         else:
-            calls = _mistral_calls(text)
-        return _finish(calls, tools)
-    if not calls:
-        # Last resort, and deliberately narrow: the message must begin with the
-        # call object. Unmarked dialects are otherwise indistinguishable from a
-        # model answering in JSON, so anything looser invents tool calls from
-        # prose. The object must also carry a name alongside arguments, and the
-        # caller's tools are checked afterwards.
-        calls = _bare_json_call(text)
-    return _finish(calls, tools)
+            mistral_calls, mistral_remainder = _mistral_calls(text)
+            return _finish_with_remainder(mistral_calls, mistral_remainder, tools)
+        return _finish(calls, tools), ""
+    # Last resort, and deliberately narrow: the message must begin with the
+    # call object. Unmarked dialects are otherwise indistinguishable from a
+    # model answering in JSON, so anything looser invents tool calls from
+    # prose. The object must also carry a name alongside arguments, and the
+    # caller's tools are checked afterwards.
+    bare_calls, bare_remainder = _bare_json_call(text)
+    return _finish_with_remainder(bare_calls, bare_remainder, tools)
 
 
 def _finish(
@@ -586,3 +678,21 @@ def _finish(
             return None
         calls = coerce_tool_calls_to_schema(calls, tools)
     return calls
+
+
+def _finish_with_remainder(
+    calls: list[ToolCallItem],
+    remainder: str,
+    tools: list[dict[str, Any]] | None,
+) -> tuple[list[ToolCallItem] | None, str]:
+    """Apply :func:`_finish`, keeping the remainder only when calls survive.
+
+    When the offered-tools rule drops every call the whole message is content,
+    so the caller must fall back to the full original text rather than a
+    remainder that excludes the rejected markup.
+    """
+
+    finished = _finish(calls, tools)
+    if finished is None:
+        return None, ""
+    return finished, remainder

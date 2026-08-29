@@ -821,9 +821,11 @@ a guarantee, because forcing a call there would need constrained decoding.
 **A JSON answer stays an answer.** Several model families write a tool call as
 a bare JSON object, so a request that both offers tools and asks for JSON output
 is ambiguous on the wire. Skulk resolves it in favor of the answer: text that
-does not parse as a call to one of your tools is returned as content. Expect
-that content to arrive in one piece rather than streamed token by token, since
-it can only be classified once the message is complete.
+does not parse as a call to one of your tools is returned as content. A short
+prefix of such a message is buffered while it could still be either reading,
+and released the moment it is distinguishable, so a JSON answer streams
+incrementally after a delay bounded by its first decisive key rather than
+arriving in one piece.
 
 ## Thinking / Reasoning
 

@@ -90,6 +90,7 @@ from skulk.worker.runner.llm_inference.batch_generator import (
 from .batch_generator import Cancelled, Finished
 from .tool_parsers import (
     UNMARKED_TOOL_DIALECT,
+    infer_close_scan,
     make_mlx_parser,
     make_text_dialect_parser,
 )
@@ -806,10 +807,21 @@ class Builder:
                     self.tokenizer.tool_call_end,
                 )
             else:
+                chat_template = (
+                    getattr(self.tokenizer, "chat_template", None) or ""
+                )
                 tool_parser = make_mlx_parser(
                     self.tokenizer.tool_call_start,
                     self.tokenizer.tool_call_end,
                     self.tokenizer.tool_parser,  # type: ignore
+                    # Template truth at the wiring seam decides whether the
+                    # closer scan may skip quoted argument content; the
+                    # markers alone cannot (Qwen3 XML and Hermes JSON share
+                    # <tool_call>, with different quoting rules).
+                    close_scan=infer_close_scan(
+                        self.tokenizer.tool_call_start,
+                        chat_template if isinstance(chat_template, str) else "",
+                    ),
                 )
 
         kv_prefix_cache = KVPrefixCache(self.group)

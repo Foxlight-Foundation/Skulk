@@ -16,6 +16,33 @@ This project records release notes here and mirrors public-facing notes in
   list with no report of the mismatch, and only the served engines surfaced
   the caller's error.
 
+- A plain JSON answer from an unmarked-dialect model (Llama on MLX) streams
+  incrementally again. The message-opening brace provisionally opens a
+  tool-call block whose closing token is a generation stop that never arrives
+  as text, so the whole answer was held until the terminal chunk and
+  time-to-first-token grew to the full generation time. The open is now
+  provisional: the buffered prefix is released the moment it can no longer be
+  a call, bounded by the first decisive key, and a real call still parses
+  exactly as before.
+
+- A quoted argument containing the dialect's own closing marker (an
+  HTML-writing tool passing `"</tool_call>"`) no longer truncates the block
+  and errors the generation, on the streaming paths whose block interior is
+  known: Gemma 4's quoting and templates that render arguments as JSON.
+  Interiors with other quoting rules (Qwen3 XML) keep the previous scan.
+
+- Chained Llama `<|python_tag|>` calls are no longer split inside a quoted
+  argument: a semicolon in a shell command, SQL, or prose is data, and the
+  chained objects are now read as successive balanced JSON spans.
+
+- Visible text a model writes around its call is delivered as content
+  alongside the tool calls, instead of being swallowed with the markup, for
+  the dialects that know where their markup ends: the unmarked call object
+  and the Mistral `[TOOL_CALLS]` array, on both the MLX streaming path and
+  the llama.cpp text-recovery path. Mistral's displaced upstream
+  `NAME[ARGS]` form keeps parsing through the inner parser, with no
+  remainder.
+
 - Gemma 4 models can now call tools on the in-process llama.cpp engine. The
   engine's bundled chat handler does not parse Gemma 4's call format, and the
   text-recovery path had no dialect for it, so well-formed calls streamed to
