@@ -16,7 +16,12 @@ This project records release notes here and mirrors public-facing notes in
   every request regardless; the runner now wraps the default Jinja
   formatter with a per-request slot. Guessed family formats, vision
   handlers, and templates without the control are untouched, and an
-  unexpected library shape degrades loudly to the previous behavior.
+  unexpected library shape degrades loudly to the previous behavior. The
+  engine's reasoning parser follows the toggle: a thinking-off prompt
+  pre-closes the think block, so the generation starts outside it, and the
+  parser no longer assumes the mid-reasoning start (which misrouted the
+  whole plain answer into `reasoning_content` and starved tool recovery of
+  its visible text).
 
 - A `tool_choice` that forces a function name matching none of the offered
   tools (or arrives with no tools at all) is now rejected with a 400 at the

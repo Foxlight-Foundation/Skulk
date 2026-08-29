@@ -656,3 +656,38 @@ class TestInstallTemplateKwargFormatter:
         model = self._fake_model()
         model._chat_handlers = "not-a-dict"
         assert install_template_kwarg_formatter(model) is None
+
+
+class TestThinkingDisabledFlag:
+    """The reasoning parser must know when the prompt pre-closed the block.
+
+    With thinking disabled through the template, the generation starts
+    OUTSIDE the think block; a parser assuming the usual mid-reasoning start
+    misroutes the whole plain answer into reasoning_content and starves tool
+    recovery of its visible text (observed live on the den before this
+    check existed).
+    """
+
+    @staticmethod
+    def _params(enable_thinking: bool | None) -> TextGenerationTaskParams:
+        return TextGenerationTaskParams(
+            model=ModelId("unsloth/Qwen3.5-4B-GGUF"),
+            input=[InputMessage(role="user", content="hi")],
+            enable_thinking=enable_thinking,
+        )
+
+    def test_disabled_only_when_installed_and_requested(self) -> None:
+        from types import SimpleNamespace
+        from typing import cast
+
+        from skulk.worker.runner.llama_cpp.runner import Runner
+
+        with_formatter = cast("Any", SimpleNamespace(_thinking_formatter=object()))
+        without_formatter = cast("Any", SimpleNamespace(_thinking_formatter=None))
+        disabled = Runner._thinking_disabled_for
+        assert disabled(with_formatter, self._params(False)) is True
+        # The request asked for off, but the template has no control: the
+        # prompt still opens the block, so the parser must not be flipped.
+        assert disabled(without_formatter, self._params(False)) is False
+        assert disabled(with_formatter, self._params(True)) is False
+        assert disabled(with_formatter, self._params(None)) is False

@@ -1096,7 +1096,9 @@ class Runner(ServedConcurrentDispatch):
             # Reparse the marker stream from strings (the MLX engine does the
             # token-level equivalent) so reasoning lands in reasoning_content and
             # content is clean.
-            reasoning_parser = self._reasoning_text_parser()
+            reasoning_parser = self._reasoning_text_parser(
+                thinking_disabled=self._thinking_disabled_for(task.task_params)
+            )
 
             # Reasoning parsing re-chunks the stream into pieces that no longer
             # align 1:1 with the source tokens, so per-token logprobs can't be
@@ -1322,8 +1324,27 @@ class Runner(ServedConcurrentDispatch):
             return False
         return profile.output_parser == OutputParserType.GptOss
 
+    def _thinking_disabled_for(
+        self, task_params: TextGenerationTaskParams
+    ) -> bool:
+        """Whether this request's prompt rendered with thinking pre-closed.
+
+        True only when BOTH hold: the template-kwarg formatter is installed
+        (so the injection actually reaches the render) and the request asked
+        for thinking off. A control-less template or a failed install leaves
+        the prompt in its usual mid-reasoning shape, whatever the request
+        said.
+        """
+
+        return (
+            self._thinking_formatter is not None
+            and task_params.enable_thinking is False
+        )
+
     def _reasoning_text_parser(
         self,
+        *,
+        thinking_disabled: bool = False,
     ) -> HarmonyTextParser | ThinkTextParser | GemmaChannelTextParser | None:
         """Pick the string reasoning parser for this model's output format.
 
@@ -1338,6 +1359,14 @@ class Runner(ServedConcurrentDispatch):
         ``None`` so the text
         passes through untouched. A card we cannot resolve is treated as
         unparsed (logged, never raised) so generation stays best-effort.
+
+        ``thinking_disabled`` says this request rendered with
+        ``enable_thinking=false`` through the installed template-kwarg
+        formatter, which makes the prompt PRE-CLOSE the think block instead of
+        opening it: the generation then starts OUTSIDE thinking, and a parser
+        assuming the usual mid-reasoning start would misroute the whole plain
+        answer into ``reasoning_content`` (and starve tool recovery of its
+        visible text).
         """
         card = self.shard_metadata.model_card
         try:
@@ -1354,10 +1383,12 @@ class Runner(ServedConcurrentDispatch):
             return GemmaChannelTextParser()
         if profile.thinking_format == ReasoningFormat.TokenDelimited:
             # The reasoning chat template pre-fills the opening <think> in the
-            # prompt (not the output), so the stream begins mid-reasoning and only
-            # </think> appears. The runner does not toggle thinking, so this is
-            # always the shape for these models on llama.cpp.
-            return ThinkTextParser(starts_in_thinking=True)
+            # prompt (not the output), so the stream begins mid-reasoning and
+            # only </think> appears -- unless this request disabled thinking
+            # through the template, which pre-closes the block instead. The
+            # parser stays installed either way: a model that opens a literal
+            # <think> in its output is still split correctly.
+            return ThinkTextParser(starts_in_thinking=not thinking_disabled)
         return None
 
     def _send_token_chunk(
@@ -1450,7 +1481,9 @@ class Runner(ServedConcurrentDispatch):
         # text; the MLX engine does this at the token level). A reasoning model
         # wraps its answer -- and may merely *contemplate* a tool call -- inside
         # <think>/harmony scaffolding.
-        reasoning_parser = self._reasoning_text_parser()
+        reasoning_parser = self._reasoning_text_parser(
+            thinking_disabled=self._thinking_disabled_for(task.task_params)
+        )
         emissions = (
             reasoning_parser.feed(content) + reasoning_parser.flush()
             if reasoning_parser is not None
