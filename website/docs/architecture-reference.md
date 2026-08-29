@@ -812,8 +812,10 @@ by `make_mlx_parser` and called directly, and gpt-oss and DeepSeek V3.2 bypass
 it entirely for their own token-level parsers (`parse_gpt_oss`,
 `parse_deepseek_v32`). Adding a dialect here therefore reaches llama.cpp and
 those MLX paths, not every MLX model.
-The dialect is selected by the EARLIEST recognized marker in the text and
-parsed exclusively (the cross-dialect injection guard: a quoted argument may
+A message opening with a valid JSON object is the unmarked dialect, selected
+first and exclusively (the outermost structure is JSON, so markers inside its
+string values are content). Otherwise the dialect is selected by the EARLIEST
+recognized marker in the text and parsed exclusively (the cross-dialect injection guard: a quoted argument may
 carry another dialect's shape in either direction, so the outermost structure
 decides and no later branch rescans the message; a selected dialect that
 parses nothing yields no call rather than a fallback scan). Recognized

@@ -444,6 +444,21 @@ def parse_tool_calls_from_text(
     """
     if not text:
         return None
+    # A message that OPENS with a valid JSON object is the unmarked dialect,
+    # selected first and exclusively: the outermost structure is JSON, so a
+    # dialect marker inside one of its string values (a tool result or user
+    # text echoed into an argument) is content, and letting the marker scan
+    # below run on such a message would mint an executable call from that
+    # string. A leading brace that does not decode as an object is just
+    # prose and falls through to marker selection.
+    stripped = text.lstrip()
+    if stripped.startswith("{"):
+        try:
+            json.JSONDecoder().raw_decode(stripped)
+        except ValueError:
+            pass
+        else:
+            return _finish(_bare_json_call(text), tools)
     # The dialect is SELECTED by the earliest recognized marker in the text
     # and parsed exclusively. Marker presence anywhere is not enough: a
     # quoted argument may legitimately carry text shaped like ANY other
