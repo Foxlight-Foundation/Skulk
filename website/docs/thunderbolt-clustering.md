@@ -8,9 +8,10 @@ is required; that is covered separately in
 
 The happy path is deliberately small:
 
-1. Install Skulk on each node.
-2. **Grant macOS Local Network access** (the one step people miss; see below).
-3. Run `uv run skulk` on each node.
+1. Install the signed Skulk app on each node.
+2. Open the app, choose **Start Skulk**, and grant **Local Network** access when
+   macOS asks.
+3. Confirm every node appears in the dashboard.
 
 Skulk discovers peers automatically over mDNS on your local network, and the
 inference data plane automatically prefers Thunderbolt links when present.
@@ -20,9 +21,19 @@ inference data plane automatically prefers Thunderbolt links when present.
 - Two or more Apple-silicon Macs.
 - The Macs on the **same local network** (any of: a shared Ethernet/Wi-Fi LAN,
   or a Thunderbolt Bridge; see [Thunderbolt wiring](#thunderbolt-wiring)).
-- [`uv`](https://docs.astral.sh/uv/) and Node.js installed on each node.
+- The [signed Skulk app](install#macos) installed on each node. A source
+  checkout, `uv`, and Node.js are needed only when following the development
+  path below.
 
 ## 2. Install (each node)
+
+For normal use, install the app:
+
+```bash
+brew install --cask Foxlight-Foundation/skulk/skulk
+```
+
+The source-development alternative is:
 
 ```bash
 git clone https://github.com/Foxlight-Foundation/Skulk.git
@@ -53,8 +64,9 @@ When you first run Skulk, macOS shows a prompt:
 Click **Allow**. If you missed it (or are running over SSH and never saw it):
 
 1. Open **System Settings → Privacy & Security → Local Network**.
-2. Enable the toggle for the app you launch Skulk from, usually **Terminal**
-   (or iTerm, or your IDE). Tools launched from that app inherit its grant.
+2. Enable **Skulk** when using the packaged app. For a source checkout, enable
+   the terminal or IDE that launches `uv run skulk`; child processes inherit
+   that application's grant.
 3. Restart Skulk.
 
 Skulk detects this denial at startup and logs a warning telling you to grant
@@ -62,8 +74,8 @@ access, naming the specific app to enable (the terminal you launched from, or
 `Python` when launched over SSH or as a service), so you are never left
 guessing.
 
-To see which process/app identity macOS is likely to attach the grant to, run
-the read-only probe from the same launch path you plan to use for Skulk:
+Source-development users can see which process/app identity macOS is likely to
+attach the grant to by running the read-only probe from the same launch path:
 
 ```bash
 uv run skulk-macos-local-network-probe
@@ -100,13 +112,14 @@ sufficient on that machine and the next test should be a frozen/signed
 `Contents/MacOS/Skulk` runtime.
 
 > **The grant follows the launching app.** macOS attributes Local Network
-> access to the app a process is launched *from*. Run Skulk from the **Terminal
-> you granted** (i.e. `uv run skulk` in that Terminal) and it inherits the
-> grant. A process **detached** from that Terminal (`nohup … &`, or some
-> background/service launchers that reparent it) is attributed separately and
-> may be denied even though the foreground command works. If you run Skulk
-> detached or as a background service and see the denial warning, grant Local
-> Network to that launcher too (see [Run as a service](./run-skulk-as-a-service)).
+> access to the application identity a process is launched *from*. The
+> packaged runtime runs under the signed **Skulk** identity. A source runtime
+> launched with `uv run skulk` inherits the Terminal or IDE grant. A source
+> process detached from that application (`nohup … &`, or some background
+> service launchers that reparent it) is attributed separately and may be
+> denied even though the foreground command works. If a source-based service
+> sees the denial warning, grant Local Network to that launcher too (see
+> [Run as a service](./run-skulk-as-a-service)).
 
 > **Headless / SSH-only nodes:** macOS cannot show the Local Network prompt to
 > an SSH session, and there is no command-line way to grant the permission. Use
@@ -118,6 +131,11 @@ sufficient on that machine and the next test should be a frozen/signed
 > whose overlay interface is exempt from Local Network Privacy.
 
 ## 4. Run (each node)
+
+For the packaged installation, open **Skulk** and choose **Start Skulk**. Grant
+Local Network access when macOS prompts for the signed Skulk app.
+
+For the source-development installation, run:
 
 ```bash
 uv run skulk

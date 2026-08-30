@@ -205,7 +205,7 @@ outside the dynamic client-port ranges used by supported operating systems, so
 an unrelated outbound connection cannot claim it before Skulk starts.
 
 :::note Fresh installs
-`install.sh` writes bootstrap store defaults (this host under
+The packaged runtime and `install.sh` both use bootstrap store defaults (this host under
 `~/.skulk/model-store`) when no config exists, so a single node works
 immediately. When several independently installed nodes form a cluster, the
 elected master advertises a routable store address through bootstrap state
@@ -219,8 +219,8 @@ If you need a specific machine or attached volume, configure the same explicit
 
 This is the simplest path for most people.
 
-1. Start Skulk on all nodes with `uv run skulk`. Fresh defaults already
-   converge on one store.
+1. Start Skulk on all nodes from the desktop app or, for source checkouts, with
+   `uv run skulk`. Fresh defaults already converge on one store.
 2. Open the dashboard on the node you want to use for administration.
 3. Go to **Settings**.
 4. To override the elected default, enable the store host toggle for the

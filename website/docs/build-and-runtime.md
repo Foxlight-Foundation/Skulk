@@ -1,17 +1,22 @@
 ---
 id: build-and-runtime
-title: Build And Runtime Paths
+title: Source Builds And Runtime Paths
 sidebar_position: 3
 ---
 
 <!-- Copyright 2025 Foxlight Foundation -->
 
-Skulk supports both `uv` and Nix in development, but they do not have the same
-job.
+The signed macOS app and packaged Ubuntu/Debian app are the recommended way to
+use Skulk. Start with [Install Skulk](install) unless you are contributing to
+Skulk, testing a development build, using another Linux distribution, or need
+direct control over the source environment.
 
-## One-Command Install
+Skulk supports both `uv` and Nix for source development, but they do not have
+the same job.
 
-The fastest path from a fresh macOS or Linux machine to a working node:
+## Source installer
+
+The supported path from a fresh machine to a source-based node is:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Foxlight-Foundation/Skulk/main/install.sh | bash
@@ -82,7 +87,8 @@ the installer records `SKULK_VLLM_BIN` in `~/.skulk/skulk.env` so the served
 vLLM engine is available to the node.
 
 The manual paths below are for development: use them when you work on Skulk
-itself or want control over each step.
+itself or want control over each step. Packaged app users do not need `uv`,
+Nix, Node.js, or a source checkout to run Skulk.
 
 ## Recommended Contract
 
@@ -110,7 +116,8 @@ On the first run from a local interactive terminal, Skulk opens the dashboard
 in the default browser. SSH, redirected, and service launches still print the
 dashboard URL but do not open a GUI browser.
 
-That means the runtime path is the one most users and nodes should follow.
+That makes `uv` the canonical source runtime path. Packaged users run the
+release's embedded runtime instead.
 
 ## What Nix Does
 

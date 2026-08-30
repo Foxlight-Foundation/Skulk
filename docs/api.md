@@ -33,7 +33,8 @@ If you call `/v1/chat/completions` too early, Skulk will usually return somethin
 
 If you want your first successful API call, use this flow:
 
-1. Start Skulk with `uv run skulk`.
+1. Start Skulk from the desktop app or, from a source checkout, with
+   `uv run skulk`.
 2. Preview valid placements for a model.
 3. Launch a placement.
 4. Wait for the model to be ready.
@@ -53,6 +54,9 @@ If you want your first successful API call, use this flow:
 ## First Success Flow
 
 ### 1. Start Skulk
+
+Packaged users choose **Start Skulk** in the desktop app. From a source
+checkout, run:
 
 ```bash
 uv run skulk

@@ -111,6 +111,12 @@ cat /proc/cmdline
 
 ## Bring-up
 
+On Ubuntu or Debian, install the packaged app or headless runtime first using
+the [installation guide](install). The hardware preparation below remains
+necessary where the operating system has not already configured the required
+Vulkan driver, device permissions, and unified-memory limits. Use the source
+workflow when developing Skulk or building custom engine variants.
+
 The full operational steps, a one-shot dependency installer, and a launcher
 template live in
 [`deployment/rocm/`](https://github.com/Foxlight-Foundation/Skulk/tree/main/deployment/rocm)
