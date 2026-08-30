@@ -10,7 +10,7 @@
 
 [![Documentation](https://img.shields.io/badge/docs-documentation-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/)
 [![Install Skulk](https://img.shields.io/badge/docs-install_skulk-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/install/)
-[![Release Notes](https://img.shields.io/badge/release_notes-v1.5.0-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/release-notes/1.5.0/)
+[![Release Notes](https://img.shields.io/badge/release_notes-v1.5.1-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/release-notes/1.5.1/)
 [![Architecture](https://img.shields.io/badge/docs-architecture-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/architecture/)
 
   <br>
@@ -705,7 +705,7 @@ Highlights:
 - [Thunderbolt clustering](https://foxlight-foundation.github.io/Skulk/thunderbolt-clustering) and [RDMA on macOS](https://foxlight-foundation.github.io/Skulk/build-and-runtime)
 - [Speculative decoding](https://foxlight-foundation.github.io/Skulk/speculative-decoding)
 - [API guide](https://foxlight-foundation.github.io/Skulk/api-guide) and [architecture](https://foxlight-foundation.github.io/Skulk/architecture)
-- [Release notes](https://foxlight-foundation.github.io/Skulk/release-notes/1.5.0/)
+- [Release notes](https://foxlight-foundation.github.io/Skulk/release-notes/1.5.1/)
 - [CONTRIBUTING.md](CONTRIBUTING.md)
 
 ## Contributing
