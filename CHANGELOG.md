@@ -7,6 +7,22 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+## [1.5.1] - 2026-08-30
+
+### Changed
+
+- Published the current stable `main` runtime through one coordinated desktop
+  release: a signed and notarized Apple Silicon app, direct `amd64` and `arm64`
+  Debian packages, the signed Foxlight APT repository, and the Homebrew cask
+  all carry the same Skulk version and exact source provenance.
+- The macOS menu-bar app now checks the canonical stable release manifest and
+  offers the signed DMG when a newer stable version is available.
+- The APT release gate now proves a clean `sudo apt install skulk` journey on
+  both supported Linux architectures without starting or joining a cluster.
+
+Skulk runtime and wire behavior are unchanged from 1.5.0; this patch release
+provides a stable version boundary for the completed desktop distribution path.
+
 ## [1.5.0] - 2026-08-07
 
 ### Changed
