@@ -303,10 +303,14 @@ A model card's `placement.compatible_backends` selects which engine serves it
   in-process engines can win. **Coexists** (not replaces): the planner picks by
   hardware + expected concurrency. Enabled per node via `SKULK_VLLM_BIN`
   (advertises `vllm-cuda`/`vllm-rocm`, GPU-only). Validated matrix: vllm
-  0.25.1+cu129 (variant wheel from wheels.vllm.ai; the PyPI default links
-  libcudart.so.13; 0.25.1 is the floor for the Laguna DFlash drafter) +
-  ninja in the venv (FlashInfer JIT; the runner prepends the venv bin dir
-  to the server PATH). Card `runtime.vllm_spec_method`/
+  0.28.0+cu129 (variant wheel from wheels.vllm.ai; the PyPI default links
+  CUDA 13 runtime libraries; 0.25.1 remains the floor for the Laguna
+  DFlash drafter, and 0.28.0 adds DFlash2 drafter checkpoints on the same
+  `dflash` method string) + ninja in the venv (FlashInfer JIT; the runner
+  prepends the venv bin dir to the server PATH). Deep speculative depths
+  (>= 8) pin both `--max-num-batched-tokens` and `--max-num-seqs`
+  explicitly so vLLM's version/hardware-band-dependent scheduler defaults
+  cannot sink the draft-slot budget. Card `runtime.vllm_spec_method`/
   `vllm_spec_num_tokens`/`vllm_spec_draft_repo` map to
   `--speculative-config` (method `mtp` = native prediction heads,
   Qwen3.6-27B-FP8 measured 2.01x; method `dflash` = separate block-parallel

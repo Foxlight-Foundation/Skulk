@@ -128,21 +128,29 @@ _DEFAULT_GPU_MEMORY_UTILIZATION: Final = 0.90
 # Upper bound on concurrent in-flight generations the runner streams to the one
 # ``vllm serve`` at once. This is a client-side admission bound (the thread-pool
 # width), NOT vLLM's batch width -- the server batches up to its own
-# ``--max-num-seqs`` (default 256). Kept below that so queued requests wait in the
-# runner's bounded pool rather than piling unbounded threads against the server.
+# ``--max-num-seqs`` (a version- and hardware-band-dependent default, 256 at
+# minimum on the validated matrix). Kept below every such default so queued
+# requests wait in the runner's bounded pool rather than piling unbounded
+# threads against the server.
 _MAX_CONCURRENT_REQUESTS_ENV: Final = "SKULK_VLLM_MAX_CONCURRENT_REQUESTS"
 _DEFAULT_MAX_CONCURRENT_REQUESTS: Final = 32
 
-# vLLM scheduler defaults (vllm/config: max_num_batched_tokens / max_num_seqs
-# when the server flags are omitted). The scheduler reserves draft slots per
-# sequence out of the batched-token budget, so deep speculative depths need
-# the budget raised or engine init fails with a negative
-# max_num_scheduled_tokens. Depth 9 is where the default budget goes
-# non-positive (2048 - 256 * 8 = 0); the sizing kicks in at 8 because depth 8
-# leaves a degenerate 256-token budget. 8192 is the fresh-box-validated floor
-# (Laguna depth-15 card, vLLM 0.25.1, A100-80GB).
-_VLLM_DEFAULT_MAX_NUM_BATCHED_TOKENS: Final = 2048
-_VLLM_DEFAULT_MAX_NUM_SEQS: Final = 256
+# Deep-speculation scheduler budget. vLLM reserves draft slots per sequence
+# out of --max-num-batched-tokens, so a deep drafter needs
+# batched >= seqs * (depth - 1) or engine init fails with a negative
+# max_num_scheduled_tokens ("set to -1536" observed live with the Laguna
+# depth-15 card on vLLM 0.25.1, whose effective defaults were 2048/256).
+# Both sides of that arithmetic are version- and hardware-band-dependent
+# (0.28.0 raises serve-time defaults as high as 16384/1024 on large GPUs),
+# so at deep depths the runner pins BOTH flags explicitly rather than
+# raising one against an assumed default: max-num-seqs is pinned to the
+# 0.25.1-validated 256 and the batched budget derives from it. Depth 9 is
+# where the historical default budget went non-positive (2048 - 256 * 8);
+# the sizing kicks in at 8 because depth 8 leaves a degenerate 256-token
+# budget. 8192 is the fresh-box-validated floor (Laguna depth-15 card,
+# A100-80GB).
+_SPEC_PINNED_BATCH_BASE_TOKENS: Final = 2048
+_SPEC_PINNED_MAX_NUM_SEQS: Final = 256
 _SPEC_DEPTH_NEEDING_BATCH_SIZING: Final = 8
 _SPEC_BATCHED_TOKENS_FLOOR: Final = 8192
 
@@ -287,22 +295,25 @@ def build_vllm_serve_args(
             spec_num_tokens is not None
             and spec_num_tokens >= _SPEC_DEPTH_NEEDING_BATCH_SIZING
         ):
-            # vLLM budgets draft slots out of --max-num-batched-tokens: with
-            # its defaults (2048 batched tokens, 256 seqs) the scheduler
-            # computes 2048 - 256 * (depth - 1) scheduled tokens, which goes
-            # non-positive at depth 9 and the server refuses to start
-            # ("max_num_scheduled_tokens is set to -1536" observed live with
-            # the Laguna depth-15 card on vLLM 0.25.1). Deep block-parallel
-            # drafters therefore need the batch budget raised alongside the
-            # depth; shallow MTP depths keep vLLM's defaults untouched (the
-            # shape the #649 cards validated under). The 8192 floor is the
-            # value fresh-box validated with the depth-15 Laguna card.
+            # Deep block-parallel drafters need the scheduler budget sized
+            # to the depth, and BOTH flags pinned so the arithmetic cannot
+            # be broken by a vLLM default change underneath us (see the
+            # constant block above). Shallow MTP depths keep vLLM's
+            # defaults untouched (the shape the #649 cards validated
+            # under).
             batched = max(
                 _SPEC_BATCHED_TOKENS_FLOOR,
-                _VLLM_DEFAULT_MAX_NUM_BATCHED_TOKENS
-                + _VLLM_DEFAULT_MAX_NUM_SEQS * (spec_num_tokens - 1),
+                _SPEC_PINNED_BATCH_BASE_TOKENS
+                + _SPEC_PINNED_MAX_NUM_SEQS * (spec_num_tokens - 1),
             )
-            args.extend(["--max-num-batched-tokens", str(batched)])
+            args.extend(
+                [
+                    "--max-num-batched-tokens",
+                    str(batched),
+                    "--max-num-seqs",
+                    str(_SPEC_PINNED_MAX_NUM_SEQS),
+                ]
+            )
     return args
 
 
