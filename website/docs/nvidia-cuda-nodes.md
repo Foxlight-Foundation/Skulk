@@ -37,6 +37,12 @@ any machine where `nvidia-smi` works is ready. In particular:
 
 ## One-command install
 
+On Ubuntu or Debian, start with the packaged app or headless runtime in the
+[installation guide](install). It keeps the node's runtime aligned with the
+other release artifacts. The source installer below remains useful for other
+distributions, development builds, custom CUDA environments, and the optional
+`--with-vllm` source path.
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Foxlight-Foundation/Skulk/main/install.sh | bash
 ```

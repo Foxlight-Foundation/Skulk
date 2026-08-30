@@ -11,7 +11,8 @@ Skulk is an interconnect fabric for multi-node AI compute (distributed inference
 
 If you are getting oriented, start with these pages:
 
-- [README](https://github.com/Foxlight-Foundation/Skulk/blob/main/README.md) for installation, first run, and quick-start paths
+- [Install Skulk](https://foxlight-foundation.github.io/Skulk/install/) for the recommended macOS and Linux app packages, headless Linux, and source/development paths
+- [README](https://github.com/Foxlight-Foundation/Skulk/blob/main/README.md) for the product overview and quick-start paths
 - [API guide](api.md) for the happy path: place a model, then call the API
 - [Model store guide](model-store.md) for shared model storage and download workflows
 - [KV cache backends](kv-cache-backends.md) for backend and runtime tuning

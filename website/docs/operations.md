@@ -13,6 +13,8 @@ mid-generation, the disk gets tight, or you need to trace a bad request.
 It is written around the live control-plane endpoints and the behaviors that
 shipped for launch. Every action here is something you can do against a
 running cluster with `curl` and the dashboard. There is nothing to recompile.
+Packaged users can start or stop the local node and open its dashboard or logs
+from the Skulk app; the operational behavior below is the same once it runs.
 
 Throughout, `localhost:52415` is the local node's API; the same endpoints
 exist on every node, so swap the host to inspect a specific machine.

@@ -6,7 +6,12 @@ sidebar_label: Run as a service
 
 # Run Skulk as a service
 
-Make Skulk start when your computer boots, and restart itself if it ever crashes. This is what you want for any always-on cluster node.
+The packaged Skulk apps are the recommended service-management path: the macOS
+app owns its bundled runtime, and the Ubuntu/Debian app controls the packaged
+`skulk.service` user unit. See [Install Skulk](install) for those paths.
+
+This guide is for advanced operators running Skulk from a source checkout who
+want it to start when the computer boots and restart if it crashes.
 
 ## What you'll have when you're done
 
@@ -22,7 +27,7 @@ About 5 minutes per machine. No coding. No sudo for the standard install.
 
 You need:
 
-1. **A working Skulk install.** You should already be able to run `uv run skulk` from your Skulk folder and have it boot cleanly. On a fresh box, the fastest way to get there is the one-command installer (`curl -fsSL https://raw.githubusercontent.com/Foxlight-Foundation/Skulk/main/install.sh | bash`); the [Build and Runtime guide](./build-and-runtime.md) covers it, along with the manual path.
+1. **A working source-based Skulk install.** You should already be able to run `uv run skulk` from your Skulk folder and have it boot cleanly. The source installer (`curl -fsSL https://raw.githubusercontent.com/Foxlight-Foundation/Skulk/main/install.sh | bash`) provisions that checkout; the [Source Builds and Runtime guide](./build-and-runtime.md) covers it, along with the manual path.
 2. **`uv` on your PATH.** Check by running `which uv`. If you see a path, you're good. If it says "not found", install `uv` from [docs.astral.sh/uv](https://docs.astral.sh/uv/) and come back.
 3. **macOS** (any recent version) **or Linux** with systemd (Ubuntu, Debian, Fedora, Arch, anything modern).
 
