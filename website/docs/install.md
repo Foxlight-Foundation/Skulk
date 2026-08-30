@@ -41,9 +41,11 @@ To update later:
 brew upgrade --cask Foxlight-Foundation/skulk/skulk
 ```
 
-The first releases use Homebrew as the update channel; the app does not yet
-self-update. A future app update check can notify you and hand the upgrade to
-the same signed release channel without changing how the node is packaged.
+Skulk checks Foxlight's stable release manifest when the app starts and also
+offers **Check for Updates…** in the menu. When a newer stable version is
+available, **Download _version_…** opens its signed DMG. The app never silently
+downloads or replaces itself; Homebrew users can continue to update with the
+command above.
 
 To uninstall:
 
