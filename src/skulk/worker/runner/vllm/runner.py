@@ -115,8 +115,14 @@ from skulk.worker.runner.served_concurrency import ServedConcurrentDispatch
 from skulk.worker.runner.vllm.orphan_sweep import sweep_orphaned_vllm_engines
 
 # vLLM startup can be slow: weight load + torch.compile + CUDA-graph capture on a
-# large model runs to a couple of minutes, so allow a generous health deadline.
-_HEALTH_DEADLINE_S: Final = 600.0
+# large model runs to minutes, and 0.28.0's torch-2.13 AOT compile chain pushed a
+# COLD-cache first start past 600s (observed live: a 27B FP8 model on A100-80GB
+# finished compiling at ~10:05 and was killed by the old 600s deadline moments
+# before health). Warm compile caches come up far faster; the ceiling must fit
+# the cold case because every fresh node hits it. A crashed server is caught
+# separately by process-exit detection, so a long ceiling does not delay real
+# failure reporting.
+_HEALTH_DEADLINE_S: Final = 1800.0
 
 # Fraction of GPU VRAM vLLM may use for weights + KV cache. Operator-tunable via
 # env; vLLM's own default is 0.90. Placement admits against the same usable-VRAM
