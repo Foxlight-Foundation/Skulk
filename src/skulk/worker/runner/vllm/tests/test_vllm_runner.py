@@ -657,3 +657,17 @@ def test_vllm_max_model_len_constant_shared_with_placement() -> None:
     from skulk.shared.models.memory_estimate import VLLM_MAX_MODEL_LEN
 
     assert VLLM_MAX_MODEL_LEN == 32768
+
+
+def test_tool_call_finish_surfaces_forced_choice_stop() -> None:
+    # With a named tool_choice, vLLM reports the forced call under
+    # finish_reason "stop" (OpenAI semantics); gating on "tool_calls" alone
+    # returned an empty stop chunk to the caller (observed live on 0.28.0).
+    from skulk.worker.runner.vllm.runner import tool_call_finish_surfaces
+
+    assert tool_call_finish_surfaces("stop")
+    assert tool_call_finish_surfaces("tool_calls")
+    assert tool_call_finish_surfaces(None)
+    # A call cut short has incomplete arguments and must not surface.
+    assert not tool_call_finish_surfaces("length")
+    assert not tool_call_finish_surfaces("content_filter")

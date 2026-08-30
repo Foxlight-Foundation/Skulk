@@ -317,6 +317,25 @@ def build_vllm_serve_args(
     return args
 
 
+def tool_call_finish_surfaces(raw_finish: object) -> bool:
+    """Whether a non-streamed response's parsed tool calls may reach the caller.
+
+    "stop" is a COMPLETE generation and must surface its calls: with a named
+    ``tool_choice``, vLLM follows OpenAI semantics and reports the forced call
+    under finish_reason "stop" rather than "tool_calls" (observed live on
+    0.28.0; excluding it returned an empty stop chunk to the caller). Only
+    length/content_filter cut a call short with incomplete arguments, so those
+    finishes keep the calls unsurfaced and fall through to the prose path.
+
+    Args:
+        raw_finish: The server's raw ``finish_reason`` for the choice.
+
+    Returns:
+        ``True`` when parsed tool calls are complete and safe to surface.
+    """
+    return raw_finish in (None, "stop", "tool_calls")
+
+
 def resolve_vllm_tool_call_parser(card: ModelCard) -> str | None:
     """The vLLM tool parser this card should launch with, or None.
 
@@ -959,7 +978,7 @@ class Runner(ServedConcurrentDispatch):
             stats = self.stamp_runner_stats(stats, admission_in_flight)
         raw_finish = choice.get("finish_reason")
         tool_calls = tool_calls_from_message(message)
-        if tool_calls and raw_finish in (None, "tool_calls"):
+        if tool_calls and tool_call_finish_surfaces(raw_finish):
             self.event_sender.send(
                 ChunkGenerated(
                     command_id=command_id,
