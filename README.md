@@ -705,7 +705,7 @@ Highlights:
 - [Thunderbolt clustering](https://foxlight-foundation.github.io/Skulk/thunderbolt-clustering) and [RDMA on macOS](https://foxlight-foundation.github.io/Skulk/build-and-runtime)
 - [Speculative decoding](https://foxlight-foundation.github.io/Skulk/speculative-decoding)
 - [API guide](https://foxlight-foundation.github.io/Skulk/api-guide) and [architecture](https://foxlight-foundation.github.io/Skulk/architecture)
-- [Release notes](https://foxlight-foundation.github.io/Skulk/release-notes/1.5.0/)
+- [Release notes](https://foxlight-foundation.github.io/Skulk/release-notes/1.5.1/)
 - [CONTRIBUTING.md](CONTRIBUTING.md)
 
 ## Contributing
