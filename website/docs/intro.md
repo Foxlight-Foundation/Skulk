@@ -21,11 +21,14 @@ endpoint, so you can run models far larger than any single machine could hold.
 
    **Apple Silicon macOS 15 or newer**
 
+   [Download the signed Skulk DMG](install#macos), or install it with Homebrew:
+
    ```bash
    brew install --cask Foxlight-Foundation/skulk/skulk
    ```
 
-   Open **Skulk** from Applications and choose **Start Skulk**.
+   Open **Skulk** from Applications, click the Skulk fox in the menu bar, and
+   choose **Start Skulk**. Approve **Local Network** access when macOS asks.
 
    **Ubuntu or Debian desktop (`amd64` or `arm64`)**
 
@@ -39,10 +42,12 @@ endpoint, so you can run models far larger than any single machine could hold.
    Open **Skulk** from the application menu and choose **Start Skulk**. See the
    complete [installation guide](install) for updates, headless Linux, cluster
    namespaces, other Linux distributions, and development builds.
-2. Open the dashboard (default `http://localhost:52415`), pick a model, and
-   launch it. The supported catalog comes from Skulk's TUF-verified external
+2. When the app reports **Ready**, choose **Open Dashboard**. Confirm the local
+   machine appears, pick a model, and launch it. A single machine is already a
+   valid one-node cluster; Skulk uses additional compatible nodes when they are
+   available. The supported catalog comes from Skulk's TUF-verified external
    model-card registry; each card identifies one exact selectable artifact.
-   Skulk places it across the cluster and starts serving when it is ready.
+   Skulk starts serving when the placement is ready.
 3. Call the OpenAI-compatible endpoint at `/v1/chat/completions` with any client
    that speaks that format. The [API guide](api-guide) walks through a first
    request step by step, from placement to first token.
@@ -68,11 +73,13 @@ machines as it needs and routes the work through the pipeline automatically. A
 join the same cluster. Skulk elects a master, places models across the available
 nodes, and rebalances when a node leaves or rejoins.
 
-**Always on, self-healing.** Skulk runs as a supervised service on macOS and
-Linux: it starts at boot, restarts on crash, and rebuilds cluster state on
-recovery. If the master node dies, a new one is elected and the models already
-placed keep running, so the cluster stays available (an in-flight request at the
-moment of failover may need to be retried).
+**Supervised and self-healing.** Once started, Skulk runs as a supervised
+service on macOS and Linux: it restarts on crash and rebuilds cluster state on
+recovery. The desktop apps keep first start user-triggered; headless Linux
+operators can explicitly enable start at boot. If the master node dies, a new
+one is elected and the models already placed keep running, so the cluster stays
+available (an in-flight request at the moment of failover may need to be
+retried).
 
 **Manage it from anywhere.** Put your nodes on a Tailscale network and the
 mobile-friendly operator panel gives you live memory, GPU, and temperature for
