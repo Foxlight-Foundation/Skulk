@@ -54,6 +54,8 @@ desktop control for starting the node, opening the dashboard, and viewing logs.
 
 **Apple Silicon macOS 15 or newer:**
 
+[Download the signed and notarized Skulk 1.5.1 DMG](https://releases.foxlight.ai/desktop/macos/1.5.1/3/Skulk-1.5.1-3-macOS-arm64.dmg), or install with Homebrew:
+
 ```bash
 brew install --cask Foxlight-Foundation/skulk/skulk
 ```
@@ -67,7 +69,11 @@ sudo apt update
 sudo apt install skulk
 ```
 
-Open **Skulk**, choose **Start Skulk**, and then open the dashboard from the app.
+Open **Skulk**. On macOS, click the Skulk fox in the menu bar; the app does not
+keep a Dock window open. Choose **Start Skulk**, approve **Local Network** access
+on macOS, wait for **Ready**, and open the dashboard from the app. A single
+machine is already a valid one-node cluster. Skulk never requires Screen &
+System Audio Recording.
 See the [installation guide](https://foxlight-foundation.github.io/Skulk/install/)
 for updates, headless Linux, cluster namespaces, and removal.
 
