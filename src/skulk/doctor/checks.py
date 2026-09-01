@@ -648,6 +648,141 @@ def _check_hf_token(facts: NodeFacts) -> Sequence[CheckResult]:
     ]
 
 
+# --- vllm prerequisites ------------------------------------------------------
+
+_CXX_COMPILERS = ("g++", "clang++", "c++")
+"""C++ compiler names Inductor will look for on PATH, in no particular order.
+
+Inductor drives a **C++** compiler, not a C one: ``torch._inductor.cpp_builder``
+resolves ``$CXX`` and otherwise joins ``bin/g++``. A box carrying ``gcc`` with
+no ``g++`` therefore still fails, which is why checking for ``cc``/``gcc``
+would report a toolchain that cannot actually build the kernels.
+"""
+
+
+def _vllm_interpreter(vllm_binary_path: str) -> Path | None:
+    """Locate the interpreter that runs the configured vLLM entry point.
+
+    The adjacent ``python`` covers the venv layout the installer creates. A
+    console script installed elsewhere (a user install under ``~/.local/bin``,
+    a pipx shim) has no sibling interpreter, so fall back to the shebang pip
+    wrote into the script, which names the real one.
+    """
+    adjacent = Path(vllm_binary_path).with_name("python")
+    if adjacent.exists():
+        return adjacent
+    try:
+        with Path(vllm_binary_path).open("rb") as handle:
+            first_line = handle.readline(512).decode("utf-8", "replace").strip()
+    except OSError:
+        return None
+    if not first_line.startswith("#!"):
+        return None
+    tokens = first_line[2:].split()
+    if not tokens:
+        return None
+    first = Path(tokens[0])
+    # "#!/usr/bin/env python3" and its "env -S" form name the interpreter as an
+    # argument, so the leading path is env itself. Returning that would probe
+    # `env -c ...`, which fails and silently skips header verification.
+    if first.name == "env":
+        for argument in tokens[1:]:
+            if argument.startswith("-"):
+                continue
+            resolved = shutil.which(argument)
+            return Path(resolved) if resolved else None
+        return None
+    return first if first.is_absolute() and first.exists() else None
+
+
+def _vllm_include_dir(vllm_binary_path: str) -> Path | None:
+    """Ask the vLLM venv's own interpreter where its C headers would live.
+
+    The vLLM engine runs in its own virtualenv with its own Python version, so
+    the headers that matter are that interpreter's, not the ones Skulk is
+    running under. Asking the interpreter itself avoids guessing a version.
+    """
+    interpreter = _vllm_interpreter(vllm_binary_path)
+    if interpreter is None:
+        return None
+    try:
+        completed = subprocess.run(  # noqa: S603 - fixed, known-safe command
+            [str(interpreter), "-c", "import sysconfig;print(sysconfig.get_paths()['include'])"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    include = completed.stdout.strip()
+    return Path(include) if include else None
+
+
+def _check_vllm_prerequisites(facts: NodeFacts) -> Sequence[CheckResult]:
+    """vLLM's Triton JIT needs a C toolchain that the wheel does not install."""
+    check_id = "vllm-prerequisites"
+    title = "vLLM build prerequisites"
+
+    binary = facts.vllm_binary
+    if binary.state != "ok" or binary.configured_path is None:
+        # No usable vLLM on this node: engine-available already reports on the
+        # configured-but-broken states, and there is nothing to prepare for.
+        return [_ok(check_id, title, "no vLLM engine configured on this node")]
+
+    missing: list[str] = []
+    if not any(shutil.which(compiler) for compiler in _CXX_COMPILERS):
+        missing.append("a C++ compiler (g++/clang++/c++) on PATH")
+    include_dir = _vllm_include_dir(binary.configured_path)
+    if include_dir is None:
+        # Not knowing is not the same as knowing it is broken. Reporting fail
+        # here would tell an operator their working node cannot serve, which is
+        # worse than staying quiet about the half we could not determine.
+        if not missing:
+            return [
+                _ok(
+                    check_id,
+                    title,
+                    "C++ toolchain present; could not resolve the vLLM "
+                    "interpreter's include directory, so headers were not "
+                    "verified",
+                )
+            ]
+    elif not (include_dir / "Python.h").exists():
+        missing.append(f"Python development headers (no Python.h in {include_dir})")
+
+    if not missing:
+        return [
+            _ok(
+                check_id,
+                title,
+                "C++ toolchain and Python development headers present for the "
+                "vLLM engine",
+            )
+        ]
+    return [
+        CheckResult(
+            check_id=check_id,
+            title=title,
+            verdict="fail",
+            detail="vLLM cannot JIT-compile its kernels: missing " + "; ".join(missing),
+            consequence=(
+                "the node advertises vLLM capacity and accepts placements, but "
+                "every engine start fails during initialization with an "
+                "InductorError, so the model never serves"
+            ),
+            remediation=(
+                "install the Python development headers and a C++ compiler "
+                "for the vLLM interpreter (Debian and Ubuntu: "
+                "`sudo apt install python3-dev build-essential`; RHEL family: "
+                "`sudo dnf install python3-devel gcc-c++`), then retry the "
+                "placement"
+            ),
+        )
+    ]
+
+
 # --- registry --------------------------------------------------------------
 
 REGISTRY: tuple[DoctorCheck, ...] = (
@@ -710,6 +845,20 @@ REGISTRY: tuple[DoctorCheck, ...] = (
             "repositories fail."
         ),
         run=_check_hf_token,
+    ),
+    DoctorCheck(
+        check_id="vllm-prerequisites",
+        title="vLLM build prerequisites",
+        docs=(
+            "When a vLLM engine is configured, verifies the node can actually "
+            "compile its kernels. vLLM JITs Triton and torch.compile kernels "
+            "at runtime, shelling out to a C++ compiler (Inductor drives g++, "
+            "so gcc alone is not enough) against the Python development "
+            "headers; neither is a dependency of the vLLM wheel. Without them "
+            "the node advertises vLLM capacity and accepts placements, then "
+            "fails every engine start with an InductorError."
+        ),
+        run=_check_vllm_prerequisites,
     ),
 )
 

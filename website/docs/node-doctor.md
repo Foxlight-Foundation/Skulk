@@ -56,3 +56,7 @@ Reports whether the built web dashboard is present. The API serves without it; h
 ### Hugging Face token (`hf-token`)
 
 Reports whether this node can authenticate to Hugging Face, and whether it is the node that needs to. Tokens are node-local and are never broadcast to the cluster, so the token must exist on whichever node performs downloads: the model store host when a store is configured, otherwise every node for itself. Without one, public models still download and only gated or private repositories fail.
+
+### vLLM build prerequisites (`vllm-prerequisites`)
+
+When a vLLM engine is configured, verifies the node can actually compile its kernels. vLLM JITs Triton and torch.compile kernels at runtime, shelling out to a C++ compiler (Inductor drives g++, so gcc alone is not enough) against the Python development headers; neither is a dependency of the vLLM wheel. Without them the node advertises vLLM capacity and accepts placements, then fails every engine start with an InductorError.

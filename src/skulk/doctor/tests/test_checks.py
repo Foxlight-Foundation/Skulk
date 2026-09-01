@@ -1,7 +1,7 @@
 # pyright: reportPrivateUsage=false
 """Doctor registry tests: verdicts, consequences, and crash containment."""
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import pytest
@@ -13,6 +13,7 @@ from skulk.doctor.checks import (
     _check_capability_conflicts,
     _check_engine_available,
     _check_hf_token,
+    _check_vllm_prerequisites,
     run_checks,
 )
 from skulk.facts.testing import (
@@ -531,3 +532,221 @@ def test_hf_token_ok_when_the_node_is_offline(
     results = _check_hf_token(make_facts())
     assert [r.verdict for r in results] == ["ok"]
     assert "offline" in results[0].detail
+
+
+# --- vllm prerequisites ------------------------------------------------------
+
+
+def _which_only(name: str, path: Path) -> Callable[[str], str | None]:
+    """A shutil.which stub resolving exactly one command name."""
+
+    def _which(candidate: str) -> str | None:
+        return str(path) if candidate == name else None
+
+    return _which
+
+
+def _gcc_only(name: str) -> str | None:
+    """A node with gcc but no g++: the shape Inductor cannot use."""
+    return "/usr/bin/gcc" if name in ("cc", "gcc") else None
+
+
+def _no_compiler(_name: str) -> str | None:
+    """Stand in for shutil.which on a node with no C toolchain."""
+    return None
+
+
+def _has_compiler(_name: str) -> str | None:
+    """Stand in for shutil.which on a node with a working C++ toolchain."""
+    return "/usr/bin/g++"
+
+
+def _include_dir_returning(include: Path | None) -> Callable[[str], Path | None]:
+    """Stand in for the venv interpreter's reported include directory."""
+
+    def _resolve(_binary_path: str) -> Path | None:
+        return include
+
+    return _resolve
+
+
+
+def _vllm_facts(tmp_path: Path) -> NodeFacts:
+    """Facts describing a node with a usable vLLM binary at a real path."""
+    from skulk.shared.types.node_facts import EngineBinaryFact
+
+    binary = tmp_path / "vllm-env" / "bin" / "vllm"
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    _ = binary.write_text("#!/bin/sh\n")
+    return make_facts(
+        platform="linux",
+        vllm_bin=EngineBinaryFact(
+            env_var="SKULK_VLLM_BIN", configured_path=str(binary), state="ok"
+        ),
+    )
+
+
+def test_vllm_prerequisites_skipped_without_a_configured_engine() -> None:
+    """Nothing to prepare for, and engine-available already covers the rest."""
+    results = _check_vllm_prerequisites(make_facts(platform="linux"))
+    assert [r.verdict for r in results] == ["ok"]
+    assert "no vLLM engine configured" in results[0].detail
+
+
+def test_vllm_prerequisites_fails_without_a_compiler(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The exact fresh-box shape: wheel installed, toolchain absent."""
+    facts = _vllm_facts(tmp_path)
+    monkeypatch.setattr("skulk.doctor.checks.shutil.which", _no_compiler)
+    include = tmp_path / "include"
+    include.mkdir()
+    _ = (include / "Python.h").write_text("")
+    monkeypatch.setattr(
+        "skulk.doctor.checks._vllm_include_dir", _include_dir_returning(include)
+    )
+    results = _check_vllm_prerequisites(facts)
+    assert [r.verdict for r in results] == ["fail"]
+    assert "C++ compiler" in results[0].detail
+    assert "InductorError" in results[0].consequence
+    assert "python3-dev" in results[0].remediation
+    assert "gcc-c++" in results[0].remediation
+
+
+def test_vllm_prerequisites_fails_without_python_headers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    facts = _vllm_facts(tmp_path)
+    monkeypatch.setattr("skulk.doctor.checks.shutil.which", _has_compiler)
+    include = tmp_path / "include-empty"
+    include.mkdir()
+    monkeypatch.setattr(
+        "skulk.doctor.checks._vllm_include_dir", _include_dir_returning(include)
+    )
+    results = _check_vllm_prerequisites(facts)
+    assert [r.verdict for r in results] == ["fail"]
+    assert "Python.h" in results[0].detail
+
+
+def test_vllm_prerequisites_ok_when_the_toolchain_is_present(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    facts = _vllm_facts(tmp_path)
+    monkeypatch.setattr("skulk.doctor.checks.shutil.which", _has_compiler)
+    include = tmp_path / "include-ok"
+    include.mkdir()
+    _ = (include / "Python.h").write_text("")
+    monkeypatch.setattr(
+        "skulk.doctor.checks._vllm_include_dir", _include_dir_returning(include)
+    )
+    results = _check_vllm_prerequisites(facts)
+    assert [r.verdict for r in results] == ["ok"]
+
+
+def test_vllm_prerequisites_unresolvable_interpreter_does_not_fail(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Not knowing is not the same as knowing it is broken.
+
+    A console script whose interpreter cannot be located must not produce a
+    fail verdict telling an operator their working node cannot serve.
+    """
+    facts = _vllm_facts(tmp_path)
+    monkeypatch.setattr("skulk.doctor.checks.shutil.which", _has_compiler)
+    monkeypatch.setattr(
+        "skulk.doctor.checks._vllm_include_dir", _include_dir_returning(None)
+    )
+    results = _check_vllm_prerequisites(facts)
+    assert [r.verdict for r in results] == ["ok"]
+    assert "not verified" in results[0].detail
+
+
+def test_vllm_interpreter_falls_back_to_the_console_script_shebang(
+    tmp_path: Path,
+) -> None:
+    """A user or pipx install has no sibling python; pip's shebang names it."""
+    from skulk.doctor.checks import _vllm_interpreter
+
+    interpreter = tmp_path / "real-python"
+    _ = interpreter.write_text("")
+    script = tmp_path / "bin" / "vllm"
+    script.parent.mkdir(parents=True)
+    _ = script.write_text(f"#!{interpreter}\nprint('x')\n")
+    assert _vllm_interpreter(str(script)) == interpreter
+
+
+def test_vllm_interpreter_prefers_the_adjacent_venv_python(tmp_path: Path) -> None:
+    from skulk.doctor.checks import _vllm_interpreter
+
+    bindir = tmp_path / "vllm-env" / "bin"
+    bindir.mkdir(parents=True)
+    adjacent = bindir / "python"
+    _ = adjacent.write_text("")
+    script = bindir / "vllm"
+    _ = script.write_text("#!/usr/bin/env python3\n")
+    assert _vllm_interpreter(str(script)) == adjacent
+
+
+def test_vllm_interpreter_resolves_an_env_shebang(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`#!/usr/bin/env python3` names the interpreter as an argument.
+
+    Returning /usr/bin/env would probe `env -c ...`, which fails and silently
+    skips header verification, defeating the fallback entirely.
+    """
+    from skulk.doctor.checks import _vllm_interpreter
+
+    real = tmp_path / "python3"
+    _ = real.write_text("")
+    monkeypatch.setattr(
+        "skulk.doctor.checks.shutil.which", _which_only("python3", real)
+    )
+    script = tmp_path / "bin" / "vllm"
+    script.parent.mkdir(parents=True)
+    _ = script.write_text("#!/usr/bin/env python3\n")
+    assert _vllm_interpreter(str(script)) == real
+
+
+def test_vllm_interpreter_handles_env_dash_s(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`env -S` puts flags before the interpreter name."""
+    from skulk.doctor.checks import _vllm_interpreter
+
+    real = tmp_path / "python3"
+    _ = real.write_text("")
+    monkeypatch.setattr(
+        "skulk.doctor.checks.shutil.which", _which_only("python3", real)
+    )
+    script = tmp_path / "bin" / "vllm"
+    script.parent.mkdir(parents=True)
+    _ = script.write_text("#!/usr/bin/env -S python3 -u\n")
+    assert _vllm_interpreter(str(script)) == real
+
+
+def test_vllm_prerequisites_requires_a_cxx_compiler(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Inductor drives g++, so gcc alone is not a usable toolchain.
+
+    torch._inductor.cpp_builder resolves $CXX and otherwise joins bin/g++, so a
+    box with gcc and no g++ still fails at engine init.
+    """
+    facts = _vllm_facts(tmp_path)
+    monkeypatch.setattr("skulk.doctor.checks.shutil.which", _gcc_only)
+    include = tmp_path / "include"
+    include.mkdir()
+    _ = (include / "Python.h").write_text("")
+    monkeypatch.setattr(
+        "skulk.doctor.checks._vllm_include_dir", _include_dir_returning(include)
+    )
+    results = _check_vllm_prerequisites(facts)
+    assert [r.verdict for r in results] == ["fail"]
+    assert "C++ compiler" in results[0].detail
+    # The remediation must name a package that actually provides g++.
+    assert "gcc-c++" in results[0].remediation
+
+
+def test_vllm_prerequisites_check_is_registered() -> None:
+    assert any(check.check_id == "vllm-prerequisites" for check in REGISTRY)
