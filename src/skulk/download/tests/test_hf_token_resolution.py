@@ -312,3 +312,45 @@ def test_service_env_hash_without_space_stays_in_the_token(
     """Shell only starts a comment after whitespace, so a bare # is literal."""
     _write_service_env(monkeypatch, tmp_path, "HF_TOKEN=has#hash\n")
     assert resolve_hf_token_source() == ("has#hash", "service_env")
+
+
+def test_blank_environment_token_pins_resolution_to_the_token_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A present-but-empty HF_TOKEN is not an absent one.
+
+    Node startup only promotes hf_token when the key is missing, so a blank
+    export leaves the downloader on the token file. Reporting the startup-only
+    sources would claim a token that never gets sent.
+    """
+    _write_service_env(monkeypatch, tmp_path, "HF_TOKEN=from_service_env\n")
+    _set_config_token(monkeypatch, "from_config")
+    _write_token_file("from_file")
+    monkeypatch.setenv("HF_TOKEN", "")
+    assert resolve_hf_token_source() == ("from_file", "file")
+
+
+def test_blank_environment_token_with_no_file_is_absent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _set_config_token(monkeypatch, "from_config")
+    monkeypatch.setenv("HF_TOKEN", "")
+    assert resolve_hf_token_source() == (None, "absent")
+
+
+def test_token_path_follows_huggingface_hub(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """HF_TOKEN_PATH and the XDG cache location must be honored as the Hub does.
+
+    Recomputing $HF_HOME/token missed both, so `hf auth login` could report
+    success while writing somewhere Skulk never read.
+    """
+    from huggingface_hub import constants as hf_constants
+
+    override = tmp_path / "hub-token"
+    monkeypatch.setattr(hf_constants, "HF_TOKEN_PATH", str(override))
+    assert get_hf_token_path() == override
+
+    _ = override.write_text("from_hub_path\n")
+    assert resolve_hf_token_source() == ("from_hub_path", "file")

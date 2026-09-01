@@ -575,7 +575,9 @@ def _check_hf_token(facts: NodeFacts) -> Sequence[CheckResult]:
                 check_id,
                 title,
                 f"token configured as HF_TOKEN in {get_service_env_path()}, "
-                "which the service startup wrapper exports",
+                "which the service startup wrapper exports; a node launched "
+                "directly with `uv run skulk` does not read that file and "
+                "would need HF_TOKEN in its own environment",
             )
         ]
     if source == "config":

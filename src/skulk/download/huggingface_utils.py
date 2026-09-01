@@ -148,8 +148,21 @@ def get_hf_token_path() -> Path:
     This is the location ``hf auth login`` writes and the only token source
     read per download rather than once at process start, which makes it the
     supported way to give a headless node a token without a restart.
+
+    Delegates to ``huggingface_hub``'s own resolved constant rather than
+    rebuilding it, so ``HF_TOKEN_PATH`` and the XDG cache location are honored
+    exactly as the Hub CLI honors them. Recomputing it here as
+    ``$HF_HOME/token`` silently missed both, which meant ``hf auth login`` could
+    report success while writing somewhere Skulk never read.
     """
-    return get_hf_home() / "token"
+    try:
+        from huggingface_hub import constants as hf_constants
+
+        return Path(hf_constants.HF_TOKEN_PATH)
+    except (ImportError, AttributeError):
+        # Never let a Hub-internals change break token resolution outright;
+        # fall back to the documented default layout.
+        return get_hf_home() / "token"
 
 
 def _config_hf_token() -> str | None:
@@ -199,9 +212,15 @@ def resolve_hf_token_source(
         A ``(token, source)`` pair. ``token`` is ``None`` exactly when
         ``source`` is ``"absent"``.
     """
-    if token := os.environ.get("HF_TOKEN"):
-        return token, "env"
-    if include_config:
+    environment_token = os.environ.get("HF_TOKEN")
+    if environment_token:
+        return environment_token, "env"
+    # A present-but-empty HF_TOKEN is not the same as an absent one. Node
+    # startup only promotes hf_token when the key is *missing*, so a blank
+    # export pins the node to the token file and the startup-only sources
+    # below can never activate. Reporting one of them would claim a token the
+    # downloader will not send.
+    if include_config and environment_token is None:
         if service_token := _service_env_hf_token():
             return service_token, "service_env"
         if config_token := _config_hf_token():
