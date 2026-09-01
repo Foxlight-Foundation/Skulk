@@ -23,9 +23,14 @@ _MODEL = ModelId("meta-llama/Llama-3.1-8B-Instruct")
 
 @pytest.fixture(autouse=True)
 def _hermetic_token(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """No ambient HF_TOKEN and no real token file may leak into these tests."""
+    """No ambient token from any source may leak into these tests."""
     monkeypatch.delenv("HF_TOKEN", raising=False)
     monkeypatch.setenv("HF_HOME", str(tmp_path / "hf-home"))
+    monkeypatch.setattr(
+        "skulk.download.huggingface_utils.get_service_env_path",
+        lambda: tmp_path / "absent.env",
+    )
+    monkeypatch.setattr("skulk.store.config.load_skulk_config", lambda: None)
 
 
 def _write_token_file(text: str) -> None:
@@ -75,7 +80,7 @@ async def test_sync_and_async_resolvers_agree(file_contents: str | None) -> None
 
 async def test_401_without_token_names_node_and_restart_free_mechanism() -> None:
     message = await _build_auth_error_message(401, _MODEL)
-    assert "no Hugging Face token is configured" in message
+    assert "sent no Hugging Face token" in message
     assert "hf auth login" in message
     assert "store host" in message
     assert "never broadcast" in message
@@ -89,14 +94,14 @@ async def test_401_with_token_reports_rejection_not_absence(
     message = await _build_auth_error_message(401, _MODEL)
     assert "rejected the configured token" in message
     assert "expired, revoked, or mistyped" in message
-    assert "no Hugging Face token is configured" not in message
+    assert "sent no Hugging Face token" not in message
     assert "HF_TOKEN environment variable" in message
 
 
 async def test_403_without_token_covers_both_terms_and_token() -> None:
     message = await _build_auth_error_message(403, _MODEL)
     assert f"https://huggingface.co/{_MODEL}" in message
-    assert "no Hugging Face token is configured" in message
+    assert "sent no Hugging Face token" in message
 
 
 async def test_403_with_token_points_at_the_account_mismatch(
@@ -105,7 +110,7 @@ async def test_403_with_token_points_at_the_account_mismatch(
     monkeypatch.setenv("HF_TOKEN", "valid")
     message = await _build_auth_error_message(403, _MODEL)
     assert "same" in message and "account" in message
-    assert "no Hugging Face token is configured" not in message
+    assert "sent no Hugging Face token" not in message
 
 
 async def test_auth_messages_never_leak_the_token(
@@ -256,14 +261,7 @@ async def test_auth_message_ignores_tokens_this_process_never_loaded(
     assert "never_loaded" not in message
 
 
-async def test_auth_message_has_no_restart_hint_when_nothing_is_configured(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.setattr(
-        "skulk.download.huggingface_utils.get_service_env_path",
-        lambda: tmp_path / "absent.env",
-    )
-    monkeypatch.setattr("skulk.store.config.load_skulk_config", lambda: None)
+async def test_auth_message_has_no_restart_hint_when_nothing_is_configured() -> None:
     message = await _build_auth_error_message(401, _MODEL)
     assert "sent no Hugging Face token" in message
     assert "restart the node to apply it" not in message
