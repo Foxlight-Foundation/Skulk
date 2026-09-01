@@ -476,18 +476,33 @@ def _fetching_role(facts: NodeFacts) -> tuple[bool, str]:
     explain itself instead of asserting a role the operator cannot see.
     """
     del facts
-    from skulk.store.config import load_skulk_config, node_matches_store_host
+    from skulk.store.config import (
+        load_skulk_config,
+        node_matches_store_host,
+        resolve_config_path,
+    )
 
+    config_path = resolve_config_path()
+    if not config_path.exists():
+        # skulk.yaml is resolved relative to the working directory, so this is
+        # either a genuinely zero-config node (which does download for itself)
+        # or doctor being run from somewhere other than the install directory.
+        # Say which, rather than asserting a store layout we cannot see.
+        return True, (
+            f"no {config_path} in the working directory, so this reads as a "
+            "zero-config node that downloads directly; if this node uses a "
+            "model store, re-run doctor from its install directory"
+        )
     try:
         config = load_skulk_config()
     except Exception:  # noqa: BLE001 - a broken config is another check's job
         # Unreadable config: assume this node fetches, because warning about a
         # token that turns out to be unnecessary is far cheaper than staying
         # silent on the node that actually needed one.
-        return True, "cluster config could not be read, assuming direct downloads"
+        return True, f"{config_path} could not be read, assuming direct downloads"
     store = config.model_store if config is not None else None
     if store is None or not store.enabled:
-        return True, "no model store configured, so this node downloads directly"
+        return True, "no model store is configured, so this node downloads directly"
     if node_matches_store_host(store.store_host, node_id="", hostname=None):
         return True, f"this node is the model store host ({store.store_host})"
     return False, f"the model store host ({store.store_host}) performs downloads"

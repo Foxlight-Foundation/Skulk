@@ -263,6 +263,20 @@ def _clear_token_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("HF_HOME", str(tmp_path / "hf-home"))
 
 
+def _present_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Pretend a skulk.yaml exists, so the check reaches its store branches.
+
+    skulk.yaml resolves against the working directory, so without this the
+    check reports the "no config here" case rather than the store layout the
+    test is exercising.
+    """
+    config_path = tmp_path / "skulk.yaml"
+    _ = config_path.write_text("{}\n")
+    monkeypatch.setattr(
+        "skulk.store.config.resolve_config_path", lambda: config_path
+    )
+
+
 def test_hf_token_ok_from_env(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -292,6 +306,7 @@ def test_hf_token_degraded_when_this_node_downloads(
 ) -> None:
     """No store configured means this node fetches, so a missing token bites."""
     _clear_token_env(monkeypatch, tmp_path)
+    _present_config(monkeypatch, tmp_path)
     monkeypatch.setattr("skulk.store.config.load_skulk_config", lambda: None)
     results = _check_hf_token(make_facts())
     assert [r.verdict for r in results] == ["degraded"]
@@ -309,6 +324,7 @@ def test_hf_token_ok_when_another_node_is_the_store_host(
     from skulk.store.config import ModelStoreConfig, SkulkConfig
 
     _clear_token_env(monkeypatch, tmp_path)
+    _present_config(monkeypatch, tmp_path)
     config = SkulkConfig(
         model_store=ModelStoreConfig(
             store_host="some-other-machine",
@@ -331,6 +347,7 @@ def test_hf_token_degraded_when_this_node_is_the_store_host(
     from skulk.store.config import ModelStoreConfig, SkulkConfig
 
     _clear_token_env(monkeypatch, tmp_path)
+    _present_config(monkeypatch, tmp_path)
     config = SkulkConfig(
         model_store=ModelStoreConfig(
             store_host=socket.gethostname(),
@@ -345,3 +362,21 @@ def test_hf_token_degraded_when_this_node_is_the_store_host(
 
 def test_hf_token_check_is_registered() -> None:
     assert any(check.check_id == "hf-token" for check in REGISTRY)
+
+
+def test_hf_token_missing_config_says_so_instead_of_asserting_no_store(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """skulk.yaml resolves against the CWD, so absence is ambiguous.
+
+    Doctor run outside the install directory must not silently claim the node
+    has no model store; it still warns (a zero-config node really does
+    download for itself) but names the ambiguity.
+    """
+    _clear_token_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "skulk.store.config.resolve_config_path", lambda: tmp_path / "absent.yaml"
+    )
+    results = _check_hf_token(make_facts())
+    assert [r.verdict for r in results] == ["degraded"]
+    assert "install directory" in results[0].detail
