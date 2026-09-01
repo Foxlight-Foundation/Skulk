@@ -37,7 +37,7 @@ afterEach(async () => {
 });
 
 describe('ClusterNode interaction surface', () => {
-  it('covers the node, metadata, whitespace, and action rail as one hover target', async () => {
+  it('bridges metadata and actions without extending beyond the node selector width', async () => {
     const onInteractionChange = vi.fn();
     container = document.createElement('div');
     document.body.append(container);
@@ -61,9 +61,9 @@ describe('ClusterNode interaction surface', () => {
 
     const interactionSurface = container.querySelector('[data-node-interaction-surface="true"]');
     expect(interactionSurface).not.toBeNull();
-    expect(interactionSurface).toHaveAttribute('x', '-112');
+    expect(interactionSurface).toHaveAttribute('x', '-46');
     expect(interactionSurface).toHaveAttribute('y', '-52');
-    expect(interactionSurface).toHaveAttribute('width', '224');
+    expect(interactionSurface).toHaveAttribute('width', '92');
     expect(interactionSurface).toHaveAttribute('height', '206');
     expect(interactionSurface).toHaveAttribute('pointer-events', 'all');
 

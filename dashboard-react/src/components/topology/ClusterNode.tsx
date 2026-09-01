@@ -40,8 +40,8 @@ const UTILIZATION_RADIUS = 39;
 const UTILIZATION_CIRCUMFERENCE = 2 * Math.PI * UTILIZATION_RADIUS;
 const INTERACTION_SURFACE = {
   height: 206,
-  width: 224,
-  x: -112,
+  width: 92,
+  x: -46,
   y: -52,
 } as const;
 
@@ -296,8 +296,9 @@ export function ClusterNode({
         </clipPath>
       </defs>
 
-      {/* SVG groups have no painted box of their own. This surface keeps the
-          node, labels, whitespace, and action rail inside one hover region. */}
+      {/* SVG groups have no painted box of their own. This narrow surface
+          bridges the node, metadata, and action rail without extending into
+          neighboring node selectors in dense layouts. */}
       <rect
         aria-hidden="true"
         data-node-interaction-surface="true"
