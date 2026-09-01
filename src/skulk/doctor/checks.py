@@ -492,11 +492,16 @@ def _fetching_role(facts: NodeFacts) -> tuple[bool, str]:
         resolve_config_path,
     )
 
-    if _declared_participation() == "management":
-        # A management node runs no worker, so it is never a placement
-        # candidate and never downloads weights. A permanent degraded verdict
-        # there would be pure noise.
-        return False, "this node is management-only and downloads no models"
+    participation = _declared_participation()
+    if participation != "full":
+        # placement.py hard-filters every participation value other than
+        # "full", so neither a management node nor an ffn_only one is ever
+        # assigned an inference shard, and neither downloads weights. A
+        # permanent degraded verdict there would be pure noise.
+        return False, (
+            f"this node declares {participation} participation, so the planner "
+            "assigns it no inference shard and it downloads no models"
+        )
     config_path = resolve_config_path()
     if not config_path.exists():
         # skulk.yaml is resolved relative to the working directory, so this is

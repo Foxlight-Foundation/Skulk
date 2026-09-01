@@ -212,7 +212,8 @@ def resolve_hf_token_source(
         A ``(token, source)`` pair. ``token`` is ``None`` exactly when
         ``source`` is ``"absent"``.
     """
-    environment_token = os.environ.get("HF_TOKEN")
+    raw_environment_token = os.environ.get("HF_TOKEN")
+    environment_token = (raw_environment_token or "").strip()
     if environment_token:
         return environment_token, "env"
     # A present-but-empty HF_TOKEN is not the same as an absent one. Node
@@ -220,7 +221,7 @@ def resolve_hf_token_source(
     # export pins the node to the token file and the startup-only sources
     # below can never activate. Reporting one of them would claim a token the
     # downloader will not send.
-    if include_config and environment_token is None:
+    if include_config and raw_environment_token is None:
         if service_token := _service_env_hf_token():
             return service_token, "service_env"
         if config_token := _config_hf_token():
@@ -246,8 +247,10 @@ async def get_hf_token() -> str | None:
     ``resolve_hf_token_source(include_config=False)`` so the operator guidance
     doctor prints cannot drift from what downloads actually use.
     """
-    # Check environment variable first
-    if token := os.environ.get("HF_TOKEN"):
+    # Check environment variable first. Whitespace is not a credential: an
+    # unstripped value here would be sent as a bearer token and rejected,
+    # producing a confusing "token rejected" instead of falling through.
+    if token := (os.environ.get("HF_TOKEN") or "").strip():
         return token
     # Fall back to file-based token
     token_path = get_hf_token_path()

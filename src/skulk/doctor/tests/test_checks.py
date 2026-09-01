@@ -453,15 +453,20 @@ def test_hf_token_ok_from_service_env_file(
     assert "from_service_env" not in results[0].detail
 
 
-def test_hf_token_ok_on_management_only_node(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+@pytest.mark.parametrize("participation", ["management", "ffn_only"])
+def test_hf_token_ok_on_every_non_serving_participation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, participation: str
 ) -> None:
-    """A management node runs no worker, so it never downloads weights."""
+    """placement.py hard-filters every participation other than "full".
+
+    Neither a management node nor an ffn_only one is assigned an inference
+    shard, so neither downloads weights and neither should be warned.
+    """
     _clear_token_env(monkeypatch, tmp_path)
-    monkeypatch.setenv("SKULK_NODE_PARTICIPATION", "management")
+    monkeypatch.setenv("SKULK_NODE_PARTICIPATION", participation)
     results = _check_hf_token(make_facts())
     assert [r.verdict for r in results] == ["ok"]
-    assert "management-only" in results[0].detail
+    assert participation in results[0].detail
 
 
 def test_hf_token_worker_detail_notes_direct_fallback(

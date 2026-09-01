@@ -362,3 +362,37 @@ def test_token_path_follows_huggingface_hub(
 
     _ = override.write_text("from_hub_path\n")
     assert resolve_hf_token_source() == ("from_hub_path", "file")
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
+def test_whitespace_environment_token_is_not_a_credential(
+    monkeypatch: pytest.MonkeyPatch, blank: str
+) -> None:
+    """Whitespace in HF_TOKEN must not read as a configured token.
+
+    Left unstripped it would be sent as a bearer token and rejected, and the
+    guidance would tell the operator their token was revoked rather than that
+    they never had one.
+    """
+    _write_token_file("from_file")
+    monkeypatch.setenv("HF_TOKEN", blank)
+    assert resolve_hf_token_source() == ("from_file", "file")
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+async def test_whitespace_environment_token_agrees_across_resolvers(
+    monkeypatch: pytest.MonkeyPatch, blank: str
+) -> None:
+    monkeypatch.setenv("HF_TOKEN", blank)
+    sync_token, _source = resolve_hf_token_source(include_config=False)
+    assert sync_token == await get_hf_token()
+    assert sync_token is None
+
+
+async def test_whitespace_environment_token_reports_as_absent_not_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HF_TOKEN", "   ")
+    message = await _build_auth_error_message(401, _MODEL)
+    assert "sent no Hugging Face token" in message
+    assert "rejected the configured token" not in message
