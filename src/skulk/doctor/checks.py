@@ -486,13 +486,12 @@ def _fetching_role(facts: NodeFacts) -> tuple[bool, str]:
     explain itself instead of asserting a role the operator cannot see.
     """
     del facts
+    from skulk.shared.constants import SKULK_OFFLINE
     from skulk.store.config import (
         load_skulk_config,
         node_matches_store_host,
         resolve_config_path,
     )
-
-    from skulk.shared.constants import SKULK_OFFLINE
 
     if SKULK_OFFLINE:
         # Offline mode is an explicit declaration that this node fetches
