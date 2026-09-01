@@ -20,6 +20,21 @@ export interface CompleteEdgePair {
 }
 
 /**
+ * Orders node groups for SVG painting while preserving their orbit positions.
+ * The active node is painted last so its hover surface and action rail remain
+ * above neighboring transparent hit regions in dense layouts.
+ */
+export function orderTopologyPositionsForPainting(
+  positions: readonly TopologyNodePosition[],
+  activeNodeId: string | null,
+): TopologyNodePosition[] {
+  if (!activeNodeId) return [...positions];
+  const activePosition = positions.find(({ id }) => id === activeNodeId);
+  if (!activePosition) return [...positions];
+  return [...positions.filter(({ id }) => id !== activeNodeId), activePosition];
+}
+
+/**
  * Builds the complete undirected mesh used by the operator topology view.
  * Every unordered node pair appears exactly once. The canvas presents the
  * cluster as one fabric rather than mirroring transient transport adjacency,

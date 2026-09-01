@@ -25,6 +25,8 @@ export interface ClusterNodeProps {
   allNodes?: Record<string, NodeInfo>;
   /** Whether this node is currently selected. */
   selected?: boolean;
+  /** Notifies the graph when this node needs the top SVG paint layer. */
+  onInteractionChange?: (interacting: boolean) => void;
   /** Called when the node itself is selected or deselected. */
   onSelect?: () => void;
   /** Called when the user confirms a node restart. */
@@ -223,6 +225,7 @@ export function ClusterNode({
   edges = [],
   allNodes = {},
   selected = false,
+  onInteractionChange,
   onSelect,
   onRestart,
   onInspect,
@@ -267,11 +270,24 @@ export function ClusterNode({
       className="topology-node"
       data-node-id={nodeId}
       onBlur={(event) => {
-        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setInteracting(false);
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+          setInteracting(false);
+          onInteractionChange?.(false);
+        }
       }}
-      onFocus={() => setInteracting(true)}
-      onMouseEnter={() => setInteracting(true)}
-      onMouseLeave={() => setInteracting(false)}
+      onFocus={() => {
+        setInteracting(true);
+        onInteractionChange?.(true);
+      }}
+      onMouseEnter={() => {
+        setInteracting(true);
+        onInteractionChange?.(true);
+      }}
+      onMouseLeave={(event) => {
+        if (event.currentTarget.contains(document.activeElement)) return;
+        setInteracting(false);
+        onInteractionChange?.(false);
+      }}
       transform={`translate(${x}, ${y}) scale(${scale})`}
     >
       <defs>

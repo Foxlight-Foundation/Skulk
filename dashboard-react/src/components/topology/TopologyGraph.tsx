@@ -8,6 +8,7 @@ import { ClusterNode } from './ClusterNode';
 import {
   buildCompleteEdgePairs,
   computeTopologyPositions,
+  orderTopologyPositionsForPainting,
   type TopologyNodePosition,
 } from './topologyLayout';
 
@@ -47,6 +48,7 @@ export function TopologyGraph({ data, onInspectNode }: TopologyGraphProps) {
   const arrowheadId = `topology-arrowhead-${graphInstanceId}`;
   const [svgRef, { width, height }] = useResizeObserver<SVGSVGElement>();
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [interactingNodeId, setInteractingNodeId] = useState<string | null>(null);
 
   const handleRestart = useCallback((nodeId: string) => {
     fetch(`/admin/restart?node_id=${encodeURIComponent(nodeId)}`, { method: 'POST' }).catch(
@@ -76,6 +78,14 @@ export function TopologyGraph({ data, onInspectNode }: TopologyGraphProps) {
   );
   const effectiveSelectedNodeId =
     selectedNodeId && data.nodes[selectedNodeId] ? selectedNodeId : null;
+  const topNodeId =
+    interactingNodeId && data.nodes[interactingNodeId]
+      ? interactingNodeId
+      : effectiveSelectedNodeId;
+  const paintOrderedPositions = useMemo(
+    () => orderTopologyPositionsForPainting(positions, topNodeId),
+    [positions, topNodeId],
+  );
 
   return (
     <Container>
@@ -176,7 +186,7 @@ export function TopologyGraph({ data, onInspectNode }: TopologyGraphProps) {
           })}
         </g>
 
-        {positions.map((position) => {
+        {paintOrderedPositions.map((position) => {
           const nodeInfo = data.nodes[position.id];
           if (!nodeInfo) return null;
           return (
@@ -186,6 +196,11 @@ export function TopologyGraph({ data, onInspectNode }: TopologyGraphProps) {
               key={position.id}
               nodeId={position.id}
               nodeInfo={nodeInfo}
+              onInteractionChange={(interacting) =>
+                setInteractingNodeId((current) =>
+                  interacting ? position.id : current === position.id ? null : current,
+                )
+              }
               onInspect={() => onInspectNode?.(position.id)}
               onRestart={() => handleRestart(position.id)}
               onSelect={() =>

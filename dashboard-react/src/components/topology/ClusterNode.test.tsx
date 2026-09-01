@@ -38,6 +38,7 @@ afterEach(async () => {
 
 describe('ClusterNode interaction surface', () => {
   it('covers the node, metadata, whitespace, and action rail as one hover target', async () => {
+    const onInteractionChange = vi.fn();
     container = document.createElement('div');
     document.body.append(container);
     root = createRoot(container);
@@ -46,7 +47,13 @@ describe('ClusterNode interaction surface', () => {
       root?.render(
         <ThemeProvider theme={darkTheme}>
           <svg>
-            <ClusterNode nodeId="kite3" nodeInfo={nodeInfo} x={0} y={0} />
+            <ClusterNode
+              nodeId="kite3"
+              nodeInfo={nodeInfo}
+              onInteractionChange={onInteractionChange}
+              x={0}
+              y={0}
+            />
           </svg>
         </ThemeProvider>,
       );
@@ -70,6 +77,12 @@ describe('ClusterNode interaction surface', () => {
     await act(async () => {
       interactionSurface?.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
     });
+    expect(onInteractionChange).toHaveBeenLastCalledWith(true);
     expect(container.querySelector('[role="toolbar"]')).not.toBeNull();
+
+    await act(async () => {
+      interactionSurface?.dispatchEvent(new MouseEvent('mouseout', { bubbles: true }));
+    });
+    expect(onInteractionChange).toHaveBeenLastCalledWith(false);
   });
 });

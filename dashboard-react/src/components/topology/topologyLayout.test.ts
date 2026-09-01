@@ -4,6 +4,7 @@ import {
   buildCompleteEdgePairs,
   clampTelemetryRatio,
   computeTopologyPositions,
+  orderTopologyPositionsForPainting,
 } from './topologyLayout';
 
 function node(name: string): NodeInfo {
@@ -106,6 +107,21 @@ describe('topology layout', () => {
       { source: 'b', target: 'd' },
       { source: 'c', target: 'd' },
     ]);
+  });
+
+  it('paints the interacting node last without moving its orbit position', () => {
+    const positions = [
+      { id: 'node-a', x: 10, y: 20 },
+      { id: 'node-b', x: 30, y: 40 },
+      { id: 'node-c', x: 50, y: 60 },
+    ];
+
+    expect(orderTopologyPositionsForPainting(positions, 'node-a')).toEqual([
+      positions[1],
+      positions[2],
+      positions[0],
+    ]);
+    expect(positions.map(({ id }) => id)).toEqual(['node-a', 'node-b', 'node-c']);
   });
 
   it('does not create routes for fewer than two nodes', () => {
