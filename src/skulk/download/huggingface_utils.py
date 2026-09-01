@@ -86,10 +86,18 @@ what the running service actually uses.
 
 
 def get_service_env_path() -> Path:
-    """Return the service environment file the startup wrappers source."""
-    from skulk.shared.constants import SKULK_HOME_DIR
+    """Return the service environment file the startup wrappers actually read.
 
-    return SKULK_HOME_DIR / "skulk.env"
+    Deliberately mirrors the shipped wrappers rather than Skulk's own home
+    resolution: ``skulk-startup.sh`` uses
+    ``${SKULK_ENV_FILE:-$HOME/.skulk/skulk.env}`` and the systemd unit hardcodes
+    ``%h/.skulk/skulk.env``. Neither consults ``SKULK_HOME``, so deriving this
+    path from it would point doctor at a different file than the running
+    service, which is the exact false report this source exists to prevent.
+    """
+    if override := os.environ.get("SKULK_ENV_FILE"):
+        return Path(override)
+    return Path.home() / ".skulk" / "skulk.env"
 
 
 def _service_env_hf_token() -> str | None:
@@ -105,6 +113,11 @@ def _service_env_hf_token() -> str | None:
         contents = get_service_env_path().read_text()
     except OSError:
         return None
+    # Last assignment wins, matching both consumers: the startup wrapper
+    # sources this as shell, and systemd's EnvironmentFile also takes the final
+    # value for a repeated key. Returning the first match would disagree with
+    # the service whenever an operator appends a replacement token.
+    resolved: str | None = None
     for raw_line in contents.splitlines():
         line = raw_line.strip()
         if line.startswith("#") or "=" not in line:
@@ -114,9 +127,8 @@ def _service_env_hf_token() -> str | None:
             continue
         # Shell-style quoting is common in these files; nothing here executes
         # the file, so strip only the surrounding quotes.
-        token = value.strip().strip("\"'")
-        return token or None
-    return None
+        resolved = value.strip().strip("\"'") or None
+    return resolved
 
 
 def get_hf_token_path() -> Path:

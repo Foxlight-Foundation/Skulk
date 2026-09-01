@@ -265,3 +265,39 @@ async def test_auth_message_has_no_restart_hint_when_nothing_is_configured() -> 
     message = await _build_auth_error_message(401, _MODEL)
     assert "sent no Hugging Face token" in message
     assert "restart the node to apply it" not in message
+
+
+def test_service_env_path_matches_the_shipped_wrappers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """SKULK_ENV_FILE wins, then ~/.skulk/skulk.env. SKULK_HOME is not consulted.
+
+    skulk-startup.sh uses ${SKULK_ENV_FILE:-$HOME/.skulk/skulk.env} and the
+    systemd unit hardcodes %h/.skulk/skulk.env, so resolving this from
+    SKULK_HOME would read a different file than the running service.
+    """
+    from skulk.download.huggingface_utils import get_service_env_path
+
+    monkeypatch.delenv("SKULK_ENV_FILE", raising=False)
+    monkeypatch.setenv("SKULK_HOME", "somewhere-else")
+    assert get_service_env_path() == Path.home() / ".skulk" / "skulk.env"
+
+    override = tmp_path / "custom.env"
+    monkeypatch.setenv("SKULK_ENV_FILE", str(override))
+    assert get_service_env_path() == override
+
+
+def test_service_env_last_assignment_wins(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Shell sourcing and systemd EnvironmentFile both take the final value.
+
+    An operator appending a replacement token must not have doctor keep
+    reporting the superseded one.
+    """
+    _write_service_env(
+        monkeypatch,
+        tmp_path,
+        "HF_TOKEN=superseded\nSKULK_VLLM_BIN=/x\nHF_TOKEN=current\n",
+    )
+    assert resolve_hf_token_source() == ("current", "service_env")
