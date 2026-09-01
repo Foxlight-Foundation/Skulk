@@ -1,3 +1,4 @@
+# pyright: reportPrivateUsage=false, reportUnusedFunction=false
 """Hugging Face token resolution and the operator guidance built on it (#917).
 
 A token is node-local and never broadcast, so the only thing standing between
