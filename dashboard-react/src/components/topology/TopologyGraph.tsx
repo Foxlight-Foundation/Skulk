@@ -1,252 +1,218 @@
-import { useCallback, useMemo } from 'react';
-import styled from 'styled-components';
-import type { TopologyData, TopologyEdge } from '../../types/topology';
+import { useCallback, useId, useMemo, useState } from 'react';
+import styled, { useTheme } from 'styled-components';
+import type { TopologyData } from '../../types/topology';
 import { useResizeObserver } from '../../hooks/useResizeObserver';
+import type { Theme } from '../../theme';
+import { useSkulkTranslation } from '../../i18n/tolgee';
 import { ClusterNode } from './ClusterNode';
-import { useIsMobile } from '../../hooks/useMediaQuery';
+import {
+  buildCompleteEdgePairs,
+  computeTopologyPositions,
+  orderTopologyPositionsForPainting,
+  type TopologyNodePosition,
+} from './topologyLayout';
 
+/** Props for the responsive cluster topology canvas. */
 export interface TopologyGraphProps {
   data: TopologyData;
   /** Called when a node diagnostics inspection is requested. */
   onInspectNode?: (nodeId: string) => void;
 }
 
-interface NodePosition {
-  id: string;
-  x: number;
-  y: number;
-}
-
-/* ---- edge pair helpers ---- */
-
-function edgePairKey(a: string, b: string): string {
-  return a < b ? `${a}::${b}` : `${b}::${a}`;
-}
-
-interface EdgePair {
-  a: string;
-  b: string;
-  aToB: boolean;
-  bToA: boolean;
-}
-
-function buildEdgePairs(edges: TopologyEdge[]): EdgePair[] {
-  const map = new Map<string, EdgePair>();
-  for (const e of edges) {
-    const key = edgePairKey(e.source, e.target);
-    const existing = map.get(key);
-    if (existing) {
-      if (e.source === existing.a) existing.aToB = true;
-      else existing.bToA = true;
-    } else {
-      const aIsSource = e.source < e.target;
-      map.set(key, {
-        a: aIsSource ? e.source : e.target,
-        b: aIsSource ? e.target : e.source,
-        aToB: aIsSource,
-        bToA: !aIsSource,
-      });
-    }
-  }
-  return Array.from(map.values());
-}
-
-/* ---- layout ---- */
-
-function computePositions(
-  nodeIds: string[],
-  width: number,
-  height: number,
-): NodePosition[] {
-  const n = nodeIds.length;
-  if (n === 0 || width === 0 || height === 0) return [];
-
-  const cx = width / 2;
-  const topPad = 70;
-  const bottomPad = 70;
-  const cy = topPad + (height - topPad - bottomPad) / 2;
-
-  if (n === 1) {
-    return [{ id: nodeIds[0], x: cx, y: cy }];
-  }
-
-  const minDim = Math.min(width, height);
-  const orbitRadius = Math.min(
-    minDim * 0.32,
-    Math.max(minDim * 0.18, minDim * (0.2 + n * 0.02)),
-  );
-
-  return nodeIds.map((id, i) => {
-    const angle = (i / n) * 2 * Math.PI - Math.PI / 2;
-    return {
-      id,
-      x: cx + orbitRadius * Math.cos(angle),
-      y: cy + orbitRadius * Math.sin(angle),
-    };
-  });
-}
-
-
-
-/* ---- styles ---- */
-
 const Container = styled.div`
   position: relative;
   width: 100%;
   height: 100%;
+  min-height: 420px;
 `;
 
-/* ---- component ---- */
+function nodeScaleForCanvas(nodeCount: number, width: number, height: number): number {
+  const densityScale = nodeCount <= 4 ? 1 : Math.max(0.62, 1 - (nodeCount - 4) * 0.075);
+  // Native topology nodes stay finger-legible on phones. Density may still
+  // reduce large fabrics, but viewport scaling alone never shrinks a node
+  // below 86% of the desktop mark.
+  const widthScale = Math.max(0.86, Math.min(1.12, width / 620));
+  const heightScale = Math.max(0.86, Math.min(1.12, height / 560));
+  return densityScale * Math.min(widthScale, heightScale);
+}
 
+/**
+ * Scalable topology projection shared across desktop and phone-sized dashboard
+ * canvases. Nodes follow skulk-app's stable orbit while a complete animated
+ * mesh preserves the dashboard's bidirectional fabric view.
+ */
 export function TopologyGraph({ data, onInspectNode }: TopologyGraphProps) {
+  const { t } = useSkulkTranslation();
+  const theme = useTheme() as Theme;
+  const graphInstanceId = useId().replace(/:/g, '');
+  const arrowheadId = `topology-arrowhead-${graphInstanceId}`;
   const [svgRef, { width, height }] = useResizeObserver<SVGSVGElement>();
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [interactingNodeId, setInteractingNodeId] = useState<string | null>(null);
 
   const handleRestart = useCallback((nodeId: string) => {
-    fetch(`/admin/restart?node_id=${encodeURIComponent(nodeId)}`, { method: 'POST' }).catch((error) => {
-      console.error('Failed to restart node', nodeId, error);
-    });
+    fetch(`/admin/restart?node_id=${encodeURIComponent(nodeId)}`, { method: 'POST' }).catch(
+      (error: unknown) => {
+        console.error('Failed to restart node', nodeId, error);
+      },
+    );
   }, []);
 
-  const nodeIds = useMemo(() => Object.keys(data.nodes), [data.nodes]);
-
-  const positions = useMemo(
-    () => computePositions(nodeIds, width, height),
-    [nodeIds, width, height],
+  const nodeCount = Object.keys(data.nodes).length;
+  const nodeScale = useMemo(
+    () => nodeScaleForCanvas(nodeCount, width, height),
+    [height, nodeCount, width],
   );
-
-  const posById = useMemo(() => {
-    const m = new Map<string, NodePosition>();
-    for (const p of positions) m.set(p.id, p);
-    return m;
+  const positions = useMemo(
+    () => computeTopologyPositions(data.nodes, width, height, nodeScale),
+    [data.nodes, height, nodeScale, width],
+  );
+  const positionsById = useMemo(() => {
+    const positionsMap = new Map<string, TopologyNodePosition>();
+    for (const position of positions) positionsMap.set(position.id, position);
+    return positionsMap;
   }, [positions]);
-
-  const edgePairs = useMemo(() => buildEdgePairs(data.edges), [data.edges]);
-
-  // Phone width: device glyphs render at 3/4 scale so several node cards
-  // fit a narrow viewport without their stat chips colliding (half scale
-  // read too small on a phone; Tom sized it by eye).
-  const isMobile = useIsMobile();
-  const nodeScale = useMemo(() => {
-    const n = nodeIds.length;
-    const base = n <= 1 ? 1 : Math.max(0.6, 1 - (n - 1) * 0.08);
-    return isMobile ? base * 0.75 : base;
-  }, [nodeIds.length, isMobile]);
-
-
-  if (width === 0 || height === 0) {
-    return (
-      <Container>
-        <svg ref={svgRef} style={{ width: '100%', height: '100%', background: 'transparent' }} />
-      </Container>
-    );
-  }
+  const completeEdges = useMemo(
+    () => buildCompleteEdgePairs(Object.keys(data.nodes)),
+    [data.nodes],
+  );
+  const effectiveSelectedNodeId =
+    selectedNodeId && data.nodes[selectedNodeId] ? selectedNodeId : null;
+  const topNodeId =
+    interactingNodeId && data.nodes[interactingNodeId]
+      ? interactingNodeId
+      : effectiveSelectedNodeId;
+  const paintOrderedPositions = useMemo(
+    () => orderTopologyPositionsForPainting(positions, topNodeId),
+    [positions, topNodeId],
+  );
 
   return (
     <Container>
       <svg
+        aria-label={t(
+          'topology.graphAria.completeMesh',
+          'Cluster topology with {nodeCount} nodes and {routeCount} bidirectional routes. Node fill shows memory pressure, the outer arc shows compute utilization, and the inner ring and dot show health.',
+          { nodeCount, routeCount: completeEdges.length },
+        )}
+        onClick={(event) => {
+          if (event.target === event.currentTarget) setSelectedNodeId(null);
+        }}
         ref={svgRef}
-        style={{ width: '100%', height: '100%', background: 'transparent' }}
+        role="group"
+        style={{ background: 'transparent', height: '100%', width: '100%' }}
       >
         <defs>
           <marker
-            id="arrowhead"
-            viewBox="0 0 10 10"
+            id={arrowheadId}
+            markerHeight="11"
+            markerWidth="11"
+            orient="auto-start-reverse"
             refX="10"
             refY="5"
-            markerWidth="11"
-            markerHeight="11"
-            orient="auto-start-reverse"
+            viewBox="0 0 10 10"
           >
             <path
               d="M 0 0 L 10 5 L 0 10"
               fill="none"
-              stroke="#B3B3B3"
-              strokeWidth="1.6"
+              stroke={theme.colors.topologyConnectionLine}
               strokeLinecap="round"
               strokeLinejoin="round"
+              strokeWidth="1.6"
+              vectorEffect="non-scaling-stroke"
             />
           </marker>
           <style>{`
-            .topo-link {
-              stroke: #b3b3b3;
-              stroke-width: 1px;
+            .topology-link {
+              animation: topologyFlow 0.75s linear infinite;
+              opacity: 0.77;
               stroke-dasharray: 4 4;
-              opacity: 0.8;
-              animation: topoFlow 0.75s linear infinite;
+              stroke-width: 1.35px;
             }
-            @keyframes topoFlow {
+            @keyframes topologyFlow {
               from { stroke-dashoffset: 0; }
-              to   { stroke-dashoffset: -10; }
+              to { stroke-dashoffset: -10; }
+            }
+            @media (prefers-reduced-motion: reduce) {
+              .topology-link { animation: none; }
             }
           `}</style>
         </defs>
 
-        {/* Edges */}
-        <g>
-          {edgePairs.map((pair) => {
-            const pA = posById.get(pair.a);
-            const pB = posById.get(pair.b);
-            if (!pA || !pB) return null;
-
-            const dx = pB.x - pA.x;
-            const dy = pB.y - pA.y;
-            const len = Math.hypot(dx, dy) || 1;
-            const ux = dx / len;
-            const uy = dy / len;
-            const mx = (pA.x + pB.x) / 2;
-            const my = (pA.y + pB.y) / 2;
-            const tipOffset = 16;
-            const carrier = 2;
-
+        <g aria-hidden>
+          {completeEdges.map((edge) => {
+            const source = positionsById.get(edge.source);
+            const target = positionsById.get(edge.target);
+            if (!source || !target) return null;
+            const deltaX = target.x - source.x;
+            const deltaY = target.y - source.y;
+            const length = Math.hypot(deltaX, deltaY) || 1;
+            const unitX = deltaX / length;
+            const unitY = deltaY / length;
+            const midpointX = (source.x + target.x) / 2;
+            const midpointY = (source.y + target.y) / 2;
+            const arrowOffset = 16;
+            const carrierLength = 2;
             return (
-              <g key={`${pair.a}-${pair.b}`}>
+              <g key={`${edge.source}-${edge.target}`}>
                 <line
-                  x1={pA.x} y1={pA.y}
-                  x2={pB.x} y2={pB.y}
-                  className="topo-link"
+                  className="topology-link"
+                  stroke={theme.colors.topologyConnectionLine}
+                  strokeLinecap="round"
+                  vectorEffect="non-scaling-stroke"
+                  x1={source.x}
+                  x2={target.x}
+                  y1={source.y}
+                  y2={target.y}
                 />
-                {pair.aToB && (
-                  <line
-                    x1={mx - ux * (tipOffset + carrier)}
-                    y1={my - uy * (tipOffset + carrier)}
-                    x2={mx - ux * tipOffset}
-                    y2={my - uy * tipOffset}
-                    stroke="none"
-                    markerEnd="url(#arrowhead)"
-                  />
-                )}
-                {pair.bToA && (
-                  <line
-                    x1={mx + ux * (tipOffset + carrier)}
-                    y1={my + uy * (tipOffset + carrier)}
-                    x2={mx + ux * tipOffset}
-                    y2={my + uy * tipOffset}
-                    stroke="none"
-                    markerEnd="url(#arrowhead)"
-                  />
-                )}
+                <line
+                  markerEnd={`url(#${arrowheadId})`}
+                  stroke="none"
+                  x1={midpointX - unitX * (arrowOffset + carrierLength)}
+                  x2={midpointX - unitX * arrowOffset}
+                  y1={midpointY - unitY * (arrowOffset + carrierLength)}
+                  y2={midpointY - unitY * arrowOffset}
+                />
+                <line
+                  markerEnd={`url(#${arrowheadId})`}
+                  stroke="none"
+                  x1={midpointX + unitX * (arrowOffset + carrierLength)}
+                  x2={midpointX + unitX * arrowOffset}
+                  y1={midpointY + unitY * (arrowOffset + carrierLength)}
+                  y2={midpointY + unitY * arrowOffset}
+                />
               </g>
             );
           })}
         </g>
 
-        {/* Nodes */}
-        <g>
-          {positions.map((pos) => (
+        {paintOrderedPositions.map((position) => {
+          const nodeInfo = data.nodes[position.id];
+          if (!nodeInfo) return null;
+          return (
             <ClusterNode
-              key={pos.id}
-              nodeId={pos.id}
-              nodeInfo={data.nodes[pos.id]}
-              x={pos.x}
-              y={pos.y}
-              scale={nodeScale}
-              edges={data.edges}
               allNodes={data.nodes}
-              onRestart={() => handleRestart(pos.id)}
-              onInspect={() => onInspectNode?.(pos.id)}
+              edges={data.edges}
+              key={position.id}
+              nodeId={position.id}
+              nodeInfo={nodeInfo}
+              onInteractionChange={(interacting) =>
+                setInteractingNodeId((current) =>
+                  interacting ? position.id : current === position.id ? null : current,
+                )
+              }
+              onInspect={() => onInspectNode?.(position.id)}
+              onRestart={() => handleRestart(position.id)}
+              onSelect={() =>
+                setSelectedNodeId((current) => (current === position.id ? null : position.id))
+              }
+              scale={nodeScale}
+              selected={effectiveSelectedNodeId === position.id}
+              x={position.x}
+              y={position.y}
             />
-          ))}
-        </g>
+          );
+        })}
       </svg>
     </Container>
   );

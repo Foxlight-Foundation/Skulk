@@ -154,6 +154,23 @@ interface ColorTokens {
   gpuBarBg: string;   // empty/background fill of the GPU stats bar
   meshLine: string;
   meshNode: string;
+  /** Raised node surface from skulk-app's native topology palette. */
+  topologyNodeSurface: string;
+  /** Primary-colour memory fill, rendered at 42% opacity by the node. */
+  topologyNodeMemory: string;
+  topologyNodeComputeTrack: string;
+  topologyNodeCompute: string;
+  topologyNodeSelection: string;
+  topologyNodeText: string;
+  topologyNodeLabel: string;
+  topologyNodeDetail: string;
+  topologyNodeHealthy: string;
+  topologyNodeSyncing: string;
+  topologyNodeWarning: string;
+  topologyNodeDanger: string;
+  topologyNodeDotBorder: string;
+  /** Native topology hue at desktop-readable contrast. */
+  topologyConnectionLine: string;
   // Fullscreen background NetworkMesh — must be much subtler than the topology mesh.
   bgMeshLine: string;
   bgMeshNode: string;
@@ -278,6 +295,22 @@ const darkColors: ColorTokens = {
   gpuBarBg: 'rgba(43, 58, 99, 0.65)',
   meshLine: 'rgba(147, 174, 223, 0.30)',
   meshNode: 'rgba(147, 174, 223, 0.55)',
+  // Precomposed Den surfaceRaised over the canvas. SVG topology edges are
+  // painted behind nodes, so this surface must stay opaque to occlude them.
+  topologyNodeSurface: '#151D34',
+  topologyNodeMemory: '#93AEDF',
+  topologyNodeComputeTrack: 'rgba(147, 174, 223, 0.22)',
+  topologyNodeCompute: '#F2A03D',
+  topologyNodeSelection: '#92A4C2',
+  topologyNodeText: '#F4F6FB',
+  topologyNodeLabel: 'rgba(147, 174, 223, 0.75)',
+  topologyNodeDetail: 'rgba(232, 237, 247, 0.56)',
+  topologyNodeHealthy: '#54C79A',
+  topologyNodeSyncing: '#93AEDF',
+  topologyNodeWarning: '#F2A03D',
+  topologyNodeDanger: '#F2707E',
+  topologyNodeDotBorder: 'rgba(43, 58, 99, 0.28)',
+  topologyConnectionLine: 'rgba(147, 174, 223, 0.78)',
   bgMeshLine: 'rgba(147, 174, 223, 0.10)',
   bgMeshNode: 'rgba(147, 174, 223, 0.08)',
 
@@ -379,6 +412,20 @@ const lightColors: ColorTokens = {
   gpuBarBg: '#bccfe8',             // a touch darker than the device case so the bar reads as a separate element
   meshLine: 'rgba(29, 78, 216, 0.30)',
   meshNode: 'rgba(29, 78, 216, 0.55)',
+  topologyNodeSurface: '#FFFFFF',
+  topologyNodeMemory: '#456FB0',
+  topologyNodeComputeTrack: 'rgba(17, 33, 60, 0.16)',
+  topologyNodeCompute: '#AC580A',
+  topologyNodeSelection: '#52657F',
+  topologyNodeText: '#11213C',
+  topologyNodeLabel: '#5F7086',
+  topologyNodeDetail: '#65707E',
+  topologyNodeHealthy: '#1C7A54',
+  topologyNodeSyncing: '#456FB0',
+  topologyNodeWarning: '#96601A',
+  topologyNodeDanger: '#B23A44',
+  topologyNodeDotBorder: '#FFFFFF',
+  topologyConnectionLine: 'rgba(17, 33, 60, 0.78)',
   bgMeshLine: 'rgba(29, 78, 216, 0.16)',
   bgMeshNode: 'rgba(29, 78, 216, 0.12)',
 
