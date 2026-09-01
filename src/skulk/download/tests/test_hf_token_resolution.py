@@ -14,7 +14,6 @@ from skulk.download.download_utils import _build_auth_error_message
 from skulk.download.huggingface_utils import (
     get_hf_token,
     get_hf_token_path,
-    get_service_env_path,
     resolve_hf_token_source,
 )
 from skulk.shared.types.common import ModelId
