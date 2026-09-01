@@ -261,7 +261,14 @@ def _clear_token_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Make token resolution hermetic: no ambient env var, file, or env file."""
     monkeypatch.delenv("HF_TOKEN", raising=False)
     monkeypatch.delenv("SKULK_NODE_PARTICIPATION", raising=False)
+    # HF_TOKEN_PATH is resolved at huggingface_hub import time, so HF_HOME
+    # alone would leave these tests touching the real token file.
+    from huggingface_hub import constants as hf_constants
+
     monkeypatch.setenv("HF_HOME", str(tmp_path / "hf-home"))
+    monkeypatch.setattr(
+        hf_constants, "HF_TOKEN_PATH", str(tmp_path / "hf-home" / "token")
+    )
     monkeypatch.setattr(Path, "home", lambda: tmp_path / "fake-home")
 
 

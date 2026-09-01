@@ -25,7 +25,15 @@ _MODEL = ModelId("meta-llama/Llama-3.1-8B-Instruct")
 def _hermetic_token(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """No ambient token from any source may leak into these tests."""
     monkeypatch.delenv("HF_TOKEN", raising=False)
+    # huggingface_hub resolves HF_TOKEN_PATH once at import, so setting HF_HOME
+    # here would NOT redirect it and these tests would read and write the
+    # developer's real ~/.cache/huggingface/token. Patch the constant itself.
+    from huggingface_hub import constants as hf_constants
+
     monkeypatch.setenv("HF_HOME", str(tmp_path / "hf-home"))
+    monkeypatch.setattr(
+        hf_constants, "HF_TOKEN_PATH", str(tmp_path / "hf-home" / "token")
+    )
     # Relocate HOME rather than stubbing the resolver, so these tests exercise
     # the shipped path resolution and no developer's real skulk.env leaks in.
     monkeypatch.setattr(Path, "home", lambda: tmp_path / "fake-home")
