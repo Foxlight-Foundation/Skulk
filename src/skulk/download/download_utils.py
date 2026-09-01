@@ -68,6 +68,7 @@ class HuggingFaceRateLimitError(Exception):
 
 _HF_TOKEN_SOURCE_LABELS: dict[HfTokenSource, str] = {
     "env": "the HF_TOKEN environment variable",
+    "config": "hf_token in skulk.yaml",
     "file": "the Hugging Face token file",
     "absent": "no configured source",
 }

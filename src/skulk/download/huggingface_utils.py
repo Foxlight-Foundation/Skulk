@@ -67,13 +67,17 @@ def get_hf_home() -> Path:
     return Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface"))
 
 
-HfTokenSource = Literal["env", "file", "absent"]
+HfTokenSource = Literal["env", "config", "file", "absent"]
 """Where a resolved Hugging Face token came from.
 
-``env`` is the ``HF_TOKEN`` environment variable, which a node also
-populates at startup from ``hf_token:`` in ``skulk.yaml``. ``file`` is
-``$HF_HOME/token`` (what ``hf auth login`` writes). ``absent`` means this
-node cannot authenticate to Hugging Face at all.
+``env`` is the ``HF_TOKEN`` environment variable. ``config`` is ``hf_token:``
+in ``skulk.yaml``, which node startup copies into ``HF_TOKEN`` when that
+variable is unset. ``file`` is ``$HF_HOME/token`` (what ``hf auth login``
+writes). ``absent`` means this node cannot authenticate to Hugging Face.
+
+The order is the node's effective precedence: because startup promotes
+``hf_token`` into the environment before anything reads the token file, a
+configured ``hf_token`` wins over ``$HF_HOME/token``.
 """
 
 
@@ -87,13 +91,45 @@ def get_hf_token_path() -> Path:
     return get_hf_home() / "token"
 
 
-def resolve_hf_token_source() -> tuple[str | None, HfTokenSource]:
+def _config_hf_token() -> str | None:
+    """Return ``hf_token:`` from ``skulk.yaml``, or ``None``.
+
+    Read directly rather than via the environment because a standalone command
+    such as ``skulk doctor`` runs before node startup would have promoted this
+    value into ``HF_TOKEN``. Without it, the most common setup (a token saved
+    through the dashboard, which persists here) reads as no token at all.
+    """
+    # Imported lazily: the download layer must not take a module-level
+    # dependency on config loading.
+    from skulk.store.config import load_skulk_config
+
+    try:
+        config = load_skulk_config()
+    except Exception:  # noqa: BLE001 - a broken config is not this function's problem
+        return None
+    if config is None or not config.hf_token:
+        return None
+    return config.hf_token.strip() or None
+
+
+def resolve_hf_token_source(
+    *, include_config: bool = True
+) -> tuple[str | None, HfTokenSource]:
     """Resolve this node's Hugging Face token synchronously, with provenance.
 
-    Applies the same precedence as :func:`get_hf_token` (environment first,
-    then the token file) but is callable from synchronous contexts such as
-    ``skulk doctor`` and reports which source won, so operator-facing output
-    can name the mechanism rather than merely asserting a token exists.
+    Applies the node's effective precedence: ``HF_TOKEN``, then ``hf_token:``
+    in ``skulk.yaml``, then ``$HF_HOME/token``. That middle step mirrors what
+    node startup does (it copies ``hf_token`` into ``HF_TOKEN`` when unset), so
+    a synchronous caller sees the same token the running node would use.
+
+    Callable from synchronous contexts such as ``skulk doctor``, and it reports
+    which source won so operator-facing output can name the mechanism to change
+    rather than merely asserting that a token exists.
+
+    Args:
+        include_config: When ``False``, skip ``skulk.yaml`` and resolve exactly
+            what an already-running process sees (``HF_TOKEN`` then the token
+            file). Used to pin agreement with :func:`get_hf_token`.
 
     Returns:
         A ``(token, source)`` pair. ``token`` is ``None`` exactly when
@@ -101,6 +137,8 @@ def resolve_hf_token_source() -> tuple[str | None, HfTokenSource]:
     """
     if token := os.environ.get("HF_TOKEN"):
         return token, "env"
+    if include_config and (config_token := _config_hf_token()):
+        return config_token, "config"
     token_path = get_hf_token_path()
     try:
         contents = token_path.read_text().strip()
@@ -116,9 +154,11 @@ def resolve_hf_token_source() -> tuple[str | None, HfTokenSource]:
 async def get_hf_token() -> str | None:
     """Retrieve the Hugging Face token from HF_TOKEN env var or HF_HOME directory.
 
-    Precedence is shared with :func:`resolve_hf_token_source`; a regression
-    test pins the two implementations to the same answer so the operator
-    guidance doctor prints cannot drift from what downloads actually use.
+    This is the in-process view: ``HF_TOKEN`` (which startup has already
+    populated from ``hf_token:`` when it was unset) then ``$HF_HOME/token``. A
+    regression test pins it to
+    ``resolve_hf_token_source(include_config=False)`` so the operator guidance
+    doctor prints cannot drift from what downloads actually use.
     """
     # Check environment variable first
     if token := os.environ.get("HF_TOKEN"):

@@ -467,6 +467,16 @@ def _check_dashboard_assets(facts: NodeFacts) -> Sequence[CheckResult]:
 # --- hugging face token ----------------------------------------------------
 
 
+def _is_peer_id_store_host(store_host: str) -> bool:
+    """Whether ``store_host`` looks like a libp2p peer ID rather than a hostname.
+
+    Peer IDs are base58 and carry no dots; hostnames in this field are short
+    names or ``.local`` spellings. The distinction matters because hostname
+    matching is decidable from doctor while peer-ID matching is not.
+    """
+    return "." not in store_host and store_host.startswith(("12D3KooW", "Qm"))
+
+
 def _fetching_role(facts: NodeFacts) -> tuple[bool, str]:
     """Whether this node performs Hugging Face fetches, and why.
 
@@ -505,6 +515,17 @@ def _fetching_role(facts: NodeFacts) -> tuple[bool, str]:
         return True, "no model store is configured, so this node downloads directly"
     if node_matches_store_host(store.store_host, node_id="", hostname=None):
         return True, f"this node is the model store host ({store.store_host})"
+    if _is_peer_id_store_host(store.store_host):
+        # store_host may be a libp2p peer ID, which only the running node can
+        # match against its own ephemeral ID. Doctor has no node ID, so it
+        # cannot rule out that this node is the store host. Claiming "a worker,
+        # no token needed" here would reintroduce exactly the silent gap this
+        # check exists to close, so report the ambiguity instead.
+        return True, (
+            f"the model store host is configured as a node ID "
+            f"({store.store_host}), which doctor cannot match against this "
+            "node; if this node is the store host, it needs the token"
+        )
     return False, f"the model store host ({store.store_host}) performs downloads"
 
 
@@ -527,6 +548,15 @@ def _check_hf_token(facts: NodeFacts) -> Sequence[CheckResult]:
                 title,
                 "token configured via the HF_TOKEN environment variable "
                 "(set directly, or from hf_token in skulk.yaml at startup)",
+            )
+        ]
+    if source == "config":
+        return [
+            _ok(
+                check_id,
+                title,
+                "token configured via hf_token in skulk.yaml (what the "
+                "dashboard writes); node startup copies it into HF_TOKEN",
             )
         ]
     if source == "file":

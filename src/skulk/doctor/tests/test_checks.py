@@ -380,3 +380,46 @@ def test_hf_token_missing_config_says_so_instead_of_asserting_no_store(
     results = _check_hf_token(make_facts())
     assert [r.verdict for r in results] == ["degraded"]
     assert "install directory" in results[0].detail
+
+
+def test_hf_token_ok_from_skulk_yaml(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The dashboard-saved token must not read as absent in standalone doctor."""
+    from skulk.store.config import SkulkConfig
+
+    _clear_token_env(monkeypatch, tmp_path)
+    _present_config(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "skulk.store.config.load_skulk_config",
+        lambda: SkulkConfig(hf_token="from_config"),
+    )
+    results = _check_hf_token(make_facts())
+    assert [r.verdict for r in results] == ["ok"]
+    assert "skulk.yaml" in results[0].detail
+    assert "from_config" not in results[0].detail
+
+
+def test_hf_token_warns_when_store_host_is_a_node_id(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A peer-ID store_host is undecidable from doctor, so do not claim worker.
+
+    node_matches_store_host compares peer IDs exactly against the running
+    node's own ID, which doctor does not have. Reporting ok here would hide
+    the missing token on a real store host.
+    """
+    from skulk.store.config import ModelStoreConfig, SkulkConfig
+
+    _clear_token_env(monkeypatch, tmp_path)
+    _present_config(monkeypatch, tmp_path)
+    config = SkulkConfig(
+        model_store=ModelStoreConfig(
+            store_host="12D3KooWEn2jByBsnoeDhqzx7nxaX4d6Qvqs6EcbH6ppHPq26HAT",
+            store_path=str(tmp_path / "store"),
+        )
+    )
+    monkeypatch.setattr("skulk.store.config.load_skulk_config", lambda: config)
+    results = _check_hf_token(make_facts())
+    assert [r.verdict for r in results] == ["degraded"]
+    assert "cannot match" in results[0].detail

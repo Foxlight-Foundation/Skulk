@@ -63,11 +63,13 @@ async def test_sync_and_async_resolvers_agree(file_contents: str | None) -> None
     """The doctor's answer must match what downloads actually use.
 
     Two implementations of one precedence rule is exactly how operator
-    guidance drifts away from runtime behavior, so pin them together.
+    guidance drifts away from runtime behavior, so pin them together. The
+    comparison excludes skulk.yaml because get_hf_token models an already
+    running process, where startup has folded that value into HF_TOKEN.
     """
     if file_contents is not None:
         _write_token_file(file_contents)
-    sync_token, _source = resolve_hf_token_source()
+    sync_token, _source = resolve_hf_token_source(include_config=False)
     assert sync_token == await get_hf_token()
 
 
@@ -113,3 +115,75 @@ async def test_auth_messages_never_leak_the_token(
     for status in (401, 403, 500):
         message = await _build_auth_error_message(status, _MODEL)
         assert "hf_supersecret_value" not in message
+
+
+def _set_config_token(
+    monkeypatch: pytest.MonkeyPatch, token: str | None
+) -> None:
+    """Point skulk.yaml resolution at a config carrying (or lacking) a token."""
+    from skulk.store.config import SkulkConfig
+
+    config = SkulkConfig(hf_token=token)
+    monkeypatch.setattr("skulk.store.config.load_skulk_config", lambda: config)
+
+
+def test_config_token_is_found_without_a_running_node(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dashboard-saved token lives in skulk.yaml, not the environment.
+
+    Standalone commands run before node startup promotes it into HF_TOKEN, so
+    resolving only env and file would report the most common setup as absent.
+    """
+    _set_config_token(monkeypatch, "from_config")
+    assert resolve_hf_token_source() == ("from_config", "config")
+
+
+def test_env_outranks_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_config_token(monkeypatch, "from_config")
+    monkeypatch.setenv("HF_TOKEN", "from_env")
+    assert resolve_hf_token_source() == ("from_env", "env")
+
+
+def test_config_outranks_token_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Mirrors runtime: startup promotes hf_token before the file is read."""
+    _write_token_file("from_file")
+    _set_config_token(monkeypatch, "from_config")
+    assert resolve_hf_token_source() == ("from_config", "config")
+
+
+def test_blank_config_token_falls_through_to_the_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_token_file("from_file")
+    _set_config_token(monkeypatch, "   ")
+    assert resolve_hf_token_source() == ("from_file", "file")
+
+
+def test_include_config_false_ignores_skulk_yaml(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_config_token(monkeypatch, "from_config")
+    assert resolve_hf_token_source(include_config=False) == (None, "absent")
+
+
+def test_unreadable_config_does_not_break_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A malformed skulk.yaml is another check's problem, not a crash here."""
+
+    def _raise() -> None:
+        raise ValueError("malformed config")
+
+    monkeypatch.setattr("skulk.store.config.load_skulk_config", _raise)
+    _write_token_file("from_file")
+    assert resolve_hf_token_source() == ("from_file", "file")
+
+
+async def test_401_names_skulk_yaml_when_that_is_the_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_config_token(monkeypatch, "stale")
+    message = await _build_auth_error_message(401, _MODEL)
+    assert "hf_token in skulk.yaml" in message
+    assert "stale" not in message
