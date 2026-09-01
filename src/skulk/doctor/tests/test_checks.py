@@ -537,6 +537,20 @@ def test_hf_token_ok_when_the_node_is_offline(
 # --- vllm prerequisites ------------------------------------------------------
 
 
+def _which_only(name: str, path: Path) -> Callable[[str], str | None]:
+    """A shutil.which stub resolving exactly one command name."""
+
+    def _which(candidate: str) -> str | None:
+        return str(path) if candidate == name else None
+
+    return _which
+
+
+def _gcc_only(name: str) -> str | None:
+    """A node with gcc but no g++: the shape Inductor cannot use."""
+    return "/usr/bin/gcc" if name in ("cc", "gcc") else None
+
+
 def _no_compiler(_name: str) -> str | None:
     """Stand in for shutil.which on a node with no C toolchain."""
     return None
@@ -593,9 +607,10 @@ def test_vllm_prerequisites_fails_without_a_compiler(
     )
     results = _check_vllm_prerequisites(facts)
     assert [r.verdict for r in results] == ["fail"]
-    assert "C compiler" in results[0].detail
+    assert "C++ compiler" in results[0].detail
     assert "InductorError" in results[0].consequence
     assert "python3-dev" in results[0].remediation
+    assert "gcc-c++" in results[0].remediation
 
 
 def test_vllm_prerequisites_fails_without_python_headers(
@@ -685,8 +700,7 @@ def test_vllm_interpreter_resolves_an_env_shebang(
     real = tmp_path / "python3"
     _ = real.write_text("")
     monkeypatch.setattr(
-        "skulk.doctor.checks.shutil.which",
-        lambda name: str(real) if name == "python3" else None,
+        "skulk.doctor.checks.shutil.which", _which_only("python3", real)
     )
     script = tmp_path / "bin" / "vllm"
     script.parent.mkdir(parents=True)
@@ -703,8 +717,7 @@ def test_vllm_interpreter_handles_env_dash_s(
     real = tmp_path / "python3"
     _ = real.write_text("")
     monkeypatch.setattr(
-        "skulk.doctor.checks.shutil.which",
-        lambda name: str(real) if name == "python3" else None,
+        "skulk.doctor.checks.shutil.which", _which_only("python3", real)
     )
     script = tmp_path / "bin" / "vllm"
     script.parent.mkdir(parents=True)
@@ -721,10 +734,7 @@ def test_vllm_prerequisites_requires_a_cxx_compiler(
     box with gcc and no g++ still fails at engine init.
     """
     facts = _vllm_facts(tmp_path)
-    monkeypatch.setattr(
-        "skulk.doctor.checks.shutil.which",
-        lambda name: "/usr/bin/gcc" if name in ("cc", "gcc") else None,
-    )
+    monkeypatch.setattr("skulk.doctor.checks.shutil.which", _gcc_only)
     include = tmp_path / "include"
     include.mkdir()
     _ = (include / "Python.h").write_text("")
