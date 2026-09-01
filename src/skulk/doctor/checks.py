@@ -654,6 +654,33 @@ _C_COMPILERS = ("cc", "gcc", "clang")
 """Compiler names Triton's JIT will look for on PATH, in no particular order."""
 
 
+def _vllm_interpreter(vllm_binary_path: str) -> Path | None:
+    """Locate the interpreter that runs the configured vLLM entry point.
+
+    The adjacent ``python`` covers the venv layout the installer creates. A
+    console script installed elsewhere (a user install under ``~/.local/bin``,
+    a pipx shim) has no sibling interpreter, so fall back to the shebang pip
+    wrote into the script, which names the real one.
+    """
+    adjacent = Path(vllm_binary_path).with_name("python")
+    if adjacent.exists():
+        return adjacent
+    try:
+        with Path(vllm_binary_path).open("rb") as handle:
+            first_line = handle.readline(512).decode("utf-8", "replace").strip()
+    except OSError:
+        return None
+    if not first_line.startswith("#!"):
+        return None
+    # "#!/path/to/python" or "#!/usr/bin/env python3"; take the last token that
+    # points at something executable rather than parsing shebang grammar.
+    for candidate in reversed(first_line[2:].split()):
+        path = Path(candidate)
+        if path.is_absolute() and path.exists():
+            return path
+    return None
+
+
 def _vllm_include_dir(vllm_binary_path: str) -> Path | None:
     """Ask the vLLM venv's own interpreter where its C headers would live.
 
@@ -661,8 +688,8 @@ def _vllm_include_dir(vllm_binary_path: str) -> Path | None:
     the headers that matter are that interpreter's, not the ones Skulk is
     running under. Asking the interpreter itself avoids guessing a version.
     """
-    interpreter = Path(vllm_binary_path).with_name("python")
-    if not interpreter.exists():
+    interpreter = _vllm_interpreter(vllm_binary_path)
+    if interpreter is None:
         return None
     try:
         completed = subprocess.run(  # noqa: S603 - fixed, known-safe command
@@ -695,9 +722,19 @@ def _check_vllm_prerequisites(facts: NodeFacts) -> Sequence[CheckResult]:
         missing.append("a C compiler (cc/gcc/clang) on PATH")
     include_dir = _vllm_include_dir(binary.configured_path)
     if include_dir is None:
-        missing.append(
-            "the vLLM interpreter's include directory (could not be resolved)"
-        )
+        # Not knowing is not the same as knowing it is broken. Reporting fail
+        # here would tell an operator their working node cannot serve, which is
+        # worse than staying quiet about the half we could not determine.
+        if not missing:
+            return [
+                _ok(
+                    check_id,
+                    title,
+                    "C toolchain present; could not resolve the vLLM "
+                    "interpreter's include directory, so headers were not "
+                    "verified",
+                )
+            ]
     elif not (include_dir / "Python.h").exists():
         missing.append(f"Python development headers (no Python.h in {include_dir})")
 

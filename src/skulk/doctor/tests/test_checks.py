@@ -547,7 +547,7 @@ def _has_compiler(_name: str) -> str | None:
     return "/usr/bin/cc"
 
 
-def _include_dir_returning(include: Path) -> Callable[[str], Path | None]:
+def _include_dir_returning(include: Path | None) -> Callable[[str], Path | None]:
     """Stand in for the venv interpreter's reported include directory."""
 
     def _resolve(_binary_path: str) -> Path | None:
@@ -626,6 +626,50 @@ def test_vllm_prerequisites_ok_when_the_toolchain_is_present(
     )
     results = _check_vllm_prerequisites(facts)
     assert [r.verdict for r in results] == ["ok"]
+
+
+def test_vllm_prerequisites_unresolvable_interpreter_does_not_fail(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Not knowing is not the same as knowing it is broken.
+
+    A console script whose interpreter cannot be located must not produce a
+    fail verdict telling an operator their working node cannot serve.
+    """
+    facts = _vllm_facts(tmp_path)
+    monkeypatch.setattr("skulk.doctor.checks.shutil.which", _has_compiler)
+    monkeypatch.setattr(
+        "skulk.doctor.checks._vllm_include_dir", _include_dir_returning(None)
+    )
+    results = _check_vllm_prerequisites(facts)
+    assert [r.verdict for r in results] == ["ok"]
+    assert "not verified" in results[0].detail
+
+
+def test_vllm_interpreter_falls_back_to_the_console_script_shebang(
+    tmp_path: Path,
+) -> None:
+    """A user or pipx install has no sibling python; pip's shebang names it."""
+    from skulk.doctor.checks import _vllm_interpreter
+
+    interpreter = tmp_path / "real-python"
+    _ = interpreter.write_text("")
+    script = tmp_path / "bin" / "vllm"
+    script.parent.mkdir(parents=True)
+    _ = script.write_text(f"#!{interpreter}\nprint('x')\n")
+    assert _vllm_interpreter(str(script)) == interpreter
+
+
+def test_vllm_interpreter_prefers_the_adjacent_venv_python(tmp_path: Path) -> None:
+    from skulk.doctor.checks import _vllm_interpreter
+
+    bindir = tmp_path / "vllm-env" / "bin"
+    bindir.mkdir(parents=True)
+    adjacent = bindir / "python"
+    _ = adjacent.write_text("")
+    script = bindir / "vllm"
+    _ = script.write_text("#!/usr/bin/env python3\n")
+    assert _vllm_interpreter(str(script)) == adjacent
 
 
 def test_vllm_prerequisites_check_is_registered() -> None:
