@@ -492,18 +492,31 @@ def _fetching_role(facts: NodeFacts) -> tuple[bool, str]:
         resolve_config_path,
     )
 
+    from skulk.shared.constants import SKULK_OFFLINE
+
+    if SKULK_OFFLINE:
+        # Offline mode is an explicit declaration that this node fetches
+        # nothing from the network, so a missing token cannot bite.
+        return False, "this node runs in offline mode and downloads nothing"
+
     participation = _declared_participation()
-    if participation != "full":
+
+    def _participation_exempt() -> tuple[bool, str]:
         # placement.py hard-filters every participation value other than
         # "full", so neither a management node nor an ffn_only one is ever
         # assigned an inference shard, and neither downloads weights. A
-        # permanent degraded verdict there would be pure noise.
+        # permanent degraded verdict there would be pure noise. Checked only
+        # after the store-host question, because a non-serving node can still
+        # be the configured store host and would then fetch for the fleet.
         return False, (
             f"this node declares {participation} participation, so the planner "
             "assigns it no inference shard and it downloads no models"
         )
+
     config_path = resolve_config_path()
     if not config_path.exists():
+        if participation != "full":
+            return _participation_exempt()
         # skulk.yaml is resolved relative to the working directory, so this is
         # either a genuinely zero-config node (which does download for itself)
         # or doctor being run from somewhere other than the install directory.
@@ -522,8 +535,13 @@ def _fetching_role(facts: NodeFacts) -> tuple[bool, str]:
         return True, f"{config_path} could not be read, assuming direct downloads"
     store = config.model_store if config is not None else None
     if store is None or not store.enabled:
+        if participation != "full":
+            return _participation_exempt()
         return True, "no model store is configured, so this node downloads directly"
     if node_matches_store_host(store.store_host, node_id="", hostname=None):
+        # Deliberately ahead of the participation exemption: hosting the store
+        # is not an inference role, so a management or ffn_only node can be the
+        # store host and would then fetch for the whole fleet.
         return True, f"this node is the model store host ({store.store_host})"
     if _is_peer_id_store_host(store.store_host):
         # store_host may be a libp2p peer ID, which only the running node can
@@ -536,6 +554,8 @@ def _fetching_role(facts: NodeFacts) -> tuple[bool, str]:
             f"({store.store_host}), which doctor cannot match against this "
             "node; if this node is the store host, it needs the token"
         )
+    if participation != "full":
+        return _participation_exempt()
     if store.download.allow_hf_fallback:
         # #657: a worker that cannot reach the store falls back to downloading
         # from Hugging Face itself, so "only the store host fetches" is not

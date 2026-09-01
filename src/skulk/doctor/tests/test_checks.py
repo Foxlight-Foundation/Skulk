@@ -261,6 +261,7 @@ def _clear_token_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Make token resolution hermetic: no ambient env var, file, or env file."""
     monkeypatch.delenv("HF_TOKEN", raising=False)
     monkeypatch.delenv("SKULK_NODE_PARTICIPATION", raising=False)
+    monkeypatch.setattr("skulk.shared.constants.SKULK_OFFLINE", False)
     # HF_TOKEN_PATH is resolved at huggingface_hub import time, so HF_HOME
     # alone would leave these tests touching the real token file.
     from huggingface_hub import constants as hf_constants
@@ -492,3 +493,41 @@ def test_hf_token_worker_detail_notes_direct_fallback(
     results = _check_hf_token(make_facts())
     assert [r.verdict for r in results] == ["ok"]
     assert "allow_hf_fallback" in results[0].detail
+
+
+def test_hf_token_warns_on_a_non_serving_store_host(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Hosting the store is not an inference role.
+
+    A management node can be the configured store host, and would then fetch
+    for the whole fleet, so the participation exemption must not shadow it.
+    """
+    import socket
+
+    from skulk.store.config import ModelStoreConfig, SkulkConfig
+
+    _clear_token_env(monkeypatch, tmp_path)
+    _present_config(monkeypatch, tmp_path)
+    monkeypatch.setenv("SKULK_NODE_PARTICIPATION", "management")
+    config = SkulkConfig(
+        model_store=ModelStoreConfig(
+            store_host=socket.gethostname(),
+            store_path=str(tmp_path / "store"),
+        )
+    )
+    monkeypatch.setattr("skulk.store.config.load_skulk_config", lambda: config)
+    results = _check_hf_token(make_facts())
+    assert [r.verdict for r in results] == ["degraded"]
+    assert "store host" in results[0].detail
+
+
+def test_hf_token_ok_when_the_node_is_offline(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Offline mode declares that this node fetches nothing."""
+    _clear_token_env(monkeypatch, tmp_path)
+    monkeypatch.setattr("skulk.shared.constants.SKULK_OFFLINE", True)
+    results = _check_hf_token(make_facts())
+    assert [r.verdict for r in results] == ["ok"]
+    assert "offline" in results[0].detail
