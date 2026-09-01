@@ -650,8 +650,14 @@ def _check_hf_token(facts: NodeFacts) -> Sequence[CheckResult]:
 
 # --- vllm prerequisites ------------------------------------------------------
 
-_C_COMPILERS = ("cc", "gcc", "clang")
-"""Compiler names Triton's JIT will look for on PATH, in no particular order."""
+_CXX_COMPILERS = ("g++", "clang++", "c++")
+"""C++ compiler names Inductor will look for on PATH, in no particular order.
+
+Inductor drives a **C++** compiler, not a C one: ``torch._inductor.cpp_builder``
+resolves ``$CXX`` and otherwise joins ``bin/g++``. A box carrying ``gcc`` with
+no ``g++`` therefore still fails, which is why checking for ``cc``/``gcc``
+would report a toolchain that cannot actually build the kernels.
+"""
 
 
 def _vllm_interpreter(vllm_binary_path: str) -> Path | None:
@@ -672,13 +678,21 @@ def _vllm_interpreter(vllm_binary_path: str) -> Path | None:
         return None
     if not first_line.startswith("#!"):
         return None
-    # "#!/path/to/python" or "#!/usr/bin/env python3"; take the last token that
-    # points at something executable rather than parsing shebang grammar.
-    for candidate in reversed(first_line[2:].split()):
-        path = Path(candidate)
-        if path.is_absolute() and path.exists():
-            return path
-    return None
+    tokens = first_line[2:].split()
+    if not tokens:
+        return None
+    first = Path(tokens[0])
+    # "#!/usr/bin/env python3" and its "env -S" form name the interpreter as an
+    # argument, so the leading path is env itself. Returning that would probe
+    # `env -c ...`, which fails and silently skips header verification.
+    if first.name == "env":
+        for argument in tokens[1:]:
+            if argument.startswith("-"):
+                continue
+            resolved = shutil.which(argument)
+            return Path(resolved) if resolved else None
+        return None
+    return first if first.is_absolute() and first.exists() else None
 
 
 def _vllm_include_dir(vllm_binary_path: str) -> Path | None:
@@ -718,8 +732,8 @@ def _check_vllm_prerequisites(facts: NodeFacts) -> Sequence[CheckResult]:
         return [_ok(check_id, title, "no vLLM engine configured on this node")]
 
     missing: list[str] = []
-    if not any(shutil.which(compiler) for compiler in _C_COMPILERS):
-        missing.append("a C compiler (cc/gcc/clang) on PATH")
+    if not any(shutil.which(compiler) for compiler in _CXX_COMPILERS):
+        missing.append("a C++ compiler (g++/clang++/c++) on PATH")
     include_dir = _vllm_include_dir(binary.configured_path)
     if include_dir is None:
         # Not knowing is not the same as knowing it is broken. Reporting fail
@@ -730,7 +744,7 @@ def _check_vllm_prerequisites(facts: NodeFacts) -> Sequence[CheckResult]:
                 _ok(
                     check_id,
                     title,
-                    "C toolchain present; could not resolve the vLLM "
+                    "C++ toolchain present; could not resolve the vLLM "
                     "interpreter's include directory, so headers were not "
                     "verified",
                 )
@@ -743,7 +757,7 @@ def _check_vllm_prerequisites(facts: NodeFacts) -> Sequence[CheckResult]:
             _ok(
                 check_id,
                 title,
-                "C toolchain and Python development headers present for the "
+                "C++ toolchain and Python development headers present for the "
                 "vLLM engine",
             )
         ]
@@ -759,10 +773,11 @@ def _check_vllm_prerequisites(facts: NodeFacts) -> Sequence[CheckResult]:
                 "InductorError, so the model never serves"
             ),
             remediation=(
-                "install the Python development headers and a C compiler for "
-                "the vLLM interpreter (Debian and Ubuntu: "
+                "install the Python development headers and a C++ compiler "
+                "for the vLLM interpreter (Debian and Ubuntu: "
                 "`sudo apt install python3-dev build-essential`; RHEL family: "
-                "`sudo dnf install python3-devel gcc`), then retry the placement"
+                "`sudo dnf install python3-devel gcc-c++`), then retry the "
+                "placement"
             ),
         )
     ]
