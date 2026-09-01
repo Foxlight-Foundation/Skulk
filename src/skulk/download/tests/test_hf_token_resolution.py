@@ -288,3 +288,11 @@ def test_service_env_last_assignment_wins(
         "HF_TOKEN=superseded\nSKULK_VLLM_BIN=/x\nHF_TOKEN=current\n",
     )
     assert resolve_hf_token_source() == ("current", "service_env")
+
+
+def test_service_env_export_prefix_is_recognized(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """skulk-startup.sh sources this file as shell, so `export` is valid there."""
+    _write_service_env(monkeypatch, tmp_path, "export HF_TOKEN=exported_value\n")
+    assert resolve_hf_token_source() == ("exported_value", "service_env")

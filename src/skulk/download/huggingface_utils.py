@@ -126,7 +126,11 @@ def _service_env_hf_token() -> str | None:
         if line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
-        if key.strip() != "HF_TOKEN":
+        key = key.strip()
+        # `export HF_TOKEN=...` is valid in this file because skulk-startup.sh
+        # sources it as shell, so the prefix must not hide the assignment.
+        key = key.removeprefix("export ").strip()
+        if key != "HF_TOKEN":
             continue
         # Shell-style quoting is common in these files; nothing here executes
         # the file, so strip only the surrounding quotes.
