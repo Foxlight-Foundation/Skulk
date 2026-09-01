@@ -196,8 +196,9 @@ node that actually performs the download:
 - With no model store, every node downloads for itself and needs its own
   token.
 
-Get a token at <https://huggingface.co/settings/tokens>, then use whichever
-mechanism fits the node. Skulk reads them in this order:
+Get a token at
+[huggingface.co/settings/tokens](https://huggingface.co/settings/tokens), then
+use whichever mechanism fits the node. Skulk reads them in this order:
 
 | Where | How to set it | Restart needed |
 | --- | --- | --- |
