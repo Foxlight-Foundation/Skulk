@@ -1,7 +1,7 @@
 # pyright: reportPrivateUsage=false
 """Doctor registry tests: verdicts, consequences, and crash containment."""
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import pytest
@@ -537,6 +537,26 @@ def test_hf_token_ok_when_the_node_is_offline(
 # --- vllm prerequisites ------------------------------------------------------
 
 
+def _no_compiler(_name: str) -> str | None:
+    """Stand in for shutil.which on a node with no C toolchain."""
+    return None
+
+
+def _has_compiler(_name: str) -> str | None:
+    """Stand in for shutil.which on a node that has one."""
+    return "/usr/bin/cc"
+
+
+def _include_dir_returning(include: Path) -> Callable[[str], Path | None]:
+    """Stand in for the venv interpreter's reported include directory."""
+
+    def _resolve(_binary_path: str) -> Path | None:
+        return include
+
+    return _resolve
+
+
+
 def _vllm_facts(tmp_path: Path) -> NodeFacts:
     """Facts describing a node with a usable vLLM binary at a real path."""
     from skulk.shared.types.node_facts import EngineBinaryFact
@@ -564,12 +584,12 @@ def test_vllm_prerequisites_fails_without_a_compiler(
 ) -> None:
     """The exact fresh-box shape: wheel installed, toolchain absent."""
     facts = _vllm_facts(tmp_path)
-    monkeypatch.setattr("skulk.doctor.checks.shutil.which", lambda _name: None)
+    monkeypatch.setattr("skulk.doctor.checks.shutil.which", _no_compiler)
     include = tmp_path / "include"
     include.mkdir()
     _ = (include / "Python.h").write_text("")
     monkeypatch.setattr(
-        "skulk.doctor.checks._vllm_include_dir", lambda _path: include
+        "skulk.doctor.checks._vllm_include_dir", _include_dir_returning(include)
     )
     results = _check_vllm_prerequisites(facts)
     assert [r.verdict for r in results] == ["fail"]
@@ -582,11 +602,11 @@ def test_vllm_prerequisites_fails_without_python_headers(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     facts = _vllm_facts(tmp_path)
-    monkeypatch.setattr("skulk.doctor.checks.shutil.which", lambda name: "/usr/bin/cc")
+    monkeypatch.setattr("skulk.doctor.checks.shutil.which", _has_compiler)
     include = tmp_path / "include-empty"
     include.mkdir()
     monkeypatch.setattr(
-        "skulk.doctor.checks._vllm_include_dir", lambda _path: include
+        "skulk.doctor.checks._vllm_include_dir", _include_dir_returning(include)
     )
     results = _check_vllm_prerequisites(facts)
     assert [r.verdict for r in results] == ["fail"]
@@ -597,12 +617,12 @@ def test_vllm_prerequisites_ok_when_the_toolchain_is_present(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     facts = _vllm_facts(tmp_path)
-    monkeypatch.setattr("skulk.doctor.checks.shutil.which", lambda name: "/usr/bin/cc")
+    monkeypatch.setattr("skulk.doctor.checks.shutil.which", _has_compiler)
     include = tmp_path / "include-ok"
     include.mkdir()
     _ = (include / "Python.h").write_text("")
     monkeypatch.setattr(
-        "skulk.doctor.checks._vllm_include_dir", lambda _path: include
+        "skulk.doctor.checks._vllm_include_dir", _include_dir_returning(include)
     )
     results = _check_vllm_prerequisites(facts)
     assert [r.verdict for r in results] == ["ok"]
