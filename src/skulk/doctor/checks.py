@@ -464,6 +464,91 @@ def _check_dashboard_assets(facts: NodeFacts) -> Sequence[CheckResult]:
     ]
 
 
+# --- hugging face token ----------------------------------------------------
+
+
+def _fetching_role(facts: NodeFacts) -> tuple[bool, str]:
+    """Whether this node performs Hugging Face fetches, and why.
+
+    A token only matters on the node that actually reaches out to Hugging
+    Face. With a model store enabled that is the store host; without one,
+    every node downloads for itself. Returning the reason lets the verdict
+    explain itself instead of asserting a role the operator cannot see.
+    """
+    del facts
+    from skulk.store.config import load_skulk_config, node_matches_store_host
+
+    try:
+        config = load_skulk_config()
+    except Exception:  # noqa: BLE001 - a broken config is another check's job
+        # Unreadable config: assume this node fetches, because warning about a
+        # token that turns out to be unnecessary is far cheaper than staying
+        # silent on the node that actually needed one.
+        return True, "cluster config could not be read, assuming direct downloads"
+    store = config.model_store if config is not None else None
+    if store is None or not store.enabled:
+        return True, "no model store configured, so this node downloads directly"
+    if node_matches_store_host(store.store_host, node_id="", hostname=None):
+        return True, f"this node is the model store host ({store.store_host})"
+    return False, f"the model store host ({store.store_host}) performs downloads"
+
+
+def _check_hf_token(facts: NodeFacts) -> Sequence[CheckResult]:
+    """Whether this node can authenticate to Hugging Face, if it needs to."""
+    check_id = "hf-token"
+    title = "Hugging Face token"
+    from skulk.download.huggingface_utils import (
+        get_hf_token_path,
+        resolve_hf_token_source,
+    )
+
+    _token, source = resolve_hf_token_source()
+    fetches, reason = _fetching_role(facts)
+
+    if source == "env":
+        return [
+            _ok(
+                check_id,
+                title,
+                "token configured via the HF_TOKEN environment variable "
+                "(set directly, or from hf_token in skulk.yaml at startup)",
+            )
+        ]
+    if source == "file":
+        return [_ok(check_id, title, f"token configured at {get_hf_token_path()}")]
+
+    if not fetches:
+        # No token here is entirely normal on a worker: it never talks to
+        # Hugging Face. Saying so beats a warning the operator cannot act on.
+        return [
+            _ok(
+                check_id,
+                title,
+                f"no token on this node, which is expected: {reason}",
+            )
+        ]
+    return [
+        CheckResult(
+            check_id=check_id,
+            title=title,
+            verdict="degraded",
+            detail=f"no Hugging Face token is configured, and {reason}",
+            consequence=(
+                "public models download normally, but every gated or private "
+                "repository (Llama and Gemma among them) fails to download "
+                "on this node"
+            ),
+            remediation=(
+                "run `hf auth login` on this node (writes "
+                f"{get_hf_token_path()} and is picked up without a restart), "
+                "or set HF_TOKEN in ~/.skulk/skulk.env and restart. Tokens are "
+                "node-local and never broadcast to the cluster, so setting one "
+                "in another node's dashboard does not cover this node."
+            ),
+        )
+    ]
+
+
 # --- registry --------------------------------------------------------------
 
 REGISTRY: tuple[DoctorCheck, ...] = (
@@ -512,6 +597,20 @@ REGISTRY: tuple[DoctorCheck, ...] = (
             "serves without it; headless workers are expected to run this way."
         ),
         run=_check_dashboard_assets,
+    ),
+    DoctorCheck(
+        check_id="hf-token",
+        title="Hugging Face token",
+        docs=(
+            "Reports whether this node can authenticate to Hugging Face, and "
+            "whether it is the node that needs to. Tokens are node-local and "
+            "are never broadcast to the cluster, so the token must exist on "
+            "whichever node performs downloads: the model store host when a "
+            "store is configured, otherwise every node for itself. Without "
+            "one, public models still download and only gated or private "
+            "repositories fail."
+        ),
+        run=_check_hf_token,
     ),
 )
 

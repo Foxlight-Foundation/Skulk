@@ -12,6 +12,7 @@ from skulk.doctor.checks import (
     DoctorCheck,
     _check_capability_conflicts,
     _check_engine_available,
+    _check_hf_token,
     run_checks,
 )
 from skulk.facts.testing import (
@@ -251,3 +252,96 @@ def test_declared_management_needs_no_engine(
     monkeypatch.setenv("SKULK_NODE_PARTICIPATION", "management")
     results = _check_engine_available(make_facts())
     assert [r.verdict for r in results] == ["ok"]
+
+
+# --- hugging face token ----------------------------------------------------
+
+
+def _clear_token_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Make token resolution hermetic: no ambient env var, no real token file."""
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.setenv("HF_HOME", str(tmp_path / "hf-home"))
+
+
+def test_hf_token_ok_from_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _clear_token_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("HF_TOKEN", "hf_secret")
+    results = _check_hf_token(make_facts())
+    assert [r.verdict for r in results] == ["ok"]
+    assert "HF_TOKEN" in results[0].detail
+    # The token itself must never reach operator-facing output.
+    assert "hf_secret" not in results[0].detail
+
+
+def test_hf_token_ok_from_token_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _clear_token_env(monkeypatch, tmp_path)
+    token_path = tmp_path / "hf-home" / "token"
+    token_path.parent.mkdir(parents=True)
+    _ = token_path.write_text("hf_from_file\n")
+    results = _check_hf_token(make_facts())
+    assert [r.verdict for r in results] == ["ok"]
+    assert "hf_from_file" not in results[0].detail
+
+
+def test_hf_token_degraded_when_this_node_downloads(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No store configured means this node fetches, so a missing token bites."""
+    _clear_token_env(monkeypatch, tmp_path)
+    monkeypatch.setattr("skulk.store.config.load_skulk_config", lambda: None)
+    results = _check_hf_token(make_facts())
+    assert [r.verdict for r in results] == ["degraded"]
+    assert "gated" in results[0].consequence
+    # The remediation must name the restart-free mechanism and the node-local
+    # rule, because setting it on the wrong node is the failure being fixed.
+    assert "hf auth login" in results[0].remediation
+    assert "node-local" in results[0].remediation
+
+
+def test_hf_token_ok_when_another_node_is_the_store_host(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A worker needs no token; warning there would be unactionable noise."""
+    from skulk.store.config import ModelStoreConfig, SkulkConfig
+
+    _clear_token_env(monkeypatch, tmp_path)
+    config = SkulkConfig(
+        model_store=ModelStoreConfig(
+            store_host="some-other-machine",
+            store_path=str(tmp_path / "store"),
+        )
+    )
+    monkeypatch.setattr("skulk.store.config.load_skulk_config", lambda: config)
+    results = _check_hf_token(make_facts())
+    assert [r.verdict for r in results] == ["ok"]
+    assert "expected" in results[0].detail
+    assert "some-other-machine" in results[0].detail
+
+
+def test_hf_token_degraded_when_this_node_is_the_store_host(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The exact silent misconfiguration #917 is about."""
+    import socket
+
+    from skulk.store.config import ModelStoreConfig, SkulkConfig
+
+    _clear_token_env(monkeypatch, tmp_path)
+    config = SkulkConfig(
+        model_store=ModelStoreConfig(
+            store_host=socket.gethostname(),
+            store_path=str(tmp_path / "store"),
+        )
+    )
+    monkeypatch.setattr("skulk.store.config.load_skulk_config", lambda: config)
+    results = _check_hf_token(make_facts())
+    assert [r.verdict for r in results] == ["degraded"]
+    assert "store host" in results[0].detail
+
+
+def test_hf_token_check_is_registered() -> None:
+    assert any(check.check_id == "hf-token" for check in REGISTRY)

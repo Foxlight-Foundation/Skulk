@@ -1,7 +1,7 @@
 import os
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import Callable, Generator, Iterable
+from typing import Callable, Generator, Iterable, Literal
 
 import aiofiles
 import aiofiles.os as aios
@@ -67,16 +67,67 @@ def get_hf_home() -> Path:
     return Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface"))
 
 
+HfTokenSource = Literal["env", "file", "absent"]
+"""Where a resolved Hugging Face token came from.
+
+``env`` is the ``HF_TOKEN`` environment variable, which a node also
+populates at startup from ``hf_token:`` in ``skulk.yaml``. ``file`` is
+``$HF_HOME/token`` (what ``hf auth login`` writes). ``absent`` means this
+node cannot authenticate to Hugging Face at all.
+"""
+
+
+def get_hf_token_path() -> Path:
+    """Return the file-based Hugging Face token path for this node.
+
+    This is the location ``hf auth login`` writes and the only token source
+    read per download rather than once at process start, which makes it the
+    supported way to give a headless node a token without a restart.
+    """
+    return get_hf_home() / "token"
+
+
+def resolve_hf_token_source() -> tuple[str | None, HfTokenSource]:
+    """Resolve this node's Hugging Face token synchronously, with provenance.
+
+    Applies the same precedence as :func:`get_hf_token` (environment first,
+    then the token file) but is callable from synchronous contexts such as
+    ``skulk doctor`` and reports which source won, so operator-facing output
+    can name the mechanism rather than merely asserting a token exists.
+
+    Returns:
+        A ``(token, source)`` pair. ``token`` is ``None`` exactly when
+        ``source`` is ``"absent"``.
+    """
+    if token := os.environ.get("HF_TOKEN"):
+        return token, "env"
+    token_path = get_hf_token_path()
+    try:
+        contents = token_path.read_text().strip()
+    except OSError:
+        # An unreadable or missing token file is simply "no token here": the
+        # caller's job is to say so actionably, not to fail the audit.
+        return None, "absent"
+    if contents:
+        return contents, "file"
+    return None, "absent"
+
+
 async def get_hf_token() -> str | None:
-    """Retrieve the Hugging Face token from HF_TOKEN env var or HF_HOME directory."""
+    """Retrieve the Hugging Face token from HF_TOKEN env var or HF_HOME directory.
+
+    Precedence is shared with :func:`resolve_hf_token_source`; a regression
+    test pins the two implementations to the same answer so the operator
+    guidance doctor prints cannot drift from what downloads actually use.
+    """
     # Check environment variable first
     if token := os.environ.get("HF_TOKEN"):
         return token
     # Fall back to file-based token
-    token_path = get_hf_home() / "token"
+    token_path = get_hf_token_path()
     if await aios.path.exists(token_path):
         async with aiofiles.open(token_path, "r") as f:
-            return (await f.read()).strip()
+            return (await f.read()).strip() or None
     return None
 
 
