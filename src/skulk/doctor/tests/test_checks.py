@@ -13,6 +13,7 @@ from skulk.doctor.checks import (
     _check_capability_conflicts,
     _check_engine_available,
     _check_hf_token,
+    _check_vllm_prerequisites,
     run_checks,
 )
 from skulk.facts.testing import (
@@ -531,3 +532,81 @@ def test_hf_token_ok_when_the_node_is_offline(
     results = _check_hf_token(make_facts())
     assert [r.verdict for r in results] == ["ok"]
     assert "offline" in results[0].detail
+
+
+# --- vllm prerequisites ------------------------------------------------------
+
+
+def _vllm_facts(tmp_path: Path) -> NodeFacts:
+    """Facts describing a node with a usable vLLM binary at a real path."""
+    from skulk.shared.types.node_facts import EngineBinaryFact
+
+    binary = tmp_path / "vllm-env" / "bin" / "vllm"
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    _ = binary.write_text("#!/bin/sh\n")
+    return make_facts(
+        platform="linux",
+        vllm_bin=EngineBinaryFact(
+            env_var="SKULK_VLLM_BIN", configured_path=str(binary), state="ok"
+        ),
+    )
+
+
+def test_vllm_prerequisites_skipped_without_a_configured_engine() -> None:
+    """Nothing to prepare for, and engine-available already covers the rest."""
+    results = _check_vllm_prerequisites(make_facts(platform="linux"))
+    assert [r.verdict for r in results] == ["ok"]
+    assert "no vLLM engine configured" in results[0].detail
+
+
+def test_vllm_prerequisites_fails_without_a_compiler(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The exact fresh-box shape: wheel installed, toolchain absent."""
+    facts = _vllm_facts(tmp_path)
+    monkeypatch.setattr("skulk.doctor.checks.shutil.which", lambda _name: None)
+    include = tmp_path / "include"
+    include.mkdir()
+    _ = (include / "Python.h").write_text("")
+    monkeypatch.setattr(
+        "skulk.doctor.checks._vllm_include_dir", lambda _path: include
+    )
+    results = _check_vllm_prerequisites(facts)
+    assert [r.verdict for r in results] == ["fail"]
+    assert "C compiler" in results[0].detail
+    assert "InductorError" in results[0].consequence
+    assert "python3-dev" in results[0].remediation
+
+
+def test_vllm_prerequisites_fails_without_python_headers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    facts = _vllm_facts(tmp_path)
+    monkeypatch.setattr("skulk.doctor.checks.shutil.which", lambda name: "/usr/bin/cc")
+    include = tmp_path / "include-empty"
+    include.mkdir()
+    monkeypatch.setattr(
+        "skulk.doctor.checks._vllm_include_dir", lambda _path: include
+    )
+    results = _check_vllm_prerequisites(facts)
+    assert [r.verdict for r in results] == ["fail"]
+    assert "Python.h" in results[0].detail
+
+
+def test_vllm_prerequisites_ok_when_the_toolchain_is_present(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    facts = _vllm_facts(tmp_path)
+    monkeypatch.setattr("skulk.doctor.checks.shutil.which", lambda name: "/usr/bin/cc")
+    include = tmp_path / "include-ok"
+    include.mkdir()
+    _ = (include / "Python.h").write_text("")
+    monkeypatch.setattr(
+        "skulk.doctor.checks._vllm_include_dir", lambda _path: include
+    )
+    results = _check_vllm_prerequisites(facts)
+    assert [r.verdict for r in results] == ["ok"]
+
+
+def test_vllm_prerequisites_check_is_registered() -> None:
+    assert any(check.check_id == "vllm-prerequisites" for check in REGISTRY)
