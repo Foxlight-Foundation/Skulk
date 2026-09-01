@@ -52,3 +52,7 @@ Verifies the models directory exists, is writable, and has download headroom (wa
 ### Dashboard assets (`dashboard-assets`)
 
 Reports whether the built web dashboard is present. The API serves without it; headless workers are expected to run this way.
+
+### Hugging Face token (`hf-token`)
+
+Reports whether this node can authenticate to Hugging Face, and whether it is the node that needs to. Tokens are node-local and are never broadcast to the cluster, so the token must exist on whichever node performs downloads: the model store host when a store is configured, otherwise every node for itself. Without one, public models still download and only gated or private repositories fail.

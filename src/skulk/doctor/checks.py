@@ -464,6 +464,190 @@ def _check_dashboard_assets(facts: NodeFacts) -> Sequence[CheckResult]:
     ]
 
 
+# --- hugging face token ----------------------------------------------------
+
+
+def _is_peer_id_store_host(store_host: str) -> bool:
+    """Whether ``store_host`` looks like a libp2p peer ID rather than a hostname.
+
+    Peer IDs are base58 and carry no dots; hostnames in this field are short
+    names or ``.local`` spellings. The distinction matters because hostname
+    matching is decidable from doctor while peer-ID matching is not.
+    """
+    return "." not in store_host and store_host.startswith(("12D3KooW", "Qm"))
+
+
+def _fetching_role(facts: NodeFacts) -> tuple[bool, str]:
+    """Whether this node performs Hugging Face fetches, and why.
+
+    A token only matters on the node that actually reaches out to Hugging
+    Face. With a model store enabled that is the store host; without one,
+    every node downloads for itself. Returning the reason lets the verdict
+    explain itself instead of asserting a role the operator cannot see.
+    """
+    del facts
+    from skulk.shared.constants import SKULK_OFFLINE
+    from skulk.store.config import (
+        load_skulk_config,
+        node_matches_store_host,
+        resolve_config_path,
+    )
+
+    if SKULK_OFFLINE:
+        # Offline mode is an explicit declaration that this node fetches
+        # nothing from the network, so a missing token cannot bite.
+        return False, "this node runs in offline mode and downloads nothing"
+
+    participation = _declared_participation()
+
+    def _participation_exempt() -> tuple[bool, str]:
+        # placement.py hard-filters every participation value other than
+        # "full", so neither a management node nor an ffn_only one is ever
+        # assigned an inference shard, and neither downloads weights. A
+        # permanent degraded verdict there would be pure noise. Checked only
+        # after the store-host question, because a non-serving node can still
+        # be the configured store host and would then fetch for the fleet.
+        return False, (
+            f"this node declares {participation} participation, so the planner "
+            "assigns it no inference shard and it downloads no models"
+        )
+
+    config_path = resolve_config_path()
+    if not config_path.exists():
+        if participation != "full":
+            return _participation_exempt()
+        # skulk.yaml is resolved relative to the working directory, so this is
+        # either a genuinely zero-config node (which does download for itself)
+        # or doctor being run from somewhere other than the install directory.
+        # Say which, rather than asserting a store layout we cannot see.
+        return True, (
+            f"no {config_path} in the working directory, so this reads as a "
+            "zero-config node that downloads directly; if this node uses a "
+            "model store, re-run doctor from its install directory"
+        )
+    try:
+        config = load_skulk_config()
+    except Exception:  # noqa: BLE001 - a broken config is another check's job
+        # Unreadable config: assume this node fetches, because warning about a
+        # token that turns out to be unnecessary is far cheaper than staying
+        # silent on the node that actually needed one.
+        return True, f"{config_path} could not be read, assuming direct downloads"
+    store = config.model_store if config is not None else None
+    if store is None or not store.enabled:
+        if participation != "full":
+            return _participation_exempt()
+        return True, "no model store is configured, so this node downloads directly"
+    if node_matches_store_host(store.store_host, node_id="", hostname=None):
+        # Deliberately ahead of the participation exemption: hosting the store
+        # is not an inference role, so a management or ffn_only node can be the
+        # store host and would then fetch for the whole fleet.
+        return True, f"this node is the model store host ({store.store_host})"
+    if _is_peer_id_store_host(store.store_host):
+        # store_host may be a libp2p peer ID, which only the running node can
+        # match against its own ephemeral ID. Doctor has no node ID, so it
+        # cannot rule out that this node is the store host. Claiming "a worker,
+        # no token needed" here would reintroduce exactly the silent gap this
+        # check exists to close, so report the ambiguity instead.
+        return True, (
+            f"the model store host is configured as a node ID "
+            f"({store.store_host}), which doctor cannot match against this "
+            "node; if this node is the store host, it needs the token"
+        )
+    if participation != "full":
+        return _participation_exempt()
+    if store.download.allow_hf_fallback:
+        # #657: a worker that cannot reach the store falls back to downloading
+        # from Hugging Face itself, so "only the store host fetches" is not
+        # strictly true. Not a warning, because that fallback may never fire
+        # and yellowing every worker in the fleet would drown the signal, but
+        # the caveat belongs in the detail.
+        return False, (
+            f"the model store host ({store.store_host}) performs downloads; "
+            "this node would need its own token only if it falls back to "
+            "downloading directly because the store host is unreachable "
+            "(allow_hf_fallback is on)"
+        )
+    return False, f"the model store host ({store.store_host}) performs downloads"
+
+
+def _check_hf_token(facts: NodeFacts) -> Sequence[CheckResult]:
+    """Whether this node can authenticate to Hugging Face, if it needs to."""
+    check_id = "hf-token"
+    title = "Hugging Face token"
+    from skulk.download.huggingface_utils import (
+        get_hf_token_path,
+        resolve_hf_token_source,
+    )
+
+    _token, source = resolve_hf_token_source()
+    fetches, reason = _fetching_role(facts)
+
+    if source == "env":
+        return [
+            _ok(
+                check_id,
+                title,
+                "token configured via the HF_TOKEN environment variable "
+                "(set directly, or from hf_token in skulk.yaml at startup)",
+            )
+        ]
+    if source == "service_env":
+        from skulk.download.huggingface_utils import get_service_env_path
+
+        return [
+            _ok(
+                check_id,
+                title,
+                f"token configured as HF_TOKEN in {get_service_env_path()}, "
+                "which the service startup wrapper exports; a node launched "
+                "directly with `uv run skulk` does not read that file and "
+                "would need HF_TOKEN in its own environment",
+            )
+        ]
+    if source == "config":
+        return [
+            _ok(
+                check_id,
+                title,
+                "token configured via hf_token in skulk.yaml (what the "
+                "dashboard writes); node startup copies it into HF_TOKEN",
+            )
+        ]
+    if source == "file":
+        return [_ok(check_id, title, f"token configured at {get_hf_token_path()}")]
+
+    if not fetches:
+        # No token here is entirely normal on a worker: it never talks to
+        # Hugging Face. Saying so beats a warning the operator cannot act on.
+        return [
+            _ok(
+                check_id,
+                title,
+                f"no token on this node, which is expected: {reason}",
+            )
+        ]
+    return [
+        CheckResult(
+            check_id=check_id,
+            title=title,
+            verdict="degraded",
+            detail=f"no Hugging Face token is configured, and {reason}",
+            consequence=(
+                "public models download normally, but every gated or private "
+                "repository (Llama and Gemma among them) fails to download "
+                "on this node"
+            ),
+            remediation=(
+                "run `hf auth login` on this node (writes "
+                f"{get_hf_token_path()} and is picked up without a restart), "
+                "or set HF_TOKEN in ~/.skulk/skulk.env and restart. Tokens are "
+                "node-local and never broadcast to the cluster, so setting one "
+                "in another node's dashboard does not cover this node."
+            ),
+        )
+    ]
+
+
 # --- registry --------------------------------------------------------------
 
 REGISTRY: tuple[DoctorCheck, ...] = (
@@ -512,6 +696,20 @@ REGISTRY: tuple[DoctorCheck, ...] = (
             "serves without it; headless workers are expected to run this way."
         ),
         run=_check_dashboard_assets,
+    ),
+    DoctorCheck(
+        check_id="hf-token",
+        title="Hugging Face token",
+        docs=(
+            "Reports whether this node can authenticate to Hugging Face, and "
+            "whether it is the node that needs to. Tokens are node-local and "
+            "are never broadcast to the cluster, so the token must exist on "
+            "whichever node performs downloads: the model store host when a "
+            "store is configured, otherwise every node for itself. Without "
+            "one, public models still download and only gated or private "
+            "repositories fail."
+        ),
+        run=_check_hf_token,
     ),
 )
 

@@ -12,6 +12,7 @@ from skulk.doctor.checks import (
     DoctorCheck,
     _check_capability_conflicts,
     _check_engine_available,
+    _check_hf_token,
     run_checks,
 )
 from skulk.facts.testing import (
@@ -251,3 +252,282 @@ def test_declared_management_needs_no_engine(
     monkeypatch.setenv("SKULK_NODE_PARTICIPATION", "management")
     results = _check_engine_available(make_facts())
     assert [r.verdict for r in results] == ["ok"]
+
+
+# --- hugging face token ----------------------------------------------------
+
+
+def _clear_token_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Make token resolution hermetic: no ambient env var, file, or env file."""
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("SKULK_NODE_PARTICIPATION", raising=False)
+    monkeypatch.setattr("skulk.shared.constants.SKULK_OFFLINE", False)
+    # HF_TOKEN_PATH is resolved at huggingface_hub import time, so HF_HOME
+    # alone would leave these tests touching the real token file.
+    from huggingface_hub import constants as hf_constants
+
+    monkeypatch.setenv("HF_HOME", str(tmp_path / "hf-home"))
+    monkeypatch.setattr(
+        hf_constants, "HF_TOKEN_PATH", str(tmp_path / "hf-home" / "token")
+    )
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "fake-home")
+
+
+def _present_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Pretend a skulk.yaml exists, so the check reaches its store branches.
+
+    skulk.yaml resolves against the working directory, so without this the
+    check reports the "no config here" case rather than the store layout the
+    test is exercising.
+    """
+    config_path = tmp_path / "skulk.yaml"
+    _ = config_path.write_text("{}\n")
+    monkeypatch.setattr(
+        "skulk.store.config.resolve_config_path", lambda: config_path
+    )
+
+
+def test_hf_token_ok_from_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _clear_token_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("HF_TOKEN", "hf_secret")
+    results = _check_hf_token(make_facts())
+    assert [r.verdict for r in results] == ["ok"]
+    assert "HF_TOKEN" in results[0].detail
+    # The token itself must never reach operator-facing output.
+    assert "hf_secret" not in results[0].detail
+
+
+def test_hf_token_ok_from_token_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _clear_token_env(monkeypatch, tmp_path)
+    token_path = tmp_path / "hf-home" / "token"
+    token_path.parent.mkdir(parents=True)
+    _ = token_path.write_text("hf_from_file\n")
+    results = _check_hf_token(make_facts())
+    assert [r.verdict for r in results] == ["ok"]
+    assert "hf_from_file" not in results[0].detail
+
+
+def test_hf_token_degraded_when_this_node_downloads(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No store configured means this node fetches, so a missing token bites."""
+    _clear_token_env(monkeypatch, tmp_path)
+    _present_config(monkeypatch, tmp_path)
+    monkeypatch.setattr("skulk.store.config.load_skulk_config", lambda: None)
+    results = _check_hf_token(make_facts())
+    assert [r.verdict for r in results] == ["degraded"]
+    assert "gated" in results[0].consequence
+    # The remediation must name the restart-free mechanism and the node-local
+    # rule, because setting it on the wrong node is the failure being fixed.
+    assert "hf auth login" in results[0].remediation
+    assert "node-local" in results[0].remediation
+
+
+def test_hf_token_ok_when_another_node_is_the_store_host(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A worker needs no token; warning there would be unactionable noise."""
+    from skulk.store.config import ModelStoreConfig, SkulkConfig
+
+    _clear_token_env(monkeypatch, tmp_path)
+    _present_config(monkeypatch, tmp_path)
+    config = SkulkConfig(
+        model_store=ModelStoreConfig(
+            store_host="some-other-machine",
+            store_path=str(tmp_path / "store"),
+        )
+    )
+    monkeypatch.setattr("skulk.store.config.load_skulk_config", lambda: config)
+    results = _check_hf_token(make_facts())
+    assert [r.verdict for r in results] == ["ok"]
+    assert "expected" in results[0].detail
+    assert "some-other-machine" in results[0].detail
+
+
+def test_hf_token_degraded_when_this_node_is_the_store_host(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The exact silent misconfiguration #917 is about."""
+    import socket
+
+    from skulk.store.config import ModelStoreConfig, SkulkConfig
+
+    _clear_token_env(monkeypatch, tmp_path)
+    _present_config(monkeypatch, tmp_path)
+    config = SkulkConfig(
+        model_store=ModelStoreConfig(
+            store_host=socket.gethostname(),
+            store_path=str(tmp_path / "store"),
+        )
+    )
+    monkeypatch.setattr("skulk.store.config.load_skulk_config", lambda: config)
+    results = _check_hf_token(make_facts())
+    assert [r.verdict for r in results] == ["degraded"]
+    assert "store host" in results[0].detail
+
+
+def test_hf_token_check_is_registered() -> None:
+    assert any(check.check_id == "hf-token" for check in REGISTRY)
+
+
+def test_hf_token_missing_config_says_so_instead_of_asserting_no_store(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """skulk.yaml resolves against the CWD, so absence is ambiguous.
+
+    Doctor run outside the install directory must not silently claim the node
+    has no model store; it still warns (a zero-config node really does
+    download for itself) but names the ambiguity.
+    """
+    _clear_token_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "skulk.store.config.resolve_config_path", lambda: tmp_path / "absent.yaml"
+    )
+    results = _check_hf_token(make_facts())
+    assert [r.verdict for r in results] == ["degraded"]
+    assert "install directory" in results[0].detail
+
+
+def test_hf_token_ok_from_skulk_yaml(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The dashboard-saved token must not read as absent in standalone doctor."""
+    from skulk.store.config import SkulkConfig
+
+    _clear_token_env(monkeypatch, tmp_path)
+    _present_config(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "skulk.store.config.load_skulk_config",
+        lambda: SkulkConfig(hf_token="from_config"),
+    )
+    results = _check_hf_token(make_facts())
+    assert [r.verdict for r in results] == ["ok"]
+    assert "skulk.yaml" in results[0].detail
+    assert "from_config" not in results[0].detail
+
+
+def test_hf_token_warns_when_store_host_is_a_node_id(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A peer-ID store_host is undecidable from doctor, so do not claim worker.
+
+    node_matches_store_host compares peer IDs exactly against the running
+    node's own ID, which doctor does not have. Reporting ok here would hide
+    the missing token on a real store host.
+    """
+    from skulk.store.config import ModelStoreConfig, SkulkConfig
+
+    _clear_token_env(monkeypatch, tmp_path)
+    _present_config(monkeypatch, tmp_path)
+    config = SkulkConfig(
+        model_store=ModelStoreConfig(
+            store_host="12D3KooWEn2jByBsnoeDhqzx7nxaX4d6Qvqs6EcbH6ppHPq26HAT",
+            store_path=str(tmp_path / "store"),
+        )
+    )
+    monkeypatch.setattr("skulk.store.config.load_skulk_config", lambda: config)
+    results = _check_hf_token(make_facts())
+    assert [r.verdict for r in results] == ["degraded"]
+    assert "cannot match" in results[0].detail
+
+
+def test_hf_token_ok_from_service_env_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Doctor tells operators to set HF_TOKEN here, so it must read it back.
+
+    Otherwise doctor keeps reporting degraded right after the operator follows
+    its own remediation and restarts.
+    """
+    _clear_token_env(monkeypatch, tmp_path)
+    _present_config(monkeypatch, tmp_path)
+    env_file = tmp_path / "fake-home" / ".skulk" / "skulk.env"
+    env_file.parent.mkdir(parents=True, exist_ok=True)
+    _ = env_file.write_text("HF_TOKEN=from_service_env\n")
+    results = _check_hf_token(make_facts())
+    assert [r.verdict for r in results] == ["ok"]
+    assert "skulk.env" in results[0].detail
+    assert "from_service_env" not in results[0].detail
+
+
+@pytest.mark.parametrize("participation", ["management", "ffn_only"])
+def test_hf_token_ok_on_every_non_serving_participation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, participation: str
+) -> None:
+    """placement.py hard-filters every participation other than "full".
+
+    Neither a management node nor an ffn_only one is assigned an inference
+    shard, so neither downloads weights and neither should be warned.
+    """
+    _clear_token_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("SKULK_NODE_PARTICIPATION", participation)
+    results = _check_hf_token(make_facts())
+    assert [r.verdict for r in results] == ["ok"]
+    assert participation in results[0].detail
+
+
+def test_hf_token_worker_detail_notes_direct_fallback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#657: a worker cut off from the store downloads from Hugging Face itself.
+
+    Still ok rather than degraded, because the fallback may never fire and
+    yellowing every worker in a fleet would drown the signal, but the caveat
+    has to be visible.
+    """
+    from skulk.store.config import ModelStoreConfig, SkulkConfig
+
+    _clear_token_env(monkeypatch, tmp_path)
+    _present_config(monkeypatch, tmp_path)
+    config = SkulkConfig(
+        model_store=ModelStoreConfig(
+            store_host="some-other-machine",
+            store_path=str(tmp_path / "store"),
+        )
+    )
+    monkeypatch.setattr("skulk.store.config.load_skulk_config", lambda: config)
+    results = _check_hf_token(make_facts())
+    assert [r.verdict for r in results] == ["ok"]
+    assert "allow_hf_fallback" in results[0].detail
+
+
+def test_hf_token_warns_on_a_non_serving_store_host(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Hosting the store is not an inference role.
+
+    A management node can be the configured store host, and would then fetch
+    for the whole fleet, so the participation exemption must not shadow it.
+    """
+    import socket
+
+    from skulk.store.config import ModelStoreConfig, SkulkConfig
+
+    _clear_token_env(monkeypatch, tmp_path)
+    _present_config(monkeypatch, tmp_path)
+    monkeypatch.setenv("SKULK_NODE_PARTICIPATION", "management")
+    config = SkulkConfig(
+        model_store=ModelStoreConfig(
+            store_host=socket.gethostname(),
+            store_path=str(tmp_path / "store"),
+        )
+    )
+    monkeypatch.setattr("skulk.store.config.load_skulk_config", lambda: config)
+    results = _check_hf_token(make_facts())
+    assert [r.verdict for r in results] == ["degraded"]
+    assert "store host" in results[0].detail
+
+
+def test_hf_token_ok_when_the_node_is_offline(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Offline mode declares that this node fetches nothing."""
+    _clear_token_env(monkeypatch, tmp_path)
+    monkeypatch.setattr("skulk.shared.constants.SKULK_OFFLINE", True)
+    results = _check_hf_token(make_facts())
+    assert [r.verdict for r in results] == ["ok"]
+    assert "offline" in results[0].detail

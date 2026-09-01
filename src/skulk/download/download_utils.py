@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import os
 import shutil
+import socket
 import ssl
 import time
 import traceback
@@ -25,11 +26,13 @@ from pydantic import (
 )
 
 from skulk.download.huggingface_utils import (
+    HfTokenSource,
     filter_repo_objects,
     get_allow_patterns,
     get_auth_headers,
     get_hf_endpoint,
-    get_hf_token,
+    get_hf_token_path,
+    resolve_hf_token_source,
 )
 from skulk.shared.constants import SKULK_MODELS_DIR
 from skulk.shared.models.model_cards import ModelCard, ModelTask
@@ -63,21 +66,95 @@ class HuggingFaceRateLimitError(Exception):
     """429 Huggingface code"""
 
 
+_HF_TOKEN_SOURCE_LABELS: dict[HfTokenSource, str] = {
+    "env": "the HF_TOKEN environment variable",
+    "service_env": "HF_TOKEN in ~/.skulk/skulk.env",
+    "config": "hf_token in skulk.yaml",
+    "file": "the Hugging Face token file",
+    "absent": "no configured source",
+}
+"""Operator-facing names for each token source, so messages name the
+mechanism the operator must actually go and change."""
+
+
+def _unloaded_token_hint() -> str:
+    """Point at a configured token this process never loaded, if there is one.
+
+    Both the service env file and ``hf_token:`` only reach downloads by way of
+    ``HF_TOKEN`` at startup. Editing either without restarting leaves the node
+    authenticating with nothing, and "no token configured" would be actively
+    wrong advice for an operator who just set one.
+    """
+    _token, source = resolve_hf_token_source()
+    if source in ("service_env", "config"):
+        return (
+            f" A token is configured in {_HF_TOKEN_SOURCE_LABELS[source]}, but "
+            "this process has not loaded it; restart the node to apply it."
+        )
+    return ""
+
+
+def _hf_token_remediation() -> str:
+    """Say how to give *this* node a token, naming the node.
+
+    The node matters: a token is deliberately never broadcast to the cluster
+    (``PUT /config`` strips it), so it must exist on whichever node performs
+    the fetch. On a fleet with a model store that is the store host, which is
+    usually not the node whose dashboard an operator has open (#917).
+    """
+    node = socket.gethostname()
+    return (
+        f"Give the node performing the download ({node}) a Hugging Face token: "
+        f"run `hf auth login` there (writes {get_hf_token_path()}, picked up "
+        f"without a restart), or set HF_TOKEN in ~/.skulk/skulk.env and restart "
+        f"the node. Tokens are node-local and are never broadcast to the "
+        f"cluster, so on a fleet with a model store the token must be on the "
+        f"store host. Get a token at https://huggingface.co/settings/tokens"
+    )
+
+
 async def _build_auth_error_message(status_code: int, model_id: ModelId) -> str:
-    token = await get_hf_token()
-    if status_code == 401 and token is None:
+    """Explain an HF 401/403 in terms of what the operator must actually do.
+
+    Distinguishes the four cases that look identical in the raw status code:
+    no token at all, a token that Hugging Face rejected, gated terms not yet
+    accepted, and terms that may be accepted under a *different* account than
+    the token belongs to.
+    """
+    # In-process resolution deliberately: the Authorization header this status
+    # code answers came from get_hf_token(), which reads only the environment
+    # and the token file. Consulting skulk.env or skulk.yaml here would let a
+    # token this process never loaded be described as "sent and rejected".
+    _token, source = resolve_hf_token_source(include_config=False)
+    if status_code == 401:
+        if source == "absent":
+            return (
+                f"Model '{model_id}' requires authentication and this node sent "
+                f"no Hugging Face token.{_unloaded_token_hint()} "
+                f"{_hf_token_remediation()}"
+            )
         return (
-            f"Model '{model_id}' requires authentication. "
-            f"Set HF_TOKEN in the app's Advanced settings, set the HF_TOKEN environment variable, or run `hf auth login`. "
-            f"Get a token at https://huggingface.co/settings/tokens"
+            f"Hugging Face rejected the configured token (from "
+            f"{_HF_TOKEN_SOURCE_LABELS[source]}) for '{model_id}' (HTTP 401). "
+            f"The token is likely expired, revoked, or mistyped. Replace it, "
+            f"then retry. Manage tokens at https://huggingface.co/settings/tokens"
         )
-    elif status_code == 403:
+    if status_code == 403:
+        if source == "absent":
+            return (
+                f"Access to '{model_id}' is restricted and this node sent no "
+                f"Hugging Face token.{_unloaded_token_hint()} Accept the model "
+                f"terms at https://huggingface.co/{model_id}, then "
+                f"{_hf_token_remediation()}"
+            )
         return (
-            f"Access denied to '{model_id}'. "
-            f"Please accept the model terms at https://huggingface.co/{model_id}"
+            f"Access denied to '{model_id}' (HTTP 403) even though a token "
+            f"(from {_HF_TOKEN_SOURCE_LABELS[source]}) was sent. Accept the "
+            f"model terms at https://huggingface.co/{model_id} using the same "
+            f"Hugging Face account the token belongs to, and confirm the token "
+            f"grants read access to gated repositories."
         )
-    else:
-        return f"Authentication failed for '{model_id}' (HTTP {status_code})"
+    return f"Authentication failed for '{model_id}' (HTTP {status_code})"
 
 
 def trim_etag(etag: str) -> str:

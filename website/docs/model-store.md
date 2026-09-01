@@ -215,6 +215,17 @@ If you need a specific machine or attached volume, configure the same explicit
 `store_host` on every node instead.
 :::
 
+:::caution Hugging Face tokens live on the store host
+The store host is the node that fetches from Hugging Face, so a token for
+gated or private repositories must be configured **there**. Tokens are
+node-local and are never broadcast to the cluster, so setting one in another
+node's dashboard does not reach the store host, and the mistake stays silent
+until a gated download fails. Run `skulk doctor` on the store host and check
+its **Hugging Face token** verdict. See
+[Hugging Face token](./install.md#hugging-face-token) for the mechanisms,
+including the restart-free option for headless hosts.
+:::
+
 ## Recommended Setup: Dashboard First
 
 This is the simplest path for most people.
