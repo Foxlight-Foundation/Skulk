@@ -67,18 +67,56 @@ def get_hf_home() -> Path:
     return Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface"))
 
 
-HfTokenSource = Literal["env", "config", "file", "absent"]
+HfTokenSource = Literal["env", "service_env", "config", "file", "absent"]
 """Where a resolved Hugging Face token came from.
 
-``env`` is the ``HF_TOKEN`` environment variable. ``config`` is ``hf_token:``
-in ``skulk.yaml``, which node startup copies into ``HF_TOKEN`` when that
-variable is unset. ``file`` is ``$HF_HOME/token`` (what ``hf auth login``
-writes). ``absent`` means this node cannot authenticate to Hugging Face.
+``env`` is the ``HF_TOKEN`` environment variable. ``service_env`` is
+``HF_TOKEN`` in ``~/.skulk/skulk.env``, which the launchd and systemd wrappers
+export into the service before it starts. ``config`` is ``hf_token:`` in
+``skulk.yaml``, which node startup copies into ``HF_TOKEN`` when that variable
+is unset. ``file`` is ``$HF_HOME/token`` (what ``hf auth login`` writes).
+``absent`` means this node cannot authenticate to Hugging Face.
 
-The order is the node's effective precedence: because startup promotes
-``hf_token`` into the environment before anything reads the token file, a
-configured ``hf_token`` wins over ``$HF_HOME/token``.
+The order is the node's effective precedence. The service env file and
+``hf_token`` both end up in ``HF_TOKEN`` before the token file is ever
+consulted, and the wrapper's export happens before startup would apply
+``hf_token``, so a standalone reader must consult them in this order to see
+what the running service actually uses.
 """
+
+
+def get_service_env_path() -> Path:
+    """Return the service environment file the startup wrappers source."""
+    from skulk.shared.constants import SKULK_HOME_DIR
+
+    return SKULK_HOME_DIR / "skulk.env"
+
+
+def _service_env_hf_token() -> str | None:
+    """Return ``HF_TOKEN`` from ``~/.skulk/skulk.env``, or ``None``.
+
+    The launchd and systemd wrappers source this file, so an installed service
+    authenticates with whatever it holds. A standalone ``skulk doctor`` started
+    from an operator shell does not run the wrapper, so without reading the
+    file directly doctor would keep reporting a missing token right after the
+    operator followed its own remediation.
+    """
+    try:
+        contents = get_service_env_path().read_text()
+    except OSError:
+        return None
+    for raw_line in contents.splitlines():
+        line = raw_line.strip()
+        if line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        if key.strip() != "HF_TOKEN":
+            continue
+        # Shell-style quoting is common in these files; nothing here executes
+        # the file, so strip only the surrounding quotes.
+        token = value.strip().strip("\"'")
+        return token or None
+    return None
 
 
 def get_hf_token_path() -> Path:
@@ -117,19 +155,22 @@ def resolve_hf_token_source(
 ) -> tuple[str | None, HfTokenSource]:
     """Resolve this node's Hugging Face token synchronously, with provenance.
 
-    Applies the node's effective precedence: ``HF_TOKEN``, then ``hf_token:``
-    in ``skulk.yaml``, then ``$HF_HOME/token``. That middle step mirrors what
-    node startup does (it copies ``hf_token`` into ``HF_TOKEN`` when unset), so
-    a synchronous caller sees the same token the running node would use.
+    Applies the node's effective precedence: ``HF_TOKEN``, then ``HF_TOKEN`` in
+    the service env file, then ``hf_token:`` in ``skulk.yaml``, then
+    ``$HF_HOME/token``. The two middle steps mirror what an installed node does
+    before serving (the startup wrapper exports the env file; startup copies
+    ``hf_token`` into ``HF_TOKEN`` when unset), so a synchronous caller sees the
+    same token the running node would use.
 
     Callable from synchronous contexts such as ``skulk doctor``, and it reports
     which source won so operator-facing output can name the mechanism to change
     rather than merely asserting that a token exists.
 
     Args:
-        include_config: When ``False``, skip ``skulk.yaml`` and resolve exactly
-            what an already-running process sees (``HF_TOKEN`` then the token
-            file). Used to pin agreement with :func:`get_hf_token`.
+        include_config: When ``False``, skip the service env file and
+            ``skulk.yaml`` and resolve exactly what an already-running process
+            sees (``HF_TOKEN`` then the token file). Used for in-process
+            callers and to pin agreement with :func:`get_hf_token`.
 
     Returns:
         A ``(token, source)`` pair. ``token`` is ``None`` exactly when
@@ -137,8 +178,11 @@ def resolve_hf_token_source(
     """
     if token := os.environ.get("HF_TOKEN"):
         return token, "env"
-    if include_config and (config_token := _config_hf_token()):
-        return config_token, "config"
+    if include_config:
+        if service_token := _service_env_hf_token():
+            return service_token, "service_env"
+        if config_token := _config_hf_token():
+            return config_token, "config"
     token_path = get_hf_token_path()
     try:
         contents = token_path.read_text().strip()

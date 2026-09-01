@@ -202,19 +202,19 @@ use whichever mechanism fits the node. Skulk reads them in this order:
 
 | Precedence | Where | How to set it | Restart needed |
 | --- | --- | --- | --- |
-| 1 | `HF_TOKEN` environment variable | Add `HF_TOKEN=...` to `~/.skulk/skulk.env`, which the service wrappers read | Yes |
-| 2 | `hf_token:` in `skulk.yaml` | Dashboard **Settings**, or edit the file | Yes |
-| 3 | `~/.cache/huggingface/token` | Run `hf auth login` on that node | **No** |
+| 1 | `HF_TOKEN` in the node's environment | Export it before launching Skulk | Yes |
+| 2 | `HF_TOKEN` in `~/.skulk/skulk.env` | Edit the file; the service startup wrappers export it | Yes |
+| 3 | `hf_token:` in `skulk.yaml` | Dashboard **Settings**, or edit the file | Yes |
+| 4 | `~/.cache/huggingface/token` | Run `hf auth login` on that node | **No** |
 
-`hf_token` outranks the token file because node startup copies it into
-`HF_TOKEN` when that variable is unset, and the token file is consulted only
-when `HF_TOKEN` is still empty. So if `hf_token` is set, changing the token
-file will not change which token downloads use.
+The first three all reach downloads as `HF_TOKEN`, and the token file is
+consulted only when `HF_TOKEN` is still empty. So if any of them is set,
+changing the token file will not change which token downloads use.
 
-With `hf_token` unset, the token file is the one to reach for on a **headless
-node**: it needs no dashboard, and it is the only source read at download time
-rather than once at process start, so it takes effect without restarting the
-node.
+With none of those set, the token file is the one to reach for on a
+**headless node**: it needs no dashboard, and it is the only source read at
+download time rather than once at process start, so it takes effect without
+restarting the node.
 
 To confirm a node is set up, run `skulk doctor` there. Its **Hugging Face
 token** check reports whether a token is configured, which mechanism provided

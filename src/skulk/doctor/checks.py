@@ -492,6 +492,11 @@ def _fetching_role(facts: NodeFacts) -> tuple[bool, str]:
         resolve_config_path,
     )
 
+    if _declared_participation() == "management":
+        # A management node runs no worker, so it is never a placement
+        # candidate and never downloads weights. A permanent degraded verdict
+        # there would be pure noise.
+        return False, "this node is management-only and downloads no models"
     config_path = resolve_config_path()
     if not config_path.exists():
         # skulk.yaml is resolved relative to the working directory, so this is
@@ -526,6 +531,18 @@ def _fetching_role(facts: NodeFacts) -> tuple[bool, str]:
             f"({store.store_host}), which doctor cannot match against this "
             "node; if this node is the store host, it needs the token"
         )
+    if store.download.allow_hf_fallback:
+        # #657: a worker that cannot reach the store falls back to downloading
+        # from Hugging Face itself, so "only the store host fetches" is not
+        # strictly true. Not a warning, because that fallback may never fire
+        # and yellowing every worker in the fleet would drown the signal, but
+        # the caveat belongs in the detail.
+        return False, (
+            f"the model store host ({store.store_host}) performs downloads; "
+            "this node would need its own token only if it falls back to "
+            "downloading directly because the store host is unreachable "
+            "(allow_hf_fallback is on)"
+        )
     return False, f"the model store host ({store.store_host}) performs downloads"
 
 
@@ -548,6 +565,17 @@ def _check_hf_token(facts: NodeFacts) -> Sequence[CheckResult]:
                 title,
                 "token configured via the HF_TOKEN environment variable "
                 "(set directly, or from hf_token in skulk.yaml at startup)",
+            )
+        ]
+    if source == "service_env":
+        from skulk.download.huggingface_utils import get_service_env_path
+
+        return [
+            _ok(
+                check_id,
+                title,
+                f"token configured as HF_TOKEN in {get_service_env_path()}, "
+                "which the service startup wrapper exports",
             )
         ]
     if source == "config":

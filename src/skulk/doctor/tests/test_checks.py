@@ -258,9 +258,14 @@ def test_declared_management_needs_no_engine(
 
 
 def _clear_token_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Make token resolution hermetic: no ambient env var, no real token file."""
+    """Make token resolution hermetic: no ambient env var, file, or env file."""
     monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("SKULK_NODE_PARTICIPATION", raising=False)
     monkeypatch.setenv("HF_HOME", str(tmp_path / "hf-home"))
+    monkeypatch.setattr(
+        "skulk.download.huggingface_utils.get_service_env_path",
+        lambda: tmp_path / "absent.env",
+    )
 
 
 def _present_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -423,3 +428,60 @@ def test_hf_token_warns_when_store_host_is_a_node_id(
     results = _check_hf_token(make_facts())
     assert [r.verdict for r in results] == ["degraded"]
     assert "cannot match" in results[0].detail
+
+
+def test_hf_token_ok_from_service_env_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Doctor tells operators to set HF_TOKEN here, so it must read it back.
+
+    Otherwise doctor keeps reporting degraded right after the operator follows
+    its own remediation and restarts.
+    """
+    _clear_token_env(monkeypatch, tmp_path)
+    _present_config(monkeypatch, tmp_path)
+    env_file = tmp_path / "skulk.env"
+    _ = env_file.write_text("HF_TOKEN=from_service_env\n")
+    monkeypatch.setattr(
+        "skulk.download.huggingface_utils.get_service_env_path", lambda: env_file
+    )
+    results = _check_hf_token(make_facts())
+    assert [r.verdict for r in results] == ["ok"]
+    assert "skulk.env" in results[0].detail
+    assert "from_service_env" not in results[0].detail
+
+
+def test_hf_token_ok_on_management_only_node(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A management node runs no worker, so it never downloads weights."""
+    _clear_token_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("SKULK_NODE_PARTICIPATION", "management")
+    results = _check_hf_token(make_facts())
+    assert [r.verdict for r in results] == ["ok"]
+    assert "management-only" in results[0].detail
+
+
+def test_hf_token_worker_detail_notes_direct_fallback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#657: a worker cut off from the store downloads from Hugging Face itself.
+
+    Still ok rather than degraded, because the fallback may never fire and
+    yellowing every worker in a fleet would drown the signal, but the caveat
+    has to be visible.
+    """
+    from skulk.store.config import ModelStoreConfig, SkulkConfig
+
+    _clear_token_env(monkeypatch, tmp_path)
+    _present_config(monkeypatch, tmp_path)
+    config = SkulkConfig(
+        model_store=ModelStoreConfig(
+            store_host="some-other-machine",
+            store_path=str(tmp_path / "store"),
+        )
+    )
+    monkeypatch.setattr("skulk.store.config.load_skulk_config", lambda: config)
+    results = _check_hf_token(make_facts())
+    assert [r.verdict for r in results] == ["ok"]
+    assert "allow_hf_fallback" in results[0].detail

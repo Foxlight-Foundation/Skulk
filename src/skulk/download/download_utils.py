@@ -68,12 +68,30 @@ class HuggingFaceRateLimitError(Exception):
 
 _HF_TOKEN_SOURCE_LABELS: dict[HfTokenSource, str] = {
     "env": "the HF_TOKEN environment variable",
+    "service_env": "HF_TOKEN in ~/.skulk/skulk.env",
     "config": "hf_token in skulk.yaml",
     "file": "the Hugging Face token file",
     "absent": "no configured source",
 }
 """Operator-facing names for each token source, so messages name the
 mechanism the operator must actually go and change."""
+
+
+def _unloaded_token_hint() -> str:
+    """Point at a configured token this process never loaded, if there is one.
+
+    Both the service env file and ``hf_token:`` only reach downloads by way of
+    ``HF_TOKEN`` at startup. Editing either without restarting leaves the node
+    authenticating with nothing, and "no token configured" would be actively
+    wrong advice for an operator who just set one.
+    """
+    _token, source = resolve_hf_token_source()
+    if source in ("service_env", "config"):
+        return (
+            f" A token is configured in {_HF_TOKEN_SOURCE_LABELS[source]}, but "
+            "this process has not loaded it; restart the node to apply it."
+        )
+    return ""
 
 
 def _hf_token_remediation() -> str:
@@ -103,12 +121,17 @@ async def _build_auth_error_message(status_code: int, model_id: ModelId) -> str:
     accepted, and terms that may be accepted under a *different* account than
     the token belongs to.
     """
-    _token, source = resolve_hf_token_source()
+    # In-process resolution deliberately: the Authorization header this status
+    # code answers came from get_hf_token(), which reads only the environment
+    # and the token file. Consulting skulk.env or skulk.yaml here would let a
+    # token this process never loaded be described as "sent and rejected".
+    _token, source = resolve_hf_token_source(include_config=False)
     if status_code == 401:
         if source == "absent":
             return (
-                f"Model '{model_id}' requires authentication and no Hugging Face "
-                f"token is configured on this node. {_hf_token_remediation()}"
+                f"Model '{model_id}' requires authentication and this node sent "
+                f"no Hugging Face token.{_unloaded_token_hint()} "
+                f"{_hf_token_remediation()}"
             )
         return (
             f"Hugging Face rejected the configured token (from "
@@ -119,9 +142,10 @@ async def _build_auth_error_message(status_code: int, model_id: ModelId) -> str:
     if status_code == 403:
         if source == "absent":
             return (
-                f"Access to '{model_id}' is restricted and no Hugging Face token "
-                f"is configured on this node. Accept the model terms at "
-                f"https://huggingface.co/{model_id}, then {_hf_token_remediation()}"
+                f"Access to '{model_id}' is restricted and this node sent no "
+                f"Hugging Face token.{_unloaded_token_hint()} Accept the model "
+                f"terms at https://huggingface.co/{model_id}, then "
+                f"{_hf_token_remediation()}"
             )
         return (
             f"Access denied to '{model_id}' (HTTP 403) even though a token "

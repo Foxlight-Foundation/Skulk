@@ -14,6 +14,7 @@ from skulk.download.download_utils import _build_auth_error_message
 from skulk.download.huggingface_utils import (
     get_hf_token,
     get_hf_token_path,
+    get_service_env_path,
     resolve_hf_token_source,
 )
 from skulk.shared.types.common import ModelId
@@ -187,3 +188,83 @@ async def test_401_names_skulk_yaml_when_that_is_the_source(
     message = await _build_auth_error_message(401, _MODEL)
     assert "hf_token in skulk.yaml" in message
     assert "stale" not in message
+
+
+def _write_service_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, body: str) -> None:
+    """Point the service env file at a temp path holding *body*."""
+    path = tmp_path / "skulk.env"
+    _ = path.write_text(body)
+    monkeypatch.setattr(
+        "skulk.download.huggingface_utils.get_service_env_path", lambda: path
+    )
+
+
+def test_service_env_file_token_is_found(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Doctor's own remediation writes here, so it must read it back."""
+    _write_service_env(
+        monkeypatch, tmp_path, "SKULK_VLLM_BIN=/x\nHF_TOKEN=from_service_env\n"
+    )
+    assert resolve_hf_token_source() == ("from_service_env", "service_env")
+
+
+def test_service_env_quoting_and_comments_are_handled(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _write_service_env(
+        monkeypatch, tmp_path, '# HF_TOKEN=commented\nHF_TOKEN="quoted_value"\n'
+    )
+    assert resolve_hf_token_source() == ("quoted_value", "service_env")
+
+
+def test_service_env_outranks_config_and_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The wrapper exports it before startup would apply hf_token."""
+    _write_token_file("from_file")
+    _set_config_token(monkeypatch, "from_config")
+    _write_service_env(monkeypatch, tmp_path, "HF_TOKEN=from_service_env\n")
+    assert resolve_hf_token_source() == ("from_service_env", "service_env")
+
+
+def test_missing_service_env_file_is_not_an_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        "skulk.download.huggingface_utils.get_service_env_path",
+        lambda: tmp_path / "absent.env",
+    )
+    _write_token_file("from_file")
+    assert resolve_hf_token_source() == ("from_file", "file")
+
+
+async def test_auth_message_ignores_tokens_this_process_never_loaded(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A 401 must describe the token actually sent, which was none.
+
+    skulk.yaml and skulk.env only reach downloads through HF_TOKEN at startup,
+    so describing them as "sent and rejected" would send the operator hunting a
+    revoked token instead of restarting the node.
+    """
+    _set_config_token(monkeypatch, "never_loaded")
+    message = await _build_auth_error_message(401, _MODEL)
+    assert "sent no Hugging Face token" in message
+    assert "rejected the configured token" not in message
+    # ...but it must still point at the token sitting unused in the config.
+    assert "has not loaded it; restart the node" in message
+    assert "never_loaded" not in message
+
+
+async def test_auth_message_has_no_restart_hint_when_nothing_is_configured(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        "skulk.download.huggingface_utils.get_service_env_path",
+        lambda: tmp_path / "absent.env",
+    )
+    monkeypatch.setattr("skulk.store.config.load_skulk_config", lambda: None)
+    message = await _build_auth_error_message(401, _MODEL)
+    assert "sent no Hugging Face token" in message
+    assert "restart the node to apply it" not in message

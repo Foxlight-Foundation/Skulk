@@ -71,6 +71,13 @@ def _get_xdg_dir(env_var: str, fallback: str) -> Path:
     return Path.home() / fallback / "skulk"
 
 
+SKULK_HOME_DIR = _get_home_dir()
+"""The plain Skulk home root (``~/.skulk`` unless ``SKULK_HOME`` overrides it).
+
+Distinct from the XDG directories below: this is where operator-facing files
+the service wrappers read live, such as ``skulk.env``.
+"""
+
 SKULK_CONFIG_HOME = _get_xdg_dir("XDG_CONFIG_HOME", ".config")
 SKULK_DATA_HOME = _get_xdg_dir("XDG_DATA_HOME", ".local/share")
 SKULK_CACHE_HOME = _get_xdg_dir("XDG_CACHE_HOME", ".cache")
