@@ -7,7 +7,7 @@ import type { Theme } from '../../theme';
 import { useSkulkTranslation, type SkulkTranslate } from '../../i18n/tolgee';
 import { HardwareBadge } from './HardwareBadge';
 import { TopologyNodeActions } from './TopologyNodeActions';
-import { clampTelemetryRatio } from './topologyLayout';
+import { clampTelemetryRatio, type HardwareBadgeSide } from './topologyLayout';
 
 /** Props for one scalable SVG topology node. */
 export interface ClusterNodeProps {
@@ -19,6 +19,8 @@ export interface ClusterNodeProps {
   y: number;
   /** Overall scale factor for the node and its operator controls. */
   scale?: number;
+  /** Side of the node where the hardware identity badge is rendered. */
+  hardwareBadgeSide?: HardwareBadgeSide;
   /** All observed edges, used by the node info tooltip. */
   edges?: TopologyEdge[];
   /** All nodes, used to resolve friendly connection names. */
@@ -222,6 +224,7 @@ export function ClusterNode({
   x,
   y,
   scale = 1,
+  hardwareBadgeSide = 'left',
   edges = [],
   allNodes = {},
   selected = false,
@@ -383,7 +386,12 @@ export function ClusterNode({
         strokeWidth={2}
       />
 
-      <g aria-label={deviceLabel} role="img" transform="translate(-104, -17)">
+      <g
+        aria-label={deviceLabel}
+        data-hardware-badge-side={hardwareBadgeSide}
+        role="img"
+        transform={`translate(${hardwareBadgeSide === 'right' ? 56 : -104}, -17)`}
+      >
         <HardwareBadge model={model} />
       </g>
 

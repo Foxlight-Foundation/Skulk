@@ -4,6 +4,7 @@ import {
   buildCompleteEdgePairs,
   clampTelemetryRatio,
   computeTopologyPositions,
+  hardwareBadgeSideForPosition,
   orderTopologyPositionsForPainting,
 } from './topologyLayout';
 
@@ -72,7 +73,31 @@ describe('topology layout', () => {
     expect(expandedRadius * 2 + 201 * nodeScale).toBeCloseTo(1200 * 0.7);
   });
 
-  it('reserves the full left-side badge width on a phone canvas', () => {
+  it('places three-node badges outward while keeping the centered node on the left', () => {
+    const width = 390;
+    const positions = computeTopologyPositions(
+      {
+        'node-top': node('kite3'),
+        'node-right': node('kite5'),
+        'node-left': node('kite6'),
+      },
+      width,
+      844,
+      0.86,
+    );
+
+    expect(
+      Object.fromEntries(
+        positions.map(({ id, x }) => [id, hardwareBadgeSideForPosition(x, width)]),
+      ),
+    ).toEqual({
+      'node-top': 'left',
+      'node-right': 'right',
+      'node-left': 'left',
+    });
+  });
+
+  it('reserves the full outward-facing badge width on a phone canvas', () => {
     const nodeScale = 0.86;
     const positions = computeTopologyPositions(
       {
@@ -88,8 +113,12 @@ describe('topology layout', () => {
     const leftmostNode = positions.reduce((leftmost, position) =>
       position.x < leftmost.x ? position : leftmost,
     );
+    const rightmostNode = positions.reduce((rightmost, position) =>
+      position.x > rightmost.x ? position : rightmost,
+    );
 
     expect(leftmostNode.x - 104 * nodeScale).toBeGreaterThanOrEqual(0);
+    expect(rightmostNode.x + 104 * nodeScale).toBeLessThanOrEqual(390);
   });
 
   it('keeps a single node centered', () => {
