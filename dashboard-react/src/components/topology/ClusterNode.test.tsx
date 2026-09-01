@@ -85,4 +85,29 @@ describe('ClusterNode interaction surface', () => {
     });
     expect(onInteractionChange).toHaveBeenLastCalledWith(false);
   });
+
+  it('places the hardware badge symmetrically on the requested side', async () => {
+    container = document.createElement('div');
+    document.body.append(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(
+        <ThemeProvider theme={darkTheme}>
+          <svg>
+            <ClusterNode
+              hardwareBadgeSide="right"
+              nodeId="kite3"
+              nodeInfo={nodeInfo}
+              x={0}
+              y={0}
+            />
+          </svg>
+        </ThemeProvider>,
+      );
+    });
+
+    const badge = container.querySelector('[data-hardware-badge-side="right"]');
+    expect(badge).toHaveAttribute('transform', 'translate(56, -17)');
+  });
 });

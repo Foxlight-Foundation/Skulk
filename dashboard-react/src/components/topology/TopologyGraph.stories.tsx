@@ -71,23 +71,42 @@ export const TwoNodes: Story = {
 
 const threeNodes: TopologyData = {
   nodes: {
-    'node-a': node('kite1', 'Mac Mini', 9 * GB, 16 * GB, 5, 37, 9),
-    'node-b': node('kite2', 'Mac Mini', 7.5 * GB, 16 * GB, 0, 30, 9),
-    'node-c': node('kite3', 'Mac Studio', 15.3 * GB, 24 * GB, 16, 40, 11),
+    'node-apple': node('kite3', 'Mac Studio', 8.9 * GB, 24 * GB, 15, 30, 9),
+    'node-amd': {
+      ...node('kite5', 'Nimo Direct Inc. MME3L', 2.6 * GB, 62.5 * GB, 4, 34, 16),
+      system_info: {
+        chip: 'AMD Ryzen AI Max+ 395 w/ Radeon 8060S',
+        model_id: 'Nimo Direct Inc. MME3L',
+      },
+    },
+    'node-nvidia': {
+      ...node('kite6', 'Cloud GPU host', 61 * GB, 121.6 * GB, 50, 43, 12),
+      system_info: {
+        accelerator_name: 'NVIDIA GPU',
+        accelerator_vendor: 'nvidia',
+        model_id: 'Cloud GPU host',
+      },
+      mactop_info: {
+        gpu_usage: [0, 0.5],
+        memory: { is_vram: true, ram_total: 121.6 * GB, ram_usage: 61 * GB },
+        sys_power: 12,
+        temp: { gpu_temp_avg: 43 },
+      },
+    },
   },
   edges: [
-    { source: 'node-a', target: 'node-b' },
-    { source: 'node-b', target: 'node-a' },
-    { source: 'node-b', target: 'node-c' },
-    { source: 'node-c', target: 'node-b' },
-    { source: 'node-a', target: 'node-c' },
-    { source: 'node-c', target: 'node-a' },
+    { source: 'node-apple', target: 'node-amd' },
+    { source: 'node-amd', target: 'node-apple' },
+    { source: 'node-amd', target: 'node-nvidia' },
+    { source: 'node-nvidia', target: 'node-amd' },
+    { source: 'node-apple', target: 'node-nvidia' },
+    { source: 'node-nvidia', target: 'node-apple' },
   ],
 };
 
 export const ThreeNodes: Story = {
   args: { data: threeNodes },
-  name: 'Three nodes (triangle)',
+  name: 'Three nodes (mixed hardware triangle)',
 };
 
 const fourNodes: TopologyData = {

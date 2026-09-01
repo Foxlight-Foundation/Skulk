@@ -1,6 +1,7 @@
 import type { NodeInfo } from '../../types/topology';
 
 const MAXIMUM_TOPOLOGY_HEIGHT_RATIO = 0.7;
+const CENTER_ALIGNMENT_TOLERANCE = 1;
 // Selected nodes extend from the selection ring at -49 through the action
 // rail at 152. Budgeting the interactive state prevents the rail from
 // pushing the visible topology beyond the same responsive height envelope.
@@ -17,6 +18,21 @@ export interface TopologyNodePosition {
 export interface CompleteEdgePair {
   source: string;
   target: string;
+}
+
+/** Side of a node used to place its hardware identity badge. */
+export type HardwareBadgeSide = 'left' | 'right';
+
+/**
+ * Places a hardware badge on the outside edge of the topology orbit.
+ * Nodes aligned with the canvas center retain the established left placement;
+ * the tolerance prevents tiny trigonometric rounding errors from flipping them.
+ */
+export function hardwareBadgeSideForPosition(
+  positionX: number,
+  canvasWidth: number,
+): HardwareBadgeSide {
+  return positionX > canvasWidth / 2 + CENTER_ALIGNMENT_TOLERANCE ? 'right' : 'left';
 }
 
 /**
@@ -84,8 +100,9 @@ export function computeTopologyPositions(
   // skulk-app deliberately uses one radius rather than separate horizontal and
   // vertical radii. The extra bounds account for this dashboard's retained
   // hardware badge and operator actions without changing the circular orbit.
-  // The left-side vendor badge ends seven units clear of the widest (selected)
-  // node ring. Reserve its full reach so small canvases never clip the badge.
+  // The outward-facing vendor badge ends seven units clear of the widest
+  // (selected) node ring. Reserve its full reach on both canvas edges so small
+  // canvases never clip the badge.
   const horizontalLimit = width / 2 - 108 * nodeScale;
   const verticalLimit = height / 2 - 104 * nodeScale;
   const footprintLimit = Math.max(

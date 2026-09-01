@@ -8,6 +8,7 @@ import { ClusterNode } from './ClusterNode';
 import {
   buildCompleteEdgePairs,
   computeTopologyPositions,
+  hardwareBadgeSideForPosition,
   orderTopologyPositionsForPainting,
   type TopologyNodePosition,
 } from './topologyLayout';
@@ -193,6 +194,7 @@ export function TopologyGraph({ data, onInspectNode }: TopologyGraphProps) {
             <ClusterNode
               allNodes={data.nodes}
               edges={data.edges}
+              hardwareBadgeSide={hardwareBadgeSideForPosition(position.x, width)}
               key={position.id}
               nodeId={position.id}
               nodeInfo={nodeInfo}
