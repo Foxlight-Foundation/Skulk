@@ -262,10 +262,7 @@ def _clear_token_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.delenv("HF_TOKEN", raising=False)
     monkeypatch.delenv("SKULK_NODE_PARTICIPATION", raising=False)
     monkeypatch.setenv("HF_HOME", str(tmp_path / "hf-home"))
-    monkeypatch.setattr(
-        "skulk.download.huggingface_utils.get_service_env_path",
-        lambda: tmp_path / "absent.env",
-    )
+    monkeypatch.setenv("SKULK_ENV_FILE", str(tmp_path / "absent.env"))
 
 
 def _present_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -442,9 +439,7 @@ def test_hf_token_ok_from_service_env_file(
     _present_config(monkeypatch, tmp_path)
     env_file = tmp_path / "skulk.env"
     _ = env_file.write_text("HF_TOKEN=from_service_env\n")
-    monkeypatch.setattr(
-        "skulk.download.huggingface_utils.get_service_env_path", lambda: env_file
-    )
+    monkeypatch.setenv("SKULK_ENV_FILE", str(env_file))
     results = _check_hf_token(make_facts())
     assert [r.verdict for r in results] == ["ok"]
     assert "skulk.env" in results[0].detail

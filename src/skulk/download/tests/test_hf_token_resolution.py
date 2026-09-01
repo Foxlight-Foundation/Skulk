@@ -26,10 +26,9 @@ def _hermetic_token(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """No ambient token from any source may leak into these tests."""
     monkeypatch.delenv("HF_TOKEN", raising=False)
     monkeypatch.setenv("HF_HOME", str(tmp_path / "hf-home"))
-    monkeypatch.setattr(
-        "skulk.download.huggingface_utils.get_service_env_path",
-        lambda: tmp_path / "absent.env",
-    )
+    # Point the real resolver at a path that does not exist rather than
+    # stubbing it, so these tests exercise the shipped path resolution.
+    monkeypatch.setenv("SKULK_ENV_FILE", str(tmp_path / "absent.env"))
     monkeypatch.setattr("skulk.store.config.load_skulk_config", lambda: None)
 
 
@@ -198,9 +197,7 @@ def _write_service_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, body: st
     """Point the service env file at a temp path holding *body*."""
     path = tmp_path / "skulk.env"
     _ = path.write_text(body)
-    monkeypatch.setattr(
-        "skulk.download.huggingface_utils.get_service_env_path", lambda: path
-    )
+    monkeypatch.setenv("SKULK_ENV_FILE", str(path))
 
 
 def test_service_env_file_token_is_found(
@@ -232,13 +229,7 @@ def test_service_env_outranks_config_and_file(
     assert resolve_hf_token_source() == ("from_service_env", "service_env")
 
 
-def test_missing_service_env_file_is_not_an_error(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.setattr(
-        "skulk.download.huggingface_utils.get_service_env_path",
-        lambda: tmp_path / "absent.env",
-    )
+def test_missing_service_env_file_is_not_an_error() -> None:
     _write_token_file("from_file")
     assert resolve_hf_token_source() == ("from_file", "file")
 
