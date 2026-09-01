@@ -296,3 +296,19 @@ def test_service_env_export_prefix_is_recognized(
     """skulk-startup.sh sources this file as shell, so `export` is valid there."""
     _write_service_env(monkeypatch, tmp_path, "export HF_TOKEN=exported_value\n")
     assert resolve_hf_token_source() == ("exported_value", "service_env")
+
+
+def test_service_env_inline_comment_is_not_part_of_the_token(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """` #` starts a comment in the shell that sources this file."""
+    _write_service_env(monkeypatch, tmp_path, "HF_TOKEN=real_value  # rotated 2026-09\n")
+    assert resolve_hf_token_source() == ("real_value", "service_env")
+
+
+def test_service_env_hash_without_space_stays_in_the_token(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Shell only starts a comment after whitespace, so a bare # is literal."""
+    _write_service_env(monkeypatch, tmp_path, "HF_TOKEN=has#hash\n")
+    assert resolve_hf_token_source() == ("has#hash", "service_env")

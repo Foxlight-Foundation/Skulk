@@ -1,4 +1,5 @@
 import os
+import re
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import Callable, Generator, Iterable, Literal
@@ -132,8 +133,11 @@ def _service_env_hf_token() -> str | None:
         key = key.removeprefix("export ").strip()
         if key != "HF_TOKEN":
             continue
-        # Shell-style quoting is common in these files; nothing here executes
-        # the file, so strip only the surrounding quotes.
+        # Shell-style quoting and trailing comments are both common here, and
+        # the wrapper sources this as shell, where ` #` starts a comment.
+        # Nothing in this function executes the file; it only unwraps what the
+        # shell would have produced.
+        value = re.split(r"\s+#", value, maxsplit=1)[0]
         resolved = value.strip().strip("\"'") or None
     return resolved
 
