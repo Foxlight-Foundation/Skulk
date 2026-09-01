@@ -851,11 +851,12 @@ REGISTRY: tuple[DoctorCheck, ...] = (
         title="vLLM build prerequisites",
         docs=(
             "When a vLLM engine is configured, verifies the node can actually "
-            "compile its kernels. vLLM JITs Triton and torch.compile kernels at "
-            "runtime, shelling out to a C compiler against the Python "
-            "development headers; neither is a dependency of the vLLM wheel. "
-            "Without them the node advertises vLLM capacity and accepts "
-            "placements, then fails every engine start with an InductorError."
+            "compile its kernels. vLLM JITs Triton and torch.compile kernels "
+            "at runtime, shelling out to a C++ compiler (Inductor drives g++, "
+            "so gcc alone is not enough) against the Python development "
+            "headers; neither is a dependency of the vLLM wheel. Without them "
+            "the node advertises vLLM capacity and accepts placements, then "
+            "fails every engine start with an InductorError."
         ),
         run=_check_vllm_prerequisites,
     ),
