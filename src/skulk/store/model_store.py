@@ -1344,7 +1344,20 @@ class ModelStore:
                     or existing.artifact_role != artifact_role
                     or existing.owner_model_id != owner_model_id
                     or existing.owner_card_id != owner_card_id
-                    or not self.is_in_store(model_id)
+                    # Artifact-level, not alias-level. is_in_store() only asks
+                    # whether *some* registered generation of this alias sits on
+                    # disk, so a surviving generation (typically a legacy
+                    # revision-None install) kept a cached pinned-revision
+                    # "complete" alive after the directory that status actually
+                    # referred to was cancelled, evicted, or replaced. Placement
+                    # then trusted the cached status and launched a runner
+                    # against a path with missing weight shards (#916).
+                    or not self.entry_matches_artifact(
+                        model_id,
+                        existing.source_revision,
+                        existing.source_repository,
+                        existing.model_card,
+                    )
                 )
                 if existing.status in ("failed", "cancelled") or stale_complete:
                     del self._active_downloads[model_id]

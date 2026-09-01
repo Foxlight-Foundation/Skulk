@@ -7,7 +7,14 @@ can linger. If ``request_download`` trusted it, the re-download would be
 short-circuited and the model would never come back, and a worker staging it
 would fail "not found in store". These tests pin the two guards that prevent
 that: ``delete_model`` clears the cache at the source, and ``request_download``
-re-checks ``is_in_store`` as a backstop for any other cause of files-gone.
+re-checks that the cached status's own artifact is still registered as a
+backstop for any other cause of files-gone.
+
+That backstop is artifact-level rather than alias-level (#916). Asking only
+whether *some* generation of the alias is on disk let a surviving generation,
+typically a legacy revision-``None`` install, vouch for a cached
+pinned-revision ``"complete"`` whose own directory had been cancelled or
+replaced, and placement then launched a runner against missing weight shards.
 """
 
 from pathlib import Path
@@ -123,3 +130,66 @@ async def test_request_download_recovers_missing_requested_quant(
     )
 
     assert status.status in ("pending", "downloading")
+
+
+def _seed_complete_at_revision(
+    store: ModelStore, model_id: str, source_revision: str
+) -> None:
+    """Cache a ``complete`` status pinned to one immutable revision."""
+    store._active_downloads[model_id] = StoreDownloadStatus(  # pyright: ignore[reportPrivateUsage]
+        model_id=model_id,
+        source_revision=source_revision,
+        status="complete",
+        progress=1.0,
+    )
+
+
+async def test_cached_pinned_complete_is_stale_when_only_a_legacy_generation_remains(
+    tmp_path: Path,
+) -> None:
+    """#916: a legacy generation must not vouch for a pinned-revision complete.
+
+    The registered entry is a legacy install carrying no ``source_revision``,
+    while the cached status claims a specific immutable revision completed. The
+    directory that status referred to is gone. An alias-level presence check
+    calls this fresh and short-circuits the re-download, which is how a runner
+    ended up loading a directory with missing shards.
+    """
+    revision = "a" * 40
+    store = ModelStore(tmp_path)
+    _register(store, "org/legacy", ["model-00001-of-00002.safetensors", "config.json"])
+    legacy_entry = store.get_entry("org/legacy")
+    assert legacy_entry is not None
+    assert legacy_entry.source_revision is None
+    # The alias really is on disk, which is exactly why the old guard passed.
+    assert store.is_in_store("org/legacy") is True
+    _seed_complete_at_revision(store, "org/legacy", revision)
+
+    status = await store.request_download("org/legacy", None, None, revision)
+
+    assert status.status in ("pending", "downloading")
+
+
+async def test_cached_complete_survives_when_the_registered_revision_agrees(
+    tmp_path: Path,
+) -> None:
+    """The tightened guard must not break dedup for a genuinely present artifact."""
+    revision = "b" * 40
+    store = ModelStore(tmp_path)
+    model_dir = store.store_path / "org--pinned"
+    model_dir.mkdir(parents=True, exist_ok=True)
+    for name in ("model.safetensors", "config.json"):
+        _ = (model_dir / name).write_text("x")
+    store.register_model(
+        "org/pinned",
+        model_dir,
+        ["model.safetensors", "config.json"],
+        1,
+        repo_has_projector=False,
+        source_revision=revision,
+    )
+    _seed_complete_at_revision(store, "org/pinned", revision)
+
+    status = await store.request_download("org/pinned", None, None, revision)
+
+    assert status.status == "complete"
