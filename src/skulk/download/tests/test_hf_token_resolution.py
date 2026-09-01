@@ -26,9 +26,9 @@ def _hermetic_token(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """No ambient token from any source may leak into these tests."""
     monkeypatch.delenv("HF_TOKEN", raising=False)
     monkeypatch.setenv("HF_HOME", str(tmp_path / "hf-home"))
-    # Point the real resolver at a path that does not exist rather than
-    # stubbing it, so these tests exercise the shipped path resolution.
-    monkeypatch.setenv("SKULK_ENV_FILE", str(tmp_path / "absent.env"))
+    # Relocate HOME rather than stubbing the resolver, so these tests exercise
+    # the shipped path resolution and no developer's real skulk.env leaks in.
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "fake-home")
     monkeypatch.setattr("skulk.store.config.load_skulk_config", lambda: None)
 
 
@@ -194,10 +194,11 @@ async def test_401_names_skulk_yaml_when_that_is_the_source(
 
 
 def _write_service_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, body: str) -> None:
-    """Point the service env file at a temp path holding *body*."""
-    path = tmp_path / "skulk.env"
+    """Create ~/.skulk/skulk.env under the relocated HOME, holding *body*."""
+    del monkeypatch
+    path = (tmp_path / "fake-home" / ".skulk" / "skulk.env")
+    path.parent.mkdir(parents=True, exist_ok=True)
     _ = path.write_text(body)
-    monkeypatch.setenv("SKULK_ENV_FILE", str(path))
 
 
 def test_service_env_file_token_is_found(
@@ -261,21 +262,16 @@ async def test_auth_message_has_no_restart_hint_when_nothing_is_configured() -> 
 def test_service_env_path_matches_the_shipped_wrappers(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """SKULK_ENV_FILE wins, then ~/.skulk/skulk.env. SKULK_HOME is not consulted.
+    """~/.skulk/skulk.env, and SKULK_HOME must not move it.
 
-    skulk-startup.sh uses ${SKULK_ENV_FILE:-$HOME/.skulk/skulk.env} and the
-    systemd unit hardcodes %h/.skulk/skulk.env, so resolving this from
-    SKULK_HOME would read a different file than the running service.
+    The systemd unit hardcodes %h/.skulk/skulk.env and skulk-startup.sh
+    defaults to $HOME/.skulk/skulk.env; neither consults SKULK_HOME, so
+    resolving from it would read a file the service never sources.
     """
     from skulk.download.huggingface_utils import get_service_env_path
 
-    monkeypatch.delenv("SKULK_ENV_FILE", raising=False)
     monkeypatch.setenv("SKULK_HOME", "somewhere-else")
-    assert get_service_env_path() == Path.home() / ".skulk" / "skulk.env"
-
-    override = tmp_path / "custom.env"
-    monkeypatch.setenv("SKULK_ENV_FILE", str(override))
-    assert get_service_env_path() == override
+    assert get_service_env_path() == tmp_path / "fake-home" / ".skulk" / "skulk.env"
 
 
 def test_service_env_last_assignment_wins(

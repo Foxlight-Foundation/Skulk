@@ -88,15 +88,18 @@ what the running service actually uses.
 def get_service_env_path() -> Path:
     """Return the service environment file the startup wrappers actually read.
 
-    Deliberately mirrors the shipped wrappers rather than Skulk's own home
-    resolution: ``skulk-startup.sh`` uses
-    ``${SKULK_ENV_FILE:-$HOME/.skulk/skulk.env}`` and the systemd unit hardcodes
-    ``%h/.skulk/skulk.env``. Neither consults ``SKULK_HOME``, so deriving this
-    path from it would point doctor at a different file than the running
-    service, which is the exact false report this source exists to prevent.
+    Fixed at ``~/.skulk/skulk.env``, which is what the systemd unit hardcodes
+    (``EnvironmentFile=-%h/.skulk/skulk.env``) and what ``skulk-startup.sh``
+    defaults to. Deliberately not derived from ``SKULK_HOME``: the wrappers do
+    not consult it, so doing so would point doctor at a file the service never
+    reads, which is the exact false report this source exists to prevent.
+
+    The wrappers also honor a ``SKULK_ENV_FILE`` override, which this does not
+    read, because that variable is shell-wrapper configuration and the runtime
+    deliberately does not take new environment-driven configuration. On the
+    rare node using that override, doctor reports the token as absent rather
+    than reading a file it was not told about.
     """
-    if override := os.environ.get("SKULK_ENV_FILE"):
-        return Path(override)
     return Path.home() / ".skulk" / "skulk.env"
 
 
