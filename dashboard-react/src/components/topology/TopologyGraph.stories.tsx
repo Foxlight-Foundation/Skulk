@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/react-vite';
+import styled from 'styled-components';
 import type { TopologyData, NodeInfo } from '../../types/topology';
 import { TopologyGraph } from './TopologyGraph';
 
@@ -26,11 +27,11 @@ function node(
   };
 }
 
-const Wrap = ({ children }: { children: React.ReactNode }) => (
-  <div style={{ width: '100%', height: '100vh', background: '#111' }}>
-    {children}
-  </div>
-);
+const Wrap = styled.div`
+  width: 100%;
+  height: 100vh;
+  background: ${({ theme }) => theme.colors.bgGradient};
+`;
 
 const meta: Meta<typeof TopologyGraph> = {
   title: 'Topology/TopologyGraph',
@@ -111,6 +112,45 @@ const fourNodes: TopologyData = {
 export const FourNodes: Story = {
   args: { data: fourNodes },
   name: 'Four nodes (square)',
+};
+
+const mixedHardware: TopologyData = {
+  nodes: {
+    'node-apple-studio': node('kite1', 'Mac Studio', 42 * GB, 64 * GB, 28, 48, 31),
+    'node-apple-mini': node('kite2', 'Mac Mini', 20 * GB, 32 * GB, 12, 41, 18),
+    'node-amd': {
+      ...node('kite4', 'Nimo Direct Inc. MME3L', 96 * GB, 128 * GB, 62, 55, 68),
+      system_info: {
+        chip: 'AMD Ryzen AI Max+ 395 w/ Radeon 8060S',
+        model_id: 'Nimo Direct Inc. MME3L',
+      },
+    },
+    'node-nvidia': {
+      ...node('cuda-1', 'Cloud GPU host', 48 * GB, 80 * GB, 74, 61, 220),
+      system_info: {
+        accelerator_name: 'NVIDIA A100 80GB PCIe',
+        accelerator_vendor: 'nvidia',
+        model_id: 'Cloud GPU host',
+      },
+      mactop_info: {
+        gpu_usage: [0, 0.74],
+        memory: { is_vram: true, ram_total: 80 * GB, ram_usage: 48 * GB },
+        sys_power: 220,
+        temp: { gpu_temp_avg: 61 },
+      },
+    },
+  },
+  edges: [
+    { source: 'node-apple-studio', target: 'node-apple-mini' },
+    { source: 'node-apple-mini', target: 'node-amd' },
+    { source: 'node-amd', target: 'node-nvidia' },
+    { source: 'node-nvidia', target: 'node-apple-studio' },
+  ],
+};
+
+export const MixedHardware: Story = {
+  args: { data: mixedHardware },
+  name: 'Mixed hardware fabric',
 };
 
 const sixNodes: TopologyData = {

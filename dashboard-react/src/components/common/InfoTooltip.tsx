@@ -32,6 +32,8 @@ export interface InfoTooltipProps {
   size?: number;
   /** Custom trigger element. Defaults to info icon. */
   children?: React.ReactNode;
+  /** Accessible name for an icon-only trigger. */
+  triggerLabel?: string;
   className?: string;
 }
 
@@ -91,6 +93,7 @@ export function InfoTooltip({
   filled = false,
   size = 20,
   children,
+  triggerLabel,
   className,
 }: InfoTooltipProps) {
   const [isOpen, setIsOpen] = useState(false);
@@ -128,9 +131,11 @@ export function InfoTooltip({
   return (
     <>
       <Trigger
+        aria-label={triggerLabel}
         ref={refs.setReference}
         {...getReferenceProps()}
         className={className}
+        role={triggerLabel ? 'button' : undefined}
         tabIndex={0}
       >
         {children ?? <InfoIcon filled={filled} size={size} />}
