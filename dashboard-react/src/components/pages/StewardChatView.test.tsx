@@ -10,7 +10,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { store } from '../../store';
 import { apiSlice } from '../../store/api';
 import { chatActions } from '../../store/slices/chatSlice';
-import type { StewardState } from '../../store/endpoints/steward';
+import type { StewardState, StewardTransition } from '../../store/endpoints/steward';
 import { darkTheme } from '../../theme/theme';
 import type { ModelInfo } from '../../types/models';
 import { discoverSkulkSpeechSelection } from '../../audio/fabricSpeechDiscovery';
@@ -52,6 +52,9 @@ interface StewardStatusFixture {
   ready: boolean;
   steward_model: string | null;
   instance_id: string | null;
+  desired_model: string | null;
+  transition: StewardTransition;
+  progress: number | null;
   state: StewardState;
 }
 
@@ -161,6 +164,9 @@ const READY: StewardStatusFixture = {
   ready: true,
   steward_model: 'org/steward-4b',
   instance_id: 'inst-1',
+  desired_model: 'org/steward-4b',
+  transition: 'idle',
+  progress: null,
   state: 'ready',
 };
 
@@ -270,6 +276,23 @@ describe('StewardChatView', () => {
     expect((body as { model?: string }).model).toBe('skulk/steward');
     expect((body as { stream?: boolean }).stream).toBe(true);
     expect(container?.textContent).toContain('Is the cluster healthy?');
+  });
+
+  it('shows best-brain prestaging without blocking the serving steward', async () => {
+    stubFetch({
+      status: {
+        ...READY,
+        desired_model: 'org/steward-35b',
+        transition: 'prestaging',
+        progress: 0.42,
+      },
+    });
+    await renderPage();
+    await waitFor(
+      () => container?.textContent?.includes('fabric transition: prestaging 42%') ?? false,
+      'prestaging transition never rendered',
+    );
+    expect(container?.querySelector('textarea')).not.toBeNull();
   });
 });
 

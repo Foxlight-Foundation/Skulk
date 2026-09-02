@@ -20,6 +20,7 @@ import contextlib
 import json
 import re
 from collections.abc import AsyncGenerator, Mapping
+from collections.abc import Set as AbstractSet
 from typing import TYPE_CHECKING, Any, Literal, cast, final
 
 import anyio
@@ -66,7 +67,7 @@ MAX_STEPS_PER_TURN = 8
 """Investigation budget: tool calls per operator message."""
 
 CANARY_INTERVAL_SECONDS = 300
-"""How often the steward's hosting node probes it for liveness."""
+"""How often the elected API node probes the steward for liveness."""
 
 CANARY_PROBE_TIMEOUT_SECONDS = 120
 """Per-probe deadline; generous because a cold small model may be slow."""
@@ -88,11 +89,12 @@ it hard.
 StewardState = Literal["disabled", "downloading", "starting", "ready", "degraded"]
 """One-word lifecycle summary of the steward, derived from the other status
 fields plus canary history. See :func:`derive_steward_state`."""
+StewardTransition = Literal["idle", "prestaging", "replacing", "repairing"]
+"""Best-brain convergence activity exposed to operator clients."""
 
 STEWARD_NOT_READY_MESSAGES: dict[StewardState, str] = {
     "disabled": (
-        "Intelligent-fabric mode is disabled; enable it in Settings to talk "
-        "with Skulk."
+        "Intelligent-fabric mode is disabled; enable it in Settings to talk with Skulk."
     ),
     "downloading": "Skulk is preparing its resident intelligence and cannot answer yet.",
     "starting": (
@@ -217,6 +219,22 @@ def steward_tool_definitions() -> list[dict[str, Any]]:
             no_args,
         ),
         (
+            "get_node_diagnostics",
+            "Fetch the complete diagnostic bundle for one named node, "
+            "including resources, processes, placements, runner state, data "
+            "planes, warnings, and doctor findings.",
+            {
+                "type": "object",
+                "properties": {
+                    "node_name": {
+                        "type": "string",
+                        "description": "Friendly node name to inspect.",
+                    }
+                },
+                "required": ["node_name"],
+            },
+        ),
+        (
             "get_cluster_versions",
             "Fetch per-node Skulk version status. Mixed versions across a "
             "cluster are unsupported and explain many strange failures.",
@@ -231,10 +249,19 @@ def steward_tool_definitions() -> list[dict[str, Any]]:
         ),
         (
             "run_doctor",
-            "Run this node's diagnostic check registry (skulk doctor) and "
-            "return check results. Use for environment problems: missing "
-            "engines, GPU detection, storage.",
-            no_args,
+            "Return a named node's diagnostic check registry (skulk doctor) "
+            "results. Use for environment problems: missing engines, GPU "
+            "detection, storage.",
+            {
+                "type": "object",
+                "properties": {
+                    "node_name": {
+                        "type": "string",
+                        "description": "Friendly node name to inspect.",
+                    }
+                },
+                "required": ["node_name"],
+            },
         ),
         (
             "search_docs",
@@ -408,6 +435,26 @@ class StewardStatusResponse(BaseModel):
         default=None,
         description="The steward instance id, when present.",
     )
+    desired_model: str | None = Field(
+        default=None,
+        description=(
+            "Preferred brain currently being prepared, or the serving brain "
+            "when no transition is active."
+        ),
+    )
+    transition: StewardTransition = Field(
+        default="idle",
+        description=(
+            "Controlled best-brain lifecycle: idle, prestaging, replacing, or "
+            "repairing after a placement disappeared."
+        ),
+    )
+    progress: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Aggregate prestaging completion ratio when measurable.",
+    )
     state: StewardState = Field(
         default="disabled",
         description=(
@@ -426,11 +473,12 @@ def canary_probe_target(
     runners: "Mapping[RunnerId, RunnerStatus]",
     tasks: "Mapping[TaskId, Task]",
     node_id: "NodeId",
+    api_node_ids: "AbstractSet[NodeId] | None" = None,
 ) -> InstanceId | None:
     """The steward instance this node should probe, or None.
 
     Pure decision logic: probe only when a steward placement exists, it is
-    hosted on THIS node (one prober per steward, with locality), every
+    assigned to THIS API node (one prober per steward), every
     runner reports Ready (Running means busy, and a busy-but-wedged runner
     belongs to the worker's wedge detector, not the canary), and no task is
     currently bound to the instance.
@@ -442,17 +490,19 @@ def canary_probe_target(
         if instance.system_role != "steward":
             continue
         node_to_runner = instance.shard_assignments.node_to_runner
-        # Prober election for a steward that spans nodes (possible after a
-        # memory-refusal repair widens the placement): only the
-        # lexicographically smallest hosting node probes, so exactly one
-        # canary runs per steward.
-        hosting_nodes = sorted(str(candidate) for candidate in node_to_runner)
-        if not hosting_nodes or str(node_id) != hosting_nodes[0]:
+        # New callers provide the API-advertising participants and elect the
+        # lowest stable identity. The compatibility fallback keeps
+        # the original hosting-node election for old callers and replay tests.
+        candidates = (
+            sorted(str(candidate) for candidate in api_node_ids)
+            if api_node_ids is not None
+            else sorted(str(candidate) for candidate in node_to_runner)
+        )
+        if not candidates or str(node_id) != candidates[0]:
             continue
         runner_ids = list(node_to_runner.values())
         if not runner_ids or not all(
-            isinstance(runners.get(runner_id), RunnerReady)
-            for runner_id in runner_ids
+            isinstance(runners.get(runner_id), RunnerReady) for runner_id in runner_ids
         ):
             continue
         # Only live work defers the probe: terminal lifecycle tasks
@@ -563,6 +613,25 @@ def _node_name_lookup(state_payload: dict[str, object]) -> dict[str, str]:
     return names
 
 
+def _requested_node_id(
+    node_names: Mapping[str, str], requested_node: object
+) -> tuple[str | None, dict[str, object] | None]:
+    """Resolve one operator-facing node name without exposing routing ids."""
+    if not isinstance(requested_node, str) or not requested_node.strip():
+        return None, {
+            "error": "node_name is required",
+            "known_nodes": sorted(node_names.values()),
+        }
+    normalized = requested_node.strip().casefold()
+    for node_id, node_name in node_names.items():
+        if node_name.casefold() == normalized:
+            return node_id, None
+    return None, {
+        "error": f"unknown node '{requested_node}'",
+        "known_nodes": sorted(node_names.values()),
+    }
+
+
 def _friendly_node_payload(value: object, node_names: Mapping[str, str]) -> object:
     """Replace known routing identifiers throughout a diagnostic payload."""
     if isinstance(value, dict):
@@ -602,9 +671,7 @@ def _instance_lifecycle(
     assignments = _as_object_dict(instance.get("shardAssignments"))
     runners = _as_object_dict(state_payload.get("runners"))
     runner_states: dict[str, str] = {}
-    for node_id, runner_id in _as_object_dict(
-        assignments.get("nodeToRunner")
-    ).items():
+    for node_id, runner_id in _as_object_dict(assignments.get("nodeToRunner")).items():
         if isinstance(runner_id, str):
             runner_states[node_id] = _tagged_kind(runners.get(runner_id)) or "Missing"
     kinds = tuple(runner_states.values())
@@ -682,9 +749,7 @@ def _node_summaries(
             for item in _as_object_list(resources.get("hardwareClasses"))
             if isinstance(item, str)
         )
-        capability_tokens = {
-            item.lower() for item in (*backends, *hardware_classes)
-        }
+        capability_tokens = {item.lower() for item in (*backends, *hardware_classes)}
         accelerator_vendor = accelerator.get("vendor")
         if isinstance(accelerator_vendor, str):
             capability_tokens.add(accelerator_vendor.lower())
@@ -733,16 +798,13 @@ def _node_summaries(
                     "rocm": None
                     if not has_capability_evidence
                     else any(
-                        token == "amd"
-                        or token.startswith("amd:")
-                        or "rocm" in token
+                        token == "amd" or token.startswith("amd:") or "rocm" in token
                         for token in capability_tokens
                     ),
                     "mlx": None
                     if not has_capability_evidence
                     else any(
-                        token == "apple"
-                        or token.startswith(("apple:", "mlx"))
+                        token == "apple" or token.startswith(("apple:", "mlx"))
                         for token in capability_tokens
                     ),
                 },
@@ -767,19 +829,19 @@ def _instance_failures_summary(
             {
                 key: value
                 for key, value in {
-                "historical": True,
-                "currentInstance": False,
-                "modelId": failure.get("modelId"),
-                "systemRole": failure.get("systemRole"),
-                "errorCode": failure.get("errorCode"),
-                "errorMessage": _friendly_node_payload(
-                    failure.get("errorMessage"), node_names
-                ),
-                "affectedNodes": [
-                    node_names.get(node_id, "Unavailable node")
-                    for node_id in affected_node_ids
-                ],
-                "recordedAt": failure.get("recordedAt"),
+                    "historical": True,
+                    "currentInstance": False,
+                    "modelId": failure.get("modelId"),
+                    "systemRole": failure.get("systemRole"),
+                    "errorCode": failure.get("errorCode"),
+                    "errorMessage": _friendly_node_payload(
+                        failure.get("errorMessage"), node_names
+                    ),
+                    "affectedNodes": [
+                        node_names.get(node_id, "Unavailable node")
+                        for node_id in affected_node_ids
+                    ],
+                    "recordedAt": failure.get("recordedAt"),
                 }.items()
                 if value is not None
             }
@@ -812,9 +874,7 @@ def _downloads_summary(
                 # staging several models gives the steward ambiguous rows.
                 shard_envelope = _as_object_dict(body.get("shardMetadata"))
                 for shard_body in shard_envelope.values():
-                    card = _as_object_dict(
-                        _as_object_dict(shard_body).get("modelCard")
-                    )
+                    card = _as_object_dict(_as_object_dict(shard_body).get("modelCard"))
                     if card.get("modelId") is not None:
                         row["modelId"] = card.get("modelId")
                     break
@@ -927,9 +987,7 @@ def steward_operator_tool_result(state_payload: dict[str, object]) -> str:
     ]
     downloads = _as_object_dict(summary.get("downloads"))
     node_disk = _as_object_dict(summary.get("nodeDisk"))
-    total_downloads = sum(
-        len(_as_object_list(rows)) for rows in downloads.values()
-    )
+    total_downloads = sum(len(_as_object_list(rows)) for rows in downloads.values())
     coverage: dict[str, object] = {
         field: {
             "included": 0,
@@ -1017,7 +1075,9 @@ def steward_operator_tool_result(state_payload: dict[str, object]) -> str:
 
 
 _FUNCTION_BLOCK = re.compile(r"<function=([\w.-]+)>(.*?)</function>", re.DOTALL)
-_PARAMETER_BLOCK = re.compile(r"<parameter=([\w.-]+)>\n?(.*?)\n?</parameter>", re.DOTALL)
+_PARAMETER_BLOCK = re.compile(
+    r"<parameter=([\w.-]+)>\n?(.*?)\n?</parameter>", re.DOTALL
+)
 _TOOL_CALL_BLOCK = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
 
 
@@ -1078,9 +1138,7 @@ def parse_text_tool_calls(text: str) -> list[ToolCall]:
         return ToolCall(
             id=f"steward-text-{len(calls)}",
             index=len(calls),
-            function=ToolCallItem(
-                name=match.group(1), arguments=json.dumps(arguments)
-            ),
+            function=ToolCallItem(name=match.group(1), arguments=json.dumps(arguments)),
         )
 
     spans: list[tuple[int, int]] = []
@@ -1159,9 +1217,7 @@ class StewardHarness:
             completion_tokens_details=CompletionTokensDetails(),
         )
 
-    async def canary_probe(
-        self, instance_id: InstanceId, model_id: str
-    ) -> bool:
+    async def canary_probe(self, instance_id: InstanceId, model_id: str) -> bool:
         """One deterministic liveness probe of the steward's generation path.
 
         A minimal no-tools request pinned to the instance; success is any
@@ -1297,6 +1353,25 @@ class StewardHarness:
                     _node_name_lookup(payload),
                 )
             )
+        if name == "get_node_diagnostics":
+            payload = await api.get_cluster_state()
+            node_names = _node_name_lookup(payload)
+            node_id, error = _requested_node_id(
+                node_names,
+                arguments.get("node_name", arguments.get("node")),
+            )
+            if error is not None or node_id is None:
+                return _bounded(error or {"error": "node not found"})
+            diagnostics = await api.get_cluster_node_diagnostics(node_id)
+            return _bounded(
+                {
+                    "node": node_names[node_id],
+                    "diagnostics": _friendly_node_payload(
+                        diagnostics.model_dump(by_alias=True, mode="json"),
+                        node_names,
+                    ),
+                }
+            )
         if name == "get_cluster_versions":
             cluster = await api.get_cluster_diagnostics()
             payload = await api.get_cluster_state()
@@ -1330,14 +1405,23 @@ class StewardHarness:
                 )
             )
         if name == "run_doctor":
-            # The doctor registry runs against the process-cached facts
-            # snapshot, so this is a cheap local read, not a fresh probe.
-            from skulk.doctor.checks import run_checks
-            from skulk.facts import current_node_facts
-
-            results = run_checks(current_node_facts())
+            payload = await api.get_cluster_state()
+            node_names = _node_name_lookup(payload)
+            node_id, error = _requested_node_id(
+                node_names,
+                arguments.get("node_name", arguments.get("node")),
+            )
+            if error is not None or node_id is None:
+                return _bounded(error or {"error": "node not found"})
+            diagnostics = await api.get_cluster_node_diagnostics(node_id)
             return _bounded(
-                {"results": [result.model_dump(mode="json") for result in results]}
+                {
+                    "node": node_names[node_id],
+                    "results": [
+                        result.model_dump(mode="json", by_alias=True)
+                        for result in diagnostics.doctor
+                    ],
+                }
             )
         if name == "search_docs":
             from skulk.api.steward_docs import (
@@ -1520,10 +1604,7 @@ class StewardHarness:
                     pending += payload
                     cut = splittable_prefix(pending)
                     piece, pending = pending[:cut], pending[cut:]
-                    if any(
-                        pending.startswith(marker)
-                        for marker in _HOLDBACK_MARKERS
-                    ):
+                    if any(pending.startswith(marker) for marker in _HOLDBACK_MARKERS):
                         suppressing = True
                     if piece:
                         yield TokenChunk(
@@ -1586,9 +1667,7 @@ class StewardHarness:
                 )
             )
             messages.append(
-                ChatCompletionMessage(
-                    role="tool", content=result, tool_call_id=call.id
-                )
+                ChatCompletionMessage(role="tool", content=result, tool_call_id=call.id)
             )
         else:
             reply = (

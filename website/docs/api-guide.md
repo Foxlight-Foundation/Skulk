@@ -2023,6 +2023,12 @@ Response fields:
   should keep showing a preparing state and hold chat until ready.
 - `steward_model`: model card id of the steward brain when present, else null.
 - `instance_id`: the steward instance id when present, else null.
+- `desired_model`: the better brain currently being prepared, or the serving
+  brain when no transition is active.
+- `transition`: controlled brain lifecycle: `idle`, `prestaging`, `replacing`,
+  or `repairing` after the placement disappears.
+- `progress`: aggregate prestaging completion from `0` to `1` when byte totals
+  are available, else null.
 - `state`: a one-word lifecycle summary derived from the fields above plus
   the liveness canary's history, for clients that want to render a single
   line instead of re-deriving the precedence rules. The booleans remain
@@ -2033,7 +2039,7 @@ Response fields:
   - `starting`: the fabric is placing the steward, or it is placed and
     loading.
   - `ready`: serving, with no outstanding liveness failure.
-  - `degraded`: serving, but the hosting node's liveness canary has at least
+  - `degraded`: serving, but the elected API node's liveness canary has at least
     one failed probe outstanding. The steward may still answer; three
     consecutive failures make the fabric replace the placement.
 

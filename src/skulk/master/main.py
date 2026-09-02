@@ -65,6 +65,7 @@ from skulk.shared.types.commands import (
     SetModelTrustApproval,
     SetTracingEnabled,
     SpeechSynthesis,
+    StartDownload,
     TaskCancelled,
     TaskFinished,
     TestCommand,
@@ -131,6 +132,7 @@ from skulk.shared.types.telemetry import (
 )
 from skulk.shared.types.worker.downloads import (
     DownloadAttemptId,
+    DownloadCompleted,
     DownloadFailed,
     DownloadOngoing,
     DownloadPending,
@@ -144,7 +146,11 @@ from skulk.shared.types.worker.instances import (
     InstanceMeta,
 )
 from skulk.shared.types.worker.runners import RunnerReady, RunnerRunning
-from skulk.shared.types.worker.shards import RpcDonorShardMetadata, Sharding
+from skulk.shared.types.worker.shards import (
+    RpcDonorShardMetadata,
+    Sharding,
+    ShardMetadata,
+)
 from skulk.store.config import (
     load_skulk_config,
     persist_model_trust_config,
@@ -166,6 +172,9 @@ EVENT_LOG_IDLE_GROWTH_WARNING_EVENTS_PER_MINUTE = 60.0
 EVENT_LOG_GROWTH_WARNING_COOLDOWN_SECONDS = 300.0
 NON_CONTROL_EVENT_WARNING_COOLDOWN_SECONDS = 60.0
 NON_CONTROL_EVENT_WARNING_KEY_LIMIT = 256
+STEWARD_UPGRADE_STABILITY_SECONDS = 300.0
+STEWARD_UPGRADE_IDLE_SECONDS = 30.0
+STEWARD_UPGRADE_RETRY_COOLDOWN_SECONDS = 1800.0
 
 
 @final
@@ -811,6 +820,12 @@ class Master:
         # so an unplaceable steward (no eligible node yet) logs and retries
         # calmly instead of hammering the planner every 10s tick.
         self._steward_last_attempt_monotonic: float = 0.0
+        self._steward_upgrade_model: ModelId | None = None
+        self._steward_upgrade_stable_since: float | None = None
+        self._steward_upgrade_prestaged_model: ModelId | None = None
+        self._steward_upgrade_idle_since: float | None = None
+        self._steward_upgrade_replacing_instance: InstanceId | None = None
+        self._steward_upgrade_retry_after: float = 0.0
         # Per-node memory (bytes) freed by a just-deleted instance. The grace
         # window is zero by default, so entries are normally pruned without being
         # applied; keeping the structure preserves one place to revisit this if
@@ -2423,6 +2438,7 @@ class Master:
                     f"placement(s) {[str(s) for s in stewards]}"
                 )
                 await self._teardown_steward_instances(stewards)
+            self._reset_steward_upgrade()
             return
 
         if len(stewards) > 1:
@@ -2437,7 +2453,17 @@ class Master:
             await self._teardown_steward_instances(extras)
             return
         if stewards:
+            await self._maintain_steward_upgrade(
+                stewards[0], tuple(fabric.steward_models)
+            )
             return
+
+        if self._steward_upgrade_replacing_instance is not None:
+            # The old placement has now left replicated state. Make the
+            # already-staged successor eligible immediately instead of waiting
+            # behind the ordinary one-minute no-placement retry pace.
+            self._steward_upgrade_replacing_instance = None
+            self._steward_last_attempt_monotonic = 0.0
 
         now = time.monotonic()
         if now - self._steward_last_attempt_monotonic < 60:
@@ -2448,44 +2474,16 @@ class Master:
         # have loaded it yet.
         await get_model_cards()
         for model_ref in fabric.steward_models:
-            card = get_card(ModelId(model_ref))
-            if card is None:
-                logger.warning(
-                    f"Steward model {model_ref} has no model card; skipping"
-                )
-                continue
-            command = PlaceInstance(
-                model_card=card,
-                sharding=Sharding.Pipeline,
-                instance_meta=InstanceMeta.MlxRing,
-                min_nodes=1,
-                system_role="steward",
-            )
             try:
-                final_placement = place_instance(
-                    command,
-                    self.state.topology,
-                    self.state.instances,
-                    self._telemetry_view.node_memory,
-                    self.state.node_network,
-                    download_status=self._effective_downloads(),
-                    node_resources=self._telemetry_view.node_resources,
-                    node_vram=usable_vram_by_node(
-                        self._telemetry_view.node_system,
-                        self._telemetry_view.node_resources,
-                        node_memory=self._telemetry_view.node_memory,
-                    ),
-                    unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
-                        self._telemetry_view.node_system,
-                        self._telemetry_view.node_resources,
-                        node_memory=self._telemetry_view.node_memory,
-                    ),
-                    approved_remote_code_identities=self._model_trust_approvals,
+                final_placement = await self._place_steward_model(
+                    model_ref, self.state.instances
                 )
             except (PlacementError, PlacementInfoPendingError) as err:
                 logger.warning(
                     f"Steward placement with {model_ref} not possible yet: {err}"
                 )
+                continue
+            if final_placement is None:
                 continue
             logger.info(
                 f"Establishing steward placement with {model_ref} "
@@ -2500,6 +2498,189 @@ class Master:
             "Intelligent fabric is enabled but no configured steward model "
             "can be placed on the current topology; will retry"
         )
+
+    async def _place_steward_model(
+        self,
+        model_ref: str,
+        current_instances: Mapping[InstanceId, Instance],
+    ) -> dict[InstanceId, Instance] | None:
+        """Return a steward placement for one exact brain, without emitting it."""
+        await get_model_cards()
+        card = get_card(ModelId(model_ref))
+        if card is None:
+            logger.warning(f"Steward model {model_ref} has no model card; skipping")
+            return None
+        command = PlaceInstance(
+            model_card=card,
+            sharding=Sharding.Pipeline,
+            instance_meta=InstanceMeta.MlxRing,
+            min_nodes=1,
+            system_role="steward",
+        )
+        return place_instance(
+            command,
+            self.state.topology,
+            current_instances,
+            self._telemetry_view.node_memory,
+            self.state.node_network,
+            download_status=self._effective_downloads(),
+            node_resources=self._telemetry_view.node_resources,
+            node_vram=usable_vram_by_node(
+                self._telemetry_view.node_system,
+                self._telemetry_view.node_resources,
+                node_memory=self._telemetry_view.node_memory,
+            ),
+            unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
+                self._telemetry_view.node_system,
+                self._telemetry_view.node_resources,
+                node_memory=self._telemetry_view.node_memory,
+            ),
+            approved_remote_code_identities=self._model_trust_approvals,
+        )
+
+    def _reset_steward_upgrade(self) -> None:
+        """Forget one in-progress best-brain convergence attempt."""
+        self._steward_upgrade_model = None
+        self._steward_upgrade_stable_since = None
+        self._steward_upgrade_prestaged_model = None
+        self._steward_upgrade_idle_since = None
+
+    def _steward_model_download_completed(
+        self, node_id: NodeId, model_id: ModelId
+    ) -> bool:
+        """Whether one node reports a completed staging record for a brain."""
+        return any(
+            isinstance(progress, DownloadCompleted)
+            and progress.node_id == node_id
+            and progress.shard_metadata.model_card.model_id == model_id
+            for progress in self._effective_downloads().get(node_id, ())
+        )
+
+    async def _maintain_steward_upgrade(
+        self,
+        steward_id: InstanceId,
+        preference: tuple[str, ...],
+    ) -> None:
+        """Converge an existing steward upward without creating a standby.
+
+        A better brain must remain placeable for five minutes. Its exact target
+        shards are then staged while the current steward keeps serving. Once
+        staging is complete and the current steward has been idle/Ready for
+        thirty seconds, the old placement is removed; the ordinary exactly-one
+        invariant places the already-staged successor on the following tick.
+        """
+        if self._steward_upgrade_replacing_instance == steward_id:
+            return
+        now = time.monotonic()
+        if now < self._steward_upgrade_retry_after:
+            return
+        current = self.state.instances.get(steward_id)
+        if current is None:
+            self._reset_steward_upgrade()
+            return
+        current_model = str(current.shard_assignments.model_id)
+        try:
+            current_index = preference.index(current_model)
+        except ValueError:
+            current_index = len(preference)
+
+        candidate_model: ModelId | None = None
+        candidate_instance: Instance | None = None
+        for model_ref in preference[:current_index]:
+            try:
+                placed = await self._place_steward_model(
+                    model_ref, self.state.instances
+                )
+            except (PlacementError, PlacementInfoPendingError):
+                continue
+            if placed is None:
+                continue
+            new_instances = [
+                instance
+                for instance_id, instance in placed.items()
+                if instance_id not in self.state.instances
+            ]
+            if len(new_instances) != 1:
+                continue
+            candidate_model = ModelId(model_ref)
+            candidate_instance = new_instances[0]
+            break
+
+        if candidate_model is None or candidate_instance is None:
+            self._reset_steward_upgrade()
+            return
+        if self._steward_upgrade_model != candidate_model:
+            self._reset_steward_upgrade()
+            self._steward_upgrade_model = candidate_model
+            self._steward_upgrade_stable_since = now
+            logger.info(
+                f"Better steward brain {candidate_model} is placeable; "
+                "waiting for topology stability before staging"
+            )
+            return
+        stable_since = self._steward_upgrade_stable_since
+        if stable_since is None or now - stable_since < STEWARD_UPGRADE_STABILITY_SECONDS:
+            return
+
+        required_shards: list[tuple[NodeId, ShardMetadata]] = []
+        for node_id, runner_id in candidate_instance.shard_assignments.node_to_runner.items():
+            shard = candidate_instance.shard_assignments.runner_to_shard[runner_id]
+            if isinstance(shard, RpcDonorShardMetadata):
+                continue
+            required_shards.append((node_id, shard))
+        if self._steward_upgrade_prestaged_model != candidate_model:
+            for node_id, shard in required_shards:
+                if self._steward_model_download_completed(node_id, candidate_model):
+                    continue
+                await self.download_command_sender.send(
+                    ForwarderDownloadCommand(
+                        origin=self._system_id,
+                        command=StartDownload(
+                            target_node_id=node_id,
+                            shard_metadata=shard,
+                        ),
+                    )
+                )
+            self._steward_upgrade_prestaged_model = candidate_model
+            logger.info(f"Prestaging better steward brain {candidate_model}")
+            return
+        if any(
+            not self._steward_model_download_completed(node_id, candidate_model)
+            for node_id, _shard in required_shards
+        ):
+            return
+
+        runner_ids = current.shard_assignments.node_to_runner.values()
+        idle_ready = bool(current.shard_assignments.node_to_runner) and all(
+            isinstance(self.state.runners.get(runner_id), RunnerReady)
+            for runner_id in runner_ids
+        )
+        if idle_ready:
+            idle_ready = not any(
+                getattr(task, "instance_id", None) == steward_id
+                and getattr(task, "task_status", None)
+                in (TaskStatus.Pending, TaskStatus.Running)
+                for task in self.state.tasks.values()
+            )
+        if not idle_ready:
+            self._steward_upgrade_idle_since = None
+            return
+        if self._steward_upgrade_idle_since is None:
+            self._steward_upgrade_idle_since = now
+            return
+        if now - self._steward_upgrade_idle_since < STEWARD_UPGRADE_IDLE_SECONDS:
+            return
+
+        logger.info(
+            f"Replacing steward {current_model} with staged better brain "
+            f"{candidate_model}"
+        )
+        self._steward_upgrade_replacing_instance = steward_id
+        self._steward_upgrade_retry_after = (
+            now + STEWARD_UPGRADE_RETRY_COOLDOWN_SECONDS
+        )
+        await self._teardown_steward_instances([steward_id])
+        self._reset_steward_upgrade()
 
     async def _teardown_steward_instances(
         self, instance_ids: Sequence[InstanceId]

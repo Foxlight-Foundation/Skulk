@@ -436,6 +436,7 @@ from skulk.shared.types.diagnostics import (
     DiagnosticCaptureResponse,
     DiagnosticProcessSample,
     DiagnosticsProcess,
+    DoctorCheckDiagnostics,
     InstancePlacementDiagnostics,
     MlxMemorySnapshot,
     NodeDiagnostics,
@@ -486,7 +487,11 @@ from skulk.shared.types.text_generation import (
     InputMessage,
     TextGenerationTaskParams,
 )
-from skulk.shared.types.worker.downloads import DownloadCompleted, LiveDownloadProgress
+from skulk.shared.types.worker.downloads import (
+    DownloadCompleted,
+    DownloadOngoing,
+    LiveDownloadProgress,
+)
 from skulk.shared.types.worker.instances import (
     Instance,
     InstanceId,
@@ -718,9 +723,7 @@ def _select_reconciliation_generations(
             continue
         artifact_model_id = candidates[0][2].get("modelId")
         if isinstance(artifact_model_id, str):
-            generations_by_artifact.setdefault(artifact_model_id, []).append(
-                generation
-            )
+            generations_by_artifact.setdefault(artifact_model_id, []).append(generation)
 
     def generation_rank(generation: tuple[str, str]) -> tuple[bool, bool, str, str]:
         identity, digest = generation
@@ -816,9 +819,7 @@ def _artifact_inventory_is_tombstoned(
 
     model_id = item.get("modelId")
     owner_model_id = item.get("ownerModelId")
-    return (
-        isinstance(model_id, str) and model_id in tombstones
-    ) or (
+    return (isinstance(model_id, str) and model_id in tombstones) or (
         isinstance(owner_model_id, str) and owner_model_id in tombstones
     )
 
@@ -1501,9 +1502,7 @@ class API:
         apply_custom_card_mutations_locally: bool = False,
     ) -> None:
         self.state = State()
-        self._apply_custom_card_mutations_locally = (
-            apply_custom_card_mutations_locally
-        )
+        self._apply_custom_card_mutations_locally = apply_custom_card_mutations_locally
         self._operator_pairing_service = operator_pairing_service
         self._operator_relay_configuration: OperatorRelayConfiguration | None = None
         if operator_pairing_service is not None:
@@ -3289,9 +3288,10 @@ class API:
             )
             applicable_claim_ids: set[str] = set()
             if uses_matrix:
-                for node_id, runner_id in (
-                    instance.shard_assignments.node_to_runner.items()
-                ):
+                for (
+                    node_id,
+                    runner_id,
+                ) in instance.shard_assignments.node_to_runner.items():
                     backend = instance.shard_assignments.runner_to_shard[
                         runner_id
                     ].resolved_backend
@@ -3318,6 +3318,7 @@ class API:
                 "signed_engine_support" if uses_matrix else "card",
                 sorted(applicable_claim_ids),
             )
+
         placement_node_vram = usable_vram_by_node(
             self._telemetry_view.node_system,
             self._telemetry_view.node_resources,
@@ -3429,8 +3430,8 @@ class API:
             # the preview must be truthful about the shape a real placement
             # would produce.
             minted_meta = instance_meta_of(instance)
-            compatibility_source, applicable_claim_ids = (
-                compatibility_for_instance(instance)
+            compatibility_source, applicable_claim_ids = compatibility_for_instance(
+                instance
             )
             if (
                 model_card.model_id,
@@ -3638,9 +3639,7 @@ class API:
             else:
                 text = ""
             if text:
-                history.append(
-                    StewardChatMessage(role=message.role, content=text)
-                )
+                history.append(StewardChatMessage(role=message.role, content=text))
         if not history or history[-1].role != "user":
             # A steward turn answers an operator; assistant-only history or
             # a trailing assistant message has no question to investigate.
@@ -3670,12 +3669,10 @@ class API:
             )
         harness = StewardHarness(self)
         command_id = CommandId()
-        history, system_prompt, task_params = (
-            await self._steward_extension_transform(history, stream=payload.stream)
+        history, system_prompt, task_params = await self._steward_extension_transform(
+            history, stream=payload.stream
         )
-        chunk_stream = harness.run_turn_chunks(
-            history, system_prompt=system_prompt
-        )
+        chunk_stream = harness.run_turn_chunks(history, system_prompt=system_prompt)
         if self._extensions is not None and self._extensions.has_chat_middleware:
             chunk_stream = self._extensions.tap_chat_stream(
                 self._extension_context, task_params, chunk_stream
@@ -3788,18 +3785,18 @@ class API:
     async def _steward_canary_loop(self) -> None:
         """Deterministic degraded-but-alive detection for the steward.
 
-        The node hosting the steward instance probes its generation path on
+        The lowest API-advertising node probes the steward generation path on
         a slow cadence; three consecutive failures tear the instance down
         (the master's invariant re-places it within a tick). Detection is
         code-checked, repair is the fabric's deterministic machinery: no
         model judges another model's health. Skips whenever the mode is
-        off, this node is not the host, the runner is not idle-Ready, or a
+        off, this node is not the elected API, the runner is not idle-Ready, or a
         task is in flight (the worker's wedge detector owns the busy case).
 
-        Known limitation (#734): the elected prober is the steward's
-        hosting node, so a split deployment whose hosting worker runs
-        --no-api has no canary; probing from any API node needs API
-        presence advertised in node resources first.
+        API election uses explicit ``NodeResources.api_available`` telemetry.
+        Generation dispatch is already node-independent and pinned to the
+        steward instance, so a worker launched with ``--no-api`` remains
+        covered.
         """
         from skulk.api.steward import (
             CANARY_FAILURE_THRESHOLD,
@@ -3814,11 +3811,18 @@ class API:
                 if not self._intelligent_fabric_enabled():
                     canary.clear_failures()
                     continue
+                advertised_api_nodes = {
+                    peer_node_id
+                    for peer_node_id, resources in self._telemetry_view.node_resources.items()
+                    if resources.api_available
+                }
+                advertised_api_nodes.add(self.node_id)
                 target = canary_probe_target(
                     self.state.instances,
                     self.state.runners,
                     self.state.tasks,
                     self.node_id,
+                    advertised_api_nodes,
                 )
                 if target is None:
                     # A skipped probe (busy, loading, not the elected
@@ -3906,16 +3910,61 @@ class API:
                 )
             if not ready:
                 downloading = self._steward_model_is_downloading(located[1])
-            canary_failures = self._steward_canary.consecutive_failures_for(
-                located[0]
-            )
+            canary_failures = self._steward_canary.consecutive_failures_for(located[0])
         enabled = self._intelligent_fabric_enabled()
+        desired_model = located[1] if located is not None else None
+        transition: Literal["idle", "prestaging", "replacing", "repairing"] = (
+            "repairing" if enabled and located is None else "idle"
+        )
+        transition_progress: float | None = None
+        try:
+            config = load_skulk_config()
+        except Exception:
+            config = None
+        fabric = config.intelligent_fabric if config is not None else None
+        if located is not None and fabric is not None:
+            current_model = located[1]
+            try:
+                current_index = fabric.steward_models.index(current_model)
+            except ValueError:
+                current_index = len(fabric.steward_models)
+            effective_downloads = self._telemetry_view.effective_downloads(
+                self.state.downloads
+            )
+            for candidate in fabric.steward_models[:current_index]:
+                candidate_records = [
+                    record
+                    for records in effective_downloads.values()
+                    for record in records
+                    if isinstance(record, LiveDownloadProgress)
+                    and str(record.shard_metadata.model_card.model_id) == candidate
+                ]
+                if not candidate_records:
+                    continue
+                desired_model = candidate
+                transition = "prestaging"
+                downloaded = 0
+                total = 0
+                for record in candidate_records:
+                    if isinstance(record, DownloadOngoing):
+                        downloaded += record.download_progress.downloaded.in_bytes
+                        total += record.download_progress.total.in_bytes
+                    else:
+                        downloaded += record.downloaded.in_bytes
+                        total += record.total.in_bytes
+                transition_progress = (
+                    min(1.0, downloaded / total) if total > 0 else None
+                )
+                break
         return StewardStatusResponse(
             enabled=enabled,
             present=located is not None,
             ready=ready,
             steward_model=located[1] if located is not None else None,
             instance_id=str(located[0]) if located is not None else None,
+            desired_model=desired_model,
+            transition=transition,
+            progress=transition_progress,
             state=derive_steward_state(
                 enabled=enabled,
                 present=located is not None,
@@ -4084,9 +4133,7 @@ class API:
                 yield pending_error
                 return
 
-            if pending_failure := self._pending_stream_failures.pop(
-                command_id, None
-            ):
+            if pending_failure := self._pending_stream_failures.pop(command_id, None):
                 # The task already failed before this stream registered
                 # (fast local TaskFailed, e.g. a pinned instance that
                 # vanished); deliver the buffered terminal chunk.
@@ -5060,10 +5107,10 @@ class API:
         images = task_params.images
         if not images:
             command = TextGeneration(
-            task_params=task_params,
-            owner_node=self.node_id,
-            target_instance_id=target_instance_id,
-        )
+                task_params=task_params,
+                owner_node=self.node_id,
+                target_instance_id=target_instance_id,
+            )
             await self._send(command)
             return command
 
@@ -5105,10 +5152,10 @@ class API:
                 update={"images": [], "image_hashes": cached_hashes}
             )
             command = TextGeneration(
-            task_params=task_params,
-            owner_node=self.node_id,
-            target_instance_id=target_instance_id,
-        )
+                task_params=task_params,
+                owner_node=self.node_id,
+                target_instance_id=target_instance_id,
+            )
             await self._send(command)
             return command
 
@@ -7397,9 +7444,7 @@ class API:
         images_complete = 0
 
         try:
-            recv = self._open_stream_queue(
-                self._image_generation_queues, command_id
-            )
+            recv = self._open_stream_queue(self._image_generation_queues, command_id)
 
             if pending_error := self._take_vision_media_failure(command_id):
                 error_response = ErrorResponse(
@@ -7532,9 +7577,7 @@ class API:
         stats: ImageGenerationStats | None = None
 
         try:
-            recv = self._open_stream_queue(
-                self._image_generation_queues, command_id
-            )
+            recv = self._open_stream_queue(self._image_generation_queues, command_id)
 
             if pending_error := self._take_vision_media_failure(command_id):
                 raise HTTPException(
@@ -8414,9 +8457,7 @@ class API:
         for entry in entries:
             model_id_raw = entry.get("model_id")
             installed_raw = entry.get("installed_card")
-            if not isinstance(model_id_raw, str) or not isinstance(
-                installed_raw, dict
-            ):
+            if not isinstance(model_id_raw, str) or not isinstance(installed_raw, dict):
                 continue
             try:
                 model_id = ModelId(model_id_raw)
@@ -8589,9 +8630,7 @@ class API:
     def _cluster_remote_code_approvals(self) -> frozenset[str]:
         """Read master-ordered cluster trust with a pre-bootstrap fallback."""
         if self.state.last_event_applied_idx >= 0:
-            return frozenset(
-                self.state.model_trust_approved_remote_code_identities
-            )
+            return frozenset(self.state.model_trust_approved_remote_code_identities)
         try:
             config = load_skulk_config(self._config_path)
         except Exception:
@@ -8871,9 +8910,7 @@ class API:
         return False
 
     @staticmethod
-    async def _describe_hf_fetch_failure(
-        model_id: ModelId, exc: Exception
-    ) -> str:
+    async def _describe_hf_fetch_failure(model_id: ModelId, exc: Exception) -> str:
         """Turn a Hub metadata-fetch failure into an operator-actionable detail.
 
         A gated or private repository surfaces here as an
@@ -8934,9 +8971,7 @@ class API:
         except Exception as exc:
             raise HTTPException(
                 status_code=400,
-                detail=await self._describe_hf_fetch_failure(
-                    payload.model_id, exc
-                ),
+                detail=await self._describe_hf_fetch_failure(payload.model_id, exc),
             ) from exc
 
         mutation = AddCustomModelCard(model_card=card)
@@ -8966,9 +9001,7 @@ class API:
             Removes signed-registry trust claims and broadcasts a persistent
             custom-card mutation across the cluster.
         """
-        qualification_service = self._require_exact_card_qualification_mutation(
-            request
-        )
+        qualification_service = self._require_exact_card_qualification_mutation(request)
         if payload.model_card.source_revision is None:
             raise HTTPException(
                 status_code=422,
@@ -9104,9 +9137,7 @@ class API:
         Raises:
             HTTPException: If the caller does not own the current exact card.
         """
-        qualification_service = self._require_exact_card_qualification_mutation(
-            request
-        )
+        qualification_service = self._require_exact_card_qualification_mutation(request)
         card = get_card(model_id)
         if card is None or not card.is_custom:
             raise HTTPException(status_code=404, detail="Custom model card not found")
@@ -9115,16 +9146,12 @@ class API:
             if not card.qualification_only:
                 raise HTTPException(
                     status_code=403,
-                    detail=(
-                        "Qualification can remove only its temporary custom cards"
-                    ),
+                    detail=("Qualification can remove only its temporary custom cards"),
                 )
             if expected is None:
                 raise HTTPException(
                     status_code=422,
-                    detail=(
-                        "Qualification cleanup requires the exact candidate card"
-                    ),
+                    detail=("Qualification cleanup requires the exact candidate card"),
                 )
             if expected.model_card.model_id != model_id:
                 raise HTTPException(
@@ -9449,7 +9476,9 @@ class API:
                 if self._apply_custom_card_mutations_locally:
                     await self._apply_local_custom_card_mutation(event)
 
-                if isinstance(event, (ModelTrustApprovalChanged, StateSnapshotHydrated)):
+                if isinstance(
+                    event, (ModelTrustApprovalChanged, StateSnapshotHydrated)
+                ):
                     try:
                         self._skulk_config = persist_model_trust_config(
                             self._config_path,
@@ -11260,6 +11289,9 @@ class API:
     async def get_node_diagnostics(self) -> NodeDiagnostics:
         """Return local read-only diagnostics for this Skulk node."""
 
+        from skulk.doctor.checks import run_checks
+        from skulk.facts import current_node_facts
+
         # This node's OWN tailnet identity rides the bundle so the per-node
         # dashboard view shows the selected node's Tailscale state (the
         # standalone connectivity endpoint reports whichever node served the
@@ -11322,6 +11354,12 @@ class API:
                 unary_concurrency_limit=_MAX_CONCURRENT_CAPABILITY_CALLS,
                 stream_concurrency_limit=_MAX_CONCURRENT_CAPABILITY_STREAMS,
             ),
+            doctor=[
+                DoctorCheckDiagnostics.model_validate(
+                    result.model_dump(mode="json", by_alias=False)
+                )
+                for result in run_checks(current_node_facts())[:64]
+            ],
             warnings=sorted(warnings),
             tailscale=tailscale,
         )
@@ -12659,9 +12697,7 @@ class API:
         now = datetime.now(tz=timezone.utc)
         now_monotonic = time.monotonic()
         self._artifact_inventory_expected_since = {
-            node_id: self._artifact_inventory_expected_since.get(
-                node_id, now_monotonic
-            )
+            node_id: self._artifact_inventory_expected_since.get(node_id, now_monotonic)
             for node_id in expected_nodes
         }
         usable: dict[NodeId, NodeArtifactInventory] = {}
@@ -12680,7 +12716,9 @@ class API:
                 if received_at.tzinfo is not None
                 else received_at.replace(tzinfo=timezone.utc)
             )
-            if (now - normalized_receipt).total_seconds() <= ARTIFACT_INVENTORY_STALE_SECONDS:
+            if (
+                now - normalized_receipt
+            ).total_seconds() <= ARTIFACT_INVENTORY_STALE_SECONDS:
                 fresh[node_id] = reading
 
         observed_nodes = len(usable)
@@ -13118,8 +13156,7 @@ class API:
                 except (OSError, ValueError) as error:
                     tombstone_metadata_valid = False
                     failures.append(
-                        "Could not read reconciliation deletion tombstones: "
-                        f"{error}"
+                        f"Could not read reconciliation deletion tombstones: {error}"
                     )
                     reconciliation_tombstones = frozenset()
                 replicas: dict[
@@ -13429,17 +13466,11 @@ class API:
                 requested_model_id
             )
         gguf_file = payload.gguf_file if payload is not None else None
-        extra_gguf_files = (
-            payload.extra_gguf_files if payload is not None else []
-        )
+        extra_gguf_files = payload.extra_gguf_files if payload is not None else []
         source_revision = payload.source_revision if payload is not None else None
-        source_repository = (
-            payload.source_repository if payload is not None else None
-        )
+        source_repository = payload.source_repository if payload is not None else None
         registry_card_id = payload.registry_card_id if payload is not None else None
-        artifact_bundle_id = (
-            payload.artifact_bundle_id if payload is not None else None
-        )
+        artifact_bundle_id = payload.artifact_bundle_id if payload is not None else None
         owner_model_id = payload.owner_model_id if payload is not None else None
         owner_registry_card_id = (
             payload.owner_registry_card_id if payload is not None else None
@@ -15712,9 +15743,7 @@ class API:
         command = AudioTranscription(owner_node=self.node_id, task_params=params)
         command_id = command.command_id
         try:
-            recv = self._open_stream_queue(
-                self._audio_transcription_queues, command_id
-            )
+            recv = self._open_stream_queue(self._audio_transcription_queues, command_id)
             self._stage_audio_transcription_media(command_id, params, audio_bytes)
             await self._send(command)
         except BaseException:

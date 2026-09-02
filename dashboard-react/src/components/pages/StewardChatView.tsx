@@ -466,6 +466,17 @@ export function StewardChatView({ readyInstances = [] }: StewardChatViewProps) {
           })}
         </ModelTag>
       )}
+      {status.transition !== 'idle' && (
+        <ModelTag>
+          {t('stewardChat.transition', 'fabric transition: {transition}{progress}', {
+            transition: status.transition,
+            progress:
+              status.progress === null
+                ? ''
+                : ` ${Math.round(status.progress * 100)}%`,
+          })}
+        </ModelTag>
+      )}
       <MessagesScroll>
         {messages.length === 0 && !isLoading ? (
           <CenterState>

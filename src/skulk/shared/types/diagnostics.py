@@ -51,6 +51,7 @@ DataPlaneTransport = Literal["disabled", "gossipsub", "zenoh"]
 TelemetryPlaneTransport = Literal["isolated_gossipsub"]
 NodeDiagnosticsVersionStatus = Literal["current", "version_mismatch", "unknown"]
 ClusterDiagnosticsVersionStatus = Literal["consistent", "mixed", "unknown"]
+DoctorCheckVerdict = Literal["ok", "degraded", "fail"]
 
 
 class MlxMemorySnapshot(CamelCaseModel):
@@ -1051,6 +1052,25 @@ class ProviderDiagnostics(ProviderCapabilityDiagnostics):
         )
 
 
+class DoctorCheckDiagnostics(CamelCaseModel):
+    """One bounded result from the node's executable environment contract."""
+
+    check_id: str = Field(description="Stable identifier of the doctor check.")
+    title: str = Field(description="Short human title for the finding.")
+    verdict: DoctorCheckVerdict = Field(description="Check outcome.")
+    detail: str = Field(description="Concrete observation made by the check.")
+    consequence: str = Field(
+        default="", description="Serving consequence when the result is not OK."
+    )
+    remediation: str = Field(
+        default="", description="Operator remediation when one is available."
+    )
+    fix_available: bool = Field(
+        default=False,
+        description="Whether skulk doctor --fix can remediate the finding.",
+    )
+
+
 class NodeDiagnostics(CamelCaseModel):
     """Read-only diagnostic bundle for one Skulk node."""
 
@@ -1089,6 +1109,13 @@ class NodeDiagnostics(CamelCaseModel):
     provider: ProviderDiagnostics = Field(
         default_factory=ProviderDiagnostics.empty,
         description="Local provider admission, lifecycle, media, and pressure metrics."
+    )
+    doctor: list[DoctorCheckDiagnostics] = Field(
+        default_factory=list,
+        description=(
+            "Bounded results from the node-local doctor registry. These are "
+            "read-only environment findings captured with this bundle."
+        ),
     )
     warnings: list[str] = Field(
         default_factory=list,

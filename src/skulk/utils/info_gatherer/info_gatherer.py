@@ -287,7 +287,7 @@ class StaticNodeInformation(TaggedModel):
         description=(
             "Stable per-installation operator identity, independent of the current "
             "runtime libp2p node ID."
-        )
+        ),
     )
     model: str
     chip: str
@@ -578,6 +578,7 @@ GatheredInfo = (
 @dataclass
 class InfoGatherer:
     info_sender: Sender[GatheredInfo]
+    api_available: bool = True
     data_transport: NodeDataTransport = "gossipsub"
     heartbeat_poll_interval: float | None = 2
     interface_watcher_interval: float | None = 10
@@ -712,6 +713,7 @@ class InfoGatherer:
                     )
                     await self.info_sender.send(
                         await NodeResources.gather(
+                            api_available=self.api_available,
                             data_transport=self.data_transport,
                             zenoh_connected_peers=zenoh_connected_peers,
                         )
@@ -739,7 +741,10 @@ class InfoGatherer:
         instead of keeping the stale value until the node leaves the cluster
         (provider liveness, fabric-citizenship Phase 2a).
         """
-        if self.capabilities_poll_interval is None or self.capabilities_provider is None:
+        if (
+            self.capabilities_poll_interval is None
+            or self.capabilities_provider is None
+        ):
             return
         published_nonempty = False
         while True:

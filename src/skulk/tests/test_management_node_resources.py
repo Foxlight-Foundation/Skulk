@@ -20,6 +20,7 @@ async def test_management_node_advertises_transport_without_placement() -> None:
             task_group.start_soon(
                 _publish_management_node_resources,
                 NodeId("api-only-node"),
+                True,
                 "zenoh",
                 telemetry_send,
                 None,
@@ -29,6 +30,7 @@ async def test_management_node_advertises_transport_without_placement() -> None:
             assert telemetry.node_id == NodeId("api-only-node")
             assert isinstance(telemetry.info, NodeResources)
             assert telemetry.info.data_transport == "zenoh"
+            assert telemetry.info.api_available is True
             assert telemetry.info.participation == "management"
             assert telemetry.info.backends == frozenset()
             task_group.cancel_scope.cancel()

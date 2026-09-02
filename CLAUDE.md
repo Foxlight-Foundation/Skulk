@@ -337,11 +337,14 @@ Optional resident operator assistant, config-gated (`intelligent_fabric` in
 skulk.yaml, default off). Identity = `BaseInstance.system_role` flagged
 placement (additive schema field); the master's `_maintain_steward_placement`
 planning-tick invariant keeps exactly one steward placed from the
-`steward_models` preference list (Qwen3.6-35B-A3B GGUF then MLX = the
-benched v1 brain, then the Qwen3.5-4B MLX/GGUF cards, then the Qwen3.5-0.8B
+`steward_models` preference list (Qwen3.6-35B-A3B GGUF then MLX, then the
+parser-pinned vLLM FP8 card = the 35B tier, then the Qwen3.5-4B MLX/GGUF
+cards, then the Qwen3.5-0.8B
 GGUF universal floor so CPU-only fleets place one), tears down duplicates,
 and inherits failover from election since the invariant re-runs on every
-tick. Every steward generation runs with thinking OFF
+tick. A higher-preference brain must be stable for five minutes, is prestaged,
+and replaces the old brain only after 30 seconds idle, with a 30-minute retry
+cooldown after fallback. Every steward generation runs with thinking OFF
 (`STEWARD_THINKING_ENABLED`): bench-measured, thinking degraded the
 finalists' trust behavior, and it is the harness's request shape rather
 than a card claim. GGUF steward cards must stay text-only or the vision
@@ -349,7 +352,7 @@ platform gate bars them from `llama_server`. Repair builders re-stamp `system_ro
 exclusions). `TextGeneration.target_instance_id` pins generation to one
 instance (mirrors SpeechSynthesis). Harness = `src/skulk/api/steward.py`:
 bounded read-only tools (state/resources/telemetry/data-plane/versions/
-envelopes/doctor/catalog), with state normalized into exact heterogeneous
+envelopes/per-node diagnostics and doctor/catalog), with state normalized into exact heterogeneous
 node facts, non-overlapping operator placement/ready/terminal lifecycle
 buckets, a separate internal-service bucket, and explicitly historical
 terminal failures;
@@ -357,18 +360,21 @@ terminal failures;
 normal chat dispatch path. Client surface = reserved virtual
 model `skulk/steward` on chat-completions (client tools 400; trace as
 reasoning_content; streaming via the ordinary adapters over
-`run_turn_chunks`); `GET /v1/steward` = presence plus a derived `state`
+`run_turn_chunks`); `GET /v1/steward` = presence plus a derived `state` and
+additive `desired_model`/`transition`/`progress`
 (`disabled|downloading|starting|ready|degraded`); flagged entry in
 /v1/models (`system_role`). The reserved id refuses with 503 (status
 payload + Retry-After) before streaming when no steward is ready, keeping
 the in-stream ErrorChunk for the post-preflight race. Ordinary deletion of
 the steward is refused while the mode is on; the dashboard hides
-`systemRole` instances. Canary: the hosting node's API probes the steward
+`systemRole` instances. Canary: the lowest API-advertising node probes the steward
 every 300s when idle-Ready (minimal pinned generation, code-checked); the
 failure run lives in `StewardCanaryState` so one failure already reads as
 `degraded`, and 3 consecutive failures tear it down and the invariant
 re-places (degraded-but-alive coverage; busy-wedge stays with the worker
-wedge detector).
+wedge detector). `NodeResources.api_available` is explicit fleet truth for the
+election (`--no-api` advertises false; true is the mixed-version default), so
+the worker hosting the steward need not expose an API.
 
 ### Message Flow
 Components communicate via typed pub/sub topics (src/skulk/routing/topics.py):

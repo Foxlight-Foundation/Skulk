@@ -227,6 +227,8 @@ def platform_compatible_backends(
     card_serves_vision: bool,
     card_serves_speech: bool = False,
     card_has_pinned_projector: bool = False,
+    card_supports_tool_calling: bool = False,
+    card_vllm_tool_call_parser: str | None = None,
 ) -> frozenset[str]:
     """Filter a card's declared backends down to what this platform can serve.
 
@@ -246,6 +248,10 @@ def platform_compatible_backends(
         card_serves_speech: whether the card declares a speech capability.
         card_has_pinned_projector: whether a vision card identifies one exact
             immutable projector that the served runner can validate and load.
+        card_supports_tool_calling: whether the model exposes tool calling.
+        card_vllm_tool_call_parser: exact vLLM parser pinned by the card. vLLM
+            tool requests fail closed when this is absent, so those cards are
+            not platform-compatible with vLLM for resident tool use.
 
     Returns:
         The subset of tags whose engine can serve everything the card declares.
@@ -268,6 +274,8 @@ def platform_compatible_backends(
             for tag in filtered
             if (engine := engine_of(tag)) is None or engine in _SPEECH_SERVING_ENGINES
         )
+    if card_supports_tool_calling and card_vllm_tool_call_parser is None:
+        filtered = frozenset(tag for tag in filtered if engine_of(tag) != "vllm")
     return filtered
 
 

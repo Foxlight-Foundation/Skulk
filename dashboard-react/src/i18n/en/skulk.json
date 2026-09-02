@@ -861,6 +861,7 @@
   "stewardChat.placing.state": "Status: {state}",
   "stewardChat.placing.title": "Skulk is getting ready",
   "stewardChat.servedBy": "fabric cognition: {model}",
+  "stewardChat.transition": "fabric transition: {transition}{progress}",
   "storeRegistry.cachedNodes": "{count} node(s)",
   "storeRegistry.cachedOn": "Cached on",
   "storeRegistry.central": "Central",

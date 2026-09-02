@@ -820,7 +820,12 @@ The steward is an ordinary model instance with one extra property: its
 placement record carries a system-role marker, and the master treats "exactly
 one steward placement exists" as an invariant of its planning loop. The
 master places the first servable model from the configured preference list,
-re-places the steward after node loss through the same repair machinery every
+including the parser-pinned Qwen3.6 35B FP8 vLLM brain in the 35B tier. A
+better brain must remain placeable for five minutes before Skulk prestages its
+target shards. The current brain keeps serving until staging completes and it
+has been idle for 30 seconds; Skulk then performs a short exactly-one restart,
+falling back through the same preference invariant if promotion fails. The
+master re-places the steward after node loss through the same repair machinery every
 instance gets, and, because the invariant is re-evaluated on every planning
 tick, a newly elected master re-establishes the steward automatically after
 failover. Duplicate stewards (possible across a failover window) are detected
@@ -839,7 +844,8 @@ internal system-role services in a separate bucket; retained terminal failures
 explicitly marked as historical and non-current;
 health reasons and capability conflicts;
 telemetry and data-plane diagnostics, per-node version status, performance
-envelopes, the local doctor check registry, the model catalog, and a
+envelopes, complete diagnostics and doctor results for any named node, the
+model catalog, and a
 search over Skulk's own bundled documentation so what-is and how-to
 questions are answered from the shipped docs rather than model priors)
 and an investigation loop of up to eight tool calls per turn. Tool steps stream to
@@ -855,19 +861,23 @@ workload while gaining nothing, so the harness pins it off rather than
 leaving the choice to whichever model is placed.
 
 A small status endpoint reports presence and readiness so clients know
-whether to offer the surface, along with a single lifecycle word covering
+whether to offer the surface, along with desired-brain, transition, and
+prestaging-progress fields and a single lifecycle word covering
 the whole progression from disabled through downloading, starting, and
 ready to degraded. Because a steward that has not finished being placed
 cannot answer, the reserved model id refuses those requests up front with a
 service-unavailable response carrying that same status, so a client can tell
-"the fabric is still setting up" from "the answer failed halfway". The node
-hosting the steward also runs a slow deterministic canary: a minimal
+"the fabric is still setting up" from "the answer failed halfway". The
+API-advertising node with the lowest stable identity also runs a slow
+deterministic canary: a minimal
 pinned generation whose answer is shape-checked by code, so a steward
 that is alive in state but wedged in generation is torn down and
 re-placed by the same invariant that handles node loss. The first failed
 probe already shows up in the status as a degraded steward, well before the
-third one triggers the replacement. In this release
-the steward observes and advises only: no tool can change the cluster, and
+third one triggers the replacement. API presence is explicit telemetry
+(`NodeResources.api_available`), so a worker launched with `--no-api` can still
+host the steward without being elected to run its canary. In this release the
+steward observes and advises only: no tool can change the cluster, and
 anything action-shaped is returned to the operator as a recommendation.
 The normalized operator record is deliberately deterministic: the resident
 copies counts and measurements rather than reconstructing them from prose, and

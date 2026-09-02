@@ -425,6 +425,12 @@ This project records release notes here and mirrors public-facing notes in
   run on steward turns exactly as on ordinary completions, and a steward that
   is still being placed answers with a clean 503 status payload instead of
   failing mid-answer.
+  The resident now converges upward when better capacity appears: an improved
+  brain must remain placeable for five minutes, stages before replacement, and
+  waits for a 30-second idle window. The parser-pinned 35B FP8 vLLM card joins
+  the default tier; explicit `NodeResources.api_available` telemetry elects one
+  canary owner while still covering `--no-api` worker hosts;
+  and node-scoped diagnostics include each node's doctor findings.
 
 ## [1.5.1] - 2026-08-30
 
