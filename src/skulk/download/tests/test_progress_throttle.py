@@ -146,6 +146,28 @@ async def test_synced_config_blank_token_does_not_clobber_local(
 
 
 @pytest.mark.asyncio
+async def test_synced_config_whitespace_token_does_not_clobber_local(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Whitespace is truthy but not a credential; it must merge as absent.
+
+    Downstream resolution strips tokens before use, so a whitespace-only value
+    arriving over the wire would replace a real local token with something
+    that resolves as blank.
+    """
+
+    config_path = tmp_path / "skulk.yaml"
+    config_path.write_text("hf_token: local-secret\n")
+    coordinator = _make_coordinator()
+    monkeypatch.setattr(coordinator_mod, "resolve_config_path", lambda: config_path)
+
+    await coordinator._sync_config("hf_token: '   '\n")
+
+    assert "hf_token: local-secret" in config_path.read_text()
+
+
+@pytest.mark.asyncio
 async def test_synced_config_merges_latest_trust_inside_transaction(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

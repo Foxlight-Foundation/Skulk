@@ -285,6 +285,24 @@ def test_update_config_never_broadcasts_a_blank_token(
     assert "hf_token" not in broadcasts[0]
 
 
+def test_update_config_never_broadcasts_a_whitespace_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Whitespace is truthy but not a credential; it stays off the wire."""
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    config_path = tmp_path / "skulk.yaml"
+    api = _build_api()
+    object.__setattr__(api, "_config_path", config_path)
+    broadcasts = _capture_broadcast(api)
+    client = TestClient(api.app)
+
+    response = client.put("/config", json={"config": {"hf_token": "   "}})
+
+    assert response.status_code == 200
+    assert len(broadcasts) == 1
+    assert "hf_token" not in broadcasts[0]
+
+
 def test_update_config_never_broadcasts_model_trust(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

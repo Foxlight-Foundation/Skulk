@@ -123,6 +123,20 @@ def hostname_aliases(hostname: str) -> set[str]:
     return aliases
 
 
+def normalized_hf_token(value: object) -> str | None:
+    """Return a usable Hugging Face token from a config value, else ``None``.
+
+    Whitespace is not a credential: downstream resolution strips tokens before
+    use, so a whitespace-only value would ride the wire as "present", clobber
+    a real local token on merge, and then resolve as blank. Every propagation
+    guard (send and receive) must therefore treat it as absent.
+    """
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
 def node_matches_store_host(
     store_host: str,
     node_id: str,

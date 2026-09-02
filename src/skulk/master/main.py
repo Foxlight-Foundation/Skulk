@@ -2806,7 +2806,9 @@ class Master:
         sanitized_config: JsonObject = {
             str(key): copy.deepcopy(value) for key, value in raw_config.items()
         }
-        if not sanitized_config.get("hf_token"):
+        from skulk.store.config import normalized_hf_token
+
+        if normalized_hf_token(sanitized_config.get("hf_token")) is None:
             sanitized_config.pop("hf_token", None)
         sanitized_config.pop("model_trust", None)
         model_store = sanitized_config.get("model_store")

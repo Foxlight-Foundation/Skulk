@@ -446,6 +446,8 @@ async def test_state_sync_response_includes_config_yaml(
         assert response.config_yaml is not None
         # The master's token rides the bootstrap so a joining node can
         # download immediately; the fabric is PSK-encrypted and trusted.
+        # (A whitespace-only token is dropped by the same guard that drops a
+        # blank one; normalized_hf_token has its own unit coverage.)
         assert "hf_token: super-secret-token" in response.config_yaml
         # Deprecated compatibility state must still never travel.
         assert "model_trust" not in response.config_yaml

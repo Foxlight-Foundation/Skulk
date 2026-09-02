@@ -104,3 +104,20 @@ def test_bootstrap_does_not_overwrite_an_existing_env_token(
     import os
 
     assert os.environ.get("HF_TOKEN") == "operator-launch-token"
+
+
+def test_bootstrap_whitespace_token_does_not_clobber_local(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Whitespace is truthy but not a credential; it must merge as absent."""
+
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    config_path = tmp_path / "skulk.yaml"
+    config_path.write_text("hf_token: local-secret\n")
+
+    merged = merge_cluster_config_bootstrap("hf_token: '   '\n", config_path)
+
+    assert merged.get("hf_token") == "local-secret"
+    import os
+
+    assert "HF_TOKEN" not in os.environ

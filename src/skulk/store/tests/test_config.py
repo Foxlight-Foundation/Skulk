@@ -257,3 +257,15 @@ def test_enabled_store_with_identity_is_valid() -> None:
 
     config = ModelStoreConfig(enabled=True, store_host="kite", store_path="/models")
     assert config.store_host == "kite"
+
+
+def test_normalized_hf_token_treats_whitespace_as_absent() -> None:
+    """Whitespace is truthy but not a credential (#922 review)."""
+    from skulk.store.config import normalized_hf_token
+
+    assert normalized_hf_token(None) is None
+    assert normalized_hf_token("") is None
+    assert normalized_hf_token("   ") is None
+    assert normalized_hf_token("\t\n") is None
+    assert normalized_hf_token(123) is None
+    assert normalized_hf_token(" real-token ") == "real-token"

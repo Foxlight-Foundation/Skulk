@@ -532,20 +532,24 @@ def merge_cluster_config_bootstrap(
         yaml_module.safe_load(config_yaml) or {},
     )
 
+    from skulk.store.config import normalized_hf_token
+
     def preserve_local_fields(
         existing: dict[str, object],
     ) -> dict[str, object]:
         updated = dict(received)
-        if not updated.get("hf_token") and existing.get("hf_token"):
+        if normalized_hf_token(updated.get("hf_token")) is None and existing.get(
+            "hf_token"
+        ):
             updated["hf_token"] = existing["hf_token"]
         if "model_trust" not in updated and "model_trust" in existing:
             updated["model_trust"] = existing["model_trust"]
         return updated
 
     merged = update_skulk_config_atomic(config_path, preserve_local_fields)
-    adopted_token = merged.get("hf_token")
+    adopted_token = normalized_hf_token(merged.get("hf_token"))
     if adopted_token and "HF_TOKEN" not in os.environ:
-        os.environ["HF_TOKEN"] = str(adopted_token)
+        os.environ["HF_TOKEN"] = adopted_token
         logger.info("Adopted HF token from cluster config bootstrap")
     return merged
 
@@ -1385,9 +1389,11 @@ class Node:
         # its own broadcast via local delivery and persists it through the
         # normal config-sync path, so there is no separate local write here
         # (it would only be clobbered by that same broadcast).
+        from skulk.store.config import normalized_hf_token
+
         broadcast_dict = copy.deepcopy(self.skulk_config.model_dump())
         broadcast_dict["model_store"]["store_http_host"] = reachable_host
-        if not broadcast_dict.get("hf_token"):
+        if normalized_hf_token(broadcast_dict.get("hf_token")) is None:
             broadcast_dict.pop("hf_token", None)
         broadcast_dict.pop("model_trust", None)
         broadcast_yaml = yaml.safe_dump(

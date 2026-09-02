@@ -12445,8 +12445,10 @@ class API:
 
         from skulk.shared.types.commands import SyncConfig
 
+        from skulk.store.config import normalized_hf_token
+
         broadcast_data = copy.deepcopy(config_data)
-        if not broadcast_data.get("hf_token"):
+        if normalized_hf_token(broadcast_data.get("hf_token")) is None:
             broadcast_data.pop("hf_token", None)
         broadcast_data.pop("model_trust", None)
         broadcast_yaml = yaml.safe_dump(

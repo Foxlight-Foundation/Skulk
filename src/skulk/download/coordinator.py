@@ -421,8 +421,12 @@ class DownloadCoordinator:
                 absent-or-blank must never erase a locally configured one.
                 """
 
+                from skulk.store.config import normalized_hf_token
+
                 updated = dict(received)
-                if not updated.get("hf_token") and existing.get("hf_token"):
+                if normalized_hf_token(
+                    updated.get("hf_token")
+                ) is None and existing.get("hf_token"):
                     updated["hf_token"] = existing["hf_token"]
                 if "model_trust" not in updated and "model_trust" in existing:
                     updated["model_trust"] = existing["model_trust"]
