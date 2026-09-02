@@ -171,3 +171,106 @@ def test_bootstrap_malformed_payload_keeps_local_config(
     assert merged.get("logging") == {"enabled": True}
     persisted = config_path.read_text()
     assert "logging" in persisted and "local-secret" in persisted
+
+
+@pytest.mark.asyncio
+async def test_store_host_rebroadcast_uses_persisted_config_not_the_startup_snapshot(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A re-election broadcast must not resurrect a rotated-away token.
+
+    Config sync updates the file but not Node.skulk_config, so serializing the
+    startup snapshot would rebroadcast stale token A over rotated token B and
+    overwrite it fleet-wide (#922 review).
+    """
+    import socket as socket_module
+
+    import yaml as yaml_module
+
+    from skulk import main as main_module
+    from skulk.main import Node
+    from skulk.store.config import ModelStoreConfig, SkulkConfig
+
+    hostname = socket_module.gethostname()
+    stale = SkulkConfig(
+        hf_token="stale-token-a",
+        model_store=ModelStoreConfig(
+            store_host=hostname, store_path=str(tmp_path / "store")
+        ),
+    )
+    rotated = SkulkConfig(
+        hf_token="rotated-token-b",
+        model_store=ModelStoreConfig(
+            store_host=hostname, store_path=str(tmp_path / "store")
+        ),
+    )
+    monkeypatch.setattr(main_module, "load_skulk_config", lambda *a, **k: rotated)
+
+    sent: list[object] = []
+
+    class _Sender:
+        async def send(self, command: object) -> None:
+            sent.append(command)
+
+    class _Router:
+        def sender(self, _topic: object) -> "_Sender":
+            return _Sender()
+
+    node = object.__new__(Node)
+    node.skulk_config = stale
+    node.router = _Router()
+    node.node_id = "not-the-store-host-by-id"
+
+    await Node._broadcast_config_if_store_host(node)
+
+    assert len(sent) == 1
+    config_yaml = sent[0].command.config_yaml  # pyright: ignore[reportAttributeAccessIssue]
+    broadcast = yaml_module.safe_load(config_yaml)
+    assert broadcast["hf_token"] == "rotated-token-b"
+    assert "stale-token-a" not in config_yaml
+
+
+def test_provenance_marker_survives_in_place_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An inherited marker is trusted, not recomputed.
+
+    os.execv carries the environment, so a config-promoted HF_TOKEN would
+    otherwise be re-stamped operator-supplied after every /admin/restart,
+    blocking rotation forever (#922 review). This pins the startup stamping
+    rule directly: an inherited "" survives even with HF_TOKEN present.
+    """
+    import os
+
+    from skulk.store.config import (
+        HF_TOKEN_USER_SET_MARKER,
+        stamp_hf_token_provenance,
+    )
+
+    monkeypatch.setenv("HF_TOKEN", "config-promoted-token")
+    monkeypatch.setenv(HF_TOKEN_USER_SET_MARKER, "")
+
+    stamp_hf_token_provenance()
+
+    assert os.environ[HF_TOKEN_USER_SET_MARKER] == ""
+
+
+def test_provenance_marker_stamped_fresh_at_first_launch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import os
+
+    from skulk.store.config import (
+        HF_TOKEN_USER_SET_MARKER,
+        stamp_hf_token_provenance,
+    )
+
+    monkeypatch.delenv(HF_TOKEN_USER_SET_MARKER, raising=False)
+    monkeypatch.setenv("HF_TOKEN", "operator-token")
+    stamp_hf_token_provenance()
+    assert os.environ[HF_TOKEN_USER_SET_MARKER] == "1"
+
+    monkeypatch.delenv(HF_TOKEN_USER_SET_MARKER, raising=False)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    stamp_hf_token_provenance()
+    assert os.environ[HF_TOKEN_USER_SET_MARKER] == ""

@@ -148,6 +148,20 @@ actually converges without restarts.
 """
 
 
+def stamp_hf_token_provenance() -> None:
+    """Record at startup whether ``HF_TOKEN`` was operator-supplied.
+
+    An inherited marker is trusted rather than recomputed: an in-place restart
+    (``os.execv``) carries the previous process's environment, so a
+    config-promoted ``HF_TOKEN`` would otherwise look operator-supplied after
+    every ``/admin/restart`` and block rotation forever.
+    """
+    if HF_TOKEN_USER_SET_MARKER not in os.environ:
+        os.environ[HF_TOKEN_USER_SET_MARKER] = (
+            "1" if "HF_TOKEN" in os.environ else ""
+        )
+
+
 def promote_hf_token(value: object, *, source: str) -> bool:
     """Promote a config-carried token into ``HF_TOKEN`` when allowed.
 

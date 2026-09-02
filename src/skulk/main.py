@@ -737,11 +737,16 @@ class Node:
         # via the service env file). If so, config syncs must never replace
         # it; a value merely promoted from skulk.yaml below may be replaced
         # by a newer fleet token so rotation converges without restarts.
-        from skulk.store.config import HF_TOKEN_USER_SET_MARKER, promote_hf_token
-
-        os.environ[HF_TOKEN_USER_SET_MARKER] = (
-            "1" if "HF_TOKEN" in os.environ else ""
+        # An inherited marker is trusted rather than recomputed: an in-place
+        # restart (os.execv) carries the previous process's environment, so a
+        # config-promoted HF_TOKEN would otherwise look operator-supplied
+        # after every /admin/restart and block rotation forever (#922 review).
+        from skulk.store.config import (
+            promote_hf_token,
+            stamp_hf_token_provenance,
         )
+
+        stamp_hf_token_provenance()
         if skulk_config is not None:
             _ = promote_hf_token(skulk_config.hf_token, source="local config")
 
@@ -1365,6 +1370,14 @@ class Node:
         here: a second write would only be clobbered by the host applying its
         own broadcast.
         """
+        # Reload persisted truth first: config sync updates the file (and the
+        # environment) but not this startup snapshot, so serializing
+        # self.skulk_config as-is after a Settings token rotation would
+        # rebroadcast the stale token and overwrite the rotated one
+        # fleet-wide (#922 review).
+        refreshed_config = load_skulk_config()
+        if refreshed_config is not None:
+            self.skulk_config = refreshed_config
         if self.skulk_config is None or self.skulk_config.model_store is None:
             return
         ms = self.skulk_config.model_store
