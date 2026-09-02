@@ -9,7 +9,7 @@ uv pip install skulk-llama-server-vulkan
 llama-server-vulkan --list-devices
 ```
 
-Skulk's engine provisioning discovers the installed wheel automatically and wires it as the node's served engine. Version scheme: `0.<llama.cpp build>.<packaging revision>`, in lockstep with the CUDA sibling wheel and Skulk's engine pin. Built from source in the Skulk repository's `engine-wheel` workflow and published via PyPI trusted publishing.
+Skulk's engine provisioning discovers the installed wheel automatically and wires it as the node's served engine. Version scheme: `0.<llama.cpp build>.<packaging revision>`, in lockstep with the CUDA sibling wheel and Skulk's engine pin. Built from source in the Skulk repository's `engine-wheel` workflow and published to the Foxlight package index at `wheels.foxlight.ai`, which is the sole channel for new versions (releases published to PyPI before 2026-08-30 remain available but are not updated).
 
 This wheel is the engine path for AMD GPU nodes and the fallback for bare-metal NVIDIA nodes when the CUDA wheel is unavailable; how it fits into Skulk's install and provisioning flow is documented in the [Build & Runtime Paths guide](https://foxlight-foundation.github.io/Skulk/build-and-runtime/).
 
