@@ -2193,8 +2193,11 @@ class API:
                 "once to an immutable commit, and the explicit add action authorizes "
                 "repository code selected by that card. Success waits until the exact "
                 "mutation is ordered and visible in the responding API's catalog. The "
-                "mutation requires direct loopback access or an authenticated "
-                "operator-gateway credential."
+                "mutation requires a direct loopback or trusted-fabric "
+                "(private LAN / CGNAT) connection without proxy-forwarding "
+                "headers, or an authenticated operator-gateway credential; "
+                "browser requests must present a fabric, loopback, or exactly "
+                "same-origin Origin."
             ),
         )(self.add_custom_model)
         self.app.post(
@@ -2509,7 +2512,10 @@ class API:
             summary="Start a node download",
             description=(
                 "Start a low-level node download for an exact authorized catalog "
-                "card. Requires loopback or authenticated operator access."
+                "card. Requires a direct loopback or trusted-fabric (private "
+                "LAN / CGNAT) connection without proxy-forwarding headers, or "
+                "authenticated operator-gateway access; browser requests must "
+                "present a fabric, loopback, or exactly same-origin Origin."
             ),
         )(self.start_download)
         self.app.delete(
@@ -8769,6 +8775,7 @@ class API:
             client_host,
             request.headers.get("origin"),
             forwarding_headers_present=forwarding_headers_present,
+            request_host_authority=request.headers.get("host"),
         ):
             return
         raise HTTPException(

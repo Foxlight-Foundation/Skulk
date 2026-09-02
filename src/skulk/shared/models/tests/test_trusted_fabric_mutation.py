@@ -67,3 +67,62 @@ def test_loopback_rule_remains_strict() -> None:
     """The narrower guard is untouched: fabric peers stay rejected there."""
     assert loopback_mutation_allowed("192.168.0.55", None) is False
     assert loopback_mutation_allowed("127.0.0.1", None) is True
+
+
+@pytest.mark.parametrize(
+    "origin_host",
+    ["kite3.local", "my-node.tailnet-abc.ts.net"],
+)
+def test_same_origin_hostname_dashboards_are_admitted(origin_host: str) -> None:
+    """Dashboards are browsed by hostname; same-origin proves this node served it.
+
+    A cross-site page cannot satisfy this: the browser's cross-site request
+    carries the target's Host header but the attacker page's Origin.
+    """
+    assert (
+        trusted_fabric_mutation_allowed(
+            "192.168.0.55",
+            f"http://{origin_host}:52415",
+            request_host_authority=f"{origin_host}:52415",
+        )
+        is True
+    )
+
+
+def test_cross_host_hostname_origin_is_rejected() -> None:
+    assert (
+        trusted_fabric_mutation_allowed(
+            "192.168.0.55",
+            "http://evil.example.com:52415",
+            request_host_authority="kite3.local:52415",
+        )
+        is False
+    )
+
+
+def test_hostname_origin_without_request_authority_is_rejected() -> None:
+    assert (
+        trusted_fabric_mutation_allowed(
+            "192.168.0.55", "http://kite3.local:52415"
+        )
+        is False
+    )
+
+
+def test_same_origin_comparison_is_case_insensitive_and_port_exact() -> None:
+    assert (
+        trusted_fabric_mutation_allowed(
+            "192.168.0.55",
+            "http://KITE3.local:52415",
+            request_host_authority="kite3.LOCAL:52415",
+        )
+        is True
+    )
+    assert (
+        trusted_fabric_mutation_allowed(
+            "192.168.0.55",
+            "http://kite3.local:52416",
+            request_host_authority="kite3.local:52415",
+        )
+        is False
+    )

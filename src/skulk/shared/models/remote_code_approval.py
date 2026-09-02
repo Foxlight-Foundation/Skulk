@@ -224,6 +224,7 @@ def trusted_fabric_mutation_allowed(
     origin: str | None,
     *,
     forwarding_headers_present: bool = False,
+    request_host_authority: str | None = None,
 ) -> bool:
     """Return whether a request came directly from a trusted-fabric peer.
 
@@ -238,12 +239,19 @@ def trusted_fabric_mutation_allowed(
         client_host: Socket peer host reported by the ASGI server.
         origin: Optional browser Origin header.
         forwarding_headers_present: Whether a proxy-origin header was supplied.
+        request_host_authority: The request's own ``Host`` header, used to
+            accept a same-origin browser request when the dashboard is opened
+            by hostname (``kite3.local``, a MagicDNS name) rather than an IP
+            literal. Same-origin proves the page was served by this very node,
+            so a cross-site page cannot satisfy it: a browser's cross-site
+            request carries the target's Host but the attacker page's Origin.
 
     Returns:
         ``True`` only for a direct loopback or trusted-fabric peer and, for
-        browser requests, an Origin on the same trust classes. Proxy-shaped
-        requests still fail closed: a forwarded request's true origin is
-        unknowable, and the public relay must never reach these handlers.
+        browser requests, an Origin that is either on the same trust classes
+        or exactly same-origin with the request itself. Proxy-shaped requests
+        still fail closed: a forwarded request's true origin is unknowable,
+        and the public relay must never reach these handlers.
     """
 
     if forwarding_headers_present or not _is_trusted_fabric_host(client_host):
@@ -254,9 +262,17 @@ def trusted_fabric_mutation_allowed(
         parsed_origin = urlsplit(origin)
     except ValueError:
         return False
-    return parsed_origin.scheme in {"http", "https"} and _is_trusted_fabric_host(
-        parsed_origin.hostname
-    )
+    if parsed_origin.scheme not in {"http", "https"}:
+        return False
+    if _is_trusted_fabric_host(parsed_origin.hostname):
+        return True
+    # Hostname Origins: accept only an exact same-origin match against the
+    # request's own authority. Skulk serves plain HTTP on a non-default port,
+    # so both sides always carry an explicit port and a lowercase string
+    # comparison of the authority is exact.
+    if request_host_authority is None:
+        return False
+    return parsed_origin.netloc.lower() == request_host_authority.strip().lower()
 
 
 def loopback_mutation_allowed(

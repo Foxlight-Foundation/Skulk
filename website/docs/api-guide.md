@@ -1590,7 +1590,9 @@ custom model card to the cluster catalog. The
 dashboard and operator API may call this through the normal cluster control
 surface when the request comes from a direct loopback or trusted-fabric socket
 peer (private LAN or CGNAT, with no proxy-forwarding headers and, for browser
-requests, an Origin on the same trust classes), or has passed the authenticated
+requests, an Origin on the same trust classes or exactly same-origin with the
+request, which is how a dashboard opened by hostname such as `kite3.local` or
+a MagicDNS name qualifies), or has passed the authenticated
 operator gateway with `operations:write`. The trusted-fabric admission matches
 the cluster's standing posture (a peer on those networks can already join the
 mesh as a full member) and is what lets a dashboard browsed from another
@@ -2041,8 +2043,9 @@ automatically).
 
 Lower-level endpoint for explicit node download control. It accepts a target
 node and shard metadata only from direct loopback or trusted-fabric callers
-(private LAN or CGNAT socket peers without proxy-forwarding headers) or an
-authenticated operator gateway. The embedded model card must exactly match current authorized
+(private LAN or CGNAT socket peers without proxy-forwarding headers; browser
+requests must also present a fabric, loopback, or exactly same-origin
+`Origin`) or an authenticated operator gateway. The embedded model card must exactly match current authorized
 catalog truth apart from a snapshot-only publication stamp; unknown aliases
 return `404`, and stale or forged content returns `409` without dispatching a
 download.
