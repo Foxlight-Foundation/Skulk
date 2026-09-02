@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from skulk.download.download_utils import _build_auth_error_message
+from skulk.download.download_utils import build_auth_error_message
 from skulk.download.huggingface_utils import (
     get_hf_token,
     get_hf_token_path,
@@ -86,7 +86,7 @@ async def test_sync_and_async_resolvers_agree(file_contents: str | None) -> None
 
 
 async def test_401_without_token_names_node_and_the_dashboard_path() -> None:
-    message = await _build_auth_error_message(401, _MODEL)
+    message = await build_auth_error_message(401, _MODEL)
     assert "sent no Hugging Face token" in message
     assert "hf auth login" in message
     # The easy path on a formed cluster: enter it once, it propagates.
@@ -99,7 +99,7 @@ async def test_401_with_token_reports_rejection_not_absence(
 ) -> None:
     """A configured-but-rejected token must not be described as missing."""
     monkeypatch.setenv("HF_TOKEN", "expired")
-    message = await _build_auth_error_message(401, _MODEL)
+    message = await build_auth_error_message(401, _MODEL)
     assert "rejected the configured token" in message
     assert "expired, revoked, or mistyped" in message
     assert "sent no Hugging Face token" not in message
@@ -107,7 +107,7 @@ async def test_401_with_token_reports_rejection_not_absence(
 
 
 async def test_403_without_token_covers_both_terms_and_token() -> None:
-    message = await _build_auth_error_message(403, _MODEL)
+    message = await build_auth_error_message(403, _MODEL)
     assert f"https://huggingface.co/{_MODEL}" in message
     assert "sent no Hugging Face token" in message
 
@@ -116,7 +116,7 @@ async def test_403_with_token_points_at_the_account_mismatch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("HF_TOKEN", "valid")
-    message = await _build_auth_error_message(403, _MODEL)
+    message = await build_auth_error_message(403, _MODEL)
     assert "same" in message and "account" in message
     assert "sent no Hugging Face token" not in message
 
@@ -126,7 +126,7 @@ async def test_auth_messages_never_leak_the_token(
 ) -> None:
     monkeypatch.setenv("HF_TOKEN", "hf_supersecret_value")
     for status in (401, 403, 500):
-        message = await _build_auth_error_message(status, _MODEL)
+        message = await build_auth_error_message(status, _MODEL)
         assert "hf_supersecret_value" not in message
 
 
@@ -197,7 +197,7 @@ async def test_401_names_skulk_yaml_when_that_is_the_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _set_config_token(monkeypatch, "stale")
-    message = await _build_auth_error_message(401, _MODEL)
+    message = await build_auth_error_message(401, _MODEL)
     assert "hf_token in skulk.yaml" in message
     assert "stale" not in message
 
@@ -254,7 +254,7 @@ async def test_auth_message_ignores_tokens_this_process_never_loaded(
     revoked token instead of restarting the node.
     """
     _set_config_token(monkeypatch, "never_loaded")
-    message = await _build_auth_error_message(401, _MODEL)
+    message = await build_auth_error_message(401, _MODEL)
     assert "sent no Hugging Face token" in message
     assert "rejected the configured token" not in message
     # ...but it must still point at the token sitting unused in the config.
@@ -263,7 +263,7 @@ async def test_auth_message_ignores_tokens_this_process_never_loaded(
 
 
 async def test_auth_message_has_no_restart_hint_when_nothing_is_configured() -> None:
-    message = await _build_auth_error_message(401, _MODEL)
+    message = await build_auth_error_message(401, _MODEL)
     assert "sent no Hugging Face token" in message
     assert "restart the node to apply it" not in message
 
@@ -394,6 +394,6 @@ async def test_whitespace_environment_token_reports_as_absent_not_rejected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("HF_TOKEN", "   ")
-    message = await _build_auth_error_message(401, _MODEL)
+    message = await build_auth_error_message(401, _MODEL)
     assert "sent no Hugging Face token" in message
     assert "rejected the configured token" not in message

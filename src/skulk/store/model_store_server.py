@@ -524,7 +524,13 @@ class ModelStoreServer:
         return response
 
     async def _handle_list_downloads(self, request: web.Request) -> web.Response:
-        """``GET /downloads`` — list active store-side downloads."""
+        """``GET /downloads`` — list pending, in-progress, and failed downloads.
+
+        Failed entries carry their actionable ``error`` explanation so the
+        dashboard can tell the operator why (for example a gated repository
+        that needs a token or accepted terms) instead of silently dropping
+        the row.
+        """
         downloads = self._store.list_active_downloads()
         return web.json_response(
             [

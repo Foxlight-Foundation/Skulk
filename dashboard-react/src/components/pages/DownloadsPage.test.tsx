@@ -10,7 +10,9 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 vi.mock('../../i18n/tolgee', () => ({
   useSkulkTranslation: () => ({
-    t: (_key: string, fallback: string) => fallback,
+    t: (_key: string, fallback: string, params?: Record<string, unknown>) =>
+      fallback.replace(/\{(\w+)\}/g, (match, name: string) =>
+        params && name in params ? String(params[name]) : match),
   }),
 }));
 
@@ -27,7 +29,12 @@ vi.mock('../layout/StoreRegistryTable', () => ({
 }));
 
 vi.mock('./ModelSearchModal', () => ({
-  ModelSearchModal: () => null,
+  ModelSearchModal: ({ onDownloadStarted }: { onDownloadStarted?: (modelId: string) => void }) => (
+    <button
+      data-testid="mock-download-start"
+      onClick={() => onDownloadStarted?.('meta-llama/gated')}
+    />
+  ),
 }));
 
 vi.mock('../cluster/PlacementManager', () => ({
@@ -252,5 +259,126 @@ describe('ModelStorePage registry convergence', () => {
 
     expect(container?.textContent).toContain('org/imported-model');
     expect(registryRequests).toBe(2);
+  });
+});
+
+describe('ModelStorePage failed-download surfacing', () => {
+  const GATED_REASON =
+    "Access to 'meta-llama/gated' is restricted and this node sent no Hugging Face token.";
+
+  it('toasts the store reason when a download transitions to failed, then converges', async () => {
+    vi.useFakeTimers();
+    const { addToast } = await import('../../hooks/useToast');
+    let downloadRequests = 0;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === '/models') return jsonResponse({ data: [] });
+      if (path === '/store/downloads') {
+        downloadRequests += 1;
+        return jsonResponse({
+          downloads: downloadRequests === 1
+            ? [{ modelId: 'meta-llama/gated', progress: 0.1, status: 'downloading' }]
+            : [{ modelId: 'meta-llama/gated', progress: 0.1, status: 'failed', error: GATED_REASON }],
+        });
+      }
+      if (path === '/store/reconciliation') return reconciliationResponse();
+      if (path === '/store/registry') return jsonResponse({ entries: [] });
+      throw new Error(`unexpected fetch: ${path}`);
+    }));
+
+    await renderModelStore();
+    await flushEffects();
+    expect(addToast).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    await flushEffects();
+
+    expect(addToast).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'error',
+      message: expect.stringContaining(GATED_REASON),
+    }));
+
+    // The failed entry is terminal: the 2s poll must stop instead of spinning
+    // on a listing that now permanently includes it.
+    const requestsAfterToast = downloadRequests;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6000);
+    });
+    expect(downloadRequests).toBe(requestsAfterToast);
+  });
+
+  it('does not toast a failure already listed on the first fetch', async () => {
+    vi.useFakeTimers();
+    const { addToast } = await import('../../hooks/useToast');
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === '/models') return jsonResponse({ data: [] });
+      if (path === '/store/downloads') {
+        return jsonResponse({
+          downloads: [{ modelId: 'meta-llama/gated', progress: 0, status: 'failed', error: GATED_REASON }],
+        });
+      }
+      if (path === '/store/reconciliation') return reconciliationResponse();
+      if (path === '/store/registry') return jsonResponse({ entries: [] });
+      throw new Error(`unexpected fetch: ${path}`);
+    }));
+
+    await renderModelStore();
+    await flushEffects();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4000);
+    });
+    await flushEffects();
+
+    expect(addToast).not.toHaveBeenCalled();
+  });
+});
+
+describe('ModelStorePage failed-download retry', () => {
+  it('toasts again when a retry fails before ever being observed as live', async () => {
+    vi.useFakeTimers();
+    const { addToast } = await import('../../hooks/useToast');
+    const REASON = "Access to 'meta-llama/gated' is restricted and this node sent no Hugging Face token.";
+    let downloadRequests = 0;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === '/models') return jsonResponse({ data: [] });
+      if (path === '/store/downloads') {
+        downloadRequests += 1;
+        return jsonResponse({
+          downloads: downloadRequests === 1
+            ? [{ modelId: 'meta-llama/gated', progress: 0.1, status: 'downloading' }]
+            : [{ modelId: 'meta-llama/gated', progress: 0.1, status: 'failed', error: REASON }],
+        });
+      }
+      if (path === '/store/reconciliation') return reconciliationResponse();
+      if (path === '/store/registry') return jsonResponse({ entries: [] });
+      throw new Error(`unexpected fetch: ${path}`);
+    }));
+
+    await renderModelStore();
+    await flushEffects();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    await flushEffects();
+    expect(addToast).toHaveBeenCalledTimes(1);
+
+    // Retry: the store accepts the new attempt, but it fails again before any
+    // poll observes a live status. Forgetting the model on accept means the
+    // repeat failure toasts instead of being treated as already known.
+    const retryButton = container?.querySelector('[data-testid="mock-download-start"]') as HTMLButtonElement;
+    await act(async () => {
+      retryButton.click();
+    });
+    await flushEffects();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    await flushEffects();
+
+    expect(addToast).toHaveBeenCalledTimes(2);
   });
 });

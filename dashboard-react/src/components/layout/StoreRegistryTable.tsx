@@ -70,6 +70,8 @@ export interface StoreDownloadProgress {
   modelId: string;
   progress: number;
   status: string;
+  /** Actionable failure explanation from the store, set when status is 'failed'. */
+  error?: string | null;
 }
 
 export interface ModelCardInfo {
@@ -774,7 +776,9 @@ export function StoreRegistryTable({
   }, [activeDownloads]);
 
   const isActive = (id: string) => activeModelIds.includes(id);
-  const downloadingCount = activeDownloads.length;
+  // Failed entries stay in the listing so their reason can be shown; only
+  // live transfers count toward the "downloading" header.
+  const downloadingCount = activeDownloads.filter((d) => d.status !== 'failed').length;
 
   return (
     <Container>
@@ -830,12 +834,22 @@ export function StoreRegistryTable({
               <Cell $area="files" />
               <Cell $align="right" $area="status">
                 <MobileLabel>{t('common.status', 'Status')}</MobileLabel>
-                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
-                  <ProgressTrack>
-                    <ProgressFill $pct={dl.progress * 100} />
-                  </ProgressTrack>
-                  <ProgressText>{(dl.progress * 100).toFixed(0)}%</ProgressText>
-                </div>
+                {dl.status === 'failed' ? (
+                  <InfoTooltip
+                    content={dl.error ?? t('storeRegistry.downloadFailedNoReason', 'Download failed. Check the store host logs for details.')}
+                    placement="left"
+                    delay={0}
+                  >
+                    <StateBadge $tone="danger">{t('storeRegistry.downloadFailed', 'Download failed')}</StateBadge>
+                  </InfoTooltip>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
+                    <ProgressTrack>
+                      <ProgressFill $pct={dl.progress * 100} />
+                    </ProgressTrack>
+                    <ProgressText>{(dl.progress * 100).toFixed(0)}%</ProgressText>
+                  </div>
+                )}
               </Cell>
               <Cell $area="actions" />
             </TRow>
@@ -844,6 +858,9 @@ export function StoreRegistryTable({
           {/* Registered entries */}
           {orderedEntries.map((entry) => {
             const dl = downloadMap.get(entry.model_id);
+            // A failed download must not lock the row's actions: the operator
+            // fixes the cause (token, gated terms) and retries via Download.
+            const downloading = dl !== undefined && dl.status !== 'failed';
             const active = isActive(entry.model_id);
             const tooLarge = totalClusterMemoryBytes > 0 && entry.total_bytes > totalClusterMemoryBytes;
             // Speculative-decoding companion (drafter / MTP-head sidecar): loaded
@@ -868,7 +885,7 @@ export function StoreRegistryTable({
                     <StopBtn onClick={() => onStop(entry.model_id)} title={t('storeRegistry.stopModel', 'Stop model')}>
                       <MdClose size={20} />
                     </StopBtn>
-                  ) : !active && !dl && !companion && onLaunch ? (
+                  ) : !active && !downloading && !companion && onLaunch ? (
                     tooLarge ? (
                       <InfoTooltip content={t('storeRegistry.insufficientClusterMemory', 'Insufficient cluster memory')} placement="right" delay={0}>
                         <DisabledBtn aria-label={t('storeRegistry.insufficientMemory', 'Insufficient memory')}>
@@ -891,7 +908,7 @@ export function StoreRegistryTable({
                   ) : null}
                 </PlayCell>
                 <PlayCell $area="place">
-                  {!active && !dl && !companion && onPlacement ? (
+                  {!active && !downloading && !companion && onPlacement ? (
                     <PlacementBtn
                       onClick={() => onPlacement(entry.model_id)}
                       title={t('storeRegistry.configurePlacement', 'Configure placement')}
@@ -994,7 +1011,15 @@ export function StoreRegistryTable({
                 </Cell>
                 <Cell $align="right" $area="status">
                   <MobileLabel>{t('common.status', 'Status')}</MobileLabel>
-                  {dl ? (
+                  {dl && dl.status === 'failed' ? (
+                    <InfoTooltip
+                      content={dl.error ?? t('storeRegistry.downloadFailedNoReason', 'Download failed. Check the store host logs for details.')}
+                      placement="left"
+                      delay={0}
+                    >
+                      <StateBadge $tone="danger">{t('storeRegistry.downloadFailed', 'Download failed')}</StateBadge>
+                    </InfoTooltip>
+                  ) : dl ? (
                     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
                       <ProgressTrack>
                         <ProgressFill $pct={dl.progress * 100} />

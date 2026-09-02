@@ -1185,7 +1185,18 @@ class ModelStoreClient:
                 request = session.post(url, json=body) if body else session.post(url)
                 async with request as resp:
                     if resp.status not in (200, 201):
-                        return {"status": "error", "error": f"HTTP {resp.status}"}
+                        # Keep the store's own explanation: a bare "HTTP 409"
+                        # gives the operator nothing to act on, while the
+                        # response body names the conflict or capacity limit.
+                        detail = (await resp.text()).strip()
+                        return {
+                            "status": "error",
+                            "error": (
+                                f"HTTP {resp.status}: {detail[:300]}"
+                                if detail
+                                else f"HTTP {resp.status}"
+                            ),
+                        }
                     data: object = await resp.json()
                     return data if isinstance(data, dict) else {"status": "unknown"}
         except Exception as exc:

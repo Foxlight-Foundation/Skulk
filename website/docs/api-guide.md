@@ -1622,6 +1622,12 @@ shard group. `source_revision` is also optional; when supplied it must be a full
 40-character Hugging Face commit hash. When omitted, Skulk resolves `main` once
 to the Hub's full commit. Card metadata and subsequent artifact downloads are
 therefore always pinned to an immutable revision.
+When the Hub refuses the metadata fetch with 401 or 403 (a gated or private
+repository), the 400 response explains the concrete fix for this node:
+configure a Hugging Face token, accept the model terms on the repository page,
+or accept them under the same account the configured token belongs to. Like
+every HTTPException from this API, the explanation is serialized in the
+OpenAI-style error envelope, so clients read it from `error.message`.
 
 ### Add an exact unsigned model card
 
@@ -2135,13 +2141,23 @@ use the enriched public `GET /store/registry` endpoint above.
 
 **GET** `/store/downloads`
 
-Use this to inspect in-progress shared-store download activity.
+Use this to inspect shared-store download activity. The listing carries
+pending, in-progress, and failed downloads; each failed entry keeps an
+actionable `error` explanation (for example how to authenticate for a gated
+Hugging Face repository) and stays listed until a retry replaces it or the
+store host restarts. Cancelled downloads are not listed.
 
 ### Request a store download
 
 **POST** `/store/models/{model_id}/download`
 
 Use this when you want the store host to fetch and register a model.
+
+The response reports the store's current transfer state. A store-host
+rejection (for example an immutable-card conflict or a capacity limit) is
+reported in the same 200 response with `status` set to `error` and the
+store's operator-readable reason in `error`; callers must check the body's
+status rather than treating any 200 as an accepted transfer.
 
 For signed-registry artifacts, Skulk's internal request also carries the
 immutable card ID. The store host verifies that identity against its own signed

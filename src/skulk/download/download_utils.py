@@ -113,13 +113,31 @@ def _hf_token_remediation() -> str:
     )
 
 
-async def _build_auth_error_message(status_code: int, model_id: ModelId) -> str:
+async def build_auth_error_message(status_code: int, model_id: ModelId) -> str:
     """Explain an HF 401/403 in terms of what the operator must actually do.
 
     Distinguishes the four cases that look identical in the raw status code:
     no token at all, a token that Hugging Face rejected, gated terms not yet
     accepted, and terms that may be accepted under a *different* account than
     the token belongs to.
+
+    Args:
+        status_code: The HTTP status Hugging Face answered with; 401 and 403
+            get case-specific remediation, any other value a generic line.
+        model_id: The repository the request was for, named in the message.
+
+    Returns:
+        A human-readable explanation naming the concrete fix for this node
+        (configure a token, accept the model terms, or align the accepting
+        account with the token).
+
+    Side effects:
+        Reads this process's ``HF_TOKEN`` environment variable and the
+        Hugging Face token file to report which token source (if any) the
+        failing request would have used. The no-token remediation
+        additionally consults ``~/.skulk/skulk.env`` and ``skulk.yaml``
+        (via :func:`resolve_hf_token_source`) to mention a configured token
+        this process has not loaded. Nothing is written.
     """
     # In-process resolution deliberately: the Authorization header this status
     # code answers came from get_hf_token(), which reads only the environment
@@ -1201,7 +1219,7 @@ async def _fetch_file_list(
         session.get(url, headers=headers) as response,
     ):
         if response.status in [401, 403]:
-            msg = await _build_auth_error_message(response.status, model_id)
+            msg = await build_auth_error_message(response.status, model_id)
             raise HuggingFaceAuthenticationError(msg)
         elif response.status == 429:
             raise HuggingFaceRateLimitError(
@@ -1307,7 +1325,7 @@ async def file_meta(
             redirected_location = r.headers.get("location")
             return await file_meta(model_id, revision, path, redirected_location)
         if r.status in [401, 403]:
-            msg = await _build_auth_error_message(r.status, model_id)
+            msg = await build_auth_error_message(r.status, model_id)
             raise HuggingFaceAuthenticationError(msg)
         content_length = int(
             r.headers.get("x-linked-size") or r.headers.get("content-length") or 0
@@ -1356,7 +1374,7 @@ async def range_read(
     ):
         if r.status in (401, 403):
             raise HuggingFaceAuthenticationError(
-                await _build_auth_error_message(r.status, model_id)
+                await build_auth_error_message(r.status, model_id)
             )
         if r.status == 404:
             raise FileNotFoundError(f"File {path} not found in {model_id}@{revision}")
@@ -1503,7 +1521,7 @@ async def _download_file(
             if r.status == 404:
                 raise FileNotFoundError(f"File not found: {url}")
             if r.status in [401, 403]:
-                msg = await _build_auth_error_message(r.status, model_id)
+                msg = await build_auth_error_message(r.status, model_id)
                 raise HuggingFaceAuthenticationError(msg)
             assert r.status in [200, 206], (
                 f"Failed to download {path} from {url}: {r.status}"

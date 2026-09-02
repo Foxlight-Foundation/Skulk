@@ -2861,7 +2861,13 @@ class API:
             "/store/downloads",
             tags=["Store"],
             summary="List active store downloads",
-            description="List in-progress downloads being managed by the shared model store.",
+            description=(
+                "List downloads being managed by the shared model store: "
+                "pending, in-progress, and failed. Failed entries stay listed "
+                "with an actionable `error` explanation (for example how to "
+                "authenticate for a gated Hugging Face repository) until a "
+                "retry replaces them; cancelled downloads are not listed."
+            ),
         )(self.get_store_downloads)
         self.app.post(
             "/store/models/{model_id:path}/download",
@@ -8864,6 +8870,36 @@ class API:
         cls._require_loopback_mutation(request)
         return False
 
+    @staticmethod
+    async def _describe_hf_fetch_failure(
+        model_id: ModelId, exc: Exception
+    ) -> str:
+        """Turn a Hub metadata-fetch failure into an operator-actionable detail.
+
+        A gated or private repository surfaces here as an
+        ``HfHubHTTPError`` whose raw text tells the operator to "log in",
+        which is the wrong remediation for a Skulk node. Route 401/403
+        through the download layer's explainer so the Add flow names the
+        same concrete fixes as a failed download (configure a token, accept
+        the model terms, match the accepting account to the token).
+
+        Args:
+            model_id: The repository the caller asked to add.
+            exc: The exception raised while fetching Hub metadata.
+
+        Returns:
+            A human-readable failure description for the HTTP error detail.
+        """
+        # Imported lazily: the API module must not take a module-level
+        # dependency on the download layer for one error path.
+        from skulk.download.download_utils import build_auth_error_message
+
+        response = getattr(exc, "response", None)
+        status_code = getattr(response, "status_code", None)
+        if status_code in (401, 403):
+            return await build_auth_error_message(status_code, model_id)
+        return f"Failed to fetch model: {exc}"
+
     async def add_custom_model(
         self, payload: AddCustomModelParams, request: Request
     ) -> ModelListModel:
@@ -8897,7 +8933,10 @@ class API:
             card = preserve_generated_card_constraints(card, bundled_card)
         except Exception as exc:
             raise HTTPException(
-                status_code=400, detail=f"Failed to fetch model: {exc}"
+                status_code=400,
+                detail=await self._describe_hf_fetch_failure(
+                    payload.model_id, exc
+                ),
             ) from exc
 
         mutation = AddCustomModelCard(model_card=card)
