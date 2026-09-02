@@ -45,7 +45,6 @@ def test_forwarded_requests_fail_closed_even_from_the_fabric() -> None:
     ("origin", "allowed"),
     [
         ("http://192.168.0.122:52415", True),
-        ("http://localhost:52415", True),
         ("https://10.0.0.9", True),
         ("http://evil.example.com", False),
         ("https://203.0.113.7", False),
@@ -55,6 +54,27 @@ def test_forwarded_requests_fail_closed_even_from_the_fabric() -> None:
 def test_browser_origin_must_also_be_on_the_fabric(origin: str, allowed: bool) -> None:
     """A public page in a fabric browser must not ride the user's location."""
     assert trusted_fabric_mutation_allowed("192.168.0.55", origin) is allowed
+
+
+def test_loopback_origin_requires_a_loopback_peer() -> None:
+    """A loopback Origin proves the page came from the CLIENT's machine.
+
+    From a loopback socket peer that is fine (the page and the node share the
+    machine); from a fabric peer it means some localhost-served page on the
+    user's machine is reaching across the LAN, which must not pass.
+    """
+    assert (
+        trusted_fabric_mutation_allowed("127.0.0.1", "http://localhost:52415")
+        is True
+    )
+    assert (
+        trusted_fabric_mutation_allowed("192.168.0.55", "http://localhost:52415")
+        is False
+    )
+    assert (
+        trusted_fabric_mutation_allowed("192.168.0.55", "http://127.0.0.1:8080")
+        is False
+    )
 
 
 def test_ipv6_non_loopback_is_rejected() -> None:

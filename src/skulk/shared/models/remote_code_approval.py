@@ -202,21 +202,34 @@ gateway.
 """
 
 
-def _is_trusted_fabric_host(host: str | None) -> bool:
-    """Whether a socket or Origin host is loopback or on the trusted fabric."""
+def _is_loopback_host(host: str | None) -> bool:
+    """Whether a host names the local loopback."""
     if host == "localhost":
         return True
+    if host is None:
+        return False
+    try:
+        return ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _is_fabric_ipv4(host: str | None) -> bool:
+    """Whether a host is a private-LAN or CGNAT IPv4 literal."""
     if host is None:
         return False
     try:
         parsed = ip_address(host)
     except ValueError:
         return False
-    if parsed.is_loopback:
-        return True
-    if parsed.version != 4:
-        return False
-    return any(parsed in network for network in _TRUSTED_FABRIC_IPV4_NETWORKS)
+    return parsed.version == 4 and any(
+        parsed in network for network in _TRUSTED_FABRIC_IPV4_NETWORKS
+    )
+
+
+def _is_trusted_fabric_host(host: str | None) -> bool:
+    """Whether a socket or Origin host is loopback or on the trusted fabric."""
+    return _is_loopback_host(host) or _is_fabric_ipv4(host)
 
 
 def trusted_fabric_mutation_allowed(
@@ -266,15 +279,22 @@ def trusted_fabric_mutation_allowed(
         return False
     if parsed_origin.scheme not in {"http", "https"}:
         return False
-    if _is_trusted_fabric_host(parsed_origin.hostname):
+    origin_host = parsed_origin.hostname
+    # A loopback Origin only proves the page came from the CLIENT's own
+    # machine, so it is honored only when the socket peer is loopback too;
+    # otherwise a page served from a user's localhost could drive mutations
+    # at a fabric node it never came from.
+    if _is_loopback_host(origin_host):
+        return _is_loopback_host(client_host)
+    if _is_fabric_ipv4(origin_host):
         return True
     # Hostname Origins: accept only a name this node positively knows as its
     # own. Comparing against the request's Host header instead would be
     # DNS-rebinding-vulnerable: after a rebind, the attacker's hostname
     # appears in both Origin and Host, so their equality proves nothing.
-    if self_host_names is None or parsed_origin.hostname is None:
+    if self_host_names is None or origin_host is None:
         return False
-    return parsed_origin.hostname.lower() in self_host_names
+    return origin_host.lower() in self_host_names
 
 
 def loopback_mutation_allowed(
