@@ -274,11 +274,11 @@ def test_normalized_hf_token_treats_whitespace_as_absent() -> None:
 class TestPromoteHfToken:
     """Rotation converges; operator launch values are never replaced (#922)."""
 
-    def _clear(self, monkeypatch: object) -> None:
+    def _clear(self, monkeypatch: "pytest.MonkeyPatch") -> None:
         from skulk.store.config import HF_TOKEN_USER_SET_MARKER
 
-        monkeypatch.delenv("HF_TOKEN", raising=False)  # pyright: ignore[reportAttributeAccessIssue]
-        monkeypatch.delenv(HF_TOKEN_USER_SET_MARKER, raising=False)  # pyright: ignore[reportAttributeAccessIssue]
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv(HF_TOKEN_USER_SET_MARKER, raising=False)
 
     def test_promotes_into_an_empty_environment(
         self, monkeypatch: "pytest.MonkeyPatch"

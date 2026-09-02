@@ -527,7 +527,7 @@ def merge_cluster_config_bootstrap(
 
     from skulk.store.config import update_skulk_config_atomic
 
-    decoded: object = yaml_module.safe_load(config_yaml)
+    decoded: object = cast(object, yaml_module.safe_load(config_yaml))
     if not isinstance(decoded, dict):
         # A malformed payload must degrade to "keep local config", not crash
         # a node mid-join; the trusted fabric makes this a bug signal, not an
