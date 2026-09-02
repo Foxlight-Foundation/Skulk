@@ -2491,6 +2491,7 @@ class Master:
         model_ref: str,
         current_instances: Mapping[InstanceId, Instance],
         node_memory: Mapping[NodeId, MemoryUsage] | None = None,
+        node_vram: Mapping[NodeId, Memory] | None = None,
     ) -> dict[InstanceId, Instance] | None:
         """Return a steward placement for one exact brain, without emitting it."""
         await get_model_cards()
@@ -2506,6 +2507,15 @@ class Master:
             system_role="steward",
         )
         placement_memory = node_memory or self._telemetry_view.node_memory
+        placement_vram = (
+            node_vram
+            if node_vram is not None
+            else usable_vram_by_node(
+                self._telemetry_view.node_system,
+                self._telemetry_view.node_resources,
+                node_memory=placement_memory,
+            )
+        )
         return place_instance(
             command,
             self.state.topology,
@@ -2514,11 +2524,7 @@ class Master:
             self.state.node_network,
             download_status=self._effective_downloads(),
             node_resources=self._telemetry_view.node_resources,
-            node_vram=usable_vram_by_node(
-                self._telemetry_view.node_system,
-                self._telemetry_view.node_resources,
-                node_memory=placement_memory,
-            ),
+            node_vram=placement_vram,
             unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
                 self._telemetry_view.node_system,
                 self._telemetry_view.node_resources,
@@ -2527,10 +2533,10 @@ class Master:
             approved_remote_code_identities=self._model_trust_approvals,
         )
 
-    def _steward_replacement_memory(
+    def _steward_replacement_memory_inputs(
         self, current: Instance
-    ) -> Mapping[NodeId, MemoryUsage]:
-        """Build a hypothetical snapshot with only the old steward reclaimed.
+    ) -> tuple[Mapping[NodeId, MemoryUsage], Mapping[NodeId, Memory]]:
+        """Build hypothetical RAM and VRAM with only the steward reclaimed.
 
         The snapshot is used only to decide whether replacement shards are
         worth prestaging. Actual post-teardown placement still uses observed
@@ -2548,7 +2554,7 @@ class Master:
                 continue
             footprint = estimate_shard_footprint(shard.model_card, fraction)
             credit[node_id] = credit.get(node_id, 0) + footprint.in_bytes
-        return {
+        memory = {
             node_id: (
                 usage.model_copy(
                     update={
@@ -2565,6 +2571,30 @@ class Master:
             )
             for node_id, usage in self._telemetry_view.node_memory.items()
         }
+        unified_nodes = unified_memory_gpu_node_ids(
+            self._telemetry_view.node_system,
+            self._telemetry_view.node_resources,
+            node_memory=memory,
+        )
+        vram = dict(
+            usable_vram_by_node(
+                self._telemetry_view.node_system,
+                self._telemetry_view.node_resources,
+                node_memory=memory,
+            )
+        )
+        for node_id, reclaimed_bytes in credit.items():
+            if node_id in unified_nodes or node_id not in vram:
+                continue
+            accelerator = getattr(
+                self._telemetry_view.node_system.get(node_id), "accelerator", None
+            )
+            total_bytes = getattr(accelerator, "vram_total_bytes", None)
+            credited_bytes = vram[node_id].in_bytes + reclaimed_bytes
+            if isinstance(total_bytes, int) and total_bytes > 0:
+                credited_bytes = min(total_bytes, credited_bytes)
+            vram[node_id] = Memory.from_bytes(credited_bytes)
+        return memory, vram
 
     def _reset_steward_upgrade(self) -> None:
         """Forget one in-progress best-brain convergence attempt."""
@@ -2619,11 +2649,16 @@ class Master:
             for instance_id, instance in self.state.instances.items()
             if instance_id != steward_id
         }
-        replacement_memory = self._steward_replacement_memory(current)
+        replacement_memory, replacement_vram = self._steward_replacement_memory_inputs(
+            current
+        )
         for model_ref in preference[:current_index]:
             try:
                 placed = await self._place_steward_model(
-                    model_ref, instances_without_steward, replacement_memory
+                    model_ref,
+                    instances_without_steward,
+                    replacement_memory,
+                    replacement_vram,
                 )
             except (PlacementError, PlacementInfoPendingError):
                 continue

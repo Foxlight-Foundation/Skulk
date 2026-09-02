@@ -125,10 +125,12 @@ async def test_upgrade_stages_then_waits_for_idle_before_teardown(
         _model_ref: str,
         current_instances: Mapping[InstanceId, Instance],
         node_memory: Mapping[NodeId, MemoryUsage] | None = None,
+        node_vram: Mapping[NodeId, Memory] | None = None,
     ) -> dict[InstanceId, Instance]:
         assert old.instance_id not in current_instances
         assert node_memory is not None
         assert node_memory[master.node_id].ram_available.in_gb > 2
+        assert node_vram is not None
         return {**current_instances, candidate.instance_id: candidate}
 
     monkeypatch.setattr(master, "_place_steward_model", place_candidate)
@@ -197,7 +199,9 @@ def test_completed_steward_download_requires_exact_shard_metadata() -> None:
     assert not master._steward_model_download_completed(master.node_id, candidate_shard)
 
 
-def test_replacement_admission_credits_only_outgoing_steward_memory() -> None:
+def test_replacement_admission_credits_outgoing_steward_ram_and_vram(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Prestaging eligibility can account for memory released at replacement."""
     master, _download_receiver, _event_receiver = _master()
     old, _shard = _instance(master.node_id, "org/current")
@@ -207,8 +211,25 @@ def test_replacement_admission_credits_only_outgoing_steward_memory() -> None:
         other_node: _memory(4),
     }
 
-    replacement = master._steward_replacement_memory(old)
+    def fake_usable_vram(*_args: object, **_kwargs: object) -> dict[NodeId, Memory]:
+        return {
+            master.node_id: Memory.from_gb(2),
+            other_node: Memory.from_gb(4),
+        }
+
+    def fake_unified_nodes(*_args: object, **_kwargs: object) -> set[NodeId]:
+        return set()
+
+    monkeypatch.setattr("skulk.master.main.usable_vram_by_node", fake_usable_vram)
+    monkeypatch.setattr(
+        "skulk.master.main.unified_memory_gpu_node_ids",
+        fake_unified_nodes,
+    )
+
+    replacement, vram = master._steward_replacement_memory_inputs(old)
 
     assert replacement[master.node_id].ram_available.in_gb > 2
     assert replacement[master.node_id].ram_available.in_gb <= 16
     assert replacement[other_node].ram_available.in_gb == 4
+    assert vram[master.node_id].in_gb > 2
+    assert vram[other_node].in_gb == 4
