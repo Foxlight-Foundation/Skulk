@@ -257,3 +257,81 @@ def test_enabled_store_with_identity_is_valid() -> None:
 
     config = ModelStoreConfig(enabled=True, store_host="kite", store_path="/models")
     assert config.store_host == "kite"
+
+
+def test_normalized_hf_token_treats_whitespace_as_absent() -> None:
+    """Whitespace is truthy but not a credential (#922 review)."""
+    from skulk.store.config import normalized_hf_token
+
+    assert normalized_hf_token(None) is None
+    assert normalized_hf_token("") is None
+    assert normalized_hf_token("   ") is None
+    assert normalized_hf_token("\t\n") is None
+    assert normalized_hf_token(123) is None
+    assert normalized_hf_token(" real-token ") == "real-token"
+
+
+class TestPromoteHfToken:
+    """Rotation converges; operator launch values are never replaced (#922)."""
+
+    def _clear(self, monkeypatch: "pytest.MonkeyPatch") -> None:
+        from skulk.store.config import HF_TOKEN_USER_SET_MARKER
+
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv(HF_TOKEN_USER_SET_MARKER, raising=False)
+
+    def test_promotes_into_an_empty_environment(
+        self, monkeypatch: "pytest.MonkeyPatch"
+    ) -> None:
+        import os
+
+        from skulk.store.config import promote_hf_token
+
+        self._clear(monkeypatch)
+        assert promote_hf_token("token-a", source="test") is True
+        assert os.environ["HF_TOKEN"] == "token-a"
+
+    def test_replaces_a_config_derived_value_so_rotation_converges(
+        self, monkeypatch: "pytest.MonkeyPatch"
+    ) -> None:
+        import os
+
+        from skulk.store.config import promote_hf_token
+
+        self._clear(monkeypatch)
+        monkeypatch.setenv("HF_TOKEN", "token-a")  # promoted from config earlier
+        assert promote_hf_token("token-b", source="test") is True
+        assert os.environ["HF_TOKEN"] == "token-b"
+
+    def test_never_replaces_an_operator_supplied_launch_value(
+        self, monkeypatch: "pytest.MonkeyPatch"
+    ) -> None:
+        import os
+
+        from skulk.store.config import HF_TOKEN_USER_SET_MARKER, promote_hf_token
+
+        self._clear(monkeypatch)
+        monkeypatch.setenv("HF_TOKEN", "operator-token")
+        monkeypatch.setenv(HF_TOKEN_USER_SET_MARKER, "1")
+        assert promote_hf_token("fleet-token", source="test") is False
+        assert os.environ["HF_TOKEN"] == "operator-token"
+
+    def test_whitespace_never_lands_in_the_environment(
+        self, monkeypatch: "pytest.MonkeyPatch"
+    ) -> None:
+        import os
+
+        from skulk.store.config import promote_hf_token
+
+        self._clear(monkeypatch)
+        assert promote_hf_token("   ", source="test") is False
+        assert "HF_TOKEN" not in os.environ
+
+    def test_noop_when_the_value_is_already_current(
+        self, monkeypatch: "pytest.MonkeyPatch"
+    ) -> None:
+        from skulk.store.config import promote_hf_token
+
+        self._clear(monkeypatch)
+        monkeypatch.setenv("HF_TOKEN", "token-a")
+        assert promote_hf_token("token-a", source="test") is False

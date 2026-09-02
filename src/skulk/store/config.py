@@ -78,6 +78,7 @@ from pathlib import Path
 from typing import Final, Literal, cast, final
 
 import yaml
+from loguru import logger
 from pydantic import Field, field_validator, model_validator
 
 from skulk.utils.pydantic_ext import FrozenModel
@@ -121,6 +122,70 @@ def hostname_aliases(hostname: str) -> set[str]:
         aliases.add(short_hostname)
         aliases.add(f"{short_hostname}.local")
     return aliases
+
+
+def normalized_hf_token(value: object) -> str | None:
+    """Return a usable Hugging Face token from a config value, else ``None``.
+
+    Whitespace is not a credential: downstream resolution strips tokens before
+    use, so a whitespace-only value would ride the wire as "present", clobber
+    a real local token on merge, and then resolve as blank. Every propagation
+    guard (send and receive) must therefore treat it as absent.
+    """
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+HF_TOKEN_USER_SET_MARKER = "_SKULK_HF_TOKEN_USER_SET"
+"""Internal marker: ``HF_TOKEN`` was supplied by the operator at launch.
+
+Same pattern as ``_SKULK_KV_BACKEND_USER_SET``: an operator-exported value
+outranks config sync forever, while a value merely promoted from config may be
+replaced when a newer fleet token arrives, so token rotation through Settings
+actually converges without restarts.
+"""
+
+
+def stamp_hf_token_provenance() -> None:
+    """Record at startup whether ``HF_TOKEN`` was operator-supplied.
+
+    An inherited marker is trusted rather than recomputed: an in-place restart
+    (``os.execv``) carries the previous process's environment, so a
+    config-promoted ``HF_TOKEN`` would otherwise look operator-supplied after
+    every ``/admin/restart`` and block rotation forever.
+    """
+    if HF_TOKEN_USER_SET_MARKER not in os.environ:
+        os.environ[HF_TOKEN_USER_SET_MARKER] = (
+            "1" if "HF_TOKEN" in os.environ else ""
+        )
+
+
+def promote_hf_token(value: object, *, source: str) -> bool:
+    """Promote a config-carried token into ``HF_TOKEN`` when allowed.
+
+    Normalizes first (whitespace never lands in the environment), refuses to
+    touch an operator-supplied launch value, and otherwise replaces the
+    current config-derived value so rotation takes effect without a restart.
+
+    Args:
+        value: The raw ``hf_token`` config value.
+        source: Human-readable origin for the log line.
+
+    Returns:
+        Whether the environment was updated.
+    """
+    token = normalized_hf_token(value)
+    if token is None:
+        return False
+    if os.environ.get(HF_TOKEN_USER_SET_MARKER) == "1":
+        return False
+    if os.environ.get("HF_TOKEN") == token:
+        return False
+    os.environ["HF_TOKEN"] = token
+    logger.info(f"HF token updated from {source}")
+    return True
 
 
 def node_matches_store_host(

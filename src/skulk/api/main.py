@@ -12435,13 +12435,20 @@ class API:
         # A consent change must apply immediately, not after the TTL.
         self._telemetry_config_cached_until = 0.0
         self._sync_builtin_speech_capability()
-        # Broadcast to all nodes via gossipsub — strip hf_token (secret).
+        # Broadcast to all nodes via gossipsub. hf_token rides along so a
+        # token entered in any node's Settings converges onto the node that
+        # actually fetches (the store host, or a worker doing an
+        # allow_hf_fallback direct download). The fabric is PSK-encrypted and
+        # trusted by doctrine; GET /config still never returns the token. A
+        # blank token is dropped so it can never clobber a real one on peers.
         import copy
 
         from skulk.shared.types.commands import SyncConfig
+        from skulk.store.config import normalized_hf_token
 
         broadcast_data = copy.deepcopy(config_data)
-        broadcast_data.pop("hf_token", None)
+        if normalized_hf_token(broadcast_data.get("hf_token")) is None:
+            broadcast_data.pop("hf_token", None)
         broadcast_data.pop("model_trust", None)
         broadcast_yaml = yaml.safe_dump(
             broadcast_data, default_flow_style=False, sort_keys=False
@@ -12454,10 +12461,12 @@ class API:
             "_SKULK_KV_BACKEND_USER_SET"
         ):
             os.environ["SKULK_KV_CACHE_BACKEND"] = str(inference["kv_cache_backend"])
-        # Apply HF token immediately
-        hf_token = config_data.get("hf_token")
-        if hf_token and "HF_TOKEN" not in os.environ:
-            os.environ["HF_TOKEN"] = str(hf_token)
+        # Apply HF token immediately: replaces a config-derived value so
+        # rotation converges, never an operator-supplied launch value, and
+        # whitespace never lands in the environment.
+        from skulk.store.config import promote_hf_token
+
+        _ = promote_hf_token(config_data.get("hf_token"), source="settings update")
         # Apply logging config immediately
         logging_cfg_update = _coerce_json_object(config_data.get("logging"))
         if logging_cfg_update:

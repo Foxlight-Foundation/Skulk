@@ -200,6 +200,136 @@ def test_update_config_preserves_existing_model_trust_when_omitted(
     assert config.model_trust.approved_remote_code_identities == [card_id]
 
 
+def _capture_broadcast(api: API) -> list[str]:
+    """Intercept the SyncConfig broadcast a PUT /config emits."""
+    captured: list[str] = []
+
+    async def send(command: object) -> None:
+        from skulk.shared.types.commands import SyncConfig
+
+        if isinstance(command, SyncConfig):
+            captured.append(command.config_yaml)
+
+    object.__setattr__(api, "_send_download", send)
+    return captured
+
+
+def test_update_config_broadcasts_the_token_to_the_fleet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A token entered in one node's Settings must reach the store host.
+
+    The token rides the PSK-encrypted config broadcast so every node,
+    including the one that actually fetches from Hugging Face, converges on
+    it. GET /config still never returns it.
+    """
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    config_path = tmp_path / "skulk.yaml"
+    api = _build_api()
+    object.__setattr__(api, "_config_path", config_path)
+    broadcasts = _capture_broadcast(api)
+    client = TestClient(api.app)
+
+    response = client.put(
+        "/config", json={"config": {"hf_token": "fleet-token"}}
+    )
+
+    assert response.status_code == 200
+    assert len(broadcasts) == 1
+    assert "hf_token: fleet-token" in broadcasts[0]
+    # The HTTP surface stays secret-free even though the fabric carries it.
+    get_response = client.get("/config")
+    assert "fleet-token" not in get_response.text
+
+
+def test_update_config_broadcasts_the_preserved_local_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Saving unrelated settings re-broadcasts this node's existing token.
+
+    That is what lets any node's Settings page act as the fleet's token
+    source: the merged config, local token included, is what the fleet sees.
+    """
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    config_path = tmp_path / "skulk.yaml"
+    config_path.write_text("hf_token: existing-token\n", encoding="utf-8")
+    api = _build_api()
+    object.__setattr__(api, "_config_path", config_path)
+    broadcasts = _capture_broadcast(api)
+    client = TestClient(api.app)
+
+    response = client.put(
+        "/config", json={"config": {"inference": {"kv_cache_backend": "default"}}}
+    )
+
+    assert response.status_code == 200
+    assert len(broadcasts) == 1
+    assert "hf_token: existing-token" in broadcasts[0]
+
+
+def test_update_config_never_broadcasts_a_blank_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A blank token is dropped so it cannot clobber a real one on peers."""
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    config_path = tmp_path / "skulk.yaml"
+    api = _build_api()
+    object.__setattr__(api, "_config_path", config_path)
+    broadcasts = _capture_broadcast(api)
+    client = TestClient(api.app)
+
+    response = client.put("/config", json={"config": {"hf_token": ""}})
+
+    assert response.status_code == 200
+    assert len(broadcasts) == 1
+    assert "hf_token" not in broadcasts[0]
+
+
+def test_update_config_never_broadcasts_a_whitespace_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Whitespace is truthy but not a credential; it stays off the wire."""
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    config_path = tmp_path / "skulk.yaml"
+    api = _build_api()
+    object.__setattr__(api, "_config_path", config_path)
+    broadcasts = _capture_broadcast(api)
+    client = TestClient(api.app)
+
+    response = client.put("/config", json={"config": {"hf_token": "   "}})
+
+    assert response.status_code == 200
+    assert len(broadcasts) == 1
+    assert "hf_token" not in broadcasts[0]
+
+
+def test_update_config_never_broadcasts_model_trust(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deprecated node-local compatibility state stays off the wire."""
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    card_id = f"card_{'a' * 52}"
+    config_path = tmp_path / "skulk.yaml"
+    config_path.write_text(
+        "model_trust:\n"
+        "  approved_remote_code_identities:\n"
+        f"    - {card_id}\n",
+        encoding="utf-8",
+    )
+    api = _build_api()
+    object.__setattr__(api, "_config_path", config_path)
+    broadcasts = _capture_broadcast(api)
+    client = TestClient(api.app)
+
+    response = client.put(
+        "/config", json={"config": {"inference": {"kv_cache_backend": "default"}}}
+    )
+
+    assert response.status_code == 200
+    assert len(broadcasts) == 1
+    assert "model_trust" not in broadcasts[0]
+
+
 def test_update_config_merges_latest_trust_inside_transaction(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

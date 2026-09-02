@@ -444,8 +444,13 @@ async def test_state_sync_response_includes_config_yaml(
                 response = candidate
 
         assert response.config_yaml is not None
-        assert "super-secret-token" not in response.config_yaml
-        assert "hf_token" not in response.config_yaml
+        # The master's token rides the bootstrap so a joining node can
+        # download immediately; the fabric is PSK-encrypted and trusted.
+        # (A whitespace-only token is dropped by the same guard that drops a
+        # blank one; normalized_hf_token has its own unit coverage.)
+        assert "hf_token: super-secret-token" in response.config_yaml
+        # Deprecated compatibility state must still never travel.
+        assert "model_trust" not in response.config_yaml
         assert "store_host: kite3.local" in response.config_yaml
         assert response.snapshot is not None
         assert response.snapshot.session_id == session_id

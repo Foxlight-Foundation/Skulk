@@ -638,11 +638,11 @@ def _check_hf_token(facts: NodeFacts) -> Sequence[CheckResult]:
                 "on this node"
             ),
             remediation=(
-                "run `hf auth login` on this node (writes "
-                f"{get_hf_token_path()} and is picked up without a restart), "
-                "or set HF_TOKEN in ~/.skulk/skulk.env and restart. Tokens are "
-                "node-local and never broadcast to the cluster, so setting one "
-                "in another node's dashboard does not cover this node."
+                "on a formed cluster, enter the token once in any node's "
+                "dashboard Settings; it propagates to every node including "
+                "this one. On a single node, run `hf auth login` (writes "
+                f"{get_hf_token_path()} and is picked up without a restart) "
+                "or set HF_TOKEN in ~/.skulk/skulk.env and restart."
             ),
         )
     ]
@@ -837,12 +837,14 @@ REGISTRY: tuple[DoctorCheck, ...] = (
         title="Hugging Face token",
         docs=(
             "Reports whether this node can authenticate to Hugging Face, and "
-            "whether it is the node that needs to. Tokens are node-local and "
-            "are never broadcast to the cluster, so the token must exist on "
-            "whichever node performs downloads: the model store host when a "
-            "store is configured, otherwise every node for itself. Without "
-            "one, public models still download and only gated or private "
-            "repositories fail."
+            "whether it is the node that needs to. A token entered in any "
+            "node's dashboard Settings propagates over the encrypted cluster "
+            "fabric to every node, and joining nodes adopt it at bootstrap, "
+            "so one entry covers the fleet; this check verifies it actually "
+            "arrived on the node that performs downloads (the model store "
+            "host when a store is configured, otherwise this node itself). "
+            "Without one, public models still download and only gated or "
+            "private repositories fail."
         ),
         run=_check_hf_token,
     ),

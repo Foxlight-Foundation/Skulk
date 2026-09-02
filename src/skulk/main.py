@@ -503,6 +503,64 @@ def _state_sync_store_http_host(
     )
 
 
+def merge_cluster_config_bootstrap(
+    config_yaml: str,
+    config_path: Path,
+) -> dict[str, object]:
+    """Merge an authoritative bootstrap config into the local file.
+
+    A payload carrying an ``hf_token`` is adopted, persisted mode ``0o600``,
+    and promoted into ``HF_TOKEN`` when that variable is unset, so a freshly
+    joined node's downloads authenticate without a restart. Absent-or-blank
+    incoming tokens never erase a locally configured one, and node-local
+    deprecated ``model_trust`` compatibility state is preserved.
+
+    Args:
+        config_yaml: The master's serialized bootstrap configuration.
+        config_path: Destination ``skulk.yaml``.
+
+    Returns:
+        The merged configuration mapping as persisted.
+    """
+
+    import yaml as yaml_module
+
+    from skulk.store.config import update_skulk_config_atomic
+
+    decoded: object = cast(object, yaml_module.safe_load(config_yaml))
+    if not isinstance(decoded, dict):
+        # A malformed payload must degrade to "keep local config" in full:
+        # merging an empty mapping here would wipe every local field except
+        # the explicitly preserved ones. The identity update returns the
+        # existing config untouched (and still stamps the 0600 mode). The
+        # trusted fabric makes this a bug signal, not an attack surface, so
+        # a warning is the right volume.
+        if decoded is not None:
+            logger.warning(
+                "Ignoring non-mapping cluster bootstrap config payload"
+            )
+        return update_skulk_config_atomic(config_path, lambda existing: existing)
+    received = cast("dict[str, object]", decoded)
+
+    from skulk.store.config import normalized_hf_token, promote_hf_token
+
+    def preserve_local_fields(
+        existing: dict[str, object],
+    ) -> dict[str, object]:
+        updated = dict(received)
+        if normalized_hf_token(updated.get("hf_token")) is None and existing.get(
+            "hf_token"
+        ):
+            updated["hf_token"] = existing["hf_token"]
+        if "model_trust" not in updated and "model_trust" in existing:
+            updated["model_trust"] = existing["model_trust"]
+        return updated
+
+    merged = update_skulk_config_atomic(config_path, preserve_local_fields)
+    _ = promote_hf_token(merged.get("hf_token"), source="cluster config bootstrap")
+    return merged
+
+
 @dataclass
 class Node:
     router: Router
@@ -675,14 +733,22 @@ class Node:
                 f"Inference config: kv_cache_backend={skulk_config.inference.kv_cache_backend}"
             )
 
-        # Apply HF token from config if not already set via env
-        if (
-            skulk_config is not None
-            and skulk_config.hf_token
-            and "HF_TOKEN" not in os.environ
-        ):
-            os.environ["HF_TOKEN"] = skulk_config.hf_token
-            logger.info("HF token loaded from config")
+        # Track whether the operator supplied HF_TOKEN at launch (directly or
+        # via the service env file). If so, config syncs must never replace
+        # it; a value merely promoted from skulk.yaml below may be replaced
+        # by a newer fleet token so rotation converges without restarts.
+        # An inherited marker is trusted rather than recomputed: an in-place
+        # restart (os.execv) carries the previous process's environment, so a
+        # config-promoted HF_TOKEN would otherwise look operator-supplied
+        # after every /admin/restart and block rotation forever (#922 review).
+        from skulk.store.config import (
+            promote_hf_token,
+            stamp_hf_token_provenance,
+        )
+
+        stamp_hf_token_provenance()
+        if skulk_config is not None:
+            _ = promote_hf_token(skulk_config.hf_token, source="local config")
 
         store_client, store_server = _configure_model_store_runtime(
             node_id, skulk_config
@@ -1243,10 +1309,18 @@ class Node:
         return None
 
     def _apply_cluster_config_yaml(self, config_yaml: str) -> None:
-        """Persist cluster config locally and rebuild derived runtime wiring."""
+        """Persist cluster config locally and rebuild derived runtime wiring.
+
+        Merges rather than overwrites: an authoritative payload that carries
+        no ``hf_token`` must not erase one configured locally (the previous
+        raw ``write_text`` did exactly that on every bootstrap). An incoming
+        token is adopted and promoted to ``HF_TOKEN`` when unset, mirroring
+        the ordinary config-sync receive path, so downloads on a freshly
+        joined node authenticate without a restart.
+        """
 
         config_path = resolve_config_path()
-        config_path.write_text(config_yaml)
+        merge_cluster_config_bootstrap(config_yaml, config_path)
         self.skulk_config = load_skulk_config(config_path)
 
     async def _apply_authoritative_cluster_config(self, config_yaml: str) -> None:
@@ -1296,6 +1370,14 @@ class Node:
         here: a second write would only be clobbered by the host applying its
         own broadcast.
         """
+        # Reload persisted truth first: config sync updates the file (and the
+        # environment) but not this startup snapshot, so serializing
+        # self.skulk_config as-is after a Settings token rotation would
+        # rebroadcast the stale token and overwrite the rotated one
+        # fleet-wide (#922 review).
+        refreshed_config = load_skulk_config()
+        if refreshed_config is not None:
+            self.skulk_config = refreshed_config
         if self.skulk_config is None or self.skulk_config.model_store is None:
             return
         ms = self.skulk_config.model_store
@@ -1323,13 +1405,19 @@ class Node:
 
         import yaml
 
-        # Broadcast the resolved reachable host to the cluster (secrets stripped).
-        # The store host applies its own broadcast via local delivery and persists
-        # it through the normal config-sync path, so there is no separate local
-        # write here (it would only be clobbered by that same broadcast).
+        # Broadcast the resolved reachable host to the cluster. The store
+        # host's hf_token (if any) rides along so a fleet formed from one
+        # configured node converges on that token; a blank one is dropped so
+        # it can never clobber a real token on peers. The store host applies
+        # its own broadcast via local delivery and persists it through the
+        # normal config-sync path, so there is no separate local write here
+        # (it would only be clobbered by that same broadcast).
+        from skulk.store.config import normalized_hf_token
+
         broadcast_dict = copy.deepcopy(self.skulk_config.model_dump())
         broadcast_dict["model_store"]["store_http_host"] = reachable_host
-        broadcast_dict.pop("hf_token", None)
+        if normalized_hf_token(broadcast_dict.get("hf_token")) is None:
+            broadcast_dict.pop("hf_token", None)
         broadcast_dict.pop("model_trust", None)
         broadcast_yaml = yaml.safe_dump(
             broadcast_dict, default_flow_style=False, sort_keys=False

@@ -186,15 +186,14 @@ nothing here. A token is required only for **gated or private** repositories,
 which includes several popular families (Llama and Gemma among them). Without
 one, those downloads fail while everything else keeps working.
 
-A token is **node-local by design**. It is never broadcast to the cluster, so
-setting it on one node does not give it to the others. It must exist on the
-node that actually performs the download:
+**Setting the token in any node's dashboard covers the whole cluster.** A
+token saved through **Settings** rides the encrypted cluster fabric to every
+node, including the model store host that actually performs downloads, and
+nodes that join later adopt it at bootstrap. A save that carries no token (or
+a blank one) never erases a token another node already has.
 
-- With a model store configured, that is the **store host**. This is the case
-  operators miss most often, because it is usually not the node whose
-  dashboard is open.
-- With no model store, every node downloads for itself and needs its own
-  token.
+The per-node mechanisms below still matter for a single machine that has not
+formed a cluster, and for choosing which source wins on one node.
 
 Get a token at
 [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens), then
@@ -218,7 +217,9 @@ restarting the node.
 
 To confirm a node is set up, run `skulk doctor` there. Its **Hugging Face
 token** check reports whether a token is configured, which mechanism provided
-it, and whether this node is one that needs it at all.
+it, and whether this node is one that needs it at all. On a formed cluster the
+simplest remediation it can point to is entering the token once in any node's
+dashboard Settings.
 
 ## First-run troubleshooting
 
@@ -230,7 +231,7 @@ it, and whether this node is one that needs it at all.
 | A second local node never appears | Confirm every node uses the same version and namespace. On macOS, enable **System Settings → Privacy & Security → Local Network → Skulk**, then stop and start Skulk. |
 | macOS asks for Screen & System Audio Recording | Deny it. That permission is not part of the Skulk desktop contract. Include the app version when reporting the prompt. |
 | The dashboard opens but shows only one node | That is a working one-node cluster. Start the other nodes, then troubleshoot discovery only if they do not join. |
-| A gated model fails to download | Confirm a Hugging Face token is set on the node that downloads, which is the model store host when a store is configured. Run `skulk doctor` there and see the **Hugging Face token** check. Accept the model terms on the same account the token belongs to. |
+| A gated model fails to download | Enter a Hugging Face token in any node's dashboard **Settings**; it propagates to the whole cluster. Run `skulk doctor` on the downloading node (the store host, when a store is configured) and see the **Hugging Face token** check. Accept the model terms on the same account the token belongs to. |
 | `sudo` looks frozen while asking for a password | Type the Linux account password and press Enter; no typing feedback is shown. |
 
 The macOS app does not start Skulk automatically at login. On Linux desktop,

@@ -85,12 +85,13 @@ async def test_sync_and_async_resolvers_agree(file_contents: str | None) -> None
     assert sync_token == await get_hf_token()
 
 
-async def test_401_without_token_names_node_and_restart_free_mechanism() -> None:
+async def test_401_without_token_names_node_and_the_dashboard_path() -> None:
     message = await _build_auth_error_message(401, _MODEL)
     assert "sent no Hugging Face token" in message
     assert "hf auth login" in message
-    assert "store host" in message
-    assert "never broadcast" in message
+    # The easy path on a formed cluster: enter it once, it propagates.
+    assert "dashboard Settings" in message
+    assert "propagates" in message
 
 
 async def test_401_with_token_reports_rejection_not_absence(

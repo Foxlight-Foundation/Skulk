@@ -2770,11 +2770,15 @@ class Master:
                 )
 
     def _load_state_sync_config_yaml(self) -> str | None:
-        """Return a sanitized config payload for bootstrap responses.
+        """Return a config payload for bootstrap responses.
 
-        State-sync responses travel over cluster pub/sub, so they must never
-        include secrets such as ``hf_token``. Read/parse failures are treated
-        as non-fatal so bootstrap requests cannot crash master coordination.
+        ``hf_token`` rides along: a node joining the fleet adopts the elected
+        master's token so downloads work everywhere without per-node token
+        entry (the fabric is PSK-encrypted and trusted by doctrine). A blank
+        token is dropped so it can never clobber a joining node's real one.
+        ``model_trust`` remains stripped as deprecated compatibility state.
+        Read/parse failures are treated as non-fatal so bootstrap requests
+        cannot crash master coordination.
         """
 
         config_path = resolve_config_path()
@@ -2802,7 +2806,10 @@ class Master:
         sanitized_config: JsonObject = {
             str(key): copy.deepcopy(value) for key, value in raw_config.items()
         }
-        sanitized_config.pop("hf_token", None)
+        from skulk.store.config import normalized_hf_token
+
+        if normalized_hf_token(sanitized_config.get("hf_token")) is None:
+            sanitized_config.pop("hf_token", None)
         sanitized_config.pop("model_trust", None)
         model_store = sanitized_config.get("model_store")
         if (

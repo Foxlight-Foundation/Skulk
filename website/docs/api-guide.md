@@ -2437,9 +2437,12 @@ Updates cluster-wide config. Important behavior:
 - `model_trust` cannot be replaced through `PUT /config`; authenticated
   operators receive `409` because the current API has no secondary model-trust
   ceremony
-- `hf_token` is not broadcast over gossipsub; each receiving node merges its
-  existing local token into the synchronized config before an atomic
-  owner-only write
+- `hf_token` propagates over the PSK-encrypted cluster fabric: a token
+  entered in any node's Settings converges onto every node, including the
+  model store host that actually fetches from Hugging Face. A broadcast
+  carrying no token (or a blank one) never erases a receiving node's existing
+  local token; every write remains atomic and owner-only (mode `0o600`), and
+  `GET /config` still never returns the token
 - logging changes (enable/disable) take effect immediately on all nodes
 - inference changes affect future launches
 - historical model-trust commands and state remain wire-compatible but have no

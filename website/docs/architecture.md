@@ -537,9 +537,11 @@ all executable, source, artifact, runtime, and capability truth still matches.
 Custom-card creation accepts only a direct loopback request or an authenticated
 operator-gateway request with write scope; successful gateway validation is
 carried to the canonical route in the ASGI scope rather than through a
-caller-spoofable header. Secret-stripped config convergence retains each
-recipient's local Hugging Face token before atomically replacing its owner-only
-config file. `POST /place_instance` re-evaluates current facts at launch.
+caller-spoofable header. Config convergence carries the Hugging Face token
+across the PSK-encrypted fabric, so a token entered in any node's Settings
+reaches the nodes that download; an absent-or-blank incoming token never
+erases a recipient's local one, each write atomically replaces the owner-only
+config file, and the HTTP config surface never returns the token. `POST /place_instance` re-evaluates current facts at launch.
 
 For GGUF text models the bundled cards use that preference order deliberately:
 they list both llama.cpp engines as compatible but rank the served

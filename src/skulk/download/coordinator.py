@@ -414,10 +414,19 @@ class DownloadCoordinator:
             def preserve_local_fields(
                 existing: dict[str, object],
             ) -> dict[str, object]:
-                """Merge node-local secrets and trust inside the write lock."""
+                """Merge node-local fields inside the write lock.
+
+                An incoming ``hf_token`` is adopted (that is how a token
+                entered in one node's Settings reaches the store host), but
+                absent-or-blank must never erase a locally configured one.
+                """
+
+                from skulk.store.config import normalized_hf_token
 
                 updated = dict(received)
-                if "hf_token" not in updated and "hf_token" in existing:
+                if normalized_hf_token(
+                    updated.get("hf_token")
+                ) is None and existing.get("hf_token"):
                     updated["hf_token"] = existing["hf_token"]
                 if "model_trust" not in updated and "model_trust" in existing:
                     updated["model_trust"] = existing["model_trust"]
@@ -447,11 +456,12 @@ class DownloadCoordinator:
                     logger.info(
                         "DownloadCoordinator: skipping KV backend update (user env var override active)"
                     )
-            # Apply HF token if not user-set
-            hf_token = raw.get("hf_token")
-            if hf_token and "HF_TOKEN" not in os.environ:
-                os.environ["HF_TOKEN"] = str(hf_token)
-                logger.info("DownloadCoordinator: updated HF_TOKEN from config sync")
+            # Promote the merged token: replaces a config-derived value so
+            # rotation converges, never an operator-supplied launch value,
+            # and whitespace never lands in the environment.
+            from skulk.store.config import promote_hf_token
+
+            _ = promote_hf_token(raw.get("hf_token"), source="config sync")
             # Apply logging config — enable/disable structured stdout
             logging_cfg = _coerce_json_object(raw.get("logging"))
             if logging_cfg:
