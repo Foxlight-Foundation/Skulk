@@ -2490,6 +2490,7 @@ class Master:
         self,
         model_ref: str,
         current_instances: Mapping[InstanceId, Instance],
+        node_memory: Mapping[NodeId, MemoryUsage] | None = None,
     ) -> dict[InstanceId, Instance] | None:
         """Return a steward placement for one exact brain, without emitting it."""
         await get_model_cards()
@@ -2504,26 +2505,66 @@ class Master:
             min_nodes=1,
             system_role="steward",
         )
+        placement_memory = node_memory or self._telemetry_view.node_memory
         return place_instance(
             command,
             self.state.topology,
             current_instances,
-            self._telemetry_view.node_memory,
+            placement_memory,
             self.state.node_network,
             download_status=self._effective_downloads(),
             node_resources=self._telemetry_view.node_resources,
             node_vram=usable_vram_by_node(
                 self._telemetry_view.node_system,
                 self._telemetry_view.node_resources,
-                node_memory=self._telemetry_view.node_memory,
+                node_memory=placement_memory,
             ),
             unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
                 self._telemetry_view.node_system,
                 self._telemetry_view.node_resources,
-                node_memory=self._telemetry_view.node_memory,
+                node_memory=placement_memory,
             ),
             approved_remote_code_identities=self._model_trust_approvals,
         )
+
+    def _steward_replacement_memory(
+        self, current: Instance
+    ) -> Mapping[NodeId, MemoryUsage]:
+        """Build a hypothetical snapshot with only the old steward reclaimed.
+
+        The snapshot is used only to decide whether replacement shards are
+        worth prestaging. Actual post-teardown placement still uses observed
+        telemetry, avoiding optimistic admission while a worker releases the
+        outgoing model asynchronously.
+        """
+        credit: dict[NodeId, int] = {}
+        assignments = current.shard_assignments
+        for node_id, runner_id in assignments.node_to_runner.items():
+            shard = assignments.runner_to_shard.get(runner_id)
+            if shard is None:
+                continue
+            fraction = shard_fraction_of_model(shard)
+            if fraction is None or fraction <= 0.0:
+                continue
+            footprint = estimate_shard_footprint(shard.model_card, fraction)
+            credit[node_id] = credit.get(node_id, 0) + footprint.in_bytes
+        return {
+            node_id: (
+                usage.model_copy(
+                    update={
+                        "ram_available": Memory.from_bytes(
+                            min(
+                                usage.ram_total.in_bytes,
+                                usage.ram_available.in_bytes + credit[node_id],
+                            )
+                        )
+                    }
+                )
+                if node_id in credit
+                else usage
+            )
+            for node_id, usage in self._telemetry_view.node_memory.items()
+        }
 
     def _reset_steward_upgrade(self) -> None:
         """Forget one in-progress best-brain convergence attempt."""
@@ -2578,10 +2619,11 @@ class Master:
             for instance_id, instance in self.state.instances.items()
             if instance_id != steward_id
         }
+        replacement_memory = self._steward_replacement_memory(current)
         for model_ref in preference[:current_index]:
             try:
                 placed = await self._place_steward_model(
-                    model_ref, instances_without_steward
+                    model_ref, instances_without_steward, replacement_memory
                 )
             except (PlacementError, PlacementInfoPendingError):
                 continue

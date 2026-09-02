@@ -21,6 +21,7 @@ from skulk.shared.types.events import (
     LocalForwarderEvent,
 )
 from skulk.shared.types.memory import Memory
+from skulk.shared.types.profiling import MemoryUsage
 from skulk.shared.types.state import State
 from skulk.shared.types.state_sync import StateSyncMessage
 from skulk.shared.types.worker.downloads import DownloadCompleted
@@ -97,6 +98,15 @@ def _instance(
     )
 
 
+def _memory(available_gb: float) -> MemoryUsage:
+    return MemoryUsage(
+        ram_total=Memory.from_gb(16),
+        ram_available=Memory.from_gb(available_gb),
+        swap_total=Memory(),
+        swap_available=Memory(),
+    )
+
+
 @pytest.mark.asyncio
 async def test_upgrade_stages_then_waits_for_idle_before_teardown(
     monkeypatch: pytest.MonkeyPatch,
@@ -114,11 +124,15 @@ async def test_upgrade_stages_then_waits_for_idle_before_teardown(
     async def place_candidate(
         _model_ref: str,
         current_instances: Mapping[InstanceId, Instance],
+        node_memory: Mapping[NodeId, MemoryUsage] | None = None,
     ) -> dict[InstanceId, Instance]:
         assert old.instance_id not in current_instances
+        assert node_memory is not None
+        assert node_memory[master.node_id].ram_available.in_gb > 2
         return {**current_instances, candidate.instance_id: candidate}
 
     monkeypatch.setattr(master, "_place_steward_model", place_candidate)
+    master._telemetry_view.node_memory[master.node_id] = _memory(2)
     now = [0.0]
     monkeypatch.setattr("skulk.master.main.time.monotonic", lambda: now[0])
 
@@ -181,3 +195,20 @@ def test_completed_steward_download_requires_exact_shard_metadata() -> None:
 
     assert candidate.shard_assignments.model_id == other_shard.model_card.model_id
     assert not master._steward_model_download_completed(master.node_id, candidate_shard)
+
+
+def test_replacement_admission_credits_only_outgoing_steward_memory() -> None:
+    """Prestaging eligibility can account for memory released at replacement."""
+    master, _download_receiver, _event_receiver = _master()
+    old, _shard = _instance(master.node_id, "org/current")
+    other_node = NodeId(get_node_id_keypair().to_node_id())
+    master._telemetry_view.node_memory = {
+        master.node_id: _memory(2),
+        other_node: _memory(4),
+    }
+
+    replacement = master._steward_replacement_memory(old)
+
+    assert replacement[master.node_id].ram_available.in_gb > 2
+    assert replacement[master.node_id].ram_available.in_gb <= 16
+    assert replacement[other_node].ram_available.in_gb == 4

@@ -2696,7 +2696,12 @@ Behavior notes:
   listed as explicit failures. The dashboard's Performance tab renders these.
 - `GET /v1/diagnostics/node` returns the local node's runtime/config facts,
   resources, process tree, live runner-supervisor state, flight-recorder phase
-  state, placement analysis, and `dataPlane` plus `provider` blocks. DATA diagnostics include
+  state, placement analysis, a bounded `doctor` array, and `dataPlane` plus
+  `provider` blocks. Each doctor entry contains `checkId`, `title`, `verdict`,
+  `detail`, `consequence`, `remediation`, and `fixAvailable` from the node-local
+  doctor registry. The array is capped at 64 entries. The proxied
+  `GET /v1/diagnostics/cluster/{node_id}` response carries the same complete
+  bundle, including doctor results for the selected node. DATA diagnostics include
   transport/reorder mode; active and terminal lifecycle counts; first-byte and
   stream-span timing; duplicate, reordered, skipped, late, idle-timeout,
   transport-failure, and missing-lifecycle counters; plus router egress queue
