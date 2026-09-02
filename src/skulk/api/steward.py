@@ -534,10 +534,38 @@ def _as_object_list(value: object) -> list[object]:
 
 
 def _bounded(payload: object) -> str:
+    """Serialize a tool result without ever returning malformed JSON."""
+
     rendered = json.dumps(payload, indent=1, default=str)
-    if len(rendered) > MAX_TOOL_RESULT_CHARS:
-        rendered = rendered[:MAX_TOOL_RESULT_CHARS] + "\n...[truncated]"
-    return rendered
+    if len(rendered) <= MAX_TOOL_RESULT_CHARS:
+        return rendered
+
+    def envelope(preview: str) -> str:
+        return _compact_json(
+            {
+                "truncated": True,
+                "originalCharacters": len(rendered),
+                "includedCharacters": len(preview),
+                "omittedCharacters": len(rendered) - len(preview),
+                "preview": preview,
+            }
+        )
+
+    # JSON escaping means the serialized size is not a fixed offset from the
+    # preview length. Binary search retains the largest prefix that fits while
+    # keeping the result parseable and making the omitted tail explicit.
+    lower = 0
+    upper = min(len(rendered), MAX_TOOL_RESULT_CHARS)
+    best = envelope("")
+    while lower <= upper:
+        midpoint = (lower + upper) // 2
+        candidate = envelope(rendered[:midpoint])
+        if len(candidate) <= MAX_TOOL_RESULT_CHARS:
+            best = candidate
+            lower = midpoint + 1
+        else:
+            upper = midpoint - 1
+    return best
 
 
 def _compact_json(payload: object) -> str:
