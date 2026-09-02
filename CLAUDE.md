@@ -173,7 +173,9 @@ out. The CUDA engine also ships as x86_64 and aarch64 variants of the pip wheel
 tarball provisioning on NVIDIA nodes. Engine wheels publish to the Foxlight
 PEP 503 index on Cloudflare R2 (`wheels.foxlight.ai`, source of
 truth; `scripts/publish_wheel_index.py`; CUDA wheel exceeds PyPI's size
-limit) with the Vulkan wheel mirrored to PyPI. The CUDA wheel builds with
+limit). The R2 index is the sole channel for new wheel versions: the Vulkan
+PyPI mirror was retired 2026-08-30 and existing PyPI versions stay up
+unchanged. The CUDA wheel builds with
 `GGML_CUDA_NO_VMM=ON`: GPU-less CI cannot satisfy the driver API's transitive
 libcuda.so.1 link (stubs ship only libcuda.so), so never reintroduce
 driver-API-dependent flags to that build. The aarch64 lane uses CUDA 12.9 and

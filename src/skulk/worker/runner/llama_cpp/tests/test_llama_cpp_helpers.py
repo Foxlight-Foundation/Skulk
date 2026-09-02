@@ -115,6 +115,56 @@ def test_messages_prefers_chat_template_messages() -> None:
     assert messages_for_llama(_params(chat_template_messages=msgs)) == msgs
 
 
+def test_messages_fallback_never_emits_an_assistant_tool_call_prefill() -> None:
+    """The reconstructed message list cannot end in an assistant tool call.
+
+    llama.cpp b10753 (upstream #27626) rejects an assistant message carrying
+    tool calls in prefill position, i.e. as the final message with no tool
+    result after it. Skulk's fallback reconstruction only ever emits plain
+    role/content pairs from ``input``, so it cannot produce that shape; this
+    pins that property against future edits to the fallback.
+    """
+    params = _params(
+        instructions="be brief",
+        input=[
+            InputMessage(role="user", content="what is the weather"),
+            InputMessage(role="assistant", content="checking"),
+        ],
+    )
+
+    for message in messages_for_llama(params):
+        assert "tool_calls" not in message
+
+
+def test_messages_pass_client_conversations_through_unchanged() -> None:
+    """A client-supplied tool round trip reaches the server verbatim.
+
+    Skulk proxies OpenAI-shaped conversations rather than rewriting them, so
+    a well-formed tool round trip (assistant tool call followed by its tool
+    result) is forwarded exactly. A caller that ends its conversation on the
+    assistant tool call is sending an incomplete round trip, and the server's
+    own rejection is the correct outcome rather than something Skulk should
+    paper over.
+    """
+    conversation = [
+        {"role": "user", "content": "weather in Paris?"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "get_weather", "arguments": '{"city": "Paris"}'},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_1", "content": "18C"},
+    ]
+
+    assert messages_for_llama(_params(chat_template_messages=conversation)) == conversation
+
+
 def test_messages_fallback_from_input_and_instructions() -> None:
     params = _params(
         instructions="be brief",
