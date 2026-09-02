@@ -124,6 +124,12 @@ from skulk.worker.runner.vllm.orphan_sweep import sweep_orphaned_vllm_engines
 # failure reporting.
 _HEALTH_DEADLINE_S: Final = 1800.0
 
+_PORT_COLLISION_ATTEMPTS: Final = 3
+"""Startup attempts allowed when the chosen server port is taken at bind time."""
+
+_ADDRESS_IN_USE_MARKER: Final = "Address already in use"
+"""Marker identifying a lost port race in a failed server's log tail."""
+
 # Fraction of GPU VRAM vLLM may use for weights + KV cache. Operator-tunable via
 # env; vLLM's own default is 0.90. Placement admits against the same usable-VRAM
 # figure, so this stays a node-local serving knob for now (a card-level override
@@ -651,8 +657,7 @@ class Runner(ServedConcurrentDispatch):
                 task_id=task.task_id,
                 attrs={"model_dir": model_dir.name, "n_ctx": n_ctx},
             ):
-                self._spawn_server(model_dir, str(model_id), n_ctx)
-                self._await_health()
+                self._spawn_server_with_port_retry(model_dir, str(model_id), n_ctx)
         except Exception:
             self._teardown_server()
             raise
@@ -662,6 +667,42 @@ class Runner(ServedConcurrentDispatch):
             f"vllm runner ready in {time.time() - self.setup_start_time:.1f}s "
             f"(url={self.base_url})"
         )
+
+    def _spawn_server_with_port_retry(
+        self, model_dir: Path, served_model_name: str, n_ctx: int
+    ) -> None:
+        """Start the server, retrying a lost port race with a fresh port.
+
+        ``_pick_port`` proves a port free by binding and closing it, but the
+        server binds it seconds later, after Python and vLLM start up. The
+        probe range is the kernel's ephemeral range, so in that window any
+        outbound connection on a busy node (data plane, store transfers,
+        telemetry) can be assigned the same port and the server's own bind
+        fails with EADDRINUSE. Losing that race is transient and retryable;
+        every other startup failure is not, and is re-raised on the spot so
+        real faults still fail fast.
+        """
+        for attempt in range(1, _PORT_COLLISION_ATTEMPTS + 1):
+            self._spawn_server(model_dir, served_model_name, n_ctx)
+            try:
+                self._await_health()
+            except RuntimeError as exc:
+                lost_race = (
+                    _ADDRESS_IN_USE_MARKER in str(exc)
+                    and attempt < _PORT_COLLISION_ATTEMPTS
+                )
+                if not lost_race:
+                    raise
+                logger.warning(
+                    "vllm serve lost a port race on startup "
+                    f"(attempt {attempt}/{_PORT_COLLISION_ATTEMPTS}); "
+                    "retrying with a fresh port"
+                )
+                # Reclaim the failed process and its log before rebinding, so a
+                # retry cannot leak the previous attempt's handles.
+                self._teardown_server()
+                continue
+            return
 
     def _spawn_server(
         self, model_dir: Path, served_model_name: str, n_ctx: int
