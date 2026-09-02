@@ -225,6 +225,7 @@ class EventLogGrowthMonitor:
         self._last_warning_at = now
         return rate
 
+
 TOPOLOGY_SETTLE_GRACE_SECONDS = 60.0
 """How long after master start the plan loop trusts topology for pruning.
 
@@ -344,7 +345,9 @@ def dead_node_instance_failure_events(
         if not unavailable_nodes:
             continue
         node_id = unavailable_nodes[0]
-        reason = "timed out" if node_id in timed_out_node_ids else "left the live topology"
+        reason = (
+            "timed out" if node_id in timed_out_node_ids else "left the live topology"
+        )
         failures.append(
             instance_failure_event(
                 instance,
@@ -998,9 +1001,7 @@ class Master:
             PlacementModelCardIdentityError: If the card was removed or replaced
                 before the command reached the master's serialized order.
         """
-        ordered_card = self._ordered_placement_model_card(
-            command.model_card.model_id
-        )
+        ordered_card = self._ordered_placement_model_card(command.model_card.model_id)
         if ordered_card is None or not same_authorized_model_card(
             command.model_card, ordered_card
         ):
@@ -1450,7 +1451,10 @@ class Master:
                             task_id = TaskId()
                             target_unavailable = False
                             if command.target_instance_id is not None:
-                                if command.target_instance_id not in instance_task_counts:
+                                if (
+                                    command.target_instance_id
+                                    not in instance_task_counts
+                                ):
                                     target_unavailable = True
                                 selected_instance_id = command.target_instance_id
                             else:
@@ -1624,9 +1628,7 @@ class Master:
                             )
                         case SetModelTrustApproval():
                             if command.approved:
-                                self._model_trust_approvals.add(
-                                    command.trust_identity
-                                )
+                                self._model_trust_approvals.add(command.trust_identity)
                             else:
                                 self._model_trust_approvals.discard(
                                     command.trust_identity
@@ -1726,8 +1728,7 @@ class Master:
                             # the refuse→re-place loop to the cluster size.
                             refused = self.state.instances.get(command.instance_id)
                             if (
-                                command.instance_id
-                                in self._fallback_placed_instances
+                                command.instance_id in self._fallback_placed_instances
                                 and refused is not None
                             ):
                                 # Second recovery hop already used: tear down
@@ -1741,9 +1742,7 @@ class Master:
                                     "placement (two recovery hops used)."
                                 )
                                 after_delete = delete_instance(
-                                    DeleteInstance(
-                                        instance_id=command.instance_id
-                                    ),
+                                    DeleteInstance(instance_id=command.instance_id),
                                     self.state.instances,
                                 )
                                 await self.event_sender.send(
@@ -1812,9 +1811,7 @@ class Master:
                                         excluded_nodes=set(
                                             replace_command.excluded_nodes
                                         ),
-                                        stamped_exclusions=set(
-                                            refused.excluded_nodes
-                                        ),
+                                        stamped_exclusions=set(refused.excluded_nodes),
                                         node_resources=self._telemetry_view.node_resources,
                                         node_vram=usable_vram_by_node(
                                             self._telemetry_view.node_system,
@@ -1870,9 +1867,7 @@ class Master:
                                             self._telemetry_view.node_memory,
                                             self.state.node_network,
                                             download_status=self._effective_downloads(),
-                                            excluded_nodes=set(
-                                                fallback.excluded_nodes
-                                            ),
+                                            excluded_nodes=set(fallback.excluded_nodes),
                                             stamped_exclusions=set(
                                                 refused.excluded_nodes
                                             ),
@@ -2095,9 +2090,7 @@ class Master:
             self._telemetry_view.node_last_telemetry,
             now=now,
         )
-        for node_id in sorted(
-            gap_nodes - self._heartbeat_gap_warned_nodes, key=str
-        ):
+        for node_id in sorted(gap_nodes - self._heartbeat_gap_warned_nodes, key=str):
             evidence = observations[node_id]
             logger.bind(
                 liveness_event="heartbeat_gap",
@@ -2106,16 +2099,12 @@ class Master:
                 fallback_telemetry_age_seconds=(
                     evidence.fallback_telemetry_age_seconds
                 ),
-                last_logged_event_age_seconds=(
-                    evidence.last_logged_event_age_seconds
-                ),
+                last_logged_event_age_seconds=(evidence.last_logged_event_age_seconds),
             ).warning(
                 f"Dedicated heartbeat from node {node_id} is late or absent; "
                 "ordinary telemetry and logged events remain liveness fallbacks"
             )
-        recovered_nodes = (
-            self._heartbeat_gap_warned_nodes - gap_nodes
-        ) & current_nodes
+        recovered_nodes = (self._heartbeat_gap_warned_nodes - gap_nodes) & current_nodes
         for node_id in sorted(recovered_nodes, key=str):
             heartbeat_at = self._telemetry_view.node_last_heartbeat[node_id]
             logger.bind(
@@ -2399,7 +2388,6 @@ class Master:
                     "recovery)"
                 )
 
-
     async def _maintain_steward_placement(self) -> None:
         """Re-establish the intelligent-fabric steward placement invariant.
 
@@ -2486,8 +2474,7 @@ class Master:
             if final_placement is None:
                 continue
             logger.info(
-                f"Establishing steward placement with {model_ref} "
-                "(intelligent fabric)"
+                f"Establishing steward placement with {model_ref} (intelligent fabric)"
             )
             for event in get_transition_events(
                 self.state.instances, final_placement, self.state.tasks
@@ -2546,13 +2533,13 @@ class Master:
         self._steward_upgrade_idle_since = None
 
     def _steward_model_download_completed(
-        self, node_id: NodeId, model_id: ModelId
+        self, node_id: NodeId, shard_metadata: ShardMetadata
     ) -> bool:
-        """Whether one node reports a completed staging record for a brain."""
+        """Whether one node reports this exact completed steward shard."""
         return any(
             isinstance(progress, DownloadCompleted)
             and progress.node_id == node_id
-            and progress.shard_metadata.model_card.model_id == model_id
+            and progress.shard_metadata == shard_metadata
             for progress in self._effective_downloads().get(node_id, ())
         )
 
@@ -2586,10 +2573,15 @@ class Master:
 
         candidate_model: ModelId | None = None
         candidate_instance: Instance | None = None
+        instances_without_steward = {
+            instance_id: instance
+            for instance_id, instance in self.state.instances.items()
+            if instance_id != steward_id
+        }
         for model_ref in preference[:current_index]:
             try:
                 placed = await self._place_steward_model(
-                    model_ref, self.state.instances
+                    model_ref, instances_without_steward
                 )
             except (PlacementError, PlacementInfoPendingError):
                 continue
@@ -2598,7 +2590,7 @@ class Master:
             new_instances = [
                 instance
                 for instance_id, instance in placed.items()
-                if instance_id not in self.state.instances
+                if instance_id not in instances_without_steward
             ]
             if len(new_instances) != 1:
                 continue
@@ -2619,18 +2611,24 @@ class Master:
             )
             return
         stable_since = self._steward_upgrade_stable_since
-        if stable_since is None or now - stable_since < STEWARD_UPGRADE_STABILITY_SECONDS:
+        if (
+            stable_since is None
+            or now - stable_since < STEWARD_UPGRADE_STABILITY_SECONDS
+        ):
             return
 
         required_shards: list[tuple[NodeId, ShardMetadata]] = []
-        for node_id, runner_id in candidate_instance.shard_assignments.node_to_runner.items():
+        for (
+            node_id,
+            runner_id,
+        ) in candidate_instance.shard_assignments.node_to_runner.items():
             shard = candidate_instance.shard_assignments.runner_to_shard[runner_id]
             if isinstance(shard, RpcDonorShardMetadata):
                 continue
             required_shards.append((node_id, shard))
         if self._steward_upgrade_prestaged_model != candidate_model:
             for node_id, shard in required_shards:
-                if self._steward_model_download_completed(node_id, candidate_model):
+                if self._steward_model_download_completed(node_id, shard):
                     continue
                 await self.download_command_sender.send(
                     ForwarderDownloadCommand(
@@ -2645,8 +2643,8 @@ class Master:
             logger.info(f"Prestaging better steward brain {candidate_model}")
             return
         if any(
-            not self._steward_model_download_completed(node_id, candidate_model)
-            for node_id, _shard in required_shards
+            not self._steward_model_download_completed(node_id, shard)
+            for node_id, shard in required_shards
         ):
             return
 
@@ -2676,9 +2674,7 @@ class Master:
             f"{candidate_model}"
         )
         self._steward_upgrade_replacing_instance = steward_id
-        self._steward_upgrade_retry_after = (
-            now + STEWARD_UPGRADE_RETRY_COOLDOWN_SECONDS
-        )
+        self._steward_upgrade_retry_after = now + STEWARD_UPGRADE_RETRY_COOLDOWN_SECONDS
         await self._teardown_steward_instances([steward_id])
         self._reset_steward_upgrade()
 
@@ -2693,18 +2689,14 @@ class Master:
         not keep occupying disk and bandwidth after its instance is gone —
         the same steps the ordinary DeleteInstance path performs.
         """
-        for task_failed in orphaned_task_failure_events(
-            self.state, set(instance_ids)
-        ):
+        for task_failed in orphaned_task_failure_events(self.state, set(instance_ids)):
             await self.event_sender.send(task_failed)
         survivors = dict(self.state.instances)
         for instance_id in instance_ids:
             survivors = delete_instance(
                 DeleteInstance(instance_id=instance_id), survivors
             )
-        for cmd in cancel_unnecessary_downloads(
-            survivors, self._effective_downloads()
-        ):
+        for cmd in cancel_unnecessary_downloads(survivors, self._effective_downloads()):
             await self.download_command_sender.send(
                 ForwarderDownloadCommand(origin=self._system_id, command=cmd)
             )
@@ -2712,6 +2704,7 @@ class Master:
             self.state.instances, survivors, self.state.tasks
         ):
             await self.event_sender.send(event)
+
     async def _event_processor(self) -> None:
         with self.local_event_receiver as local_events:
             async for local_event in local_events:
@@ -2744,9 +2737,7 @@ class Master:
                             f"{type(local_event.event).__name__}{payload_note} "
                             f"from {local_event.origin}"
                         )
-                    self._multi_buffer.skip(
-                        local_event.origin_idx, local_event.origin
-                    )
+                    self._multi_buffer.skip(local_event.origin_idx, local_event.origin)
                 else:
                     self._multi_buffer.ingest(
                         local_event.origin_idx,
@@ -2760,9 +2751,7 @@ class Master:
                         ):
                             if task_id == event.task_id:
                                 self.command_task_mapping.pop(command_id, None)
-                                self._realtime_instance_by_command.pop(
-                                    command_id, None
-                                )
+                                self._realtime_instance_by_command.pop(command_id, None)
 
                     if isinstance(event, TaskFailed) or (
                         isinstance(event, TaskStatusUpdated)
@@ -2774,9 +2763,7 @@ class Master:
                                 # Terminal task state is authoritative even if
                                 # the owning API disappears before TaskFinished.
                                 # Preserve command mapping for eventual deletion.
-                                self._realtime_instance_by_command.pop(
-                                    command_id, None
-                                )
+                                self._realtime_instance_by_command.pop(command_id, None)
 
                     # Refuse to index task-lifecycle events that are state
                     # no-ops (the task is already gone). Without this cap a
@@ -2878,10 +2865,7 @@ class Master:
             await self._send_event(IndexedEvent(idx=idx, event=event))
             replayed += 1
             self._active_replay_next_idx = idx + 1
-            if (
-                replayed % EVENT_LOG_REPLAY_CHUNK_SIZE == 0
-                and idx + 1 < replay_end
-            ):
+            if replayed % EVENT_LOG_REPLAY_CHUNK_SIZE == 0 and idx + 1 < replay_end:
                 await anyio.sleep(EVENT_LOG_REPLAY_CHUNK_INTERVAL_SECONDS)
         logger.info(
             "Served paced event-log replay "
@@ -2993,9 +2977,8 @@ class Master:
             sanitized_config.pop("hf_token", None)
         sanitized_config.pop("model_trust", None)
         model_store = sanitized_config.get("model_store")
-        if (
-            self._state_sync_store_http_host is not None
-            and isinstance(model_store, dict)
+        if self._state_sync_store_http_host is not None and isinstance(
+            model_store, dict
         ):
             model_store["store_http_host"] = self._state_sync_store_http_host
         return yaml.safe_dump(

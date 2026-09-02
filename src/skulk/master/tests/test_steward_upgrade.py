@@ -61,7 +61,9 @@ def _master() -> tuple[Master, Receiver[ForwarderDownloadCommand], Receiver[Even
     )
 
 
-def _instance(node_id: NodeId, model_id: str) -> tuple[MlxRingInstance, PipelineShardMetadata]:
+def _instance(
+    node_id: NodeId, model_id: str
+) -> tuple[MlxRingInstance, PipelineShardMetadata]:
     card = ModelCard(
         model_id=ModelId(model_id),
         storage_size=Memory.from_gb(1),
@@ -113,6 +115,7 @@ async def test_upgrade_stages_then_waits_for_idle_before_teardown(
         _model_ref: str,
         current_instances: Mapping[InstanceId, Instance],
     ) -> dict[InstanceId, Instance]:
+        assert old.instance_id not in current_instances
         return {**current_instances, candidate.instance_id: candidate}
 
     monkeypatch.setattr(master, "_place_steward_model", place_candidate)
@@ -156,3 +159,25 @@ async def test_upgrade_stages_then_waits_for_idle_before_teardown(
         for event in events
     )
     assert not any(event.__class__.__name__ == "InstanceCreated" for event in events)
+
+
+def test_completed_steward_download_requires_exact_shard_metadata() -> None:
+    """A stale completion for another shard cannot authorize replacement."""
+    master, _download_receiver, _event_receiver = _master()
+    candidate, candidate_shard = _instance(master.node_id, "org/better")
+    _other, other_shard = _instance(master.node_id, "org/better")
+    other_shard = other_shard.model_copy(update={"end_layer": 3})
+    master.state = State(
+        downloads={
+            master.node_id: [
+                DownloadCompleted(
+                    node_id=master.node_id,
+                    shard_metadata=other_shard,
+                    total=Memory.from_gb(1),
+                )
+            ]
+        }
+    )
+
+    assert candidate.shard_assignments.model_id == other_shard.model_card.model_id
+    assert not master._steward_model_download_completed(master.node_id, candidate_shard)
