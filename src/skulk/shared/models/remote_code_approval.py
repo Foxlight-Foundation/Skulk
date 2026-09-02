@@ -224,7 +224,7 @@ def trusted_fabric_mutation_allowed(
     origin: str | None,
     *,
     forwarding_headers_present: bool = False,
-    request_host_authority: str | None = None,
+    self_host_names: "AbstractSet[str] | None" = None,
 ) -> bool:
     """Return whether a request came directly from a trusted-fabric peer.
 
@@ -239,17 +239,19 @@ def trusted_fabric_mutation_allowed(
         client_host: Socket peer host reported by the ASGI server.
         origin: Optional browser Origin header.
         forwarding_headers_present: Whether a proxy-origin header was supplied.
-        request_host_authority: The request's own ``Host`` header, used to
-            accept a same-origin browser request when the dashboard is opened
-            by hostname (``kite3.local``, a MagicDNS name) rather than an IP
-            literal. Same-origin proves the page was served by this very node,
-            so a cross-site page cannot satisfy it: a browser's cross-site
-            request carries the target's Host but the attacker page's Origin.
+        self_host_names: Lowercased hostnames this node positively knows as
+            its own (its hostname aliases and, when Tailscale runs, its
+            MagicDNS name). A hostname Origin is accepted only when it names
+            one of these, which admits a dashboard opened by hostname while
+            staying DNS-rebinding-proof: after a rebind the attacker's
+            hostname appears in both Origin and Host, so header equality
+            proves nothing, but the attacker cannot make their hostname one
+            this node recognizes as itself.
 
     Returns:
         ``True`` only for a direct loopback or trusted-fabric peer and, for
         browser requests, an Origin that is either on the same trust classes
-        or exactly same-origin with the request itself. Proxy-shaped requests
+        or a hostname this node knows as its own. Proxy-shaped requests
         still fail closed: a forwarded request's true origin is unknowable,
         and the public relay must never reach these handlers.
     """
@@ -266,13 +268,13 @@ def trusted_fabric_mutation_allowed(
         return False
     if _is_trusted_fabric_host(parsed_origin.hostname):
         return True
-    # Hostname Origins: accept only an exact same-origin match against the
-    # request's own authority. Skulk serves plain HTTP on a non-default port,
-    # so both sides always carry an explicit port and a lowercase string
-    # comparison of the authority is exact.
-    if request_host_authority is None:
+    # Hostname Origins: accept only a name this node positively knows as its
+    # own. Comparing against the request's Host header instead would be
+    # DNS-rebinding-vulnerable: after a rebind, the attacker's hostname
+    # appears in both Origin and Host, so their equality proves nothing.
+    if self_host_names is None or parsed_origin.hostname is None:
         return False
-    return parsed_origin.netloc.lower() == request_host_authority.strip().lower()
+    return parsed_origin.hostname.lower() in self_host_names
 
 
 def loopback_mutation_allowed(

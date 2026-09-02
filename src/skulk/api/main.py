@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from http import HTTPStatus
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Final, Literal, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Annotated, ClassVar, Final, Literal, Protocol, TypeVar, cast
 from uuid import uuid4
 
 import anyio
@@ -2196,8 +2196,8 @@ class API:
                 "mutation requires a direct loopback or trusted-fabric "
                 "(private LAN / CGNAT) connection without proxy-forwarding "
                 "headers, or an authenticated operator-gateway credential; "
-                "browser requests must present a fabric, loopback, or exactly "
-                "same-origin Origin."
+                "browser requests must present an Origin on those trust classes "
+                "or naming one of this node's own hostnames."
             ),
         )(self.add_custom_model)
         self.app.post(
@@ -2515,7 +2515,8 @@ class API:
                 "card. Requires a direct loopback or trusted-fabric (private "
                 "LAN / CGNAT) connection without proxy-forwarding headers, or "
                 "authenticated operator-gateway access; browser requests must "
-                "present a fabric, loopback, or exactly same-origin Origin."
+                "present an Origin on those trust classes or naming one of "
+                "this node's own hostnames."
             ),
         )(self.start_download)
         self.app.delete(
@@ -8775,7 +8776,7 @@ class API:
             client_host,
             request.headers.get("origin"),
             forwarding_headers_present=forwarding_headers_present,
-            request_host_authority=request.headers.get("host"),
+            self_host_names=cls._known_self_host_names(),
         ):
             return
         raise HTTPException(
@@ -9222,6 +9223,7 @@ class API:
                 tg.start_soon(self._store_reconciliation_loop)
                 print_startup_banner(self.port)
                 tg.start_soon(self.run_api, shutdown_ev)
+                tg.start_soon(self._prime_tailscale_self_host_name)
                 if (
                     self._operator_pairing_service is not None
                     and self._operator_relay_configuration is not None
