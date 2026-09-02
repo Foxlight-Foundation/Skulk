@@ -529,14 +529,17 @@ def merge_cluster_config_bootstrap(
 
     decoded: object = cast(object, yaml_module.safe_load(config_yaml))
     if not isinstance(decoded, dict):
-        # A malformed payload must degrade to "keep local config", not crash
-        # a node mid-join; the trusted fabric makes this a bug signal, not an
-        # attack surface, so a warning is the right volume.
+        # A malformed payload must degrade to "keep local config" in full:
+        # merging an empty mapping here would wipe every local field except
+        # the explicitly preserved ones. The identity update returns the
+        # existing config untouched (and still stamps the 0600 mode). The
+        # trusted fabric makes this a bug signal, not an attack surface, so
+        # a warning is the right volume.
         if decoded is not None:
             logger.warning(
                 "Ignoring non-mapping cluster bootstrap config payload"
             )
-        decoded = {}
+        return update_skulk_config_atomic(config_path, lambda existing: existing)
     received = cast("dict[str, object]", decoded)
 
     from skulk.store.config import normalized_hf_token, promote_hf_token

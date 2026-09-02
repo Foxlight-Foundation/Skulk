@@ -153,11 +153,21 @@ def test_bootstrap_rotates_a_config_derived_token(
 def test_bootstrap_malformed_payload_keeps_local_config(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A non-mapping payload must degrade to keep-local, not crash the join."""
+    """A non-mapping payload must keep the ENTIRE local config, not crash.
+
+    Degrading to an empty mapping and merging would wipe every local field
+    except the explicitly preserved ones (#922 review, second round).
+    """
     monkeypatch.delenv("HF_TOKEN", raising=False)
     config_path = tmp_path / "skulk.yaml"
-    config_path.write_text("hf_token: local-secret\n")
+    config_path.write_text(
+        "hf_token: local-secret\nlogging:\n  enabled: true\n"
+    )
 
     merged = merge_cluster_config_bootstrap("- just\n- a\n- list\n", config_path)
 
     assert merged.get("hf_token") == "local-secret"
+    # The rest of the local config survives too.
+    assert merged.get("logging") == {"enabled": True}
+    persisted = config_path.read_text()
+    assert "logging" in persisted and "local-secret" in persisted
