@@ -4,7 +4,7 @@ import base64
 import hashlib
 import json
 from collections.abc import Set as AbstractSet
-from ipaddress import ip_address
+from ipaddress import ip_address, ip_network
 from urllib.parse import urlsplit
 
 from skulk.shared.models.model_cards import ModelCard
@@ -185,6 +185,116 @@ def require_remote_code_approval(
             "immutable signed execution identity: "
             f"{card.registry_card_id}"
         )
+
+
+_TRUSTED_FABRIC_IPV4_NETWORKS = (
+    ip_network("10.0.0.0/8"),
+    ip_network("172.16.0.0/12"),
+    ip_network("192.168.0.0/16"),
+    ip_network("100.64.0.0/10"),
+)
+"""Private-LAN plus CGNAT overlay ranges, matching the Zenoh auto-bind policy.
+
+The same address classes the data plane treats as the trusted fabric: a
+browser or peer on one of these networks is a cluster-adjacent operator
+surface, while anything public still requires loopback or the authenticated
+gateway.
+"""
+
+
+def _is_loopback_host(host: str | None) -> bool:
+    """Whether a host names the local loopback."""
+    if host == "localhost":
+        return True
+    if host is None:
+        return False
+    try:
+        return ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _is_fabric_ipv4(host: str | None) -> bool:
+    """Whether a host is a private-LAN or CGNAT IPv4 literal."""
+    if host is None:
+        return False
+    try:
+        parsed = ip_address(host)
+    except ValueError:
+        return False
+    return parsed.version == 4 and any(
+        parsed in network for network in _TRUSTED_FABRIC_IPV4_NETWORKS
+    )
+
+
+def _is_trusted_fabric_host(host: str | None) -> bool:
+    """Whether a socket or Origin host is loopback or on the trusted fabric."""
+    return _is_loopback_host(host) or _is_fabric_ipv4(host)
+
+
+def trusted_fabric_mutation_allowed(
+    client_host: str | None,
+    origin: str | None,
+    *,
+    forwarding_headers_present: bool = False,
+    self_host_names: "AbstractSet[str] | None" = None,
+) -> bool:
+    """Return whether a request came directly from a trusted-fabric peer.
+
+    The operator dashboard is served on the LAN listener and browsed from
+    other machines on that LAN, so operator mutations accept a direct private
+    LAN or CGNAT overlay socket peer in addition to loopback. This is the
+    cluster's standing trust posture: a peer on those networks can already
+    join the mesh as a full member, so gating the dashboard's mutations to
+    loopback provided ceremony rather than a boundary.
+
+    Args:
+        client_host: Socket peer host reported by the ASGI server.
+        origin: Optional browser Origin header.
+        forwarding_headers_present: Whether a proxy-origin header was supplied.
+        self_host_names: Lowercased hostnames this node positively knows as
+            its own (its hostname aliases and, when Tailscale runs, its
+            MagicDNS name). A hostname Origin is accepted only when it names
+            one of these, which admits a dashboard opened by hostname while
+            staying DNS-rebinding-proof: after a rebind the attacker's
+            hostname appears in both Origin and Host, so header equality
+            proves nothing, but the attacker cannot make their hostname one
+            this node recognizes as itself.
+
+    Returns:
+        ``True`` only for a direct loopback or trusted-fabric peer and, for
+        browser requests, an Origin that is either on the same trust classes
+        or a hostname this node knows as its own. Proxy-shaped requests
+        still fail closed: a forwarded request's true origin is unknowable,
+        and the public relay must never reach these handlers.
+    """
+
+    if forwarding_headers_present or not _is_trusted_fabric_host(client_host):
+        return False
+    if origin is None:
+        return True
+    try:
+        parsed_origin = urlsplit(origin)
+    except ValueError:
+        return False
+    if parsed_origin.scheme not in {"http", "https"}:
+        return False
+    origin_host = parsed_origin.hostname
+    # A loopback Origin only proves the page came from the CLIENT's own
+    # machine, so it is honored only when the socket peer is loopback too;
+    # otherwise a page served from a user's localhost could drive mutations
+    # at a fabric node it never came from.
+    if _is_loopback_host(origin_host):
+        return _is_loopback_host(client_host)
+    if _is_fabric_ipv4(origin_host):
+        return True
+    # Hostname Origins: accept only a name this node positively knows as its
+    # own. Comparing against the request's Host header instead would be
+    # DNS-rebinding-vulnerable: after a rebind, the attacker's hostname
+    # appears in both Origin and Host, so their equality proves nothing.
+    if self_host_names is None or origin_host is None:
+        return False
+    return origin_host.lower() in self_host_names
 
 
 def loopback_mutation_allowed(

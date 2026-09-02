@@ -1588,8 +1588,17 @@ opened.
 Resolves the repository to one immutable commit, fetches metadata, and adds a
 custom model card to the cluster catalog. The
 dashboard and operator API may call this through the normal cluster control
-surface only when the request is direct-loopback or has passed the authenticated
-operator gateway with `operations:write`. The explicit add action authorizes
+surface when the request comes from a direct loopback or trusted-fabric socket
+peer (private LAN or CGNAT, with no proxy-forwarding headers and, for browser
+requests, an Origin on the same trust classes or naming one of this node's
+own hostnames, which is how a dashboard opened via `kite3.local` or the node's
+MagicDNS name qualifies while a DNS-rebound attacker hostname does not), or
+has passed the authenticated
+operator gateway with `operations:write`. The trusted-fabric admission matches
+the cluster's standing posture (a peer on those networks can already join the
+mesh as a full member) and is what lets a dashboard browsed from another
+machine on the LAN add models. Forwarded requests and public peers are still
+refused. The explicit add action authorizes
 repository code selected by that card; there is no second approval step. A
 successful response waits for the exact add command to be ordered, persisted,
 and visible in the responding API's catalog, so an immediate download or
@@ -1645,7 +1654,8 @@ immutable `sourceRevision` is required.
 Every external vision, MTP, assistant, or draft repository must also declare
 its matching immutable companion revision.
 The exact add action authorizes repository code selected by the temporary card.
-Like `/models/add`, this mutation accepts direct loopback access
+Unlike `/models/add` (which also admits direct trusted-fabric peers for the
+dashboard), this mutation accepts only direct loopback access
 or an authenticated operator gateway with `operations:write`. A headless
 registry qualification worker may instead present
 `Authorization: Bearer <token>` when the node configures the same high-entropy
@@ -2033,8 +2043,10 @@ automatically).
 **POST** `/download/start`
 
 Lower-level endpoint for explicit node download control. It accepts a target
-node and shard metadata only from direct loopback callers or an authenticated
-operator gateway. The embedded model card must exactly match current authorized
+node and shard metadata only from direct loopback or trusted-fabric callers
+(private LAN or CGNAT socket peers without proxy-forwarding headers; browser
+requests must also present an `Origin` on those trust classes or naming one of
+this node's own hostnames) or an authenticated operator gateway. The embedded model card must exactly match current authorized
 catalog truth apart from a snapshot-only publication stamp; unknown aliases
 return `404`, and stale or forged content returns `409` without dispatching a
 download.

@@ -529,9 +529,11 @@ state remain inert rolling-upgrade compatibility surfaces. Authorization is
 never a placement axis. Placement still
 applies open backend preferences, locality, and capacity ranking adaptively, and
 the store plus runner remain final enforcement boundaries.
-Ordinary custom-card creation requires direct loopback or the
-authenticated operator gateway's write scope and waits for its exact ordered
-catalog mutation before acknowledging success. Exact pre-publication
+Ordinary custom-card creation requires direct loopback, a direct
+trusted-fabric peer (private LAN/CGNAT socket, no proxy-forwarding headers,
+fabric-or-loopback browser Origin; how a LAN-browsed dashboard adds models), or
+the authenticated operator gateway's write scope, and waits for its exact
+ordered catalog mutation before acknowledging success. Exact pre-publication
 qualification may instead use `SKULK_EXACT_CARD_QUALIFICATION_TOKEN`; only
 `POST /models/add-card` and server-marked `qualification_only` custom-card
 cleanup accept it. Cleanup supplies the complete original candidate and the

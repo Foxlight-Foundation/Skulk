@@ -28,7 +28,16 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from http import HTTPStatus
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Final, Literal, Protocol, TypeVar, cast
+from typing import (
+    TYPE_CHECKING,
+    Annotated,
+    ClassVar,
+    Final,
+    Literal,
+    Protocol,
+    TypeVar,
+    cast,
+)
 from uuid import uuid4
 
 import anyio
@@ -357,6 +366,7 @@ from skulk.shared.models.remote_code_approval import (
     remote_code_execution_requires_approval,
     remote_code_is_automatically_trusted,
     remote_code_trust_identity,
+    trusted_fabric_mutation_allowed,
 )
 from skulk.shared.tracing import (
     TraceEvent,
@@ -2192,8 +2202,11 @@ class API:
                 "once to an immutable commit, and the explicit add action authorizes "
                 "repository code selected by that card. Success waits until the exact "
                 "mutation is ordered and visible in the responding API's catalog. The "
-                "mutation requires direct loopback access or an authenticated "
-                "operator-gateway credential."
+                "mutation requires a direct loopback or trusted-fabric "
+                "(private LAN / CGNAT) connection without proxy-forwarding "
+                "headers, or an authenticated operator-gateway credential; "
+                "browser requests must present an Origin on those trust classes "
+                "or naming one of this node's own hostnames."
             ),
         )(self.add_custom_model)
         self.app.post(
@@ -2508,7 +2521,11 @@ class API:
             summary="Start a node download",
             description=(
                 "Start a low-level node download for an exact authorized catalog "
-                "card. Requires loopback or authenticated operator access."
+                "card. Requires a direct loopback or trusted-fabric (private "
+                "LAN / CGNAT) connection without proxy-forwarding headers, or "
+                "authenticated operator-gateway access; browser requests must "
+                "present an Origin on those trust classes or naming one of "
+                "this node's own hostnames."
             ),
         )(self.start_download)
         self.app.delete(
@@ -8744,12 +8761,78 @@ class API:
                 detail="This operator mutation is available only through loopback",
             )
 
+    _self_host_names: ClassVar[set[str]] = set()
+    """Lowercased hostnames this node positively knows as its own.
+
+    Seeded from the machine's hostname aliases on first use and extended with
+    the Tailscale MagicDNS name once discovered. Consulted by the operator
+    mutation guard so a dashboard opened by hostname passes, while a
+    DNS-rebound attacker hostname (never one of ours) cannot.
+    """
+
+    @classmethod
+    def _known_self_host_names(cls) -> set[str]:
+        """Return the cached self-hostname set, seeding it on first use."""
+        if not cls._self_host_names:
+            from skulk.store.config import hostname_aliases
+
+            cls._self_host_names = {
+                alias.lower() for alias in hostname_aliases(socket.gethostname())
+            }
+            cls._self_host_names.add("localhost")
+        return cls._self_host_names
+
+    async def _prime_tailscale_self_host_name(self) -> None:
+        """Record this node's MagicDNS name so hostname dashboards pass.
+
+        Best-effort at startup: without it, a dashboard browsed via the
+        MagicDNS URL falls back to the 403 (the fabric-IP and .local paths
+        are unaffected), so failure here degrades rather than breaks.
+        """
+        try:
+            from skulk.connectivity.tailscale import query_tailscale_status
+
+            status = await query_tailscale_status()
+        except Exception:  # noqa: BLE001 - absence of tailscale is normal
+            return
+        if status.dns_name:
+            self._known_self_host_names().add(status.dns_name.lower())
+
     @classmethod
     def _require_operator_mutation(cls, request: Request) -> None:
-        """Allow a mutation only from loopback or the authenticated gateway."""
+        """Allow a mutation from the gateway, loopback, or a trusted-fabric peer.
+
+        The dashboard is served on the LAN listener and browsed from other
+        machines, so operator mutations accept a direct private-LAN or CGNAT
+        socket peer: the cluster's standing trust posture, since such a peer
+        can already join the mesh as a full member. Forwarded requests and
+        public peers still require loopback or the authenticated gateway.
+        """
         if request.scope.get(OPERATOR_GATEWAY_AUTHORIZED_SCOPE_KEY) is True:
             return
-        cls._require_loopback_mutation(request)
+        client_host = request.client.host if request.client is not None else None
+        forwarding_headers_present = any(
+            raw_name.lower() == b"forwarded"
+            or raw_name.lower().startswith(b"x-forwarded-")
+            or raw_name.lower()
+            in {b"x-real-ip", b"cf-connecting-ip", b"true-client-ip"}
+            for raw_name, _raw_value in request.headers.raw
+        )
+        if trusted_fabric_mutation_allowed(
+            client_host,
+            request.headers.get("origin"),
+            forwarding_headers_present=forwarding_headers_present,
+            self_host_names=cls._known_self_host_names(),
+        ):
+            return
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "This operator mutation requires a direct loopback or "
+                "trusted-fabric (private LAN / CGNAT) connection, or an "
+                "authenticated operator-gateway credential"
+            ),
+        )
 
     @classmethod
     def _require_exact_card_qualification_mutation(cls, request: Request) -> bool:
@@ -9186,6 +9269,7 @@ class API:
                 tg.start_soon(self._store_reconciliation_loop)
                 print_startup_banner(self.port)
                 tg.start_soon(self.run_api, shutdown_ev)
+                tg.start_soon(self._prime_tailscale_self_host_name)
                 if (
                     self._operator_pairing_service is not None
                     and self._operator_relay_configuration is not None
@@ -13264,11 +13348,19 @@ class API:
         QR code generation.
         """
 
-        return await build_remote_access_info(
+        info = await build_remote_access_info(
             self.node_id,
             self.state.node_network,
             self.port,
         )
+        # Any MagicDNS name this endpoint advertises must also be accepted by
+        # the operator-mutation guard: a dashboard opened via the advertised
+        # URL sends that name in Origin. Registering it here covers tailscaled
+        # starting after Skulk did, when the startup priming saw nothing.
+        dns_name = info.tailscale.dns_name
+        if dns_name:
+            self._known_self_host_names().add(dns_name.lower())
+        return info
 
     async def get_store_downloads(self) -> JSONResponse:
         if self._store_client is None:
