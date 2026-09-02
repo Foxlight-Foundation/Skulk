@@ -6,10 +6,11 @@ use. A new user never builds llama.cpp.
 
 The pin is a specific upstream llama.cpp release tag whose official prebuilt
 Linux artifacts we resolve by platform, architecture, and compute variant.
-The pinned release publishes Linux CPU and Vulkan builds (its ROCm and CUDA
-prebuilts are Windows-only); the Vulkan build drives both AMD (RADV,
-fleet-proven) and NVIDIA GPUs through their Vulkan ICDs, so it is the GPU
-default. macOS
+The pinned release publishes Linux CPU, Vulkan, and ROCm builds (its CUDA
+prebuilts remain Windows-only). Skulk consumes only CPU and Vulkan: the
+Vulkan build drives both AMD (RADV, fleet-proven) and NVIDIA GPUs through
+their Vulkan ICDs, so it is the GPU default, and the upstream Linux ROCm
+archive stays unconsumed until a ROCm lane is qualified on real hardware. macOS
 provisions nothing (in-process MLX owns that platform), and vLLM remains the
 first-class CUDA serving path.
 

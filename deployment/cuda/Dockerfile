@@ -42,7 +42,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 #   (cuMemMap, ...) that only the driver's libcuda.so provides, and a GPU-less
 #   runner has no driver. Upstream's own CI images defer resolution to runtime
 #   this way (.devops/cuda.Dockerfile); the pod's real driver satisfies them.
-ARG LLAMA_CPP_REF=b10434
+ARG LLAMA_CPP_REF=b10753
 RUN git clone --branch "${LLAMA_CPP_REF}" --depth 1 \
          https://github.com/ggml-org/llama.cpp /opt/llama.cpp \
     && cmake -S /opt/llama.cpp -B /opt/llama.cpp/build \

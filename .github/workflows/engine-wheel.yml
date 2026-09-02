@@ -35,7 +35,7 @@ on:
 env:
   # Must match src/skulk/provisioning/manifest.py LLAMA_SERVER_PIN and both
   # packaging versions (0.<build>.<rev>); the guard step enforces all of them.
-  LLAMA_CPP_PIN: b10434
+  LLAMA_CPP_PIN: b10753
 jobs:
   build:
     runs-on: ${{ matrix.runner }}
