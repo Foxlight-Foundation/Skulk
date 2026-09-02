@@ -13348,11 +13348,19 @@ class API:
         QR code generation.
         """
 
-        return await build_remote_access_info(
+        info = await build_remote_access_info(
             self.node_id,
             self.state.node_network,
             self.port,
         )
+        # Any MagicDNS name this endpoint advertises must also be accepted by
+        # the operator-mutation guard: a dashboard opened via the advertised
+        # URL sends that name in Origin. Registering it here covers tailscaled
+        # starting after Skulk did, when the startup priming saw nothing.
+        dns_name = info.tailscale.dns_name
+        if dns_name:
+            self._known_self_host_names().add(dns_name.lower())
+        return info
 
     async def get_store_downloads(self) -> JSONResponse:
         if self._store_client is None:
