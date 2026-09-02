@@ -10,7 +10,9 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 vi.mock('../../i18n/tolgee', () => ({
   useSkulkTranslation: () => ({
-    t: (_key: string, fallback: string) => fallback,
+    t: (_key: string, fallback: string, params?: Record<string, unknown>) =>
+      fallback.replace(/\{(\w+)\}/g, (match, name: string) =>
+        params && name in params ? String(params[name]) : match),
   }),
 }));
 
