@@ -1011,7 +1011,15 @@ export function StoreRegistryTable({
                 </Cell>
                 <Cell $align="right" $area="status">
                   <MobileLabel>{t('common.status', 'Status')}</MobileLabel>
-                  {dl ? (
+                  {dl && dl.status === 'failed' ? (
+                    <InfoTooltip
+                      content={dl.error ?? t('storeRegistry.downloadFailedNoReason', 'Download failed. Check the store host logs for details.')}
+                      placement="left"
+                      delay={0}
+                    >
+                      <StateBadge $tone="danger">{t('storeRegistry.downloadFailed', 'Download failed')}</StateBadge>
+                    </InfoTooltip>
+                  ) : dl ? (
                     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
                       <ProgressTrack>
                         <ProgressFill $pct={dl.progress * 100} />
