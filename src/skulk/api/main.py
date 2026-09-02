@@ -8752,6 +8752,43 @@ class API:
                 detail="This operator mutation is available only through loopback",
             )
 
+    _self_host_names: ClassVar[set[str]] = set()
+    """Lowercased hostnames this node positively knows as its own.
+
+    Seeded from the machine's hostname aliases on first use and extended with
+    the Tailscale MagicDNS name once discovered. Consulted by the operator
+    mutation guard so a dashboard opened by hostname passes, while a
+    DNS-rebound attacker hostname (never one of ours) cannot.
+    """
+
+    @classmethod
+    def _known_self_host_names(cls) -> set[str]:
+        """Return the cached self-hostname set, seeding it on first use."""
+        if not cls._self_host_names:
+            from skulk.store.config import hostname_aliases
+
+            cls._self_host_names = {
+                alias.lower() for alias in hostname_aliases(socket.gethostname())
+            }
+            cls._self_host_names.add("localhost")
+        return cls._self_host_names
+
+    async def _prime_tailscale_self_host_name(self) -> None:
+        """Record this node's MagicDNS name so hostname dashboards pass.
+
+        Best-effort at startup: without it, a dashboard browsed via the
+        MagicDNS URL falls back to the 403 (the fabric-IP and .local paths
+        are unaffected), so failure here degrades rather than breaks.
+        """
+        try:
+            from skulk.connectivity.tailscale import query_tailscale_status
+
+            status = await query_tailscale_status()
+        except Exception:  # noqa: BLE001 - absence of tailscale is normal
+            return
+        if status.dns_name:
+            self._known_self_host_names().add(status.dns_name.lower())
+
     @classmethod
     def _require_operator_mutation(cls, request: Request) -> None:
         """Allow a mutation from the gateway, loopback, or a trusted-fabric peer.
