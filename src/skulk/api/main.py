@@ -12444,7 +12444,6 @@ class API:
         import copy
 
         from skulk.shared.types.commands import SyncConfig
-
         from skulk.store.config import normalized_hf_token
 
         broadcast_data = copy.deepcopy(config_data)
