@@ -671,3 +671,78 @@ def test_tool_call_finish_surfaces_forced_choice_stop() -> None:
     # A call cut short has incomplete arguments and must not surface.
     assert not tool_call_finish_surfaces("length")
     assert not tool_call_finish_surfaces("content_filter")
+
+
+def _retry_runner(health_outcomes: list[Exception | None]) -> tuple[Any, list[int], list[int]]:
+    """Build a runner whose spawn/health pair is scripted, tracking both calls."""
+    runner: Any = VllmRunner.__new__(VllmRunner)
+    spawns: list[int] = []
+    teardowns: list[int] = []
+    remaining = list(health_outcomes)
+
+    def fake_spawn(_model_dir: Path, _served: str, _n_ctx: int) -> None:
+        spawns.append(len(spawns) + 1)
+
+    def fake_health() -> None:
+        outcome = remaining.pop(0)
+        if outcome is not None:
+            raise outcome
+
+    def fake_teardown() -> None:
+        teardowns.append(len(teardowns) + 1)
+
+    runner._spawn_server = fake_spawn
+    runner._await_health = fake_health
+    runner._teardown_server = fake_teardown
+    return runner, spawns, teardowns
+
+
+def test_lost_port_race_retries_with_a_fresh_port() -> None:
+    """A bind-time EADDRINUSE is transient and must not fail the placement.
+
+    _pick_port proves a port free, then vllm serve binds it seconds later; in
+    that window the kernel can hand the same ephemeral port to an outbound
+    connection on a busy node. Retrying picks a new port.
+    """
+    collision = RuntimeError(
+        "vllm serve exited during startup (code 1); log tail:\n"
+        "OSError: [Errno 98] Address already in use"
+    )
+    runner, spawns, teardowns = _retry_runner([collision, None])
+
+    runner._spawn_server_with_port_retry(Path("/models/m"), "org/m", 8192)
+
+    assert len(spawns) == 2
+    # The failed attempt is reclaimed before rebinding so no handles leak.
+    assert len(teardowns) == 1
+
+
+def test_port_race_retries_are_bounded() -> None:
+    collision = RuntimeError(
+        "vllm serve exited during startup (code 1); log tail:\n"
+        "OSError: [Errno 98] Address already in use"
+    )
+    runner, spawns, _ = _retry_runner([collision, collision, collision])
+
+    with pytest.raises(RuntimeError, match="Address already in use"):
+        runner._spawn_server_with_port_retry(Path("/models/m"), "org/m", 8192)
+
+    assert len(spawns) == 3
+
+
+def test_other_startup_failures_are_not_retried() -> None:
+    """A real fault must fail fast rather than burn attempts.
+
+    A CUDA OOM, a missing weight shard, or a bad flag will fail identically on
+    a fresh port, so retrying only delays the operator's error by minutes.
+    """
+    fault = RuntimeError(
+        "vllm serve exited during startup (code 1); log tail:\n"
+        "torch.AcceleratorError: CUDA error: out of memory"
+    )
+    runner, spawns, _ = _retry_runner([fault])
+
+    with pytest.raises(RuntimeError, match="out of memory"):
+        runner._spawn_server_with_port_retry(Path("/models/m"), "org/m", 8192)
+
+    assert len(spawns) == 1
