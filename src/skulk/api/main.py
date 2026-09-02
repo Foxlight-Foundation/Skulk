@@ -28,7 +28,16 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from http import HTTPStatus
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, ClassVar, Final, Literal, Protocol, TypeVar, cast
+from typing import (
+    TYPE_CHECKING,
+    Annotated,
+    ClassVar,
+    Final,
+    Literal,
+    Protocol,
+    TypeVar,
+    cast,
+)
 from uuid import uuid4
 
 import anyio
