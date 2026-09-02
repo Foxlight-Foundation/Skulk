@@ -120,4 +120,6 @@ def test_bootstrap_whitespace_token_does_not_clobber_local(
     assert merged.get("hf_token") == "local-secret"
     import os
 
-    assert "HF_TOKEN" not in os.environ
+    # The preserved local token is legitimately promoted; the whitespace
+    # value must never be what lands in the environment.
+    assert os.environ.get("HF_TOKEN") == "local-secret"
