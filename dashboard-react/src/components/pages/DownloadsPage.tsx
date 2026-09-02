@@ -282,6 +282,16 @@ export function ModelStorePage({ topology, nodeResources = {}, downloads, instan
     }
   }, [refreshStore, scheduleStoreRefresh]);
 
+  // A retry can fail again before the next 2s poll ever shows it as live
+  // (gated-repository auth failures answer in well under a second), so the
+  // failed-to-failed transition would look unchanged and stay untoasted.
+  // Forgetting the model's previous failure when its download is accepted
+  // makes the retry's outcome toast again.
+  const handleDownloadStarted = useCallback((modelId: string) => {
+    knownFailedDownloadsRef.current?.delete(modelId);
+    void loadRegistry();
+  }, [loadRegistry]);
+
   // Load store registry on mount
   useEffect(() => {
     loadRegistry();
@@ -653,7 +663,7 @@ export function ModelStorePage({ topology, nodeResources = {}, downloads, instan
         open={searchOpen}
         onClose={() => setSearchOpen(false)}
         existingModelIds={storeModelIds}
-        onDownloadStarted={loadRegistry}
+        onDownloadStarted={handleDownloadStarted}
         fleet={fleet}
       />
       {placementModelId && topology && (

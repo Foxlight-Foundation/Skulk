@@ -1623,9 +1623,11 @@ shard group. `source_revision` is also optional; when supplied it must be a full
 to the Hub's full commit. Card metadata and subsequent artifact downloads are
 therefore always pinned to an immutable revision.
 When the Hub refuses the metadata fetch with 401 or 403 (a gated or private
-repository), the 400 response's `detail` explains the concrete fix for this
-node: configure a Hugging Face token, accept the model terms on the repository
-page, or accept them under the same account the configured token belongs to.
+repository), the 400 response explains the concrete fix for this node:
+configure a Hugging Face token, accept the model terms on the repository page,
+or accept them under the same account the configured token belongs to. Like
+every HTTPException from this API, the explanation is serialized in the
+OpenAI-style error envelope, so clients read it from `error.message`.
 
 ### Add an exact unsigned model card
 

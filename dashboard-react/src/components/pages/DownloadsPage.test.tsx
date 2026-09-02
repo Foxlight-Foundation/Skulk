@@ -29,7 +29,12 @@ vi.mock('../layout/StoreRegistryTable', () => ({
 }));
 
 vi.mock('./ModelSearchModal', () => ({
-  ModelSearchModal: () => null,
+  ModelSearchModal: ({ onDownloadStarted }: { onDownloadStarted?: (modelId: string) => void }) => (
+    <button
+      data-testid="mock-download-start"
+      onClick={() => onDownloadStarted?.('meta-llama/gated')}
+    />
+  ),
 }));
 
 vi.mock('../cluster/PlacementManager', () => ({
@@ -328,5 +333,52 @@ describe('ModelStorePage failed-download surfacing', () => {
     await flushEffects();
 
     expect(addToast).not.toHaveBeenCalled();
+  });
+});
+
+describe('ModelStorePage failed-download retry', () => {
+  it('toasts again when a retry fails before ever being observed as live', async () => {
+    vi.useFakeTimers();
+    const { addToast } = await import('../../hooks/useToast');
+    const REASON = "Access to 'meta-llama/gated' is restricted and this node sent no Hugging Face token.";
+    let downloadRequests = 0;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === '/models') return jsonResponse({ data: [] });
+      if (path === '/store/downloads') {
+        downloadRequests += 1;
+        return jsonResponse({
+          downloads: downloadRequests === 1
+            ? [{ modelId: 'meta-llama/gated', progress: 0.1, status: 'downloading' }]
+            : [{ modelId: 'meta-llama/gated', progress: 0.1, status: 'failed', error: REASON }],
+        });
+      }
+      if (path === '/store/reconciliation') return reconciliationResponse();
+      if (path === '/store/registry') return jsonResponse({ entries: [] });
+      throw new Error(`unexpected fetch: ${path}`);
+    }));
+
+    await renderModelStore();
+    await flushEffects();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    await flushEffects();
+    expect(addToast).toHaveBeenCalledTimes(1);
+
+    // Retry: the store accepts the new attempt, but it fails again before any
+    // poll observes a live status. Forgetting the model on accept means the
+    // repeat failure toasts instead of being treated as already known.
+    const retryButton = container?.querySelector('[data-testid="mock-download-start"]') as HTMLButtonElement;
+    await act(async () => {
+      retryButton.click();
+    });
+    await flushEffects();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    await flushEffects();
+
+    expect(addToast).toHaveBeenCalledTimes(2);
   });
 });

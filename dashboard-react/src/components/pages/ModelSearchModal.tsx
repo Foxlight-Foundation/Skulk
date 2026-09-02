@@ -137,7 +137,8 @@ interface ModelSearchModalProps {
   open: boolean;
   onClose: () => void;
   existingModelIds: Set<string>;
-  onDownloadStarted: () => void;
+  /** Called with the model id when the store host accepts a download start. */
+  onDownloadStarted: (modelId: string) => void;
   /** What the local fleet can serve; enables burst partitioning when set. */
   fleet?: FleetServingSummary | null;
 }
@@ -300,7 +301,7 @@ export function ModelSearchModal({
           message: t('modelSearch.toasts.downloadingToStore', 'Downloading {modelId} to store', { modelId }),
         });
         setRecentIds((prev) => [modelId, ...prev.filter((id) => id !== modelId)].slice(0, MAX_RECENT_MODELS));
-        onDownloadStarted();
+        onDownloadStarted(modelId);
       } else if (accepted?.rejected) {
         addToast({
           type: 'error',
