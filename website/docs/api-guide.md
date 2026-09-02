@@ -2151,6 +2151,12 @@ store host restarts. Cancelled downloads are not listed.
 
 Use this when you want the store host to fetch and register a model.
 
+The response reports the store's current transfer state. A store-host
+rejection (for example an immutable-card conflict or a capacity limit) is
+reported in the same 200 response with `status` set to `error` and the
+store's operator-readable reason in `error`; callers must check the body's
+status rather than treating any 200 as an accepted transfer.
+
 For signed-registry artifacts, Skulk's internal request also carries the
 immutable card ID. The store host verifies that identity against its own signed
 catalog and applies the synchronized cluster repository-code decision before

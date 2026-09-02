@@ -673,3 +673,75 @@ async def test_store_client_cancels_the_canonical_download(
     assert session.requests == [
         ("http://store.local:58080/models/org%2Fmodel/download", None)
     ]
+
+
+class _RejectionResponse(_Response):
+    """A store-host refusal whose body carries the operator-readable reason."""
+
+    def __init__(self, status: int, body: str) -> None:
+        self.status = status
+        self._body = body
+
+    async def text(self) -> str:
+        return self._body
+
+
+class _RejectingSession(_Session):
+    def __init__(self, response: _RejectionResponse) -> None:
+        super().__init__()
+        self._response = response
+
+    def post(self, url: str, *, json: object | None = None) -> _Response:
+        self.requests.append((url, json))
+        return self._response
+
+
+@pytest.mark.anyio
+async def test_store_client_preserves_the_rejection_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-2xx store answer keeps the body's explanation, not just the code.
+
+    The dashboard shows this string to the operator; a bare "HTTP 409" names
+    nothing to act on while the store's own reason does.
+    """
+    session = _RejectingSession(
+        _RejectionResponse(
+            409, "409: Requested immutable card is not available for this alias"
+        )
+    )
+
+    def fake_session_factory(**_kwargs: object) -> _RejectingSession:
+        return session
+
+    monkeypatch.setattr(
+        model_store_client, "create_http_session", fake_session_factory
+    )
+    client = ModelStoreClient(store_host="store.local", store_port=58080)
+
+    result = await client.request_store_download("org/model")
+
+    assert result["status"] == "error"
+    error = result["error"]
+    assert isinstance(error, str)
+    assert error.startswith("HTTP 409: ")
+    assert "immutable card" in error
+
+
+@pytest.mark.anyio
+async def test_store_client_reports_a_bodyless_rejection_by_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _RejectingSession(_RejectionResponse(503, "  "))
+
+    def fake_session_factory(**_kwargs: object) -> _RejectingSession:
+        return session
+
+    monkeypatch.setattr(
+        model_store_client, "create_http_session", fake_session_factory
+    )
+    client = ModelStoreClient(store_host="store.local", store_port=58080)
+
+    result = await client.request_store_download("org/model")
+
+    assert result == {"status": "error", "error": "HTTP 503"}

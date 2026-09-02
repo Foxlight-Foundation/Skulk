@@ -120,6 +120,21 @@ async def build_auth_error_message(status_code: int, model_id: ModelId) -> str:
     no token at all, a token that Hugging Face rejected, gated terms not yet
     accepted, and terms that may be accepted under a *different* account than
     the token belongs to.
+
+    Args:
+        status_code: The HTTP status Hugging Face answered with; 401 and 403
+            get case-specific remediation, any other value a generic line.
+        model_id: The repository the request was for, named in the message.
+
+    Returns:
+        A human-readable explanation naming the concrete fix for this node
+        (configure a token, accept the model terms, or align the accepting
+        account with the token).
+
+    Side effects:
+        Reads this process's ``HF_TOKEN`` environment variable and the
+        Hugging Face token file to report which token source (if any) the
+        failing request would have used; nothing is written.
     """
     # In-process resolution deliberately: the Authorization header this status
     # code answers came from get_hf_token(), which reads only the environment

@@ -13,6 +13,34 @@ const RECENTS_KEY = 'skulk-recent-models';
 const MAX_RECENT_MODELS = 20;
 
 /**
+ * Read a download-start response body and report whether the store host
+ * actually accepted the transfer.
+ *
+ * The API keeps HTTP 200 for these responses and encodes a store-host
+ * rejection as `status: "error"` with an operator-readable `error` field,
+ * so acceptance must be judged from the body, not the status code. A body
+ * that cannot be parsed is treated as accepted to preserve the previous
+ * behavior for older responses.
+ */
+export async function readAcceptedDownload(res: Response): Promise<{ rejected: boolean; reason: string | null }> {
+  try {
+    const body: unknown = await res.json();
+    if (body && typeof body === 'object') {
+      const record = body as Record<string, unknown>;
+      if (record.status === 'error') {
+        return {
+          rejected: true,
+          reason: typeof record.error === 'string' && record.error.trim() ? record.error : null,
+        };
+      }
+    }
+  } catch {
+    // Unparseable body — assume the historical accepted shape.
+  }
+  return { rejected: false, reason: null };
+}
+
+/**
  * Pull the human-readable failure reason out of an error response.
  *
  * The API reports why a mutation failed (for example that a Hugging Face
@@ -20,7 +48,7 @@ const MAX_RECENT_MODELS = 20;
  * `detail` field; a generic toast that drops it leaves the operator with
  * nothing to act on. Returns `null` when the body carries no usable text.
  */
-async function extractErrorDetail(res: Response): Promise<string | null> {
+export async function extractErrorDetail(res: Response): Promise<string | null> {
   try {
     const body: unknown = await res.json();
     if (body && typeof body === 'object') {
@@ -253,13 +281,24 @@ export function ModelSearchModal({
           body: JSON.stringify({ gguf_file: ggufFile }),
         } : {}),
       });
-      if (res.ok) {
+      // The API answers HTTP 200 even when the store host rejected the
+      // request (the rejection rides in the body as status "error"), so a
+      // status check alone would show a false success toast.
+      const accepted = res.ok ? await readAcceptedDownload(res) : null;
+      if (accepted && !accepted.rejected) {
         addToast({
           type: 'success',
           message: t('modelSearch.toasts.downloadingToStore', 'Downloading {modelId} to store', { modelId }),
         });
         setRecentIds((prev) => [modelId, ...prev.filter((id) => id !== modelId)].slice(0, MAX_RECENT_MODELS));
         onDownloadStarted();
+      } else if (accepted?.rejected) {
+        addToast({
+          type: 'error',
+          message: accepted.reason
+            ? t('modelSearch.toasts.downloadStartFailedWithReason', 'Failed to start download for {modelId}: {reason}', { modelId, reason: accepted.reason })
+            : t('modelSearch.toasts.downloadStartFailedForModel', 'Failed to start download for {modelId}', { modelId }),
+        });
       } else {
         const reason = await extractErrorDetail(res);
         addToast({
