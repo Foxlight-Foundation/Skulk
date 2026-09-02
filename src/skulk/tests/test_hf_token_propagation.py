@@ -1,3 +1,4 @@
+# pyright: reportPrivateUsage=false, reportAny=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false
 """Cluster-wide Hugging Face token propagation.
 
 A token entered in any node's Settings must converge onto the node that
@@ -204,7 +205,10 @@ async def test_store_host_rebroadcast_uses_persisted_config_not_the_startup_snap
             store_host=hostname, store_path=str(tmp_path / "store")
         ),
     )
-    monkeypatch.setattr(main_module, "load_skulk_config", lambda *a, **k: rotated)
+    def _load_rotated(*_args: object, **_kwargs: object) -> SkulkConfig:
+        return rotated
+
+    monkeypatch.setattr(main_module, "load_skulk_config", _load_rotated)
 
     sent: list[object] = []
 
@@ -217,15 +221,17 @@ async def test_store_host_rebroadcast_uses_persisted_config_not_the_startup_snap
             return _Sender()
 
     node = object.__new__(Node)
-    node.skulk_config = stale
-    node.router = _Router()
-    node.node_id = "not-the-store-host-by-id"
+    object.__setattr__(node, "skulk_config", stale)
+    object.__setattr__(node, "router", _Router())
+    object.__setattr__(node, "node_id", "not-the-store-host-by-id")
 
     await Node._broadcast_config_if_store_host(node)
 
     assert len(sent) == 1
     config_yaml = sent[0].command.config_yaml  # pyright: ignore[reportAttributeAccessIssue]
+    assert isinstance(config_yaml, str)
     broadcast = yaml_module.safe_load(config_yaml)
+    assert isinstance(broadcast, dict)
     assert broadcast["hf_token"] == "rotated-token-b"
     assert "stale-token-a" not in config_yaml
 
