@@ -357,6 +357,7 @@ from skulk.shared.models.remote_code_approval import (
     remote_code_execution_requires_approval,
     remote_code_is_automatically_trusted,
     remote_code_trust_identity,
+    trusted_fabric_mutation_allowed,
 )
 from skulk.shared.tracing import (
     TraceEvent,
@@ -8746,10 +8747,38 @@ class API:
 
     @classmethod
     def _require_operator_mutation(cls, request: Request) -> None:
-        """Allow a mutation only from loopback or the authenticated gateway."""
+        """Allow a mutation from the gateway, loopback, or a trusted-fabric peer.
+
+        The dashboard is served on the LAN listener and browsed from other
+        machines, so operator mutations accept a direct private-LAN or CGNAT
+        socket peer: the cluster's standing trust posture, since such a peer
+        can already join the mesh as a full member. Forwarded requests and
+        public peers still require loopback or the authenticated gateway.
+        """
         if request.scope.get(OPERATOR_GATEWAY_AUTHORIZED_SCOPE_KEY) is True:
             return
-        cls._require_loopback_mutation(request)
+        client_host = request.client.host if request.client is not None else None
+        forwarding_headers_present = any(
+            raw_name.lower() == b"forwarded"
+            or raw_name.lower().startswith(b"x-forwarded-")
+            or raw_name.lower()
+            in {b"x-real-ip", b"cf-connecting-ip", b"true-client-ip"}
+            for raw_name, _raw_value in request.headers.raw
+        )
+        if trusted_fabric_mutation_allowed(
+            client_host,
+            request.headers.get("origin"),
+            forwarding_headers_present=forwarding_headers_present,
+        ):
+            return
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "This operator mutation requires a direct loopback or "
+                "trusted-fabric (private LAN / CGNAT) connection, or an "
+                "authenticated operator-gateway credential"
+            ),
+        )
 
     @classmethod
     def _require_exact_card_qualification_mutation(cls, request: Request) -> bool:

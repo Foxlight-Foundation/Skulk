@@ -4,7 +4,7 @@ import base64
 import hashlib
 import json
 from collections.abc import Set as AbstractSet
-from ipaddress import ip_address
+from ipaddress import ip_address, ip_network
 from urllib.parse import urlsplit
 
 from skulk.shared.models.model_cards import ModelCard
@@ -185,6 +185,78 @@ def require_remote_code_approval(
             "immutable signed execution identity: "
             f"{card.registry_card_id}"
         )
+
+
+_TRUSTED_FABRIC_IPV4_NETWORKS = (
+    ip_network("10.0.0.0/8"),
+    ip_network("172.16.0.0/12"),
+    ip_network("192.168.0.0/16"),
+    ip_network("100.64.0.0/10"),
+)
+"""Private-LAN plus CGNAT overlay ranges, matching the Zenoh auto-bind policy.
+
+The same address classes the data plane treats as the trusted fabric: a
+browser or peer on one of these networks is a cluster-adjacent operator
+surface, while anything public still requires loopback or the authenticated
+gateway.
+"""
+
+
+def _is_trusted_fabric_host(host: str | None) -> bool:
+    """Whether a socket or Origin host is loopback or on the trusted fabric."""
+    if host == "localhost":
+        return True
+    if host is None:
+        return False
+    try:
+        parsed = ip_address(host)
+    except ValueError:
+        return False
+    if parsed.is_loopback:
+        return True
+    if parsed.version != 4:
+        return False
+    return any(parsed in network for network in _TRUSTED_FABRIC_IPV4_NETWORKS)
+
+
+def trusted_fabric_mutation_allowed(
+    client_host: str | None,
+    origin: str | None,
+    *,
+    forwarding_headers_present: bool = False,
+) -> bool:
+    """Return whether a request came directly from a trusted-fabric peer.
+
+    The operator dashboard is served on the LAN listener and browsed from
+    other machines on that LAN, so operator mutations accept a direct private
+    LAN or CGNAT overlay socket peer in addition to loopback. This is the
+    cluster's standing trust posture: a peer on those networks can already
+    join the mesh as a full member, so gating the dashboard's mutations to
+    loopback provided ceremony rather than a boundary.
+
+    Args:
+        client_host: Socket peer host reported by the ASGI server.
+        origin: Optional browser Origin header.
+        forwarding_headers_present: Whether a proxy-origin header was supplied.
+
+    Returns:
+        ``True`` only for a direct loopback or trusted-fabric peer and, for
+        browser requests, an Origin on the same trust classes. Proxy-shaped
+        requests still fail closed: a forwarded request's true origin is
+        unknowable, and the public relay must never reach these handlers.
+    """
+
+    if forwarding_headers_present or not _is_trusted_fabric_host(client_host):
+        return False
+    if origin is None:
+        return True
+    try:
+        parsed_origin = urlsplit(origin)
+    except ValueError:
+        return False
+    return parsed_origin.scheme in {"http", "https"} and _is_trusted_fabric_host(
+        parsed_origin.hostname
+    )
 
 
 def loopback_mutation_allowed(
