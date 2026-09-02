@@ -5,9 +5,12 @@ The pip-installable CUDA `llama-server` build for [Skulk](https://github.com/Fox
 The wheel carries the Foxlight-built `llama-server` and `ggml-rpc-server` binaries, compiled from the pinned upstream [llama.cpp](https://github.com/ggml-org/llama.cpp) release with CUDA enabled (upstream publishes no Linux CUDA prebuilt). The CUDA runtime is not rehosted here: it resolves from NVIDIA's official PyPI wheels (`nvidia-cuda-runtime-cu12`, `nvidia-cublas-cu12`), which install as ordinary dependencies. The `llama-server-cuda` entry point puts those libraries on the loader path and execs the real binary, forwarding all arguments.
 
 ```bash
-uv pip install skulk-llama-server-cuda
+uv pip install --extra-index-url https://wheels.foxlight.ai/simple/ \
+  skulk-llama-server-cuda
 llama-server-cuda --list-devices
 ```
+
+The index flag is required: this wheel is published only to the Foxlight index (its payload exceeds PyPI's per-file limit), while its NVIDIA runtime dependencies still resolve from PyPI.
 
 Skulk's engine provisioning discovers the installed wheel automatically and wires it as the node's served engine; no configuration is needed. A machine additionally needs the NVIDIA driver (anything where `nvidia-smi` works), which only NVIDIA can ship.
 
