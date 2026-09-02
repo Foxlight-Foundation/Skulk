@@ -134,7 +134,10 @@ async def build_auth_error_message(status_code: int, model_id: ModelId) -> str:
     Side effects:
         Reads this process's ``HF_TOKEN`` environment variable and the
         Hugging Face token file to report which token source (if any) the
-        failing request would have used; nothing is written.
+        failing request would have used. The no-token remediation
+        additionally consults ``~/.skulk/skulk.env`` and ``skulk.yaml``
+        (via :func:`resolve_hf_token_source`) to mention a configured token
+        this process has not loaded. Nothing is written.
     """
     # In-process resolution deliberately: the Authorization header this status
     # code answers came from get_hf_token(), which reads only the environment

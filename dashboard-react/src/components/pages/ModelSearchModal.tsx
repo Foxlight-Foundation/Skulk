@@ -43,16 +43,25 @@ export async function readAcceptedDownload(res: Response): Promise<{ rejected: b
 /**
  * Pull the human-readable failure reason out of an error response.
  *
- * The API reports why a mutation failed (for example that a Hugging Face
- * repository is gated and needs a token or accepted terms) in FastAPI's
- * `detail` field; a generic toast that drops it leaves the operator with
- * nothing to act on. Returns `null` when the body carries no usable text.
+ * The API's HTTPException handler serializes failures as
+ * `{"error": {"message": ...}}` (the OpenAI-style envelope), while plain
+ * FastAPI validation errors use a top-level `detail` field; both carry the
+ * reason a mutation failed (for example that a Hugging Face repository is
+ * gated and needs a token or accepted terms), and a generic toast that
+ * drops it leaves the operator with nothing to act on. Returns `null` when
+ * the body carries no usable text in either shape.
  */
 export async function extractErrorDetail(res: Response): Promise<string | null> {
   try {
     const body: unknown = await res.json();
     if (body && typeof body === 'object') {
-      const detail = (body as Record<string, unknown>).detail;
+      const record = body as Record<string, unknown>;
+      const nestedError = record.error;
+      if (nestedError && typeof nestedError === 'object') {
+        const message = (nestedError as Record<string, unknown>).message;
+        if (typeof message === 'string' && message.trim()) return message;
+      }
+      const detail = record.detail;
       if (typeof detail === 'string' && detail.trim()) return detail;
     }
   } catch {
