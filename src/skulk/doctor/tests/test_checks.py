@@ -322,10 +322,11 @@ def test_hf_token_degraded_when_this_node_downloads(
     results = _check_hf_token(make_facts())
     assert [r.verdict for r in results] == ["degraded"]
     assert "gated" in results[0].consequence
-    # The remediation must name the restart-free mechanism and the node-local
-    # rule, because setting it on the wrong node is the failure being fixed.
+    # The remediation must lead with the dashboard path (one entry covers the
+    # fleet via propagation) while keeping the restart-free local mechanism.
+    assert "dashboard Settings" in results[0].remediation
+    assert "propagates" in results[0].remediation
     assert "hf auth login" in results[0].remediation
-    assert "node-local" in results[0].remediation
 
 
 def test_hf_token_ok_when_another_node_is_the_store_host(

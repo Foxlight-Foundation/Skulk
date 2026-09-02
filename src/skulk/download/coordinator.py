@@ -414,10 +414,15 @@ class DownloadCoordinator:
             def preserve_local_fields(
                 existing: dict[str, object],
             ) -> dict[str, object]:
-                """Merge node-local secrets and trust inside the write lock."""
+                """Merge node-local fields inside the write lock.
+
+                An incoming ``hf_token`` is adopted (that is how a token
+                entered in one node's Settings reaches the store host), but
+                absent-or-blank must never erase a locally configured one.
+                """
 
                 updated = dict(received)
-                if "hf_token" not in updated and "hf_token" in existing:
+                if not updated.get("hf_token") and existing.get("hf_token"):
                     updated["hf_token"] = existing["hf_token"]
                 if "model_trust" not in updated and "model_trust" in existing:
                     updated["model_trust"] = existing["model_trust"]

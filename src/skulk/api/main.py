@@ -12435,13 +12435,19 @@ class API:
         # A consent change must apply immediately, not after the TTL.
         self._telemetry_config_cached_until = 0.0
         self._sync_builtin_speech_capability()
-        # Broadcast to all nodes via gossipsub — strip hf_token (secret).
+        # Broadcast to all nodes via gossipsub. hf_token rides along so a
+        # token entered in any node's Settings converges onto the node that
+        # actually fetches (the store host, or a worker doing an
+        # allow_hf_fallback direct download). The fabric is PSK-encrypted and
+        # trusted by doctrine; GET /config still never returns the token. A
+        # blank token is dropped so it can never clobber a real one on peers.
         import copy
 
         from skulk.shared.types.commands import SyncConfig
 
         broadcast_data = copy.deepcopy(config_data)
-        broadcast_data.pop("hf_token", None)
+        if not broadcast_data.get("hf_token"):
+            broadcast_data.pop("hf_token", None)
         broadcast_data.pop("model_trust", None)
         broadcast_yaml = yaml.safe_dump(
             broadcast_data, default_flow_style=False, sort_keys=False

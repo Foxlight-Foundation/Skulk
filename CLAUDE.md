@@ -562,8 +562,11 @@ command-correlated wait, and retained `qualification_only` installed sidecars
 do not re-enter the catalog after cleanup. Signed-registry refreshes supersede
 stale qualification entries in the master's ownership view.
 The gateway records successful bearer validation in the internal ASGI scope,
-not a caller-provided header. Secret-stripped convergence preserves each node's
-local Hugging Face token and atomically writes `skulk.yaml` mode `0o600`.
+not a caller-provided header. Config convergence carries `hf_token` over the
+PSK-encrypted fabric (Settings broadcast, store-host formation, and join-time
+bootstrap) so a token entered on any node reaches the nodes that fetch; an
+absent-or-blank incoming token never erases a local one, writes stay atomic
+mode `0o600`, and `GET /config` never returns the token.
 Installer-generated configs begin as local bootstrap stores. On cluster
 formation, followers retry state-sync config bootstrap, receive the elected
 master's routable store address, stop superseded local store servers, and

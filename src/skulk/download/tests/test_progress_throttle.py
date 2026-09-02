@@ -103,6 +103,49 @@ async def test_synced_config_preserves_node_local_hugging_face_token(
 
 
 @pytest.mark.asyncio
+async def test_synced_config_adopts_an_incoming_hugging_face_token(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A token entered in one node's Settings must reach this node.
+
+    This is the receive half of token propagation: the broadcast carries the
+    token, and every node persists it (0600) and promotes it into HF_TOKEN so
+    downloads authenticate without a restart.
+    """
+
+    config_path = tmp_path / "skulk.yaml"
+    coordinator = _make_coordinator()
+    monkeypatch.setattr(coordinator_mod, "resolve_config_path", lambda: config_path)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+
+    await coordinator._sync_config("hf_token: fleet-token\n")
+
+    assert "hf_token: fleet-token" in config_path.read_text()
+    assert config_path.stat().st_mode & 0o777 == 0o600
+    import os
+
+    assert os.environ.get("HF_TOKEN") == "fleet-token"
+
+
+@pytest.mark.asyncio
+async def test_synced_config_blank_token_does_not_clobber_local(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Present-but-blank is not a credential and must not erase a real one."""
+
+    config_path = tmp_path / "skulk.yaml"
+    config_path.write_text("hf_token: local-secret\n")
+    coordinator = _make_coordinator()
+    monkeypatch.setattr(coordinator_mod, "resolve_config_path", lambda: config_path)
+
+    await coordinator._sync_config("hf_token: ''\nlogging:\n  enabled: false\n")
+
+    assert "hf_token: local-secret" in config_path.read_text()
+
+
+@pytest.mark.asyncio
 async def test_synced_config_merges_latest_trust_inside_transaction(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

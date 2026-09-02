@@ -503,6 +503,53 @@ def _state_sync_store_http_host(
     )
 
 
+def merge_cluster_config_bootstrap(
+    config_yaml: str,
+    config_path: Path,
+) -> dict[str, object]:
+    """Merge an authoritative bootstrap config into the local file.
+
+    A payload carrying an ``hf_token`` is adopted, persisted mode ``0o600``,
+    and promoted into ``HF_TOKEN`` when that variable is unset, so a freshly
+    joined node's downloads authenticate without a restart. Absent-or-blank
+    incoming tokens never erase a locally configured one, and node-local
+    deprecated ``model_trust`` compatibility state is preserved.
+
+    Args:
+        config_yaml: The master's serialized bootstrap configuration.
+        config_path: Destination ``skulk.yaml``.
+
+    Returns:
+        The merged configuration mapping as persisted.
+    """
+
+    import yaml as yaml_module
+
+    from skulk.store.config import update_skulk_config_atomic
+
+    received = cast(
+        "dict[str, object]",
+        yaml_module.safe_load(config_yaml) or {},
+    )
+
+    def preserve_local_fields(
+        existing: dict[str, object],
+    ) -> dict[str, object]:
+        updated = dict(received)
+        if not updated.get("hf_token") and existing.get("hf_token"):
+            updated["hf_token"] = existing["hf_token"]
+        if "model_trust" not in updated and "model_trust" in existing:
+            updated["model_trust"] = existing["model_trust"]
+        return updated
+
+    merged = update_skulk_config_atomic(config_path, preserve_local_fields)
+    adopted_token = merged.get("hf_token")
+    if adopted_token and "HF_TOKEN" not in os.environ:
+        os.environ["HF_TOKEN"] = str(adopted_token)
+        logger.info("Adopted HF token from cluster config bootstrap")
+    return merged
+
+
 @dataclass
 class Node:
     router: Router
@@ -1243,10 +1290,18 @@ class Node:
         return None
 
     def _apply_cluster_config_yaml(self, config_yaml: str) -> None:
-        """Persist cluster config locally and rebuild derived runtime wiring."""
+        """Persist cluster config locally and rebuild derived runtime wiring.
+
+        Merges rather than overwrites: an authoritative payload that carries
+        no ``hf_token`` must not erase one configured locally (the previous
+        raw ``write_text`` did exactly that on every bootstrap). An incoming
+        token is adopted and promoted to ``HF_TOKEN`` when unset, mirroring
+        the ordinary config-sync receive path, so downloads on a freshly
+        joined node authenticate without a restart.
+        """
 
         config_path = resolve_config_path()
-        config_path.write_text(config_yaml)
+        merge_cluster_config_bootstrap(config_yaml, config_path)
         self.skulk_config = load_skulk_config(config_path)
 
     async def _apply_authoritative_cluster_config(self, config_yaml: str) -> None:
@@ -1323,13 +1378,17 @@ class Node:
 
         import yaml
 
-        # Broadcast the resolved reachable host to the cluster (secrets stripped).
-        # The store host applies its own broadcast via local delivery and persists
-        # it through the normal config-sync path, so there is no separate local
-        # write here (it would only be clobbered by that same broadcast).
+        # Broadcast the resolved reachable host to the cluster. The store
+        # host's hf_token (if any) rides along so a fleet formed from one
+        # configured node converges on that token; a blank one is dropped so
+        # it can never clobber a real token on peers. The store host applies
+        # its own broadcast via local delivery and persists it through the
+        # normal config-sync path, so there is no separate local write here
+        # (it would only be clobbered by that same broadcast).
         broadcast_dict = copy.deepcopy(self.skulk_config.model_dump())
         broadcast_dict["model_store"]["store_http_host"] = reachable_host
-        broadcast_dict.pop("hf_token", None)
+        if not broadcast_dict.get("hf_token"):
+            broadcast_dict.pop("hf_token", None)
         broadcast_dict.pop("model_trust", None)
         broadcast_yaml = yaml.safe_dump(
             broadcast_dict, default_flow_style=False, sort_keys=False

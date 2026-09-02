@@ -95,21 +95,21 @@ def _unloaded_token_hint() -> str:
 
 
 def _hf_token_remediation() -> str:
-    """Say how to give *this* node a token, naming the node.
+    """Say how to get a token onto this node, naming the node.
 
-    The node matters: a token is deliberately never broadcast to the cluster
-    (``PUT /config`` strips it), so it must exist on whichever node performs
-    the fetch. On a fleet with a model store that is the store host, which is
-    usually not the node whose dashboard an operator has open (#917).
+    On a formed cluster the dashboard is the easy path: a token entered in any
+    node's Settings propagates over the encrypted fabric to every node,
+    including this one. The per-node mechanisms remain for a machine that has
+    not formed a cluster.
     """
     node = socket.gethostname()
     return (
-        f"Give the node performing the download ({node}) a Hugging Face token: "
-        f"run `hf auth login` there (writes {get_hf_token_path()}, picked up "
-        f"without a restart), or set HF_TOKEN in ~/.skulk/skulk.env and restart "
-        f"the node. Tokens are node-local and are never broadcast to the "
-        f"cluster, so on a fleet with a model store the token must be on the "
-        f"store host. Get a token at https://huggingface.co/settings/tokens"
+        f"Give this node ({node}) a Hugging Face token: enter it once in any "
+        f"node's dashboard Settings (it propagates to the whole cluster), run "
+        f"`hf auth login` here (writes {get_hf_token_path()}, picked up "
+        f"without a restart), or set HF_TOKEN in ~/.skulk/skulk.env and "
+        f"restart the node. Get a token at "
+        f"https://huggingface.co/settings/tokens"
     )
 
 
