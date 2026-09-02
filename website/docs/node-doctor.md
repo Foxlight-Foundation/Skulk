@@ -55,7 +55,7 @@ Reports whether the built web dashboard is present. The API serves without it; h
 
 ### Hugging Face token (`hf-token`)
 
-Reports whether this node can authenticate to Hugging Face, and whether it is the node that needs to. Tokens are node-local and are never broadcast to the cluster, so the token must exist on whichever node performs downloads: the model store host when a store is configured, otherwise every node for itself. Without one, public models still download and only gated or private repositories fail.
+Reports whether this node can authenticate to Hugging Face, and whether it is the node that needs to. A token entered in any node's dashboard Settings propagates over the encrypted cluster fabric to every node, and joining nodes adopt it at bootstrap, so one entry covers the fleet; this check verifies it actually arrived on the node that performs downloads (the model store host when a store is configured, otherwise this node itself). Without one, public models still download and only gated or private repositories fail.
 
 ### vLLM build prerequisites (`vllm-prerequisites`)
 
