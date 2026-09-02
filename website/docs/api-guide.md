@@ -2596,8 +2596,9 @@ commands, state, and inference are not cross-version-compatible; finish the
 deployment before starting new inference work.
 
 The response carries a live `nodeResources` map as well. Each node entry includes
-its placement `backends`, declared `participation`, resolved `dataTransport`
-(`gossipsub` or `zenoh`), `zenohConnectedPeers` (the node's live Zenoh
+its placement `backends`, declared `participation`, `apiAvailable` (whether the
+node process exposes the HTTP API), resolved `dataTransport` (`gossipsub` or
+`zenoh`), `zenohConnectedPeers` (the node's live Zenoh
 peer-transport count, sampled at each advertisement; `null` when the node runs
 gossipsub or while the count is not yet trustworthy after startup), and
 `capabilityConflicts`: loud
@@ -2622,6 +2623,9 @@ over a routed or overlay network); the remediation is an explicit
 `SKULK_ZENOH_CONNECT` peer endpoint plus a dialable `SKULK_ZENOH_LISTEN`
 address. The API includes fresh telemetry-only management nodes, local or
 remote, even when replicated worker membership does not carry their entries.
+For mixed-version state that predates this field, a missing `apiAvailable`
+decodes conservatively as `true`; current `--no-api` workers advertise `false`
+explicitly.
 
 The `topology` map lists each node's connections. A socket edge carries the
 peer's `sinkMultiaddr` plus a boolean `session` annotation distinguishing its
