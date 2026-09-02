@@ -12461,10 +12461,12 @@ class API:
             "_SKULK_KV_BACKEND_USER_SET"
         ):
             os.environ["SKULK_KV_CACHE_BACKEND"] = str(inference["kv_cache_backend"])
-        # Apply HF token immediately
-        hf_token = config_data.get("hf_token")
-        if hf_token and "HF_TOKEN" not in os.environ:
-            os.environ["HF_TOKEN"] = str(hf_token)
+        # Apply HF token immediately: replaces a config-derived value so
+        # rotation converges, never an operator-supplied launch value, and
+        # whitespace never lands in the environment.
+        from skulk.store.config import promote_hf_token
+
+        _ = promote_hf_token(config_data.get("hf_token"), source="settings update")
         # Apply logging config immediately
         logging_cfg_update = _coerce_json_object(config_data.get("logging"))
         if logging_cfg_update:

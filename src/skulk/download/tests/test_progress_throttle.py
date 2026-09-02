@@ -168,6 +168,57 @@ async def test_synced_config_whitespace_token_does_not_clobber_local(
 
 
 @pytest.mark.asyncio
+async def test_synced_config_rotates_a_config_derived_token(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Token rotation through Settings must converge without restarts.
+
+    HF_TOKEN holding an earlier config-promoted value must not block the
+    replacement; only an operator-supplied launch value is protected (via the
+    user-set marker, which is absent here).
+    """
+    import os
+
+    from skulk.store.config import HF_TOKEN_USER_SET_MARKER
+
+    config_path = tmp_path / "skulk.yaml"
+    config_path.write_text("hf_token: old-token\n")
+    coordinator = _make_coordinator()
+    monkeypatch.setattr(coordinator_mod, "resolve_config_path", lambda: config_path)
+    monkeypatch.setenv("HF_TOKEN", "old-token")
+    monkeypatch.delenv(HF_TOKEN_USER_SET_MARKER, raising=False)
+
+    await coordinator._sync_config("hf_token: new-token\n")
+
+    assert "hf_token: new-token" in config_path.read_text()
+    assert os.environ.get("HF_TOKEN") == "new-token"
+
+
+@pytest.mark.asyncio
+async def test_synced_config_never_replaces_an_operator_launch_token(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import os
+
+    from skulk.store.config import HF_TOKEN_USER_SET_MARKER
+
+    config_path = tmp_path / "skulk.yaml"
+    coordinator = _make_coordinator()
+    monkeypatch.setattr(coordinator_mod, "resolve_config_path", lambda: config_path)
+    monkeypatch.setenv("HF_TOKEN", "operator-token")
+    monkeypatch.setenv(HF_TOKEN_USER_SET_MARKER, "1")
+
+    await coordinator._sync_config("hf_token: fleet-token\n")
+
+    # The file converges (a later restart adopts it); the running process
+    # keeps the operator's explicit launch value.
+    assert "hf_token: fleet-token" in config_path.read_text()
+    assert os.environ.get("HF_TOKEN") == "operator-token"
+
+
+@pytest.mark.asyncio
 async def test_synced_config_merges_latest_trust_inside_transaction(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -527,12 +527,19 @@ def merge_cluster_config_bootstrap(
 
     from skulk.store.config import update_skulk_config_atomic
 
-    received = cast(
-        "dict[str, object]",
-        yaml_module.safe_load(config_yaml) or {},
-    )
+    decoded: object = yaml_module.safe_load(config_yaml)
+    if not isinstance(decoded, dict):
+        # A malformed payload must degrade to "keep local config", not crash
+        # a node mid-join; the trusted fabric makes this a bug signal, not an
+        # attack surface, so a warning is the right volume.
+        if decoded is not None:
+            logger.warning(
+                "Ignoring non-mapping cluster bootstrap config payload"
+            )
+        decoded = {}
+    received = cast("dict[str, object]", decoded)
 
-    from skulk.store.config import normalized_hf_token
+    from skulk.store.config import normalized_hf_token, promote_hf_token
 
     def preserve_local_fields(
         existing: dict[str, object],
@@ -547,10 +554,7 @@ def merge_cluster_config_bootstrap(
         return updated
 
     merged = update_skulk_config_atomic(config_path, preserve_local_fields)
-    adopted_token = normalized_hf_token(merged.get("hf_token"))
-    if adopted_token and "HF_TOKEN" not in os.environ:
-        os.environ["HF_TOKEN"] = adopted_token
-        logger.info("Adopted HF token from cluster config bootstrap")
+    _ = promote_hf_token(merged.get("hf_token"), source="cluster config bootstrap")
     return merged
 
 
@@ -726,14 +730,17 @@ class Node:
                 f"Inference config: kv_cache_backend={skulk_config.inference.kv_cache_backend}"
             )
 
-        # Apply HF token from config if not already set via env
-        if (
-            skulk_config is not None
-            and skulk_config.hf_token
-            and "HF_TOKEN" not in os.environ
-        ):
-            os.environ["HF_TOKEN"] = skulk_config.hf_token
-            logger.info("HF token loaded from config")
+        # Track whether the operator supplied HF_TOKEN at launch (directly or
+        # via the service env file). If so, config syncs must never replace
+        # it; a value merely promoted from skulk.yaml below may be replaced
+        # by a newer fleet token so rotation converges without restarts.
+        from skulk.store.config import HF_TOKEN_USER_SET_MARKER, promote_hf_token
+
+        os.environ[HF_TOKEN_USER_SET_MARKER] = (
+            "1" if "HF_TOKEN" in os.environ else ""
+        )
+        if skulk_config is not None:
+            _ = promote_hf_token(skulk_config.hf_token, source="local config")
 
         store_client, store_server = _configure_model_store_runtime(
             node_id, skulk_config

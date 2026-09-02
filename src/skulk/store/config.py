@@ -78,6 +78,7 @@ from pathlib import Path
 from typing import Final, Literal, cast, final
 
 import yaml
+from loguru import logger
 from pydantic import Field, field_validator, model_validator
 
 from skulk.utils.pydantic_ext import FrozenModel
@@ -135,6 +136,42 @@ def normalized_hf_token(value: object) -> str | None:
         return None
     stripped = value.strip()
     return stripped or None
+
+
+HF_TOKEN_USER_SET_MARKER = "_SKULK_HF_TOKEN_USER_SET"
+"""Internal marker: ``HF_TOKEN`` was supplied by the operator at launch.
+
+Same pattern as ``_SKULK_KV_BACKEND_USER_SET``: an operator-exported value
+outranks config sync forever, while a value merely promoted from config may be
+replaced when a newer fleet token arrives, so token rotation through Settings
+actually converges without restarts.
+"""
+
+
+def promote_hf_token(value: object, *, source: str) -> bool:
+    """Promote a config-carried token into ``HF_TOKEN`` when allowed.
+
+    Normalizes first (whitespace never lands in the environment), refuses to
+    touch an operator-supplied launch value, and otherwise replaces the
+    current config-derived value so rotation takes effect without a restart.
+
+    Args:
+        value: The raw ``hf_token`` config value.
+        source: Human-readable origin for the log line.
+
+    Returns:
+        Whether the environment was updated.
+    """
+    token = normalized_hf_token(value)
+    if token is None:
+        return False
+    if os.environ.get(HF_TOKEN_USER_SET_MARKER) == "1":
+        return False
+    if os.environ.get("HF_TOKEN") == token:
+        return False
+    os.environ["HF_TOKEN"] = token
+    logger.info(f"HF token updated from {source}")
+    return True
 
 
 def node_matches_store_host(

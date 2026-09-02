@@ -456,11 +456,12 @@ class DownloadCoordinator:
                     logger.info(
                         "DownloadCoordinator: skipping KV backend update (user env var override active)"
                     )
-            # Apply HF token if not user-set
-            hf_token = raw.get("hf_token")
-            if hf_token and "HF_TOKEN" not in os.environ:
-                os.environ["HF_TOKEN"] = str(hf_token)
-                logger.info("DownloadCoordinator: updated HF_TOKEN from config sync")
+            # Promote the merged token: replaces a config-derived value so
+            # rotation converges, never an operator-supplied launch value,
+            # and whitespace never lands in the environment.
+            from skulk.store.config import promote_hf_token
+
+            _ = promote_hf_token(raw.get("hf_token"), source="config sync")
             # Apply logging config — enable/disable structured stdout
             logging_cfg = _coerce_json_object(raw.get("logging"))
             if logging_cfg:
