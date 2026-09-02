@@ -71,3 +71,72 @@ describe('StoreRegistryTable chat action', () => {
     expect(container?.querySelector('button[title="Chat with model"]')).toBeNull();
   });
 });
+
+describe('StoreRegistryTable failed downloads', () => {
+  const GATED_REASON = "Access to 'org/gated' is restricted and this node sent no Hugging Face token.";
+
+  async function renderWithDownload(status: string, error?: string): Promise<void> {
+    container = document.createElement('div');
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () => {
+      root?.render(
+        <ThemeProvider theme={darkTheme}>
+          <StoreRegistryTable
+            entries={[{
+              model_id: 'org/gated',
+              total_bytes: 1024,
+              files: ['model.safetensors'],
+              downloaded_at: new Date().toISOString(),
+            }]}
+            activeDownloads={[{ modelId: 'org/gated', progress: 0.2, status, error }]}
+            activeModelIds={[]}
+            onRefresh={vi.fn()}
+            onDelete={vi.fn()}
+            onLaunch={vi.fn()}
+          />
+        </ThemeProvider>,
+      );
+    });
+  }
+
+  it('badges a failed registered download instead of showing a stuck progress bar', async () => {
+    await renderWithDownload('failed', GATED_REASON);
+
+    expect(container?.textContent).toContain('Download failed');
+    expect(container?.textContent).not.toContain('20%');
+    // A failed download must not lock the row: the operator fixes the cause
+    // and retries, so Launch stays available for the installed generation.
+    expect(container?.querySelector('button[title="Launch model"]')).not.toBeNull();
+  });
+
+  it('keeps the progress bar and suppresses launch while a download is live', async () => {
+    await renderWithDownload('downloading');
+
+    expect(container?.textContent).toContain('20%');
+    expect(container?.textContent).not.toContain('Download failed');
+    expect(container?.querySelector('button[title="Launch model"]')).toBeNull();
+  });
+
+  it('badges a failed unregistered (pending row) download', async () => {
+    container = document.createElement('div');
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () => {
+      root?.render(
+        <ThemeProvider theme={darkTheme}>
+          <StoreRegistryTable
+            entries={[]}
+            activeDownloads={[{ modelId: 'org/unregistered', progress: 0, status: 'failed', error: GATED_REASON }]}
+            activeModelIds={[]}
+            onRefresh={vi.fn()}
+            onDelete={vi.fn()}
+          />
+        </ThemeProvider>,
+      );
+    });
+
+    expect(container?.textContent).toContain('org/unregistered');
+    expect(container?.textContent).toContain('Download failed');
+  });
+});

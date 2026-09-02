@@ -1515,11 +1515,21 @@ class ModelStore:
         return None
 
     def list_active_downloads(self) -> list[StoreDownloadStatus]:
-        """Return all in-progress or pending downloads."""
+        """Return downloads an operator still needs to see.
+
+        Includes pending and in-flight transfers plus terminal ``failed``
+        entries, whose ``error`` field carries the actionable explanation
+        (for example how to authenticate for a gated Hugging Face
+        repository). Failed entries previously vanished from this listing,
+        which left the dashboard with no reason to show; they now stay
+        visible until a retry replaces them or the process restarts.
+        ``cancelled`` entries remain excluded because the operator chose
+        that outcome.
+        """
         return [
             s
             for s in self._active_downloads.values()
-            if s.status in ("pending", "downloading")
+            if s.status in ("pending", "downloading", "failed")
         ]
 
     async def import_peer_artifact(

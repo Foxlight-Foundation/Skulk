@@ -1622,6 +1622,10 @@ shard group. `source_revision` is also optional; when supplied it must be a full
 40-character Hugging Face commit hash. When omitted, Skulk resolves `main` once
 to the Hub's full commit. Card metadata and subsequent artifact downloads are
 therefore always pinned to an immutable revision.
+When the Hub refuses the metadata fetch with 401 or 403 (a gated or private
+repository), the 400 response's `detail` explains the concrete fix for this
+node: configure a Hugging Face token, accept the model terms on the repository
+page, or accept them under the same account the configured token belongs to.
 
 ### Add an exact unsigned model card
 
@@ -2135,7 +2139,11 @@ use the enriched public `GET /store/registry` endpoint above.
 
 **GET** `/store/downloads`
 
-Use this to inspect in-progress shared-store download activity.
+Use this to inspect shared-store download activity. The listing carries
+pending, in-progress, and failed downloads; each failed entry keeps an
+actionable `error` explanation (for example how to authenticate for a gated
+Hugging Face repository) and stays listed until a retry replaces it or the
+store host restarts. Cancelled downloads are not listed.
 
 ### Request a store download
 

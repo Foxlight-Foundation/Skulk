@@ -57,6 +57,37 @@ export function ModelStorePage({ topology, nodeResources = {}, downloads, instan
   const pollRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const storePollingDisposedRef = useRef(false);
   const optimizePollRef = useRef<ReturnType<typeof setInterval>>(undefined);
+  // Download failures already listed on the first fetch are shown by the
+  // table badge only; `null` means no fetch has been applied yet. Failures
+  // that appear after that additionally raise a toast with the store's
+  // reason, once per failure.
+  const knownFailedDownloadsRef = useRef<Set<string> | null>(null);
+
+  const applyDownloadEntries = useCallback((entries: StoreDownloadProgress[]) => {
+    const failedNow = entries.filter((d) => d.status === 'failed');
+    if (knownFailedDownloadsRef.current === null) {
+      knownFailedDownloadsRef.current = new Set(failedNow.map((d) => d.modelId));
+    } else {
+      const known = knownFailedDownloadsRef.current;
+      for (const dl of failedNow) {
+        if (known.has(dl.modelId)) continue;
+        known.add(dl.modelId);
+        addToast({
+          type: 'error',
+          message: dl.error
+            ? t('downloads.toasts.downloadFailedWithReason', 'Download of {modelId} failed: {reason}', { modelId: dl.modelId, reason: dl.error })
+            : t('downloads.toasts.downloadFailed', 'Download of {modelId} failed', { modelId: dl.modelId }),
+        });
+      }
+      // A retry that goes live again clears the entry so a repeat failure
+      // re-raises the toast.
+      for (const id of Array.from(known)) {
+        const current = entries.find((d) => d.modelId === id);
+        if (current && current.status !== 'failed') known.delete(id);
+      }
+    }
+    setStoreDownloads(entries);
+  }, [t]);
 
   // Fetch authoritative model card info from /models API
   useEffect(() => {
@@ -205,20 +236,22 @@ export function ModelStorePage({ topology, nodeResources = {}, downloads, instan
     ]);
     if (storePollingDisposedRef.current) return true;
     if (registryEntries !== null) setStoreEntries(registryEntries);
-    if (downloadEntries !== null) setStoreDownloads(downloadEntries);
+    if (downloadEntries !== null) applyDownloadEntries(downloadEntries);
     if (reconciliationStatus !== null) setReconciliation(reconciliationStatus);
 
     // A transient failure must keep the convergence loop alive. In particular,
     // the store can finish a download just as the dashboard reloads; stopping on
     // an empty downloads response while the registry request failed leaves a new
     // user permanently looking at "0 models in store" until a manual refresh.
+    // Failed downloads stay listed (so their reason stays visible) but are
+    // terminal: only live transfers should keep the 2s poll running.
     return registryEntries !== null
       && downloadEntries !== null
       && reconciliationStatus !== null
-      && downloadEntries.length === 0
+      && downloadEntries.every((d) => d.status === 'failed')
       && reconciliationStatus.state !== 'scanning'
       && reconciliationStatus.state !== 'importing';
-  }, [fetchDownloads, fetchReconciliation, fetchRegistry]);
+  }, [applyDownloadEntries, fetchDownloads, fetchReconciliation, fetchRegistry]);
 
   const scheduleStoreRefresh = useCallback(() => {
     if (storePollingDisposedRef.current || pollRef.current) return;

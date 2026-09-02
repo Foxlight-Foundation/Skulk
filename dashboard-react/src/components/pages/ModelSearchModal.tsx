@@ -13,6 +13,27 @@ const RECENTS_KEY = 'skulk-recent-models';
 const MAX_RECENT_MODELS = 20;
 
 /**
+ * Pull the human-readable failure reason out of an error response.
+ *
+ * The API reports why a mutation failed (for example that a Hugging Face
+ * repository is gated and needs a token or accepted terms) in FastAPI's
+ * `detail` field; a generic toast that drops it leaves the operator with
+ * nothing to act on. Returns `null` when the body carries no usable text.
+ */
+async function extractErrorDetail(res: Response): Promise<string | null> {
+  try {
+    const body: unknown = await res.json();
+    if (body && typeof body === 'object') {
+      const detail = (body as Record<string, unknown>).detail;
+      if (typeof detail === 'string' && detail.trim()) return detail;
+    }
+  } catch {
+    // Non-JSON error body — fall through to the generic message.
+  }
+  return null;
+}
+
+/**
  * One-time migration of pre-rename (exo-*) localStorage keys so existing
  * users keep their favorites and recents across the 2026-06 exo -> skulk
  * rename. Safe to remove a few releases after launch.
@@ -240,9 +261,12 @@ export function ModelSearchModal({
         setRecentIds((prev) => [modelId, ...prev.filter((id) => id !== modelId)].slice(0, MAX_RECENT_MODELS));
         onDownloadStarted();
       } else {
+        const reason = await extractErrorDetail(res);
         addToast({
           type: 'error',
-          message: t('modelSearch.toasts.downloadStartFailedForModel', 'Failed to start download for {modelId}', { modelId }),
+          message: reason
+            ? t('modelSearch.toasts.downloadStartFailedWithReason', 'Failed to start download for {modelId}: {reason}', { modelId, reason })
+            : t('modelSearch.toasts.downloadStartFailedForModel', 'Failed to start download for {modelId}', { modelId }),
         });
       }
     } catch {
@@ -267,7 +291,13 @@ export function ModelSearchModal({
         }
         return true;
       }
-      addToast({ type: 'error', message: t('modelSearch.toasts.addModelFailed', 'Failed to add {modelId}', { modelId }) });
+      const reason = await extractErrorDetail(res);
+      addToast({
+        type: 'error',
+        message: reason
+          ? t('modelSearch.toasts.addModelFailedWithReason', 'Failed to add {modelId}: {reason}', { modelId, reason })
+          : t('modelSearch.toasts.addModelFailed', 'Failed to add {modelId}', { modelId }),
+      });
     } catch {
       addToast({ type: 'error', message: t('modelSearch.toasts.addModelFailed', 'Failed to add {modelId}', { modelId }) });
     }

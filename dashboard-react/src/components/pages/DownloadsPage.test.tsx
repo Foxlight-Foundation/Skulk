@@ -254,3 +254,77 @@ describe('ModelStorePage registry convergence', () => {
     expect(registryRequests).toBe(2);
   });
 });
+
+describe('ModelStorePage failed-download surfacing', () => {
+  const GATED_REASON =
+    "Access to 'meta-llama/gated' is restricted and this node sent no Hugging Face token.";
+
+  it('toasts the store reason when a download transitions to failed, then converges', async () => {
+    vi.useFakeTimers();
+    const { addToast } = await import('../../hooks/useToast');
+    let downloadRequests = 0;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === '/models') return jsonResponse({ data: [] });
+      if (path === '/store/downloads') {
+        downloadRequests += 1;
+        return jsonResponse({
+          downloads: downloadRequests === 1
+            ? [{ modelId: 'meta-llama/gated', progress: 0.1, status: 'downloading' }]
+            : [{ modelId: 'meta-llama/gated', progress: 0.1, status: 'failed', error: GATED_REASON }],
+        });
+      }
+      if (path === '/store/reconciliation') return reconciliationResponse();
+      if (path === '/store/registry') return jsonResponse({ entries: [] });
+      throw new Error(`unexpected fetch: ${path}`);
+    }));
+
+    await renderModelStore();
+    await flushEffects();
+    expect(addToast).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    await flushEffects();
+
+    expect(addToast).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'error',
+      message: expect.stringContaining(GATED_REASON),
+    }));
+
+    // The failed entry is terminal: the 2s poll must stop instead of spinning
+    // on a listing that now permanently includes it.
+    const requestsAfterToast = downloadRequests;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6000);
+    });
+    expect(downloadRequests).toBe(requestsAfterToast);
+  });
+
+  it('does not toast a failure already listed on the first fetch', async () => {
+    vi.useFakeTimers();
+    const { addToast } = await import('../../hooks/useToast');
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === '/models') return jsonResponse({ data: [] });
+      if (path === '/store/downloads') {
+        return jsonResponse({
+          downloads: [{ modelId: 'meta-llama/gated', progress: 0, status: 'failed', error: GATED_REASON }],
+        });
+      }
+      if (path === '/store/reconciliation') return reconciliationResponse();
+      if (path === '/store/registry') return jsonResponse({ entries: [] });
+      throw new Error(`unexpected fetch: ${path}`);
+    }));
+
+    await renderModelStore();
+    await flushEffects();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4000);
+    });
+    await flushEffects();
+
+    expect(addToast).not.toHaveBeenCalled();
+  });
+});
