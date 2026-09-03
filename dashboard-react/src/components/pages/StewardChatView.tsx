@@ -7,7 +7,11 @@ import type { InstanceCardData } from '../layout/InstancePanel';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 import { tolgee } from '../../i18n/tolgee';
 import { addToast } from '../../hooks/useToast';
-import { useGetStewardStatusQuery } from '../../store/endpoints/steward';
+import {
+  useDecideStewardProposalMutation,
+  useGetStewardProposalsQuery,
+  useGetStewardStatusQuery,
+} from '../../store/endpoints/steward';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { chatActions } from '../../store/slices/chatSlice';
 import type { ChatMessage, ChatSpeechModelOption, ChatVoiceOption } from '../../types/chat';
@@ -101,6 +105,67 @@ const ModelTag = styled.div`
   text-align: center;
 `;
 
+const ProposalTray = styled.section`
+  flex-shrink: 0;
+  display: grid;
+  gap: 8px;
+  max-height: 38vh;
+  overflow-y: auto;
+  padding: 10px 24px;
+  border-bottom: 1px solid ${({ theme }) => theme.colors.borderLight};
+  background: ${({ theme }) => theme.colors.surfaceSunken};
+`;
+
+const ProposalCard = styled.article`
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid ${({ theme }) => theme.colors.warning};
+  border-radius: ${({ theme }) => theme.radii.md};
+  background: ${({ theme }) => theme.colors.surface};
+`;
+
+const ProposalTitle = styled.div`
+  font-family: ${({ theme }) => theme.fonts.mono};
+  font-size: ${({ theme }) => theme.fontSizes.sm};
+  color: ${({ theme }) => theme.colors.text};
+`;
+
+const ProposalCopy = styled.div`
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  line-height: 1.45;
+  color: ${({ theme }) => theme.colors.textSecondary};
+`;
+
+const ProposalEvidence = styled.ul`
+  margin: 0;
+  padding-left: 18px;
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  line-height: 1.45;
+  color: ${({ theme }) => theme.colors.textSecondary};
+`;
+
+const ProposalActions = styled.div`
+  display: flex;
+  gap: 8px;
+`;
+
+const ProposalButton = styled.button<{ $reject?: boolean }>`
+  border: 1px solid ${({ $reject, theme }) => $reject ? theme.colors.border : theme.colors.accent};
+  border-radius: ${({ theme }) => theme.radii.sm};
+  background: ${({ $reject, theme }) => $reject ? theme.colors.surface : theme.colors.accent};
+  color: ${({ $reject, theme }) => $reject ? theme.colors.textSecondary : theme.colors.textOnAccent};
+  padding: 6px 10px;
+  font: inherit;
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  cursor: pointer;
+
+  &:disabled {
+    cursor: wait;
+    opacity: 0.55;
+  }
+`;
+
 interface StreamDelta {
   content?: string;
   reasoning_content?: string;
@@ -157,6 +222,30 @@ export function StewardChatView({ readyInstances = [] }: StewardChatViewProps) {
   const { data: status, refetch } = useGetStewardStatusQuery(undefined, {
     pollingInterval: 15000,
   });
+  const { data: proposals = [] } = useGetStewardProposalsQuery(undefined, {
+    pollingInterval: 3000,
+    skip: status?.enabled !== true,
+  });
+  const [decideProposal, { isLoading: isDecidingProposal }] =
+    useDecideStewardProposalMutation();
+  const pendingProposals = proposals.filter((proposal) => proposal.status === 'pending');
+
+  const handleProposalDecision = useCallback(async (proposalId: string, approved: boolean) => {
+    try {
+      await decideProposal({ proposalId, approved }).unwrap();
+      addToast({
+        type: approved ? 'success' : 'info',
+        message: approved
+          ? t('stewardChat.proposals.approvalSubmitted', 'Action approval submitted')
+          : t('stewardChat.proposals.rejectionSubmitted', 'Action rejected'),
+      });
+    } catch {
+      addToast({
+        type: 'error',
+        message: t('stewardChat.proposals.decisionFailed', 'Could not submit the action decision'),
+      });
+    }
+  }, [decideProposal, t]);
 
   const stopSpeechPlayback = useCallback(() => {
     speechQueueRef.current?.stop();
@@ -477,6 +566,54 @@ export function StewardChatView({ readyInstances = [] }: StewardChatViewProps) {
           })}
         </ModelTag>
       )}
+      {pendingProposals.length > 0 && (
+        <ProposalTray aria-label={t('stewardChat.proposals.label', 'Pending actions')}>
+          {pendingProposals.map((proposal) => (
+            <ProposalCard key={proposal.proposal_id}>
+              <ProposalTitle>
+                {t('stewardChat.proposals.title', '{action}: {target}', {
+                  action: proposal.action.replaceAll('_', ' '),
+                  target: proposal.target,
+                })}
+              </ProposalTitle>
+              <ProposalCopy>{proposal.rationale}</ProposalCopy>
+              <ProposalCopy>
+                {t('stewardChat.proposals.evidence', 'Evidence')}
+              </ProposalCopy>
+              <ProposalEvidence>
+                {proposal.evidence.map((item, index) => (
+                  <li key={`${proposal.proposal_id}-${index}`}>{item}</li>
+                ))}
+              </ProposalEvidence>
+              <ProposalCopy>
+                {t('stewardChat.proposals.effect', 'Expected effect: {effect}', {
+                  effect: proposal.expected_effect,
+                })}
+              </ProposalCopy>
+              <ProposalCopy>
+                {t('stewardChat.proposals.expiry', 'Expires: {time}', {
+                  time: new Date(proposal.expires_at).toLocaleTimeString(),
+                })}
+              </ProposalCopy>
+              <ProposalActions>
+                <ProposalButton
+                  disabled={isDecidingProposal}
+                  onClick={() => void handleProposalDecision(proposal.proposal_id, true)}
+                >
+                  {t('stewardChat.proposals.approve', 'Approve')}
+                </ProposalButton>
+                <ProposalButton
+                  $reject
+                  disabled={isDecidingProposal}
+                  onClick={() => void handleProposalDecision(proposal.proposal_id, false)}
+                >
+                  {t('stewardChat.proposals.reject', 'Reject')}
+                </ProposalButton>
+              </ProposalActions>
+            </ProposalCard>
+          ))}
+        </ProposalTray>
+      )}
       <MessagesScroll>
         {messages.length === 0 && !isLoading ? (
           <CenterState>
@@ -487,7 +624,7 @@ export function StewardChatView({ readyInstances = [] }: StewardChatViewProps) {
             <CenterBody>
               {t(
                 'stewardChat.empty.body',
-                'Ask Skulk about its health, why a download failed, what a node is doing, or whether something looks slow. I investigate before answering; this interface observes and advises but cannot change the cluster.',
+                'Ask Skulk about its health, models, or diagnostics. I investigate first and can prepare basic actions for your explicit approval.',
               )}
             </CenterBody>
           </CenterState>

@@ -40,6 +40,28 @@ export interface StewardStatus {
   state: StewardState;
 }
 
+/** Safe action summary returned by the steward proposal API. */
+export interface StewardActionProposal {
+  proposal_id: string;
+  action: 'place_model' | 'stop_model' | 'restart_model' | 'cancel_download';
+  target: string;
+  rationale: string;
+  evidence: string[];
+  expected_effect: string;
+  created_at: string;
+  expires_at: string;
+  status: 'pending' | 'approved' | 'dispatched' | 'rejected' | 'expired' | 'failed';
+  decided_at: string | null;
+  decided_by: string | null;
+  outcome: string | null;
+}
+
+/** Explicit operator decision submitted for one pending proposal. */
+export interface StewardActionDecision {
+  proposalId: string;
+  approved: boolean;
+}
+
 /**
  * Steward status endpoint. Conversation rides the standard streaming
  * chat-completions surface with the reserved virtual model id (see
@@ -51,7 +73,23 @@ export const stewardApi = apiSlice.injectEndpoints({
       query: () => ({ url: '/v1/steward' }),
       providesTags: ['StewardStatus'],
     }),
+    getStewardProposals: build.query<StewardActionProposal[], void>({
+      query: () => ({ url: '/v1/steward/proposals' }),
+      providesTags: ['StewardProposals'],
+    }),
+    decideStewardProposal: build.mutation<void, StewardActionDecision>({
+      query: ({ proposalId, approved }) => ({
+        url: `/v1/steward/proposals/${encodeURIComponent(proposalId)}/decision`,
+        method: 'POST',
+        body: { approved },
+      }),
+      invalidatesTags: ['StewardProposals'],
+    }),
   }),
 });
 
-export const { useGetStewardStatusQuery } = stewardApi;
+export const {
+  useDecideStewardProposalMutation,
+  useGetStewardProposalsQuery,
+  useGetStewardStatusQuery,
+} = stewardApi;

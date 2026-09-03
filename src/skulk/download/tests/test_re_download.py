@@ -28,7 +28,11 @@ from skulk.shared.types.common import NodeId, SystemId
 from skulk.shared.types.events import Event, NodeDownloadProgress
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.telemetry import NodeTelemetry
-from skulk.shared.types.worker.downloads import DownloadCompleted, DownloadFailed
+from skulk.shared.types.worker.downloads import (
+    DownloadAttemptId,
+    DownloadCompleted,
+    DownloadFailed,
+)
 from skulk.shared.types.worker.shards import PipelineShardMetadata, ShardMetadata
 from skulk.store.installed_cards import (
     build_installed_card_record,
@@ -634,6 +638,70 @@ async def test_start_during_cancellation_runs_after_cleanup() -> None:
         assert completed is not None
         assert downloader.ensure_calls == 2
     finally:
+        await coordinator.shutdown()
+        coordinator_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await coordinator_task
+
+
+async def test_cancel_download_rejects_a_replaced_attempt() -> None:
+    """An attempt-bound cancel cannot stop a newer retry of the same model."""
+
+    cmd_send, cmd_recv = channel[ForwarderDownloadCommand]()
+    event_send, _ = channel[Event]()
+    telemetry_send, _ = channel[NodeTelemetry]()
+    downloader = SlowCancellationShardDownloader()
+    coordinator = DownloadCoordinator(
+        node_id=NODE_ID,
+        shard_downloader=downloader,
+        download_command_receiver=cmd_recv,
+        event_sender=event_send,
+        telemetry_sender=telemetry_send,
+    )
+    shard = _make_shard()
+    origin = SystemId("test")
+    coordinator_task = asyncio.create_task(coordinator.run())
+
+    try:
+        await cmd_send.send(
+            ForwarderDownloadCommand(
+                origin=origin,
+                command=StartDownload(target_node_id=NODE_ID, shard_metadata=shard),
+            )
+        )
+        with anyio.fail_after(2):
+            await downloader.first_started.wait()
+        current_status = coordinator.download_status[MODEL_ID]
+        assert current_status.attempt_id is not None
+
+        await cmd_send.send(
+            ForwarderDownloadCommand(
+                origin=origin,
+                command=CancelDownload(
+                    target_node_id=NODE_ID,
+                    model_id=MODEL_ID,
+                    attempt_id=DownloadAttemptId("replaced-attempt"),
+                ),
+            )
+        )
+        await anyio.sleep(0.05)
+        assert coordinator.active_downloads[MODEL_ID].cancel_called is False
+
+        await cmd_send.send(
+            ForwarderDownloadCommand(
+                origin=origin,
+                command=CancelDownload(
+                    target_node_id=NODE_ID,
+                    model_id=MODEL_ID,
+                    attempt_id=current_status.attempt_id,
+                ),
+            )
+        )
+        with anyio.fail_after(2):
+            while not coordinator.active_downloads[MODEL_ID].cancel_called:
+                await anyio.sleep(0)
+    finally:
+        downloader.release_cleanup.set()
         await coordinator.shutdown()
         coordinator_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):

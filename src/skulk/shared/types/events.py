@@ -15,6 +15,7 @@ from skulk.shared.types.common import (
     SystemId,
 )
 from skulk.shared.types.state import State
+from skulk.shared.types.steward_actions import StewardActionProposal
 from skulk.shared.types.tasks import Task, TaskId, TaskStatus
 from skulk.shared.types.worker.downloads import (
     DownloadCompleted,
@@ -254,6 +255,12 @@ class ModelTrustApprovalChanged(BaseEvent):
     )
 
 
+class StewardActionProposalChanged(BaseEvent):
+    """Create or replace one authoritative steward proposal record."""
+
+    proposal: StewardActionProposal
+
+
 Event = (
     TestEvent
     | TaskCreated
@@ -276,6 +283,7 @@ Event = (
     | TracesMerged
     | TracingStateChanged
     | ModelTrustApprovalChanged
+    | StewardActionProposalChanged
     | CustomModelCardAdded
     | CustomModelCardDeleted
     | StagedModelEvicted
@@ -299,6 +307,7 @@ _PERSISTED_CONTROL_EVENT_TYPES: tuple[type[BaseEvent], ...] = (
     TopologyEdgeDeleted,
     TracingStateChanged,
     ModelTrustApprovalChanged,
+    StewardActionProposalChanged,
     CustomModelCardAdded,
     CustomModelCardDeleted,
     StagedModelEvicted,

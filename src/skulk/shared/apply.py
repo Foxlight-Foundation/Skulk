@@ -22,6 +22,7 @@ from skulk.shared.types.events import (
     RunnerStatusUpdated,
     StagedModelEvicted,
     StateSnapshotHydrated,
+    StewardActionProposalChanged,
     TaskAcknowledged,
     TaskCreated,
     TaskDeleted,
@@ -41,6 +42,7 @@ from skulk.shared.types.profiling import (
     ThunderboltBridgeStatus,
 )
 from skulk.shared.types.state import State
+from skulk.shared.types.steward_actions import steward_action_proposal_is_prunable
 from skulk.shared.types.tasks import Task, TaskId, TaskStatus
 from skulk.shared.types.topology import Connection, RDMAConnection
 from skulk.shared.types.worker.downloads import (
@@ -132,6 +134,28 @@ def event_apply(event: Event, state: State) -> State:
                     )
                 }
             )
+        case StewardActionProposalChanged():
+            proposals = dict(state.steward_action_proposals)
+            proposals[event.proposal.proposal_id] = event.proposal
+            # Retain the newest bounded audit window without discarding work
+            # that a promoted master can still recover.
+            if len(proposals) > 128:
+                as_of = (
+                    event.proposal.dispatched_at
+                    or event.proposal.decided_at
+                    or event.proposal.created_at
+                )
+                terminal = sorted(
+                    (
+                        proposal
+                        for proposal in proposals.values()
+                        if steward_action_proposal_is_prunable(proposal, as_of)
+                    ),
+                    key=lambda proposal: proposal.created_at,
+                )
+                for proposal in terminal[: len(proposals) - 128]:
+                    proposals.pop(proposal.proposal_id, None)
+            return state.model_copy(update={"steward_action_proposals": proposals})
         case StateSnapshotHydrated():
             return _sanitize_snapshot_downloads(event.state)
 

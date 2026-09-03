@@ -15,7 +15,7 @@ Skulk is an interconnect fabric for multi-node AI compute: it connects multiple 
 The design choices that shape almost everything else:
 
 - **Event-sourced decisions.** Correctness-critical cluster facts (instances, runners, terminal download outcomes, tracing toggles) flow through an ordered event log. Observational latest-value readings stay outside it. State is the result of `apply()`-ing events to a Pydantic model that is treated as immutable by convention (replaced wholesale by `apply()` rather than mutated in place).
-- **One master at a time.** A bully election picks the master; only the master indexes events. Failover is automatic, and the promoted node seeds the new session from its replicated state, so placed instances survive a master restart: workers rebuild their runners and serving resumes after a model-reload-sized gap. Instances with a rank on the dead master are cleaned up once live topology confirms the node is gone.
+- **One master at a time.** A bully election picks the master; only the master indexes events. Failover is automatic, and the promoted node seeds the new session from its replicated state, so placed instances and bounded steward-action recovery truth survive a master restart: workers rebuild their runners and serving resumes after a model-reload-sized gap, while the new master resumes actionable approved or dispatched proposals. Instances with a rank on the dead master are cleaned up once live topology confirms the node is gone.
 - **libp2p pub/sub for transport.** Topics carry commands, events, telemetry, and connection updates between nodes. Election and telemetry each use dedicated Python egress plus their own gossipsub behavior, protocol, and per-peer handler queues on the same libp2p swarm, so telemetry pressure cannot consume control or election capacity. Election alone retains its temporary legacy-protocol compatibility copy.
 - **MLX as the inference backend.** Pipeline-parallel and tensor-parallel sharding strategies sit on top of `mlx.distributed`'s ring or jaccl/RDMA backends.
 - **Subprocess isolation for runners.** Each model instance runs in its own `mp.Process` with its own MLX/Metal context, so a crash or hang in one runner can't bring down the rest of the node. The shipped systemd unit sets `OOMPolicy=continue` for the same boundary: if Linux OOM-kills a runner child, systemd leaves the Skulk parent, API, and co-hosted model store alive while the supervisor and crash breaker handle the failed runner.
@@ -836,7 +836,8 @@ Conversation happens through the standard OpenAI-compatible chat-completions
 endpoint using the reserved virtual model id `skulk/steward`, streaming
 included, so any OpenAI-compatible client can talk to the cluster with no
 steward-specific integration. The reserved id selects the model plus the
-server-side harness: a bounded, strictly read-only tool surface (cluster
+server-side harness: a bounded tool surface whose observation tools are
+strictly read-only (cluster
 state normalized into an exact node count, heterogeneous identity, RAM,
 accelerator, backend, and capability facts plus mutually exclusive operator
 active-placement, ready/running, and stopping/failed lifecycle buckets;
@@ -847,7 +848,9 @@ telemetry and data-plane diagnostics, per-node version status, performance
 envelopes, complete diagnostics and doctor results for any named node, the
 model catalog, and a
 search over Skulk's own bundled documentation so what-is and how-to
-questions are answered from the shipped docs rather than model priors)
+questions are answered from the shipped docs rather than model priors), plus
+four inert proposal tools for place, stop, restart, and cancel-download when
+the originating HTTP request has operator mutation authority,
 and an investigation loop of up to eight tool calls per turn. Tool steps stream to
 the client as reasoning content while the investigation runs, followed by
 the answer; client-supplied tool definitions are rejected, and client system
@@ -876,9 +879,42 @@ re-placed by the same invariant that handles node loss. The first failed
 probe already shows up in the status as a degraded steward, well before the
 third one triggers the replacement. API presence is explicit telemetry
 (`NodeResources.api_available`), so a worker launched with `--no-api` can still
-host the steward without being elected to run its canary. In this release the
-steward observes and advises only: no tool can change the cluster, and
-anything action-shaped is returned to the operator as a recommendation.
+host the steward without being elected to run its canary.
+
+Basic actions use an approval boundary, not model-held authority. A proposal
+captures the exact typed target, rationale, bounded evidence, expected effect,
+and a short expiry in replicated event-sourced state. The dashboard lists a
+safe projection with internal identities removed. A separately authorized
+operator approves or rejects the proposal through the API; only the elected
+master can consume the single-use approval, and it revalidates current catalog,
+placement, instance-role, and download truth before translating the action into
+the existing typed command machinery. System placements remain outside the
+action surface. Back-to-back place approvals reserve their computed instances
+before replicated State echoes them, preventing duplicate capacity claims.
+Stop and restart proposals capture the complete reviewed instance state, and
+approval refuses a replacement under the same identity or another approved
+stop/restart action that already owns the target.
+Download cancellation carries the observed attempt identity through the
+download command; the worker rejects it if a newer attempt is active. It is
+forwarded only after both its approval and armed dispatch audit are durable.
+Stop teardown and restart teardown both wait for the replicated decision.
+Restart also revalidates the captured model-card identity before removing the
+live instance. Restart is a
+two-phase transition: `approved` durably arms the exact teardown, and the
+planning loop re-places the captured intent only after
+replicated deletion and live capacity converge, with a five-minute bound.
+Back-to-back restart replacements reserve capacity before their State echo.
+`dispatched` records command acceptance, not asynchronous completion. A
+32-pending admission bound, 128-record audit target (with actionable recovery
+records retained past it), ten-minute
+harness expiry, and `SKULK_FABRIC_CAPABILITIES_DISABLE=1` master kill switch
+bound the feature, including fail-closed handling of carried dispatch recovery.
+The master publishes terminal expiry when a deadline passes.
+For five minutes from the separate dispatch timestamp, a promoted master reconciles the proposal's
+exact command identity against replicated state and reissues a missing effect
+once, closing the failover window between proposal and action events.
+This release has no autonomous approval or per-action grant policy.
+
 The normalized operator record is deliberately deterministic: the resident
 copies counts and measurements rather than reconstructing them from prose, and
 "placing" never includes an already-ready or running instance. Current

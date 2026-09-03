@@ -11,6 +11,7 @@ import { store } from '../../store';
 import { apiSlice } from '../../store/api';
 import { chatActions } from '../../store/slices/chatSlice';
 import type { StewardState, StewardTransition } from '../../store/endpoints/steward';
+import type { StewardActionProposal } from '../../store/endpoints/steward';
 import { darkTheme } from '../../theme/theme';
 import type { ModelInfo } from '../../types/models';
 import { discoverSkulkSpeechSelection } from '../../audio/fabricSpeechDiscovery';
@@ -80,6 +81,8 @@ function stubFetch(options: {
   sseEvents?: string[];
   chatStatus?: number;
   models?: ModelInfo[];
+  proposals?: StewardActionProposal[];
+  onDecision?: (body: unknown) => void;
   onChat?: (init: RequestInit | undefined) => void;
 }): void {
   const fetchStub = async (
@@ -98,7 +101,25 @@ function stubFetch(options: {
         headers: { 'Content-Type': 'text/event-stream' },
       });
     }
-    if (url.includes('/v1/steward')) {
+    if (url.includes('/v1/steward/proposals/') && url.endsWith('/decision')) {
+      const body = init?.body
+        ? JSON.parse(String(init.body)) as unknown
+        : input instanceof Request
+          ? await input.clone().json() as unknown
+          : undefined;
+      options.onDecision?.(body);
+      return new Response(JSON.stringify({ message: 'accepted' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    if (url.endsWith('/v1/steward/proposals')) {
+      return new Response(JSON.stringify(options.proposals ?? []), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    if (url.endsWith('/v1/steward')) {
       return new Response(JSON.stringify(options.status), {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
@@ -293,6 +314,42 @@ describe('StewardChatView', () => {
       'prestaging transition never rendered',
     );
     expect(container?.querySelector('textarea')).not.toBeNull();
+  });
+
+  it('shows an inert proposal and submits explicit approval separately', async () => {
+    let decision: unknown;
+    stubFetch({
+      status: READY,
+      proposals: [{
+        proposal_id: 'proposal-1',
+        action: 'restart_model',
+        target: 'org/model',
+        rationale: 'The runner is degraded.',
+        evidence: ['Three failed probes.'],
+        expected_effect: 'Replace the ordinary model instance.',
+        created_at: new Date().toISOString(),
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+        status: 'pending',
+        decided_at: null,
+        decided_by: null,
+        outcome: null,
+      }],
+      onDecision: (body) => { decision = body; },
+    });
+    await renderPage();
+    await waitFor(
+      () => container?.textContent?.includes('restart model: org/model') ?? false,
+      'proposal never rendered',
+    );
+    expect(container?.textContent).toContain('Three failed probes.');
+
+    const approveButton = [...(container?.querySelectorAll('button') ?? [])]
+      .find((button) => button.textContent === 'Approve');
+    expect(approveButton).toBeDefined();
+    await userEvent.click(approveButton as HTMLButtonElement);
+
+    await waitFor(() => decision !== undefined, 'approval was never submitted');
+    expect(decision).toEqual({ approved: true });
   });
 });
 

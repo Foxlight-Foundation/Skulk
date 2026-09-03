@@ -1,11 +1,12 @@
 import copy
+import os
 import time
 from collections import deque
 from collections.abc import Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import cast, final
+from typing import Literal, cast, final
 
 import anyio
 import yaml
@@ -48,7 +49,9 @@ from skulk.shared.models.model_cards import (
 from skulk.shared.types.commands import (
     AddCustomModelCard,
     AudioTranscription,
+    CancelDownload,
     CreateInstance,
+    DecideStewardAction,
     DeleteCustomModelCard,
     DeleteInstance,
     EvictStagedModel,
@@ -58,6 +61,7 @@ from skulk.shared.types.commands import (
     ImageEdits,
     ImageGeneration,
     PlaceInstance,
+    ProposeStewardAction,
     RealtimeAudioTranscription,
     RefuseInstancePlacement,
     RequestEventLog,
@@ -89,6 +93,7 @@ from skulk.shared.types.events import (
     NodeTimeoutEvidence,
     StagedModelEvicted,
     StateSnapshotHydrated,
+    StewardActionProposalChanged,
     TaskCreated,
     TaskDeleted,
     TaskFailed,
@@ -100,6 +105,15 @@ from skulk.shared.types.memory import Memory
 from skulk.shared.types.profiling import MemoryUsage
 from skulk.shared.types.state import State
 from skulk.shared.types.state_sync import StateSnapshot, StateSyncMessage
+from skulk.shared.types.steward_actions import (
+    StewardActionProposal,
+    StewardActionProposalId,
+    StewardCancelDownloadAction,
+    StewardPlaceModelAction,
+    StewardRestartInstanceAction,
+    StewardStopInstanceAction,
+    steward_action_proposal_is_prunable,
+)
 from skulk.shared.types.tasks import (
     AudioTranscription as AudioTranscriptionTask,
 )
@@ -740,6 +754,21 @@ class Master:
         # A promoted master starts a new view and lazily seeds each alias from
         # its node's already converged card cache before the first new command.
         self._ordered_model_cards: dict[ModelId, ModelCard | None] = {}
+        self._ordered_steward_proposals = dict(
+            initial_state.steward_action_proposals if initial_state is not None else {}
+        )
+        # Restart approval and teardown are separate indexed steps. This
+        # process-local marker prevents duplicate teardown while allowing a
+        # promoted master to reissue it once when approval survived but the
+        # original master's deletion did not reach replicated State.
+        self._steward_restart_teardown_issued: set[StewardActionProposalId] = set()
+        # A dispatched proposal is indexed before its action transitions. Keep
+        # a process-local marker so the current master waits for that echo,
+        # while a promoted master can reissue the exact command once.
+        self._steward_dispatched_effect_issued: set[StewardActionProposalId] = set()
+        self._steward_reserved_placements: dict[
+            StewardActionProposalId, dict[InstanceId, Instance]
+        ] = {}
         self.state = State(
             tracing_enabled=SKULK_TRACING_ENABLED,
             model_trust_approved_remote_code_identities=tuple(
@@ -1125,6 +1154,656 @@ class Master:
             node_memory=memory,
         )
         return memory, vram
+
+    def _place_for_steward_action(
+        self,
+        command: PlaceInstance,
+        current_instances: Mapping[InstanceId, Instance],
+    ) -> dict[InstanceId, Instance]:
+        """Compute one approved steward placement using authoritative inputs."""
+        self._require_ordered_place_instance_card(command)
+        credited_memory, credited_vram = self._placement_memory_inputs()
+        return place_instance(
+            command,
+            self.state.topology,
+            current_instances,
+            credited_memory,
+            self.state.node_network,
+            download_status=self._effective_downloads(),
+            excluded_nodes=set(command.excluded_nodes),
+            node_resources=self._telemetry_view.node_resources,
+            node_vram=credited_vram,
+            unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
+                self._telemetry_view.node_system,
+                self._telemetry_view.node_resources,
+                node_memory=credited_memory,
+            ),
+            approved_remote_code_identities=self._model_trust_approvals,
+        )
+
+    async def _execute_approved_steward_action(
+        self, proposal: StewardActionProposal
+    ) -> tuple[list[Event], CommandId, Literal["approved", "dispatched"]]:
+        """Execute one approved basic action through existing typed machinery.
+
+        This method owns no free-form effects. It translates the proposal's
+        validated action union into the same placement, deletion, and download
+        commands used by ordinary operator endpoints.
+        """
+        action = proposal.action
+        if isinstance(action, StewardPlaceModelAction):
+            command = PlaceInstance(
+                model_card=action.model_card,
+                sharding=action.sharding,
+                instance_meta=action.instance_meta,
+                min_nodes=action.min_nodes,
+                excluded_nodes=list(action.excluded_nodes),
+            )
+            ordered_instances = dict(self.state.instances)
+            for reservation in self._steward_reserved_placements.values():
+                ordered_instances.update(reservation)
+            placement = self._place_for_steward_action(command, ordered_instances)
+            self._steward_reserved_placements[proposal.proposal_id] = {
+                instance_id: instance
+                for instance_id, instance in placement.items()
+                if instance_id not in ordered_instances
+            }
+            self._steward_dispatched_effect_issued.add(proposal.proposal_id)
+            return (
+                list(
+                    get_transition_events(
+                        ordered_instances, placement, self.state.tasks
+                    )
+                ),
+                command.command_id,
+                "dispatched",
+            )
+
+        if isinstance(action, StewardCancelDownloadAction):
+            active_download = any(
+                isinstance(progress, (DownloadPending, DownloadOngoing))
+                and progress.shard_metadata.model_card.model_id == action.model_id
+                and progress.attempt_id == action.attempt_id
+                for progress in self._effective_downloads().get(action.node_id, ())
+            )
+            if not active_download:
+                raise ValueError("The proposed download is no longer active")
+            command = CancelDownload(
+                target_node_id=action.node_id,
+                model_id=action.model_id,
+                attempt_id=action.attempt_id,
+            )
+            return [], command.command_id, "approved"
+
+        instance_id = action.instance.instance_id
+        model_id = action.instance.shard_assignments.model_id
+        instance = self.state.instances.get(instance_id)
+        if instance is None:
+            raise ValueError("The proposed instance no longer exists")
+        if instance.system_role is not None:
+            raise ValueError("System placements cannot be changed by steward actions")
+        if instance.shard_assignments.model_id != model_id:
+            raise ValueError("The proposed instance now serves different model truth")
+        if instance != action.instance:
+            raise ValueError("The proposed instance intent no longer matches current state")
+        if any(
+            other.proposal_id != proposal.proposal_id
+            and other.status in {"approved", "dispatched"}
+            and isinstance(
+                other.action,
+                (StewardStopInstanceAction, StewardRestartInstanceAction),
+            )
+            and other.action.instance.instance_id == instance_id
+            for other in self._ordered_steward_proposals.values()
+        ):
+            raise ValueError("Another steward action already owns this instance")
+
+        delete_command = DeleteInstance(instance_id=instance_id)
+        if isinstance(action, StewardStopInstanceAction):
+            return [], delete_command.command_id, "dispatched"
+
+        assert isinstance(action, StewardRestartInstanceAction)
+        replacement_command = replacement_command_for_download_failed_instance(
+            action.instance, frozenset()
+        )
+        self._require_ordered_place_instance_card(replacement_command)
+        return [], delete_command.command_id, "approved"
+
+    def _prune_ordered_steward_action_proposals(self) -> None:
+        """Bound local proposals without dropping actionable recovery work."""
+        active_restart_ids = {
+            proposal.proposal_id
+            for proposal in self._ordered_steward_proposals.values()
+            if proposal.status in {"approved", "dispatched"}
+            and isinstance(proposal.action, StewardRestartInstanceAction)
+        }
+        self._steward_restart_teardown_issued.intersection_update(
+            active_restart_ids
+        )
+        dispatched_ids = {
+            proposal.proposal_id
+            for proposal in self._ordered_steward_proposals.values()
+            if proposal.status == "dispatched"
+        }
+        self._steward_dispatched_effect_issued.intersection_update(dispatched_ids)
+        self._steward_reserved_placements = {
+            proposal_id: reservation
+            for proposal_id, reservation in self._steward_reserved_placements.items()
+            if proposal_id in dispatched_ids
+        }
+        excess = len(self._ordered_steward_proposals) - 128
+        if excess <= 0:
+            return
+        terminal = sorted(
+            (
+                proposal
+                for proposal in self._ordered_steward_proposals.values()
+                if steward_action_proposal_is_prunable(
+                    proposal, datetime.now(tz=timezone.utc)
+                )
+            ),
+            key=lambda proposal: proposal.created_at,
+        )
+        for proposal in terminal[:excess]:
+            self._ordered_steward_proposals.pop(proposal.proposal_id, None)
+
+    def _expire_steward_action_proposals(
+        self, now: datetime
+    ) -> list[StewardActionProposalChanged]:
+        """Order terminal expiry for pending proposals whose deadline passed."""
+        changes: list[StewardActionProposalChanged] = []
+        for proposal_id, proposal in tuple(self._ordered_steward_proposals.items()):
+            if proposal.status != "pending" or proposal.expires_at > now:
+                continue
+            expired = proposal.model_copy(
+                update={
+                    "status": "expired",
+                    "decided_at": now,
+                    "decided_by": "fabric_expiry",
+                    "outcome": "The proposal expired without an operator decision.",
+                }
+            )
+            self._ordered_steward_proposals[proposal_id] = expired
+            changes.append(StewardActionProposalChanged(proposal=expired))
+        self._prune_ordered_steward_action_proposals()
+        return changes
+
+    async def _resume_approved_steward_restarts(self, now: datetime) -> None:
+        """Place approved restarts only after teardown and capacity converge."""
+        for proposal_id, proposal in tuple(self._ordered_steward_proposals.items()):
+            action = proposal.action
+            if proposal.status != "approved" or not isinstance(
+                action, StewardRestartInstanceAction
+            ):
+                continue
+            replicated_proposal = self.state.steward_action_proposals.get(proposal_id)
+            if (
+                replicated_proposal is None
+                or replicated_proposal.status != "approved"
+            ):
+                continue
+            decided_at = proposal.decided_at
+            if decided_at is None:
+                failed = proposal.model_copy(
+                    update={
+                        "status": "failed",
+                        "outcome": "Approved restart is missing its decision time.",
+                    }
+                )
+            elif os.getenv("SKULK_FABRIC_CAPABILITIES_DISABLE") == "1":
+                failed = proposal.model_copy(
+                    update={
+                        "status": "failed",
+                        "outcome": "Fabric actions are disabled by the global kill switch.",
+                    }
+                )
+            elif now > decided_at + timedelta(minutes=5):
+                failed = proposal.model_copy(
+                    update={
+                        "status": "failed",
+                        "outcome": (
+                            "Restart capacity did not become available within five minutes."
+                        ),
+                    }
+                )
+            elif action.instance.instance_id in self.state.instances:
+                current_instance = self.state.instances[action.instance.instance_id]
+                if current_instance.system_role is not None:
+                    failed = proposal.model_copy(
+                        update={
+                            "status": "failed",
+                            "outcome": (
+                                "System placements cannot be changed by steward actions."
+                            ),
+                        }
+                    )
+                elif current_instance != action.instance:
+                    failed = proposal.model_copy(
+                        update={
+                            "status": "failed",
+                            "outcome": (
+                                "The approved restart intent no longer matches current state."
+                            ),
+                        }
+                    )
+                elif proposal_id in self._steward_restart_teardown_issued:
+                    continue
+                else:
+                    replacement_command = (
+                        replacement_command_for_download_failed_instance(
+                            action.instance, frozenset()
+                        )
+                    )
+                    try:
+                        self._require_ordered_place_instance_card(replacement_command)
+                    except PlacementModelCardIdentityError as error:
+                        failed = proposal.model_copy(
+                            update={
+                                "status": "failed",
+                                "outcome": str(error)[:1024],
+                            }
+                        )
+                        self._ordered_steward_proposals[proposal_id] = failed
+                        await self.event_sender.send(
+                            StewardActionProposalChanged(proposal=failed)
+                        )
+                        continue
+                    # A promoted master can inherit the durable approval before
+                    # inheriting its predecessor's deletion. Reissue the exact
+                    # teardown once; its instance identity makes this safe and
+                    # preserves forward progress across that failover window.
+                    self._record_freed_instance(current_instance)
+                    delete_command = DeleteInstance(
+                        instance_id=current_instance.instance_id
+                    )
+                    after_delete = delete_instance(
+                        delete_command, self.state.instances
+                    )
+                    self._steward_restart_teardown_issued.add(proposal_id)
+                    for cancel_command in cancel_unnecessary_downloads(
+                        after_delete, self._effective_downloads()
+                    ):
+                        await self.download_command_sender.send(
+                            ForwarderDownloadCommand(
+                                origin=self._system_id, command=cancel_command
+                            )
+                        )
+                    for event in get_transition_events(
+                        self.state.instances, after_delete, self.state.tasks
+                    ):
+                        await self.event_sender.send(event)
+                    continue
+            else:
+                replace_command = replacement_command_for_download_failed_instance(
+                    action.instance, frozenset()
+                )
+                try:
+                    self._require_ordered_place_instance_card(replace_command)
+                    ordered_instances = dict(self.state.instances)
+                    for reservation in self._steward_reserved_placements.values():
+                        ordered_instances.update(reservation)
+                    replacement = self._place_for_steward_action(
+                        replace_command, ordered_instances
+                    )
+                    self._steward_reserved_placements[proposal_id] = {
+                        instance_id: instance
+                        for instance_id, instance in replacement.items()
+                        if instance_id not in ordered_instances
+                    }
+                except PlacementModelCardIdentityError as error:
+                    failed = proposal.model_copy(
+                        update={
+                            "status": "failed",
+                            "outcome": str(error)[:1024],
+                        }
+                    )
+                    self._ordered_steward_proposals[proposal_id] = failed
+                    await self.event_sender.send(
+                        StewardActionProposalChanged(proposal=failed)
+                    )
+                    continue
+                except PlacementError:
+                    # Teardown and memory telemetry converge independently. A
+                    # normal large model is temporarily unplaceable until the
+                    # old runner releases its allocation.
+                    continue
+                except ValueError as error:
+                    failed = proposal.model_copy(
+                        update={
+                            "status": "failed",
+                            "outcome": str(error)[:1024],
+                        }
+                    )
+                    self._ordered_steward_proposals[proposal_id] = failed
+                    await self.event_sender.send(
+                        StewardActionProposalChanged(proposal=failed)
+                    )
+                    continue
+                for cancel_command in cancel_unnecessary_downloads(
+                    replacement, self._effective_downloads()
+                ):
+                    await self.download_command_sender.send(
+                        ForwarderDownloadCommand(
+                            origin=self._system_id, command=cancel_command
+                        )
+                    )
+                dispatched = proposal.model_copy(
+                    update={
+                        "status": "dispatched",
+                        "dispatched_at": now,
+                        "command_id": replace_command.command_id,
+                        "outcome": (
+                            "Restart replacement was dispatched after teardown "
+                            "capacity became available."
+                        ),
+                    }
+                )
+                self._ordered_steward_proposals[proposal_id] = dispatched
+                self._steward_restart_teardown_issued.discard(proposal_id)
+                self._steward_dispatched_effect_issued.add(proposal_id)
+                await self.event_sender.send(
+                    StewardActionProposalChanged(proposal=dispatched)
+                )
+                for event in get_transition_events(
+                    ordered_instances, replacement, self.state.tasks
+                ):
+                    await self.event_sender.send(event)
+                continue
+            self._ordered_steward_proposals[proposal_id] = failed
+            self._steward_restart_teardown_issued.discard(proposal_id)
+            await self.event_sender.send(
+                StewardActionProposalChanged(proposal=failed)
+            )
+        self._prune_ordered_steward_action_proposals()
+
+    async def _reconcile_dispatched_steward_actions(self, now: datetime) -> None:
+        """Reissue an unreflected dispatched action once after master failover."""
+        for proposal_id, reservation in tuple(
+            self._steward_reserved_placements.items()
+        ):
+            if all(instance_id in self.state.instances for instance_id in reservation):
+                self._steward_reserved_placements.pop(proposal_id, None)
+        for proposal_id, proposal in tuple(self._ordered_steward_proposals.items()):
+            if (
+                proposal.status != "dispatched"
+                or proposal.command_id is None
+                or (
+                    (dispatch_started_at := proposal.dispatched_at or proposal.decided_at)
+                    is None
+                )
+                or now > dispatch_started_at + timedelta(minutes=5)
+                or proposal_id in self._steward_dispatched_effect_issued
+            ):
+                continue
+            replicated_proposal = self.state.steward_action_proposals.get(proposal_id)
+            if (
+                replicated_proposal is None
+                or replicated_proposal.status != "dispatched"
+            ):
+                continue
+            if os.getenv("SKULK_FABRIC_CAPABILITIES_DISABLE") == "1":
+                failed = proposal.model_copy(
+                    update={
+                        "status": "failed",
+                        "outcome": (
+                            "Fabric action recovery was blocked by the global "
+                            "kill switch."
+                        ),
+                    }
+                )
+                self._ordered_steward_proposals[proposal_id] = failed
+                self._steward_reserved_placements.pop(proposal_id, None)
+                self._steward_restart_teardown_issued.discard(proposal_id)
+                self._steward_dispatched_effect_issued.add(proposal_id)
+                await self.event_sender.send(
+                    StewardActionProposalChanged(proposal=failed)
+                )
+                continue
+            action = proposal.action
+            events: list[Event] = []
+            try:
+                if isinstance(action, StewardPlaceModelAction):
+                    expected_instance_id = InstanceId(str(proposal.command_id))
+                    if expected_instance_id in self.state.instances:
+                        continue
+                    command = PlaceInstance(
+                        command_id=proposal.command_id,
+                        model_card=action.model_card,
+                        sharding=action.sharding,
+                        instance_meta=action.instance_meta,
+                        min_nodes=action.min_nodes,
+                        excluded_nodes=list(action.excluded_nodes),
+                    )
+                    ordered_instances = dict(self.state.instances)
+                    for reservation in self._steward_reserved_placements.values():
+                        ordered_instances.update(reservation)
+                    placement = self._place_for_steward_action(command, ordered_instances)
+                    self._steward_reserved_placements[proposal_id] = {
+                        instance_id: instance
+                        for instance_id, instance in placement.items()
+                        if instance_id not in ordered_instances
+                    }
+                    events = list(
+                        get_transition_events(
+                            ordered_instances, placement, self.state.tasks
+                        )
+                    )
+                elif isinstance(action, StewardCancelDownloadAction):
+                    node_downloads = self._effective_downloads().get(
+                        action.node_id, ()
+                    )
+                    active_download = any(
+                        isinstance(progress, (DownloadPending, DownloadOngoing))
+                        and progress.shard_metadata.model_card.model_id
+                        == action.model_id
+                        and progress.attempt_id == action.attempt_id
+                        for progress in node_downloads
+                    )
+                    if not active_download:
+                        if any(
+                            isinstance(progress, (DownloadPending, DownloadOngoing))
+                            and progress.shard_metadata.model_card.model_id
+                            == action.model_id
+                            for progress in node_downloads
+                        ):
+                            raise ValueError(
+                                "The approved download attempt has been replaced"
+                            )
+                        continue
+                    self._steward_dispatched_effect_issued.add(proposal_id)
+                    await self.download_command_sender.send(
+                        ForwarderDownloadCommand(
+                            origin=self._system_id,
+                            command=CancelDownload(
+                                command_id=proposal.command_id,
+                                target_node_id=action.node_id,
+                                model_id=action.model_id,
+                                attempt_id=action.attempt_id,
+                            ),
+                        )
+                    )
+                    continue
+                elif isinstance(action, StewardStopInstanceAction):
+                    instance = self.state.instances.get(action.instance.instance_id)
+                    if instance is None:
+                        self._steward_dispatched_effect_issued.add(proposal_id)
+                        for cancel_command in cancel_unnecessary_downloads(
+                            self.state.instances, self._effective_downloads()
+                        ):
+                            await self.download_command_sender.send(
+                                ForwarderDownloadCommand(
+                                    origin=self._system_id, command=cancel_command
+                                )
+                            )
+                        continue
+                    if instance.system_role is not None:
+                        raise ValueError(
+                            "System placements cannot be changed by steward actions"
+                        )
+                    if instance != action.instance:
+                        raise ValueError(
+                            "The dispatched stop intent no longer matches current state"
+                        )
+                    after_delete = delete_instance(
+                        DeleteInstance(
+                            command_id=proposal.command_id,
+                            instance_id=action.instance.instance_id,
+                        ),
+                        self.state.instances,
+                    )
+                    self._steward_dispatched_effect_issued.add(proposal_id)
+                    for cancel_command in cancel_unnecessary_downloads(
+                        after_delete, self._effective_downloads()
+                    ):
+                        await self.download_command_sender.send(
+                            ForwarderDownloadCommand(
+                                origin=self._system_id, command=cancel_command
+                            )
+                        )
+                    events = list(
+                        get_transition_events(
+                            self.state.instances, after_delete, self.state.tasks
+                        )
+                    )
+                else:
+                    assert isinstance(action, StewardRestartInstanceAction)
+                    expected_instance_id = InstanceId(str(proposal.command_id))
+                    if expected_instance_id in self.state.instances:
+                        continue
+                    original = self.state.instances.get(action.instance.instance_id)
+                    if original is not None:
+                        if original.system_role is not None or original != action.instance:
+                            raise ValueError(
+                                "The dispatched restart intent no longer matches current state"
+                            )
+                        replacement_command = (
+                            replacement_command_for_download_failed_instance(
+                                action.instance, frozenset()
+                            ).model_copy(update={"command_id": proposal.command_id})
+                        )
+                        self._require_ordered_place_instance_card(replacement_command)
+                        if proposal_id in self._steward_restart_teardown_issued:
+                            continue
+                        after_delete = delete_instance(
+                            DeleteInstance(instance_id=original.instance_id),
+                            self.state.instances,
+                        )
+                        self._steward_restart_teardown_issued.add(proposal_id)
+                        for cancel_command in cancel_unnecessary_downloads(
+                            after_delete, self._effective_downloads()
+                        ):
+                            await self.download_command_sender.send(
+                                ForwarderDownloadCommand(
+                                    origin=self._system_id, command=cancel_command
+                                )
+                            )
+                        for event in get_transition_events(
+                            self.state.instances, after_delete, self.state.tasks
+                        ):
+                            await self.event_sender.send(event)
+                        continue
+                    replacement_command = (
+                        replacement_command_for_download_failed_instance(
+                            action.instance, frozenset()
+                        ).model_copy(update={"command_id": proposal.command_id})
+                    )
+                    ordered_instances = dict(self.state.instances)
+                    for reservation in self._steward_reserved_placements.values():
+                        ordered_instances.update(reservation)
+                    replacement = self._place_for_steward_action(
+                        replacement_command, ordered_instances
+                    )
+                    self._steward_reserved_placements[proposal_id] = {
+                        instance_id: instance
+                        for instance_id, instance in replacement.items()
+                        if instance_id not in ordered_instances
+                    }
+                    self._steward_dispatched_effect_issued.add(proposal_id)
+                    for cancel_command in cancel_unnecessary_downloads(
+                        replacement, self._effective_downloads()
+                    ):
+                        await self.download_command_sender.send(
+                            ForwarderDownloadCommand(
+                                origin=self._system_id, command=cancel_command
+                            )
+                        )
+                    events = list(
+                        get_transition_events(
+                            ordered_instances, replacement, self.state.tasks
+                        )
+                    )
+            except PlacementModelCardIdentityError as error:
+                failed = proposal.model_copy(
+                    update={"status": "failed", "outcome": str(error)[:1024]}
+                )
+                self._ordered_steward_proposals[proposal_id] = failed
+                await self.event_sender.send(
+                    StewardActionProposalChanged(proposal=failed)
+                )
+                continue
+            except PlacementError:
+                # Capacity telemetry can lag the state seed after promotion.
+                # Retry on a later planning tick within the bounded window.
+                continue
+            except ValueError as error:
+                failed = proposal.model_copy(
+                    update={"status": "failed", "outcome": str(error)[:1024]}
+                )
+                self._ordered_steward_proposals[proposal_id] = failed
+                await self.event_sender.send(
+                    StewardActionProposalChanged(proposal=failed)
+                )
+                continue
+            self._steward_dispatched_effect_issued.add(proposal_id)
+            for event in events:
+                await self.event_sender.send(event)
+        self._prune_ordered_steward_action_proposals()
+
+    async def _arm_approved_steward_download_cancellations(self) -> None:
+        """Persist cancel dispatch intent before forwarding its side effect."""
+        for proposal_id, proposal in tuple(self._ordered_steward_proposals.items()):
+            if proposal.status != "approved" or not isinstance(
+                proposal.action, StewardCancelDownloadAction
+            ):
+                continue
+            replicated_proposal = self.state.steward_action_proposals.get(proposal_id)
+            if (
+                replicated_proposal is None
+                or replicated_proposal.status != "approved"
+            ):
+                # The local proposal map is updated before its event is indexed.
+                # Only arm the cancellation after approval is recoverable from
+                # replicated state, including across master promotion.
+                continue
+            if os.getenv("SKULK_FABRIC_CAPABILITIES_DISABLE") == "1":
+                failed = proposal.model_copy(
+                    update={
+                        "status": "failed",
+                        "outcome": (
+                            "Fabric actions are disabled by the global kill switch."
+                        ),
+                    }
+                )
+                self._ordered_steward_proposals[proposal_id] = failed
+                await self.event_sender.send(
+                    StewardActionProposalChanged(proposal=failed)
+                )
+                continue
+            dispatched = proposal.model_copy(
+                update={
+                    "status": "dispatched",
+                    "dispatched_at": datetime.now(tz=timezone.utc),
+                    "outcome": (
+                        "Approved cancellation was durably armed for exact-attempt "
+                        "dispatch."
+                    ),
+                }
+            )
+            self._ordered_steward_proposals[proposal_id] = dispatched
+            await self.event_sender.send(
+                StewardActionProposalChanged(proposal=dispatched)
+            )
+        self._prune_ordered_steward_action_proposals()
 
     async def _index_seed_event(self) -> None:
         """Index failover or cold-start trust seed as this session's first event.
@@ -1654,6 +2333,144 @@ class Master:
                                     approved=command.approved,
                                 )
                             )
+                        case ProposeStewardAction():
+                            proposal = command.proposal
+                            now = datetime.now(tz=timezone.utc)
+                            generated_events.extend(
+                                self._expire_steward_action_proposals(now)
+                            )
+                            existing = self._ordered_steward_proposals.get(
+                                proposal.proposal_id
+                            )
+                            if existing is not None:
+                                logger.info(
+                                    "Ignoring redelivered steward proposal "
+                                    f"{proposal.proposal_id}"
+                                )
+                            else:
+                                if proposal.status != "pending":
+                                    raise ValueError(
+                                        "A new steward proposal must be pending"
+                                    )
+                                if proposal.expires_at <= now:
+                                    raise ValueError(
+                                        "A new steward proposal must not already be expired"
+                                    )
+                                if proposal.created_at > now + timedelta(seconds=30):
+                                    raise ValueError(
+                                        "A new steward proposal cannot be future-dated"
+                                    )
+                                if (
+                                    proposal.expires_at - proposal.created_at
+                                    > timedelta(minutes=15)
+                                ):
+                                    raise ValueError(
+                                        "Steward proposals may live for at most 15 minutes"
+                                    )
+                                pending_count = sum(
+                                    item.status == "pending"
+                                    for item in self._ordered_steward_proposals.values()
+                                )
+                                if pending_count >= 32:
+                                    raise ValueError(
+                                        "Too many steward proposals are awaiting approval"
+                                    )
+                                self._ordered_steward_proposals[
+                                    proposal.proposal_id
+                                ] = proposal
+                                self._prune_ordered_steward_action_proposals()
+                                generated_events.append(
+                                    StewardActionProposalChanged(proposal=proposal)
+                                )
+                        case DecideStewardAction():
+                            proposal = self._ordered_steward_proposals.get(
+                                command.proposal_id
+                            )
+                            if proposal is None:
+                                raise ValueError("Steward proposal not found")
+                            if proposal.status != "pending":
+                                raise ValueError(
+                                    "Steward proposal has already been decided"
+                                )
+                            now = datetime.now(tz=timezone.utc)
+                            if proposal.expires_at <= now:
+                                decided = proposal.model_copy(
+                                    update={
+                                        "status": "expired",
+                                        "decided_at": now,
+                                        "decided_by": command.decided_by,
+                                        "outcome": "Approval arrived after proposal expiry.",
+                                    }
+                                )
+                            elif not command.approved:
+                                decided = proposal.model_copy(
+                                    update={
+                                        "status": "rejected",
+                                        "decided_at": now,
+                                        "decided_by": command.decided_by,
+                                        "outcome": "Rejected by the operator.",
+                                    }
+                                )
+                            elif os.getenv("SKULK_FABRIC_CAPABILITIES_DISABLE") == "1":
+                                decided = proposal.model_copy(
+                                    update={
+                                        "status": "failed",
+                                        "decided_at": now,
+                                        "decided_by": command.decided_by,
+                                        "outcome": "Fabric actions are disabled by the global kill switch.",
+                                    }
+                                )
+                            else:
+                                try:
+                                    action_events, action_command_id, action_status = (
+                                        await self._execute_approved_steward_action(
+                                            proposal
+                                        )
+                                    )
+                                except (PlacementError, ValueError) as error:
+                                    decided = proposal.model_copy(
+                                        update={
+                                            "status": "failed",
+                                            "decided_at": now,
+                                            "decided_by": command.decided_by,
+                                            "outcome": str(error)[:1024],
+                                        }
+                                    )
+                                else:
+                                    decided = proposal.model_copy(
+                                        update={
+                                            "status": action_status,
+                                            "decided_at": now,
+                                            "dispatched_at": (
+                                                now
+                                                if action_status == "dispatched"
+                                                else None
+                                            ),
+                                            "decided_by": command.decided_by,
+                                            "command_id": action_command_id,
+                                            "outcome": (
+                                                "Download cancellation was approved and awaits "
+                                                "durable dispatch."
+                                                if isinstance(
+                                                    proposal.action,
+                                                    StewardCancelDownloadAction,
+                                                )
+                                                else "Restart teardown was dispatched; replacement "
+                                                "waits for released capacity."
+                                                if action_status == "approved"
+                                                else "Approved action was dispatched through "
+                                                "the typed command path."
+                                            ),
+                                        }
+                                    )
+                                    generated_events.extend(action_events)
+                            self._ordered_steward_proposals[
+                                command.proposal_id
+                            ] = decided
+                            self._prune_ordered_steward_action_proposals()
+                            generated_events.insert(
+                                0, StewardActionProposalChanged(proposal=decided)
+                            )
                         case DeleteInstance():
                             # Credit the freed memory back to placement admission
                             # for a short grace window so a back-to-back placement
@@ -2121,6 +2938,8 @@ class Master:
         while True:
             connected_node_ids = set(self.state.topology.list_nodes())
             now = datetime.now(tz=timezone.utc)
+            for expiry_event in self._expire_steward_action_proposals(now):
+                await self.event_sender.send(expiry_event)
             self._report_heartbeat_gap_changes(now=now)
             # ALL liveness-based action is suppressed while this session's
             # topology is still settling (#273): a failover-seeded master
@@ -2254,6 +3073,9 @@ class Master:
             # tick, a new master re-establishes the steward after election
             # without any dedicated failover machinery.
             if topology_settled:
+                await self._reconcile_dispatched_steward_actions(now)
+                await self._arm_approved_steward_download_cancellations()
+                await self._resume_approved_steward_restarts(now)
                 await self._maintain_steward_placement()
 
             await anyio.sleep(10)

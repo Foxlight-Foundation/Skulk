@@ -15,7 +15,12 @@ from skulk.shared.types.audio import (
 from skulk.shared.types.chunks import InputChunk
 from skulk.shared.types.common import CommandId, NodeId, SystemId
 from skulk.shared.types.embedding import TextEmbeddingTaskParams
+from skulk.shared.types.steward_actions import (
+    StewardActionProposal,
+    StewardActionProposalId,
+)
 from skulk.shared.types.text_generation import TextGenerationTaskParams
+from skulk.shared.types.worker.downloads import DownloadAttemptId
 from skulk.shared.types.worker.instances import (
     Instance,
     InstanceFailureCode,
@@ -131,6 +136,20 @@ class DeleteInstance(BaseCommand):
     instance_id: InstanceId
 
 
+class ProposeStewardAction(BaseCommand):
+    """Ask the master to order one inert, approval-gated steward proposal."""
+
+    proposal: StewardActionProposal
+
+
+class DecideStewardAction(BaseCommand):
+    """Atomically approve or reject one pending steward action proposal."""
+
+    proposal_id: StewardActionProposalId
+    approved: bool
+    decided_by: str = Field(min_length=1, max_length=128)
+
+
 class FailInstance(BaseCommand):
     """Report a terminal runtime failure to the authoritative master.
 
@@ -209,8 +228,17 @@ class DeleteDownload(BaseCommand):
 
 
 class CancelDownload(BaseCommand):
+    """Cancel a model download, optionally only for one observed attempt."""
+
     target_node_id: NodeId
     model_id: ModelId
+    attempt_id: DownloadAttemptId | None = Field(
+        default=None,
+        description=(
+            "Exact active attempt to cancel, or null for an ordinary operator "
+            "cancellation of the current model download."
+        ),
+    )
 
 
 class EvictStagedModel(BaseCommand):
@@ -288,6 +316,8 @@ Command = (
     | PlaceInstance
     | CreateInstance
     | DeleteInstance
+    | ProposeStewardAction
+    | DecideStewardAction
     | FailInstance
     | RefuseInstancePlacement
     | TaskCancelled

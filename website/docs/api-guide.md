@@ -1921,10 +1921,16 @@ model_card_identity_mismatch`, and no instance state is created.
 When intelligent-fabric mode is enabled in the cluster configuration
 (`intelligent_fabric.enabled`), the fabric keeps a small resident model (the
 steward) placed as a hidden system instance. The steward investigates the
-cluster through a bounded read-only tool surface and answers operator
-questions; it cannot change the cluster. `steward` remains the internal role
-and compatibility identifier, but operator surfaces present this cognition as
-Skulk itself rather than as a separate assistant or character.
+cluster through a bounded tool surface and answers operator questions. Its
+read tools return evidence; its basic-action tools can only create inert,
+expiring proposals. Read-only questions remain available to ordinary clients,
+but the server exposes proposal-creation tools to the model only when the chat
+request has trusted-fabric or authenticated operator-gateway mutation authority.
+The model never receives a direct mutating tool, and a separately authenticated
+operator must approve the exact proposal before the master can dispatch it.
+`steward` remains the internal role and compatibility
+identifier, but operator surfaces present this cognition as Skulk itself rather
+than as a separate assistant or character.
 
 ### Talking to Skulk: the virtual model
 
@@ -1935,15 +1941,20 @@ steward-specific client code is required beyond the model id.
 
 Semantics of the reserved id:
 
-- The server runs the steward's investigation loop (up to 8 read-only tool
-  calls per turn: cluster state, node resources, telemetry and data-plane
+- The server runs the steward's investigation loop (up to 8 tool calls per
+  turn: cluster state, node resources, telemetry and data-plane
   diagnostics, version status, performance envelopes, named-node doctor
   results, the model catalog, and a search over Skulk's own bundled
-  documentation) and answers from the evidence. `get_node_diagnostics`
+  documentation, plus inert basic-action proposal tools) and answers from the
+  evidence. `get_node_diagnostics`
   requires a friendly `node_name` and returns that node's complete diagnostic
   bundle; `run_doctor` also requires `node_name` and returns the selected
   node's bounded doctor findings. Both resolve only unique live friendly names
   and refuse missing or ambiguous targets rather than exposing node IDs.
+- Ordinary clients receive the same read tools and may ask diagnostic or
+  advisory questions. The four proposal tools are included only for a direct
+  trusted-fabric request or an authenticated operator-gateway request; this
+  prevents public chat access from filling the bounded proposal queue.
 - The tool trace is returned as reasoning content: in streaming responses,
   each tool step arrives as a `reasoning_content` delta while the
   investigation runs, followed by the answer as `content`; non-streaming
@@ -2051,6 +2062,87 @@ Note: deleting the steward instance through `DELETE /instance/{instance_id}`
 is refused with `409` while intelligent-fabric mode is enabled; disable the
 mode in Settings to remove the placement (the fabric then tears it down
 automatically).
+
+### GET /v1/steward/proposals
+
+Returns the bounded, newest-first audit of steward action proposals. This route
+uses the same trusted-fabric or authenticated operator-gateway authorization as
+operator mutations. It does not expose internal node IDs, instance IDs, command
+IDs, or embedded model-card payloads.
+
+Each response item contains:
+
+- `proposal_id`, `created_at`, and `expires_at`;
+- `action`: `place_model`, `stop_model`, `restart_model`, or `cancel_download`;
+- a safe `target` label, `rationale`, bounded `evidence`, and `expected_effect`;
+- `status`: `pending`, `approved`, `dispatched`, `rejected`, `expired`, or
+  `failed`; and
+- optional `decided_at`, safe actor class in `decided_by`, and `outcome`.
+
+Proposals created by the built-in harness expire after ten minutes. The master
+refuses already-expired proposals, proposals with a lifetime over fifteen
+minutes, automatically publishes expiry when the deadline passes, and refuses
+more than 32 simultaneously pending proposals. State targets a 128-record audit
+window by pruning the oldest completed terminal records; pending, approved, and
+dispatched records still inside their five-minute failover-recovery window are
+never pruned to make room.
+
+The action set is intentionally narrow:
+
+- `place_model` revalidates exact authorized catalog truth and runs the normal
+  placement planner. Normal placement also stages missing shards.
+- `stop_model` deletes the exact ordinary instance selected when proposed.
+- `restart_model` first tears down that exact ordinary instance, records
+  `approved`, then re-places the captured intent only after replicated deletion
+  and live capacity truth show that the old allocation has been released. It
+  fails if replacement capacity does not become available within five minutes.
+- `cancel_download` cancels the exact model transfer attempt on the selected
+  named node. Approval fails closed if that attempt finishes or is replaced by
+  a retry, and the worker repeats the attempt-identity check when the command
+  arrives so a later retry cannot be cancelled.
+
+System-role instances are never eligible. Targets are resolved before proposal
+creation and revalidated by the elected master at approval, so stale or
+ambiguous proposals fail without mutation.
+
+### POST `/v1/steward/proposals/{proposal_id}/decision`
+
+Submits one explicit operator decision for a pending proposal. The path
+parameter is the `proposal_id`; the JSON body is:
+
+```json
+{"approved": true}
+```
+
+`approved: false` rejects the proposal. This route requires trusted-fabric or
+authenticated operator-gateway authority. Decisions are single use. Missing
+proposals return `404`; proposals already decided in the local replicated view
+return `409`.
+
+A successful response contains the proposal ID, the decision command ID, and an
+acceptance message. Acceptance means the decision entered the ordered command
+path. Clients should poll `GET /v1/steward/proposals` for the master-authoritative
+result. `dispatched` means the approved action was translated into and accepted
+by an existing typed placement, deletion, replacement, or download command; it
+does not claim that an asynchronous model start, stop, or download has already
+completed. For restart only, `approved` means the decision is durable and the
+planning loop will dispatch teardown before waiting for released capacity.
+Stop and restart download cleanup likewise waits for the replicated decision
+before it is forwarded. Restart also revalidates its captured model-card
+identity before teardown. For five minutes after the separate timestamp of any
+`dispatched` transition, a promoted master compares the proposal's exact command
+identity with replicated state and reissues a missing action effect once.
+Download cancellation uses an additional durable step: the replicated
+`approved` decision is indexed before dispatch is armed. The armed `dispatched`
+transition must then be indexed before a later planning pass forwards the
+attempt-bound cancellation.
+
+Setting `SKULK_FABRIC_CAPABILITIES_DISABLE=1` on the elected master is the global
+fail-closed kill switch. It converts an otherwise valid approval into `failed`
+without dispatching the proposed action, and a promoted master fails carried
+dispatch recovery rather than reissuing its effect. There are no autonomous approvals or
+per-action grants in this release: every proposal requires a separate operator
+decision.
 
 ## Download Management
 

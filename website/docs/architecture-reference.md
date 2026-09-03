@@ -20,7 +20,7 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 - **Communicates via:** `LOCAL_EVENTS` (consumes), `GLOBAL_EVENTS` (publishes indexed events), `COMMANDS` (consumes), `STATE_SYNC_MESSAGES` (publishes snapshots)
 - **Election:** `src/skulk/shared/election.py`; bully algorithm; a single master at a time
 - **Formation robustness (#400):** a campaign is (re)started by a connection update only when the set of connected peers actually changes (`_apply_connection_updates` tracks `_connected_peers`), and an in-flight campaign is allowed to finish before the next one starts. Peers are multi-homed and libp2p pings/re-dials every few seconds (`PING_INTERVAL` in `rust/networking/src/discovery.rs`), so raw connection updates can arrive faster than `DEFAULT_ELECTION_TIMEOUT`; without this gating each update cancelled and restarted the campaign before it could elect a master, livelocking formation (worst at simultaneous multi-node cold start). Reducing the churn at its source (skip unreachable link-local dials, ping tuning) is a separate follow-up (#401).
-- **Failover:** re-election picks a new master, which seeds its session from the node's prior replicated state (#273, `seed_state_for_new_session` in `src/skulk/shared/session_carryover.py`): **instances, downloads, node info maps, and tracing carry over**; in-flight tasks, runner statuses, topology, and liveness timestamps are deliberately dropped (tasks died with the old session's plumbing; runner processes are torn down by the worker re-creation; topology/liveness must come from live gossip, since a carried topology would keep a dead node's out-edges forever). Workers re-create runners for the carried instances through the ordinary plan loop, so placements survive a master restart with a model-reload-sized gap instead of a silent permanent 404. The election winner tears its own worker down and rebuilds it, which cancels its `RunnerSupervisor.run()` tasks; that teardown is **shielded from cancellation** (`runner_supervisor.py`) so each runner process is fully reaped (Metal reclaims its wired GPU memory on exit) before `worker.shutdown()` returns. Without the shield the join was cancelled, the old runner lingered holding its memory, and the rebuilt worker's pre-load memory guard saw the not-yet-reclaimed memory, falsely refused the re-creation, and the #290 re-place-wider path deleted the carried instance (the silent 404 this design exists to prevent). It only bit when the winner also hosted a rank of a carried instance and was memory-tight. The plan loop suppresses liveness-based instance pruning for `TOPOLOGY_SETTLE_GRACE_SECONDS` (60s) after master start so carried instances aren't deleted while topology is still rebuilding; instances whose ranks lived on the dead master are pruned after the grace. A freshly-booted node that wins election seeds empty (it has no prior view): identical to the pre-#273 behavior. The seed is indexed as **event 0 of the new session** (a logged `StateSnapshotHydrated`, `Master._index_seed_event`): late bootstrappers receive it inside the snapshot, early bootstrappers (including the promoted node's own worker, whose bootstrap races the promotion) receive it as the live first event: one delivery path, no idx-(-1) hydration skip.
+- **Failover:** re-election picks a new master, which seeds its session from the node's prior replicated state (#273, `seed_state_for_new_session` in `src/skulk/shared/session_carryover.py`): **instances, downloads, node info maps, tracing, and bounded steward-action proposal truth carry over**; in-flight tasks, runner statuses, topology, and liveness timestamps are deliberately dropped (tasks died with the old session's plumbing; runner processes are torn down by the worker re-creation; topology/liveness must come from live gossip, since a carried topology would keep a dead node's out-edges forever). Actionable approved or dispatched steward proposals therefore reach the promoted master's exact-command recovery paths. Workers re-create runners for the carried instances through the ordinary plan loop, so placements survive a master restart with a model-reload-sized gap instead of a silent permanent 404. The election winner tears its own worker down and rebuilds it, which cancels its `RunnerSupervisor.run()` tasks; that teardown is **shielded from cancellation** (`runner_supervisor.py`) so each runner process is fully reaped (Metal reclaims its wired GPU memory on exit) before `worker.shutdown()` returns. Without the shield the join was cancelled, the old runner lingered holding its memory, and the rebuilt worker's pre-load memory guard saw the not-yet-reclaimed memory, falsely refused the re-creation, and the #290 re-place-wider path deleted the carried instance (the silent 404 this design exists to prevent). It only bit when the winner also hosted a rank of a carried instance and was memory-tight. The plan loop suppresses liveness-based instance pruning for `TOPOLOGY_SETTLE_GRACE_SECONDS` (60s) after master start so carried instances aren't deleted while topology is still rebuilding; instances whose ranks lived on the dead master are pruned after the grace. A freshly-booted node that wins election seeds empty (it has no prior view): identical to the pre-#273 behavior. The seed is indexed as **event 0 of the new session** (a logged `StateSnapshotHydrated`, `Master._index_seed_event`): late bootstrappers receive it inside the snapshot, early bootstrappers (including the promoted node's own worker, whose bootstrap races the promotion) receive it as the live first event: one delivery path, no idx-(-1) hydration skip.
 
 ### Worker
 
@@ -132,7 +132,7 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   Failed promotion falls through to the prior brain and retries after 30 minutes.
 - Pinning: `TextGeneration.target_instance_id` (mirrors SpeechSynthesis);
   miss emits TaskFailed `instance_unavailable`.
-- Harness: `src/skulk/api/steward.py`. Read-only tools: cluster state
+- Harness: `src/skulk/api/steward.py`. Observation tools: cluster state
   summary (exact node count; per-node identity, RAM, accelerator, backends,
   and CUDA/ROCm/MLX support; separate operator active-placement,
   ready/running, and stopping/failed lifecycle buckets; internal system-role
@@ -144,7 +144,41 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   section index over the checkout's own docs, anchored on
   architecture-reference.md; honest absence report on doc-less installs;
   version-correct by construction, per the no-knowledge-in-weights
-  doctrine). 6000-char tool-result bound, 8 steps/turn, observe/advise only.
+  doctrine). Proposal tools: `propose_place_model`, `propose_stop_model`,
+  `propose_restart_model`, and `propose_cancel_download`. They create inert
+  ten-minute proposals only and are supplied to the model only when the HTTP
+  request passes the operator mutation guard; read-only steward chat remains
+  available without that authority. The model has no direct mutating verb.
+  6000-char tool-result bound, 8 steps/turn.
+- Basic-action authority: exact action unions live in
+  `shared/types/steward_actions.py`; `ProposeStewardAction` and
+  `DecideStewardAction` ride `COMMANDS`; `StewardActionProposalChanged` is the
+  replicated audit event. `GET /v1/steward/proposals` returns a safe projection,
+  and `POST /v1/steward/proposals/{proposal_id}/decision` requires the ordinary
+  trusted-fabric or operator-gateway mutation guard. The master serializes each
+  decision once, reserves approved placements before the State echo,
+  revalidates current target truth, carries the reviewed attempt identity in
+  `CancelDownload` for final worker-side rejection of a replaced attempt,
+  blocks system roles, and
+  translates approval into existing place/delete/replacement/download command
+  paths. Stop and restart capture complete instance state and share one target
+  reservation, rejecting stale replacement state and conflicting approvals.
+  Stop teardown and restart teardown wait for the replicated decision,
+  and restart revalidates its captured model-card identity before teardown. Restart is
+  two-phase: `approved` durably arms teardown; after the deletion event and
+  released-capacity telemetry converge, the planning loop
+  dispatches the captured placement intent or fails it after five minutes.
+  Bounds: 32 pending, 128-record audit target; pending, approved, and
+  dispatched proposals inside the five-minute recovery window are retained
+  even when that temporarily exceeds the target. The master accepts at most a
+  15-minute proposal lifetime and publishes terminal expiry on deadline.
+  `dispatched` means command acceptance, not lifecycle completion. A promoted
+  master reconciles dispatched proposals for five minutes from their separate
+  dispatch timestamp and reissues a
+  missing exact command effect once. `SKULK_FABRIC_CAPABILITIES_DISABLE=1` is a master-side
+  global fail-closed kill switch for both new approvals and recovered dispatches.
+  No autonomous approval or per-action grants
+  yet.
 - Client surface: reserved virtual model id `skulk/steward` on
   `POST /v1/chat/completions` (checked before card resolution; client
   `tools` rejected 400; client system messages ignored; trace streams as
@@ -170,7 +204,8 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   race, so "the fabric is still setting up" is no longer indistinguishable
   from "the model failed mid-answer".
 - Dashboard: instances with `systemRole` set are hidden from all instance
-  surfaces (filter in App.tsx instanceCards).
+  surfaces (filter in App.tsx instanceCards). The steward chat polls the safe
+  proposal list and presents separate Approve and Reject controls.
 - Cards: `unsloth/Qwen3.6-35B-A3B-GGUF` (text-only so served lanes stay
   eligible) and `mlx-community/Qwen3.6-35B-A3B-4bit` (vision, MLX) are the
   v1 brain, both revision-pinned; `Qwen/Qwen3.6-35B-A3B-FP8` adds the

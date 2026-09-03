@@ -1,4 +1,4 @@
-"""The steward: the intelligent-fabric resident's read-only harness (Phase 1).
+"""The steward: resident intelligence with bounded, approval-gated hands.
 
 The steward is a small model the fabric keeps placed as a hidden system
 instance (see ``IntelligentFabricConfig`` and the master's
@@ -8,10 +8,9 @@ and the per-turn investigation loop that drives the model through the
 existing chat-completions generation path (pinned to the steward instance
 via ``TextGeneration.target_instance_id``).
 
-Phase 1 authority is observe/advise only: every tool here is a read, and no
-mutating tool exists in this module by construction. The tool vocabulary
-deliberately matches the steward bench (skulk-steward repo), so bench
-results transfer to production behavior.
+The permanent floor is observe/advise. Phase 2a adds proposal tools, but they
+remain inert until a separately authenticated operator approves the exact
+typed action. The model never receives a direct mutating tool.
 """
 
 from __future__ import annotations
@@ -21,6 +20,7 @@ import json
 import re
 from collections.abc import AsyncGenerator, Mapping
 from collections.abc import Set as AbstractSet
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Literal, cast, final
 
 import anyio
@@ -42,12 +42,20 @@ from skulk.shared.types.chunks import (
     TokenChunk,
     ToolCallChunk,
 )
-from skulk.shared.types.common import CommandId
-from skulk.shared.types.worker.instances import InstanceId
+from skulk.shared.types.common import CommandId, NodeId
+from skulk.shared.types.steward_actions import (
+    StewardActionProposal,
+    StewardActionProposalStatus,
+    StewardCancelDownloadAction,
+    StewardPlaceModelAction,
+    StewardRestartInstanceAction,
+    StewardStopInstanceAction,
+)
+from skulk.shared.types.worker.instances import InstanceId, InstanceMeta
+from skulk.shared.types.worker.shards import Sharding
 
 if TYPE_CHECKING:
     from skulk.api.main import API
-    from skulk.shared.types.common import NodeId
     from skulk.shared.types.tasks import Task, TaskId
     from skulk.shared.types.worker.instances import Instance
     from skulk.shared.types.worker.runners import RunnerId, RunnerStatus
@@ -124,6 +132,9 @@ card. Reasoning stays available on the same cards for ordinary chat: this is
 the harness's own request shape, not a claim about the model.
 """
 
+STEWARD_PROPOSAL_LIFETIME = timedelta(minutes=10)
+"""How long an exact basic-action proposal remains eligible for approval."""
+
 # The internal steward role is Skulk's resident operator-facing cognition, not
 # a separate character. The prompt therefore speaks as the fabric itself while
 # keeping the benched read-only investigation rules unchanged.
@@ -168,15 +179,54 @@ Rules:
   authoritative operator lifecycle bucket wins for the new instance.
 - If everything is healthy, say so; do not invent problems.
 - In this interface you can only observe and advise. You cannot change your
-  cluster; when
-  action is needed, tell the operator exactly what to do.
+  cluster directly. Proposal tools create inert, expiring approval requests;
+  they never execute an action. Use one only after gathering concrete evidence,
+  and explain that an authenticated operator must approve it separately.
 - Answer in plain language an operator can act on, citing the evidence.
 """
 
 
-def steward_tool_definitions() -> list[dict[str, Any]]:
-    """The steward's read-only tool surface as OpenAI function definitions."""
+STEWARD_PROPOSAL_TOOL_NAMES = frozenset(
+    {
+        "propose_place_model",
+        "propose_stop_model",
+        "propose_restart_model",
+        "propose_cancel_download",
+    }
+)
+
+
+def steward_tool_definitions(
+    *, include_proposals: bool = True
+) -> list[dict[str, Any]]:
+    """Return steward read tools and, when authorized, inert proposal tools.
+
+    Args:
+        include_proposals: Whether to expose proposal-creation tools to the model.
+
+    Returns:
+        OpenAI-compatible server-side function definitions for this request.
+    """
     no_args: dict[str, Any] = {"type": "object", "properties": {}, "required": []}
+    proposal_context: dict[str, Any] = {
+        "rationale": {
+            "type": "string",
+            "maxLength": 1024,
+            "description": "Why this exact action is recommended.",
+        },
+        "evidence": {
+            "type": "array",
+            "items": {"type": "string", "maxLength": 512},
+            "minItems": 1,
+            "maxItems": 8,
+            "description": "Concrete facts observed through tools.",
+        },
+        "expected_effect": {
+            "type": "string",
+            "maxLength": 1024,
+            "description": "What should change if the operator approves.",
+        },
+    }
     tools: list[tuple[str, str, dict[str, Any]]] = [
         (
             "get_cluster_state",
@@ -287,6 +337,81 @@ def steward_tool_definitions() -> list[dict[str, Any]]:
             "family, quantization, and capability tags.",
             no_args,
         ),
+        (
+            "propose_place_model",
+            "Create an inert, expiring proposal to place a catalog model. It "
+            "does not execute until an authenticated operator approves it.",
+            {
+                "type": "object",
+                "properties": {
+                    "model_id": {"type": "string"},
+                    "min_nodes": {"type": "integer", "minimum": 1},
+                    **proposal_context,
+                },
+                "required": [
+                    "model_id",
+                    "rationale",
+                    "evidence",
+                    "expected_effect",
+                ],
+            },
+        ),
+        (
+            "propose_stop_model",
+            "Create an inert, expiring proposal to stop the unique ordinary "
+            "instance serving a model. System placements are never eligible.",
+            {
+                "type": "object",
+                "properties": {
+                    "model_id": {"type": "string"},
+                    **proposal_context,
+                },
+                "required": [
+                    "model_id",
+                    "rationale",
+                    "evidence",
+                    "expected_effect",
+                ],
+            },
+        ),
+        (
+            "propose_restart_model",
+            "Create an inert, expiring proposal to replace the unique ordinary "
+            "instance serving a model while preserving placement intent.",
+            {
+                "type": "object",
+                "properties": {
+                    "model_id": {"type": "string"},
+                    **proposal_context,
+                },
+                "required": [
+                    "model_id",
+                    "rationale",
+                    "evidence",
+                    "expected_effect",
+                ],
+            },
+        ),
+        (
+            "propose_cancel_download",
+            "Create an inert, expiring proposal to cancel one model download "
+            "on a named node.",
+            {
+                "type": "object",
+                "properties": {
+                    "model_id": {"type": "string"},
+                    "node_name": {"type": "string"},
+                    **proposal_context,
+                },
+                "required": [
+                    "model_id",
+                    "node_name",
+                    "rationale",
+                    "evidence",
+                    "expected_effect",
+                ],
+            },
+        ),
     ]
     return [
         {
@@ -294,6 +419,7 @@ def steward_tool_definitions() -> list[dict[str, Any]]:
             "function": {"name": name, "description": desc, "parameters": params},
         }
         for name, desc, params in tools
+        if include_proposals or name not in STEWARD_PROPOSAL_TOOL_NAMES
     ]
 
 
@@ -465,6 +591,90 @@ class StewardStatusResponse(BaseModel):
             "liveness canary has an outstanding failed probe). The boolean "
             "fields remain authoritative; this is the renderable summary."
         ),
+    )
+
+
+class StewardActionDecisionRequest(BaseModel):
+    """Authenticated operator decision for one exact pending proposal."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    approved: bool = Field(description="Approve when true; reject when false.")
+
+
+class StewardActionDecisionResponse(BaseModel):
+    """Acceptance of an approval decision into the ordered command path."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    proposal_id: str = Field(description="Proposal identity being decided.")
+    command_id: str = Field(description="Decision command accepted by this API node.")
+    message: str = Field(description="Operator-readable acceptance message.")
+
+
+class StewardActionProposalView(BaseModel):
+    """Operator-safe proposal projection with internal identities removed."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    proposal_id: str = Field(description="Stable proposal identity.")
+    action: Literal[
+        "place_model", "stop_model", "restart_model", "cancel_download"
+    ] = Field(description="Safe basic-action name awaiting or following a decision.")
+    target: str = Field(description="Friendly model or node-and-model target.")
+    rationale: str = Field(description="Why the steward recommended the action.")
+    evidence: tuple[str, ...] = Field(
+        description="Bounded operator-readable evidence behind the recommendation."
+    )
+    expected_effect: str = Field(description="Expected effect if approved.")
+    created_at: datetime = Field(description="UTC proposal creation time.")
+    expires_at: datetime = Field(description="UTC approval deadline.")
+    status: StewardActionProposalStatus = Field(
+        description="Authoritative proposal lifecycle state."
+    )
+    decided_at: datetime | None = Field(
+        default=None, description="UTC terminal decision time."
+    )
+    decided_by: str | None = Field(
+        default=None, description="Safe actor class responsible for the decision."
+    )
+    outcome: str | None = Field(
+        default=None, description="Bounded dispatch or refusal outcome."
+    )
+
+
+def steward_action_proposal_view(
+    proposal: StewardActionProposal,
+) -> StewardActionProposalView:
+    """Remove internal node, instance, command, and card payloads from a proposal."""
+    action = proposal.action
+    if isinstance(action, StewardPlaceModelAction):
+        action_name: Literal[
+            "place_model", "stop_model", "restart_model", "cancel_download"
+        ] = "place_model"
+        target = str(action.model_card.model_id)
+    elif isinstance(action, StewardStopInstanceAction):
+        action_name = "stop_model"
+        target = str(action.instance.shard_assignments.model_id)
+    elif isinstance(action, StewardRestartInstanceAction):
+        action_name = "restart_model"
+        target = str(action.instance.shard_assignments.model_id)
+    else:
+        action_name = "cancel_download"
+        target = f"{action.model_id} on {action.node_name}"
+    return StewardActionProposalView(
+        proposal_id=str(proposal.proposal_id),
+        action=action_name,
+        target=target,
+        rationale=proposal.rationale,
+        evidence=proposal.evidence,
+        expected_effect=proposal.expected_effect,
+        created_at=proposal.created_at,
+        expires_at=proposal.expires_at,
+        status=proposal.status,
+        decided_at=proposal.decided_at,
+        decided_by=proposal.decided_by,
+        outcome=proposal.outcome,
     )
 
 
@@ -1218,8 +1428,9 @@ class StewardHarness:
     to callers.
     """
 
-    def __init__(self, api: "API") -> None:
+    def __init__(self, api: "API", *, proposals_allowed: bool = True) -> None:
         self._api = api
+        self._proposals_allowed = proposals_allowed
         # The inner TextGeneration currently in flight for this turn, so an
         # abandoned stream (client disconnect, cancel button) can stop the
         # runner instead of leaving it generating for nobody.
@@ -1316,8 +1527,85 @@ class StewardHarness:
                 return instance_id, str(instance.shard_assignments.model_id)
         return None
 
+    @staticmethod
+    def _proposal_context(
+        arguments: Mapping[str, object],
+    ) -> tuple[str, tuple[str, ...], str]:
+        """Validate the bounded evidence fields shared by proposal tools."""
+        rationale = arguments.get("rationale")
+        expected_effect = arguments.get("expected_effect")
+        raw_evidence = arguments.get("evidence")
+        if not isinstance(rationale, str) or not rationale.strip():
+            raise ValueError("proposal rationale is required")
+        if not isinstance(expected_effect, str) or not expected_effect.strip():
+            raise ValueError("proposal expected_effect is required")
+        if not isinstance(raw_evidence, list) or not raw_evidence:
+            raise ValueError("proposal evidence must be a non-empty list")
+        evidence_values = cast("list[object]", raw_evidence)
+        evidence = tuple(
+            item.strip() for item in evidence_values if isinstance(item, str)
+        )
+        if len(evidence) != len(evidence_values) or any(not item for item in evidence):
+            raise ValueError("proposal evidence entries must be non-empty strings")
+        if len(evidence) > 8:
+            raise ValueError("proposal evidence is limited to eight entries")
+        if len(rationale.strip()) > 1024 or len(expected_effect.strip()) > 1024:
+            raise ValueError("proposal rationale and expected_effect are limited to 1024 chars")
+        if any(len(item) > 512 for item in evidence):
+            raise ValueError("proposal evidence entries are limited to 512 chars")
+        return rationale.strip(), evidence, expected_effect.strip()
+
+    def _unique_operator_instance(self, model_id: ModelId) -> "Instance":
+        """Resolve one model alias to exactly one non-system live instance."""
+        matches = [
+            instance
+            for instance in self._api.state.instances.values()
+            if instance.system_role is None
+            and instance.shard_assignments.model_id == model_id
+        ]
+        if not matches:
+            raise ValueError(f"no ordinary instance serves '{model_id}'")
+        if len(matches) != 1:
+            raise ValueError(
+                f"'{model_id}' has {len(matches)} ordinary instances; "
+                "the action is ambiguous"
+            )
+        return matches[0]
+
+    async def _propose_action(
+        self,
+        action: (
+            StewardPlaceModelAction
+            | StewardStopInstanceAction
+            | StewardRestartInstanceAction
+            | StewardCancelDownloadAction
+        ),
+        arguments: Mapping[str, object],
+    ) -> str:
+        """Order one inert proposal and return only operator-safe metadata."""
+        rationale, evidence, expected_effect = self._proposal_context(arguments)
+        now = datetime.now(tz=timezone.utc)
+        proposal = StewardActionProposal(
+            action=action,
+            rationale=rationale,
+            evidence=evidence,
+            expected_effect=expected_effect,
+            created_at=now,
+            expires_at=now + STEWARD_PROPOSAL_LIFETIME,
+        )
+        await self._api.submit_steward_action_proposal(proposal)
+        return json.dumps(
+            {
+                "proposalId": str(proposal.proposal_id),
+                "status": proposal.status,
+                "expiresAt": proposal.expires_at.isoformat(),
+                "approvalRequired": True,
+                "note": "No cluster action has executed.",
+            }
+        )
+
     async def execute_tool(self, name: str, arguments: dict[str, object]) -> str:
-        """Execute one read-only tool; failures return as tool results.
+        """Execute one observation or inert-proposal tool.
 
         The steward recovering from its own bad call is part of the design,
         so unknown tools and errors are surfaced to the model, never raised.
@@ -1329,6 +1617,10 @@ class StewardHarness:
 
     async def _execute(self, name: str, arguments: dict[str, object]) -> str:
         api = self._api
+        if name in STEWARD_PROPOSAL_TOOL_NAMES and not self._proposals_allowed:
+            raise ValueError(
+                "steward proposal creation requires operator mutation authority"
+            )
         if name == "get_cluster_state":
             payload = await api.get_cluster_state()
             return steward_operator_tool_result(payload)
@@ -1512,6 +1804,71 @@ class StewardHarness:
                         for entry in models.data[:40]
                     ]
                 }
+            )
+        if name == "propose_place_model":
+            raw_model_id = arguments.get("model_id")
+            if not isinstance(raw_model_id, str) or not raw_model_id.strip():
+                raise ValueError("propose_place_model requires model_id")
+            raw_min_nodes = arguments.get("min_nodes", 1)
+            if not isinstance(raw_min_nodes, int) or isinstance(raw_min_nodes, bool):
+                raise ValueError("min_nodes must be an integer")
+            await api.get_placement(
+                ModelId(raw_model_id),
+                sharding=Sharding.Pipeline,
+                instance_meta=InstanceMeta.MlxRing,
+                min_nodes=raw_min_nodes,
+            )
+            card = await api.load_authorized_steward_model_card(ModelId(raw_model_id))
+            return await self._propose_action(
+                StewardPlaceModelAction(
+                    model_card=card,
+                    sharding=Sharding.Pipeline,
+                    instance_meta=InstanceMeta.MlxRing,
+                    min_nodes=raw_min_nodes,
+                ),
+                arguments,
+            )
+        if name in {"propose_stop_model", "propose_restart_model"}:
+            raw_model_id = arguments.get("model_id")
+            if not isinstance(raw_model_id, str) or not raw_model_id.strip():
+                raise ValueError(f"{name} requires model_id")
+            model_id = ModelId(raw_model_id)
+            instance = self._unique_operator_instance(model_id)
+            action = (
+                StewardStopInstanceAction(
+                    instance=instance,
+                )
+                if name == "propose_stop_model"
+                else StewardRestartInstanceAction(
+                    instance=instance,
+                )
+            )
+            return await self._propose_action(action, arguments)
+        if name == "propose_cancel_download":
+            raw_model_id = arguments.get("model_id")
+            raw_node_name = arguments.get("node_name")
+            if not isinstance(raw_model_id, str) or not raw_model_id.strip():
+                raise ValueError("propose_cancel_download requires model_id")
+            payload = await api.get_cluster_state()
+            node_names = _node_name_lookup(payload)
+            node_id, error = _requested_node_id(node_names, raw_node_name)
+            if error is not None or node_id is None:
+                return _bounded(error or {"error": "node not found"})
+            model_id = ModelId(raw_model_id)
+            typed_node_id = NodeId(node_id)
+            attempt_id = api.steward_active_download_attempt(typed_node_id, model_id)
+            if attempt_id is None:
+                raise ValueError(
+                    f"no active download for '{model_id}' on '{node_names[node_id]}'"
+                )
+            return await self._propose_action(
+                StewardCancelDownloadAction(
+                    node_id=typed_node_id,
+                    node_name=node_names[node_id],
+                    model_id=model_id,
+                    attempt_id=attempt_id,
+                ),
+                arguments,
             )
         return json.dumps(
             {"error": f"unknown tool '{name}'", "available": STEWARD_TOOL_NAMES}
@@ -1739,7 +2096,9 @@ class StewardHarness:
         request = ChatCompletionRequest(
             model=model_id,  # type: ignore[arg-type]
             messages=messages,
-            tools=steward_tool_definitions(),
+            tools=steward_tool_definitions(
+                include_proposals=self._proposals_allowed
+            ),
             temperature=0.1,
             max_tokens=1024,
             stream=False,

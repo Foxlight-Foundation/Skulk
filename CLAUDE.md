@@ -351,12 +351,40 @@ than a card claim. GGUF steward cards must stay text-only or the vision
 platform gate bars them from `llama_server`. Repair builders re-stamp `system_role` (same pattern as #658
 exclusions). `TextGeneration.target_instance_id` pins generation to one
 instance (mirrors SpeechSynthesis). Harness = `src/skulk/api/steward.py`:
-bounded read-only tools (state/resources/telemetry/data-plane/versions/
+bounded observation tools (state/resources/telemetry/data-plane/versions/
 envelopes/per-node diagnostics and doctor/catalog), with state normalized into exact heterogeneous
 node facts, non-overlapping operator placement/ready/terminal lifecycle
 buckets, a separate internal-service bucket, and explicitly historical
-terminal failures;
-8 steps per turn, observe/advise only, rides the
+terminal failures), plus inert ten-minute proposal tools for place, stop,
+restart, and cancel-download. Proposal tools are supplied only when the chat
+request has operator mutation authority; read-only steward chat remains broadly
+available. The model has no direct mutating tool.
+`ProposeStewardAction` / `DecideStewardAction` are serialized by the master;
+`StewardActionProposalChanged` replicates the bounded audit. The dashboard uses
+`GET /v1/steward/proposals` and the separately authorized
+`POST /v1/steward/proposals/{proposal_id}/decision`. Approval is single-use and
+revalidates current catalog, placement, ordinary-instance, and live-download
+truth before reusing existing typed action paths. Place approvals reserve
+capacity before State echoes; cancellation carries the observed attempt to the
+worker for final identity validation and is forwarded only after durable
+approval and dispatch-arm echoes. System roles are never
+eligible. Stop teardown and restart teardown wait for the replicated decision;
+both capture the complete reviewed instance state and share one target
+reservation, so stale replacements and conflicting stop/restart approvals are
+refused. Restart revalidates captured model-card truth before teardown. Restart
+is two-phase: `approved` durably arms teardown, then the planner
+waits for replicated deletion plus released-capacity telemetry before placing
+the captured intent, failing after five minutes. 32 pending and a 128-record
+audit target bound state while actionable recovery records are retained.
+`dispatched` means command acceptance, not completion; the
+master publishes terminal expiry when deadlines pass. A promoted master
+inherits the bounded proposal map in the new-session seed, reconciles
+dispatched proposals for five minutes from dispatch, and reissues a missing
+exact command effect once.
+`SKULK_FABRIC_CAPABILITIES_DISABLE=1` is
+the global master-side kill switch; it also fails carried dispatch recovery
+closed after promotion. There is no autonomous approval policy.
+8 steps per turn, rides the
 normal chat dispatch path. Client surface = reserved virtual
 model `skulk/steward` on chat-completions (client tools 400; trace as
 reasoning_content; streaming via the ordinary adapters over

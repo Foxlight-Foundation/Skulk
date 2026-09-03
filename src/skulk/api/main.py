@@ -144,11 +144,15 @@ from skulk.api.steward import (
     STEWARD_RETRY_AFTER_SECONDS,
     STEWARD_SYSTEM_PROMPT,
     STEWARD_VIRTUAL_MODEL_ID,
+    StewardActionDecisionRequest,
+    StewardActionDecisionResponse,
+    StewardActionProposalView,
     StewardCanaryState,
     StewardChatMessage,
     StewardHarness,
     StewardStatusResponse,
     derive_steward_state,
+    steward_action_proposal_view,
 )
 from skulk.api.types import (
     AddCustomModelParams,
@@ -401,6 +405,7 @@ from skulk.shared.types.commands import (
     AudioTranscription,
     Command,
     CreateInstance,
+    DecideStewardAction,
     DeleteCustomModelCard,
     DeleteDownload,
     DeleteInstance,
@@ -412,6 +417,7 @@ from skulk.shared.types.commands import (
     ImageEdits,
     ImageGeneration,
     PlaceInstance,
+    ProposeStewardAction,
     RealtimeAudioTranscription,
     SetModelTrustApproval,
     SetTracingEnabled,
@@ -477,6 +483,10 @@ from skulk.shared.types.profiling import (
     read_wired_memory_bytes,
 )
 from skulk.shared.types.state import State
+from skulk.shared.types.steward_actions import (
+    StewardActionProposal,
+    StewardActionProposalId,
+)
 from skulk.shared.types.telemetry import (
     NODE_LIVENESS_TIMEOUT,
     NodeTelemetry,
@@ -488,6 +498,7 @@ from skulk.shared.types.text_generation import (
     TextGenerationTaskParams,
 )
 from skulk.shared.types.worker.downloads import (
+    DownloadAttemptId,
     DownloadCompleted,
     DownloadOngoing,
     LiveDownloadProgress,
@@ -2271,9 +2282,11 @@ class API:
                 "models are rejected before command dispatch. The reserved model id "
                 "'skulk/steward' selects the intelligent-fabric steward and answers 404 when "
                 "that mode is disabled, or 503 with the steward status payload while the "
-                "steward is still being placed, staged, or loaded."
+                "steward is still being placed, staged, or loaded. Steward observation is "
+                "available to ordinary clients, but proposal-creation tools are exposed only "
+                "to requests with operator mutation authority."
             ),
-        )(self.chat_completions)
+        )(self.chat_completions_route)
         self.app.post(
             "/v1/embeddings",
             tags=["Compatibility APIs"],
@@ -2713,6 +2726,27 @@ class API:
                 "steward chat endpoint."
             ),
         )(self.get_steward_status)
+        self.app.get(
+            "/v1/steward/proposals",
+            tags=["Intelligent Fabric"],
+            summary="List approval-gated steward action proposals",
+            description=(
+                "Return the bounded replicated proposal audit, newest first, with "
+                "internal node, instance, command, and model-card payloads removed. "
+                "The surface requires operator authority because it is paired with "
+                "the approval workflow."
+            ),
+        )(self.list_steward_action_proposals)
+        self.app.post(
+            "/v1/steward/proposals/{proposal_id}/decision",
+            tags=["Intelligent Fabric"],
+            summary="Approve or reject one steward action proposal",
+            description=(
+                "Submit one authenticated, single-use decision to the elected master. "
+                "Approval revalidates expiry, model truth, system-placement protection, "
+                "and current cluster state before dispatching an existing typed command."
+            ),
+        )(self.decide_steward_action_proposal)
         self.app.post(
             "/v1/diagnostics/node/runners/{runner_id}/cancel",
             tags=["Diagnostics"],
@@ -3572,7 +3606,10 @@ class API:
         return self.state.instances[instance_id]
 
     async def _steward_chat_completions(
-        self, payload: ChatCompletionRequest
+        self,
+        payload: ChatCompletionRequest,
+        *,
+        proposals_allowed: bool = True,
     ) -> StreamingResponse:
         """Serve the steward through the standard chat-completions surface.
 
@@ -3667,7 +3704,7 @@ class API:
                 detail=detail,
                 headers={"Retry-After": str(STEWARD_RETRY_AFTER_SECONDS)},
             )
-        harness = StewardHarness(self)
+        harness = StewardHarness(self, proposals_allowed=proposals_allowed)
         command_id = CommandId()
         history, system_prompt, task_params = await self._steward_extension_transform(
             history, stream=payload.stream
@@ -3864,6 +3901,137 @@ class API:
     async def get_steward_status(self) -> "StewardStatusResponse":
         """Report intelligent-fabric mode and the current steward placement."""
         return self._steward_status()
+
+    async def submit_steward_action_proposal(
+        self, proposal: StewardActionProposal
+    ) -> None:
+        """Submit one inert steward proposal to the authoritative master.
+
+        Args:
+            proposal: Exact typed action, evidence, effect, and expiry produced
+                by the resident steward harness.
+
+        Side effects:
+            Sends only :class:`ProposeStewardAction`; no proposed action is
+            executed until a separate authenticated decision is ordered.
+        """
+        if not self._intelligent_fabric_enabled():
+            raise ValueError("Intelligent-fabric mode is disabled")
+        await self._send(ProposeStewardAction(proposal=proposal))
+
+    async def load_authorized_steward_model_card(
+        self, model_id: ModelId
+    ) -> ModelCard:
+        """Resolve exact catalog truth for a steward placement proposal.
+
+        Args:
+            model_id: Exact selectable model alias proposed by the steward.
+
+        Returns:
+            The signed, bundled, installed, or explicitly added model card.
+
+        Raises:
+            HTTPException: When the alias is not authorized in the catalog.
+        """
+        return await self._load_authorized_model_card(model_id)
+
+    async def list_steward_action_proposals(
+        self, request: Request
+    ) -> list[StewardActionProposalView]:
+        """Return the bounded proposal audit to an authorized operator.
+
+        Args:
+            request: Incoming request proving operator authority.
+
+        Returns:
+            Newest-first replicated safe summaries without internal identities.
+
+        Raises:
+            HTTPException: If the caller lacks operator authority.
+        """
+        self._require_operator_mutation(request)
+        return [
+            steward_action_proposal_view(proposal)
+            for proposal in sorted(
+                self.state.steward_action_proposals.values(),
+                key=lambda proposal: proposal.created_at,
+                reverse=True,
+            )
+        ]
+
+    def steward_active_download_attempt(
+        self, node_id: NodeId, model_id: ModelId
+    ) -> DownloadAttemptId | None:
+        """Return the exact live download attempt for a model on one node.
+
+        Args:
+            node_id: Exact internal node selected from a unique friendly name.
+            model_id: Exact model alias selected by the steward.
+
+        Returns:
+            The attempt identity for pending or ongoing effective download
+            truth, or ``None`` when no safely identifiable attempt is active.
+        """
+        for progress in self._telemetry_view.effective_downloads(
+            self.state.downloads
+        ).get(node_id, ()):
+            if (
+                isinstance(progress, LiveDownloadProgress)
+                and progress.shard_metadata.model_card.model_id == model_id
+            ):
+                return progress.attempt_id
+        return None
+
+    async def decide_steward_action_proposal(
+        self,
+        proposal_id: StewardActionProposalId,
+        payload: StewardActionDecisionRequest,
+        request: Request,
+    ) -> StewardActionDecisionResponse:
+        """Approve or reject one exact pending proposal through the master.
+
+        Args:
+            proposal_id: Stable proposal identity returned by the steward.
+            payload: Explicit approve or reject decision.
+            request: Incoming request proving operator authority.
+
+        Returns:
+            Acceptance of the decision command. Clients poll the proposal list
+            for the authoritative master-ordered result.
+
+        Raises:
+            HTTPException: If authorization fails or the proposal is absent or
+                already terminal in this node's replicated view.
+        """
+        self._require_operator_mutation(request)
+        proposal = self.state.steward_action_proposals.get(proposal_id)
+        if proposal is None:
+            raise HTTPException(status_code=404, detail="Steward proposal not found")
+        if proposal.status != "pending":
+            raise HTTPException(
+                status_code=409,
+                detail=f"Steward proposal is already {proposal.status}",
+            )
+        actor = (
+            "authenticated_operator_gateway"
+            if request.scope.get(OPERATOR_GATEWAY_AUTHORIZED_SCOPE_KEY) is True
+            else "trusted_fabric_operator"
+        )
+        command = DecideStewardAction(
+            proposal_id=proposal_id,
+            approved=payload.approved,
+            decided_by=actor,
+        )
+        await self._send(command)
+        return StewardActionDecisionResponse(
+            proposal_id=str(proposal_id),
+            command_id=str(command.command_id),
+            message=(
+                "Approval submitted to the elected master."
+                if payload.approved
+                else "Rejection submitted to the elected master."
+            ),
+        )
 
     def _steward_model_is_downloading(self, model_id: str) -> bool:
         """Whether any node holds a live download record for ``model_id``.
@@ -5192,8 +5360,28 @@ class API:
             raise
         return command
 
+    async def chat_completions_route(
+        self, payload: ChatCompletionRequest, request: Request
+    ) -> StreamingResponse:
+        """Serve chat completions with request-scoped steward proposal authority.
+
+        Args:
+            payload: OpenAI-compatible chat completion request.
+            request: HTTP request used to determine operator mutation authority.
+
+        Returns:
+            A streaming or collected chat-completions response.
+        """
+        return await self.chat_completions(
+            payload,
+            steward_proposals_allowed=self._operator_mutation_allowed(request),
+        )
+
     async def chat_completions(
-        self, payload: ChatCompletionRequest
+        self,
+        payload: ChatCompletionRequest,
+        *,
+        steward_proposals_allowed: bool = True,
     ) -> StreamingResponse:
         """OpenAI Chat Completions API - adapter."""
         if str(payload.model) == STEWARD_VIRTUAL_MODEL_ID:
@@ -5201,7 +5389,10 @@ class API:
             # server-side investigation loop answers, with its tool trace
             # streamed as reasoning content. Checked before card resolution
             # so no repository of the same name can shadow it.
-            return await self._steward_chat_completions(payload)
+            return await self._steward_chat_completions(
+                payload,
+                proposals_allowed=steward_proposals_allowed,
+            )
         resolved_model = await self._resolve_and_validate_text_model(payload.model)
         model_card = await self._get_running_model_card(resolved_model)
         task_params = await chat_request_to_text_generation(
@@ -8878,6 +9069,15 @@ class API:
                 "authenticated operator-gateway credential"
             ),
         )
+
+    @classmethod
+    def _operator_mutation_allowed(cls, request: Request) -> bool:
+        """Return whether a request may originate steward proposals."""
+        try:
+            cls._require_operator_mutation(request)
+        except HTTPException:
+            return False
+        return True
 
     @classmethod
     def _require_exact_card_qualification_mutation(cls, request: Request) -> bool:

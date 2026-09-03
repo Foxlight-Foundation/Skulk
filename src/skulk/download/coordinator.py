@@ -376,18 +376,29 @@ class DownloadCoordinator:
                         await self._start_download(shard)
                     case DeleteDownload(model_id=model_id):
                         await self._delete_download(model_id)
-                    case CancelDownload(model_id=model_id):
-                        await self._cancel_download(model_id)
+                    case CancelDownload(model_id=model_id, attempt_id=attempt_id):
+                        await self._cancel_download(model_id, attempt_id)
                     case RestartNode():
                         await self._restart_node()
 
-    async def _cancel_download(self, model_id: ModelId) -> None:
+    async def _cancel_download(
+        self,
+        model_id: ModelId,
+        attempt_id: DownloadAttemptId | None = None,
+    ) -> None:
+        """Cancel the current model download when its attempt identity matches."""
         if model_id in self.active_downloads and model_id in self.download_status:
+            current_status = self.download_status[model_id]
+            if attempt_id is not None and current_status.attempt_id != attempt_id:
+                logger.info(
+                    "Ignoring cancellation for stale download attempt "
+                    f"{attempt_id} of {model_id}"
+                )
+                return
             logger.info(f"Cancelling download for {model_id}")
             self.active_downloads[model_id].cancel()
             self._reset_progress_throttle(model_id)
             self._begin_reset(model_id)
-            current_status = self.download_status[model_id]
             pending = DownloadPending(
                 shard_metadata=current_status.shard_metadata,
                 node_id=self.node_id,
