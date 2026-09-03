@@ -319,7 +319,7 @@ async def test_dispatched_restart_reissues_exact_replacement_after_failover(
     event_sender, event_receiver = channel[Event]()
     download_sender, _ = channel[ForwarderDownloadCommand]()
     master = object.__new__(Master)
-    master.state = State()
+    master.state = State(instances={original.instance_id: original})
     master._ordered_steward_proposals = {  # pyright: ignore[reportPrivateUsage]
         proposal.proposal_id: proposal
     }
@@ -342,6 +342,20 @@ async def test_dispatched_restart_reissues_exact_replacement_after_failover(
     monkeypatch.setattr(master, "_place_for_steward_action", place_exact_command)
     await master._reconcile_dispatched_steward_actions(now)  # pyright: ignore[reportPrivateUsage]
 
+    deleted = await event_receiver.receive()
+    assert isinstance(deleted, InstanceDeleted)
+    assert deleted.instance_id == original.instance_id
+    await master._reconcile_dispatched_steward_actions(  # pyright: ignore[reportPrivateUsage]
+        now + timedelta(seconds=1)
+    )
+    with anyio.move_on_after(0.01) as duplicate_teardown_scope:
+        await event_receiver.receive()
+    assert duplicate_teardown_scope.cancel_called
+
+    master.state = State()
+    await master._reconcile_dispatched_steward_actions(  # pyright: ignore[reportPrivateUsage]
+        now + timedelta(seconds=2)
+    )
     created = await event_receiver.receive()
     assert isinstance(created, InstanceCreated)
     assert created.instance.instance_id == replacement_id

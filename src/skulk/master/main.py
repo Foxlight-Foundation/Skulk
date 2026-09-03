@@ -1296,14 +1296,14 @@ class Master:
 
     def _prune_ordered_steward_action_proposals(self) -> None:
         """Bound local proposal state without dropping pending or approved work."""
-        approved_restart_ids = {
+        active_restart_ids = {
             proposal.proposal_id
             for proposal in self._ordered_steward_proposals.values()
-            if proposal.status == "approved"
+            if proposal.status in {"approved", "dispatched"}
             and isinstance(proposal.action, StewardRestartInstanceAction)
         }
         self._steward_restart_teardown_issued.intersection_update(
-            approved_restart_ids
+            active_restart_ids
         )
         dispatched_ids = {
             proposal.proposal_id
