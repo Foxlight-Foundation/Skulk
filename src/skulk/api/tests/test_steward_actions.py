@@ -304,6 +304,60 @@ async def test_cancel_approval_rejects_a_replacement_download_attempt() -> None:
 
 
 @pytest.mark.asyncio
+async def test_kill_switch_blocks_failover_recovery_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A promoted master fails carried actions closed under the kill switch."""
+    now = datetime.now(tz=timezone.utc)
+    proposal = _cancel_proposal().model_copy(
+        update={
+            "status": "dispatched",
+            "decided_at": now,
+            "dispatched_at": now,
+            "decided_by": "trusted_fabric_operator",
+            "command_id": CommandId("carried-command"),
+        }
+    )
+    telemetry_view = TelemetryView()
+    telemetry_view.apply(
+        NodeTelemetry(
+            node_id=NodeId("worker"),
+            info=DownloadPending(
+                node_id=NodeId("worker"),
+                attempt_id=DownloadAttemptId("attempt"),
+                shard_metadata=get_pipeline_shard_metadata(
+                    ModelId("org/model"), device_rank=0
+                ),
+            ),
+        )
+    )
+    event_sender, event_receiver = channel[Event]()
+    download_sender, download_receiver = channel[ForwarderDownloadCommand]()
+    master = object.__new__(Master)
+    master.state = State(
+        steward_action_proposals={proposal.proposal_id: proposal}
+    )
+    master._ordered_steward_proposals = {proposal.proposal_id: proposal}  # pyright: ignore[reportPrivateUsage]
+    master._steward_reserved_placements = {}  # pyright: ignore[reportPrivateUsage]
+    master._steward_restart_teardown_issued = set()  # pyright: ignore[reportPrivateUsage]
+    master._steward_dispatched_effect_issued = set()  # pyright: ignore[reportPrivateUsage]
+    master._telemetry_view = telemetry_view  # pyright: ignore[reportPrivateUsage]
+    master.event_sender = event_sender
+    master.download_command_sender = download_sender
+    monkeypatch.setenv("SKULK_FABRIC_CAPABILITIES_DISABLE", "1")
+
+    await master._reconcile_dispatched_steward_actions(now)  # pyright: ignore[reportPrivateUsage]
+
+    changed = await event_receiver.receive()
+    assert isinstance(changed, StewardActionProposalChanged)
+    assert changed.proposal.status == "failed"
+    assert "kill switch" in (changed.proposal.outcome or "")
+    with anyio.move_on_after(0.01) as dispatch_scope:
+        await download_receiver.receive()
+    assert dispatch_scope.cancel_called
+
+
+@pytest.mark.asyncio
 async def test_stop_approval_rejects_replaced_instance_state() -> None:
     """A reused instance id cannot redirect an approval to new placement truth."""
     reviewed = _ordinary_instance()

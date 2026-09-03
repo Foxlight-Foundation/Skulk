@@ -382,7 +382,8 @@ inherits the bounded proposal map in the new-session seed, reconciles
 dispatched proposals for five minutes from dispatch, and reissues a missing
 exact command effect once.
 `SKULK_FABRIC_CAPABILITIES_DISABLE=1` is
-the global master-side kill switch; there is no autonomous approval policy.
+the global master-side kill switch; it also fails carried dispatch recovery
+closed after promotion. There is no autonomous approval policy.
 8 steps per turn, rides the
 normal chat dispatch path. Client surface = reserved virtual
 model `skulk/steward` on chat-completions (client tools 400; trace as

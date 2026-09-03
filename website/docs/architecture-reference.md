@@ -176,7 +176,8 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   master reconciles dispatched proposals for five minutes from their separate
   dispatch timestamp and reissues a
   missing exact command effect once. `SKULK_FABRIC_CAPABILITIES_DISABLE=1` is a master-side
-  global fail-closed kill switch. No autonomous approval or per-action grants
+  global fail-closed kill switch for both new approvals and recovered dispatches.
+  No autonomous approval or per-action grants
   yet.
 - Client surface: reserved virtual model id `skulk/steward` on
   `POST /v1/chat/completions` (checked before card resolution; client

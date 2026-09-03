@@ -908,7 +908,8 @@ Back-to-back restart replacements reserve capacity before their State echo.
 32-pending admission bound, 128-record audit target (with actionable recovery
 records retained past it), ten-minute
 harness expiry, and `SKULK_FABRIC_CAPABILITIES_DISABLE=1` master kill switch
-bound the feature. The master publishes terminal expiry when a deadline passes.
+bound the feature, including fail-closed handling of carried dispatch recovery.
+The master publishes terminal expiry when a deadline passes.
 For five minutes from the separate dispatch timestamp, a promoted master reconciles the proposal's
 exact command identity against replicated state and reissues a missing effect
 once, closing the failover window between proposal and action events.

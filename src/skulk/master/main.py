@@ -1541,6 +1541,24 @@ class Master:
                 or replicated_proposal.status != "dispatched"
             ):
                 continue
+            if os.getenv("SKULK_FABRIC_CAPABILITIES_DISABLE") == "1":
+                failed = proposal.model_copy(
+                    update={
+                        "status": "failed",
+                        "outcome": (
+                            "Fabric action recovery was blocked by the global "
+                            "kill switch."
+                        ),
+                    }
+                )
+                self._ordered_steward_proposals[proposal_id] = failed
+                self._steward_reserved_placements.pop(proposal_id, None)
+                self._steward_restart_teardown_issued.discard(proposal_id)
+                self._steward_dispatched_effect_issued.add(proposal_id)
+                await self.event_sender.send(
+                    StewardActionProposalChanged(proposal=failed)
+                )
+                continue
             action = proposal.action
             events: list[Event] = []
             try:

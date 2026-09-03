@@ -2139,7 +2139,8 @@ attempt-bound cancellation.
 
 Setting `SKULK_FABRIC_CAPABILITIES_DISABLE=1` on the elected master is the global
 fail-closed kill switch. It converts an otherwise valid approval into `failed`
-without dispatching the proposed action. There are no autonomous approvals or
+without dispatching the proposed action, and a promoted master fails carried
+dispatch recovery rather than reissuing its effect. There are no autonomous approvals or
 per-action grants in this release: every proposal requires a separate operator
 decision.
 
