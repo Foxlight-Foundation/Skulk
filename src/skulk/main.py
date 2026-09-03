@@ -141,6 +141,7 @@ _ZENOH_ISOLATION_WARNING_INTERVAL_SECONDS = 300.0
 
 async def _publish_management_node_resources(
     node_id: NodeId,
+    api_available: bool,
     data_transport: NodeDataTransport,
     telemetry_sender: TelemetrySender | Sender[NodeTelemetry],
     zenoh_peer_sampler: "ZenohPeerSampler | None" = None,
@@ -155,6 +156,7 @@ async def _publish_management_node_resources(
 
     Args:
         node_id: Stable identity attached to the telemetry reading.
+        api_available: Whether this management process exposes the API surface.
         data_transport: DATA transport already resolved during node startup.
         telemetry_sender: Existing latest-value telemetry admission handle.
         zenoh_peer_sampler: Live data-plane connectivity sampler; a
@@ -173,6 +175,7 @@ async def _publish_management_node_resources(
             resources = NodeResources(
                 backends=frozenset(),
                 participation="management",
+                api_available=api_available,
                 data_transport=data_transport,
                 zenoh_connected_peers=(
                     await zenoh_peer_sampler.advertised_count()
@@ -536,9 +539,7 @@ def merge_cluster_config_bootstrap(
         # trusted fabric makes this a bug signal, not an attack surface, so
         # a warning is the right volume.
         if decoded is not None:
-            logger.warning(
-                "Ignoring non-mapping cluster bootstrap config payload"
-            )
+            logger.warning("Ignoring non-mapping cluster bootstrap config payload")
         return update_skulk_config_atomic(config_path, lambda existing: existing)
     received = cast("dict[str, object]", decoded)
 
@@ -863,6 +864,7 @@ class Node:
                 download_command_sender=router.sender(topics.DOWNLOAD_COMMANDS),
                 telemetry_sender=router.telemetry_sender(),
                 telemetry_view=telemetry_view,
+                api_available=args.spawn_api,
                 data_transport="zenoh" if _zenoh_on else "gossipsub",
                 zenoh_peer_sampler=zenoh_peer_sampler,
                 data_sender=router.sender(topics.DATA),
@@ -974,6 +976,7 @@ class Node:
                 tg.start_soon(
                     _publish_management_node_resources,
                     self.node_id,
+                    self.api is not None,
                     "zenoh" if self.data_plane_zenoh else "gossipsub",
                     self.router.telemetry_sender(),
                     self.zenoh_peer_sampler,
@@ -1651,6 +1654,7 @@ class Node:
                             # management/edge node as eligible (#279 review).
                             telemetry_sender=self.router.telemetry_sender(),
                             telemetry_view=self.telemetry_view,
+                            api_available=self.api is not None,
                             data_transport=(
                                 "zenoh" if self.data_plane_zenoh else "gossipsub"
                             ),
@@ -1709,9 +1713,7 @@ class Node:
                             result.session_id.master_node_id,
                         )
                     if start_replacement_event_router:
-                        self._tg.start_soon(
-                            self._observe_artifact_inventory_events
-                        )
+                        self._tg.start_soon(self._observe_artifact_inventory_events)
                         self._tg.start_soon(self.event_router.run)
                     # Broadcast config to cluster so worker nodes get the right store address
                     await self._broadcast_config_if_store_host()

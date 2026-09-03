@@ -389,9 +389,7 @@ def runners_never_reported(
         if supervisor.has_reported_status:
             continue
         if supervisor.seconds_since_created(now_monotonic) >= deadline_seconds:
-            stalled.append(
-                (instance_id, supervisor.shard_metadata.model_card.model_id)
-            )
+            stalled.append((instance_id, supervisor.shard_metadata.model_card.model_id))
     return stalled
 
 
@@ -528,9 +526,7 @@ def _local_usable_vram() -> Memory | None:
         # so count current free system RAM (minus OS headroom, capped by GTT).
         # The VRAM portion keeps its working-set headroom.
         sys_for_gpu = min(
-            max(
-                0, local_memory.ram_available.in_bytes - UMA_GPU_OS_HEADROOM.in_bytes
-            ),
+            max(0, local_memory.ram_available.in_bytes - UMA_GPU_OS_HEADROOM.in_bytes),
             gtt_total,
         )
         return Memory.from_bytes(vram_usable + sys_for_gpu)
@@ -721,6 +717,7 @@ class Worker:
         download_command_sender: Sender[ForwarderDownloadCommand],
         telemetry_sender: TelemetrySender | Sender[NodeTelemetry] | None = None,
         telemetry_view: TelemetryView | None = None,
+        api_available: bool = True,
         data_transport: NodeDataTransport = "gossipsub",
         zenoh_peer_sampler: ZenohPeerSampler | None = None,
         data_sender: Sender[DataChunk] | None = None,
@@ -743,6 +740,7 @@ class Worker:
         self.command_sender = command_sender
         self.download_command_sender = download_command_sender
         self._telemetry_sender = telemetry_sender
+        self._api_available = api_available
         self._data_transport: NodeDataTransport = data_transport
         # Data-plane connectivity sampler threaded into the InfoGatherer so
         # NodeResources advertisements carry live Zenoh peer counts (#680).
@@ -814,16 +812,12 @@ class Worker:
         # Buffer for input image chunks (for image editing)
         self.input_chunk_buffer: dict[CommandId, dict[int, InputImageChunk]] = {}
         self.input_chunk_counts: dict[CommandId, int] = {}
-        self._speech_media_chunks: dict[
-            CommandId, dict[int, SpeechMediaPacket]
-        ] = {}
+        self._speech_media_chunks: dict[CommandId, dict[int, SpeechMediaPacket]] = {}
         self._speech_media_completed: dict[CommandId, SpeechMediaPacket] = {}
         self._speech_media_ready: set[CommandId] = set()
         self._speech_media_pending_bytes: dict[CommandId, int] = {}
         self._speech_media_pending_since: dict[CommandId, float] = {}
-        self._vision_media_chunks: dict[
-            CommandId, dict[int, VisionMediaPacket]
-        ] = {}
+        self._vision_media_chunks: dict[CommandId, dict[int, VisionMediaPacket]] = {}
         self._vision_media_opened: dict[CommandId, VisionMediaPacket] = {}
         self._vision_media_completed: dict[CommandId, VisionMediaPacket] = {}
         self._vision_media_verified: dict[CommandId, VisionMediaPacket] = {}
@@ -1049,6 +1043,7 @@ class Worker:
         info_send, info_recv = channel[GatheredInfo]()
         info_gatherer: InfoGatherer = InfoGatherer(
             info_send,
+            api_available=self._api_available,
             data_transport=self._data_transport,
             # Fabric-citizenship: the gatherer publishes whatever the API-side
             # extension surface has advertised on the shared TelemetryView. The
@@ -1107,7 +1102,10 @@ class Worker:
         assert self._realtime_audio_packet_receiver is not None
         with self._realtime_audio_packet_receiver as packets:
             async for packet in packets:
-                if packet.target_node != self.node_id or packet.kind == "transport_failed":
+                if (
+                    packet.target_node != self.node_id
+                    or packet.kind == "transport_failed"
+                ):
                     continue
                 await self._route_realtime_audio_frame(packet.to_input_frame())
 
@@ -1117,7 +1115,10 @@ class Worker:
         assert self._speech_media_packet_receiver is not None
         with self._speech_media_packet_receiver as packets:
             async for packet in packets:
-                if packet.target_node != self.node_id or packet.kind == "transport_failed":
+                if (
+                    packet.target_node != self.node_id
+                    or packet.kind == "transport_failed"
+                ):
                     continue
                 command_id = packet.command_id
                 if packet.kind in ("cancelled",):
@@ -1149,8 +1150,7 @@ class Worker:
                     continue
                 if (
                     packet.sequence >= _SPEECH_MEDIA_PENDING_FRAMES
-                    or
-                    len(chunks) >= _SPEECH_MEDIA_PENDING_FRAMES
+                    or len(chunks) >= _SPEECH_MEDIA_PENDING_FRAMES
                     or pending_bytes + len(packet.data) > _SPEECH_MEDIA_PENDING_BYTES
                 ):
                     await self._reject_speech_media(command_id)
@@ -1159,8 +1159,8 @@ class Worker:
                     command_id, time.monotonic()
                 )
                 chunks[packet.sequence] = packet
-                self._speech_media_pending_bytes[command_id] = (
-                    pending_bytes + len(packet.data)
+                self._speech_media_pending_bytes[command_id] = pending_bytes + len(
+                    packet.data
                 )
                 self._refresh_speech_media_ready(command_id)
 
@@ -1209,9 +1209,7 @@ class Worker:
                         or self._vision_media_completed.get(command_id)
                         or next(
                             iter(
-                                self._vision_media_chunks.get(
-                                    command_id, {}
-                                ).values()
+                                self._vision_media_chunks.get(command_id, {}).values()
                             ),
                             None,
                         )
@@ -1337,16 +1335,15 @@ class Worker:
                     self._vision_media_pending_since[command_id] = time.monotonic()
                 existing_completion = self._vision_media_completed.get(command_id)
                 existing_chunks = self._vision_media_chunks.get(command_id, {})
-                reference = opened or existing_completion or next(
-                    iter(existing_chunks.values()), None
+                reference = (
+                    opened
+                    or existing_completion
+                    or next(iter(existing_chunks.values()), None)
                 )
-                if (
-                    reference is not None
-                    and (
-                        packet.source_node != reference.source_node
-                        or packet.model != reference.model
-                        or packet.total_chunks != reference.total_chunks
-                    )
+                if reference is not None and (
+                    packet.source_node != reference.source_node
+                    or packet.model != reference.model
+                    or packet.total_chunks != reference.total_chunks
                 ):
                     await self._reject_vision_media(
                         packet, "Vision media frame metadata changed in flight"
@@ -1358,7 +1355,10 @@ class Worker:
                             packet, "Vision media completion does not match its open"
                         )
                         continue
-                    if existing_completion is not None and existing_completion != packet:
+                    if (
+                        existing_completion is not None
+                        and existing_completion != packet
+                    ):
                         await self._reject_vision_media(
                             packet, "Vision media completion metadata changed in flight"
                         )
@@ -1374,7 +1374,8 @@ class Worker:
                 if existing is not None:
                     if existing != packet:
                         await self._reject_vision_media(
-                            packet, "Vision media sequence was reused with different data"
+                            packet,
+                            "Vision media sequence was reused with different data",
                         )
                     continue
                 pending_bytes = self._vision_media_pending_bytes.get(command_id, 0)
@@ -1678,8 +1679,7 @@ class Worker:
             active_api_bytes=0,
             pending_worker_acknowledgements=0,
             active_streams=len(
-                self._vision_media_pending_since.keys()
-                | self._vision_media_accepted
+                self._vision_media_pending_since.keys() | self._vision_media_accepted
             ),
             pending_frames=sum(
                 len(chunks) for chunks in self._vision_media_chunks.values()
@@ -1701,9 +1701,7 @@ class Worker:
         self._speech_media_pending_bytes.pop(command_id, None)
         self._speech_media_pending_since.pop(command_id, None)
 
-    def _track_pending_transcription_media(
-        self, task: AudioTranscription
-    ) -> None:
+    def _track_pending_transcription_media(self, task: AudioTranscription) -> None:
         """Start the media deadline for one active local batch STT task."""
 
         instance = self.state.instances.get(task.instance_id)
@@ -1775,9 +1773,7 @@ class Worker:
                         )
                     )
 
-    async def _route_realtime_audio_frame(
-        self, frame: RealtimeAudioInputFrame
-    ) -> None:
+    async def _route_realtime_audio_frame(self, frame: RealtimeAudioInputFrame) -> None:
         """Route one local or remote frame through shared bounded worker state."""
 
         if frame.command_id in self._realtime_finished_commands:
@@ -1916,7 +1912,9 @@ class Worker:
                 self.state = apply(self.state, event=event)
                 event = event.event
 
-                if isinstance(event, (ModelTrustApprovalChanged, StateSnapshotHydrated)):
+                if isinstance(
+                    event, (ModelTrustApprovalChanged, StateSnapshotHydrated)
+                ):
                     try:
                         persist_model_trust_config(
                             resolve_config_path(),
@@ -1955,7 +1953,6 @@ class Worker:
                 # and --no-worker nodes (#279 slice 2).
                 if self._telemetry_view is not None:
                     record_membership_from_event(self._telemetry_view, event)
-
 
                 if isinstance(event, TaskCreated) and isinstance(
                     event.task, (TextGeneration, ImageEdits)
@@ -2055,13 +2052,13 @@ class Worker:
             # let a lingering instance re-trip and re-send FailInstance), so
             # this is where dead-instance keys are reclaimed.
             self._crash_breaker.retain(self.state.instances)
-            self._model_trust_failures_handled.intersection_update(
-                self.state.instances
-            )
+            self._model_trust_failures_handled.intersection_update(self.state.instances)
 
-            for trust_instance_id, trust_model_id, trust_error in (
-                model_trust_failed_live_instances(self.runners, self.state.instances)
-            ):
+            for (
+                trust_instance_id,
+                trust_model_id,
+                trust_error,
+            ) in model_trust_failed_live_instances(self.runners, self.state.instances):
                 if trust_instance_id not in self._model_trust_failures_handled:
                     self._model_trust_failures_handled.add(trust_instance_id)
                     logger.error(
@@ -2272,8 +2269,7 @@ class Worker:
                         or completed.model != ModelId(task.task_params.model)
                         or task.owner_node is None
                         or completed.source_node != task.owner_node
-                        or completed.total_chunks
-                        != task.task_params.total_input_chunks
+                        or completed.total_chunks != task.task_params.total_input_chunks
                         or completed.image_count != 1
                         or {chunk.image_index for chunk in chunks.values()} != {0}
                     ):
@@ -2349,8 +2345,7 @@ class Worker:
                         cached_image_indexes = set(task.task_params.image_hashes)
                         all_image_indexes = set(
                             range(
-                                task.task_params.image_count
-                                + len(cached_image_indexes)
+                                task.task_params.image_count + len(cached_image_indexes)
                             )
                         )
                         if (
@@ -2572,9 +2567,7 @@ class Worker:
 
             logger.info(f"Worker plan: {_summarize_worker_task(task)}")
             assert task.task_status
-            await self.event_sender.send(
-                TaskCreated(task_id=task.task_id, task=task)
-            )
+            await self.event_sender.send(TaskCreated(task_id=task.task_id, task=task))
             await self._execute_create_runner(task)
             return None
 
@@ -2621,9 +2614,7 @@ class Worker:
         if fit_error is not None:
             logger.error(fit_error)
             await self.event_sender.send(
-                TaskStatusUpdated(
-                    task_id=task.task_id, task_status=TaskStatus.Failed
-                )
+                TaskStatusUpdated(task_id=task.task_id, task_status=TaskStatus.Failed)
             )
             # Memory refusal (not a crash/wedge): ask the master to re-place
             # wider instead of silently deleting (#290).
@@ -3272,9 +3263,7 @@ class Worker:
         if isinstance(parsed, ipaddress.IPv4Address):
             return Multiaddr(address=f"/ip4/{ip}/tcp/{port}")
         return Multiaddr(
-            address=(
-                f"/ip6/{ip}/tcp/{port}" if ":" in ip else f"/ip4/{ip}/tcp/{port}"
-            )
+            address=(f"/ip6/{ip}/tcp/{port}" if ":" in ip else f"/ip4/{ip}/tcp/{port}")
         )
 
     def _session_edge_may_emit(self, peer: NodeId) -> bool:
@@ -3287,9 +3276,7 @@ class Worker:
         endpoint memory is emitted by the self-heal sweep once membership
         (re)appears on both ends (PR #674 review).
         """
-        return (
-            self.node_id in self.state.last_seen and peer in self.state.last_seen
-        )
+        return self.node_id in self.state.last_seen and peer in self.state.last_seen
 
     def _session_edges_missing_from_state(self) -> list[Connection]:
         """Live session edges this worker emitted that replicated state lost.
@@ -3431,9 +3418,7 @@ class Worker:
                         continue
                     await self.event_sender.send(
                         TopologyEdgeCreated(
-                            conn=Connection(
-                                source=self.node_id, sink=peer, edge=edge
-                            )
+                            conn=Connection(source=self.node_id, sink=peer, edge=edge)
                         )
                     )
                 else:
@@ -3575,9 +3560,7 @@ class Worker:
                     or not self._session_edge_may_emit(healed.sink)
                 ):
                     continue
-                logger.debug(
-                    f"re-emitting live session edge lost from state: {healed}"
-                )
+                logger.debug(f"re-emitting live session edge lost from state: {healed}")
                 await self.event_sender.send(TopologyEdgeCreated(conn=healed))
             for stale in self._session_edges_stale_in_state():
                 logger.debug(f"deleting session edge no longer backed: {stale}")

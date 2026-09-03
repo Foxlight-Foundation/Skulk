@@ -116,6 +116,14 @@ signature voice, the dashboard can speak fabric answers as they stream and
 pins that voice for every sentence without changing ordinary chat voice
 selection.
 
+Intelligent Fabric now converges to the best available resident brain instead
+of keeping the first fallback forever. Better brains are stability-gated,
+prestaged, and swapped only after an idle window. The 35B FP8 vLLM card joins
+the default tier with parser support enforced as platform truth. Split
+API/worker deployments retain canary coverage through explicit API-availability
+telemetry, and Skulk can inspect complete
+diagnostics and doctor findings on any named node.
+
 ## Durable local model cards and cache reconciliation
 
 Every complete model artifact now retains its full effective card and a hashed

@@ -24,6 +24,7 @@ from skulk.shared.backends import (
     resolve_node_backend,
 )
 from skulk.shared.data_plane_health import zenoh_isolated_nodes
+from skulk.shared.models.capabilities import resolve_model_capability_profile
 from skulk.shared.models.memory_estimate import instance_context_token_limit
 from skulk.shared.models.model_cards import (
     ModelCard,
@@ -318,6 +319,12 @@ def _card_platform_backends(
         card_serves_speech=card_serves_speech(card),
         card_has_pinned_projector=(
             card.vision is not None and card.vision.has_pinned_projector
+        ),
+        card_supports_tool_calling=resolve_model_capability_profile(
+            card.model_id, model_card=card
+        ).supports_tool_calling,
+        card_vllm_tool_call_parser=(
+            card.runtime.vllm_tool_call_parser if card.runtime is not None else None
         ),
     )
 

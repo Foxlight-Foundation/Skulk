@@ -318,6 +318,10 @@ class NodeResources(CamelCaseModel):
         description="Open observed hardware identifiers for support constraints.",
     )
     participation: NodeParticipation = "full"
+    api_available: bool = True
+    """Whether this process exposes the Skulk HTTP/WebSocket API. Defaults to
+    true so mixed-version telemetry preserves the pre-existing all-nodes API
+    assumption; nodes launched with ``--no-api`` advertise false explicitly."""
     data_transport: NodeDataTransport = "gossipsub"
     zenoh_connected_peers: int | None = None
     """Live Zenoh peer transports on this node's data-plane session, sampled at
@@ -378,12 +382,14 @@ class NodeResources(CamelCaseModel):
     async def gather(
         cls,
         *,
+        api_available: bool = True,
         data_transport: NodeDataTransport = "gossipsub",
         zenoh_connected_peers: int | None = None,
     ) -> "NodeResources":
         """Probe backends and read node policy plus the resolved DATA transport.
 
         Args:
+            api_available: Whether this process exposes the API surface.
             data_transport: Transport already resolved during node startup. Passing
                 the resolved value avoids reinterpreting environment configuration
                 independently from the router that actually owns DATA delivery.
@@ -421,6 +427,7 @@ class NodeResources(CamelCaseModel):
             engine_builds=engine_builds,
             hardware_classes=hardware_class_inventory(facts),
             participation=participation,
+            api_available=api_available,
             data_transport=data_transport,
             zenoh_connected_peers=zenoh_connected_peers,
             capability_conflicts=derivation.conflicts,

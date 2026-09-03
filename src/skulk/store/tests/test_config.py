@@ -209,6 +209,7 @@ def test_intelligent_fabric_config_defaults() -> None:
     assert parsed.intelligent_fabric.steward_models == [
         "unsloth/Qwen3.6-35B-A3B-GGUF",
         "mlx-community/Qwen3.6-35B-A3B-4bit",
+        "Qwen/Qwen3.6-35B-A3B-FP8",
         "mlx-community/Qwen3.5-4B-MLX-4bit",
         "unsloth/Qwen3.5-4B-GGUF",
         "unsloth/Qwen3.5-0.8B-GGUF",

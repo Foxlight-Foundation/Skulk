@@ -10,6 +10,7 @@ from collections.abc import Callable, Iterator
 import loguru
 
 from skulk.shared.constants import preferred_env_value
+from skulk.shared.models.capabilities import resolve_model_capability_profile
 from skulk.shared.models.model_cards import (
     RuntimeCapabilityCardConfig,
     card_serves_speech,
@@ -451,6 +452,14 @@ def _resolve_text_engine(bound_instance: BoundInstance) -> str | None:
             card_has_pinned_projector=(
                 shard.model_card.vision is not None
                 and shard.model_card.vision.has_pinned_projector
+            ),
+            card_supports_tool_calling=resolve_model_capability_profile(
+                shard.model_card.model_id, model_card=shard.model_card
+            ).supports_tool_calling,
+            card_vllm_tool_call_parser=(
+                shard.model_card.runtime.vllm_tool_call_parser
+                if shard.model_card.runtime is not None
+                else None
             ),
         ),
         placement.backend_preference,

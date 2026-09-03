@@ -91,8 +91,9 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   the `skulk` voice; it never falls back to another voice for fabric answers.
 
 - Config: `intelligent_fabric` in `skulk.yaml` (`enabled`, default false;
-  `steward_models` preference list, default Qwen3.6-35B-A3B GGUF then MLX
-  (the benched v1 brain), then Qwen3.5-4B MLX, then the 4B GGUF, then the
+  `steward_models` preference list, default Qwen3.6-35B-A3B GGUF then MLX,
+  then the parser-pinned vLLM FP8 card (the benched 35B tier), then
+  Qwen3.5-4B MLX, then the 4B GGUF, then the
   Qwen3.5-0.8B GGUF universal floor so CPU-only fleets still place a
   steward). The master places the first entry the cluster can serve, so a
   fleet falls through to the largest brain it can host.
@@ -106,8 +107,8 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 - Identity: `BaseInstance.system_role = "steward" | None` (additive field;
   None on replayed old logs). Stamped from `PlaceInstance.system_role` at
   mint; all three repair builders re-stamp it from the instance.
-- Canary: the hosting node's API runs `_steward_canary_loop` (every 300s,
-  only when mode on + this node hosts + runner idle-Ready + no in-flight
+- Canary: the lowest API-advertising node runs `_steward_canary_loop` (every 300s,
+  only when mode on + elected + runner idle-Ready + no in-flight
   task; busy-wedge belongs to the worker wedge detector). Probe = minimal
   pinned no-tools generation, code-checked non-empty text within 120s; 3
   consecutive failures send `FailInstance(runner_unresponsive)` so the cause is
@@ -115,14 +116,20 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   Pure target selection = `canary_probe_target` (steward.py). The failure
   run lives in `StewardCanaryState` on the API (not a loop local), so the
   status endpoint can report `degraded` from the FIRST failure instead of
-  hiding the problem until teardown; single event loop, no lock. Limitation:
-  requires the hosting node to run an API; split API/worker shapes = #734.
+  hiding the problem until teardown; single event loop, no lock. The probe
+  dispatches by pinned instance, so a worker host using `--no-api` is covered.
+  API presence is explicit `NodeResources.api_available` telemetry; the field
+  defaults true only for mixed-version compatibility, and `--no-api` processes
+  advertise false.
 - Invariant: `Master._maintain_steward_placement` runs each planning tick
   behind the topology-settle grace: places first servable card from the
   preference list (min_nodes=1, MlxRing meta), tears down duplicate
   stewards keeping the lowest instance id, paces attempts to one per
   minute. Master failover re-establishes the steward via the invariant; no
-  dedicated failover code.
+  dedicated failover code. If a higher-preference brain remains placeable for
+  five minutes, its exact shards are prestaged; after the current steward is
+  idle-Ready for 30 seconds the invariant performs a short exactly-one restart.
+  Failed promotion falls through to the prior brain and retries after 30 minutes.
 - Pinning: `TextGeneration.target_instance_id` (mirrors SpeechSynthesis);
   miss emits TaskFailed `instance_unavailable`.
 - Harness: `src/skulk/api/steward.py`. Read-only tools: cluster state
@@ -131,7 +138,8 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   ready/running, and stopping/failed lifecycle buckets; internal system-role
   services isolated from operator models; retained terminal failures marked
   historical and non-current), node resources, telemetry diagnostics, data-plane diagnostics,
-  cluster versions, performance envelopes, local doctor registry, model
+  complete per-node diagnostics, cluster versions, performance envelopes,
+  each named node's doctor registry, model
   catalog, and `search_docs` (steward_docs.py: dependency-free tf-idf
   section index over the checkout's own docs, anchored on
   architecture-reference.md; honest absence report on doc-less installs;
@@ -149,7 +157,9 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   emitted as content. `GET /v1/models` carries a flagged entry
   (`system_role: "steward"`) while enabled. `GET /v1/steward` = presence
   plus `state` (`disabled | downloading | starting | ready | degraded`,
-  pure `derive_steward_state`; the booleans stay authoritative). The
+  pure `derive_steward_state`; the booleans stay authoritative). Additive
+  `desired_model`, `transition`, and `progress` fields expose best-brain
+  staging and repair. The
   earlier bespoke `POST /v1/steward/chat` was removed before any release.
   Ordinary `DELETE /instance/{id}` of the steward is refused 409 while the
   mode is enabled.
@@ -163,7 +173,8 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   surfaces (filter in App.tsx instanceCards).
 - Cards: `unsloth/Qwen3.6-35B-A3B-GGUF` (text-only so served lanes stay
   eligible) and `mlx-community/Qwen3.6-35B-A3B-4bit` (vision, MLX) are the
-  v1 brain, both revision-pinned; `mlx-community/Qwen3.5-4B-MLX-4bit` /
+  v1 brain, both revision-pinned; `Qwen/Qwen3.6-35B-A3B-FP8` adds the
+  parser-pinned vLLM CUDA/ROCm lane; `mlx-community/Qwen3.5-4B-MLX-4bit` /
   `unsloth/Qwen3.5-4B-GGUF` are the small-fleet tier and
   `unsloth/Qwen3.5-0.8B-GGUF` the floor. GGUF steward cards must stay
   text-only: a `[vision]` section gates them off `llama_server`, whose

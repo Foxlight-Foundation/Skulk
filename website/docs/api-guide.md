@@ -1937,9 +1937,13 @@ Semantics of the reserved id:
 
 - The server runs the steward's investigation loop (up to 8 read-only tool
   calls per turn: cluster state, node resources, telemetry and data-plane
-  diagnostics, version status, performance envelopes, the local doctor
-  registry, the model catalog, and a search over Skulk's own bundled
-  documentation) and answers from the evidence.
+  diagnostics, version status, performance envelopes, named-node doctor
+  results, the model catalog, and a search over Skulk's own bundled
+  documentation) and answers from the evidence. `get_node_diagnostics`
+  requires a friendly `node_name` and returns that node's complete diagnostic
+  bundle; `run_doctor` also requires `node_name` and returns the selected
+  node's bounded doctor findings. Both resolve only unique live friendly names
+  and refuse missing or ambiguous targets rather than exposing node IDs.
 - The tool trace is returned as reasoning content: in streaming responses,
   each tool step arrives as a `reasoning_content` delta while the
   investigation runs, followed by the answer as `content`; non-streaming
@@ -2023,6 +2027,12 @@ Response fields:
   should keep showing a preparing state and hold chat until ready.
 - `steward_model`: model card id of the steward brain when present, else null.
 - `instance_id`: the steward instance id when present, else null.
+- `desired_model`: the better brain currently being prepared, or the serving
+  brain when no transition is active.
+- `transition`: controlled brain lifecycle: `idle`, `prestaging`, `replacing`,
+  or `repairing` after the placement disappears.
+- `progress`: aggregate prestaging completion from `0` to `1` when byte totals
+  are available, else null.
 - `state`: a one-word lifecycle summary derived from the fields above plus
   the liveness canary's history, for clients that want to render a single
   line instead of re-deriving the precedence rules. The booleans remain
@@ -2033,7 +2043,7 @@ Response fields:
   - `starting`: the fabric is placing the steward, or it is placed and
     loading.
   - `ready`: serving, with no outstanding liveness failure.
-  - `degraded`: serving, but the hosting node's liveness canary has at least
+  - `degraded`: serving, but the elected API node's liveness canary has at least
     one failed probe outstanding. The steward may still answer; three
     consecutive failures make the fabric replace the placement.
 
@@ -2586,8 +2596,9 @@ commands, state, and inference are not cross-version-compatible; finish the
 deployment before starting new inference work.
 
 The response carries a live `nodeResources` map as well. Each node entry includes
-its placement `backends`, declared `participation`, resolved `dataTransport`
-(`gossipsub` or `zenoh`), `zenohConnectedPeers` (the node's live Zenoh
+its placement `backends`, declared `participation`, `apiAvailable` (whether the
+node process exposes the HTTP API), resolved `dataTransport` (`gossipsub` or
+`zenoh`), `zenohConnectedPeers` (the node's live Zenoh
 peer-transport count, sampled at each advertisement; `null` when the node runs
 gossipsub or while the count is not yet trustworthy after startup), and
 `capabilityConflicts`: loud
@@ -2612,6 +2623,9 @@ over a routed or overlay network); the remediation is an explicit
 `SKULK_ZENOH_CONNECT` peer endpoint plus a dialable `SKULK_ZENOH_LISTEN`
 address. The API includes fresh telemetry-only management nodes, local or
 remote, even when replicated worker membership does not carry their entries.
+For mixed-version state that predates this field, a missing `apiAvailable`
+decodes conservatively as `true`; current `--no-api` workers advertise `false`
+explicitly.
 
 The `topology` map lists each node's connections. A socket edge carries the
 peer's `sinkMultiaddr` plus a boolean `session` annotation distinguishing its
@@ -2690,7 +2704,12 @@ Behavior notes:
   listed as explicit failures. The dashboard's Performance tab renders these.
 - `GET /v1/diagnostics/node` returns the local node's runtime/config facts,
   resources, process tree, live runner-supervisor state, flight-recorder phase
-  state, placement analysis, and `dataPlane` plus `provider` blocks. DATA diagnostics include
+  state, placement analysis, a bounded `doctor` array, and `dataPlane` plus
+  `provider` blocks. Each doctor entry contains `checkId`, `title`, `verdict`,
+  `detail`, `consequence`, `remediation`, and `fixAvailable` from the node-local
+  doctor registry. The array is capped at 64 entries. The proxied
+  `GET /v1/diagnostics/cluster/{node_id}` response carries the same complete
+  bundle, including doctor results for the selected node. DATA diagnostics include
   transport/reorder mode; active and terminal lifecycle counts; first-byte and
   stream-span timing; duplicate, reordered, skipped, late, idle-timeout,
   transport-failure, and missing-lifecycle counters; plus router egress queue

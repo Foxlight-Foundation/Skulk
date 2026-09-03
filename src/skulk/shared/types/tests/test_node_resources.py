@@ -17,6 +17,7 @@ def test_node_resources_survives_json_wire_round_trip() -> None:
         engine_builds={"mlx": "mlx@0.29.1"},
         hardware_classes=frozenset({"apple", "apple:m4-max"}),
         participation="management",
+        api_available=False,
         data_transport="zenoh",
     )
     restored = NodeResources.model_validate(original.model_dump(mode="json"))
@@ -25,6 +26,7 @@ def test_node_resources_survives_json_wire_round_trip() -> None:
     assert restored.engine_builds == {"mlx": "mlx@0.29.1"}
     assert restored.hardware_classes == frozenset({"apple", "apple:m4-max"})
     assert restored.participation == "management"
+    assert restored.api_available is False
     assert restored.data_transport == "zenoh"
 
 
@@ -40,11 +42,16 @@ def test_node_resources_defaults_are_full_mlx() -> None:
     nr = NodeResources()
     assert nr.backends == frozenset({"mlx"})
     assert nr.participation == "full"
+    assert nr.api_available is True
     assert nr.data_transport == "gossipsub"
 
 
 async def test_node_resources_gather_uses_resolved_data_transport() -> None:
-    resources = await NodeResources.gather(data_transport="zenoh")
+    resources = await NodeResources.gather(
+        api_available=False,
+        data_transport="zenoh",
+    )
+    assert resources.api_available is False
     assert resources.data_transport == "zenoh"
 
 

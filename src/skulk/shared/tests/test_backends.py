@@ -225,6 +225,28 @@ def test_platform_compatible_backends_gates_speech_to_mlx_audio() -> None:
     )
 
 
+def test_platform_compatible_backends_requires_vllm_tool_parser() -> None:
+    """Tool-using cards cannot land on a vLLM server without its parser pair."""
+    declared = frozenset({"mlx", "vllm-cuda", "vllm-rocm"})
+
+    assert platform_compatible_backends(
+        declared,
+        card_serves_vision=False,
+        card_supports_tool_calling=True,
+    ) == frozenset({"mlx"})
+    assert platform_compatible_backends(
+        declared,
+        card_serves_vision=False,
+        card_supports_tool_calling=True,
+        card_vllm_tool_call_parser="qwen3_xml",
+    ) == declared
+    assert platform_compatible_backends(
+        declared,
+        card_serves_vision=False,
+        card_supports_tool_calling=False,
+    ) == declared
+
+
 def test_resolve_node_backend_none_when_no_intersection() -> None:
     assert (
         resolve_node_backend(

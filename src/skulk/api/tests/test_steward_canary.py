@@ -5,7 +5,7 @@ from skulk.master.placement import place_instance
 from skulk.master.tests.test_placement import fully_connected_three_nodes
 from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
 from skulk.shared.types.commands import PlaceInstance
-from skulk.shared.types.common import CommandId
+from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.tasks import TaskId, TaskStatus, TextGeneration
 from skulk.shared.types.text_generation import InputMessage, TextGenerationTaskParams
@@ -54,9 +54,39 @@ def test_non_hosting_node_does_not_probe() -> None:
     host = next(iter(instance.shard_assignments.node_to_runner))
     runner_id = instance.shard_assignments.node_to_runner[host]
     runners = {runner_id: RunnerReady()}
-    from skulk.shared.types.common import NodeId
-
     assert canary_probe_target(placed, runners, {}, NodeId()) is None
+
+
+def test_lowest_api_node_probes_even_when_it_does_not_host_the_steward() -> None:
+    """A --no-api worker host remains covered by an elected API peer."""
+    placed = _steward_placement()
+    instance = next(iter(placed.values()))
+    host = next(iter(instance.shard_assignments.node_to_runner))
+    runner_id = instance.shard_assignments.node_to_runner[host]
+    prober = NodeId("api-a")
+    other_api = NodeId("api-b")
+    api_nodes = {prober, other_api}
+
+    assert (
+        canary_probe_target(
+            placed,
+            {runner_id: RunnerReady()},
+            {},
+            prober,
+            api_nodes,
+        )
+        == instance.instance_id
+    )
+    assert (
+        canary_probe_target(
+            placed,
+            {runner_id: RunnerReady()},
+            {},
+            other_api,
+            api_nodes,
+        )
+        is None
+    )
 
 
 def test_busy_or_loading_runner_is_not_probed() -> None:

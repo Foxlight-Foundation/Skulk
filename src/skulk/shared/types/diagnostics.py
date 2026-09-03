@@ -2,7 +2,7 @@
 
 from typing import Literal
 
-from pydantic import Field
+from pydantic import ConfigDict, Field
 
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.memory import Memory
@@ -51,6 +51,7 @@ DataPlaneTransport = Literal["disabled", "gossipsub", "zenoh"]
 TelemetryPlaneTransport = Literal["isolated_gossipsub"]
 NodeDiagnosticsVersionStatus = Literal["current", "version_mismatch", "unknown"]
 ClusterDiagnosticsVersionStatus = Literal["consistent", "mixed", "unknown"]
+DoctorCheckVerdict = Literal["ok", "degraded", "fail"]
 
 
 class MlxMemorySnapshot(CamelCaseModel):
@@ -338,9 +339,7 @@ class RunnerTaskCancelResponse(CamelCaseModel):
     status: RunnerTaskCancelStatus = Field(
         description="Cancellation outcome as observed by the local runner supervisor."
     )
-    message: str = Field(
-        description="Human-readable description of what the node did."
-    )
+    message: str = Field(description="Human-readable description of what the node did.")
 
 
 class DiagnosticProcessSample(CamelCaseModel):
@@ -442,7 +441,9 @@ class PlacementRunnerDiagnostics(CamelCaseModel):
     end_layer: int = Field(description="Exclusive final model layer on this shard.")
     n_layers: int = Field(description="Total number of model layers.")
     is_local: bool = Field(description="Whether this assignment is on the API node.")
-    is_master: bool = Field(description="Whether this assignment is on the master node.")
+    is_master: bool = Field(
+        description="Whether this assignment is on the master node."
+    )
     tasks: list[RunnerTaskDiagnostics] = Field(
         default_factory=list,
         description="Event-sourced tasks associated with this runner assignment.",
@@ -561,10 +562,18 @@ class NodeTailscaleDiagnostics(CamelCaseModel):
     node served the HTTP request, which is wrong in a per-node context.
     """
 
-    running: bool = Field(description="Whether tailscaled reports BackendState Running.")
-    self_ip: str | None = Field(default=None, description="Tailscale IPv4 (100.x) when running.")
-    hostname: str | None = Field(default=None, description="Tailnet-registered hostname.")
-    dns_name: str | None = Field(default=None, description="MagicDNS name when available.")
+    running: bool = Field(
+        description="Whether tailscaled reports BackendState Running."
+    )
+    self_ip: str | None = Field(
+        default=None, description="Tailscale IPv4 (100.x) when running."
+    )
+    hostname: str | None = Field(
+        default=None, description="Tailnet-registered hostname."
+    )
+    dns_name: str | None = Field(
+        default=None, description="MagicDNS name when available."
+    )
 
 
 class DataPlaneDiagnostics(CamelCaseModel):
@@ -673,7 +682,7 @@ class DataPlaneOwnerDiagnostics(CamelCaseModel):
     )
     idle_stream_reclaims: int = Field(
         default=0,
-        description="Command queues reclaimed after their egress idle lease expired."
+        description="Command queues reclaimed after their egress idle lease expired.",
     )
 
 
@@ -729,7 +738,7 @@ class DataPlaneEgressDiagnostics(CamelCaseModel):
     )
     idle_stream_reclaims: int = Field(
         default=0,
-        description="Remote command queues reclaimed after their idle lease expired."
+        description="Remote command queues reclaimed after their idle lease expired.",
     )
     enqueue_latency_samples: int = Field(
         description="Remote frames with measured TopicRouter enqueue latency."
@@ -939,7 +948,9 @@ class ProviderCapabilityDiagnostics(CamelCaseModel):
     max_active_streams: int = Field(
         description="Highest concurrent admitted stream count observed."
     )
-    admitted_streams: int = Field(description="Provider streams admitted for execution.")
+    admitted_streams: int = Field(
+        description="Provider streams admitted for execution."
+    )
     rejected_streams: int = Field(
         description="Provider stream opens rejected after capability resolution."
     )
@@ -1051,6 +1062,27 @@ class ProviderDiagnostics(ProviderCapabilityDiagnostics):
         )
 
 
+class DoctorCheckDiagnostics(CamelCaseModel):
+    """One bounded result from the node's executable environment contract."""
+
+    model_config = ConfigDict(frozen=True)
+
+    check_id: str = Field(description="Stable identifier of the doctor check.")
+    title: str = Field(description="Short human title for the finding.")
+    verdict: DoctorCheckVerdict = Field(description="Check outcome.")
+    detail: str = Field(description="Concrete observation made by the check.")
+    consequence: str = Field(
+        default="", description="Serving consequence when the result is not OK."
+    )
+    remediation: str = Field(
+        default="", description="Operator remediation when one is available."
+    )
+    fix_available: bool = Field(
+        default=False,
+        description="Whether skulk doctor --fix can remediate the finding.",
+    )
+
+
 class NodeDiagnostics(CamelCaseModel):
     """Read-only diagnostic bundle for one Skulk node."""
 
@@ -1088,7 +1120,14 @@ class NodeDiagnostics(CamelCaseModel):
     )
     provider: ProviderDiagnostics = Field(
         default_factory=ProviderDiagnostics.empty,
-        description="Local provider admission, lifecycle, media, and pressure metrics."
+        description="Local provider admission, lifecycle, media, and pressure metrics.",
+    )
+    doctor: list[DoctorCheckDiagnostics] = Field(
+        default_factory=list,
+        description=(
+            "Bounded results from the node-local doctor registry. These are "
+            "read-only environment findings captured with this bundle."
+        ),
     )
     warnings: list[str] = Field(
         default_factory=list,

@@ -12,6 +12,8 @@ import { apiSlice } from '../api';
  *   repair the placement.
  */
 export type StewardState = 'disabled' | 'downloading' | 'starting' | 'ready' | 'degraded';
+/** Controlled best-brain convergence activity. */
+export type StewardTransition = 'idle' | 'prestaging' | 'replacing' | 'repairing';
 
 /** Steward availability as reported by `GET /v1/steward`. */
 export interface StewardStatus {
@@ -25,6 +27,12 @@ export interface StewardStatus {
   steward_model: string | null;
   /** The steward instance id when present. */
   instance_id: string | null;
+  /** Preferred brain being prepared, or the currently serving brain. */
+  desired_model: string | null;
+  /** Best-brain lifecycle activity. */
+  transition: StewardTransition;
+  /** Aggregate prestaging ratio from 0 to 1, when measurable. */
+  progress: number | null;
   /**
    * Renderable lifecycle word. The booleans above stay authoritative; this
    * saves every client from re-deriving the same precedence rules.

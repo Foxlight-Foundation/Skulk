@@ -65,6 +65,7 @@ from skulk.shared.types.commands import (
     SetModelTrustApproval,
     SetTracingEnabled,
     SpeechSynthesis,
+    StartDownload,
     TaskCancelled,
     TaskFinished,
     TestCommand,
@@ -131,6 +132,7 @@ from skulk.shared.types.telemetry import (
 )
 from skulk.shared.types.worker.downloads import (
     DownloadAttemptId,
+    DownloadCompleted,
     DownloadFailed,
     DownloadOngoing,
     DownloadPending,
@@ -144,7 +146,11 @@ from skulk.shared.types.worker.instances import (
     InstanceMeta,
 )
 from skulk.shared.types.worker.runners import RunnerReady, RunnerRunning
-from skulk.shared.types.worker.shards import RpcDonorShardMetadata, Sharding
+from skulk.shared.types.worker.shards import (
+    RpcDonorShardMetadata,
+    Sharding,
+    ShardMetadata,
+)
 from skulk.store.config import (
     load_skulk_config,
     persist_model_trust_config,
@@ -166,6 +172,9 @@ EVENT_LOG_IDLE_GROWTH_WARNING_EVENTS_PER_MINUTE = 60.0
 EVENT_LOG_GROWTH_WARNING_COOLDOWN_SECONDS = 300.0
 NON_CONTROL_EVENT_WARNING_COOLDOWN_SECONDS = 60.0
 NON_CONTROL_EVENT_WARNING_KEY_LIMIT = 256
+STEWARD_UPGRADE_STABILITY_SECONDS = 300.0
+STEWARD_UPGRADE_IDLE_SECONDS = 30.0
+STEWARD_UPGRADE_RETRY_COOLDOWN_SECONDS = 1800.0
 
 
 @final
@@ -215,6 +224,7 @@ class EventLogGrowthMonitor:
             return None
         self._last_warning_at = now
         return rate
+
 
 TOPOLOGY_SETTLE_GRACE_SECONDS = 60.0
 """How long after master start the plan loop trusts topology for pruning.
@@ -335,7 +345,9 @@ def dead_node_instance_failure_events(
         if not unavailable_nodes:
             continue
         node_id = unavailable_nodes[0]
-        reason = "timed out" if node_id in timed_out_node_ids else "left the live topology"
+        reason = (
+            "timed out" if node_id in timed_out_node_ids else "left the live topology"
+        )
         failures.append(
             instance_failure_event(
                 instance,
@@ -811,6 +823,12 @@ class Master:
         # so an unplaceable steward (no eligible node yet) logs and retries
         # calmly instead of hammering the planner every 10s tick.
         self._steward_last_attempt_monotonic: float = 0.0
+        self._steward_upgrade_model: ModelId | None = None
+        self._steward_upgrade_stable_since: float | None = None
+        self._steward_upgrade_prestaged_model: ModelId | None = None
+        self._steward_upgrade_idle_since: float | None = None
+        self._steward_upgrade_replacing_instance: InstanceId | None = None
+        self._steward_upgrade_retry_after: float = 0.0
         # Per-node memory (bytes) freed by a just-deleted instance. The grace
         # window is zero by default, so entries are normally pruned without being
         # applied; keeping the structure preserves one place to revisit this if
@@ -983,9 +1001,7 @@ class Master:
             PlacementModelCardIdentityError: If the card was removed or replaced
                 before the command reached the master's serialized order.
         """
-        ordered_card = self._ordered_placement_model_card(
-            command.model_card.model_id
-        )
+        ordered_card = self._ordered_placement_model_card(command.model_card.model_id)
         if ordered_card is None or not same_authorized_model_card(
             command.model_card, ordered_card
         ):
@@ -1435,7 +1451,10 @@ class Master:
                             task_id = TaskId()
                             target_unavailable = False
                             if command.target_instance_id is not None:
-                                if command.target_instance_id not in instance_task_counts:
+                                if (
+                                    command.target_instance_id
+                                    not in instance_task_counts
+                                ):
                                     target_unavailable = True
                                 selected_instance_id = command.target_instance_id
                             else:
@@ -1609,9 +1628,7 @@ class Master:
                             )
                         case SetModelTrustApproval():
                             if command.approved:
-                                self._model_trust_approvals.add(
-                                    command.trust_identity
-                                )
+                                self._model_trust_approvals.add(command.trust_identity)
                             else:
                                 self._model_trust_approvals.discard(
                                     command.trust_identity
@@ -1711,8 +1728,7 @@ class Master:
                             # the refuse→re-place loop to the cluster size.
                             refused = self.state.instances.get(command.instance_id)
                             if (
-                                command.instance_id
-                                in self._fallback_placed_instances
+                                command.instance_id in self._fallback_placed_instances
                                 and refused is not None
                             ):
                                 # Second recovery hop already used: tear down
@@ -1726,9 +1742,7 @@ class Master:
                                     "placement (two recovery hops used)."
                                 )
                                 after_delete = delete_instance(
-                                    DeleteInstance(
-                                        instance_id=command.instance_id
-                                    ),
+                                    DeleteInstance(instance_id=command.instance_id),
                                     self.state.instances,
                                 )
                                 await self.event_sender.send(
@@ -1797,9 +1811,7 @@ class Master:
                                         excluded_nodes=set(
                                             replace_command.excluded_nodes
                                         ),
-                                        stamped_exclusions=set(
-                                            refused.excluded_nodes
-                                        ),
+                                        stamped_exclusions=set(refused.excluded_nodes),
                                         node_resources=self._telemetry_view.node_resources,
                                         node_vram=usable_vram_by_node(
                                             self._telemetry_view.node_system,
@@ -1855,9 +1867,7 @@ class Master:
                                             self._telemetry_view.node_memory,
                                             self.state.node_network,
                                             download_status=self._effective_downloads(),
-                                            excluded_nodes=set(
-                                                fallback.excluded_nodes
-                                            ),
+                                            excluded_nodes=set(fallback.excluded_nodes),
                                             stamped_exclusions=set(
                                                 refused.excluded_nodes
                                             ),
@@ -2080,9 +2090,7 @@ class Master:
             self._telemetry_view.node_last_telemetry,
             now=now,
         )
-        for node_id in sorted(
-            gap_nodes - self._heartbeat_gap_warned_nodes, key=str
-        ):
+        for node_id in sorted(gap_nodes - self._heartbeat_gap_warned_nodes, key=str):
             evidence = observations[node_id]
             logger.bind(
                 liveness_event="heartbeat_gap",
@@ -2091,16 +2099,12 @@ class Master:
                 fallback_telemetry_age_seconds=(
                     evidence.fallback_telemetry_age_seconds
                 ),
-                last_logged_event_age_seconds=(
-                    evidence.last_logged_event_age_seconds
-                ),
+                last_logged_event_age_seconds=(evidence.last_logged_event_age_seconds),
             ).warning(
                 f"Dedicated heartbeat from node {node_id} is late or absent; "
                 "ordinary telemetry and logged events remain liveness fallbacks"
             )
-        recovered_nodes = (
-            self._heartbeat_gap_warned_nodes - gap_nodes
-        ) & current_nodes
+        recovered_nodes = (self._heartbeat_gap_warned_nodes - gap_nodes) & current_nodes
         for node_id in sorted(recovered_nodes, key=str):
             heartbeat_at = self._telemetry_view.node_last_heartbeat[node_id]
             logger.bind(
@@ -2384,7 +2388,6 @@ class Master:
                     "recovery)"
                 )
 
-
     async def _maintain_steward_placement(self) -> None:
         """Re-establish the intelligent-fabric steward placement invariant.
 
@@ -2423,6 +2426,7 @@ class Master:
                     f"placement(s) {[str(s) for s in stewards]}"
                 )
                 await self._teardown_steward_instances(stewards)
+            self._reset_steward_upgrade()
             return
 
         if len(stewards) > 1:
@@ -2437,7 +2441,17 @@ class Master:
             await self._teardown_steward_instances(extras)
             return
         if stewards:
+            await self._maintain_steward_upgrade(
+                stewards[0], tuple(fabric.steward_models)
+            )
             return
+
+        if self._steward_upgrade_replacing_instance is not None:
+            # The old placement has now left replicated state. Make the
+            # already-staged successor eligible immediately instead of waiting
+            # behind the ordinary one-minute no-placement retry pace.
+            self._steward_upgrade_replacing_instance = None
+            self._steward_last_attempt_monotonic = 0.0
 
         now = time.monotonic()
         if now - self._steward_last_attempt_monotonic < 60:
@@ -2448,48 +2462,19 @@ class Master:
         # have loaded it yet.
         await get_model_cards()
         for model_ref in fabric.steward_models:
-            card = get_card(ModelId(model_ref))
-            if card is None:
-                logger.warning(
-                    f"Steward model {model_ref} has no model card; skipping"
-                )
-                continue
-            command = PlaceInstance(
-                model_card=card,
-                sharding=Sharding.Pipeline,
-                instance_meta=InstanceMeta.MlxRing,
-                min_nodes=1,
-                system_role="steward",
-            )
             try:
-                final_placement = place_instance(
-                    command,
-                    self.state.topology,
-                    self.state.instances,
-                    self._telemetry_view.node_memory,
-                    self.state.node_network,
-                    download_status=self._effective_downloads(),
-                    node_resources=self._telemetry_view.node_resources,
-                    node_vram=usable_vram_by_node(
-                        self._telemetry_view.node_system,
-                        self._telemetry_view.node_resources,
-                        node_memory=self._telemetry_view.node_memory,
-                    ),
-                    unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
-                        self._telemetry_view.node_system,
-                        self._telemetry_view.node_resources,
-                        node_memory=self._telemetry_view.node_memory,
-                    ),
-                    approved_remote_code_identities=self._model_trust_approvals,
+                final_placement = await self._place_steward_model(
+                    model_ref, self.state.instances
                 )
             except (PlacementError, PlacementInfoPendingError) as err:
                 logger.warning(
                     f"Steward placement with {model_ref} not possible yet: {err}"
                 )
                 continue
+            if final_placement is None:
+                continue
             logger.info(
-                f"Establishing steward placement with {model_ref} "
-                "(intelligent fabric)"
+                f"Establishing steward placement with {model_ref} (intelligent fabric)"
             )
             for event in get_transition_events(
                 self.state.instances, final_placement, self.state.tasks
@@ -2500,6 +2485,275 @@ class Master:
             "Intelligent fabric is enabled but no configured steward model "
             "can be placed on the current topology; will retry"
         )
+
+    async def _place_steward_model(
+        self,
+        model_ref: str,
+        current_instances: Mapping[InstanceId, Instance],
+        node_memory: Mapping[NodeId, MemoryUsage] | None = None,
+        node_vram: Mapping[NodeId, Memory] | None = None,
+    ) -> dict[InstanceId, Instance] | None:
+        """Return a steward placement for one exact brain, without emitting it."""
+        await get_model_cards()
+        card = get_card(ModelId(model_ref))
+        if card is None:
+            logger.warning(f"Steward model {model_ref} has no model card; skipping")
+            return None
+        command = PlaceInstance(
+            model_card=card,
+            sharding=Sharding.Pipeline,
+            instance_meta=InstanceMeta.MlxRing,
+            min_nodes=1,
+            system_role="steward",
+        )
+        placement_memory = node_memory or self._telemetry_view.node_memory
+        placement_vram = (
+            node_vram
+            if node_vram is not None
+            else usable_vram_by_node(
+                self._telemetry_view.node_system,
+                self._telemetry_view.node_resources,
+                node_memory=placement_memory,
+            )
+        )
+        return place_instance(
+            command,
+            self.state.topology,
+            current_instances,
+            placement_memory,
+            self.state.node_network,
+            download_status=self._effective_downloads(),
+            node_resources=self._telemetry_view.node_resources,
+            node_vram=placement_vram,
+            unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
+                self._telemetry_view.node_system,
+                self._telemetry_view.node_resources,
+                node_memory=placement_memory,
+            ),
+            approved_remote_code_identities=self._model_trust_approvals,
+        )
+
+    def _steward_replacement_memory_inputs(
+        self, current: Instance
+    ) -> tuple[Mapping[NodeId, MemoryUsage], Mapping[NodeId, Memory]]:
+        """Build hypothetical RAM and VRAM with only the steward reclaimed.
+
+        The snapshot is used only to decide whether replacement shards are
+        worth prestaging. Actual post-teardown placement still uses observed
+        telemetry, avoiding optimistic admission while a worker releases the
+        outgoing model asynchronously.
+        """
+        credit: dict[NodeId, int] = {}
+        assignments = current.shard_assignments
+        for node_id, runner_id in assignments.node_to_runner.items():
+            shard = assignments.runner_to_shard.get(runner_id)
+            if shard is None:
+                continue
+            fraction = shard_fraction_of_model(shard)
+            if fraction is None or fraction <= 0.0:
+                continue
+            footprint = estimate_shard_footprint(shard.model_card, fraction)
+            credit[node_id] = credit.get(node_id, 0) + footprint.in_bytes
+        memory = {
+            node_id: (
+                usage.model_copy(
+                    update={
+                        "ram_available": Memory.from_bytes(
+                            min(
+                                usage.ram_total.in_bytes,
+                                usage.ram_available.in_bytes + credit[node_id],
+                            )
+                        )
+                    }
+                )
+                if node_id in credit
+                else usage
+            )
+            for node_id, usage in self._telemetry_view.node_memory.items()
+        }
+        unified_nodes = unified_memory_gpu_node_ids(
+            self._telemetry_view.node_system,
+            self._telemetry_view.node_resources,
+            node_memory=memory,
+        )
+        vram = dict(
+            usable_vram_by_node(
+                self._telemetry_view.node_system,
+                self._telemetry_view.node_resources,
+                node_memory=memory,
+            )
+        )
+        for node_id, reclaimed_bytes in credit.items():
+            if node_id in unified_nodes or node_id not in vram:
+                continue
+            accelerator = getattr(
+                self._telemetry_view.node_system.get(node_id), "accelerator", None
+            )
+            total_bytes = getattr(accelerator, "vram_total_bytes", None)
+            credited_bytes = vram[node_id].in_bytes + reclaimed_bytes
+            if isinstance(total_bytes, int) and total_bytes > 0:
+                credited_bytes = min(total_bytes, credited_bytes)
+            vram[node_id] = Memory.from_bytes(credited_bytes)
+        return memory, vram
+
+    def _reset_steward_upgrade(self) -> None:
+        """Forget one in-progress best-brain convergence attempt."""
+        self._steward_upgrade_model = None
+        self._steward_upgrade_stable_since = None
+        self._steward_upgrade_prestaged_model = None
+        self._steward_upgrade_idle_since = None
+
+    def _steward_model_download_completed(
+        self, node_id: NodeId, shard_metadata: ShardMetadata
+    ) -> bool:
+        """Whether one node reports this exact completed steward shard."""
+        return any(
+            isinstance(progress, DownloadCompleted)
+            and progress.node_id == node_id
+            and progress.shard_metadata == shard_metadata
+            for progress in self._effective_downloads().get(node_id, ())
+        )
+
+    async def _maintain_steward_upgrade(
+        self,
+        steward_id: InstanceId,
+        preference: tuple[str, ...],
+    ) -> None:
+        """Converge an existing steward upward without creating a standby.
+
+        A better brain must remain placeable for five minutes. Its exact target
+        shards are then staged while the current steward keeps serving. Once
+        staging is complete and the current steward has been idle/Ready for
+        thirty seconds, the old placement is removed; the ordinary exactly-one
+        invariant places the already-staged successor on the following tick.
+        """
+        if self._steward_upgrade_replacing_instance == steward_id:
+            return
+        now = time.monotonic()
+        if now < self._steward_upgrade_retry_after:
+            return
+        current = self.state.instances.get(steward_id)
+        if current is None:
+            self._reset_steward_upgrade()
+            return
+        current_model = str(current.shard_assignments.model_id)
+        try:
+            current_index = preference.index(current_model)
+        except ValueError:
+            current_index = len(preference)
+
+        candidate_model: ModelId | None = None
+        candidate_instance: Instance | None = None
+        instances_without_steward = {
+            instance_id: instance
+            for instance_id, instance in self.state.instances.items()
+            if instance_id != steward_id
+        }
+        replacement_memory, replacement_vram = self._steward_replacement_memory_inputs(
+            current
+        )
+        for model_ref in preference[:current_index]:
+            try:
+                placed = await self._place_steward_model(
+                    model_ref,
+                    instances_without_steward,
+                    replacement_memory,
+                    replacement_vram,
+                )
+            except (PlacementError, PlacementInfoPendingError):
+                continue
+            if placed is None:
+                continue
+            new_instances = [
+                instance
+                for instance_id, instance in placed.items()
+                if instance_id not in instances_without_steward
+            ]
+            if len(new_instances) != 1:
+                continue
+            candidate_model = ModelId(model_ref)
+            candidate_instance = new_instances[0]
+            break
+
+        if candidate_model is None or candidate_instance is None:
+            self._reset_steward_upgrade()
+            return
+        if self._steward_upgrade_model != candidate_model:
+            self._reset_steward_upgrade()
+            self._steward_upgrade_model = candidate_model
+            self._steward_upgrade_stable_since = now
+            logger.info(
+                f"Better steward brain {candidate_model} is placeable; "
+                "waiting for topology stability before staging"
+            )
+            return
+        stable_since = self._steward_upgrade_stable_since
+        if (
+            stable_since is None
+            or now - stable_since < STEWARD_UPGRADE_STABILITY_SECONDS
+        ):
+            return
+
+        required_shards: list[tuple[NodeId, ShardMetadata]] = []
+        for (
+            node_id,
+            runner_id,
+        ) in candidate_instance.shard_assignments.node_to_runner.items():
+            shard = candidate_instance.shard_assignments.runner_to_shard[runner_id]
+            if isinstance(shard, RpcDonorShardMetadata):
+                continue
+            required_shards.append((node_id, shard))
+        if self._steward_upgrade_prestaged_model != candidate_model:
+            for node_id, shard in required_shards:
+                if self._steward_model_download_completed(node_id, shard):
+                    continue
+                await self.download_command_sender.send(
+                    ForwarderDownloadCommand(
+                        origin=self._system_id,
+                        command=StartDownload(
+                            target_node_id=node_id,
+                            shard_metadata=shard,
+                        ),
+                    )
+                )
+            self._steward_upgrade_prestaged_model = candidate_model
+            logger.info(f"Prestaging better steward brain {candidate_model}")
+            return
+        if any(
+            not self._steward_model_download_completed(node_id, shard)
+            for node_id, shard in required_shards
+        ):
+            return
+
+        runner_ids = current.shard_assignments.node_to_runner.values()
+        idle_ready = bool(current.shard_assignments.node_to_runner) and all(
+            isinstance(self.state.runners.get(runner_id), RunnerReady)
+            for runner_id in runner_ids
+        )
+        if idle_ready:
+            idle_ready = not any(
+                getattr(task, "instance_id", None) == steward_id
+                and getattr(task, "task_status", None)
+                in (TaskStatus.Pending, TaskStatus.Running)
+                for task in self.state.tasks.values()
+            )
+        if not idle_ready:
+            self._steward_upgrade_idle_since = None
+            return
+        if self._steward_upgrade_idle_since is None:
+            self._steward_upgrade_idle_since = now
+            return
+        if now - self._steward_upgrade_idle_since < STEWARD_UPGRADE_IDLE_SECONDS:
+            return
+
+        logger.info(
+            f"Replacing steward {current_model} with staged better brain "
+            f"{candidate_model}"
+        )
+        self._steward_upgrade_replacing_instance = steward_id
+        self._steward_upgrade_retry_after = now + STEWARD_UPGRADE_RETRY_COOLDOWN_SECONDS
+        await self._teardown_steward_instances([steward_id])
+        self._reset_steward_upgrade()
 
     async def _teardown_steward_instances(
         self, instance_ids: Sequence[InstanceId]
@@ -2512,18 +2766,14 @@ class Master:
         not keep occupying disk and bandwidth after its instance is gone —
         the same steps the ordinary DeleteInstance path performs.
         """
-        for task_failed in orphaned_task_failure_events(
-            self.state, set(instance_ids)
-        ):
+        for task_failed in orphaned_task_failure_events(self.state, set(instance_ids)):
             await self.event_sender.send(task_failed)
         survivors = dict(self.state.instances)
         for instance_id in instance_ids:
             survivors = delete_instance(
                 DeleteInstance(instance_id=instance_id), survivors
             )
-        for cmd in cancel_unnecessary_downloads(
-            survivors, self._effective_downloads()
-        ):
+        for cmd in cancel_unnecessary_downloads(survivors, self._effective_downloads()):
             await self.download_command_sender.send(
                 ForwarderDownloadCommand(origin=self._system_id, command=cmd)
             )
@@ -2531,6 +2781,7 @@ class Master:
             self.state.instances, survivors, self.state.tasks
         ):
             await self.event_sender.send(event)
+
     async def _event_processor(self) -> None:
         with self.local_event_receiver as local_events:
             async for local_event in local_events:
@@ -2563,9 +2814,7 @@ class Master:
                             f"{type(local_event.event).__name__}{payload_note} "
                             f"from {local_event.origin}"
                         )
-                    self._multi_buffer.skip(
-                        local_event.origin_idx, local_event.origin
-                    )
+                    self._multi_buffer.skip(local_event.origin_idx, local_event.origin)
                 else:
                     self._multi_buffer.ingest(
                         local_event.origin_idx,
@@ -2579,9 +2828,7 @@ class Master:
                         ):
                             if task_id == event.task_id:
                                 self.command_task_mapping.pop(command_id, None)
-                                self._realtime_instance_by_command.pop(
-                                    command_id, None
-                                )
+                                self._realtime_instance_by_command.pop(command_id, None)
 
                     if isinstance(event, TaskFailed) or (
                         isinstance(event, TaskStatusUpdated)
@@ -2593,9 +2840,7 @@ class Master:
                                 # Terminal task state is authoritative even if
                                 # the owning API disappears before TaskFinished.
                                 # Preserve command mapping for eventual deletion.
-                                self._realtime_instance_by_command.pop(
-                                    command_id, None
-                                )
+                                self._realtime_instance_by_command.pop(command_id, None)
 
                     # Refuse to index task-lifecycle events that are state
                     # no-ops (the task is already gone). Without this cap a
@@ -2697,10 +2942,7 @@ class Master:
             await self._send_event(IndexedEvent(idx=idx, event=event))
             replayed += 1
             self._active_replay_next_idx = idx + 1
-            if (
-                replayed % EVENT_LOG_REPLAY_CHUNK_SIZE == 0
-                and idx + 1 < replay_end
-            ):
+            if replayed % EVENT_LOG_REPLAY_CHUNK_SIZE == 0 and idx + 1 < replay_end:
                 await anyio.sleep(EVENT_LOG_REPLAY_CHUNK_INTERVAL_SECONDS)
         logger.info(
             "Served paced event-log replay "
@@ -2812,9 +3054,8 @@ class Master:
             sanitized_config.pop("hf_token", None)
         sanitized_config.pop("model_trust", None)
         model_store = sanitized_config.get("model_store")
-        if (
-            self._state_sync_store_http_host is not None
-            and isinstance(model_store, dict)
+        if self._state_sync_store_http_host is not None and isinstance(
+            model_store, dict
         ):
             model_store["store_http_host"] = self._state_sync_store_http_host
         return yaml.safe_dump(
