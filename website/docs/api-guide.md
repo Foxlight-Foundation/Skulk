@@ -2095,7 +2095,7 @@ System-role instances are never eligible. Targets are resolved before proposal
 creation and revalidated by the elected master at approval, so stale or
 ambiguous proposals fail without mutation.
 
-### POST /v1/steward/proposals/{proposal_id}/decision
+### POST `/v1/steward/proposals/{proposal_id}/decision`
 
 Submits one explicit operator decision for a pending proposal. The path
 parameter is the `proposal_id`; the JSON body is:
