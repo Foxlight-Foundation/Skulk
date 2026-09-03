@@ -15,6 +15,10 @@ from skulk.shared.types.audio import (
 from skulk.shared.types.chunks import InputChunk
 from skulk.shared.types.common import CommandId, NodeId, SystemId
 from skulk.shared.types.embedding import TextEmbeddingTaskParams
+from skulk.shared.types.steward_actions import (
+    StewardActionProposal,
+    StewardActionProposalId,
+)
 from skulk.shared.types.text_generation import TextGenerationTaskParams
 from skulk.shared.types.worker.instances import (
     Instance,
@@ -129,6 +133,20 @@ class CreateInstance(BaseCommand):
 
 class DeleteInstance(BaseCommand):
     instance_id: InstanceId
+
+
+class ProposeStewardAction(BaseCommand):
+    """Ask the master to order one inert, approval-gated steward proposal."""
+
+    proposal: StewardActionProposal
+
+
+class DecideStewardAction(BaseCommand):
+    """Atomically approve or reject one pending steward action proposal."""
+
+    proposal_id: StewardActionProposalId
+    approved: bool
+    decided_by: str = Field(min_length=1, max_length=128)
 
 
 class FailInstance(BaseCommand):
@@ -288,6 +306,8 @@ Command = (
     | PlaceInstance
     | CreateInstance
     | DeleteInstance
+    | ProposeStewardAction
+    | DecideStewardAction
     | FailInstance
     | RefuseInstancePlacement
     | TaskCancelled

@@ -144,11 +144,15 @@ from skulk.api.steward import (
     STEWARD_RETRY_AFTER_SECONDS,
     STEWARD_SYSTEM_PROMPT,
     STEWARD_VIRTUAL_MODEL_ID,
+    StewardActionDecisionRequest,
+    StewardActionDecisionResponse,
+    StewardActionProposalView,
     StewardCanaryState,
     StewardChatMessage,
     StewardHarness,
     StewardStatusResponse,
     derive_steward_state,
+    steward_action_proposal_view,
 )
 from skulk.api.types import (
     AddCustomModelParams,
@@ -401,6 +405,7 @@ from skulk.shared.types.commands import (
     AudioTranscription,
     Command,
     CreateInstance,
+    DecideStewardAction,
     DeleteCustomModelCard,
     DeleteDownload,
     DeleteInstance,
@@ -412,6 +417,7 @@ from skulk.shared.types.commands import (
     ImageEdits,
     ImageGeneration,
     PlaceInstance,
+    ProposeStewardAction,
     RealtimeAudioTranscription,
     SetModelTrustApproval,
     SetTracingEnabled,
@@ -477,6 +483,10 @@ from skulk.shared.types.profiling import (
     read_wired_memory_bytes,
 )
 from skulk.shared.types.state import State
+from skulk.shared.types.steward_actions import (
+    StewardActionProposal,
+    StewardActionProposalId,
+)
 from skulk.shared.types.telemetry import (
     NODE_LIVENESS_TIMEOUT,
     NodeTelemetry,
@@ -2713,6 +2723,27 @@ class API:
                 "steward chat endpoint."
             ),
         )(self.get_steward_status)
+        self.app.get(
+            "/v1/steward/proposals",
+            tags=["Intelligent Fabric"],
+            summary="List approval-gated steward action proposals",
+            description=(
+                "Return the bounded replicated proposal audit, newest first, with "
+                "internal node, instance, command, and model-card payloads removed. "
+                "The surface requires operator authority because it is paired with "
+                "the approval workflow."
+            ),
+        )(self.list_steward_action_proposals)
+        self.app.post(
+            "/v1/steward/proposals/{proposal_id}/decision",
+            tags=["Intelligent Fabric"],
+            summary="Approve or reject one steward action proposal",
+            description=(
+                "Submit one authenticated, single-use decision to the elected master. "
+                "Approval revalidates expiry, model truth, system-placement protection, "
+                "and current cluster state before dispatching an existing typed command."
+            ),
+        )(self.decide_steward_action_proposal)
         self.app.post(
             "/v1/diagnostics/node/runners/{runner_id}/cancel",
             tags=["Diagnostics"],
@@ -3864,6 +3895,132 @@ class API:
     async def get_steward_status(self) -> "StewardStatusResponse":
         """Report intelligent-fabric mode and the current steward placement."""
         return self._steward_status()
+
+    async def submit_steward_action_proposal(
+        self, proposal: StewardActionProposal
+    ) -> None:
+        """Submit one inert steward proposal to the authoritative master.
+
+        Args:
+            proposal: Exact typed action, evidence, effect, and expiry produced
+                by the resident steward harness.
+
+        Side effects:
+            Sends only :class:`ProposeStewardAction`; no proposed action is
+            executed until a separate authenticated decision is ordered.
+        """
+        if not self._intelligent_fabric_enabled():
+            raise ValueError("Intelligent-fabric mode is disabled")
+        await self._send(ProposeStewardAction(proposal=proposal))
+
+    async def load_authorized_steward_model_card(
+        self, model_id: ModelId
+    ) -> ModelCard:
+        """Resolve exact catalog truth for a steward placement proposal.
+
+        Args:
+            model_id: Exact selectable model alias proposed by the steward.
+
+        Returns:
+            The signed, bundled, installed, or explicitly added model card.
+
+        Raises:
+            HTTPException: When the alias is not authorized in the catalog.
+        """
+        return await self._load_authorized_model_card(model_id)
+
+    async def list_steward_action_proposals(
+        self, request: Request
+    ) -> list[StewardActionProposalView]:
+        """Return the bounded proposal audit to an authorized operator.
+
+        Args:
+            request: Incoming request proving operator authority.
+
+        Returns:
+            Newest-first replicated safe summaries without internal identities.
+
+        Raises:
+            HTTPException: If the caller lacks operator authority.
+        """
+        self._require_operator_mutation(request)
+        return [
+            steward_action_proposal_view(proposal)
+            for proposal in sorted(
+                self.state.steward_action_proposals.values(),
+                key=lambda proposal: proposal.created_at,
+                reverse=True,
+            )
+        ]
+
+    def steward_download_is_active(self, node_id: NodeId, model_id: ModelId) -> bool:
+        """Return whether one node currently reports a live download for a model.
+
+        Args:
+            node_id: Exact internal node selected from a unique friendly name.
+            model_id: Exact model alias selected by the steward.
+
+        Returns:
+            True only for pending or ongoing effective download truth.
+        """
+        return any(
+            isinstance(progress, LiveDownloadProgress)
+            and progress.shard_metadata.model_card.model_id == model_id
+            for progress in self._telemetry_view.effective_downloads(
+                self.state.downloads
+            ).get(node_id, ())
+        )
+
+    async def decide_steward_action_proposal(
+        self,
+        proposal_id: StewardActionProposalId,
+        payload: StewardActionDecisionRequest,
+        request: Request,
+    ) -> StewardActionDecisionResponse:
+        """Approve or reject one exact pending proposal through the master.
+
+        Args:
+            proposal_id: Stable proposal identity returned by the steward.
+            payload: Explicit approve or reject decision.
+            request: Incoming request proving operator authority.
+
+        Returns:
+            Acceptance of the decision command. Clients poll the proposal list
+            for the authoritative master-ordered result.
+
+        Raises:
+            HTTPException: If authorization fails or the proposal is absent or
+                already terminal in this node's replicated view.
+        """
+        self._require_operator_mutation(request)
+        proposal = self.state.steward_action_proposals.get(proposal_id)
+        if proposal is None:
+            raise HTTPException(status_code=404, detail="Steward proposal not found")
+        if proposal.status != "pending":
+            raise HTTPException(
+                status_code=409,
+                detail=f"Steward proposal is already {proposal.status}",
+            )
+        actor = (
+            "authenticated_operator_gateway"
+            if request.scope.get(OPERATOR_GATEWAY_AUTHORIZED_SCOPE_KEY) is True
+            else "trusted_fabric_operator"
+        )
+        command = DecideStewardAction(
+            proposal_id=proposal_id,
+            approved=payload.approved,
+            decided_by=actor,
+        )
+        await self._send(command)
+        return StewardActionDecisionResponse(
+            proposal_id=str(proposal_id),
+            command_id=str(command.command_id),
+            message=(
+                "Approval submitted to the elected master."
+                if payload.approved
+                else "Rejection submitted to the elected master."
+            ),
+        )
 
     def _steward_model_is_downloading(self, model_id: str) -> bool:
         """Whether any node holds a live download record for ``model_id``.

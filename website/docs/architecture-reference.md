@@ -132,7 +132,7 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   Failed promotion falls through to the prior brain and retries after 30 minutes.
 - Pinning: `TextGeneration.target_instance_id` (mirrors SpeechSynthesis);
   miss emits TaskFailed `instance_unavailable`.
-- Harness: `src/skulk/api/steward.py`. Read-only tools: cluster state
+- Harness: `src/skulk/api/steward.py`. Observation tools: cluster state
   summary (exact node count; per-node identity, RAM, accelerator, backends,
   and CUDA/ROCm/MLX support; separate operator active-placement,
   ready/running, and stopping/failed lifecycle buckets; internal system-role
@@ -144,7 +144,24 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   section index over the checkout's own docs, anchored on
   architecture-reference.md; honest absence report on doc-less installs;
   version-correct by construction, per the no-knowledge-in-weights
-  doctrine). 6000-char tool-result bound, 8 steps/turn, observe/advise only.
+  doctrine). Proposal tools: `propose_place_model`, `propose_stop_model`,
+  `propose_restart_model`, and `propose_cancel_download`. They create inert
+  ten-minute proposals only; the model has no direct mutating verb. 6000-char
+  tool-result bound, 8 steps/turn.
+- Basic-action authority: exact action unions live in
+  `shared/types/steward_actions.py`; `ProposeStewardAction` and
+  `DecideStewardAction` ride `COMMANDS`; `StewardActionProposalChanged` is the
+  replicated audit event. `GET /v1/steward/proposals` returns a safe projection,
+  and `POST /v1/steward/proposals/{proposal_id}/decision` requires the ordinary
+  trusted-fabric or operator-gateway mutation guard. The master serializes each
+  decision once, revalidates current target truth, blocks system roles, and
+  translates approval into existing place/delete/replacement/download command
+  paths. Bounds: 32 pending, 128 retained; the master accepts at most a
+  15-minute proposal lifetime and publishes terminal expiry on deadline.
+  `dispatched` means command acceptance, not
+  lifecycle completion. `SKULK_FABRIC_CAPABILITIES_DISABLE=1` is a master-side
+  global fail-closed kill switch. No autonomous approval or per-action grants
+  yet.
 - Client surface: reserved virtual model id `skulk/steward` on
   `POST /v1/chat/completions` (checked before card resolution; client
   `tools` rejected 400; client system messages ignored; trace streams as
@@ -170,7 +187,8 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   race, so "the fabric is still setting up" is no longer indistinguishable
   from "the model failed mid-answer".
 - Dashboard: instances with `systemRole` set are hidden from all instance
-  surfaces (filter in App.tsx instanceCards).
+  surfaces (filter in App.tsx instanceCards). The steward chat polls the safe
+  proposal list and presents separate Approve and Reject controls.
 - Cards: `unsloth/Qwen3.6-35B-A3B-GGUF` (text-only so served lanes stay
   eligible) and `mlx-community/Qwen3.6-35B-A3B-4bit` (vision, MLX) are the
   v1 brain, both revision-pinned; `Qwen/Qwen3.6-35B-A3B-FP8` adds the

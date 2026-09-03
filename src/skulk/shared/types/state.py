@@ -17,6 +17,10 @@ from skulk.shared.types.profiling import (
     NodeThunderboltInfo,
     ThunderboltBridgeStatus,
 )
+from skulk.shared.types.steward_actions import (
+    StewardActionProposal,
+    StewardActionProposalId,
+)
 from skulk.shared.types.tasks import Task, TaskId
 from skulk.shared.types.worker.downloads import DownloadProgress
 from skulk.shared.types.worker.instances import Instance, InstanceFailure, InstanceId
@@ -47,6 +51,12 @@ class State(CamelCaseModel):
             "Bounded newest-first history of terminal placement failures retained "
             "after their instances are removed. Clean operator stops are excluded."
         ),
+    )
+    steward_action_proposals: Mapping[
+        StewardActionProposalId, StewardActionProposal
+    ] = Field(
+        default={},
+        description="Bounded authoritative steward proposals keyed by identity.",
     )
 
     @field_validator("instance_failures", mode="before")

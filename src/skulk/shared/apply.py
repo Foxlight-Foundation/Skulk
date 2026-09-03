@@ -22,6 +22,7 @@ from skulk.shared.types.events import (
     RunnerStatusUpdated,
     StagedModelEvicted,
     StateSnapshotHydrated,
+    StewardActionProposalChanged,
     TaskAcknowledged,
     TaskCreated,
     TaskDeleted,
@@ -132,6 +133,23 @@ def event_apply(event: Event, state: State) -> State:
                     )
                 }
             )
+        case StewardActionProposalChanged():
+            proposals = dict(state.steward_action_proposals)
+            proposals[event.proposal.proposal_id] = event.proposal
+            # Retain the newest bounded audit window. Pending proposals are
+            # never pruned, so an approval cannot disappear before expiry.
+            if len(proposals) > 128:
+                terminal = sorted(
+                    (
+                        proposal
+                        for proposal in proposals.values()
+                        if proposal.status != "pending"
+                    ),
+                    key=lambda proposal: proposal.created_at,
+                )
+                for proposal in terminal[: len(proposals) - 128]:
+                    proposals.pop(proposal.proposal_id, None)
+            return state.model_copy(update={"steward_action_proposals": proposals})
         case StateSnapshotHydrated():
             return _sanitize_snapshot_downloads(event.state)
 

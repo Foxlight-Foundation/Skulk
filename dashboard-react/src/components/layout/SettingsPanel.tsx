@@ -687,7 +687,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                   filled
                   content={t(
                     'settings.intelligentFabric.enabledTooltip',
-                    'Keeps Skulk available as the fabric itself: ask about cluster health, models, and diagnostics from the Skulk page. This interface observes and advises; it cannot change the cluster.',
+                    'Keeps Skulk available as the fabric itself: ask about cluster health, models, and diagnostics from the Skulk page. Skulk can prepare basic actions, but each one requires your separate approval.',
                   )}
                 />
               </FieldLabel>

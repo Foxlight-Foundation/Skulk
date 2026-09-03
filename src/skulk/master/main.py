@@ -1,4 +1,5 @@
 import copy
+import os
 import time
 from collections import deque
 from collections.abc import Mapping, Sequence
@@ -48,7 +49,9 @@ from skulk.shared.models.model_cards import (
 from skulk.shared.types.commands import (
     AddCustomModelCard,
     AudioTranscription,
+    CancelDownload,
     CreateInstance,
+    DecideStewardAction,
     DeleteCustomModelCard,
     DeleteInstance,
     EvictStagedModel,
@@ -58,6 +61,7 @@ from skulk.shared.types.commands import (
     ImageEdits,
     ImageGeneration,
     PlaceInstance,
+    ProposeStewardAction,
     RealtimeAudioTranscription,
     RefuseInstancePlacement,
     RequestEventLog,
@@ -89,6 +93,7 @@ from skulk.shared.types.events import (
     NodeTimeoutEvidence,
     StagedModelEvicted,
     StateSnapshotHydrated,
+    StewardActionProposalChanged,
     TaskCreated,
     TaskDeleted,
     TaskFailed,
@@ -100,6 +105,13 @@ from skulk.shared.types.memory import Memory
 from skulk.shared.types.profiling import MemoryUsage
 from skulk.shared.types.state import State
 from skulk.shared.types.state_sync import StateSnapshot, StateSyncMessage
+from skulk.shared.types.steward_actions import (
+    StewardActionProposal,
+    StewardCancelDownloadAction,
+    StewardPlaceModelAction,
+    StewardRestartInstanceAction,
+    StewardStopInstanceAction,
+)
 from skulk.shared.types.tasks import (
     AudioTranscription as AudioTranscriptionTask,
 )
@@ -740,6 +752,9 @@ class Master:
         # A promoted master starts a new view and lazily seeds each alias from
         # its node's already converged card cache before the first new command.
         self._ordered_model_cards: dict[ModelId, ModelCard | None] = {}
+        self._ordered_steward_proposals = dict(
+            initial_state.steward_action_proposals if initial_state is not None else {}
+        )
         self.state = State(
             tracing_enabled=SKULK_TRACING_ENABLED,
             model_trust_approved_remote_code_identities=tuple(
@@ -1125,6 +1140,146 @@ class Master:
             node_memory=memory,
         )
         return memory, vram
+
+    def _place_for_steward_action(
+        self,
+        command: PlaceInstance,
+        current_instances: Mapping[InstanceId, Instance],
+    ) -> dict[InstanceId, Instance]:
+        """Compute one approved steward placement using authoritative inputs."""
+        self._require_ordered_place_instance_card(command)
+        credited_memory, credited_vram = self._placement_memory_inputs()
+        return place_instance(
+            command,
+            self.state.topology,
+            current_instances,
+            credited_memory,
+            self.state.node_network,
+            download_status=self._effective_downloads(),
+            excluded_nodes=set(command.excluded_nodes),
+            node_resources=self._telemetry_view.node_resources,
+            node_vram=credited_vram,
+            unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
+                self._telemetry_view.node_system,
+                self._telemetry_view.node_resources,
+                node_memory=credited_memory,
+            ),
+            approved_remote_code_identities=self._model_trust_approvals,
+        )
+
+    async def _execute_approved_steward_action(
+        self, proposal: StewardActionProposal
+    ) -> tuple[list[Event], CommandId]:
+        """Execute one approved basic action through existing typed machinery.
+
+        This method owns no free-form effects. It translates the proposal's
+        validated action union into the same placement, deletion, and download
+        commands used by ordinary operator endpoints.
+        """
+        action = proposal.action
+        if isinstance(action, StewardPlaceModelAction):
+            command = PlaceInstance(
+                model_card=action.model_card,
+                sharding=action.sharding,
+                instance_meta=action.instance_meta,
+                min_nodes=action.min_nodes,
+                excluded_nodes=list(action.excluded_nodes),
+            )
+            placement = self._place_for_steward_action(command, self.state.instances)
+            return (
+                list(
+                    get_transition_events(
+                        self.state.instances, placement, self.state.tasks
+                    )
+                ),
+                command.command_id,
+            )
+
+        if isinstance(action, StewardCancelDownloadAction):
+            active_download = any(
+                isinstance(progress, (DownloadPending, DownloadOngoing))
+                and progress.shard_metadata.model_card.model_id == action.model_id
+                for progress in self._effective_downloads().get(action.node_id, ())
+            )
+            if not active_download:
+                raise ValueError("The proposed download is no longer active")
+            command = CancelDownload(
+                target_node_id=action.node_id,
+                model_id=action.model_id,
+            )
+            await self.download_command_sender.send(
+                ForwarderDownloadCommand(origin=self._system_id, command=command)
+            )
+            return [], command.command_id
+
+        instance = self.state.instances.get(action.instance_id)
+        if instance is None:
+            raise ValueError("The proposed instance no longer exists")
+        if instance.system_role is not None:
+            raise ValueError("System placements cannot be changed by steward actions")
+        if instance.shard_assignments.model_id != action.model_id:
+            raise ValueError("The proposed instance now serves different model truth")
+
+        self._record_freed_instance(instance)
+        delete_command = DeleteInstance(instance_id=action.instance_id)
+        after_delete = delete_instance(delete_command, self.state.instances)
+        if isinstance(action, StewardStopInstanceAction):
+            for cancel_command in cancel_unnecessary_downloads(
+                after_delete, self._effective_downloads()
+            ):
+                await self.download_command_sender.send(
+                    ForwarderDownloadCommand(
+                        origin=self._system_id, command=cancel_command
+                    )
+                )
+            return (
+                list(
+                    get_transition_events(
+                        self.state.instances, after_delete, self.state.tasks
+                    )
+                ),
+                delete_command.command_id,
+            )
+
+        assert isinstance(action, StewardRestartInstanceAction)
+        replace_command = replacement_command_for_download_failed_instance(
+            instance, frozenset()
+        )
+        replacement = self._place_for_steward_action(replace_command, after_delete)
+        for cancel_command in cancel_unnecessary_downloads(
+            replacement, self._effective_downloads()
+        ):
+            await self.download_command_sender.send(
+                ForwarderDownloadCommand(origin=self._system_id, command=cancel_command)
+            )
+        return (
+            list(
+                get_transition_events(
+                    self.state.instances, replacement, self.state.tasks
+                )
+            ),
+            replace_command.command_id,
+        )
+
+    async def _expire_steward_action_proposals(self, now: datetime) -> None:
+        """Publish terminal expiry for pending proposals whose deadline passed."""
+        for proposal_id, proposal in tuple(self._ordered_steward_proposals.items()):
+            if proposal.status != "pending" or proposal.expires_at > now:
+                continue
+            expired = proposal.model_copy(
+                update={
+                    "status": "expired",
+                    "decided_at": now,
+                    "decided_by": "fabric_expiry",
+                    "outcome": "The proposal expired without an operator decision.",
+                }
+            )
+            # Update before yielding to the event channel so a concurrent
+            # approval cannot consume the stale pending view.
+            self._ordered_steward_proposals[proposal_id] = expired
+            await self.event_sender.send(
+                StewardActionProposalChanged(proposal=expired)
+            )
 
     async def _index_seed_event(self) -> None:
         """Index failover or cold-start trust seed as this session's first event.
@@ -1654,6 +1809,125 @@ class Master:
                                     approved=command.approved,
                                 )
                             )
+                        case ProposeStewardAction():
+                            proposal = command.proposal
+                            existing = self._ordered_steward_proposals.get(
+                                proposal.proposal_id
+                            )
+                            if existing is not None:
+                                logger.info(
+                                    "Ignoring redelivered steward proposal "
+                                    f"{proposal.proposal_id}"
+                                )
+                            else:
+                                now = datetime.now(tz=timezone.utc)
+                                if proposal.status != "pending":
+                                    raise ValueError(
+                                        "A new steward proposal must be pending"
+                                    )
+                                if proposal.expires_at <= now:
+                                    raise ValueError(
+                                        "A new steward proposal must not already be expired"
+                                    )
+                                if proposal.created_at > now + timedelta(seconds=30):
+                                    raise ValueError(
+                                        "A new steward proposal cannot be future-dated"
+                                    )
+                                if (
+                                    proposal.expires_at - proposal.created_at
+                                    > timedelta(minutes=15)
+                                ):
+                                    raise ValueError(
+                                        "Steward proposals may live for at most 15 minutes"
+                                    )
+                                pending_count = sum(
+                                    item.status == "pending"
+                                    for item in self._ordered_steward_proposals.values()
+                                )
+                                if pending_count >= 32:
+                                    raise ValueError(
+                                        "Too many steward proposals are awaiting approval"
+                                    )
+                                self._ordered_steward_proposals[
+                                    proposal.proposal_id
+                                ] = proposal
+                                generated_events.append(
+                                    StewardActionProposalChanged(proposal=proposal)
+                                )
+                        case DecideStewardAction():
+                            proposal = self._ordered_steward_proposals.get(
+                                command.proposal_id
+                            )
+                            if proposal is None:
+                                raise ValueError("Steward proposal not found")
+                            if proposal.status != "pending":
+                                raise ValueError(
+                                    "Steward proposal has already been decided"
+                                )
+                            now = datetime.now(tz=timezone.utc)
+                            if proposal.expires_at <= now:
+                                decided = proposal.model_copy(
+                                    update={
+                                        "status": "expired",
+                                        "decided_at": now,
+                                        "decided_by": command.decided_by,
+                                        "outcome": "Approval arrived after proposal expiry.",
+                                    }
+                                )
+                            elif not command.approved:
+                                decided = proposal.model_copy(
+                                    update={
+                                        "status": "rejected",
+                                        "decided_at": now,
+                                        "decided_by": command.decided_by,
+                                        "outcome": "Rejected by the operator.",
+                                    }
+                                )
+                            elif os.getenv("SKULK_FABRIC_CAPABILITIES_DISABLE") == "1":
+                                decided = proposal.model_copy(
+                                    update={
+                                        "status": "failed",
+                                        "decided_at": now,
+                                        "decided_by": command.decided_by,
+                                        "outcome": "Fabric actions are disabled by the global kill switch.",
+                                    }
+                                )
+                            else:
+                                try:
+                                    action_events, action_command_id = (
+                                        await self._execute_approved_steward_action(
+                                            proposal
+                                        )
+                                    )
+                                except (PlacementError, ValueError) as error:
+                                    decided = proposal.model_copy(
+                                        update={
+                                            "status": "failed",
+                                            "decided_at": now,
+                                            "decided_by": command.decided_by,
+                                            "outcome": str(error)[:1024],
+                                        }
+                                    )
+                                else:
+                                    decided = proposal.model_copy(
+                                        update={
+                                            "status": "dispatched",
+                                            "decided_at": now,
+                                            "decided_by": command.decided_by,
+                                            "command_id": action_command_id,
+                                            "outcome": (
+                                                "Approved action was dispatched through "
+                                                "the typed command path."
+                                            ),
+                                        }
+                                    )
+                                    generated_events.extend(action_events)
+                            self._ordered_steward_proposals[
+                                command.proposal_id
+                            ] = decided
+                            generated_events.insert(
+                                0, StewardActionProposalChanged(proposal=decided)
+                            )
                         case DeleteInstance():
                             # Credit the freed memory back to placement admission
                             # for a short grace window so a back-to-back placement
@@ -2121,6 +2395,7 @@ class Master:
         while True:
             connected_node_ids = set(self.state.topology.list_nodes())
             now = datetime.now(tz=timezone.utc)
+            await self._expire_steward_action_proposals(now)
             self._report_heartbeat_gap_changes(now=now)
             # ALL liveness-based action is suppressed while this session's
             # topology is still settling (#273): a failover-seeded master

@@ -351,12 +351,23 @@ than a card claim. GGUF steward cards must stay text-only or the vision
 platform gate bars them from `llama_server`. Repair builders re-stamp `system_role` (same pattern as #658
 exclusions). `TextGeneration.target_instance_id` pins generation to one
 instance (mirrors SpeechSynthesis). Harness = `src/skulk/api/steward.py`:
-bounded read-only tools (state/resources/telemetry/data-plane/versions/
+bounded observation tools (state/resources/telemetry/data-plane/versions/
 envelopes/per-node diagnostics and doctor/catalog), with state normalized into exact heterogeneous
 node facts, non-overlapping operator placement/ready/terminal lifecycle
 buckets, a separate internal-service bucket, and explicitly historical
-terminal failures;
-8 steps per turn, observe/advise only, rides the
+terminal failures), plus inert ten-minute proposal tools for place, stop,
+restart, and cancel-download. The model has no direct mutating tool.
+`ProposeStewardAction` / `DecideStewardAction` are serialized by the master;
+`StewardActionProposalChanged` replicates the bounded audit. The dashboard uses
+`GET /v1/steward/proposals` and the separately authorized
+`POST /v1/steward/proposals/{proposal_id}/decision`. Approval is single-use and
+revalidates current catalog, placement, ordinary-instance, and live-download
+truth before reusing existing typed action paths. System roles are never
+eligible; 32 pending and 128 retained records bound state. `dispatched` means
+command acceptance, not completion; the master publishes terminal expiry when
+deadlines pass. `SKULK_FABRIC_CAPABILITIES_DISABLE=1` is
+the global master-side kill switch; there is no autonomous approval policy.
+8 steps per turn, rides the
 normal chat dispatch path. Client surface = reserved virtual
 model `skulk/steward` on chat-completions (client tools 400; trace as
 reasoning_content; streaming via the ordinary adapters over
