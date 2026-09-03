@@ -1832,7 +1832,8 @@ class StewardHarness:
                 return _bounded(error or {"error": "node not found"})
             model_id = ModelId(raw_model_id)
             typed_node_id = NodeId(node_id)
-            if not api.steward_download_is_active(typed_node_id, model_id):
+            attempt_id = api.steward_active_download_attempt(typed_node_id, model_id)
+            if attempt_id is None:
                 raise ValueError(
                     f"no active download for '{model_id}' on '{node_names[node_id]}'"
                 )
@@ -1841,6 +1842,7 @@ class StewardHarness:
                     node_id=typed_node_id,
                     node_name=node_names[node_id],
                     model_id=model_id,
+                    attempt_id=attempt_id,
                 ),
                 arguments,
             )

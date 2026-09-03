@@ -765,6 +765,9 @@ class Master:
         # a process-local marker so the current master waits for that echo,
         # while a promoted master can reissue the exact command once.
         self._steward_dispatched_effect_issued: set[StewardActionProposalId] = set()
+        self._steward_reserved_placements: dict[
+            StewardActionProposalId, dict[InstanceId, Instance]
+        ] = {}
         self.state = State(
             tracing_enabled=SKULK_TRACING_ENABLED,
             model_trust_approved_remote_code_identities=tuple(
@@ -1195,12 +1198,20 @@ class Master:
                 min_nodes=action.min_nodes,
                 excluded_nodes=list(action.excluded_nodes),
             )
-            placement = self._place_for_steward_action(command, self.state.instances)
+            ordered_instances = dict(self.state.instances)
+            for reservation in self._steward_reserved_placements.values():
+                ordered_instances.update(reservation)
+            placement = self._place_for_steward_action(command, ordered_instances)
+            self._steward_reserved_placements[proposal.proposal_id] = {
+                instance_id: instance
+                for instance_id, instance in placement.items()
+                if instance_id not in ordered_instances
+            }
             self._steward_dispatched_effect_issued.add(proposal.proposal_id)
             return (
                 list(
                     get_transition_events(
-                        self.state.instances, placement, self.state.tasks
+                        ordered_instances, placement, self.state.tasks
                     )
                 ),
                 command.command_id,
@@ -1211,6 +1222,7 @@ class Master:
             active_download = any(
                 isinstance(progress, (DownloadPending, DownloadOngoing))
                 and progress.shard_metadata.model_card.model_id == action.model_id
+                and progress.attempt_id == action.attempt_id
                 for progress in self._effective_downloads().get(action.node_id, ())
             )
             if not active_download:
@@ -1219,11 +1231,7 @@ class Master:
                 target_node_id=action.node_id,
                 model_id=action.model_id,
             )
-            self._steward_dispatched_effect_issued.add(proposal.proposal_id)
-            await self.download_command_sender.send(
-                ForwarderDownloadCommand(origin=self._system_id, command=command)
-            )
-            return [], command.command_id, "dispatched"
+            return [], command.command_id, "approved"
 
         instance_id = (
             action.instance_id
@@ -1311,6 +1319,11 @@ class Master:
             if proposal.status == "dispatched"
         }
         self._steward_dispatched_effect_issued.intersection_update(dispatched_ids)
+        self._steward_reserved_placements = {
+            proposal_id: reservation
+            for proposal_id, reservation in self._steward_reserved_placements.items()
+            if proposal_id in dispatched_ids
+        }
         excess = len(self._ordered_steward_proposals) - 128
         if excess <= 0:
             return
@@ -1489,6 +1502,11 @@ class Master:
 
     async def _reconcile_dispatched_steward_actions(self, now: datetime) -> None:
         """Reissue an unreflected dispatched action once after master failover."""
+        for proposal_id, reservation in tuple(
+            self._steward_reserved_placements.items()
+        ):
+            if all(instance_id in self.state.instances for instance_id in reservation):
+                self._steward_reserved_placements.pop(proposal_id, None)
         for proposal_id, proposal in tuple(self._ordered_steward_proposals.items()):
             if (
                 proposal.status != "dispatched"
@@ -1513,24 +1531,41 @@ class Master:
                         min_nodes=action.min_nodes,
                         excluded_nodes=list(action.excluded_nodes),
                     )
-                    placement = self._place_for_steward_action(
-                        command, self.state.instances
-                    )
+                    ordered_instances = dict(self.state.instances)
+                    for reservation in self._steward_reserved_placements.values():
+                        ordered_instances.update(reservation)
+                    placement = self._place_for_steward_action(command, ordered_instances)
+                    self._steward_reserved_placements[proposal_id] = {
+                        instance_id: instance
+                        for instance_id, instance in placement.items()
+                        if instance_id not in ordered_instances
+                    }
                     events = list(
                         get_transition_events(
-                            self.state.instances, placement, self.state.tasks
+                            ordered_instances, placement, self.state.tasks
                         )
                     )
                 elif isinstance(action, StewardCancelDownloadAction):
+                    node_downloads = self._effective_downloads().get(
+                        action.node_id, ()
+                    )
                     active_download = any(
                         isinstance(progress, (DownloadPending, DownloadOngoing))
                         and progress.shard_metadata.model_card.model_id
                         == action.model_id
-                        for progress in self._effective_downloads().get(
-                            action.node_id, ()
-                        )
+                        and progress.attempt_id == action.attempt_id
+                        for progress in node_downloads
                     )
                     if not active_download:
+                        if any(
+                            isinstance(progress, (DownloadPending, DownloadOngoing))
+                            and progress.shard_metadata.model_card.model_id
+                            == action.model_id
+                            for progress in node_downloads
+                        ):
+                            raise ValueError(
+                                "The approved download attempt has been replaced"
+                            )
                         continue
                     self._steward_dispatched_effect_issued.add(proposal_id)
                     await self.download_command_sender.send(
@@ -1646,6 +1681,42 @@ class Master:
             self._steward_dispatched_effect_issued.add(proposal_id)
             for event in events:
                 await self.event_sender.send(event)
+        self._prune_ordered_steward_action_proposals()
+
+    async def _arm_approved_steward_download_cancellations(self) -> None:
+        """Persist cancel dispatch intent before forwarding its side effect."""
+        for proposal_id, proposal in tuple(self._ordered_steward_proposals.items()):
+            if proposal.status != "approved" or not isinstance(
+                proposal.action, StewardCancelDownloadAction
+            ):
+                continue
+            if os.getenv("SKULK_FABRIC_CAPABILITIES_DISABLE") == "1":
+                failed = proposal.model_copy(
+                    update={
+                        "status": "failed",
+                        "outcome": (
+                            "Fabric actions are disabled by the global kill switch."
+                        ),
+                    }
+                )
+                self._ordered_steward_proposals[proposal_id] = failed
+                await self.event_sender.send(
+                    StewardActionProposalChanged(proposal=failed)
+                )
+                continue
+            dispatched = proposal.model_copy(
+                update={
+                    "status": "dispatched",
+                    "outcome": (
+                        "Approved cancellation was durably armed for exact-attempt "
+                        "dispatch."
+                    ),
+                }
+            )
+            self._ordered_steward_proposals[proposal_id] = dispatched
+            await self.event_sender.send(
+                StewardActionProposalChanged(proposal=dispatched)
+            )
         self._prune_ordered_steward_action_proposals()
 
     async def _index_seed_event(self) -> None:
@@ -2287,7 +2358,13 @@ class Master:
                                             "decided_by": command.decided_by,
                                             "command_id": action_command_id,
                                             "outcome": (
-                                                "Restart teardown was dispatched; replacement "
+                                                "Download cancellation was approved and awaits "
+                                                "durable dispatch."
+                                                if isinstance(
+                                                    proposal.action,
+                                                    StewardCancelDownloadAction,
+                                                )
+                                                else "Restart teardown was dispatched; replacement "
                                                 "waits for released capacity."
                                                 if action_status == "approved"
                                                 else "Approved action was dispatched through "
@@ -2905,6 +2982,7 @@ class Master:
             # tick, a new master re-establishes the steward after election
             # without any dedicated failover machinery.
             if topology_settled:
+                await self._arm_approved_steward_download_cancellations()
                 await self._reconcile_dispatched_steward_actions(now)
                 await self._resume_approved_steward_restarts(now)
                 await self._maintain_steward_placement()

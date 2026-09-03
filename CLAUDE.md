@@ -362,7 +362,9 @@ restart, and cancel-download. The model has no direct mutating tool.
 `GET /v1/steward/proposals` and the separately authorized
 `POST /v1/steward/proposals/{proposal_id}/decision`. Approval is single-use and
 revalidates current catalog, placement, ordinary-instance, and live-download
-truth before reusing existing typed action paths. System roles are never
+truth before reusing existing typed action paths. Place approvals reserve
+capacity before State echoes; cancellation is bound to the observed attempt and
+forwarded only after durable approval. System roles are never
 eligible. Restart is two-phase: `approved` dispatches teardown, then the planner
 waits for replicated deletion plus released-capacity telemetry before placing
 the captured intent, failing after five minutes. 32 pending and 128 retained

@@ -154,7 +154,9 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   replicated audit event. `GET /v1/steward/proposals` returns a safe projection,
   and `POST /v1/steward/proposals/{proposal_id}/decision` requires the ordinary
   trusted-fabric or operator-gateway mutation guard. The master serializes each
-  decision once, revalidates current target truth, blocks system roles, and
+  decision once, reserves approved placements before the State echo,
+  revalidates current target truth, binds cancellation to an exact download
+  attempt, blocks system roles, and
   translates approval into existing place/delete/replacement/download command
   paths. Restart is two-phase: `approved` records teardown dispatch; after the
   deletion event and released-capacity telemetry converge, the planning loop

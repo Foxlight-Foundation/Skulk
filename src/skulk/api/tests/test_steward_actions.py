@@ -43,7 +43,7 @@ from skulk.shared.types.steward_actions import (
     StewardStopInstanceAction,
 )
 from skulk.shared.types.telemetry import NodeTelemetry, TelemetryView
-from skulk.shared.types.worker.downloads import DownloadPending
+from skulk.shared.types.worker.downloads import DownloadAttemptId, DownloadPending
 from skulk.shared.types.worker.instances import (
     InstanceId,
     InstanceMeta,
@@ -62,6 +62,7 @@ def _cancel_proposal() -> StewardActionProposal:
             node_id=NodeId("worker"),
             node_name="Worker",
             model_id=ModelId("org/model"),
+            attempt_id=DownloadAttemptId("attempt"),
         ),
         rationale="The transfer is stalled.",
         evidence=("No progress for ten minutes.",),
@@ -171,6 +172,39 @@ def test_proposal_event_round_trips_through_replicated_state() -> None:
 
 
 @pytest.mark.asyncio
+async def test_cancel_approval_rejects_a_replacement_download_attempt() -> None:
+    """Approval cannot cancel a retry the operator did not review."""
+    proposal = _cancel_proposal()
+    telemetry_view = TelemetryView()
+    telemetry_view.apply(
+        NodeTelemetry(
+            node_id=NodeId("worker"),
+            info=DownloadPending(
+                node_id=NodeId("worker"),
+                attempt_id=DownloadAttemptId("replacement-attempt"),
+                shard_metadata=get_pipeline_shard_metadata(
+                    ModelId("org/model"), device_rank=0
+                ),
+            ),
+        )
+    )
+    download_sender, download_receiver = channel[ForwarderDownloadCommand]()
+    master = object.__new__(Master)
+    master.state = State()
+    master._telemetry_view = telemetry_view  # pyright: ignore[reportPrivateUsage]
+    master._steward_dispatched_effect_issued = set()  # pyright: ignore[reportPrivateUsage]
+    master.download_command_sender = download_sender
+
+    with pytest.raises(ValueError, match="no longer active"):
+        await master._execute_approved_steward_action(  # pyright: ignore[reportPrivateUsage]
+            proposal
+        )
+    with anyio.move_on_after(0.01) as dispatch_scope:
+        await download_receiver.receive()
+    assert dispatch_scope.cancel_called
+
+
+@pytest.mark.asyncio
 async def test_restart_waits_for_teardown_before_replacement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -194,6 +228,7 @@ async def test_restart_waits_for_teardown_before_replacement(
     }
     master._steward_restart_teardown_issued = set()  # pyright: ignore[reportPrivateUsage]
     master._steward_dispatched_effect_issued = set()  # pyright: ignore[reportPrivateUsage]
+    master._steward_reserved_placements = {}  # pyright: ignore[reportPrivateUsage]
     master._recently_freed_bytes = {}  # pyright: ignore[reportPrivateUsage]
     master._telemetry_view = TelemetryView()  # pyright: ignore[reportPrivateUsage]
     master._model_trust_approvals = set()  # pyright: ignore[reportPrivateUsage]
@@ -273,6 +308,7 @@ async def test_approved_restart_reissues_teardown_once_after_master_failover() -
     }
     master._steward_restart_teardown_issued = set()  # pyright: ignore[reportPrivateUsage]
     master._steward_dispatched_effect_issued = set()  # pyright: ignore[reportPrivateUsage]
+    master._steward_reserved_placements = {}  # pyright: ignore[reportPrivateUsage]
     master._recently_freed_bytes = {}  # pyright: ignore[reportPrivateUsage]
     master._telemetry_view = TelemetryView()  # pyright: ignore[reportPrivateUsage]
     master._model_trust_approvals = set()  # pyright: ignore[reportPrivateUsage]
@@ -325,6 +361,7 @@ async def test_dispatched_restart_reissues_exact_replacement_after_failover(
     }
     master._steward_restart_teardown_issued = set()  # pyright: ignore[reportPrivateUsage]
     master._steward_dispatched_effect_issued = set()  # pyright: ignore[reportPrivateUsage]
+    master._steward_reserved_placements = {}  # pyright: ignore[reportPrivateUsage]
     master._recently_freed_bytes = {}  # pyright: ignore[reportPrivateUsage]
     master._telemetry_view = TelemetryView()  # pyright: ignore[reportPrivateUsage]
     master._model_trust_approvals = set()  # pyright: ignore[reportPrivateUsage]
@@ -416,6 +453,7 @@ async def test_dispatched_place_and_stop_reissue_after_master_failover(
     }
     master._steward_restart_teardown_issued = set()  # pyright: ignore[reportPrivateUsage]
     master._steward_dispatched_effect_issued = set()  # pyright: ignore[reportPrivateUsage]
+    master._steward_reserved_placements = {}  # pyright: ignore[reportPrivateUsage]
     master._recently_freed_bytes = {}  # pyright: ignore[reportPrivateUsage]
     master._telemetry_view = TelemetryView()  # pyright: ignore[reportPrivateUsage]
     master._model_trust_approvals = set()  # pyright: ignore[reportPrivateUsage]
@@ -443,6 +481,69 @@ async def test_dispatched_place_and_stop_reissue_after_master_failover(
     assert created.instance.instance_id == replacement.instance_id
     assert isinstance(deleted, InstanceDeleted)
     assert deleted.instance_id == original.instance_id
+
+
+@pytest.mark.asyncio
+async def test_place_approvals_reserve_capacity_before_state_echo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Back-to-back place approvals plan against earlier reserved instances."""
+    template = _ordinary_instance()
+    card = next(iter(template.shard_assignments.runner_to_shard.values())).model_card
+    now = datetime.now(tz=timezone.utc)
+
+    def proposal() -> StewardActionProposal:
+        return StewardActionProposal(
+            action=StewardPlaceModelAction(
+                model_card=card,
+                sharding=Sharding.Pipeline,
+                instance_meta=InstanceMeta.MlxRing,
+                min_nodes=1,
+            ),
+            rationale="Capacity is required.",
+            evidence=("The workload requires another placement.",),
+            expected_effect="Place another ordinary model instance.",
+            created_at=now,
+            expires_at=now + timedelta(minutes=10),
+        )
+
+    first = proposal()
+    second = proposal()
+    download_sender, _ = channel[ForwarderDownloadCommand]()
+    master = object.__new__(Master)
+    master.state = State()
+    master._ordered_steward_proposals = {}  # pyright: ignore[reportPrivateUsage]
+    master._steward_restart_teardown_issued = set()  # pyright: ignore[reportPrivateUsage]
+    master._steward_dispatched_effect_issued = set()  # pyright: ignore[reportPrivateUsage]
+    master._steward_reserved_placements = {}  # pyright: ignore[reportPrivateUsage]
+    master.download_command_sender = download_sender
+    observed_counts: list[int] = []
+
+    def reserve_place(
+        command: PlaceInstance,
+        current_instances: object,
+    ) -> dict[InstanceId, MlxRingInstance]:
+        assert isinstance(current_instances, dict)
+        typed_current = cast("dict[InstanceId, MlxRingInstance]", current_instances)
+        observed_counts.append(len(typed_current))
+        placed = template.model_copy(
+            update={"instance_id": InstanceId(str(command.command_id))}
+        )
+        return {**typed_current, placed.instance_id: placed}
+
+    monkeypatch.setattr(master, "_place_for_steward_action", reserve_place)
+    first_events, _, _ = await master._execute_approved_steward_action(  # pyright: ignore[reportPrivateUsage]
+        first
+    )
+    second_events, _, _ = await master._execute_approved_steward_action(  # pyright: ignore[reportPrivateUsage]
+        second
+    )
+
+    assert observed_counts == [0, 1]
+    assert len(first_events) == 1
+    assert len(second_events) == 1
+    assert isinstance(first_events[0], InstanceCreated)
+    assert isinstance(second_events[0], InstanceCreated)
 
 
 @pytest.mark.asyncio
@@ -488,6 +589,7 @@ async def test_master_approves_a_proposal_exactly_once(
                 node_id=NodeId("worker"),
                 info=DownloadPending(
                     node_id=NodeId("worker"),
+                    attempt_id=DownloadAttemptId("attempt"),
                     shard_metadata=get_pipeline_shard_metadata(
                         ModelId("org/model"), device_rank=0
                     ),
@@ -504,7 +606,14 @@ async def test_master_approves_a_proposal_exactly_once(
         )
         changed = await event_receiver.receive()
         assert isinstance(changed, StewardActionProposalChanged)
-        assert changed.proposal.status == "dispatched", changed.proposal.outcome
+        assert changed.proposal.status == "approved", changed.proposal.outcome
+        await master._arm_approved_steward_download_cancellations()  # pyright: ignore[reportPrivateUsage]
+        armed = await event_receiver.receive()
+        assert isinstance(armed, StewardActionProposalChanged)
+        assert armed.proposal.status == "dispatched"
+        await master._reconcile_dispatched_steward_actions(  # pyright: ignore[reportPrivateUsage]
+            datetime.now(tz=timezone.utc)
+        )
         dispatched = await download_receiver.receive()
         assert isinstance(dispatched.command, CancelDownload)
         assert dispatched.command.model_id == ModelId("org/model")

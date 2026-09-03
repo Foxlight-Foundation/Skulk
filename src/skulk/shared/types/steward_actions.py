@@ -7,6 +7,7 @@ from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from skulk.shared.models.model_cards import ModelCard
 from skulk.shared.types.common import CommandId, Id, ModelId, NodeId
+from skulk.shared.types.worker.downloads import DownloadAttemptId
 from skulk.shared.types.worker.instances import Instance, InstanceId, InstanceMeta
 from skulk.shared.types.worker.shards import Sharding
 from skulk.utils.pydantic_ext import FrozenModel, TaggedModel
@@ -70,6 +71,9 @@ class StewardCancelDownloadAction(TaggedModel):
         description="Friendly node name shown to the approving operator.",
     )
     model_id: ModelId = Field(description="Model whose active download is cancelled.")
+    attempt_id: DownloadAttemptId = Field(
+        description="Exact live download attempt reviewed by the operator."
+    )
 
 
 StewardBasicAction = (

@@ -498,6 +498,7 @@ from skulk.shared.types.text_generation import (
     TextGenerationTaskParams,
 )
 from skulk.shared.types.worker.downloads import (
+    DownloadAttemptId,
     DownloadCompleted,
     DownloadOngoing,
     LiveDownloadProgress,
@@ -3953,23 +3954,28 @@ class API:
             )
         ]
 
-    def steward_download_is_active(self, node_id: NodeId, model_id: ModelId) -> bool:
-        """Return whether one node currently reports a live download for a model.
+    def steward_active_download_attempt(
+        self, node_id: NodeId, model_id: ModelId
+    ) -> DownloadAttemptId | None:
+        """Return the exact live download attempt for a model on one node.
 
         Args:
             node_id: Exact internal node selected from a unique friendly name.
             model_id: Exact model alias selected by the steward.
 
         Returns:
-            True only for pending or ongoing effective download truth.
+            The attempt identity for pending or ongoing effective download
+            truth, or ``None`` when no safely identifiable attempt is active.
         """
-        return any(
-            isinstance(progress, LiveDownloadProgress)
-            and progress.shard_metadata.model_card.model_id == model_id
-            for progress in self._telemetry_view.effective_downloads(
-                self.state.downloads
-            ).get(node_id, ())
-        )
+        for progress in self._telemetry_view.effective_downloads(
+            self.state.downloads
+        ).get(node_id, ()):
+            if (
+                isinstance(progress, LiveDownloadProgress)
+                and progress.shard_metadata.model_card.model_id == model_id
+            ):
+                return progress.attempt_id
+        return None
 
     async def decide_steward_action_proposal(
         self,
