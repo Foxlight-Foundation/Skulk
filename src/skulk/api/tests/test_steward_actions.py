@@ -238,10 +238,11 @@ async def test_master_approves_a_proposal_exactly_once(
         proposed = await event_receiver.receive()
         assert isinstance(proposed, StewardActionProposalChanged)
         assert proposed.proposal.status == "pending"
-        await master._expire_steward_action_proposals(  # pyright: ignore[reportPrivateUsage]
+        expiry_events = master._expire_steward_action_proposals(  # pyright: ignore[reportPrivateUsage]
             expiring.expires_at + timedelta(seconds=1)
         )
-        expired = await event_receiver.receive()
+        assert len(expiry_events) == 1
+        expired = expiry_events[0]
         assert isinstance(expired, StewardActionProposalChanged)
         assert expired.proposal.status == "expired"
         assert expired.proposal.decided_by == "fabric_expiry"

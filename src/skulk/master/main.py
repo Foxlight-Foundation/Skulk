@@ -1261,8 +1261,27 @@ class Master:
             replace_command.command_id,
         )
 
-    async def _expire_steward_action_proposals(self, now: datetime) -> None:
-        """Publish terminal expiry for pending proposals whose deadline passed."""
+    def _prune_ordered_steward_action_proposals(self) -> None:
+        """Bound master-local proposal ordering state without dropping pending work."""
+        excess = len(self._ordered_steward_proposals) - 128
+        if excess <= 0:
+            return
+        terminal = sorted(
+            (
+                proposal
+                for proposal in self._ordered_steward_proposals.values()
+                if proposal.status != "pending"
+            ),
+            key=lambda proposal: proposal.created_at,
+        )
+        for proposal in terminal[:excess]:
+            self._ordered_steward_proposals.pop(proposal.proposal_id, None)
+
+    def _expire_steward_action_proposals(
+        self, now: datetime
+    ) -> list[StewardActionProposalChanged]:
+        """Order terminal expiry for pending proposals whose deadline passed."""
+        changes: list[StewardActionProposalChanged] = []
         for proposal_id, proposal in tuple(self._ordered_steward_proposals.items()):
             if proposal.status != "pending" or proposal.expires_at > now:
                 continue
@@ -1274,12 +1293,10 @@ class Master:
                     "outcome": "The proposal expired without an operator decision.",
                 }
             )
-            # Update before yielding to the event channel so a concurrent
-            # approval cannot consume the stale pending view.
             self._ordered_steward_proposals[proposal_id] = expired
-            await self.event_sender.send(
-                StewardActionProposalChanged(proposal=expired)
-            )
+            changes.append(StewardActionProposalChanged(proposal=expired))
+        self._prune_ordered_steward_action_proposals()
+        return changes
 
     async def _index_seed_event(self) -> None:
         """Index failover or cold-start trust seed as this session's first event.
@@ -1811,6 +1828,10 @@ class Master:
                             )
                         case ProposeStewardAction():
                             proposal = command.proposal
+                            now = datetime.now(tz=timezone.utc)
+                            generated_events.extend(
+                                self._expire_steward_action_proposals(now)
+                            )
                             existing = self._ordered_steward_proposals.get(
                                 proposal.proposal_id
                             )
@@ -1820,7 +1841,6 @@ class Master:
                                     f"{proposal.proposal_id}"
                                 )
                             else:
-                                now = datetime.now(tz=timezone.utc)
                                 if proposal.status != "pending":
                                     raise ValueError(
                                         "A new steward proposal must be pending"
@@ -1851,6 +1871,7 @@ class Master:
                                 self._ordered_steward_proposals[
                                     proposal.proposal_id
                                 ] = proposal
+                                self._prune_ordered_steward_action_proposals()
                                 generated_events.append(
                                     StewardActionProposalChanged(proposal=proposal)
                                 )
@@ -1925,6 +1946,7 @@ class Master:
                             self._ordered_steward_proposals[
                                 command.proposal_id
                             ] = decided
+                            self._prune_ordered_steward_action_proposals()
                             generated_events.insert(
                                 0, StewardActionProposalChanged(proposal=decided)
                             )
@@ -2395,7 +2417,8 @@ class Master:
         while True:
             connected_node_ids = set(self.state.topology.list_nodes())
             now = datetime.now(tz=timezone.utc)
-            await self._expire_steward_action_proposals(now)
+            for expiry_event in self._expire_steward_action_proposals(now):
+                await self.event_sender.send(expiry_event)
             self._report_heartbeat_gap_changes(now=now)
             # ALL liveness-based action is suppressed while this session's
             # topology is still settling (#273): a failover-seeded master
