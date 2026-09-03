@@ -159,10 +159,13 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   `CancelDownload` for final worker-side rejection of a replaced attempt,
   blocks system roles, and
   translates approval into existing place/delete/replacement/download command
-  paths. Restart is two-phase: `approved` records teardown dispatch; after the
-  deletion event and released-capacity telemetry converge, the planning loop
+  paths. Stop and restart cleanup waits for the replicated decision. Restart is
+  two-phase: `approved` durably arms teardown; after the deletion event and
+  released-capacity telemetry converge, the planning loop
   dispatches the captured placement intent or fails it after five minutes.
-  Bounds: 32 pending, 128 retained; the master accepts at most a
+  Bounds: 32 pending, 128-record audit target; pending, approved, and
+  dispatched proposals inside the five-minute recovery window are retained
+  even when that temporarily exceeds the target. The master accepts at most a
   15-minute proposal lifetime and publishes terminal expiry on deadline.
   `dispatched` means command acceptance, not lifecycle completion. A promoted
   master reconciles dispatched proposals for five minutes and reissues a

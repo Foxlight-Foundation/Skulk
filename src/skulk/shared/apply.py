@@ -42,6 +42,7 @@ from skulk.shared.types.profiling import (
     ThunderboltBridgeStatus,
 )
 from skulk.shared.types.state import State
+from skulk.shared.types.steward_actions import steward_action_proposal_is_prunable
 from skulk.shared.types.tasks import Task, TaskId, TaskStatus
 from skulk.shared.types.topology import Connection, RDMAConnection
 from skulk.shared.types.worker.downloads import (
@@ -136,14 +137,15 @@ def event_apply(event: Event, state: State) -> State:
         case StewardActionProposalChanged():
             proposals = dict(state.steward_action_proposals)
             proposals[event.proposal.proposal_id] = event.proposal
-            # Retain the newest bounded audit window. Pending and approved
-            # two-phase restarts are never pruned before reaching a terminal state.
+            # Retain the newest bounded audit window without discarding work
+            # that a promoted master can still recover.
             if len(proposals) > 128:
+                as_of = event.proposal.decided_at or event.proposal.created_at
                 terminal = sorted(
                     (
                         proposal
                         for proposal in proposals.values()
-                        if proposal.status not in {"pending", "approved"}
+                        if steward_action_proposal_is_prunable(proposal, as_of)
                     ),
                     key=lambda proposal: proposal.created_at,
                 )

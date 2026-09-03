@@ -37,6 +37,7 @@ from skulk.shared.types.state import State
 from skulk.shared.types.state_sync import StateSyncMessage
 from skulk.shared.types.steward_actions import (
     StewardActionProposal,
+    StewardActionProposalId,
     StewardCancelDownloadAction,
     StewardPlaceModelAction,
     StewardRestartInstanceAction,
@@ -171,6 +172,68 @@ def test_proposal_event_round_trips_through_replicated_state() -> None:
     assert restored.steward_action_proposals[proposal.proposal_id] == proposal
 
 
+def test_dispatched_proposal_survives_its_failover_recovery_window() -> None:
+    """Audit pruning retains dispatched work until recovery can no longer run."""
+    now = datetime.now(tz=timezone.utc)
+    template = _cancel_proposal()
+    recent_dispatch = template.model_copy(
+        update={
+            "proposal_id": StewardActionProposalId("recent-dispatch"),
+            "status": "dispatched",
+            "decided_at": now,
+            "decided_by": "trusted_fabric_operator",
+            "command_id": CommandId("cancel-command"),
+        }
+    )
+    pending = {
+        StewardActionProposalId(f"pending-{index}"): template.model_copy(
+            update={"proposal_id": StewardActionProposalId(f"pending-{index}")}
+        )
+        for index in range(127)
+    }
+    state = State(
+        steward_action_proposals={
+            **pending,
+            recent_dispatch.proposal_id: recent_dispatch,
+        }
+    )
+    rejected = template.model_copy(
+        update={
+            "proposal_id": StewardActionProposalId("prunable-rejection"),
+            "status": "rejected",
+            "decided_at": now + timedelta(seconds=1),
+            "decided_by": "trusted_fabric_operator",
+        }
+    )
+
+    within_window = apply(
+        state,
+        IndexedEvent(
+            idx=0,
+            event=StewardActionProposalChanged(proposal=rejected),
+        ),
+    )
+    assert recent_dispatch.proposal_id in within_window.steward_action_proposals
+    assert rejected.proposal_id not in within_window.steward_action_proposals
+
+    later_pending = template.model_copy(
+        update={
+            "proposal_id": StewardActionProposalId("later-pending"),
+            "created_at": now + timedelta(minutes=6),
+            "expires_at": now + timedelta(minutes=16),
+        }
+    )
+    after_window = apply(
+        within_window,
+        IndexedEvent(
+            idx=1,
+            event=StewardActionProposalChanged(proposal=later_pending),
+        ),
+    )
+    assert recent_dispatch.proposal_id not in after_window.steward_action_proposals
+    assert later_pending.proposal_id in after_window.steward_action_proposals
+
+
 @pytest.mark.asyncio
 async def test_cancel_approval_rejects_a_replacement_download_attempt() -> None:
     """Approval cannot cancel a retry the operator did not review."""
@@ -244,9 +307,8 @@ async def test_restart_waits_for_teardown_before_replacement(
 
     assert status == "approved"
     assert command_id
-    assert len(events) == 1
-    assert isinstance(events[0], InstanceDeleted)
-    assert proposal.proposal_id in master._steward_restart_teardown_issued  # pyright: ignore[reportPrivateUsage]
+    assert events == []
+    assert proposal.proposal_id not in master._steward_restart_teardown_issued  # pyright: ignore[reportPrivateUsage]
 
     approved = proposal.model_copy(
         update={
@@ -256,7 +318,10 @@ async def test_restart_waits_for_teardown_before_replacement(
             "command_id": command_id,
         }
     )
-    master.state = State()
+    master.state = State(
+        instances={instance.instance_id: instance},
+        steward_action_proposals={proposal.proposal_id: approved},
+    )
     master._ordered_steward_proposals = {  # pyright: ignore[reportPrivateUsage]
         proposal.proposal_id: approved
     }
@@ -273,6 +338,15 @@ async def test_restart_waits_for_teardown_before_replacement(
     monkeypatch.setattr(master, "_place_for_steward_action", place_after_release)
     await master._resume_approved_steward_restarts(  # pyright: ignore[reportPrivateUsage]
         now + timedelta(seconds=30)
+    )
+
+    deleted = await event_receiver.receive()
+    assert isinstance(deleted, InstanceDeleted)
+    master.state = State(
+        steward_action_proposals={proposal.proposal_id: approved}
+    )
+    await master._resume_approved_steward_restarts(  # pyright: ignore[reportPrivateUsage]
+        now + timedelta(seconds=31)
     )
 
     changed = await event_receiver.receive()
@@ -302,7 +376,10 @@ async def test_approved_restart_reissues_teardown_once_after_master_failover() -
     event_sender, event_receiver = channel[Event]()
     download_sender, _ = channel[ForwarderDownloadCommand]()
     master = object.__new__(Master)
-    master.state = State(instances={instance.instance_id: instance})
+    master.state = State(
+        instances={instance.instance_id: instance},
+        steward_action_proposals={proposal.proposal_id: proposal},
+    )
     master._ordered_steward_proposals = {  # pyright: ignore[reportPrivateUsage]
         proposal.proposal_id: proposal
     }
@@ -332,6 +409,98 @@ async def test_approved_restart_reissues_teardown_once_after_master_failover() -
 
 
 @pytest.mark.asyncio
+async def test_stop_cleanup_waits_for_replicated_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stop cannot cancel downloads before its dispatch intent is recoverable."""
+    instance = _ordinary_instance()
+    model_id = instance.shard_assignments.model_id
+    now = datetime.now(tz=timezone.utc)
+    proposal = StewardActionProposal(
+        action=StewardStopInstanceAction(
+            instance_id=instance.instance_id,
+            model_id=model_id,
+        ),
+        rationale="The instance is no longer required.",
+        evidence=("No active workload requires the instance.",),
+        expected_effect="Stop the ordinary model instance.",
+        created_at=now,
+        expires_at=now + timedelta(minutes=10),
+    )
+    event_sender, event_receiver = channel[Event]()
+    download_sender, download_receiver = channel[ForwarderDownloadCommand]()
+    telemetry_view = TelemetryView()
+    telemetry_view.apply(
+        NodeTelemetry(
+            node_id=NodeId("worker"),
+            info=DownloadPending(
+                node_id=NodeId("worker"),
+                attempt_id=DownloadAttemptId("attempt"),
+                shard_metadata=get_pipeline_shard_metadata(model_id, device_rank=0),
+            ),
+        )
+    )
+    master = object.__new__(Master)
+    master.state = State(instances={instance.instance_id: instance})
+    master._ordered_steward_proposals = {proposal.proposal_id: proposal}  # pyright: ignore[reportPrivateUsage]
+    master._steward_restart_teardown_issued = set()  # pyright: ignore[reportPrivateUsage]
+    master._steward_dispatched_effect_issued = set()  # pyright: ignore[reportPrivateUsage]
+    master._steward_reserved_placements = {}  # pyright: ignore[reportPrivateUsage]
+    master._recently_freed_bytes = {}  # pyright: ignore[reportPrivateUsage]
+    master._telemetry_view = telemetry_view  # pyright: ignore[reportPrivateUsage]
+    master._model_trust_approvals = set()  # pyright: ignore[reportPrivateUsage]
+    master._system_id = SystemId("master")  # pyright: ignore[reportPrivateUsage]
+    master.event_sender = event_sender
+    master.download_command_sender = download_sender
+
+    def cleanup_commands(
+        _instances: object, _downloads: object
+    ) -> list[CancelDownload]:
+        return [CancelDownload(target_node_id=NodeId("worker"), model_id=model_id)]
+
+    monkeypatch.setattr(
+        "skulk.master.main.cancel_unnecessary_downloads",
+        cleanup_commands,
+    )
+
+    events, command_id, status = (
+        await master._execute_approved_steward_action(proposal)  # pyright: ignore[reportPrivateUsage]
+    )
+    assert events == []
+    assert status == "dispatched"
+    with anyio.move_on_after(0.01) as premature_cleanup:
+        await download_receiver.receive()
+    assert premature_cleanup.cancel_called
+
+    dispatched = proposal.model_copy(
+        update={
+            "status": "dispatched",
+            "decided_at": now,
+            "decided_by": "trusted_fabric_operator",
+            "command_id": command_id,
+        }
+    )
+    master.state = State(
+        instances={instance.instance_id: instance},
+        steward_action_proposals={proposal.proposal_id: dispatched},
+    )
+    master._ordered_steward_proposals = {proposal.proposal_id: dispatched}  # pyright: ignore[reportPrivateUsage]
+    cleanup: ForwarderDownloadCommand | None = None
+    deleted: Event | None = None
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(
+            master._reconcile_dispatched_steward_actions,  # pyright: ignore[reportPrivateUsage]
+            now,
+        )
+        cleanup = await download_receiver.receive()
+        deleted = await event_receiver.receive()
+    assert cleanup is not None
+    assert deleted is not None
+    assert isinstance(cleanup.command, CancelDownload)
+    assert isinstance(deleted, InstanceDeleted)
+
+
+@pytest.mark.asyncio
 async def test_dispatched_restart_reissues_exact_replacement_after_failover(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -355,7 +524,10 @@ async def test_dispatched_restart_reissues_exact_replacement_after_failover(
     event_sender, event_receiver = channel[Event]()
     download_sender, _ = channel[ForwarderDownloadCommand]()
     master = object.__new__(Master)
-    master.state = State(instances={original.instance_id: original})
+    master.state = State(
+        instances={original.instance_id: original},
+        steward_action_proposals={proposal.proposal_id: proposal},
+    )
     master._ordered_steward_proposals = {  # pyright: ignore[reportPrivateUsage]
         proposal.proposal_id: proposal
     }
@@ -389,7 +561,7 @@ async def test_dispatched_restart_reissues_exact_replacement_after_failover(
         await event_receiver.receive()
     assert duplicate_teardown_scope.cancel_called
 
-    master.state = State()
+    master.state = State(steward_action_proposals={proposal.proposal_id: proposal})
     await master._reconcile_dispatched_steward_actions(  # pyright: ignore[reportPrivateUsage]
         now + timedelta(seconds=2)
     )
@@ -446,7 +618,13 @@ async def test_dispatched_place_and_stop_reissue_after_master_failover(
     event_sender, event_receiver = channel[Event]()
     download_sender, _ = channel[ForwarderDownloadCommand]()
     master = object.__new__(Master)
-    master.state = State(instances={original.instance_id: original})
+    master.state = State(
+        instances={original.instance_id: original},
+        steward_action_proposals={
+            place_proposal.proposal_id: place_proposal,
+            stop_proposal.proposal_id: stop_proposal,
+        },
+    )
     master._ordered_steward_proposals = {  # pyright: ignore[reportPrivateUsage]
         place_proposal.proposal_id: place_proposal,
         stop_proposal.proposal_id: stop_proposal,

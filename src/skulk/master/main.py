@@ -112,6 +112,7 @@ from skulk.shared.types.steward_actions import (
     StewardPlaceModelAction,
     StewardRestartInstanceAction,
     StewardStopInstanceAction,
+    steward_action_proposal_is_prunable,
 )
 from skulk.shared.types.tasks import (
     AudioTranscription as AudioTranscriptionTask,
@@ -1262,49 +1263,15 @@ class Master:
         ):
             raise ValueError("Another steward restart already owns this instance")
 
-        self._record_freed_instance(instance)
         delete_command = DeleteInstance(instance_id=instance_id)
-        after_delete = delete_instance(delete_command, self.state.instances)
         if isinstance(action, StewardStopInstanceAction):
-            self._steward_dispatched_effect_issued.add(proposal.proposal_id)
-            for cancel_command in cancel_unnecessary_downloads(
-                after_delete, self._effective_downloads()
-            ):
-                await self.download_command_sender.send(
-                    ForwarderDownloadCommand(
-                        origin=self._system_id, command=cancel_command
-                    )
-                )
-            return (
-                list(
-                    get_transition_events(
-                        self.state.instances, after_delete, self.state.tasks
-                    )
-                ),
-                delete_command.command_id,
-                "dispatched",
-            )
+            return [], delete_command.command_id, "dispatched"
 
         assert isinstance(action, StewardRestartInstanceAction)
-        self._steward_restart_teardown_issued.add(proposal.proposal_id)
-        for cancel_command in cancel_unnecessary_downloads(
-            after_delete, self._effective_downloads()
-        ):
-            await self.download_command_sender.send(
-                ForwarderDownloadCommand(origin=self._system_id, command=cancel_command)
-            )
-        return (
-            list(
-                get_transition_events(
-                    self.state.instances, after_delete, self.state.tasks
-                )
-            ),
-            delete_command.command_id,
-            "approved",
-        )
+        return [], delete_command.command_id, "approved"
 
     def _prune_ordered_steward_action_proposals(self) -> None:
-        """Bound local proposal state without dropping pending or approved work."""
+        """Bound local proposals without dropping actionable recovery work."""
         active_restart_ids = {
             proposal.proposal_id
             for proposal in self._ordered_steward_proposals.values()
@@ -1332,7 +1299,9 @@ class Master:
             (
                 proposal
                 for proposal in self._ordered_steward_proposals.values()
-                if proposal.status not in {"pending", "approved"}
+                if steward_action_proposal_is_prunable(
+                    proposal, datetime.now(tz=timezone.utc)
+                )
             ),
             key=lambda proposal: proposal.created_at,
         )
@@ -1366,6 +1335,12 @@ class Master:
             action = proposal.action
             if proposal.status != "approved" or not isinstance(
                 action, StewardRestartInstanceAction
+            ):
+                continue
+            replicated_proposal = self.state.steward_action_proposals.get(proposal_id)
+            if (
+                replicated_proposal is None
+                or replicated_proposal.status != "approved"
             ):
                 continue
             decided_at = proposal.decided_at
@@ -1517,6 +1492,12 @@ class Master:
                 or proposal_id in self._steward_dispatched_effect_issued
             ):
                 continue
+            replicated_proposal = self.state.steward_action_proposals.get(proposal_id)
+            if (
+                replicated_proposal is None
+                or replicated_proposal.status != "dispatched"
+            ):
+                continue
             action = proposal.action
             events: list[Event] = []
             try:
@@ -1547,18 +1528,6 @@ class Master:
                         )
                     )
                 elif isinstance(action, StewardCancelDownloadAction):
-                    replicated_proposal = self.state.steward_action_proposals.get(
-                        proposal_id
-                    )
-                    if (
-                        replicated_proposal is None
-                        or replicated_proposal.status != "dispatched"
-                    ):
-                        # Cancellation is an external side effect rather than a
-                        # state transition. Wait until the dispatch intent has
-                        # round-tripped through the indexed event log so a new
-                        # master can recover it before forwarding the command.
-                        continue
                     node_downloads = self._effective_downloads().get(
                         action.node_id, ()
                     )
@@ -1596,6 +1565,15 @@ class Master:
                 elif isinstance(action, StewardStopInstanceAction):
                     instance = self.state.instances.get(action.instance_id)
                     if instance is None:
+                        self._steward_dispatched_effect_issued.add(proposal_id)
+                        for cancel_command in cancel_unnecessary_downloads(
+                            self.state.instances, self._effective_downloads()
+                        ):
+                            await self.download_command_sender.send(
+                                ForwarderDownloadCommand(
+                                    origin=self._system_id, command=cancel_command
+                                )
+                            )
                         continue
                     if instance.system_role is not None:
                         raise ValueError(

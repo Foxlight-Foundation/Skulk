@@ -1,6 +1,6 @@
 """Typed, event-sourced actions proposed by the intelligent-fabric steward."""
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Literal, Self, cast
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
@@ -172,3 +172,22 @@ class StewardActionProposal(FrozenModel):
         if any(len(item) > 512 for item in self.evidence):
             raise ValueError("steward proposal evidence entries are limited to 512 chars")
         return self
+
+
+def steward_action_proposal_is_prunable(
+    proposal: StewardActionProposal, as_of: datetime
+) -> bool:
+    """Return whether a proposal may leave the bounded retained audit.
+
+    Pending and approved work is always actionable. Dispatched work remains
+    actionable for the same five-minute failover-recovery window used by the
+    master, then becomes eligible for ordinary audit pruning.
+    """
+    if proposal.status in {"pending", "approved"}:
+        return False
+    if proposal.status != "dispatched":
+        return True
+    return (
+        proposal.decided_at is not None
+        and as_of > proposal.decided_at + timedelta(minutes=5)
+    )

@@ -2075,8 +2075,9 @@ Each response item contains:
 Proposals created by the built-in harness expire after ten minutes. The master
 refuses already-expired proposals, proposals with a lifetime over fifteen
 minutes, automatically publishes expiry when the deadline passes, and refuses
-more than 32 simultaneously pending proposals. State retains at
-most 128 records by pruning the oldest terminal records; pending records are
+more than 32 simultaneously pending proposals. State targets a 128-record audit
+window by pruning the oldest completed terminal records; pending, approved, and
+dispatched records still inside their five-minute failover-recovery window are
 never pruned to make room.
 
 The action set is intentionally narrow:
@@ -2117,8 +2118,10 @@ path. Clients should poll `GET /v1/steward/proposals` for the master-authoritati
 result. `dispatched` means the approved action was translated into and accepted
 by an existing typed placement, deletion, replacement, or download command; it
 does not claim that an asynchronous model start, stop, or download has already
-completed. For restart only, `approved` means teardown was dispatched and the
-replacement is waiting for released capacity. For five minutes after any
+completed. For restart only, `approved` means the decision is durable and the
+planning loop will dispatch teardown before waiting for released capacity.
+Stop and restart download cleanup likewise waits for the replicated decision
+before it is forwarded. For five minutes after any
 `dispatched` decision, a promoted master compares the proposal's exact command
 identity with replicated state and reissues a missing action effect once.
 Download cancellation uses an additional durable step: the replicated
