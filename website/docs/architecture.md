@@ -890,8 +890,10 @@ placement, instance-role, and download truth before translating the action into
 the existing typed command machinery. System placements remain outside the
 action surface. Back-to-back place approvals reserve their computed instances
 before replicated State echoes them, preventing duplicate capacity claims.
-Download cancellation is bound to the observed attempt identity and forwarded
-only after its approved audit is durable. Restart is a two-phase transition: `approved` dispatches the
+Download cancellation carries the observed attempt identity through the
+download command; the worker rejects it if a newer attempt is active. It is
+forwarded only after both its approval and armed dispatch audit are durable.
+Restart is a two-phase transition: `approved` dispatches the
 exact teardown, and the planning loop re-places the captured intent only after
 replicated deletion and live capacity converge, with a five-minute bound.
 `dispatched` records command acceptance, not asynchronous completion. A

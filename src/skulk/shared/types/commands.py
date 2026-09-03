@@ -20,6 +20,7 @@ from skulk.shared.types.steward_actions import (
     StewardActionProposalId,
 )
 from skulk.shared.types.text_generation import TextGenerationTaskParams
+from skulk.shared.types.worker.downloads import DownloadAttemptId
 from skulk.shared.types.worker.instances import (
     Instance,
     InstanceFailureCode,
@@ -227,8 +228,17 @@ class DeleteDownload(BaseCommand):
 
 
 class CancelDownload(BaseCommand):
+    """Cancel a model download, optionally only for one observed attempt."""
+
     target_node_id: NodeId
     model_id: ModelId
+    attempt_id: DownloadAttemptId | None = Field(
+        default=None,
+        description=(
+            "Exact active attempt to cancel, or null for an ordinary operator "
+            "cancellation of the current model download."
+        ),
+    )
 
 
 class EvictStagedModel(BaseCommand):

@@ -1230,6 +1230,7 @@ class Master:
             command = CancelDownload(
                 target_node_id=action.node_id,
                 model_id=action.model_id,
+                attempt_id=action.attempt_id,
             )
             return [], command.command_id, "approved"
 
@@ -1587,6 +1588,7 @@ class Master:
                                 command_id=proposal.command_id,
                                 target_node_id=action.node_id,
                                 model_id=action.model_id,
+                                attempt_id=action.attempt_id,
                             ),
                         )
                     )

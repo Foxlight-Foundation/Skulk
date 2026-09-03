@@ -155,8 +155,9 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   and `POST /v1/steward/proposals/{proposal_id}/decision` requires the ordinary
   trusted-fabric or operator-gateway mutation guard. The master serializes each
   decision once, reserves approved placements before the State echo,
-  revalidates current target truth, binds cancellation to an exact download
-  attempt, blocks system roles, and
+  revalidates current target truth, carries the reviewed attempt identity in
+  `CancelDownload` for final worker-side rejection of a replaced attempt,
+  blocks system roles, and
   translates approval into existing place/delete/replacement/download command
   paths. Restart is two-phase: `approved` records teardown dispatch; after the
   deletion event and released-capacity telemetry converge, the planning loop

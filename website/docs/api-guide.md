@@ -2090,7 +2090,8 @@ The action set is intentionally narrow:
   fails if replacement capacity does not become available within five minutes.
 - `cancel_download` cancels the exact model transfer attempt on the selected
   named node. Approval fails closed if that attempt finishes or is replaced by
-  a retry.
+  a retry, and the worker repeats the attempt-identity check when the command
+  arrives so a later retry cannot be cancelled.
 
 System-role instances are never eligible. Targets are resolved before proposal
 creation and revalidated by the elected master at approval, so stale or
@@ -2121,8 +2122,9 @@ replacement is waiting for released capacity. For five minutes after any
 `dispatched` decision, a promoted master compares the proposal's exact command
 identity with replicated state and reissues a missing action effect once.
 Download cancellation uses an additional durable step: the replicated
-`approved` decision is indexed before dispatch is armed, and only the following
-planning pass forwards the exact-attempt cancellation.
+`approved` decision is indexed before dispatch is armed. The armed `dispatched`
+transition must then be indexed before a later planning pass forwards the
+attempt-bound cancellation.
 
 Setting `SKULK_FABRIC_CAPABILITIES_DISABLE=1` on the elected master is the global
 fail-closed kill switch. It converts an otherwise valid approval into `failed`
