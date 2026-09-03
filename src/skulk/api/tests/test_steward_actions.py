@@ -106,6 +106,12 @@ def _ordinary_instance() -> MlxRingInstance:
     )
 
 
+def _authorize_instance_card(master: Master, instance: MlxRingInstance) -> None:
+    """Seed command-ordered catalog truth for a lightweight master fixture."""
+    card = next(iter(instance.shard_assignments.runner_to_shard.values())).model_card
+    master._ordered_model_cards = {card.model_id: card}  # pyright: ignore[reportPrivateUsage]
+
+
 def test_action_tools_only_create_proposals() -> None:
     """The model receives proposal verbs, never direct mutating verbs."""
     names = {
@@ -180,7 +186,8 @@ def test_dispatched_proposal_survives_its_failover_recovery_window() -> None:
         update={
             "proposal_id": StewardActionProposalId("recent-dispatch"),
             "status": "dispatched",
-            "decided_at": now,
+            "decided_at": now - timedelta(minutes=6),
+            "dispatched_at": now,
             "decided_by": "trusted_fabric_operator",
             "command_id": CommandId("cancel-command"),
         }
@@ -298,6 +305,7 @@ async def test_restart_waits_for_teardown_before_replacement(
     master._system_id = SystemId("master")  # pyright: ignore[reportPrivateUsage]
     master.event_sender = event_sender
     master.download_command_sender = download_sender
+    _authorize_instance_card(master, instance)
 
     events, command_id, status = (
         await master._execute_approved_steward_action(  # pyright: ignore[reportPrivateUsage]
@@ -353,8 +361,59 @@ async def test_restart_waits_for_teardown_before_replacement(
     created = await event_receiver.receive()
     assert isinstance(changed, StewardActionProposalChanged)
     assert changed.proposal.status == "dispatched"
+    assert changed.proposal.dispatched_at == now + timedelta(seconds=31)
     assert isinstance(created, InstanceCreated)
     assert created.instance.instance_id == replacement.instance_id
+
+
+@pytest.mark.asyncio
+async def test_restart_refuses_changed_card_before_teardown() -> None:
+    """Restart preserves the live instance when captured card truth is stale."""
+    instance = _ordinary_instance()
+    now = datetime.now(tz=timezone.utc)
+    proposal = StewardActionProposal(
+        action=StewardRestartInstanceAction(instance=instance),
+        rationale="The runner is degraded.",
+        evidence=("Three consecutive probes failed.",),
+        expected_effect="Replace the ordinary model instance.",
+        created_at=now,
+        expires_at=now + timedelta(minutes=10),
+    )
+    approved = proposal.model_copy(
+        update={
+            "status": "approved",
+            "decided_at": now,
+            "decided_by": "trusted_fabric_operator",
+            "command_id": CommandId("teardown-command"),
+        }
+    )
+    event_sender, event_receiver = channel[Event]()
+    download_sender, _ = channel[ForwarderDownloadCommand]()
+    master = object.__new__(Master)
+    master.state = State(
+        instances={instance.instance_id: instance},
+        steward_action_proposals={proposal.proposal_id: approved},
+    )
+    master._ordered_steward_proposals = {proposal.proposal_id: approved}  # pyright: ignore[reportPrivateUsage]
+    master._ordered_model_cards = {  # pyright: ignore[reportPrivateUsage]
+        instance.shard_assignments.model_id: None
+    }
+    master._steward_restart_teardown_issued = set()  # pyright: ignore[reportPrivateUsage]
+    master._steward_dispatched_effect_issued = set()  # pyright: ignore[reportPrivateUsage]
+    master._steward_reserved_placements = {}  # pyright: ignore[reportPrivateUsage]
+    master.event_sender = event_sender
+    master.download_command_sender = download_sender
+
+    await master._resume_approved_steward_restarts(now)  # pyright: ignore[reportPrivateUsage]
+
+    changed = await event_receiver.receive()
+    assert isinstance(changed, StewardActionProposalChanged)
+    assert changed.proposal.status == "failed"
+    assert "identity no longer matches" in (changed.proposal.outcome or "")
+    assert master.state.instances == {instance.instance_id: instance}
+    with anyio.move_on_after(0.01) as no_teardown:
+        await event_receiver.receive()
+    assert no_teardown.cancel_called
 
 
 @pytest.mark.asyncio
@@ -392,6 +451,7 @@ async def test_approved_restart_reissues_teardown_once_after_master_failover() -
     master._system_id = SystemId("promoted-master")  # pyright: ignore[reportPrivateUsage]
     master.event_sender = event_sender
     master.download_command_sender = download_sender
+    _authorize_instance_card(master, instance)
 
     await master._resume_approved_steward_restarts(now)  # pyright: ignore[reportPrivateUsage]
 
@@ -516,7 +576,8 @@ async def test_dispatched_restart_reissues_exact_replacement_after_failover(
         created_at=now - timedelta(minutes=1),
         expires_at=now + timedelta(minutes=9),
         status="dispatched",
-        decided_at=now - timedelta(seconds=30),
+        decided_at=now - timedelta(minutes=4, seconds=59),
+        dispatched_at=now - timedelta(seconds=30),
         decided_by="trusted_fabric_operator",
         command_id=CommandId(str(replacement_id)),
     )
@@ -540,6 +601,7 @@ async def test_dispatched_restart_reissues_exact_replacement_after_failover(
     master._system_id = SystemId("promoted-master")  # pyright: ignore[reportPrivateUsage]
     master.event_sender = event_sender
     master.download_command_sender = download_sender
+    _authorize_instance_card(master, original)
 
     def place_exact_command(
         command: PlaceInstance, current_instances: object
@@ -722,6 +784,76 @@ async def test_place_approvals_reserve_capacity_before_state_echo(
     assert len(second_events) == 1
     assert isinstance(first_events[0], InstanceCreated)
     assert isinstance(second_events[0], InstanceCreated)
+
+
+@pytest.mark.asyncio
+async def test_restart_replacements_reserve_capacity_before_state_echo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Back-to-back restart replacements include earlier reserved capacity."""
+    template = _ordinary_instance()
+    second_original = template.model_copy(
+        update={"instance_id": InstanceId("second-original-instance")}
+    )
+    now = datetime.now(tz=timezone.utc)
+
+    def proposal(instance: MlxRingInstance) -> StewardActionProposal:
+        return StewardActionProposal(
+            action=StewardRestartInstanceAction(instance=instance),
+            rationale="The runner is degraded.",
+            evidence=("Three consecutive probes failed.",),
+            expected_effect="Replace the ordinary model instance.",
+            created_at=now - timedelta(minutes=1),
+            expires_at=now + timedelta(minutes=9),
+            status="approved",
+            decided_at=now - timedelta(seconds=30),
+            decided_by="trusted_fabric_operator",
+        )
+
+    first = proposal(template)
+    second = proposal(second_original)
+    event_sender, _ = channel[Event]()
+    download_sender, _ = channel[ForwarderDownloadCommand]()
+    master = object.__new__(Master)
+    master.state = State(
+        steward_action_proposals={
+            first.proposal_id: first,
+            second.proposal_id: second,
+        }
+    )
+    master._ordered_steward_proposals = {  # pyright: ignore[reportPrivateUsage]
+        first.proposal_id: first,
+        second.proposal_id: second,
+    }
+    master._steward_restart_teardown_issued = set()  # pyright: ignore[reportPrivateUsage]
+    master._steward_dispatched_effect_issued = set()  # pyright: ignore[reportPrivateUsage]
+    master._steward_reserved_placements = {}  # pyright: ignore[reportPrivateUsage]
+    master._recently_freed_bytes = {}  # pyright: ignore[reportPrivateUsage]
+    master._telemetry_view = TelemetryView()  # pyright: ignore[reportPrivateUsage]
+    master._model_trust_approvals = set()  # pyright: ignore[reportPrivateUsage]
+    master._system_id = SystemId("master")  # pyright: ignore[reportPrivateUsage]
+    master.event_sender = event_sender
+    master.download_command_sender = download_sender
+    _authorize_instance_card(master, template)
+    observed_counts: list[int] = []
+
+    def reserve_restart(
+        command: PlaceInstance,
+        current_instances: object,
+    ) -> dict[InstanceId, MlxRingInstance]:
+        assert isinstance(current_instances, dict)
+        typed_current = cast("dict[InstanceId, MlxRingInstance]", current_instances)
+        observed_counts.append(len(typed_current))
+        replacement = template.model_copy(
+            update={"instance_id": InstanceId(str(command.command_id))}
+        )
+        return {**typed_current, replacement.instance_id: replacement}
+
+    monkeypatch.setattr(master, "_place_for_steward_action", reserve_restart)
+    await master._resume_approved_steward_restarts(now)  # pyright: ignore[reportPrivateUsage]
+
+    assert observed_counts == [0, 1]
+    assert len(master._steward_reserved_placements) == 2  # pyright: ignore[reportPrivateUsage]
 
 
 @pytest.mark.asyncio

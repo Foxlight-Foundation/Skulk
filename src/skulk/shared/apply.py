@@ -140,7 +140,11 @@ def event_apply(event: Event, state: State) -> State:
             # Retain the newest bounded audit window without discarding work
             # that a promoted master can still recover.
             if len(proposals) > 128:
-                as_of = event.proposal.decided_at or event.proposal.created_at
+                as_of = (
+                    event.proposal.dispatched_at
+                    or event.proposal.decided_at
+                    or event.proposal.created_at
+                )
                 terminal = sorted(
                     (
                         proposal

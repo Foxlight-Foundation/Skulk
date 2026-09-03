@@ -366,14 +366,15 @@ truth before reusing existing typed action paths. Place approvals reserve
 capacity before State echoes; cancellation carries the observed attempt to the
 worker for final identity validation and is forwarded only after durable
 approval and dispatch-arm echoes. System roles are never
-eligible. Stop and restart cleanup waits for the replicated decision. Restart
+eligible. Stop teardown and restart teardown wait for the replicated decision;
+restart revalidates captured model-card truth before teardown. Restart
 is two-phase: `approved` durably arms teardown, then the planner
 waits for replicated deletion plus released-capacity telemetry before placing
 the captured intent, failing after five minutes. 32 pending and a 128-record
 audit target bound state while actionable recovery records are retained.
 `dispatched` means command acceptance, not completion; the
 master publishes terminal expiry when deadlines pass. A promoted master
-reconciles dispatched proposals for five minutes and reissues a missing exact
+reconciles dispatched proposals for five minutes from dispatch and reissues a missing exact
 command effect once.
 `SKULK_FABRIC_CAPABILITIES_DISABLE=1` is
 the global master-side kill switch; there is no autonomous approval policy.

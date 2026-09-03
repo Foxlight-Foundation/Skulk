@@ -1268,6 +1268,10 @@ class Master:
             return [], delete_command.command_id, "dispatched"
 
         assert isinstance(action, StewardRestartInstanceAction)
+        replacement_command = replacement_command_for_download_failed_instance(
+            action.instance, frozenset()
+        )
+        self._require_ordered_place_instance_card(replacement_command)
         return [], delete_command.command_id, "approved"
 
     def _prune_ordered_steward_action_proposals(self) -> None:
@@ -1390,6 +1394,25 @@ class Master:
                 elif proposal_id in self._steward_restart_teardown_issued:
                     continue
                 else:
+                    replacement_command = (
+                        replacement_command_for_download_failed_instance(
+                            action.instance, frozenset()
+                        )
+                    )
+                    try:
+                        self._require_ordered_place_instance_card(replacement_command)
+                    except PlacementModelCardIdentityError as error:
+                        failed = proposal.model_copy(
+                            update={
+                                "status": "failed",
+                                "outcome": str(error)[:1024],
+                            }
+                        )
+                        self._ordered_steward_proposals[proposal_id] = failed
+                        await self.event_sender.send(
+                            StewardActionProposalChanged(proposal=failed)
+                        )
+                        continue
                     # A promoted master can inherit the durable approval before
                     # inheriting its predecessor's deletion. Reissue the exact
                     # teardown once; its instance identity makes this safe and
@@ -1420,9 +1443,30 @@ class Master:
                     action.instance, frozenset()
                 )
                 try:
+                    self._require_ordered_place_instance_card(replace_command)
+                    ordered_instances = dict(self.state.instances)
+                    for reservation in self._steward_reserved_placements.values():
+                        ordered_instances.update(reservation)
                     replacement = self._place_for_steward_action(
-                        replace_command, self.state.instances
+                        replace_command, ordered_instances
                     )
+                    self._steward_reserved_placements[proposal_id] = {
+                        instance_id: instance
+                        for instance_id, instance in replacement.items()
+                        if instance_id not in ordered_instances
+                    }
+                except PlacementModelCardIdentityError as error:
+                    failed = proposal.model_copy(
+                        update={
+                            "status": "failed",
+                            "outcome": str(error)[:1024],
+                        }
+                    )
+                    self._ordered_steward_proposals[proposal_id] = failed
+                    await self.event_sender.send(
+                        StewardActionProposalChanged(proposal=failed)
+                    )
+                    continue
                 except PlacementError:
                     # Teardown and memory telemetry converge independently. A
                     # normal large model is temporarily unplaceable until the
@@ -1451,6 +1495,7 @@ class Master:
                 dispatched = proposal.model_copy(
                     update={
                         "status": "dispatched",
+                        "dispatched_at": now,
                         "command_id": replace_command.command_id,
                         "outcome": (
                             "Restart replacement was dispatched after teardown "
@@ -1465,7 +1510,7 @@ class Master:
                     StewardActionProposalChanged(proposal=dispatched)
                 )
                 for event in get_transition_events(
-                    self.state.instances, replacement, self.state.tasks
+                    ordered_instances, replacement, self.state.tasks
                 ):
                     await self.event_sender.send(event)
                 continue
@@ -1486,9 +1531,12 @@ class Master:
         for proposal_id, proposal in tuple(self._ordered_steward_proposals.items()):
             if (
                 proposal.status != "dispatched"
-                or proposal.decided_at is None
                 or proposal.command_id is None
-                or now > proposal.decided_at + timedelta(minutes=5)
+                or (
+                    (dispatch_started_at := proposal.dispatched_at or proposal.decided_at)
+                    is None
+                )
+                or now > dispatch_started_at + timedelta(minutes=5)
                 or proposal_id in self._steward_dispatched_effect_issued
             ):
                 continue
@@ -1615,6 +1663,12 @@ class Master:
                             raise ValueError(
                                 "The dispatched restart intent no longer matches current state"
                             )
+                        replacement_command = (
+                            replacement_command_for_download_failed_instance(
+                                action.instance, frozenset()
+                            ).model_copy(update={"command_id": proposal.command_id})
+                        )
+                        self._require_ordered_place_instance_card(replacement_command)
                         if proposal_id in self._steward_restart_teardown_issued:
                             continue
                         after_delete = delete_instance(
@@ -1640,9 +1694,17 @@ class Master:
                             action.instance, frozenset()
                         ).model_copy(update={"command_id": proposal.command_id})
                     )
+                    ordered_instances = dict(self.state.instances)
+                    for reservation in self._steward_reserved_placements.values():
+                        ordered_instances.update(reservation)
                     replacement = self._place_for_steward_action(
-                        replacement_command, self.state.instances
+                        replacement_command, ordered_instances
                     )
+                    self._steward_reserved_placements[proposal_id] = {
+                        instance_id: instance
+                        for instance_id, instance in replacement.items()
+                        if instance_id not in ordered_instances
+                    }
                     self._steward_dispatched_effect_issued.add(proposal_id)
                     for cancel_command in cancel_unnecessary_downloads(
                         replacement, self._effective_downloads()
@@ -1654,9 +1716,18 @@ class Master:
                         )
                     events = list(
                         get_transition_events(
-                            self.state.instances, replacement, self.state.tasks
+                            ordered_instances, replacement, self.state.tasks
                         )
                     )
+            except PlacementModelCardIdentityError as error:
+                failed = proposal.model_copy(
+                    update={"status": "failed", "outcome": str(error)[:1024]}
+                )
+                self._ordered_steward_proposals[proposal_id] = failed
+                await self.event_sender.send(
+                    StewardActionProposalChanged(proposal=failed)
+                )
+                continue
             except PlacementError:
                 # Capacity telemetry can lag the state seed after promotion.
                 # Retry on a later planning tick within the bounded window.
@@ -1708,6 +1779,7 @@ class Master:
             dispatched = proposal.model_copy(
                 update={
                     "status": "dispatched",
+                    "dispatched_at": datetime.now(tz=timezone.utc),
                     "outcome": (
                         "Approved cancellation was durably armed for exact-attempt "
                         "dispatch."
@@ -2356,6 +2428,11 @@ class Master:
                                         update={
                                             "status": action_status,
                                             "decided_at": now,
+                                            "dispatched_at": (
+                                                now
+                                                if action_status == "dispatched"
+                                                else None
+                                            ),
                                             "decided_by": command.decided_by,
                                             "command_id": action_command_id,
                                             "outcome": (

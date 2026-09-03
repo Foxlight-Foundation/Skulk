@@ -893,16 +893,19 @@ before replicated State echoes them, preventing duplicate capacity claims.
 Download cancellation carries the observed attempt identity through the
 download command; the worker rejects it if a newer attempt is active. It is
 forwarded only after both its approval and armed dispatch audit are durable.
-Stop and restart cleanup also waits for the replicated decision. Restart is a
+Stop teardown and restart teardown both wait for the replicated decision.
+Restart also revalidates the captured model-card identity before removing the
+live instance. Restart is a
 two-phase transition: `approved` durably arms the exact teardown, and the
 planning loop re-places the captured intent only after
 replicated deletion and live capacity converge, with a five-minute bound.
+Back-to-back restart replacements reserve capacity before their State echo.
 `dispatched` records command acceptance, not asynchronous completion. A
 32-pending admission bound, 128-record audit target (with actionable recovery
 records retained past it), ten-minute
 harness expiry, and `SKULK_FABRIC_CAPABILITIES_DISABLE=1` master kill switch
 bound the feature. The master publishes terminal expiry when a deadline passes.
-For five minutes after a dispatch, a promoted master reconciles the proposal's
+For five minutes from the separate dispatch timestamp, a promoted master reconciles the proposal's
 exact command identity against replicated state and reissues a missing effect
 once, closing the failover window between proposal and action events.
 This release has no autonomous approval or per-action grant policy.

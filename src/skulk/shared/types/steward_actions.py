@@ -126,6 +126,10 @@ class StewardActionProposal(FrozenModel):
         default=None,
         description="UTC approval or rejection time.",
     )
+    dispatched_at: datetime | None = Field(
+        default=None,
+        description="UTC time when recoverable action dispatch began.",
+    )
     decided_by: str | None = Field(
         default=None,
         max_length=128,
@@ -141,7 +145,9 @@ class StewardActionProposal(FrozenModel):
         description="Bounded execution outcome or refusal explanation.",
     )
 
-    @field_validator("created_at", "expires_at", "decided_at", mode="before")
+    @field_validator(
+        "created_at", "expires_at", "decided_at", "dispatched_at", mode="before"
+    )
     @classmethod
     def _coerce_datetime(cls, value: object) -> object:
         """Restore strict datetimes from JSON event-log snapshots."""
@@ -160,7 +166,12 @@ class StewardActionProposal(FrozenModel):
     @model_validator(mode="after")
     def _validate_proposal_contract(self) -> Self:
         """Reject ambiguous clocks and unbounded operator-visible evidence."""
-        timestamps = (self.created_at, self.expires_at, self.decided_at)
+        timestamps = (
+            self.created_at,
+            self.expires_at,
+            self.decided_at,
+            self.dispatched_at,
+        )
         if any(
             value is not None
             and (value.tzinfo is None or value.utcoffset() is None)
@@ -188,6 +199,7 @@ def steward_action_proposal_is_prunable(
     if proposal.status != "dispatched":
         return True
     return (
-        proposal.decided_at is not None
-        and as_of > proposal.decided_at + timedelta(minutes=5)
+        (dispatch_started_at := proposal.dispatched_at or proposal.decided_at)
+        is not None
+        and as_of > dispatch_started_at + timedelta(minutes=5)
     )

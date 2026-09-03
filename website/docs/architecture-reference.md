@@ -159,7 +159,8 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   `CancelDownload` for final worker-side rejection of a replaced attempt,
   blocks system roles, and
   translates approval into existing place/delete/replacement/download command
-  paths. Stop and restart cleanup waits for the replicated decision. Restart is
+  paths. Stop teardown and restart teardown wait for the replicated decision,
+  and restart revalidates its captured model-card identity before teardown. Restart is
   two-phase: `approved` durably arms teardown; after the deletion event and
   released-capacity telemetry converge, the planning loop
   dispatches the captured placement intent or fails it after five minutes.
@@ -168,7 +169,8 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   even when that temporarily exceeds the target. The master accepts at most a
   15-minute proposal lifetime and publishes terminal expiry on deadline.
   `dispatched` means command acceptance, not lifecycle completion. A promoted
-  master reconciles dispatched proposals for five minutes and reissues a
+  master reconciles dispatched proposals for five minutes from their separate
+  dispatch timestamp and reissues a
   missing exact command effect once. `SKULK_FABRIC_CAPABILITIES_DISABLE=1` is a master-side
   global fail-closed kill switch. No autonomous approval or per-action grants
   yet.
