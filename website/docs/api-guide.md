@@ -1923,9 +1923,12 @@ When intelligent-fabric mode is enabled in the cluster configuration
 steward) placed as a hidden system instance. The steward investigates the
 cluster through a bounded tool surface and answers operator questions. Its
 read tools return evidence; its basic-action tools can only create inert,
-expiring proposals. The model never receives a direct mutating tool, and a
-separately authenticated operator must approve the exact proposal before the
-master can dispatch it. `steward` remains the internal role and compatibility
+expiring proposals. Read-only questions remain available to ordinary clients,
+but the server exposes proposal-creation tools to the model only when the chat
+request has trusted-fabric or authenticated operator-gateway mutation authority.
+The model never receives a direct mutating tool, and a separately authenticated
+operator must approve the exact proposal before the master can dispatch it.
+`steward` remains the internal role and compatibility
 identifier, but operator surfaces present this cognition as Skulk itself rather
 than as a separate assistant or character.
 
@@ -1948,6 +1951,10 @@ Semantics of the reserved id:
   bundle; `run_doctor` also requires `node_name` and returns the selected
   node's bounded doctor findings. Both resolve only unique live friendly names
   and refuse missing or ambiguous targets rather than exposing node IDs.
+- Ordinary clients receive the same read tools and may ask diagnostic or
+  advisory questions. The four proposal tools are included only for a direct
+  trusted-fabric request or an authenticated operator-gateway request; this
+  prevents public chat access from filling the bounded proposal queue.
 - The tool trace is returned as reasoning content: in streaming responses,
   each tool step arrives as a `reasoning_content` delta while the
   investigation runs, followed by the answer as `content`; non-streaming

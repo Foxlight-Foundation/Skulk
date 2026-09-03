@@ -130,6 +130,35 @@ def test_action_tools_only_create_proposals() -> None:
     assert "restart_model" not in names
 
 
+def test_untrusted_steward_tools_are_observation_only() -> None:
+    """A chat request without mutation authority cannot expose proposal tools."""
+    names = {
+        cast("dict[str, object]", item["function"])["name"]
+        for item in steward_tool_definitions(include_proposals=False)
+    }
+
+    assert "get_cluster_state" in names
+    assert not {
+        "propose_place_model",
+        "propose_stop_model",
+        "propose_restart_model",
+        "propose_cancel_download",
+    } & names
+
+
+@pytest.mark.asyncio
+async def test_untrusted_harness_refuses_hallucinated_proposal_call() -> None:
+    """Defense in depth rejects a proposal call absent from the tool schema."""
+    harness = StewardHarness(cast("API", object()), proposals_allowed=False)
+
+    result = cast(
+        "dict[str, object]",
+        json.loads(await harness.execute_tool("propose_stop_model", {})),
+    )
+
+    assert "requires operator mutation authority" in str(result["error"])
+
+
 @pytest.mark.asyncio
 async def test_harness_proposal_is_inert_until_separate_decision() -> None:
     """Creating a proposal submits only proposal state and reports no execution."""
@@ -272,6 +301,77 @@ async def test_cancel_approval_rejects_a_replacement_download_attempt() -> None:
     with anyio.move_on_after(0.01) as dispatch_scope:
         await download_receiver.receive()
     assert dispatch_scope.cancel_called
+
+
+@pytest.mark.asyncio
+async def test_stop_approval_rejects_replaced_instance_state() -> None:
+    """A reused instance id cannot redirect an approval to new placement truth."""
+    reviewed = _ordinary_instance()
+    replacement = reviewed.model_copy(update={"ephemeral_port": 52416})
+    now = datetime.now(tz=timezone.utc)
+    proposal = StewardActionProposal(
+        action=StewardStopInstanceAction(instance=reviewed),
+        rationale="The instance is no longer required.",
+        evidence=("No active workload requires the instance.",),
+        expected_effect="Stop the reviewed ordinary model instance.",
+        created_at=now,
+        expires_at=now + timedelta(minutes=10),
+    )
+    master = object.__new__(Master)
+    master.state = State(instances={replacement.instance_id: replacement})
+    master._ordered_steward_proposals = {proposal.proposal_id: proposal}  # pyright: ignore[reportPrivateUsage]
+
+    with pytest.raises(ValueError, match="intent no longer matches"):
+        await master._execute_approved_steward_action(proposal)  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("candidate_kind", ["stop", "restart"])
+async def test_stop_and_restart_approvals_share_target_reservation(
+    candidate_kind: str,
+) -> None:
+    """An approved lifecycle action prevents a second action on its target."""
+    instance = _ordinary_instance()
+    now = datetime.now(tz=timezone.utc)
+    candidate_action = (
+        StewardStopInstanceAction(instance=instance)
+        if candidate_kind == "stop"
+        else StewardRestartInstanceAction(instance=instance)
+    )
+    competing_action = (
+        StewardRestartInstanceAction(instance=instance)
+        if candidate_kind == "stop"
+        else StewardStopInstanceAction(instance=instance)
+    )
+    candidate = StewardActionProposal(
+        action=candidate_action,
+        rationale="The instance needs lifecycle work.",
+        evidence=("The exact instance was reviewed.",),
+        expected_effect="Apply the reviewed lifecycle action.",
+        created_at=now,
+        expires_at=now + timedelta(minutes=10),
+    )
+    competing = StewardActionProposal(
+        action=competing_action,
+        rationale="Another lifecycle action was approved first.",
+        evidence=("The exact instance was reviewed.",),
+        expected_effect="Apply the first lifecycle action.",
+        created_at=now,
+        expires_at=now + timedelta(minutes=10),
+        status="approved",
+        decided_at=now,
+        decided_by="trusted_fabric_operator",
+        command_id=CommandId("reserved-command"),
+    )
+    master = object.__new__(Master)
+    master.state = State(instances={instance.instance_id: instance})
+    master._ordered_steward_proposals = {  # pyright: ignore[reportPrivateUsage]
+        candidate.proposal_id: candidate,
+        competing.proposal_id: competing,
+    }
+
+    with pytest.raises(ValueError, match="already owns this instance"):
+        await master._execute_approved_steward_action(candidate)  # pyright: ignore[reportPrivateUsage]
 
 
 @pytest.mark.asyncio
@@ -478,8 +578,7 @@ async def test_stop_cleanup_waits_for_replicated_dispatch(
     now = datetime.now(tz=timezone.utc)
     proposal = StewardActionProposal(
         action=StewardStopInstanceAction(
-            instance_id=instance.instance_id,
-            model_id=model_id,
+            instance=instance,
         ),
         rationale="The instance is no longer required.",
         evidence=("No active workload requires the instance.",),
@@ -661,8 +760,7 @@ async def test_dispatched_place_and_stop_reissue_after_master_failover(
     )
     stop_proposal = StewardActionProposal(
         action=StewardStopInstanceAction(
-            instance_id=original.instance_id,
-            model_id=card.model_id,
+            instance=original,
         ),
         rationale="The instance is no longer required.",
         evidence=("No active workload requires the instance.",),

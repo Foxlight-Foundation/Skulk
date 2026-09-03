@@ -146,8 +146,10 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   version-correct by construction, per the no-knowledge-in-weights
   doctrine). Proposal tools: `propose_place_model`, `propose_stop_model`,
   `propose_restart_model`, and `propose_cancel_download`. They create inert
-  ten-minute proposals only; the model has no direct mutating verb. 6000-char
-  tool-result bound, 8 steps/turn.
+  ten-minute proposals only and are supplied to the model only when the HTTP
+  request passes the operator mutation guard; read-only steward chat remains
+  available without that authority. The model has no direct mutating verb.
+  6000-char tool-result bound, 8 steps/turn.
 - Basic-action authority: exact action unions live in
   `shared/types/steward_actions.py`; `ProposeStewardAction` and
   `DecideStewardAction` ride `COMMANDS`; `StewardActionProposalChanged` is the
@@ -159,7 +161,9 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   `CancelDownload` for final worker-side rejection of a replaced attempt,
   blocks system roles, and
   translates approval into existing place/delete/replacement/download command
-  paths. Stop teardown and restart teardown wait for the replicated decision,
+  paths. Stop and restart capture complete instance state and share one target
+  reservation, rejecting stale replacement state and conflicting approvals.
+  Stop teardown and restart teardown wait for the replicated decision,
   and restart revalidates its captured model-card identity before teardown. Restart is
   two-phase: `approved` durably arms teardown; after the deletion event and
   released-capacity telemetry converge, the planning loop

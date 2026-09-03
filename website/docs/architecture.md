@@ -849,7 +849,8 @@ envelopes, complete diagnostics and doctor results for any named node, the
 model catalog, and a
 search over Skulk's own bundled documentation so what-is and how-to
 questions are answered from the shipped docs rather than model priors), plus
-four inert proposal tools for place, stop, restart, and cancel-download,
+four inert proposal tools for place, stop, restart, and cancel-download when
+the originating HTTP request has operator mutation authority,
 and an investigation loop of up to eight tool calls per turn. Tool steps stream to
 the client as reasoning content while the investigation runs, followed by
 the answer; client-supplied tool definitions are rejected, and client system
@@ -890,6 +891,9 @@ placement, instance-role, and download truth before translating the action into
 the existing typed command machinery. System placements remain outside the
 action surface. Back-to-back place approvals reserve their computed instances
 before replicated State echoes them, preventing duplicate capacity claims.
+Stop and restart proposals capture the complete reviewed instance state, and
+approval refuses a replacement under the same identity or another approved
+stop/restart action that already owns the target.
 Download cancellation carries the observed attempt identity through the
 download command; the worker rejects it if a newer attempt is active. It is
 forwarded only after both its approval and armed dispatch audit are durable.

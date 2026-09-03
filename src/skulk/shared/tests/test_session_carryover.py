@@ -15,9 +15,10 @@ from skulk.shared.types.profiling import NodeNetworkInfo
 from skulk.shared.types.state import State
 from skulk.shared.types.steward_actions import (
     StewardActionProposal,
-    StewardStopInstanceAction,
+    StewardCancelDownloadAction,
 )
 from skulk.shared.types.worker.downloads import (
+    DownloadAttemptId,
     DownloadCompleted,
     DownloadOngoing,
 )
@@ -85,9 +86,11 @@ def test_carries_steward_action_recovery_truth() -> None:
     """Master promotion preserves actionable steward proposal state."""
     now = datetime(2026, 9, 3, 8, 0, tzinfo=timezone.utc)
     proposal = StewardActionProposal(
-        action=StewardStopInstanceAction(
-            instance_id=InstanceId("ordinary-instance"),
+        action=StewardCancelDownloadAction(
+            node_id=NodeId("worker"),
+            node_name="Worker",
             model_id=ModelId("org/model"),
+            attempt_id=DownloadAttemptId("attempt"),
         ),
         rationale="The instance is no longer required.",
         evidence=("No active workload requires the instance.",),

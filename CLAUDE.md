@@ -356,7 +356,9 @@ envelopes/per-node diagnostics and doctor/catalog), with state normalized into e
 node facts, non-overlapping operator placement/ready/terminal lifecycle
 buckets, a separate internal-service bucket, and explicitly historical
 terminal failures), plus inert ten-minute proposal tools for place, stop,
-restart, and cancel-download. The model has no direct mutating tool.
+restart, and cancel-download. Proposal tools are supplied only when the chat
+request has operator mutation authority; read-only steward chat remains broadly
+available. The model has no direct mutating tool.
 `ProposeStewardAction` / `DecideStewardAction` are serialized by the master;
 `StewardActionProposalChanged` replicates the bounded audit. The dashboard uses
 `GET /v1/steward/proposals` and the separately authorized
@@ -367,7 +369,9 @@ capacity before State echoes; cancellation carries the observed attempt to the
 worker for final identity validation and is forwarded only after durable
 approval and dispatch-arm echoes. System roles are never
 eligible. Stop teardown and restart teardown wait for the replicated decision;
-restart revalidates captured model-card truth before teardown. Restart
+both capture the complete reviewed instance state and share one target
+reservation, so stale replacements and conflicting stop/restart approvals are
+refused. Restart revalidates captured model-card truth before teardown. Restart
 is two-phase: `approved` durably arms teardown, then the planner
 waits for replicated deletion plus released-capacity telemetry before placing
 the captured intent, failing after five minutes. 32 pending and a 128-record

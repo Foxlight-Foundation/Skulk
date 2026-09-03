@@ -2282,9 +2282,11 @@ class API:
                 "models are rejected before command dispatch. The reserved model id "
                 "'skulk/steward' selects the intelligent-fabric steward and answers 404 when "
                 "that mode is disabled, or 503 with the steward status payload while the "
-                "steward is still being placed, staged, or loaded."
+                "steward is still being placed, staged, or loaded. Steward observation is "
+                "available to ordinary clients, but proposal-creation tools are exposed only "
+                "to requests with operator mutation authority."
             ),
-        )(self.chat_completions)
+        )(self.chat_completions_route)
         self.app.post(
             "/v1/embeddings",
             tags=["Compatibility APIs"],
@@ -3604,7 +3606,10 @@ class API:
         return self.state.instances[instance_id]
 
     async def _steward_chat_completions(
-        self, payload: ChatCompletionRequest
+        self,
+        payload: ChatCompletionRequest,
+        *,
+        proposals_allowed: bool = True,
     ) -> StreamingResponse:
         """Serve the steward through the standard chat-completions surface.
 
@@ -3699,7 +3704,7 @@ class API:
                 detail=detail,
                 headers={"Retry-After": str(STEWARD_RETRY_AFTER_SECONDS)},
             )
-        harness = StewardHarness(self)
+        harness = StewardHarness(self, proposals_allowed=proposals_allowed)
         command_id = CommandId()
         history, system_prompt, task_params = await self._steward_extension_transform(
             history, stream=payload.stream
@@ -5355,8 +5360,28 @@ class API:
             raise
         return command
 
+    async def chat_completions_route(
+        self, payload: ChatCompletionRequest, request: Request
+    ) -> StreamingResponse:
+        """Serve chat completions with request-scoped steward proposal authority.
+
+        Args:
+            payload: OpenAI-compatible chat completion request.
+            request: HTTP request used to determine operator mutation authority.
+
+        Returns:
+            A streaming or collected chat-completions response.
+        """
+        return await self.chat_completions(
+            payload,
+            steward_proposals_allowed=self._operator_mutation_allowed(request),
+        )
+
     async def chat_completions(
-        self, payload: ChatCompletionRequest
+        self,
+        payload: ChatCompletionRequest,
+        *,
+        steward_proposals_allowed: bool = True,
     ) -> StreamingResponse:
         """OpenAI Chat Completions API - adapter."""
         if str(payload.model) == STEWARD_VIRTUAL_MODEL_ID:
@@ -5364,7 +5389,10 @@ class API:
             # server-side investigation loop answers, with its tool trace
             # streamed as reasoning content. Checked before card resolution
             # so no repository of the same name can shadow it.
-            return await self._steward_chat_completions(payload)
+            return await self._steward_chat_completions(
+                payload,
+                proposals_allowed=steward_proposals_allowed,
+            )
         resolved_model = await self._resolve_and_validate_text_model(payload.model)
         model_card = await self._get_running_model_card(resolved_model)
         task_params = await chat_request_to_text_generation(
@@ -9041,6 +9069,15 @@ class API:
                 "authenticated operator-gateway credential"
             ),
         )
+
+    @classmethod
+    def _operator_mutation_allowed(cls, request: Request) -> bool:
+        """Return whether a request may originate steward proposals."""
+        try:
+            cls._require_operator_mutation(request)
+        except HTTPException:
+            return False
+        return True
 
     @classmethod
     def _require_exact_card_qualification_mutation(cls, request: Request) -> bool:

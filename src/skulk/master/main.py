@@ -1235,16 +1235,8 @@ class Master:
             )
             return [], command.command_id, "approved"
 
-        instance_id = (
-            action.instance_id
-            if isinstance(action, StewardStopInstanceAction)
-            else action.instance.instance_id
-        )
-        model_id = (
-            action.model_id
-            if isinstance(action, StewardStopInstanceAction)
-            else action.instance.shard_assignments.model_id
-        )
+        instance_id = action.instance.instance_id
+        model_id = action.instance.shard_assignments.model_id
         instance = self.state.instances.get(instance_id)
         if instance is None:
             raise ValueError("The proposed instance no longer exists")
@@ -1252,16 +1244,19 @@ class Master:
             raise ValueError("System placements cannot be changed by steward actions")
         if instance.shard_assignments.model_id != model_id:
             raise ValueError("The proposed instance now serves different model truth")
-        if isinstance(action, StewardRestartInstanceAction) and instance != action.instance:
-            raise ValueError("The proposed restart intent no longer matches current state")
-        if isinstance(action, StewardRestartInstanceAction) and any(
+        if instance != action.instance:
+            raise ValueError("The proposed instance intent no longer matches current state")
+        if any(
             other.proposal_id != proposal.proposal_id
             and other.status in {"approved", "dispatched"}
-            and isinstance(other.action, StewardRestartInstanceAction)
+            and isinstance(
+                other.action,
+                (StewardStopInstanceAction, StewardRestartInstanceAction),
+            )
             and other.action.instance.instance_id == instance_id
             for other in self._ordered_steward_proposals.values()
         ):
-            raise ValueError("Another steward restart already owns this instance")
+            raise ValueError("Another steward action already owns this instance")
 
         delete_command = DeleteInstance(instance_id=instance_id)
         if isinstance(action, StewardStopInstanceAction):
@@ -1611,7 +1606,7 @@ class Master:
                     )
                     continue
                 elif isinstance(action, StewardStopInstanceAction):
-                    instance = self.state.instances.get(action.instance_id)
+                    instance = self.state.instances.get(action.instance.instance_id)
                     if instance is None:
                         self._steward_dispatched_effect_issued.add(proposal_id)
                         for cancel_command in cancel_unnecessary_downloads(
@@ -1627,14 +1622,14 @@ class Master:
                         raise ValueError(
                             "System placements cannot be changed by steward actions"
                         )
-                    if instance.shard_assignments.model_id != action.model_id:
+                    if instance != action.instance:
                         raise ValueError(
                             "The dispatched stop intent no longer matches current state"
                         )
                     after_delete = delete_instance(
                         DeleteInstance(
                             command_id=proposal.command_id,
-                            instance_id=action.instance_id,
+                            instance_id=action.instance.instance_id,
                         ),
                         self.state.instances,
                     )

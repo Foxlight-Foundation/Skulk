@@ -186,8 +186,27 @@ Rules:
 """
 
 
-def steward_tool_definitions() -> list[dict[str, Any]]:
-    """The steward's read tools and inert proposal tools as function definitions."""
+STEWARD_PROPOSAL_TOOL_NAMES = frozenset(
+    {
+        "propose_place_model",
+        "propose_stop_model",
+        "propose_restart_model",
+        "propose_cancel_download",
+    }
+)
+
+
+def steward_tool_definitions(
+    *, include_proposals: bool = True
+) -> list[dict[str, Any]]:
+    """Return steward read tools and, when authorized, inert proposal tools.
+
+    Args:
+        include_proposals: Whether to expose proposal-creation tools to the model.
+
+    Returns:
+        OpenAI-compatible server-side function definitions for this request.
+    """
     no_args: dict[str, Any] = {"type": "object", "properties": {}, "required": []}
     proposal_context: dict[str, Any] = {
         "rationale": {
@@ -400,6 +419,7 @@ def steward_tool_definitions() -> list[dict[str, Any]]:
             "function": {"name": name, "description": desc, "parameters": params},
         }
         for name, desc, params in tools
+        if include_proposals or name not in STEWARD_PROPOSAL_TOOL_NAMES
     ]
 
 
@@ -635,7 +655,7 @@ def steward_action_proposal_view(
         target = str(action.model_card.model_id)
     elif isinstance(action, StewardStopInstanceAction):
         action_name = "stop_model"
-        target = str(action.model_id)
+        target = str(action.instance.shard_assignments.model_id)
     elif isinstance(action, StewardRestartInstanceAction):
         action_name = "restart_model"
         target = str(action.instance.shard_assignments.model_id)
@@ -1408,8 +1428,9 @@ class StewardHarness:
     to callers.
     """
 
-    def __init__(self, api: "API") -> None:
+    def __init__(self, api: "API", *, proposals_allowed: bool = True) -> None:
         self._api = api
+        self._proposals_allowed = proposals_allowed
         # The inner TextGeneration currently in flight for this turn, so an
         # abandoned stream (client disconnect, cancel button) can stop the
         # runner instead of leaving it generating for nobody.
@@ -1596,6 +1617,10 @@ class StewardHarness:
 
     async def _execute(self, name: str, arguments: dict[str, object]) -> str:
         api = self._api
+        if name in STEWARD_PROPOSAL_TOOL_NAMES and not self._proposals_allowed:
+            raise ValueError(
+                "steward proposal creation requires operator mutation authority"
+            )
         if name == "get_cluster_state":
             payload = await api.get_cluster_state()
             return steward_operator_tool_result(payload)
@@ -1811,8 +1836,7 @@ class StewardHarness:
             instance = self._unique_operator_instance(model_id)
             action = (
                 StewardStopInstanceAction(
-                    instance_id=instance.instance_id,
-                    model_id=model_id,
+                    instance=instance,
                 )
                 if name == "propose_stop_model"
                 else StewardRestartInstanceAction(
@@ -2072,7 +2096,9 @@ class StewardHarness:
         request = ChatCompletionRequest(
             model=model_id,  # type: ignore[arg-type]
             messages=messages,
-            tools=steward_tool_definitions(),
+            tools=steward_tool_definitions(
+                include_proposals=self._proposals_allowed
+            ),
             temperature=0.1,
             max_tokens=1024,
             stream=False,
