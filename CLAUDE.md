@@ -374,8 +374,9 @@ the captured intent, failing after five minutes. 32 pending and a 128-record
 audit target bound state while actionable recovery records are retained.
 `dispatched` means command acceptance, not completion; the
 master publishes terminal expiry when deadlines pass. A promoted master
-reconciles dispatched proposals for five minutes from dispatch and reissues a missing exact
-command effect once.
+inherits the bounded proposal map in the new-session seed, reconciles
+dispatched proposals for five minutes from dispatch, and reissues a missing
+exact command effect once.
 `SKULK_FABRIC_CAPABILITIES_DISABLE=1` is
 the global master-side kill switch; there is no autonomous approval policy.
 8 steps per turn, rides the

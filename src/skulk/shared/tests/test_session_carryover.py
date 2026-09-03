@@ -6,13 +6,17 @@ Pins what a promoted master inherits from the node's prior replicated state
 session's event index).
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from skulk.shared.session_carryover import seed_state_for_new_session
 from skulk.shared.topology import Topology
 from skulk.shared.types.common import ModelId, NodeId
 from skulk.shared.types.profiling import NodeNetworkInfo
 from skulk.shared.types.state import State
+from skulk.shared.types.steward_actions import (
+    StewardActionProposal,
+    StewardStopInstanceAction,
+)
 from skulk.shared.types.worker.downloads import (
     DownloadCompleted,
     DownloadOngoing,
@@ -75,6 +79,30 @@ def test_carries_bounded_instance_failure_truth() -> None:
     seed = seed_state_for_new_session(prior)
 
     assert seed.instance_failures == (failure,)
+
+
+def test_carries_steward_action_recovery_truth() -> None:
+    """Master promotion preserves actionable steward proposal state."""
+    now = datetime(2026, 9, 3, 8, 0, tzinfo=timezone.utc)
+    proposal = StewardActionProposal(
+        action=StewardStopInstanceAction(
+            instance_id=InstanceId("ordinary-instance"),
+            model_id=ModelId("org/model"),
+        ),
+        rationale="The instance is no longer required.",
+        evidence=("No active workload requires the instance.",),
+        expected_effect="Stop the ordinary model instance.",
+        created_at=now,
+        expires_at=now + timedelta(minutes=10),
+        status="dispatched",
+        decided_at=now + timedelta(seconds=1),
+        dispatched_at=now + timedelta(seconds=2),
+    )
+    prior = State(steward_action_proposals={proposal.proposal_id: proposal})
+
+    seed = seed_state_for_new_session(prior)
+
+    assert seed.steward_action_proposals == prior.steward_action_proposals
 
 
 def test_carries_only_completed_downloads():
