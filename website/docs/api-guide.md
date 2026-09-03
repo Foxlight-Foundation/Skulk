@@ -2116,7 +2116,9 @@ result. `dispatched` means the approved action was translated into and accepted
 by an existing typed placement, deletion, replacement, or download command; it
 does not claim that an asynchronous model start, stop, or download has already
 completed. For restart only, `approved` means teardown was dispatched and the
-replacement is waiting for released capacity.
+replacement is waiting for released capacity. For five minutes after any
+`dispatched` decision, a promoted master compares the proposal's exact command
+identity with replicated state and reissues a missing action effect once.
 
 Setting `SKULK_FABRIC_CAPABILITIES_DISABLE=1` on the elected master is the global
 fail-closed kill switch. It converts an otherwise valid approval into `failed`

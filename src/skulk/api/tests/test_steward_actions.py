@@ -18,9 +18,10 @@ from skulk.shared.types.commands import (
     DecideStewardAction,
     ForwarderCommand,
     ForwarderDownloadCommand,
+    PlaceInstance,
     ProposeStewardAction,
 )
-from skulk.shared.types.common import ModelId, NodeId, SessionId, SystemId
+from skulk.shared.types.common import CommandId, ModelId, NodeId, SessionId, SystemId
 from skulk.shared.types.events import (
     Event,
     GlobalForwarderEvent,
@@ -37,17 +38,20 @@ from skulk.shared.types.state_sync import StateSyncMessage
 from skulk.shared.types.steward_actions import (
     StewardActionProposal,
     StewardCancelDownloadAction,
+    StewardPlaceModelAction,
     StewardRestartInstanceAction,
+    StewardStopInstanceAction,
 )
 from skulk.shared.types.telemetry import NodeTelemetry, TelemetryView
 from skulk.shared.types.worker.downloads import DownloadPending
 from skulk.shared.types.worker.instances import (
     InstanceId,
+    InstanceMeta,
     MlxRingInstance,
     ShardAssignments,
 )
 from skulk.shared.types.worker.runners import RunnerId
-from skulk.shared.types.worker.shards import PipelineShardMetadata
+from skulk.shared.types.worker.shards import PipelineShardMetadata, Sharding
 from skulk.utils.channels import channel
 
 
@@ -189,6 +193,7 @@ async def test_restart_waits_for_teardown_before_replacement(
         proposal.proposal_id: proposal
     }
     master._steward_restart_teardown_issued = set()  # pyright: ignore[reportPrivateUsage]
+    master._steward_dispatched_effect_issued = set()  # pyright: ignore[reportPrivateUsage]
     master._recently_freed_bytes = {}  # pyright: ignore[reportPrivateUsage]
     master._telemetry_view = TelemetryView()  # pyright: ignore[reportPrivateUsage]
     master._model_trust_approvals = set()  # pyright: ignore[reportPrivateUsage]
@@ -267,6 +272,7 @@ async def test_approved_restart_reissues_teardown_once_after_master_failover() -
         proposal.proposal_id: proposal
     }
     master._steward_restart_teardown_issued = set()  # pyright: ignore[reportPrivateUsage]
+    master._steward_dispatched_effect_issued = set()  # pyright: ignore[reportPrivateUsage]
     master._recently_freed_bytes = {}  # pyright: ignore[reportPrivateUsage]
     master._telemetry_view = TelemetryView()  # pyright: ignore[reportPrivateUsage]
     master._model_trust_approvals = set()  # pyright: ignore[reportPrivateUsage]
@@ -287,6 +293,142 @@ async def test_approved_restart_reissues_teardown_once_after_master_failover() -
     with anyio.move_on_after(0.01) as receive_scope:
         await event_receiver.receive()
     assert receive_scope.cancel_called
+
+
+@pytest.mark.asyncio
+async def test_dispatched_restart_reissues_exact_replacement_after_failover(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A promoted master recovers the action-event dispatch window."""
+    original = _ordinary_instance()
+    replacement_id = InstanceId("replacement-command")
+    now = datetime.now(tz=timezone.utc)
+    proposal = StewardActionProposal(
+        action=StewardRestartInstanceAction(instance=original),
+        rationale="The runner is degraded.",
+        evidence=("Three consecutive probes failed.",),
+        expected_effect="Replace the ordinary model instance.",
+        created_at=now - timedelta(minutes=1),
+        expires_at=now + timedelta(minutes=9),
+        status="dispatched",
+        decided_at=now - timedelta(seconds=30),
+        decided_by="trusted_fabric_operator",
+        command_id=CommandId(str(replacement_id)),
+    )
+    replacement = original.model_copy(update={"instance_id": replacement_id})
+    event_sender, event_receiver = channel[Event]()
+    download_sender, _ = channel[ForwarderDownloadCommand]()
+    master = object.__new__(Master)
+    master.state = State()
+    master._ordered_steward_proposals = {  # pyright: ignore[reportPrivateUsage]
+        proposal.proposal_id: proposal
+    }
+    master._steward_restart_teardown_issued = set()  # pyright: ignore[reportPrivateUsage]
+    master._steward_dispatched_effect_issued = set()  # pyright: ignore[reportPrivateUsage]
+    master._recently_freed_bytes = {}  # pyright: ignore[reportPrivateUsage]
+    master._telemetry_view = TelemetryView()  # pyright: ignore[reportPrivateUsage]
+    master._model_trust_approvals = set()  # pyright: ignore[reportPrivateUsage]
+    master._system_id = SystemId("promoted-master")  # pyright: ignore[reportPrivateUsage]
+    master.event_sender = event_sender
+    master.download_command_sender = download_sender
+
+    def place_exact_command(
+        command: PlaceInstance, current_instances: object
+    ) -> dict[InstanceId, MlxRingInstance]:
+        assert command.command_id == proposal.command_id
+        assert current_instances == {}
+        return {replacement.instance_id: replacement}
+
+    monkeypatch.setattr(master, "_place_for_steward_action", place_exact_command)
+    await master._reconcile_dispatched_steward_actions(now)  # pyright: ignore[reportPrivateUsage]
+
+    created = await event_receiver.receive()
+    assert isinstance(created, InstanceCreated)
+    assert created.instance.instance_id == replacement_id
+    assert proposal.proposal_id in master._steward_dispatched_effect_issued  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.asyncio
+async def test_dispatched_place_and_stop_reissue_after_master_failover(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A promoted master recovers missing place and stop transition events."""
+    original = _ordinary_instance()
+    card = next(iter(original.shard_assignments.runner_to_shard.values())).model_card
+    now = datetime.now(tz=timezone.utc)
+    place_command_id = CommandId("place-command")
+    place_proposal = StewardActionProposal(
+        action=StewardPlaceModelAction(
+            model_card=card,
+            sharding=Sharding.Pipeline,
+            instance_meta=InstanceMeta.MlxRing,
+            min_nodes=1,
+        ),
+        rationale="Capacity is required.",
+        evidence=("The requested model has no active instance.",),
+        expected_effect="Place the requested model.",
+        created_at=now - timedelta(minutes=1),
+        expires_at=now + timedelta(minutes=9),
+        status="dispatched",
+        decided_at=now - timedelta(seconds=30),
+        decided_by="trusted_fabric_operator",
+        command_id=place_command_id,
+    )
+    stop_proposal = StewardActionProposal(
+        action=StewardStopInstanceAction(
+            instance_id=original.instance_id,
+            model_id=card.model_id,
+        ),
+        rationale="The instance is no longer required.",
+        evidence=("No active workload requires the instance.",),
+        expected_effect="Stop the ordinary model instance.",
+        created_at=now - timedelta(minutes=1),
+        expires_at=now + timedelta(minutes=9),
+        status="dispatched",
+        decided_at=now - timedelta(seconds=30),
+        decided_by="trusted_fabric_operator",
+        command_id=CommandId("stop-command"),
+    )
+    replacement = original.model_copy(
+        update={"instance_id": InstanceId(str(place_command_id))}
+    )
+    event_sender, event_receiver = channel[Event]()
+    download_sender, _ = channel[ForwarderDownloadCommand]()
+    master = object.__new__(Master)
+    master.state = State(instances={original.instance_id: original})
+    master._ordered_steward_proposals = {  # pyright: ignore[reportPrivateUsage]
+        place_proposal.proposal_id: place_proposal,
+        stop_proposal.proposal_id: stop_proposal,
+    }
+    master._steward_restart_teardown_issued = set()  # pyright: ignore[reportPrivateUsage]
+    master._steward_dispatched_effect_issued = set()  # pyright: ignore[reportPrivateUsage]
+    master._recently_freed_bytes = {}  # pyright: ignore[reportPrivateUsage]
+    master._telemetry_view = TelemetryView()  # pyright: ignore[reportPrivateUsage]
+    master._model_trust_approvals = set()  # pyright: ignore[reportPrivateUsage]
+    master._system_id = SystemId("promoted-master")  # pyright: ignore[reportPrivateUsage]
+    master.event_sender = event_sender
+    master.download_command_sender = download_sender
+
+    def place_exact_command(
+        command: PlaceInstance,
+        current_instances: object,
+    ) -> dict[InstanceId, MlxRingInstance]:
+        assert command.command_id == place_command_id
+        assert current_instances == {original.instance_id: original}
+        return {
+            original.instance_id: original,
+            replacement.instance_id: replacement,
+        }
+
+    monkeypatch.setattr(master, "_place_for_steward_action", place_exact_command)
+    await master._reconcile_dispatched_steward_actions(now)  # pyright: ignore[reportPrivateUsage]
+
+    created = await event_receiver.receive()
+    deleted = await event_receiver.receive()
+    assert isinstance(created, InstanceCreated)
+    assert created.instance.instance_id == replacement.instance_id
+    assert isinstance(deleted, InstanceDeleted)
+    assert deleted.instance_id == original.instance_id
 
 
 @pytest.mark.asyncio

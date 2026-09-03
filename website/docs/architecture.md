@@ -895,6 +895,9 @@ replicated deletion and live capacity converge, with a five-minute bound.
 32-pending admission bound, 128-record audit bound, ten-minute
 harness expiry, and `SKULK_FABRIC_CAPABILITIES_DISABLE=1` master kill switch
 bound the feature. The master publishes terminal expiry when a deadline passes.
+For five minutes after a dispatch, a promoted master reconciles the proposal's
+exact command identity against replicated state and reissues a missing effect
+once, closing the failover window between proposal and action events.
 This release has no autonomous approval or per-action grant policy.
 
 The normalized operator record is deliberately deterministic: the resident

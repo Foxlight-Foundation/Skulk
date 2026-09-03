@@ -367,7 +367,9 @@ eligible. Restart is two-phase: `approved` dispatches teardown, then the planner
 waits for replicated deletion plus released-capacity telemetry before placing
 the captured intent, failing after five minutes. 32 pending and 128 retained
 records bound state. `dispatched` means command acceptance, not completion; the
-master publishes terminal expiry when deadlines pass.
+master publishes terminal expiry when deadlines pass. A promoted master
+reconciles dispatched proposals for five minutes and reissues a missing exact
+command effect once.
 `SKULK_FABRIC_CAPABILITIES_DISABLE=1` is
 the global master-side kill switch; there is no autonomous approval policy.
 8 steps per turn, rides the
