@@ -2068,7 +2068,8 @@ Each response item contains:
 - `proposal_id`, `created_at`, and `expires_at`;
 - `action`: `place_model`, `stop_model`, `restart_model`, or `cancel_download`;
 - a safe `target` label, `rationale`, bounded `evidence`, and `expected_effect`;
-- `status`: `pending`, `dispatched`, `rejected`, `expired`, or `failed`; and
+- `status`: `pending`, `approved`, `dispatched`, `rejected`, `expired`, or
+  `failed`; and
 - optional `decided_at`, safe actor class in `decided_by`, and `outcome`.
 
 Proposals created by the built-in harness expire after ten minutes. The master
@@ -2083,8 +2084,10 @@ The action set is intentionally narrow:
 - `place_model` revalidates exact authorized catalog truth and runs the normal
   placement planner. Normal placement also stages missing shards.
 - `stop_model` deletes the exact ordinary instance selected when proposed.
-- `restart_model` replaces that exact ordinary instance while preserving its
-  placement intent.
+- `restart_model` first tears down that exact ordinary instance, records
+  `approved`, then re-places the captured intent only after replicated deletion
+  and live capacity truth show that the old allocation has been released. It
+  fails if replacement capacity does not become available within five minutes.
 - `cancel_download` cancels the exact model transfer on the selected named
   node, only while it remains active.
 
@@ -2112,7 +2115,8 @@ path. Clients should poll `GET /v1/steward/proposals` for the master-authoritati
 result. `dispatched` means the approved action was translated into and accepted
 by an existing typed placement, deletion, replacement, or download command; it
 does not claim that an asynchronous model start, stop, or download has already
-completed.
+completed. For restart only, `approved` means teardown was dispatched and the
+replacement is waiting for released capacity.
 
 Setting `SKULK_FABRIC_CAPABILITIES_DISABLE=1` on the elected master is the global
 fail-closed kill switch. It converts an otherwise valid approval into `failed`

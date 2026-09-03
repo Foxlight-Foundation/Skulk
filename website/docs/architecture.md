@@ -888,8 +888,11 @@ operator approves or rejects the proposal through the API; only the elected
 master can consume the single-use approval, and it revalidates current catalog,
 placement, instance-role, and download truth before translating the action into
 the existing typed command machinery. System placements remain outside the
-action surface. `dispatched` records command acceptance, not asynchronous
-completion. A 32-pending admission bound, 128-record audit bound, ten-minute
+action surface. Restart is a two-phase transition: `approved` dispatches the
+exact teardown, and the planning loop re-places the captured intent only after
+replicated deletion and live capacity converge, with a five-minute bound.
+`dispatched` records command acceptance, not asynchronous completion. A
+32-pending admission bound, 128-record audit bound, ten-minute
 harness expiry, and `SKULK_FABRIC_CAPABILITIES_DISABLE=1` master kill switch
 bound the feature. The master publishes terminal expiry when a deadline passes.
 This release has no autonomous approval or per-action grant policy.

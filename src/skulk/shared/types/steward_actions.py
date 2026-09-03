@@ -7,7 +7,7 @@ from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from skulk.shared.models.model_cards import ModelCard
 from skulk.shared.types.common import CommandId, Id, ModelId, NodeId
-from skulk.shared.types.worker.instances import InstanceId, InstanceMeta
+from skulk.shared.types.worker.instances import Instance, InstanceId, InstanceMeta
 from skulk.shared.types.worker.shards import Sharding
 from skulk.utils.pydantic_ext import FrozenModel, TaggedModel
 
@@ -53,8 +53,9 @@ class StewardRestartInstanceAction(TaggedModel):
 
     model_config = ConfigDict(frozen=True, strict=True)
 
-    instance_id: InstanceId = Field(description="Exact ordinary instance to replace.")
-    model_id: ModelId = Field(description="Model identity shown to the approving operator.")
+    instance: Instance = Field(
+        description="Exact ordinary instance and placement intent to replace."
+    )
 
 
 class StewardCancelDownloadAction(TaggedModel):
@@ -80,6 +81,7 @@ StewardBasicAction = (
 
 StewardActionProposalStatus = Literal[
     "pending",
+    "approved",
     "dispatched",
     "rejected",
     "expired",

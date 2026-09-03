@@ -156,7 +156,10 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   trusted-fabric or operator-gateway mutation guard. The master serializes each
   decision once, revalidates current target truth, blocks system roles, and
   translates approval into existing place/delete/replacement/download command
-  paths. Bounds: 32 pending, 128 retained; the master accepts at most a
+  paths. Restart is two-phase: `approved` records teardown dispatch; after the
+  deletion event and released-capacity telemetry converge, the planning loop
+  dispatches the captured placement intent or fails it after five minutes.
+  Bounds: 32 pending, 128 retained; the master accepts at most a
   15-minute proposal lifetime and publishes terminal expiry on deadline.
   `dispatched` means command acceptance, not
   lifecycle completion. `SKULK_FABRIC_CAPABILITIES_DISABLE=1` is a master-side

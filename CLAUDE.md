@@ -363,9 +363,12 @@ restart, and cancel-download. The model has no direct mutating tool.
 `POST /v1/steward/proposals/{proposal_id}/decision`. Approval is single-use and
 revalidates current catalog, placement, ordinary-instance, and live-download
 truth before reusing existing typed action paths. System roles are never
-eligible; 32 pending and 128 retained records bound state. `dispatched` means
-command acceptance, not completion; the master publishes terminal expiry when
-deadlines pass. `SKULK_FABRIC_CAPABILITIES_DISABLE=1` is
+eligible. Restart is two-phase: `approved` dispatches teardown, then the planner
+waits for replicated deletion plus released-capacity telemetry before placing
+the captured intent, failing after five minutes. 32 pending and 128 retained
+records bound state. `dispatched` means command acceptance, not completion; the
+master publishes terminal expiry when deadlines pass.
+`SKULK_FABRIC_CAPABILITIES_DISABLE=1` is
 the global master-side kill switch; there is no autonomous approval policy.
 8 steps per turn, rides the
 normal chat dispatch path. Client surface = reserved virtual

@@ -11,6 +11,7 @@ from skulk.api.main import API
 from skulk.api.steward import StewardHarness, steward_tool_definitions
 from skulk.master.main import Master
 from skulk.shared.apply import apply
+from skulk.shared.models.model_cards import ModelCard, ModelTask
 from skulk.shared.tests.conftest import get_pipeline_shard_metadata
 from skulk.shared.types.commands import (
     CancelDownload,
@@ -24,18 +25,29 @@ from skulk.shared.types.events import (
     Event,
     GlobalForwarderEvent,
     IndexedEvent,
+    InstanceCreated,
+    InstanceDeleted,
     LocalForwarderEvent,
     StateSnapshotHydrated,
     StewardActionProposalChanged,
 )
+from skulk.shared.types.memory import Memory
 from skulk.shared.types.state import State
 from skulk.shared.types.state_sync import StateSyncMessage
 from skulk.shared.types.steward_actions import (
     StewardActionProposal,
     StewardCancelDownloadAction,
+    StewardRestartInstanceAction,
 )
 from skulk.shared.types.telemetry import NodeTelemetry, TelemetryView
 from skulk.shared.types.worker.downloads import DownloadPending
+from skulk.shared.types.worker.instances import (
+    InstanceId,
+    MlxRingInstance,
+    ShardAssignments,
+)
+from skulk.shared.types.worker.runners import RunnerId
+from skulk.shared.types.worker.shards import PipelineShardMetadata
 from skulk.utils.channels import channel
 
 
@@ -52,6 +64,39 @@ def _cancel_proposal() -> StewardActionProposal:
         expected_effect="Stop the active transfer without deleting stored data.",
         created_at=now,
         expires_at=now + timedelta(minutes=10),
+    )
+
+
+def _ordinary_instance() -> MlxRingInstance:
+    """Return one minimal ordinary placement for restart lifecycle tests."""
+    node_id = NodeId("worker")
+    runner_id = RunnerId("runner")
+    card = ModelCard(
+        model_id=ModelId("org/restart-model"),
+        storage_size=Memory.from_gb(8),
+        n_layers=4,
+        hidden_size=8,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+    )
+    return MlxRingInstance(
+        instance_id=InstanceId("original-instance"),
+        shard_assignments=ShardAssignments(
+            model_id=card.model_id,
+            runner_to_shard={
+                runner_id: PipelineShardMetadata(
+                    model_card=card,
+                    device_rank=0,
+                    world_size=1,
+                    start_layer=0,
+                    end_layer=4,
+                    n_layers=4,
+                )
+            },
+            node_to_runner={node_id: runner_id},
+        ),
+        hosts_by_node={node_id: []},
+        ephemeral_port=52415,
     )
 
 
@@ -119,6 +164,129 @@ def test_proposal_event_round_trips_through_replicated_state() -> None:
     restored = State.model_validate_json(state.model_dump_json(by_alias=True))
 
     assert restored.steward_action_proposals[proposal.proposal_id] == proposal
+
+
+@pytest.mark.asyncio
+async def test_restart_waits_for_teardown_before_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Restart dispatches deletion first and resumes from approved audit state."""
+    instance = _ordinary_instance()
+    now = datetime.now(tz=timezone.utc)
+    proposal = StewardActionProposal(
+        action=StewardRestartInstanceAction(instance=instance),
+        rationale="The runner is degraded.",
+        evidence=("Three consecutive probes failed.",),
+        expected_effect="Replace the ordinary model instance.",
+        created_at=now,
+        expires_at=now + timedelta(minutes=10),
+    )
+    event_sender, event_receiver = channel[Event]()
+    download_sender, _ = channel[ForwarderDownloadCommand]()
+    master = object.__new__(Master)
+    master.state = State(instances={instance.instance_id: instance})
+    master._ordered_steward_proposals = {  # pyright: ignore[reportPrivateUsage]
+        proposal.proposal_id: proposal
+    }
+    master._steward_restart_teardown_issued = set()  # pyright: ignore[reportPrivateUsage]
+    master._recently_freed_bytes = {}  # pyright: ignore[reportPrivateUsage]
+    master._telemetry_view = TelemetryView()  # pyright: ignore[reportPrivateUsage]
+    master._model_trust_approvals = set()  # pyright: ignore[reportPrivateUsage]
+    master._system_id = SystemId("master")  # pyright: ignore[reportPrivateUsage]
+    master.event_sender = event_sender
+    master.download_command_sender = download_sender
+
+    events, command_id, status = (
+        await master._execute_approved_steward_action(  # pyright: ignore[reportPrivateUsage]
+            proposal
+        )
+    )
+
+    assert status == "approved"
+    assert command_id
+    assert len(events) == 1
+    assert isinstance(events[0], InstanceDeleted)
+    assert proposal.proposal_id in master._steward_restart_teardown_issued  # pyright: ignore[reportPrivateUsage]
+
+    approved = proposal.model_copy(
+        update={
+            "status": "approved",
+            "decided_at": now,
+            "decided_by": "trusted_fabric_operator",
+            "command_id": command_id,
+        }
+    )
+    master.state = State()
+    master._ordered_steward_proposals = {  # pyright: ignore[reportPrivateUsage]
+        proposal.proposal_id: approved
+    }
+    replacement = instance.model_copy(
+        update={"instance_id": InstanceId("replacement-instance")}
+    )
+
+    def place_after_release(
+        _command: object, current_instances: object
+    ) -> dict[InstanceId, MlxRingInstance]:
+        assert current_instances == {}
+        return {replacement.instance_id: replacement}
+
+    monkeypatch.setattr(master, "_place_for_steward_action", place_after_release)
+    await master._resume_approved_steward_restarts(  # pyright: ignore[reportPrivateUsage]
+        now + timedelta(seconds=30)
+    )
+
+    changed = await event_receiver.receive()
+    created = await event_receiver.receive()
+    assert isinstance(changed, StewardActionProposalChanged)
+    assert changed.proposal.status == "dispatched"
+    assert isinstance(created, InstanceCreated)
+    assert created.instance.instance_id == replacement.instance_id
+
+
+@pytest.mark.asyncio
+async def test_approved_restart_reissues_teardown_once_after_master_failover() -> None:
+    """A promoted master resumes an approval whose delete was not replicated."""
+    instance = _ordinary_instance()
+    now = datetime.now(tz=timezone.utc)
+    proposal = StewardActionProposal(
+        action=StewardRestartInstanceAction(instance=instance),
+        rationale="The runner is degraded.",
+        evidence=("Three consecutive probes failed.",),
+        expected_effect="Replace the ordinary model instance.",
+        created_at=now - timedelta(minutes=1),
+        expires_at=now + timedelta(minutes=9),
+        status="approved",
+        decided_at=now - timedelta(seconds=30),
+        decided_by="trusted_fabric_operator",
+    )
+    event_sender, event_receiver = channel[Event]()
+    download_sender, _ = channel[ForwarderDownloadCommand]()
+    master = object.__new__(Master)
+    master.state = State(instances={instance.instance_id: instance})
+    master._ordered_steward_proposals = {  # pyright: ignore[reportPrivateUsage]
+        proposal.proposal_id: proposal
+    }
+    master._steward_restart_teardown_issued = set()  # pyright: ignore[reportPrivateUsage]
+    master._recently_freed_bytes = {}  # pyright: ignore[reportPrivateUsage]
+    master._telemetry_view = TelemetryView()  # pyright: ignore[reportPrivateUsage]
+    master._model_trust_approvals = set()  # pyright: ignore[reportPrivateUsage]
+    master._system_id = SystemId("promoted-master")  # pyright: ignore[reportPrivateUsage]
+    master.event_sender = event_sender
+    master.download_command_sender = download_sender
+
+    await master._resume_approved_steward_restarts(now)  # pyright: ignore[reportPrivateUsage]
+
+    deleted = await event_receiver.receive()
+    assert isinstance(deleted, InstanceDeleted)
+    assert deleted.instance_id == instance.instance_id
+    assert proposal.proposal_id in master._steward_restart_teardown_issued  # pyright: ignore[reportPrivateUsage]
+
+    await master._resume_approved_steward_restarts(  # pyright: ignore[reportPrivateUsage]
+        now + timedelta(seconds=1)
+    )
+    with anyio.move_on_after(0.01) as receive_scope:
+        await event_receiver.receive()
+    assert receive_scope.cancel_called
 
 
 @pytest.mark.asyncio

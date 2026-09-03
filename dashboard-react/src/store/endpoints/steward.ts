@@ -50,7 +50,7 @@ export interface StewardActionProposal {
   expected_effect: string;
   created_at: string;
   expires_at: string;
-  status: 'pending' | 'dispatched' | 'rejected' | 'expired' | 'failed';
+  status: 'pending' | 'approved' | 'dispatched' | 'rejected' | 'expired' | 'failed';
   decided_at: string | null;
   decided_by: string | null;
   outcome: string | null;

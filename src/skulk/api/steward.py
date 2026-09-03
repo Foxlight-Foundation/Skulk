@@ -638,7 +638,7 @@ def steward_action_proposal_view(
         target = str(action.model_id)
     elif isinstance(action, StewardRestartInstanceAction):
         action_name = "restart_model"
-        target = str(action.model_id)
+        target = str(action.instance.shard_assignments.model_id)
     else:
         action_name = "cancel_download"
         target = f"{action.model_id} on {action.node_name}"
@@ -1816,8 +1816,7 @@ class StewardHarness:
                 )
                 if name == "propose_stop_model"
                 else StewardRestartInstanceAction(
-                    instance_id=instance.instance_id,
-                    model_id=model_id,
+                    instance=instance,
                 )
             )
             return await self._propose_action(action, arguments)

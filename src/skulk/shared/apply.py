@@ -136,14 +136,14 @@ def event_apply(event: Event, state: State) -> State:
         case StewardActionProposalChanged():
             proposals = dict(state.steward_action_proposals)
             proposals[event.proposal.proposal_id] = event.proposal
-            # Retain the newest bounded audit window. Pending proposals are
-            # never pruned, so an approval cannot disappear before expiry.
+            # Retain the newest bounded audit window. Pending and approved
+            # two-phase restarts are never pruned before reaching a terminal state.
             if len(proposals) > 128:
                 terminal = sorted(
                     (
                         proposal
                         for proposal in proposals.values()
-                        if proposal.status != "pending"
+                        if proposal.status not in {"pending", "approved"}
                     ),
                     key=lambda proposal: proposal.created_at,
                 )
