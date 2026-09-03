@@ -608,9 +608,35 @@ async def test_master_approves_a_proposal_exactly_once(
         assert isinstance(changed, StewardActionProposalChanged)
         assert changed.proposal.status == "approved", changed.proposal.outcome
         await master._arm_approved_steward_download_cancellations()  # pyright: ignore[reportPrivateUsage]
+        with anyio.move_on_after(0.1) as premature_arm_wait:
+            await event_receiver.receive()
+        assert premature_arm_wait.cancel_called
+
+        master.state = master.state.model_copy(
+            update={
+                "steward_action_proposals": {
+                    proposal.proposal_id: changed.proposal
+                }
+            }
+        )
+        await master._arm_approved_steward_download_cancellations()  # pyright: ignore[reportPrivateUsage]
         armed = await event_receiver.receive()
         assert isinstance(armed, StewardActionProposalChanged)
         assert armed.proposal.status == "dispatched"
+        await master._reconcile_dispatched_steward_actions(  # pyright: ignore[reportPrivateUsage]
+            datetime.now(tz=timezone.utc)
+        )
+        with anyio.move_on_after(0.1) as premature_dispatch_wait:
+            await download_receiver.receive()
+        assert premature_dispatch_wait.cancel_called
+
+        master.state = master.state.model_copy(
+            update={
+                "steward_action_proposals": {
+                    proposal.proposal_id: armed.proposal
+                }
+            }
+        )
         await master._reconcile_dispatched_steward_actions(  # pyright: ignore[reportPrivateUsage]
             datetime.now(tz=timezone.utc)
         )

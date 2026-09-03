@@ -1546,6 +1546,18 @@ class Master:
                         )
                     )
                 elif isinstance(action, StewardCancelDownloadAction):
+                    replicated_proposal = self.state.steward_action_proposals.get(
+                        proposal_id
+                    )
+                    if (
+                        replicated_proposal is None
+                        or replicated_proposal.status != "dispatched"
+                    ):
+                        # Cancellation is an external side effect rather than a
+                        # state transition. Wait until the dispatch intent has
+                        # round-tripped through the indexed event log so a new
+                        # master can recover it before forwarding the command.
+                        continue
                     node_downloads = self._effective_downloads().get(
                         action.node_id, ()
                     )
@@ -1689,6 +1701,15 @@ class Master:
             if proposal.status != "approved" or not isinstance(
                 proposal.action, StewardCancelDownloadAction
             ):
+                continue
+            replicated_proposal = self.state.steward_action_proposals.get(proposal_id)
+            if (
+                replicated_proposal is None
+                or replicated_proposal.status != "approved"
+            ):
+                # The local proposal map is updated before its event is indexed.
+                # Only arm the cancellation after approval is recoverable from
+                # replicated state, including across master promotion.
                 continue
             if os.getenv("SKULK_FABRIC_CAPABILITIES_DISABLE") == "1":
                 failed = proposal.model_copy(
@@ -2982,8 +3003,8 @@ class Master:
             # tick, a new master re-establishes the steward after election
             # without any dedicated failover machinery.
             if topology_settled:
-                await self._arm_approved_steward_download_cancellations()
                 await self._reconcile_dispatched_steward_actions(now)
+                await self._arm_approved_steward_download_cancellations()
                 await self._resume_approved_steward_restarts(now)
                 await self._maintain_steward_placement()
 
