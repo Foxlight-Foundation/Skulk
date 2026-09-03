@@ -2120,10 +2120,10 @@ by an existing typed placement, deletion, replacement, or download command; it
 does not claim that an asynchronous model start, stop, or download has already
 completed. For restart only, `approved` means the decision is durable and the
 planning loop will dispatch teardown before waiting for released capacity.
-Stop and restart teardown and their resulting download cleanup wait for the
-replicated decision before they are forwarded. Restart also revalidates its
-captured model-card identity before teardown. For five minutes after the
-separate timestamp of any `dispatched` transition, a promoted master compares the proposal's exact command
+Stop and restart download cleanup likewise waits for the replicated decision
+before it is forwarded. Restart also revalidates its captured model-card
+identity before teardown. For five minutes after the separate timestamp of any
+`dispatched` transition, a promoted master compares the proposal's exact command
 identity with replicated state and reissues a missing action effect once.
 Download cancellation uses an additional durable step: the replicated
 `approved` decision is indexed before dispatch is armed. The armed `dispatched`
