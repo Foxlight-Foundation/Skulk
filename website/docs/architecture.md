@@ -1345,7 +1345,10 @@ WebSocket pool. Explicit version-two provisioning instead stores a delegated
 P-256 connector key, relay region, and authority epoch in that same encrypted
 journal. Before each control connection, Skulk durably advances its connector
 generation, sends a five-minute signed fencing lease, maintains canonical
-five-second heartbeats, and renews the lease. An app still opens the same
+relay-negotiated heartbeats (currently five seconds), and renews the lease.
+Data sockets remain bound to the initial hello proof throughout that control
+session; lease renewal extends authority without changing the data binding.
+An app still opens the same
 `/v1/carrier/app` URL and may begin inner TLS immediately; each relay
 `OpenConnection` causes Skulk to claim one independent data WebSocket, send the
 required connection acknowledgement, and bridge it to the same loopback TLS

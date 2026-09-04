@@ -240,6 +240,8 @@ bounded outbound lane pool or version two establishes its signed control
 connector. A version-two gateway admits at most 64 active data lanes before
 allocating a task or opening relay and loopback sockets; excess requests remain
 unclaimed and expire at the relay.
+Signed lease renewal retains the initial control-session proof for data-socket
+admission, so new connections continue to open after a renewal without re-pairing.
 The operator listener defaults to loopback port `52417`, separate from Skulk's
 default `52416` fabric transport.
 

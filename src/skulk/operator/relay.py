@@ -103,23 +103,18 @@ class _OperatorRelayDrainRequestedError(OperatorRelayError):
 
 @final
 class _ConnectorAdmissionProof:
-    """Hold the latest signed lease proof for subsequent data sockets."""
+    """Hold the immutable hello proof binding data sockets to one control session."""
 
     def __init__(self, proof: bytes) -> None:
-        """Create the shared control/data admission boundary."""
+        """Create the fixed control/data admission boundary."""
 
         self._header_value = _encode_base64url(proof)
 
     @property
     def header_value(self) -> str:
-        """Return the current portable admission header value."""
+        """Return the original portable admission header value."""
 
         return self._header_value
-
-    def replace(self, proof: bytes) -> None:
-        """Publish one successfully transmitted renewal proof."""
-
-        self._header_value = _encode_base64url(proof)
 
 
 @final
@@ -911,7 +906,6 @@ class OperatorGatewayConnector:
                     connector_id=connector_id,
                     epoch=epoch,
                     connector_generation=connector_generation,
-                    admission=admission,
                 ),
                 name="operator-relay-control-heartbeat",
             )
@@ -1005,7 +999,6 @@ class OperatorGatewayConnector:
         connector_id: bytes,
         epoch: bytes,
         connector_generation: int,
-        admission: _ConnectorAdmissionProof,
     ) -> None:
         """Send canonical heartbeats and renew the signed lease before expiry."""
 
@@ -1019,7 +1012,7 @@ class OperatorGatewayConnector:
             )
             if time.monotonic() < next_renewal:
                 continue
-            renewal, lease = build_lease_renewal(
+            renewal, _lease = build_lease_renewal(
                 private_key=private_key,
                 authority_key_id=key_id,
                 routing_locator=locator,
@@ -1031,7 +1024,9 @@ class OperatorGatewayConnector:
                 now_unix_millis=self._now_unix_millis(),
             )
             await websocket.send_bytes(renewal)
-            admission.replace(lease.proof)
+            # Renewal extends authority, while data admission stays bound to
+            # the original hello proof until this control socket ends. Changing
+            # that proof would break pending upgrades and all subsequent opens.
             next_renewal = time.monotonic() + _CONNECTOR_RENEWAL_SECONDS
 
     async def _serve_reserved_on_demand_data(
