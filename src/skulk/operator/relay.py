@@ -154,6 +154,18 @@ class OperatorRelayProvisioning(FrozenModel):
         description="Opaque unpadded base64url sixteen-byte authority epoch.",
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def _preserve_legacy_lane_default(cls, data: object) -> object:
+        """Apply the historical four-lane default only to version one."""
+
+        if not isinstance(data, dict):
+            return data
+        values = cast(dict[str, object], data)
+        if values.get("version") == 1 and "lane_count" not in values:
+            return {**values, "lane_count": 4}
+        return cast(object, values)
+
     @field_validator("routing_locator", "app_carrier_credential", "gateway_carrier_credential")
     @classmethod
     def _carrier_values_are_canonical(cls, value: str) -> str:
@@ -1003,9 +1015,17 @@ class OperatorGatewayConnector:
         finally:
             if writer is not None:
                 writer.close()
-                await writer.wait_closed()
+                try:
+                    await writer.wait_closed()
+                except OSError:
+                    logger.debug(
+                        "Operator relay loopback connection reset during cleanup"
+                    )
             if websocket is not None:
-                await websocket.close()
+                try:
+                    await websocket.close()
+                except (aiohttp.ClientError, OSError):
+                    logger.debug("Operator relay data socket failed during cleanup")
 
     def _gateway_headers(self) -> dict[str, str]:
         """Return role-separated outer carrier authentication headers."""

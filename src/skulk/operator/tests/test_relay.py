@@ -50,6 +50,7 @@ from skulk.operator.relay import (
     OperatorRelayConfigurationRepository,
     OperatorRelayProvisioning,
 )
+from skulk.operator.relay_protocol import OpenConnection
 
 
 def _base64url(value: bytes) -> str:
@@ -273,6 +274,17 @@ def test_relay_configuration_is_encrypted_and_returned_once_with_pairing(
     assert provisioning.gateway_carrier_credential not in exchange.model_dump_json()
     with pytest.raises(OperatorRelayAlreadyConfiguredError):
         service.configure_relay(provisioning, operator_api_port=52416)
+
+
+def test_version_one_provisioning_preserves_four_lane_default() -> None:
+    """A legacy provisioning document may continue to omit lane_count."""
+
+    payload = _provisioning().model_dump(mode="json", exclude={"lane_count"})
+
+    provisioning = OperatorRelayProvisioning.model_validate(payload)
+
+    assert provisioning.version == 1
+    assert provisioning.lane_count == 4
 
 
 def test_on_demand_configuration_reserves_generations_before_use(
@@ -943,6 +955,108 @@ async def test_on_demand_connector_backs_off_after_clean_control_close(
         connector_task.cancel()
         with suppress(asyncio.CancelledError):
             await connector_task
+
+
+@final
+class _ResettingStreamWriter:
+    """Minimal loopback writer that resets while awaiting final close."""
+
+    def write(self, _payload: bytes) -> None:
+        """Accept an opaque test payload."""
+
+    async def drain(self) -> None:
+        """Model successful forwarding before the peer reset."""
+
+    def close(self) -> None:
+        """Begin the synthetic close."""
+
+    async def wait_closed(self) -> None:
+        """Raise the reset observed on an abruptly disconnected loopback peer."""
+
+        raise ConnectionResetError("synthetic loopback reset")
+
+
+@final
+class _ClosingDataWebSocket:
+    """Minimal data WebSocket for cleanup containment testing."""
+
+    def __init__(self) -> None:
+        self.sent: list[bytes] = []
+        self.closed = False
+
+    def __aiter__(self) -> "_ClosingDataWebSocket":
+        """Return the empty synthetic message stream."""
+
+        return self
+
+    async def __anext__(self) -> object:
+        """End the synthetic message stream immediately."""
+
+        raise StopAsyncIteration
+
+    async def send_bytes(self, payload: bytes) -> None:
+        """Record the connection-accepted control frame."""
+
+        self.sent.append(payload)
+
+    async def close(self) -> None:
+        """Record that cleanup closed the outer data socket."""
+
+        self.closed = True
+
+
+@final
+class _DataWebSocketSession:
+    """Return one synthetic on-demand data WebSocket."""
+
+    def __init__(self, websocket: _ClosingDataWebSocket) -> None:
+        self._websocket = websocket
+
+    async def ws_connect(self, *_args: object, **_kwargs: object) -> object:
+        """Return the synthetic connection without network access."""
+
+        return self._websocket
+
+
+@pytest.mark.asyncio
+async def test_on_demand_data_cleanup_contains_loopback_reset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A loopback reset cannot escape and cancel the connector task group."""
+
+    service, _ = _service(tmp_path)
+    configuration = service.configure_relay(
+        _on_demand_provisioning(),
+        operator_api_port=52416,
+    )
+    connector = OperatorGatewayConnector(
+        configuration,
+        next_connector_generation=service.reserve_relay_connector_generation,
+    )
+    reader = asyncio.StreamReader()
+    reader.feed_eof()
+    writer = _ResettingStreamWriter()
+    websocket = _ClosingDataWebSocket()
+
+    async def open_loopback(
+        _host: str,
+        _port: int,
+    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        """Return the stream whose close acknowledgement resets."""
+
+        return reader, cast(asyncio.StreamWriter, cast(object, writer))
+
+    monkeypatch.setattr(asyncio, "open_connection", open_loopback)
+
+    await connector._serve_on_demand_data(  # pyright: ignore[reportPrivateUsage]
+        cast(aiohttp.ClientSession, cast(object, _DataWebSocketSession(websocket))),
+        OpenConnection(connection_id=bytes(16), timeout_millis=1_000),
+        "test-admission",
+    )
+
+    assert websocket.sent
+    assert websocket.closed
 
 
 async def _start_socket_server(

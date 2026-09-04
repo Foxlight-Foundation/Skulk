@@ -223,7 +223,8 @@ uv run skulk operator configure-relay \
 The Foxlight relay service supplies one of two generated schemas. Version one
 contains `version`, `app_websocket_url`, `gateway_websocket_url`,
 `routing_locator`, distinct `app_carrier_credential` and
-`gateway_carrier_credential` values, and `lane_count`. Version two keeps the
+`gateway_carrier_credential` values, and optional `lane_count` (default four).
+Version two keeps the
 same app URL, locator, and role credentials, replaces the gateway and lane
 fields with `gateway_control_websocket_url` and
 `gateway_data_websocket_url`, and adds
