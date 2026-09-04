@@ -352,9 +352,11 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   the delegated P-256 key in the encrypted authority journal, durably advances
   a `u64` connector generation before use, and proves its exact route, region,
   epoch, term, generation, and five-minute lease over one canonical SKRL control
-  WebSocket. Five-second heartbeats and signed renewal retain that authority.
+  WebSocket. Relay-negotiated heartbeats (currently five seconds) and signed
+  renewal retain that authority.
   Each `OpenConnection` is mapped to a fresh data WebSocket carrying the exact
-  connection ID and initial admission proof; its first frame is the canonical
+  connection ID and immutable initial hello proof, including after lease
+  renewal; its first frame is the canonical
   `ConnectionAccepted`, after which only opaque inner-TLS bytes are bridged to
   the existing loopback listener. The gateway admits at most 64 active data
   lanes before task or socket allocation; excess requests are left unclaimed

@@ -1043,11 +1043,11 @@ class _RenewalRecordingWebSocket:
 
 
 @pytest.mark.asyncio
-async def test_lease_renewal_publishes_new_data_admission_proof(
+async def test_lease_renewal_sends_signed_control_message(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """New data sockets use the latest proof after a control renewal."""
+    """The authority maintainer sends a heartbeat and canonical signed renewal."""
 
     service, _ = _service(tmp_path)
     configuration = service.configure_relay(
@@ -1062,10 +1062,6 @@ async def test_lease_renewal_publishes_new_data_admission_proof(
     private_key, key_id, locator, region, epoch = (
         connector._connector_authority()  # pyright: ignore[reportPrivateUsage]
     )
-    admission = relay_module._ConnectorAdmissionProof(  # pyright: ignore[reportPrivateUsage]
-        bytes(195)
-    )
-    initial_header = admission.header_value
     websocket = _RenewalRecordingWebSocket()
     monkeypatch.setattr(relay_module, "_CONNECTOR_RENEWAL_SECONDS", 0.0)
 
@@ -1080,25 +1076,27 @@ async def test_lease_renewal_publishes_new_data_admission_proof(
             connector_id=bytes(16),
             epoch=epoch,
             connector_generation=1,
-            admission=admission,
         )
     )
     try:
 
-        async def admission_was_renewed() -> None:
-            """Wait cooperatively for the maintainer to publish its lease."""
+        async def renewal_was_sent() -> None:
+            """Wait cooperatively for the maintainer to send its lease."""
 
-            while admission.header_value == initial_header:
+            while len(websocket.frames) < 2:
                 await asyncio.sleep(0.001)
 
-        await asyncio.wait_for(admission_was_renewed(), timeout=1.0)
+        await asyncio.wait_for(renewal_was_sent(), timeout=1.0)
     finally:
         renewal_task.cancel()
         with suppress(asyncio.CancelledError):
             await renewal_task
 
     assert len(websocket.frames) >= 2
-    assert admission.header_value != initial_header
+    assert _test_control_fields(websocket.frames[0])[0] == 7
+    kind, fields = _test_control_fields(websocket.frames[1])
+    assert kind == 4
+    assert len(fields[6]) > 195
 
 
 @pytest.mark.asyncio

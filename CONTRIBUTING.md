@@ -330,10 +330,16 @@ SKULK_PAIRED_RELAY_BINARY=/absolute/path/to/paired-websocket-service \
 uv run pytest src/skulk/operator/tests/test_joined_relay_integration.py
 ```
 
-The test proves QR package generation, Ed25519 device proof, credential
+The test runs both version-one warm lanes and version-two on-demand lanes with
+a binary built from reviewed relay source supporting `provision-on-demand`.
+It proves QR package generation, Ed25519 device proof, credential
 exchange, authenticated canonical `/state`, token rotation, paired-device
 listing, revocation, and rejection of revoked credentials through the actual
-opaque carrier and pinned inner TLS connection.
+opaque carrier and pinned inner TLS connection. It also opens new connections
+after a signed lease renewal and recreates both the gateway and relay while
+retaining the same app pairing material. Test listeners use generated loopback
+ports and protected temporary files. This does not prove relay-side durable
+fencing, physical-device compatibility, or hosted capacity.
 
 The live vision test is deliberately explicit because it places a real image
 through the built-in dashboard and a running model. Provide the dashboard URL,

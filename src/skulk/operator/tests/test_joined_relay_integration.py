@@ -13,7 +13,7 @@ import subprocess
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 from uuid import UUID
 
 import aiohttp
@@ -22,6 +22,7 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+import skulk.operator.relay as relay_module
 from skulk.api.main import API
 from skulk.operator.authority import EncryptedAuthorityStore
 from skulk.operator.key_provider import LocalFileAuthorityKeyProvider
@@ -39,7 +40,6 @@ from skulk.utils.channels import channel
 
 _RELAY_BINARY_ENVIRONMENT_VARIABLE = "SKULK_PAIRED_RELAY_BINARY"
 _RELAY_LOOPBACK_HOST = "127.0.0.1"
-_RELAY_LOOPBACK_PORT = 8787
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,18 +62,6 @@ def _available_loopback_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
         listener.bind((_RELAY_LOOPBACK_HOST, 0))
         return cast(tuple[str, int], listener.getsockname())[1]
-
-
-def _require_relay_port_available() -> None:
-    """Fail before provisioning if the relay's fixed dev listener is occupied."""
-
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
-            listener.bind((_RELAY_LOOPBACK_HOST, _RELAY_LOOPBACK_PORT))
-    except OSError as error:
-        pytest.fail(
-            f"loopback relay port {_RELAY_LOOPBACK_PORT} is unavailable: {error}"
-        )
 
 
 def _require_relay_binary() -> Path:
@@ -112,12 +100,13 @@ def _build_api(service: OperatorPairingService) -> API:
     )
 
 
-async def _wait_for_relay_health() -> None:
-    """Wait until the external relay process serves its health endpoint."""
+async def _wait_for_relay_health(port: int, *, ready: bool = False) -> None:
+    """Wait for process health or gateway readiness at the selected listener."""
 
-    url = f"http://{_RELAY_LOOPBACK_HOST}:{_RELAY_LOOPBACK_PORT}/healthz"
+    endpoint = "readyz" if ready else "healthz"
+    url = f"http://{_RELAY_LOOPBACK_HOST}:{port}/{endpoint}"
     async with aiohttp.ClientSession() as session:
-        for _ in range(100):
+        for _ in range(200):
             try:
                 async with session.get(url) as response:
                     if response.status == 204:
@@ -320,18 +309,45 @@ def _stop_relay_process(process: subprocess.Popen[bytes]) -> None:
 
 
 @pytest.mark.asyncio
-async def test_joined_relay_pairing_refresh_and_revocation(tmp_path: Path) -> None:
-    """Prove real relay pairing and canonical authorization without a fleet."""
+@pytest.mark.parametrize("version", [1, 2])
+async def test_joined_relay_pairing_refresh_and_revocation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    version: Literal[1, 2],
+) -> None:
+    """Prove both real relay transports, renewal, recovery, and authorization."""
 
     relay_binary = _require_relay_binary()
-    _require_relay_port_available()
+    relay_port = _available_loopback_port()
     relay_configuration_path = tmp_path / "relay.json"
     skulk_provisioning_path = tmp_path / "skulk-provisioning.json"
-    relay_origin = f"ws://{_RELAY_LOOPBACK_HOST}:{_RELAY_LOOPBACK_PORT}"
+    relay_origin = f"ws://{_RELAY_LOOPBACK_HOST}:{relay_port}"
+    renewal_sent = asyncio.Event()
+    hello_count = 0
+    original_send_bytes = aiohttp.ClientWebSocketResponse.send_bytes
+
+    async def observe_control_send(
+        websocket: aiohttp.ClientWebSocketResponse,
+        data: bytes,
+        compress: int | None = None,
+    ) -> None:
+        """Observe message kinds only after the real network send completes."""
+
+        nonlocal hello_count
+        await original_send_bytes(websocket, data, compress=compress)
+        if data[:6] == b"SKRL\x01\x01":
+            hello_count += 1
+        elif data[:6] == b"SKRL\x01\x04":
+            renewal_sent.set()
+
+    monkeypatch.setattr(aiohttp.ClientWebSocketResponse, "send_bytes", observe_control_send)
+    # Keep the actual signed wall clock and relay heartbeat; only shorten the
+    # renewal schedule so the real Rust/Python contract is exercised in seconds.
+    monkeypatch.setattr(relay_module, "_CONNECTOR_RENEWAL_SECONDS", 0.0)
     subprocess.run(
         (
             relay_binary,
-            "provision",
+            "provision" if version == 1 else "provision-on-demand",
             relay_origin,
             relay_configuration_path,
             skulk_provisioning_path,
@@ -339,6 +355,13 @@ async def test_joined_relay_pairing_refresh_and_revocation(tmp_path: Path) -> No
         check=True,
         stdout=subprocess.DEVNULL,
     )
+    # Only select the ephemeral listener in this newly generated, owner-only
+    # fixture; retain the generated credentials and all service limits.
+    relay_document = cast(
+        dict[str, object], json.loads(relay_configuration_path.read_text())
+    )
+    relay_document["bind"] = f"{_RELAY_LOOPBACK_HOST}:{relay_port}"
+    relay_configuration_path.write_text(json.dumps(relay_document))
     relay_process = subprocess.Popen(
         (relay_binary, "serve", relay_configuration_path),
         stdout=subprocess.DEVNULL,
@@ -347,7 +370,7 @@ async def test_joined_relay_pairing_refresh_and_revocation(tmp_path: Path) -> No
     gateway_task: asyncio.Task[None] | None = None
     shutdown: anyio.Event | None = None
     try:
-        await _wait_for_relay_health()
+        await _wait_for_relay_health(relay_port)
         key_provider = LocalFileAuthorityKeyProvider(tmp_path / "authority-key.bin")
         authority_store = EncryptedAuthorityStore(
             key_provider,
@@ -375,6 +398,7 @@ async def test_joined_relay_pairing_refresh_and_revocation(tmp_path: Path) -> No
         shutdown = anyio.Event()
         gateway_task = asyncio.create_task(api.run_operator_remote_access(shutdown))
         await _wait_for_operator_listener(configuration.operator_api_port)
+        await _wait_for_relay_health(relay_port, ready=True)
 
         pairing_package = pairing_service.create_session()
         assert pairing_package.as_url().startswith("skulk://pair?z=")
@@ -422,6 +446,14 @@ async def test_joined_relay_pairing_refresh_and_revocation(tmp_path: Path) -> No
         assert state.status == 200
         assert "topology" in state.body
 
+        if version == 2:
+            await asyncio.wait_for(renewal_sent.wait(), timeout=10.0)
+            renewed_state = await _request(
+                remote_access, "GET", "/state", bearer=access_token
+            )
+            assert renewed_state.status == 200
+            assert hello_count == 1, "renewal must not require control reconnection"
+
         refreshed = await _request(
             remote_access,
             "POST",
@@ -448,6 +480,47 @@ async def test_joined_relay_pairing_refresh_and_revocation(tmp_path: Path) -> No
         paired_devices = devices.body["devices"]
         assert isinstance(paired_devices, list)
         assert len(cast(list[object], paired_devices)) == 1
+
+        # Recreate gateway objects from durable storage. The existing app
+        # package and refreshed token must survive without another pairing.
+        await _stop_gateway_task(gateway_task, shutdown)
+        gateway_task = None
+        restored_store = EncryptedAuthorityStore(
+            key_provider, tmp_path / "authority.sqlite3"
+        )
+        restored_repository = OperatorRelayConfigurationRepository(
+            restored_store,
+            certificate_path=tmp_path / "operator-tls.pem",
+            private_key_path=tmp_path / "operator-tls-key.pem",
+        )
+        restored_service = OperatorPairingService(
+            restored_store, key_provider, relay_repository=restored_repository
+        )
+        api = _build_api(restored_service)
+        shutdown = anyio.Event()
+        gateway_task = asyncio.create_task(api.run_operator_remote_access(shutdown))
+        await _wait_for_operator_listener(configuration.operator_api_port)
+        await _wait_for_relay_health(relay_port, ready=True)
+        recovered_state = await _request(
+            remote_access, "GET", "/state", bearer=next_access_token
+        )
+        assert recovered_state.status == 200
+        restored_configuration = restored_repository.load()
+        assert restored_configuration is not None
+        if version == 2:
+            assert restored_configuration.connector_generation >= 2
+
+        _stop_relay_process(relay_process)
+        relay_process = subprocess.Popen(
+            (relay_binary, "serve", relay_configuration_path),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        await _wait_for_relay_health(relay_port, ready=True)
+        recovered_state = await _request(
+            remote_access, "GET", "/state", bearer=next_access_token
+        )
+        assert recovered_state.status == 200
 
         revoked = await _request(
             remote_access,
