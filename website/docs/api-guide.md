@@ -220,15 +220,23 @@ uv run skulk operator configure-relay \
   --cluster-name "Cluster"
 ```
 
-The generated version-one or explicit version-two provisioning document is supplied by the Foxlight relay service
-and contains `version`, `appWebsocketUrl`, `gatewayWebsocketUrl`,
-`routingLocator`, distinct `appCarrierCredential` and
-`gatewayCarrierCredential` values, and `laneCount`. Treat the file as a secret:
-it contains both outer carrier roles. Skulk validates exact fixed carrier paths,
-requires WSS except for loopback development, stores the route and credentials
-inside the encrypted authority journal, generates an owner-only pinned TLS
-identity, and refuses silent replacement. Restart Skulk after initial
-configuration so the designated gateway opens its bounded outbound lane pool.
+The Foxlight relay service supplies one of two generated schemas. Version one
+contains `version`, `app_websocket_url`, `gateway_websocket_url`,
+`routing_locator`, distinct `app_carrier_credential` and
+`gateway_carrier_credential` values, and `lane_count`. Version two keeps the
+same app URL, locator, and role credentials, replaces the gateway and lane
+fields with `gateway_control_websocket_url` and
+`gateway_data_websocket_url`, and adds
+`connector_authority_private_key_pkcs8`, `connector_authority_key_id`,
+`connector_region`, and `connector_authority_epoch`. Treat either file as a
+secret: both contain the outer carrier roles, and version two also contains
+delegated connector signing authority. Skulk validates exact fixed carrier
+paths, requires WSS except for loopback development, stores the route,
+credentials, and optional connector authority inside the encrypted authority
+journal, generates an owner-only pinned TLS identity, and refuses silent
+replacement. Restart Skulk after initial configuration so version one opens its
+bounded outbound lane pool or version two establishes its signed control
+connector.
 The operator listener defaults to loopback port `52417`, separate from Skulk's
 default `52416` fabric transport.
 

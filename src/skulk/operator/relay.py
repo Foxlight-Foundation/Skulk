@@ -86,6 +86,17 @@ class OperatorRelayUnavailableError(OperatorRelayError):
     """Raised when persisted relay or TLS material cannot be used safely."""
 
 
+@final
+class _OperatorRelayDrainRequestedError(OperatorRelayError):
+    """Carry one authenticated relay drain deadline into reconnect policy."""
+
+    def __init__(self, deadline_unix_millis: int) -> None:
+        """Create a safe drain signal without retaining relay-provided text."""
+
+        super().__init__("operator relay requested connector drain")
+        self.deadline_unix_millis = deadline_unix_millis
+
+
 class OperatorRelayProvisioning(FrozenModel):
     """One generated relay route delivered to the designated gateway."""
 
@@ -534,8 +545,19 @@ class OperatorRelayConfigurationRepository:
         """
 
         for _ in range(_GENERATION_RESERVATION_RETRIES):
-            configuration = self.load()
-            if configuration is None or configuration.version != 2:
+            try:
+                record, payload = self._store.read_latest_record_payload(
+                    _RELAY_RECORD_TYPE,
+                    _RELAY_RECORD_ID,
+                )
+                configuration = OperatorRelayConfiguration.model_validate_json(
+                    json.dumps(payload, separators=(",", ":"), allow_nan=False)
+                )
+            except (AuthorityNotInitializedError, ValueError) as exc:
+                raise OperatorRelayUnavailableError(
+                    "on-demand operator relay is not configured"
+                ) from exc
+            if configuration.version != 2:
                 raise OperatorRelayUnavailableError(
                     "on-demand operator relay is not configured"
                 )
@@ -545,15 +567,6 @@ class OperatorRelayConfigurationRepository:
                 )
             records = self._store.records()
             expected_commit_index = records[-1].commit_index
-            expected_record_commit_index = max(
-                (
-                    record.commit_index
-                    for record in records
-                    if record.record_type == _RELAY_RECORD_TYPE
-                    and record.record_id == _RELAY_RECORD_ID
-                ),
-                default=0,
-            )
             next_generation = configuration.connector_generation + 1
             next_configuration = configuration.model_copy(
                 update={"connector_generation": next_generation}
@@ -561,7 +574,7 @@ class OperatorRelayConfigurationRepository:
             try:
                 self._store.append(
                     expected_commit_index=expected_commit_index,
-                    expected_record_commit_index=expected_record_commit_index,
+                    expected_record_commit_index=record.commit_index,
                     authority_term=_CONNECTOR_AUTHORITY_TERM,
                     record_type=_RELAY_RECORD_TYPE,
                     record_id=_RELAY_RECORD_ID,
@@ -720,9 +733,25 @@ class OperatorGatewayConnector:
                         data_tasks,
                         connector_generation,
                     )
-                    delay = _MINIMUM_RECONNECT_SECONDS
+                    raise OperatorRelayError(
+                        "operator relay control connection ended"
+                    )
                 except asyncio.CancelledError:
                     raise
+                except _OperatorRelayDrainRequestedError as exc:
+                    drain_seconds = max(
+                        _MINIMUM_RECONNECT_SECONDS,
+                        min(
+                            300.0,
+                            (
+                                exc.deadline_unix_millis
+                                - self._now_unix_millis()
+                            )
+                            / 1_000,
+                        ),
+                    )
+                    await asyncio.sleep(drain_seconds)
+                    delay = _MINIMUM_RECONNECT_SECONDS
                 except (
                     aiohttp.ClientError,
                     OSError,
@@ -821,6 +850,8 @@ class OperatorGatewayConnector:
             for result in results:
                 if isinstance(result, asyncio.CancelledError):
                     continue
+                if isinstance(result, _OperatorRelayDrainRequestedError):
+                    raise result
                 if isinstance(result, BaseException):
                     raise OperatorRelayError(
                         "operator relay control task failed"
@@ -860,7 +891,9 @@ class OperatorGatewayConnector:
                     await websocket.send_bytes(
                         encode_drain_ack(decoded.deadline_unix_millis)
                     )
-                    return
+                    raise _OperatorRelayDrainRequestedError(
+                        decoded.deadline_unix_millis
+                    )
                 raise OperatorRelayError("operator relay sent unexpected control state")
             if message.type in {
                 aiohttp.WSMsgType.CLOSE,

@@ -10,8 +10,10 @@ import json
 import socket
 import ssl
 import struct
+import threading
 import zlib
 from collections.abc import Awaitable, Callable
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -298,6 +300,51 @@ def test_on_demand_configuration_reserves_generations_before_use(
         provisioning.connector_authority_private_key_pkcs8.encode("ascii")
         not in authority_bytes
     )
+
+
+def test_on_demand_generation_reservation_retries_concurrent_writer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Overlapping gateway starts receive distinct durable generations."""
+
+    service, repository = _service(tmp_path)
+    service.configure_relay(_on_demand_provisioning(), operator_api_port=52416)
+    store = repository._store  # pyright: ignore[reportPrivateUsage]
+    original_read = store.read_latest_record_payload
+    first_read_completed = threading.Event()
+    release_first_read = threading.Event()
+    call_lock = threading.Lock()
+    call_count = 0
+
+    def controlled_read(
+        record_type: str,
+        record_id: str,
+    ) -> tuple[object, dict[str, object]]:
+        """Pause the first reservation after its atomic record read."""
+
+        nonlocal call_count
+        result = original_read(record_type, record_id)
+        with call_lock:
+            call_count += 1
+            current_call = call_count
+        if current_call == 1:
+            first_read_completed.set()
+            assert release_first_read.wait(timeout=2.0)
+        return cast(tuple[object, dict[str, object]], result)
+
+    monkeypatch.setattr(store, "read_latest_record_payload", controlled_read)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(repository.reserve_connector_generation)
+        assert first_read_completed.wait(timeout=2.0)
+        second = executor.submit(repository.reserve_connector_generation)
+        assert second.result(timeout=2.0) == 1
+        release_first_read.set()
+        assert first.result(timeout=2.0) == 2
+
+    persisted = repository.load()
+    assert persisted is not None
+    assert persisted.connector_generation == 2
 
 
 def test_on_demand_provisioning_rejects_mismatched_connector_key() -> None:
@@ -853,6 +900,49 @@ async def test_on_demand_connector_uses_control_plus_requested_data_socket(
         await relay_runner.cleanup()
         echo_server.close()
         await echo_server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_on_demand_connector_backs_off_after_clean_control_close(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A clean relay close cannot spin through durable generations."""
+
+    service, _ = _service(tmp_path)
+    configuration = service.configure_relay(
+        _on_demand_provisioning(),
+        operator_api_port=52416,
+    )
+    generations: list[int] = []
+
+    def reserve_generation() -> int:
+        """Record every reconnect attempt made by the connector."""
+
+        generations.append(len(generations) + 1)
+        return generations[-1]
+
+    connector = OperatorGatewayConnector(
+        configuration,
+        next_connector_generation=reserve_generation,
+    )
+
+    async def close_cleanly(
+        _session: aiohttp.ClientSession,
+        _data_tasks: asyncio.TaskGroup,
+        _connector_generation: int,
+    ) -> None:
+        """Model a relay that accepts and then cleanly closes control."""
+
+    monkeypatch.setattr(connector, "_serve_control_connection", close_cleanly)
+    connector_task = asyncio.create_task(connector.run())
+    try:
+        await asyncio.sleep(0.1)
+        assert generations == [1]
+    finally:
+        connector_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await connector_task
 
 
 async def _start_socket_server(
