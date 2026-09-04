@@ -1349,8 +1349,11 @@ five-second heartbeats, and renews the lease. An app still opens the same
 `/v1/carrier/app` URL and may begin inner TLS immediately; each relay
 `OpenConnection` causes Skulk to claim one independent data WebSocket, send the
 required connection acknowledgement, and bridge it to the same loopback TLS
-listener. There are no warm data lanes in version two. The relay never receives
-the delegated private key and never terminates the inner TLS connection.
+listener. The gateway admits at most 64 concurrent version-two data lanes before
+creating a task or opening either socket; excess requests remain unclaimed and
+expire at the relay. There are no warm data lanes in version two. The relay
+never receives the delegated private key and never terminates the inner TLS
+connection.
 
 The loopback TLS listener wraps the canonical application with operator bearer
 validation: reads, model views, inference/WebSockets, mutations, and device

@@ -66,6 +66,10 @@ _CONNECTOR_AUTHORITY_TERM: Final = 1
 _CONNECTOR_RENEWAL_SECONDS: Final = 120.0
 _CONTROL_HELLO_TIMEOUT_SECONDS: Final = 5.0
 _GENERATION_RESERVATION_RETRIES: Final = 3
+# Each admitted lane consumes one relay WebSocket and one loopback TCP socket.
+# Keep the gateway below ordinary per-process descriptor limits while allowing
+# many paired devices to be active without the version-one warm-lane ceiling.
+_MAXIMUM_ON_DEMAND_DATA_LANES: Final = 64
 
 
 def _aiohttp_receive_limit_bytes(inclusive_frame_bytes: int) -> int:
@@ -116,6 +120,34 @@ class _ConnectorAdmissionProof:
         """Publish one successfully transmitted renewal proof."""
 
         self._header_value = _encode_base64url(proof)
+
+
+@final
+class _OnDemandDataLaneCapacity:
+    """Reserve a bounded number of event-loop-confined data lanes."""
+
+    def __init__(self, limit: int) -> None:
+        """Create one non-blocking admission counter."""
+
+        if limit < 1:
+            raise ValueError("on-demand data lane limit must be positive")
+        self._limit = limit
+        self._active = 0
+
+    def try_reserve(self) -> bool:
+        """Reserve one lane without queuing when capacity is exhausted."""
+
+        if self._active >= self._limit:
+            return False
+        self._active += 1
+        return True
+
+    def release(self) -> None:
+        """Release one previously reserved lane."""
+
+        if self._active < 1:
+            raise RuntimeError("on-demand data lane capacity underflow")
+        self._active -= 1
 
 
 class OperatorRelayProvisioning(FrozenModel):
@@ -660,6 +692,9 @@ class OperatorGatewayConnector:
         self._now_unix_millis = now_unix_millis or (
             lambda: time.time_ns() // 1_000_000
         )
+        self._on_demand_data_lanes = _OnDemandDataLaneCapacity(
+            _MAXIMUM_ON_DEMAND_DATA_LANES
+        )
 
     async def run(self) -> None:
         """Maintain the configured legacy lanes or signed on-demand control.
@@ -918,14 +953,26 @@ class OperatorGatewayConnector:
                     connector_generation=connector_generation,
                 )
                 if isinstance(decoded, OpenConnection):
-                    data_tasks.create_task(
-                        self._serve_on_demand_data(
-                            session,
-                            decoded,
-                            admission.header_value,
-                        ),
-                        name="operator-relay-data-lane",
+                    if not self._on_demand_data_lanes.try_reserve():
+                        logger.warning(
+                            "Operator relay data-lane capacity reached; "
+                            "declining connection"
+                        )
+                        continue
+                    data_coroutine = self._serve_reserved_on_demand_data(
+                        session,
+                        decoded,
+                        admission.header_value,
                     )
+                    try:
+                        data_tasks.create_task(
+                            data_coroutine,
+                            name="operator-relay-data-lane",
+                        )
+                    except BaseException:
+                        data_coroutine.close()
+                        self._on_demand_data_lanes.release()
+                        raise
                     continue
                 if isinstance(decoded, HeartbeatAcknowledgement):
                     continue
@@ -986,6 +1033,19 @@ class OperatorGatewayConnector:
             await websocket.send_bytes(renewal)
             admission.replace(lease.proof)
             next_renewal = time.monotonic() + _CONNECTOR_RENEWAL_SECONDS
+
+    async def _serve_reserved_on_demand_data(
+        self,
+        session: aiohttp.ClientSession,
+        request: OpenConnection,
+        admission: str,
+    ) -> None:
+        """Serve one admitted data lane and always release its reservation."""
+
+        try:
+            await self._serve_on_demand_data(session, request, admission)
+        finally:
+            self._on_demand_data_lanes.release()
 
     async def _serve_on_demand_data(
         self,

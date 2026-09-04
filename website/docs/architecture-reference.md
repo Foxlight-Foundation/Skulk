@@ -356,7 +356,9 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   Each `OpenConnection` is mapped to a fresh data WebSocket carrying the exact
   connection ID and initial admission proof; its first frame is the canonical
   `ConnectionAccepted`, after which only opaque inner-TLS bytes are bridged to
-  the existing loopback listener. No warm data lanes are opened. This path is
+  the existing loopback listener. The gateway admits at most 64 active data
+  lanes before task or socket allocation; excess requests are left unclaimed
+  for relay-side expiry. No warm data lanes are opened. This path is
   source-integrated but not enabled by version-one state and is not yet a
   production scale, mixed-version, persistence, revocation, or rollback claim.
 - **Key boundary:** `AuthorityKeyProvider` supplies the active unwrapped 32-byte

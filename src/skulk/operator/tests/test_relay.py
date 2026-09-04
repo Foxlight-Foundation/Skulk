@@ -12,7 +12,7 @@ import ssl
 import struct
 import threading
 import zlib
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from datetime import datetime, timedelta, timezone
@@ -1099,6 +1099,92 @@ async def test_lease_renewal_publishes_new_data_admission_proof(
 
     assert len(websocket.frames) >= 2
     assert admission.header_value != initial_header
+
+
+@pytest.mark.asyncio
+async def test_on_demand_control_bounds_data_tasks_before_creation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Excess opens are declined before they allocate tasks or sockets."""
+
+    monkeypatch.setattr(relay_module, "_MAXIMUM_ON_DEMAND_DATA_LANES", 2)
+    service, _ = _service(tmp_path)
+    configuration = service.configure_relay(
+        _on_demand_provisioning(),
+        operator_api_port=52416,
+    )
+    connector = OperatorGatewayConnector(
+        configuration,
+        next_connector_generation=service.reserve_relay_connector_generation,
+    )
+    started_connection_ids: list[bytes] = []
+    release_data_lanes = asyncio.Event()
+
+    async def hold_data_lane(
+        _session: aiohttp.ClientSession,
+        request: OpenConnection,
+        _admission: str,
+    ) -> None:
+        """Keep each admitted lane active until all opens are inspected."""
+
+        started_connection_ids.append(request.connection_id)
+        await release_data_lanes.wait()
+
+    monkeypatch.setattr(connector, "_serve_on_demand_data", hold_data_lane)
+
+    async def control_messages(
+        identifiers: tuple[bytes, ...],
+    ) -> AsyncIterator[aiohttp.WSMessage]:
+        """Yield canonical relay requests without opening a network socket."""
+
+        for connection_id in identifiers:
+            yield aiohttp.WSMessage(
+                aiohttp.WSMsgType.BINARY,
+                _test_control_message(
+                    9,
+                    connection_id,
+                    (5_000).to_bytes(4, "big"),
+                ),
+                None,
+            )
+
+    admission = relay_module._ConnectorAdmissionProof(  # pyright: ignore[reportPrivateUsage]
+        bytes(195)
+    )
+    initial_ids = (bytes([1]) * 16, bytes([2]) * 16, bytes([3]) * 16)
+    async with asyncio.TaskGroup() as data_tasks:
+        await connector._receive_control_messages(  # pyright: ignore[reportPrivateUsage]
+            cast(aiohttp.ClientSession, object()),
+            data_tasks,
+            cast(
+                aiohttp.ClientWebSocketResponse,
+                cast(object, control_messages(initial_ids)),
+            ),
+            connector_id=bytes(16),
+            authority_epoch=bytes(16),
+            connector_generation=1,
+            admission=admission,
+        )
+        await asyncio.sleep(0)
+        assert started_connection_ids == list(initial_ids[:2])
+        release_data_lanes.set()
+
+    follow_up_id = bytes([4]) * 16
+    async with asyncio.TaskGroup() as data_tasks:
+        await connector._receive_control_messages(  # pyright: ignore[reportPrivateUsage]
+            cast(aiohttp.ClientSession, object()),
+            data_tasks,
+            cast(
+                aiohttp.ClientWebSocketResponse,
+                cast(object, control_messages((follow_up_id,))),
+            ),
+            connector_id=bytes(16),
+            authority_epoch=bytes(16),
+            connector_generation=1,
+            admission=admission,
+        )
+    assert started_connection_ids == [*initial_ids[:2], follow_up_id]
 
 
 @pytest.mark.asyncio

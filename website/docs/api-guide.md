@@ -237,7 +237,9 @@ credentials, and optional connector authority inside the encrypted authority
 journal, generates an owner-only pinned TLS identity, and refuses silent
 replacement. Restart Skulk after initial configuration so version one opens its
 bounded outbound lane pool or version two establishes its signed control
-connector.
+connector. A version-two gateway admits at most 64 active data lanes before
+allocating a task or opening relay and loopback sockets; excess requests remain
+unclaimed and expire at the relay.
 The operator listener defaults to loopback port `52417`, separate from Skulk's
 default `52416` fabric transport.
 
