@@ -9618,11 +9618,17 @@ class API:
         """
 
         configuration = self._operator_relay_configuration
-        if configuration is None:
+        service = self._operator_pairing_service
+        if configuration is None or service is None:
             return
         try:
             async with anyio.create_task_group() as operator_task_group:
-                operator_gateway = OperatorGatewayConnector(configuration)
+                operator_gateway = OperatorGatewayConnector(
+                    configuration,
+                    next_connector_generation=(
+                        service.reserve_relay_connector_generation
+                    ),
+                )
                 operator_task_group.start_soon(self.run_operator_api, ev)
                 operator_task_group.start_soon(operator_gateway.run)
                 await ev.wait()

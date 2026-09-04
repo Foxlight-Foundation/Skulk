@@ -346,6 +346,21 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   maps every other canonical route onto existing cluster/model/chat/operation/
   device scopes. The ordinary local API/dashboard listener is unchanged and is
   not relay-accessible; no mobile-only replacement surface exists.
+- **Opt-in V2 on-demand carrier:** the same command accepts only a complete
+  generated version-two document. The existing app URL, route/app credential,
+  QR bootstrap, pinned inner TLS, and canonical API are unchanged. Skulk keeps
+  the delegated P-256 key in the encrypted authority journal, durably advances
+  a `u64` connector generation before use, and proves its exact route, region,
+  epoch, term, generation, and five-minute lease over one canonical SKRL control
+  WebSocket. Five-second heartbeats and signed renewal retain that authority.
+  Each `OpenConnection` is mapped to a fresh data WebSocket carrying the exact
+  connection ID and initial admission proof; its first frame is the canonical
+  `ConnectionAccepted`, after which only opaque inner-TLS bytes are bridged to
+  the existing loopback listener. The gateway admits at most 64 active data
+  lanes before task or socket allocation; excess requests are left unclaimed
+  for relay-side expiry. No warm data lanes are opened. This path is
+  source-integrated but not enabled by version-one state and is not yet a
+  production scale, mixed-version, persistence, revocation, or rollback claim.
 - **Key boundary:** `AuthorityKeyProvider` supplies the active unwrapped 32-byte
   data key and immutable key-version ID. V1's
   `LocalFileAuthorityKeyProvider` creates one random local key protected by

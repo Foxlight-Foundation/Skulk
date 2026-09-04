@@ -838,6 +838,11 @@ class OperatorPairingService:
 
         return self._relay_repository.load()
 
+    def reserve_relay_connector_generation(self) -> int:
+        """Durably reserve one generation for an on-demand relay connection."""
+
+        return self._relay_repository.reserve_connector_generation()
+
     def create_session(
         self,
         *,

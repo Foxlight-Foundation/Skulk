@@ -1339,11 +1339,21 @@ create parallel model, inference, or command APIs.
 before normal public operation. The app and gateway use distinct 256-bit outer
 carrier credentials and one opaque locator; all are encrypted in the local
 authority journal, while the generated inner-TLS private key is an owner-only
-file. Pairing returns only the app role plus the pinned self-signed gateway
-certificate. On startup the designated gateway maintains a bounded pool of
-outbound WebSockets. Each lane bridges opaque binary messages to a separate
-loopback TLS listener serving the existing FastAPI application. The relay never
-terminates that inner TLS connection.
+file. Pairing returns only the unchanged app role plus the pinned self-signed
+gateway certificate. Version-one provisioning keeps the bounded warm outbound
+WebSocket pool. Explicit version-two provisioning instead stores a delegated
+P-256 connector key, relay region, and authority epoch in that same encrypted
+journal. Before each control connection, Skulk durably advances its connector
+generation, sends a five-minute signed fencing lease, maintains canonical
+five-second heartbeats, and renews the lease. An app still opens the same
+`/v1/carrier/app` URL and may begin inner TLS immediately; each relay
+`OpenConnection` causes Skulk to claim one independent data WebSocket, send the
+required connection acknowledgement, and bridge it to the same loopback TLS
+listener. The gateway admits at most 64 concurrent version-two data lanes before
+creating a task or opening either socket; excess requests remain unclaimed and
+expire at the relay. There are no warm data lanes in version two. The relay
+never receives the delegated private key and never terminates the inner TLS
+connection.
 
 The loopback TLS listener wraps the canonical application with operator bearer
 validation: reads, model views, inference/WebSockets, mutations, and device
@@ -1356,6 +1366,10 @@ configuration loading, the loopback TLS listener, and the outbound connector
 are supervised as an optional ingress unit: corrupt authority/TLS material,
 bind failures, and connector failures are reported with sanitized messages and
 cannot cancel or prevent startup of the ordinary local API.
+Version two is source-integrated but remains opt-in and is not a production
+capacity claim: mixed-version upgrade/rollback, released-app regression, relay
+authority persistence/revocation, and measured 1,000–10,000-device qualification
+must pass before a production route is migrated.
 
 ### Event log
 
