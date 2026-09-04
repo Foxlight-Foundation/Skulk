@@ -1571,7 +1571,7 @@ wheels = [
 [[package]]
 name = "mlx-lm"
 version = "0.31.3.post1"
-source = { git = "https://github.com/Foxlight-Foundation/mlx-lm?rev=e2f7ddcd31ec7d5214447a8d3206af0d2bff6e35#e2f7ddcd31ec7d5214447a8d3206af0d2bff6e35" }
+source = { git = "https://github.com/Foxlight-Foundation/mlx-lm?rev=bc129ff6587ef38e15d5b97e21b7584d93e249da#bc129ff6587ef38e15d5b97e21b7584d93e249da" }
 dependencies = [
     { name = "jinja2", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "mlx", version = "0.31.2", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'darwin'" },
@@ -3140,7 +3140,7 @@ requires-dist = [
     { name = "mlx", marker = "sys_platform == 'darwin'", specifier = "==0.31.2" },
     { name = "mlx", extras = ["cpu"], marker = "sys_platform == 'linux'", specifier = "==0.30.6" },
     { name = "mlx-audio", marker = "sys_platform == 'darwin'", url = "https://github.com/Foxlight-Foundation/mlx-audio/archive/7f87787fe8a48faffe2a6fb16c87d457b5fac289.tar.gz" },
-    { name = "mlx-lm", git = "https://github.com/Foxlight-Foundation/mlx-lm?rev=e2f7ddcd31ec7d5214447a8d3206af0d2bff6e35" },
+    { name = "mlx-lm", git = "https://github.com/Foxlight-Foundation/mlx-lm?rev=bc129ff6587ef38e15d5b97e21b7584d93e249da" },
     { name = "mlx-optiq", extras = ["convert"], marker = "sys_platform == 'darwin'" },
     { name = "mlx-vlm", marker = "sys_platform == 'darwin'", specifier = "==0.6.4" },
     { name = "msgspec", specifier = ">=0.19.0" },
