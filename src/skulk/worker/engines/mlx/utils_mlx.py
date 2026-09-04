@@ -172,7 +172,11 @@ class _MlxLmLoadModel(Protocol):
     """Typed callable surface for mlx-lm's model loader."""
 
     def __call__(
-        self, model_path: Path, **kwargs: object
+        self,
+        model_path: Path,
+        *,
+        trust_remote_code: bool = ...,
+        **kwargs: object,
     ) -> tuple[nn.Module, object]: ...
 
 
@@ -722,6 +726,7 @@ def load_model(
     model_path: Path,
     *,
     prefer_vlm: bool = False,
+    trust_remote_code: bool = False,
     **kwargs: object,
 ) -> tuple[nn.Module, object]:
     """Load a text or native multimodal model.
@@ -732,6 +737,11 @@ def load_model(
             type. MLX-LM intentionally strips vision towers from Qwen VLM
             checkpoints, so vision placements must opt into the native model to
             preserve their image-grid-aware embeddings and RoPE.
+        trust_remote_code: Allow mlx-lm to execute a custom architecture file
+            named by the config's ``model_file`` key (CVE-2026-5843 gate).
+            Callers pass the card's own ``trust_remote_code``, so only a card
+            authorized as executable can reach that path; the mlx-vlm loaders
+            manage repository code internally and do not take this flag.
         **kwargs: Loader options forwarded to the selected upstream loader.
 
     Returns:
@@ -746,7 +756,9 @@ def load_model(
 
     mlx_lm_load_model = cast(_MlxLmLoadModel, _mlx_lm_load_model)
     try:
-        return mlx_lm_load_model(model_path, **kwargs)
+        return mlx_lm_load_model(
+            model_path, trust_remote_code=trust_remote_code, **kwargs
+        )
     except ValueError as exc:
         if "not supported" not in str(exc):
             raise
@@ -934,6 +946,7 @@ def load_mlx_items(
             lazy=True,
             strict=False,
             prefer_vlm=_prefers_native_vlm(card),
+            trust_remote_code=card.trust_remote_code,
         )
         # Eval layers one by one for progress reporting
         try:
@@ -1133,6 +1146,7 @@ def shard_and_load(
         lazy=True,
         strict=False,
         prefer_vlm=_prefers_native_vlm(shard_metadata.model_card),
+        trust_remote_code=shard_metadata.model_card.trust_remote_code,
     )
     logger.debug(model)
     if hasattr(model, "model") and isinstance(model.model, DeepseekV3Model):  # type: ignore

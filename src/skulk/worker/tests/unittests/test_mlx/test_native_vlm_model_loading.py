@@ -357,6 +357,11 @@ def test_pipeline_shards_use_native_loader_for_primary_vision_weights(
             "lazy": True,
             "strict": False,
             "prefer_vlm": True,
+            # The CVE-2026-5843 gate: the loader receives exactly the card's
+            # trust_remote_code. ModelCard defaults it to True (entry into the
+            # catalog is the repository-code authorization), so this fixture,
+            # which does not set the field, must arrive with the flag on.
+            "trust_remote_code": True,
         },
     }
 

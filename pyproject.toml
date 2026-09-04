@@ -126,14 +126,16 @@ skulk_pyo3_bindings = { workspace = true }
 # Thunderbolt RDMA GPU coherence, which we don't need (Skulk uses libp2p, not RDMA).
 # mlx = { git = "https://github.com/rltakashige/mlx-jaccl-fix-small-recv.git", branch = "address-rdma-gpu-locks", marker = "sys_platform == 'darwin'" }
 # Foxlight-owned mlx-lm, reconciled onto upstream v0.31.3 (version 0.31.3.post1).
-# Pinned to the merge of Foxlight-Foundation/mlx-lm PR #1 (branch
-# foxlight/v0.31.3-base). Carries two Foxlight fixes not in upstream:
+# Pinned to the fork's fix/cve-2026-5843 head: the previous pin (merge of fork
+# PR #1, branch foxlight/v0.31.3-base) plus a cherry-pick of upstream
+# bfa25a16 gating config `model_file` execution behind trust_remote_code
+# (CVE-2026-5843). Still carries the two Foxlight fixes not in upstream:
 # ArraysCache leak (mx.depends on BatchKVCache.extend) and the DeepSeek-V3.2
 # lightning-indexer batch>1 fix. The other historic carries (float32 logprobs,
 # GDN precision via upstream #997, left_padding eval via upstream #960) are
 # absorbed in upstream v0.31.3. See foxlight-docs initiatives/gemma4-mtp/
 # reconcile-notes.md for the sign-off evidence.
-mlx-lm = { git = "https://github.com/Foxlight-Foundation/mlx-lm", rev = "e2f7ddcd31ec7d5214447a8d3206af0d2bff6e35" }
+mlx-lm = { git = "https://github.com/Foxlight-Foundation/mlx-lm", rev = "bc129ff6587ef38e15d5b97e21b7584d93e249da" }
 # Uncomment to use local mlx/mlx-lm development versions:
 # mlx = { path = "/Users/Shared/mlx", editable=true }
 # mlx-lm = { path = "/Users/Shared/mlx-lm", editable=true }
