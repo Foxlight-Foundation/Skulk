@@ -215,12 +215,12 @@ pairing sessions:
 
 ```bash
 uv run skulk operator configure-relay \
-  --provisioning-file /protected/path/relay-v1.json \
+  --provisioning-file /protected/path/skulk-provisioning.json \
   --operator-api-port 52417 \
   --cluster-name "Cluster"
 ```
 
-The generated provisioning document is supplied by the Foxlight relay service
+The generated version-one or explicit version-two provisioning document is supplied by the Foxlight relay service
 and contains `version`, `appWebsocketUrl`, `gatewayWebsocketUrl`,
 `routingLocator`, distinct `appCarrierCredential` and
 `gatewayCarrierCredential` values, and `laneCount`. Treat the file as a secret:

@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import io
 import json
 import socket
 import ssl
+import struct
 import zlib
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
@@ -22,6 +24,7 @@ import qrcode
 from aiohttp import web
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.x509.oid import ExtendedKeyUsageOID
 from qrcode.constants import ERROR_CORRECT_L
@@ -64,6 +67,36 @@ def _provisioning(origin: str = "ws://127.0.0.1:41000") -> OperatorRelayProvisio
         app_carrier_credential=_base64url(bytes(range(32, 64))),
         gateway_carrier_credential=_base64url(bytes(range(64, 96))),
         lane_count=1,
+    )
+
+
+def _on_demand_provisioning(
+    origin: str = "ws://127.0.0.1:41000",
+) -> OperatorRelayProvisioning:
+    """Return one valid generated on-demand relay route."""
+
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    private_der = private_key.private_bytes(
+        serialization.Encoding.DER,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    )
+    public_der = private_key.public_key().public_bytes(
+        serialization.Encoding.DER,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    return OperatorRelayProvisioning(
+        version=2,
+        app_websocket_url=f"{origin}/v1/carrier/app",
+        gateway_control_websocket_url=f"{origin}/v1/connector/control",
+        gateway_data_websocket_url=f"{origin}/v1/connector/data",
+        routing_locator=_base64url(bytes(range(32))),
+        app_carrier_credential=_base64url(bytes(range(32, 64))),
+        gateway_carrier_credential=_base64url(bytes(range(64, 96))),
+        connector_authority_private_key_pkcs8=_base64url(private_der),
+        connector_authority_key_id=_base64url(hashlib.sha256(public_der).digest()),
+        connector_region=_base64url(bytes(range(8))),
+        connector_authority_epoch=_base64url(bytes(range(16))),
     )
 
 
@@ -238,6 +271,58 @@ def test_relay_configuration_is_encrypted_and_returned_once_with_pairing(
     assert provisioning.gateway_carrier_credential not in exchange.model_dump_json()
     with pytest.raises(OperatorRelayAlreadyConfiguredError):
         service.configure_relay(provisioning, operator_api_port=52416)
+
+
+def test_on_demand_configuration_reserves_generations_before_use(
+    tmp_path: Path,
+) -> None:
+    """Every connector attempt advances durable encrypted fencing state."""
+
+    service, repository = _service(tmp_path)
+    provisioning = _on_demand_provisioning()
+    configuration = service.configure_relay(
+        provisioning,
+        operator_api_port=52416,
+    )
+
+    assert configuration.version == 2
+    assert configuration.connector_generation == 0
+    assert service.reserve_relay_connector_generation() == 1
+    assert service.reserve_relay_connector_generation() == 2
+    persisted = repository.load()
+    assert persisted is not None
+    assert persisted.connector_generation == 2
+    authority_bytes = (tmp_path / "authority.sqlite3").read_bytes()
+    assert provisioning.connector_authority_private_key_pkcs8 is not None
+    assert (
+        provisioning.connector_authority_private_key_pkcs8.encode("ascii")
+        not in authority_bytes
+    )
+
+
+def test_on_demand_provisioning_rejects_mismatched_connector_key() -> None:
+    """A delegated signing key must match the relay-pinned public digest."""
+
+    payload = _on_demand_provisioning().model_dump(mode="json")
+    payload["connector_authority_key_id"] = _base64url(bytes(32))
+
+    with pytest.raises(ValueError, match="connector authority material"):
+        OperatorRelayProvisioning.model_validate(payload)
+
+
+def test_on_demand_connector_requires_durable_generation_provider(
+    tmp_path: Path,
+) -> None:
+    """Version 2 cannot start with process-local reusable generation state."""
+
+    service, _ = _service(tmp_path)
+    configuration = service.configure_relay(
+        _on_demand_provisioning(),
+        operator_api_port=52416,
+    )
+
+    with pytest.raises(ValueError, match="durable connector generations"):
+        OperatorGatewayConnector(configuration)
 
 
 def test_oversized_relay_package_is_rejected_before_session_persistence(
@@ -575,6 +660,199 @@ class _SyntheticRelay:
             if capture is not None:
                 capture.extend(payload)
             await destination.send_bytes(payload)
+
+
+def _test_control_fields(payload: bytes) -> tuple[int, dict[int, bytes]]:
+    """Decode the small canonical subset needed by the independent test relay."""
+
+    assert payload[:5] == b"SKRL\x01"
+    kind = payload[5]
+    assert payload[6:8] == b"\x00\x00"
+    assert int.from_bytes(payload[8:12], "big") == len(payload) - 12
+    fields: dict[int, bytes] = {}
+    offset = 12
+    while offset < len(payload):
+        identifier, flags, reserved, length = struct.unpack(
+            ">HBBI", payload[offset : offset + 8]
+        )
+        assert flags == 1 and reserved == 0
+        offset += 8
+        fields[identifier] = payload[offset : offset + length]
+        offset += length
+    assert offset == len(payload)
+    return kind, fields
+
+
+def _test_control_message(kind: int, *values: bytes) -> bytes:
+    """Encode sequential required fields for the independent test relay."""
+
+    payload = b"".join(
+        struct.pack(">HBBI", index, 1, 0, len(value)) + value
+        for index, value in enumerate(values, start=1)
+    )
+    return b"SKRL" + struct.pack(">BBHI", 1, kind, 0, len(payload)) + payload
+
+
+@final
+class _SyntheticOnDemandRelay:
+    """Independent socket fixture for one signed control and requested data lane."""
+
+    def __init__(self) -> None:
+        self.provisioning: OperatorRelayProvisioning | None = None
+        self.completed = asyncio.Event()
+        self.control_connections = 0
+        self.data_connections = 0
+        self._connection_id = bytes([0x44]) * 16
+        self._hello_proof = ""
+
+    def _configuration(self) -> OperatorRelayProvisioning:
+        """Return the fixture's installed protected route."""
+
+        assert self.provisioning is not None
+        return self.provisioning
+
+    async def control(self, request: web.Request) -> web.WebSocketResponse:
+        """Accept one hello and request one independent application connection."""
+
+        provisioning = self._configuration()
+        self._assert_gateway_headers(request, provisioning)
+        websocket = web.WebSocketResponse(max_msg_size=65_537)
+        await websocket.prepare(request)
+        self.control_connections += 1
+        hello_message = await websocket.receive(timeout=2.0)
+        assert hello_message.type is aiohttp.WSMsgType.BINARY
+        kind, fields = _test_control_fields(cast(bytes, hello_message.data))
+        assert kind == 1
+        assert fields[2] == base64.urlsafe_b64decode(
+            f"{provisioning.routing_locator}="
+        )
+        connector_id = fields[4]
+        epoch = fields[5]
+        self._hello_proof = _base64url(fields[10])
+        await websocket.send_bytes(
+            _test_control_message(
+                2,
+                struct.pack(">HH", 1, 0),
+                connector_id,
+                epoch,
+                fields[6],
+                fields[7],
+                fields[9],
+                (5_000).to_bytes(4, "big"),
+                (20_000).to_bytes(4, "big"),
+                bytes(8),
+            )
+        )
+        await websocket.send_bytes(
+            _test_control_message(
+                9,
+                self._connection_id,
+                (5_000).to_bytes(4, "big"),
+            )
+        )
+        await asyncio.wait_for(self.completed.wait(), timeout=3.0)
+        return websocket
+
+    async def data(self, request: web.Request) -> web.WebSocketResponse:
+        """Verify the control binding and exercise the opaque loopback bridge."""
+
+        provisioning = self._configuration()
+        self._assert_gateway_headers(request, provisioning)
+        assert request.headers["x-skulk-relay-connection"] == _base64url(
+            self._connection_id
+        )
+        assert request.headers["x-skulk-relay-admission"] == self._hello_proof
+        websocket = web.WebSocketResponse(max_msg_size=65_537)
+        await websocket.prepare(request)
+        self.data_connections += 1
+        accepted_message = await websocket.receive(timeout=2.0)
+        assert accepted_message.type is aiohttp.WSMsgType.BINARY
+        assert _test_control_fields(cast(bytes, accepted_message.data)) == (
+            10,
+            {1: self._connection_id},
+        )
+        await websocket.send_bytes(b"opaque-inner-tls")
+        echoed = await websocket.receive(timeout=2.0)
+        assert echoed.type is aiohttp.WSMsgType.BINARY
+        assert cast(bytes, echoed.data) == b"opaque-inner-tls"
+        self.completed.set()
+        return websocket
+
+    @staticmethod
+    def _assert_gateway_headers(
+        request: web.Request,
+        provisioning: OperatorRelayProvisioning,
+    ) -> None:
+        """Require the unchanged route and gateway bearer contract."""
+
+        assert request.headers["x-skulk-relay-route"] == provisioning.routing_locator
+        assert request.headers["Authorization"] == (
+            f"Bearer {provisioning.gateway_carrier_credential}"
+        )
+
+
+async def _start_on_demand_relay(
+    relay: _SyntheticOnDemandRelay,
+) -> tuple[web.AppRunner, int]:
+    """Start the signed connector fixture on a pre-bound loopback socket."""
+
+    application = web.Application()
+    application.router.add_get("/v1/connector/control", relay.control)
+    application.router.add_get("/v1/connector/data", relay.data)
+    runner = web.AppRunner(application)
+    await runner.setup()
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    listener.setblocking(False)
+    port = cast(tuple[str, int], listener.getsockname())[-1]
+    await web.SockSite(runner, listener).start()
+    return runner, port
+
+
+@pytest.mark.asyncio
+async def test_on_demand_connector_uses_control_plus_requested_data_socket(
+    tmp_path: Path,
+) -> None:
+    """One control socket opens no warm lanes and bridges each explicit request."""
+
+    async def echo(
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        payload = await reader.read(64 * 1024)
+        writer.write(payload)
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    echo_server, echo_port = await _start_socket_server(echo)
+    relay = _SyntheticOnDemandRelay()
+    relay_runner, relay_port = await _start_on_demand_relay(relay)
+    provisioning = _on_demand_provisioning(f"ws://127.0.0.1:{relay_port}")
+    relay.provisioning = provisioning
+    service, _ = _service(tmp_path)
+    configuration = service.configure_relay(
+        provisioning,
+        operator_api_port=echo_port,
+    )
+    connector = OperatorGatewayConnector(
+        configuration,
+        next_connector_generation=service.reserve_relay_connector_generation,
+        now_unix_millis=lambda: 1_000_000,
+    )
+    connector_task = asyncio.create_task(connector.run())
+    try:
+        await asyncio.wait_for(relay.completed.wait(), timeout=4.0)
+        assert relay.control_connections == 1
+        assert relay.data_connections == 1
+    finally:
+        connector_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await connector_task
+        await relay_runner.cleanup()
+        echo_server.close()
+        await echo_server.wait_closed()
 
 
 async def _start_socket_server(
