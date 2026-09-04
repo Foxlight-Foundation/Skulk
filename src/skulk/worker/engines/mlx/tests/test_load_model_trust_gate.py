@@ -21,8 +21,10 @@ class _RecordingLoader:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
 
-    def __call__(self, model_path: Path, **kwargs: Any) -> tuple[Any, Any]:
-        self.calls.append({"model_path": model_path, **kwargs})
+    def __call__(self, model_path: Path, **kwargs: object) -> tuple[Any, Any]:
+        call: dict[str, Any] = {"model_path": model_path}
+        call.update(kwargs)
+        self.calls.append(call)
         return object(), None
 
 

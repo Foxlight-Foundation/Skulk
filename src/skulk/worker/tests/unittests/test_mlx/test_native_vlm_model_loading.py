@@ -357,6 +357,9 @@ def test_pipeline_shards_use_native_loader_for_primary_vision_weights(
             "lazy": True,
             "strict": False,
             "prefer_vlm": True,
+            # The CVE-2026-5843 gate: the card is not flagged executable, so
+            # the loader must receive the flag off.
+            "trust_remote_code": False,
         },
     }
 
