@@ -97,6 +97,27 @@ class _OperatorRelayDrainRequestedError(OperatorRelayError):
         self.deadline_unix_millis = deadline_unix_millis
 
 
+@final
+class _ConnectorAdmissionProof:
+    """Hold the latest signed lease proof for subsequent data sockets."""
+
+    def __init__(self, proof: bytes) -> None:
+        """Create the shared control/data admission boundary."""
+
+        self._header_value = _encode_base64url(proof)
+
+    @property
+    def header_value(self) -> str:
+        """Return the current portable admission header value."""
+
+        return self._header_value
+
+    def replace(self, proof: bytes) -> None:
+        """Publish one successfully transmitted renewal proof."""
+
+        self._header_value = _encode_base64url(proof)
+
+
 class OperatorRelayProvisioning(FrozenModel):
     """One generated relay route delivered to the designated gateway."""
 
@@ -162,7 +183,11 @@ class OperatorRelayProvisioning(FrozenModel):
         if not isinstance(data, dict):
             return data
         values = cast(dict[str, object], data)
-        if values.get("version") == 1 and "lane_count" not in values:
+        if (
+            values.get("version") == 1
+            and "lane_count" not in values
+            and "laneCount" not in values
+        ):
             return {**values, "lane_count": 4}
         return cast(object, values)
 
@@ -827,7 +852,7 @@ class OperatorGatewayConnector:
                 != lease.expires_at_unix_millis
             ):
                 raise OperatorRelayError("operator relay returned invalid acceptance")
-            admission = _encode_base64url(lease.proof)
+            admission = _ConnectorAdmissionProof(lease.proof)
             receiver = asyncio.create_task(
                 self._receive_control_messages(
                     session,
@@ -851,6 +876,7 @@ class OperatorGatewayConnector:
                     connector_id=connector_id,
                     epoch=epoch,
                     connector_generation=connector_generation,
+                    admission=admission,
                 ),
                 name="operator-relay-control-heartbeat",
             )
@@ -878,7 +904,7 @@ class OperatorGatewayConnector:
         connector_id: bytes,
         authority_epoch: bytes,
         connector_generation: int,
-        admission: str,
+        admission: _ConnectorAdmissionProof,
     ) -> None:
         """Receive bounded control messages and start requested data sockets."""
 
@@ -893,7 +919,11 @@ class OperatorGatewayConnector:
                 )
                 if isinstance(decoded, OpenConnection):
                     data_tasks.create_task(
-                        self._serve_on_demand_data(session, decoded, admission),
+                        self._serve_on_demand_data(
+                            session,
+                            decoded,
+                            admission.header_value,
+                        ),
                         name="operator-relay-data-lane",
                     )
                     continue
@@ -928,6 +958,7 @@ class OperatorGatewayConnector:
         connector_id: bytes,
         epoch: bytes,
         connector_generation: int,
+        admission: _ConnectorAdmissionProof,
     ) -> None:
         """Send canonical heartbeats and renew the signed lease before expiry."""
 
@@ -941,7 +972,7 @@ class OperatorGatewayConnector:
             )
             if time.monotonic() < next_renewal:
                 continue
-            renewal, _ = build_lease_renewal(
+            renewal, lease = build_lease_renewal(
                 private_key=private_key,
                 authority_key_id=key_id,
                 routing_locator=locator,
@@ -953,6 +984,7 @@ class OperatorGatewayConnector:
                 now_unix_millis=self._now_unix_millis(),
             )
             await websocket.send_bytes(renewal)
+            admission.replace(lease.proof)
             next_renewal = time.monotonic() + _CONNECTOR_RENEWAL_SECONDS
 
     async def _serve_on_demand_data(

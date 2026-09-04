@@ -287,6 +287,17 @@ def test_version_one_provisioning_preserves_four_lane_default() -> None:
     assert provisioning.lane_count == 4
 
 
+def test_version_one_provisioning_preserves_camel_case_lane_count() -> None:
+    """The default hook must not duplicate the legacy laneCount alias."""
+
+    payload = _provisioning().model_dump(mode="json", by_alias=True)
+
+    provisioning = OperatorRelayProvisioning.model_validate(payload)
+
+    assert "laneCount" in payload
+    assert provisioning.lane_count == 1
+
+
 def test_on_demand_configuration_reserves_generations_before_use(
     tmp_path: Path,
 ) -> None:
@@ -1016,6 +1027,78 @@ class _DataWebSocketSession:
         """Return the synthetic connection without network access."""
 
         return self._websocket
+
+
+@final
+class _RenewalRecordingWebSocket:
+    """Record heartbeat and renewal frames from the authority maintainer."""
+
+    def __init__(self) -> None:
+        self.frames: list[bytes] = []
+
+    async def send_bytes(self, payload: bytes) -> None:
+        """Retain one connector control frame."""
+
+        self.frames.append(payload)
+
+
+@pytest.mark.asyncio
+async def test_lease_renewal_publishes_new_data_admission_proof(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """New data sockets use the latest proof after a control renewal."""
+
+    service, _ = _service(tmp_path)
+    configuration = service.configure_relay(
+        _on_demand_provisioning(),
+        operator_api_port=52416,
+    )
+    connector = OperatorGatewayConnector(
+        configuration,
+        next_connector_generation=service.reserve_relay_connector_generation,
+        now_unix_millis=lambda: 1_000_000,
+    )
+    private_key, key_id, locator, region, epoch = (
+        connector._connector_authority()  # pyright: ignore[reportPrivateUsage]
+    )
+    admission = relay_module._ConnectorAdmissionProof(  # pyright: ignore[reportPrivateUsage]
+        bytes(195)
+    )
+    initial_header = admission.header_value
+    websocket = _RenewalRecordingWebSocket()
+    monkeypatch.setattr(relay_module, "_CONNECTOR_RENEWAL_SECONDS", 0.0)
+
+    renewal_task = asyncio.create_task(
+        connector._maintain_control_authority(  # pyright: ignore[reportPrivateUsage]
+            cast(aiohttp.ClientWebSocketResponse, cast(object, websocket)),
+            heartbeat_seconds=0.001,
+            private_key=private_key,
+            key_id=key_id,
+            locator=locator,
+            region=region,
+            connector_id=bytes(16),
+            epoch=epoch,
+            connector_generation=1,
+            admission=admission,
+        )
+    )
+    try:
+
+        async def admission_was_renewed() -> None:
+            """Wait cooperatively for the maintainer to publish its lease."""
+
+            while admission.header_value == initial_header:
+                await asyncio.sleep(0.001)
+
+        await asyncio.wait_for(admission_was_renewed(), timeout=1.0)
+    finally:
+        renewal_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await renewal_task
+
+    assert len(websocket.frames) >= 2
+    assert admission.header_value != initial_header
 
 
 @pytest.mark.asyncio
