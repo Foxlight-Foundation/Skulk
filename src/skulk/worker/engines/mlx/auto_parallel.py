@@ -281,6 +281,21 @@ class _LayerCallable(Protocol):
     def __call__(self, x: mx.array, *args: object, **kwargs: object) -> mx.array: ...
 
 
+class _ShardedQwenAttention(Protocol):
+    """Attention attributes auto-parallel rewrites when tensor-sharding Qwen MoE.
+
+    Upstream mlx-lm 0.32 leaves these attributes unannotated, so the seam
+    declares exactly what sharding reads and writes.
+    """
+
+    q_proj: nn.Module
+    k_proj: nn.Module
+    v_proj: nn.Module
+    o_proj: nn.Module
+    n_heads: int
+    n_kv_heads: int
+
+
 class _CacheContainer(Protocol):
     """Cache wrapper whose first item carries the tensor dependency."""
 
@@ -1692,25 +1707,19 @@ class QwenShardingStrategy(TensorParallelShardingStrategy):
             Qwen3MoeModel | Qwen3NextModel | Qwen3_5TextModel | Qwen3_5MoeModel,
             model,
         )
-        total = len(model.layers)
-        for i, layer in enumerate(model.layers):
+        model_layers = cast(list[nn.Module], model.layers)
+        total = len(model_layers)
+        for i, layer in enumerate(model_layers):
             eval_with_timeout(layer.parameters(), timeout_seconds / total, on_timeout)
             # Shard the self attention
             if isinstance(layer, Qwen3MoeDecoderLayer):
-                layer.self_attn.q_proj = self.all_to_sharded_linear(
-                    layer.self_attn.q_proj
-                )
-                layer.self_attn.k_proj = self.all_to_sharded_linear(
-                    layer.self_attn.k_proj
-                )
-                layer.self_attn.v_proj = self.all_to_sharded_linear(
-                    layer.self_attn.v_proj
-                )
-                layer.self_attn.o_proj = self.sharded_to_all_linear(
-                    layer.self_attn.o_proj
-                )
-                layer.self_attn.n_heads //= self.N
-                layer.self_attn.n_kv_heads //= self.N
+                attention = cast(_ShardedQwenAttention, layer.self_attn)
+                attention.q_proj = self.all_to_sharded_linear(attention.q_proj)
+                attention.k_proj = self.all_to_sharded_linear(attention.k_proj)
+                attention.v_proj = self.all_to_sharded_linear(attention.v_proj)
+                attention.o_proj = self.sharded_to_all_linear(attention.o_proj)
+                attention.n_heads //= self.N
+                attention.n_kv_heads //= self.N
             else:
                 qwen_layer = layer
                 if hasattr(qwen_layer, "linear_attn"):

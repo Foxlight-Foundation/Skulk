@@ -40,12 +40,8 @@ from skulk.worker.engines.mlx.turboquant.cache import ensure_standard_attention
 from skulk.worker.runner.bootstrap import logger
 
 if TYPE_CHECKING:
-    from mlx_vlm.models.cache import (  # pyright: ignore[reportMissingTypeStubs]
-        ArraysCache as VlmArraysCache,
-    )
-    from mlx_vlm.models.cache import (  # pyright: ignore[reportMissingTypeStubs]
-        RotatingKVCache as VlmRotatingKVCache,
-    )
+    from mlx_vlm.models.cache import ArraysCache as VlmArraysCache
+    from mlx_vlm.models.cache import RotatingKVCache as VlmRotatingKVCache
 
     from skulk.worker.engines.mlx.vision import MediaRegion
 else:
