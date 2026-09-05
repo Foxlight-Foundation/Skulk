@@ -1855,6 +1855,12 @@ reaps its generated relay on expiry or parent EOF. See
 [the fixture contract](operator-workload-fixture.md) for lifecycle and evidence
 limits; generated data does not qualify released-device capacity.
 
+`bench/observe_operator_workload.py` optionally adds a bounded loopback opaque
+TCP bridge and ASGI metadata adapter. A digest-pinned local subprocess reduces
+fixed categories, timings, and sizes to aggregate JSON; no raw trace or content
+is retained. The measured boundary is gateway TCP/ASGI, not device WebSocket
+delivery. Queue overflow and incomplete flows invalidate the observation.
+
 ## Where to read next
 
 - [Architecture Reference](architecture-reference): dense, structured fact-sheet for AI assistants and operators who prefer reference style over narrative
