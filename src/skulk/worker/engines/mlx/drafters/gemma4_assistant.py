@@ -295,7 +295,7 @@ def load_assistant_model(model_dir: Path) -> object | None:
         # Deferred import: mlx-vlm is darwin-only and heavy; importing here
         # keeps non-darwin environments (and the missing-file fast path)
         # from ever touching it.
-        from mlx_vlm.speculative.drafters.gemma4_assistant import (  # pyright: ignore[reportMissingTypeStubs]
+        from mlx_vlm.speculative.drafters.gemma4_assistant import (
             Gemma4AssistantDraftModel,
             ModelConfig,
         )

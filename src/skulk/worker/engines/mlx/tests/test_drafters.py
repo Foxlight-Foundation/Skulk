@@ -907,7 +907,7 @@ class TestStreamGenerateDepth(TestStreamGenerateWithMTP):
         model.language_model = None
         ssm_cache = ArraysCache(size=1)
         sentinel = mx.ones((1, 4))
-        ssm_cache.state = [sentinel]
+        ssm_cache[0] = sentinel
         kv_cache = KVCache()
         _ = kv_cache.update_and_fetch(  # pyright: ignore[reportUnknownMemberType]
             mx.zeros((1, 1, 8, 4)), mx.zeros((1, 1, 8, 4))
@@ -933,8 +933,8 @@ class TestStreamGenerateDepth(TestStreamGenerateWithMTP):
             )
         )
         assert len(outputs) >= 1
-        assert ssm_cache.state[0] is not None, "depth reject zeroed the SSM state"
-        assert mx.array_equal(ssm_cache.state[0], sentinel)
+        assert ssm_cache[0] is not None, "depth reject zeroed the SSM state"
+        assert mx.array_equal(ssm_cache[0], sentinel)
 
 
 class TestRejectPathSSMState:
@@ -1019,7 +1019,7 @@ class TestRejectPathSSMState:
 
         ssm_cache = ArraysCache(size=1)
         sentinel = mx.ones((1, 4))
-        ssm_cache.state = [sentinel]
+        ssm_cache[0] = sentinel
         kv_cache = KVCache()
         _ = kv_cache.update_and_fetch(  # pyright: ignore[reportUnknownMemberType]
             mx.zeros((1, 1, 8, 4)), mx.zeros((1, 1, 8, 4))
@@ -1046,8 +1046,8 @@ class TestRejectPathSSMState:
 
         assert outputs
         native_rollback.assert_not_called()
-        assert ssm_cache.state[0] is not None
-        assert mx.array_equal(ssm_cache.state[0], sentinel)
+        assert ssm_cache[0] is not None
+        assert mx.array_equal(ssm_cache[0], sentinel)
 
     def test_reject_restores_ssm_state(self) -> None:
         """A reject must restore SSM (ArraysCache) state, not zero it.
@@ -1077,7 +1077,7 @@ class TestRejectPathSSMState:
 
         ssm_cache = ArraysCache(size=1)
         sentinel = mx.ones((1, 4))
-        ssm_cache.state = [sentinel]
+        ssm_cache[0] = sentinel
         # Seed the KV cache: in production it always holds prompt positions
         # by the time the MTP loop runs, and trim on an empty KVCache throws.
         kv_cache = KVCache()
@@ -1108,8 +1108,8 @@ class TestRejectPathSSMState:
         # The fake trunk never advances SSM state, so after snapshot+restore
         # the sentinel must survive verbatim. The pre-fix code left this
         # zeroed ([None]) after the first reject.
-        assert ssm_cache.state[0] is not None, "reject zeroed the SSM state"
-        assert mx.array_equal(ssm_cache.state[0], sentinel)
+        assert ssm_cache[0] is not None, "reject zeroed the SSM state"
+        assert mx.array_equal(ssm_cache[0], sentinel)
 
 
 # ---------------------------------------------------------------------------
@@ -1358,7 +1358,7 @@ class TestDeferredReplay:
             return trunk_fn(tokens, cache=cache)
 
         ssm_cache = ArraysCache(size=1)
-        ssm_cache.state = [mx.ones((1, 4))]
+        ssm_cache[0] = mx.ones((1, 4))
         kv_cache = KVCache()
         # Generous seed: reject trims grow with the pending window and the
         # fake trunk never advances offsets.

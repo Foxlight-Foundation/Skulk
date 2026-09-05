@@ -40,12 +40,8 @@ from skulk.worker.engines.mlx.turboquant.cache import ensure_standard_attention
 from skulk.worker.runner.bootstrap import logger
 
 if TYPE_CHECKING:
-    from mlx_vlm.models.cache import (  # pyright: ignore[reportMissingTypeStubs]
-        ArraysCache as VlmArraysCache,
-    )
-    from mlx_vlm.models.cache import (  # pyright: ignore[reportMissingTypeStubs]
-        RotatingKVCache as VlmRotatingKVCache,
-    )
+    from mlx_vlm.models.cache import ArraysCache as VlmArraysCache
+    from mlx_vlm.models.cache import RotatingKVCache as VlmRotatingKVCache
 
     from skulk.worker.engines.mlx.vision import MediaRegion
 else:
@@ -105,10 +101,33 @@ class _OptiqKVCacheFactory(Protocol):
     def __call__(self, *, head_dim: int, bits: int, seed: int) -> object: ...
 
 
-class _MutableCacheState(Protocol):
-    """Typed view shared by MLX-LM and MLX-VLM cache implementations."""
+class _ResettableRotatingCache(Protocol):
+    """Attributes a rotating KV cache needs zeroed for an empty reset.
 
-    state: object
+    Written directly rather than through the ``state`` setter: mlx-lm 0.32's
+    setter recomputes ``offset`` from ``keys.shape``, so assigning the empty
+    ``(None, None)`` state raises. ``keep``/``max_size`` are configuration,
+    not state, and survive the reset.
+    """
+
+    keys: object
+    values: object
+    offset: int
+    _idx: int
+
+
+class _MutableCacheState(Protocol):
+    """Typed view shared by MLX-LM and MLX-VLM cache implementations.
+
+    Deliberately built on ``cache`` (the slot list) rather than ``state``:
+    mlx-lm 0.32 changed ``ArraysCache.state`` to a serialization tuple
+    ``(cache, left_padding, lengths)`` while mlx-vlm 0.6.17 still returns
+    the bare slot list, so ``state`` is no longer a portable clone surface
+    - and cloning through the tuple setter silently ALIASED the live slot
+    list into the snapshot (the clone's ``cache`` was the same object).
+    """
+
+    cache: list[object | None]
     left_padding: object
     lengths: object
 
@@ -127,14 +146,16 @@ def _clone_arrays_cache(
     the MTP verify loop, where a snapshot is taken every round.
     """
     source_view = cast(_MutableCacheState, cast(object, source))
-    source_state = cast(list[object | None], source_view.state)
+    source_slots = source_view.cache
     clone = (
-        ArraysCache(len(source_state))
+        ArraysCache(len(source_slots))
         if isinstance(source, ArraysCache)
-        else VlmArraysCache(len(source_state))
+        else VlmArraysCache(len(source_slots))
     )
     clone_view = cast(_MutableCacheState, cast(object, clone))
-    clone_view.state = list(source_state)
+    # The fresh list IS the isolation point: slot replacements on the live
+    # cache must never reach the snapshot, and vice versa.
+    clone_view.cache = list(source_slots)
     # Batch-mode bookkeeping (None on the single-sequence decode path);
     # carried across so the clone matches deepcopy semantics for batched
     # callers. Dynamic attrs in mlx-lm, hence the targeted ignores.
@@ -478,13 +499,19 @@ def trim_cache(
                 # once (KVPrefixCache reuse), so the live cache must not BE
                 # the snapshot's stored object.
                 cache[i] = _copy_cache_entry(snapshot_state)  # type: ignore
+            elif isinstance(c, (ArraysCache, VlmArraysCache)):
+                cache_view = cast(_MutableCacheState, cast(object, c))
+                cache_view.cache = [None] * len(cache_view.cache)
             else:
-                cache_view = cast(_MutableCacheState, c)
-                state = cast(
-                    list[object | None] | tuple[object | None, ...],
-                    cache_view.state,
-                )
-                cache_view.state = [None] * len(state)
+                # Rotating caches have no slot list; without a snapshot the
+                # conservative reset is a full empty (forcing re-prefill),
+                # because RotatingKVCache.trim cannot trim past a rotated
+                # window and stale tokens would silently survive a reject.
+                rotating = cast(_ResettableRotatingCache, c)
+                rotating.keys = None
+                rotating.values = None
+                rotating.offset = 0
+                rotating._idx = 0  # pyright: ignore[reportPrivateUsage] - upstream attr, reset with offset
         else:
             trim_fn = getattr(c, "trim", None)
             if callable(trim_fn):

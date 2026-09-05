@@ -52,6 +52,20 @@ class _TokenizerBackend:
             "<bos>": 0,
         }
 
+    def apply_chat_template(
+        self, messages: object, **kwargs: object
+    ) -> str:
+        """Faithful-fake requirement of mlx-lm 0.32.
+
+        The wrapper's ``_infer_thinking_kwarg`` compares
+        ``type(tokenizer).apply_chat_template`` against the transformers
+        base method and then inspects its signature; a fake without the
+        method reads as a "custom renderer" whose class attribute lookup
+        then raises. Every real tokenizer has this method, so the fake
+        must too. Rendering is irrelevant to these tests.
+        """
+        return ""
+
 
 def _gemma4_tool_parser() -> Callable[[str], list[dict[str, object]]]:
     module_dict = cast(dict[str, object], utils_mlx_module.__dict__)
