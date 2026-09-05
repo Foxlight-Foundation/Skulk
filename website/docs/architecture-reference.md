@@ -1228,6 +1228,18 @@ resources/inference_model_cards/  # built-in TOML cards
 rust/                   # libp2p (networking), PyO3 bindings, system_custodian
 ```
 
+## Isolated operator qualification fixture
+
+- Entry: `bench/operator_workload_fixture.py`; opt-in, no Node/discovery/inference.
+- Real auth/gateway: generated encrypted authority, signed version-two connector,
+  TLS 1.3, scoped canonical authorization; no production configuration accepted.
+- Generated API: `bench/operator_fixture_app.py`; bounded input, fixed reads/SSE/PCM.
+- Local relay lifetime: `bench/operator_fixture_lease.py`; independent expiry and
+  parent-EOF watchdog; normal runner teardown removes temporary authority/QR files.
+- Schema validation: `bench/validate_operator_fixture.cjs`; exact app source commit
+  and matching installed schema dependency versions, not physical-device evidence.
+- Contract and limits: [operator-workload-fixture](operator-workload-fixture.md).
+
 ## Maintenance discipline
 
 This file is intentionally dense. If you find a stale fact, fix it inline rather than working around it.

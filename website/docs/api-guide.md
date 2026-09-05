@@ -8,6 +8,15 @@ sidebar_position: 2
 
 Skulk serves an API at `http://localhost:52415`.
 
+:::note Local qualification fixture
+
+The opt-in [operator workload fixture](operator-workload-fixture.md) serves a
+documented synthetic subset of these paths for isolated app observation. It
+is not part of the production API, starts no Skulk node, and cannot execute
+cluster mutations. Generated responses are not workload or capacity evidence.
+
+:::
+
 That API has two jobs:
 
 - compatibility endpoints for tools that already speak OpenAI, Claude, or Ollama-style APIs

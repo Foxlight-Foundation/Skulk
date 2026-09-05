@@ -148,6 +148,12 @@ A single Skulk `Node` (src/skulk/main.py) runs multiple components:
   the canonical FastAPI app behind scoped bearer validation; the app URL, QR
   material, and ordinary dashboard/API listener remain unchanged. Version two
   is opt-in source integration, not production scale or rollout qualification.
+  `bench/operator_workload_fixture.py` is a separate loopback synthetic API
+  fixture using this gateway/auth code without constructing a Node. It pins
+  the relay digest, generates temporary protected authority/QR files, and has
+  an independent expiry/parent-EOF watchdog. The companion source-pinned app
+  schema validator is not physical-device or capacity evidence. See
+  `website/docs/operator-workload-fixture.md` for test and privacy boundaries.
   A dormant bounded service
   can drive one caller-selected proposal with deadlines, retries, accepted-value
   recovery, local durable commit, and catch-up broadcast; it is not started by
