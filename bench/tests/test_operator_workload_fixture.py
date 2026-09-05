@@ -16,7 +16,9 @@ from pydantic import ValidationError
 from bench.operator_fixture_app import generated_responses
 from bench.operator_fixture_client import request_fixture
 from bench.operator_workload_fixture import (
+    FixtureLeaseExpiredError,
     FixtureSettings,
+    fixture_lease,
     isolated_fixture,
     verify_binary,
 )
@@ -25,6 +27,36 @@ from skulk.operator.pairing import pairing_signature_message
 
 def _base64url(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+
+async def test_only_the_session_deadline_is_normal_expiry() -> None:
+    """Startup timeouts and teardown timeouts cannot become a successful expiry."""
+    with pytest.raises(FixtureLeaseExpiredError):
+        async with fixture_lease(0.01):
+            await asyncio.sleep(1)
+    with pytest.raises(TimeoutError, match="startup failed"):
+        async with fixture_lease(1):
+            raise TimeoutError("startup failed")
+    with pytest.raises(TimeoutError, match="cleanup failed"):
+        async with fixture_lease(0.01):
+            try:
+                await asyncio.sleep(1)
+            finally:
+                raise TimeoutError("cleanup failed")
+
+
+async def test_external_cancellation_is_not_reported_as_expiry() -> None:
+    """Caller cancellation retains its identity instead of forging a deadline."""
+
+    async def wait() -> None:
+        async with fixture_lease(10):
+            await asyncio.sleep(10)
+
+    task = asyncio.create_task(wait())
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
 
 
 def test_fixture_refuses_unpinned_binary_and_unbounded_lifetime(tmp_path: Path) -> None:

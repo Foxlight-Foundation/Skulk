@@ -80,6 +80,27 @@ class RunningFixture:
     pairing_service: OperatorPairingService
 
 
+class FixtureLeaseExpiredError(Exception):
+    """The whole-session deadline cancelled an otherwise clean fixture."""
+
+
+@asynccontextmanager
+async def fixture_lease(lifetime_seconds: float) -> AsyncIterator[None]:
+    """Translate only this lease's cancellation, never inner or cleanup timeouts.
+
+    An inner TimeoutError must retain its failure status even if cleanup runs
+    past the session deadline. Catch the lease cancellation before asyncio
+    converts it to the indistinguishable builtin TimeoutError.
+    """
+    async with asyncio.timeout(lifetime_seconds) as lease:
+        try:
+            yield
+        except asyncio.CancelledError:
+            if lease.expired():
+                raise FixtureLeaseExpiredError from None
+            raise
+
+
 @final
 class _Tls13Configuration(Config):
     def create_ssl_context(self) -> ssl.SSLContext | None:
@@ -163,7 +184,7 @@ async def isolated_fixture(settings: FixtureSettings) -> AsyncIterator[RunningFi
     """
     binary = verify_binary(settings)
     deadline = asyncio.get_running_loop().time() + settings.lifetime_seconds
-    async with asyncio.timeout(settings.lifetime_seconds):
+    async with fixture_lease(settings.lifetime_seconds):
         with TemporaryDirectory(prefix="skulk-operator-fixture-") as temporary:
             directory = Path(temporary)
             relay_port, gateway_port = _available_port(), _available_port()
@@ -289,7 +310,7 @@ async def _run(settings: FixtureSettings) -> None:
                 flush=True,
             )
             await asyncio.Event().wait()
-    except TimeoutError:
+    except FixtureLeaseExpiredError:
         print(
             '{"schema":"operator-fixture-stopped.v1","reason":"lease-expired"}',
             flush=True,
