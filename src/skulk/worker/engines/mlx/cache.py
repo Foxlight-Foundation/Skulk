@@ -101,6 +101,21 @@ class _OptiqKVCacheFactory(Protocol):
     def __call__(self, *, head_dim: int, bits: int, seed: int) -> object: ...
 
 
+class _ResettableRotatingCache(Protocol):
+    """Attributes a rotating KV cache needs zeroed for an empty reset.
+
+    Written directly rather than through the ``state`` setter: mlx-lm 0.32's
+    setter recomputes ``offset`` from ``keys.shape``, so assigning the empty
+    ``(None, None)`` state raises. ``keep``/``max_size`` are configuration,
+    not state, and survive the reset.
+    """
+
+    keys: object
+    values: object
+    offset: int
+    _idx: int
+
+
 class _MutableCacheState(Protocol):
     """Typed view shared by MLX-LM and MLX-VLM cache implementations.
 
@@ -484,9 +499,19 @@ def trim_cache(
                 # once (KVPrefixCache reuse), so the live cache must not BE
                 # the snapshot's stored object.
                 cache[i] = _copy_cache_entry(snapshot_state)  # type: ignore
-            else:
-                cache_view = cast(_MutableCacheState, c)
+            elif isinstance(c, (ArraysCache, VlmArraysCache)):
+                cache_view = cast(_MutableCacheState, cast(object, c))
                 cache_view.cache = [None] * len(cache_view.cache)
+            else:
+                # Rotating caches have no slot list; without a snapshot the
+                # conservative reset is a full empty (forcing re-prefill),
+                # because RotatingKVCache.trim cannot trim past a rotated
+                # window and stale tokens would silently survive a reject.
+                rotating = cast(_ResettableRotatingCache, c)
+                rotating.keys = None
+                rotating.values = None
+                rotating.offset = 0
+                rotating._idx = 0  # pyright: ignore[reportPrivateUsage] - upstream attr, reset with offset
         else:
             trim_fn = getattr(c, "trim", None)
             if callable(trim_fn):
