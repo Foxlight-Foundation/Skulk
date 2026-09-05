@@ -102,9 +102,17 @@ class _OptiqKVCacheFactory(Protocol):
 
 
 class _MutableCacheState(Protocol):
-    """Typed view shared by MLX-LM and MLX-VLM cache implementations."""
+    """Typed view shared by MLX-LM and MLX-VLM cache implementations.
 
-    state: object
+    Deliberately built on ``cache`` (the slot list) rather than ``state``:
+    mlx-lm 0.32 changed ``ArraysCache.state`` to a serialization tuple
+    ``(cache, left_padding, lengths)`` while mlx-vlm 0.6.17 still returns
+    the bare slot list, so ``state`` is no longer a portable clone surface
+    - and cloning through the tuple setter silently ALIASED the live slot
+    list into the snapshot (the clone's ``cache`` was the same object).
+    """
+
+    cache: list[object | None]
     left_padding: object
     lengths: object
 
@@ -123,14 +131,16 @@ def _clone_arrays_cache(
     the MTP verify loop, where a snapshot is taken every round.
     """
     source_view = cast(_MutableCacheState, cast(object, source))
-    source_state = cast(list[object | None], source_view.state)
+    source_slots = source_view.cache
     clone = (
-        ArraysCache(len(source_state))
+        ArraysCache(len(source_slots))
         if isinstance(source, ArraysCache)
-        else VlmArraysCache(len(source_state))
+        else VlmArraysCache(len(source_slots))
     )
     clone_view = cast(_MutableCacheState, cast(object, clone))
-    clone_view.state = list(source_state)
+    # The fresh list IS the isolation point: slot replacements on the live
+    # cache must never reach the snapshot, and vice versa.
+    clone_view.cache = list(source_slots)
     # Batch-mode bookkeeping (None on the single-sequence decode path);
     # carried across so the clone matches deepcopy semantics for batched
     # callers. Dynamic attrs in mlx-lm, hence the targeted ignores.
@@ -476,11 +486,7 @@ def trim_cache(
                 cache[i] = _copy_cache_entry(snapshot_state)  # type: ignore
             else:
                 cache_view = cast(_MutableCacheState, c)
-                state = cast(
-                    list[object | None] | tuple[object | None, ...],
-                    cache_view.state,
-                )
-                cache_view.state = [None] * len(state)
+                cache_view.cache = [None] * len(cache_view.cache)
         else:
             trim_fn = getattr(c, "trim", None)
             if callable(trim_fn):
