@@ -27,7 +27,10 @@ uv run python -m bench.operator_workload_fixture \
   --lifetime-seconds 600
 ```
 
-The digest is verified before fixture creation. No remote relay URL, existing
+The digest is verified before fixture creation. Both provisioning and service
+launch execute a protected copy of the exact verified bytes, not a mutable build
+pathname. Readiness includes a certificate-verified local TLS handshake and a
+live gateway task, not only the relay health endpoint. No remote relay URL, existing
 cluster configuration, or supplied credentials are accepted. The tool creates
 an owner-only temporary directory and two dynamic IPv4 loopback listeners.
 Losing a bind race fails startup rather than reusing an existing listener.
@@ -56,9 +59,58 @@ do not substitute the operating relay or publish the fixture to work around it.
 Use only generated test prompts and speech input, never personal information.
 Generated handlers discard input and do not echo or persist it. Access logs
 are disabled. Real authority state lives in the fresh encrypted database.
-This fixture does not yet export observations or connection-lifetime metrics;
-HTTP request duration must not be relabeled as socket lifetime. A metadata-only
-observer and actual device captures are separate steps.
+The optional observer below exports aggregate measurements. Actual released
+device capture and source/artifact attestation remain separate steps.
+
+## Observe aggregate workload metadata
+
+`bench.observe_operator_workload` connects the fixture to the compiled aggregate
+recorder from `skulk-relay`. Build reviewed recorder modules there first; this
+command does not install Node, packages, or cloud infrastructure.
+
+```bash
+uv run python -m bench.observe_operator_workload \
+  --relay-binary /absolute/path/to/paired-websocket-service \
+  --relay-sha256 <exact-relay-sha256> \
+  --node-binary /absolute/path/to/node \
+  --recorder-module /absolute/path/to/workload-observation.js \
+  --recorder-sha256 <exact-recorder-sha256> \
+  --cli-module /absolute/path/to/workload-observation-cli.js \
+  --cli-sha256 <exact-cli-sha256> \
+  --lifetime-seconds 600
+```
+
+The two JavaScript modules are copied from verified bytes into a protected
+temporary directory. Pair the test app using the generated artifact before
+starting a flow, then close the app and let its sockets close. The local stdin
+control channel accepts only `begin <flow>`, `end`, and `finish` on separate
+lines. Supported flow names are `cold-launch`, `foreground-refresh`,
+`settled-foreground`, `background-resume`, `reconnect`, `chat`, and `speech`.
+For each flow, begin while no socket is open, perform that flow in the app,
+then close the app and wait for sockets to close before `end`. All seven flows
+must contain requests before `finish` can produce aggregate JSON. EOF, invalid
+commands, incomplete flows, and non-idle transitions fail instead of producing
+partial evidence. Control acknowledgements never echo input text.
+
+The observer adds one bounded opaque TCP bridge before the real inner-TLS
+listener. Socket lifetimes are measured at this **gateway TCP boundary**, not
+at the device's outer WebSocket. ASGI counters measure request bodies consumed
+and response bodies offered by the gateway. A completed gateway response is
+not proof the device received or rendered it. No paths, query strings, headers,
+peer addresses, credentials, prompts, responses, hashes of bodies, or packet
+traces are exported. Unknown paths become the fixed category `other`.
+
+Per-observer bounds are 512 live connections/requests, 100,000 events, two hours,
+and 10 GiB of application-body bytes. The recorder pipe holds at most 512
+metadata events of at most 512 bytes each; overflow invalidates capture rather
+than dropping samples. Output is at most 256 KiB of aggregate JSON. There are
+no raw event files. The application-byte cap counts each body once; it is
+**not** a two-relay-leg traffic meter or a provider spending limit.
+
+Output remains `unattested-aggregate`. The added bridge and recorder overhead
+must be measured before profile freeze; gateway timings must not be relabeled
+as client timings. Generated integration tests do not establish physical app
+provenance, real stream payload distributions, generator headroom, or capacity.
 
 ## Generated API behavior
 
@@ -97,6 +149,23 @@ The joined test uses a loopback-only, no-retry WebSocket/TLS client, not the
 mobile app. It checks actual pairing, generated reads, mutation rejection,
 protected files and teardown. Other tests cover real token rotation/revocation,
 oversized input, generated streams, watchdog expiry and parent EOF.
+
+Observer tests cover real TCP lifetime, ASGI privacy, fail-closed bounds,
+incomplete capture, delayed TLS listener readiness, and verified-copy execution.
+The real relay integration runs both with and without observation. To also
+exercise the compiled recorder grammar, explicitly select its local directory
+and Node executable:
+
+```bash
+SKULK_FIXTURE_RECORDER_DIRECTORY=/absolute/path/to/compiled/recorder \
+SKULK_FIXTURE_NODE_BINARY=/absolute/path/to/node \
+uv run pytest bench/tests/test_operator_fixture_observer.py \
+  bench/tests/test_operator_fixture_recorder.py \
+  bench/tests/test_observe_operator_workload.py
+```
+
+The interoperability test pins the compiled modules by digest. Update those
+pins only alongside an inspected recorder change, not to bypass a mismatch.
 
 For source-pinned schema compatibility, supply an existing app checkout with
 installed TypeScript and Zod versions matching that commit's lock:

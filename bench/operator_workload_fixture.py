@@ -16,7 +16,7 @@ import socket
 import ssl
 import sys
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -32,6 +32,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from qrcode.constants import ERROR_CORRECT_L
 
 from bench.operator_fixture_app import create_fixture_app
+from bench.operator_fixture_observer import FixtureObserver
+from bench.operator_fixture_proxy import observation_proxy
 from skulk.operator.authority import EncryptedAuthorityStore
 from skulk.operator.key_provider import LocalFileAuthorityKeyProvider
 from skulk.operator.pairing import OperatorPairingService
@@ -129,6 +131,31 @@ def verify_binary(settings: FixtureSettings) -> Path:
     return binary
 
 
+def copy_verified_fixture_binary(settings: FixtureSettings, destination: Path) -> Path:
+    """Bind relay execution to the verified bytes in a protected temporary file.
+
+    Reads `settings.relay_binary` with a 512-MiB bound, hashes the bytes while
+    copying, and compares `settings.relay_sha256` before granting execute mode.
+    `destination` must be a new file inside the fixture-owned private directory.
+    Returns that path for both provisioning and service launch. A caller must
+    remove the temporary directory after errors as well as normal completion.
+    """
+    digest = hashlib.sha256()
+    copied = 0
+    with settings.relay_binary.open("rb") as source, destination.open("xb") as target:
+        destination.chmod(0o600)
+        while chunk := source.read(1024**2):
+            copied += len(chunk)
+            if copied > 512 * 1024**2:
+                raise ValueError("fixture relay binary exceeds limit")
+            digest.update(chunk)
+            target.write(chunk)
+    if digest.hexdigest() != settings.relay_sha256:
+        raise ValueError("fixture relay digest mismatch")
+    destination.chmod(0o500)
+    return destination
+
+
 def _private_file(path: Path, value: str) -> None:
     descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     with os.fdopen(descriptor, "w") as stream:
@@ -169,27 +196,79 @@ async def _stop_guardian(guardian: asyncio.subprocess.Process) -> None:
     await asyncio.wait_for(guardian.wait(), timeout=8)
 
 
+async def wait_fixture_gateway(
+    port: int,
+    configuration: OperatorRelayConfiguration,
+    listener: asyncio.Task[None],
+) -> None:
+    """Prove the local TLS listener is ready before publishing pairing readiness.
+
+    `port` is the generated backend listener, bypassing observation so readiness
+    probes never enter measured app flows. `configuration` pins its certificate
+    and hostname; `listener` must remain alive. Returns after a verified TLS 1.3
+    handshake or raises within five seconds. Connections are always closed.
+    """
+    context = ssl.create_default_context(cafile=str(configuration.certificate_path))
+    context.minimum_version = ssl.TLSVersion.TLSv1_3
+    async with asyncio.timeout(5):
+        while True:
+            if listener.done():
+                listener.result()
+                raise RuntimeError("fixture gateway exited before readiness")
+            try:
+                _, writer = await asyncio.open_connection(
+                    "127.0.0.1",
+                    port,
+                    ssl=context,
+                    server_hostname=configuration.gateway_server_name,
+                    ssl_handshake_timeout=1,
+                )
+            except (ConnectionError, TimeoutError):
+                await asyncio.sleep(0.05)
+                continue
+            try:
+                if listener.done():
+                    listener.result()
+                    raise RuntimeError("fixture gateway exited before readiness")
+                return
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+
 async def _watch_guardian(guardian: asyncio.subprocess.Process) -> None:
     await guardian.wait()
     raise RuntimeError("fixture relay lease ended unexpectedly")
 
 
 @asynccontextmanager
-async def isolated_fixture(settings: FixtureSettings) -> AsyncIterator[RunningFixture]:
+async def isolated_fixture(
+    settings: FixtureSettings,
+    *,
+    observer: FixtureObserver | None = None,
+) -> AsyncIterator[RunningFixture]:
     """Start real local relay/gateway/auth with synthetic API bodies, then reap all.
 
     The context cancels at its whole-session deadline. Temporary keys are never
     printed and are removed after the gateway and relay stop. A separate relay
     watchdog also observes parent death and expiry. No production URL is accepted.
+    Optional `observer` adds a bounded opaque TCP bridge before the local TLS
+    listener and fixed-category ASGI counters; it never changes released apps.
     """
-    binary = verify_binary(settings)
+    verify_binary(settings)
     deadline = asyncio.get_running_loop().time() + settings.lifetime_seconds
-    async with fixture_lease(settings.lifetime_seconds):
+    async with fixture_lease(settings.lifetime_seconds), AsyncExitStack() as stack:
         with TemporaryDirectory(prefix="skulk-operator-fixture-") as temporary:
             directory = Path(temporary)
+            binary = copy_verified_fixture_binary(settings, directory / "relay-binary")
             relay_port, gateway_port = _available_port(), _available_port()
             while gateway_port == relay_port:
                 gateway_port = _available_port()
+            backend_port = gateway_port
+            if observer is not None:
+                gateway_port = await stack.enter_async_context(
+                    observation_proxy(observer, backend_port)
+                )
             relay_path = directory / "relay.json"
             provisioning_path = directory / "provisioning.json"
             provisioning_process = await asyncio.create_subprocess_exec(
@@ -234,7 +313,7 @@ async def isolated_fixture(settings: FixtureSettings) -> AsyncIterator[RunningFi
             )
             configuration.server_ssl_context()
             server = _Tls13Configuration()
-            server.bind = [f"127.0.0.1:{gateway_port}"]
+            server.bind = [f"127.0.0.1:{backend_port}"]
             server.certfile = str(configuration.certificate_path)
             server.keyfile = str(configuration.private_key_path)
             server.accesslog = None
@@ -261,7 +340,12 @@ async def isolated_fixture(settings: FixtureSettings) -> AsyncIterator[RunningFi
                     monitor = group.create_task(_watch_guardian(guardian))
                     listener = group.create_task(
                         _serve(
-                            cast(ASGIFramework, create_fixture_app(service)),
+                            cast(
+                                ASGIFramework,
+                                create_fixture_app(service)
+                                if observer is None
+                                else observer.wrap(create_fixture_app(service)),
+                            ),
                             server,
                             shutdown_trigger=shutdown.wait,
                         )
@@ -273,6 +357,9 @@ async def isolated_fixture(settings: FixtureSettings) -> AsyncIterator[RunningFi
                         ).run()
                     )
                     try:
+                        await wait_fixture_gateway(
+                            backend_port, configuration, listener
+                        )
                         await _wait_ready(relay_port, guardian)
                         invitation = service.create_invitation(
                             lifetime=timedelta(seconds=settings.lifetime_seconds),

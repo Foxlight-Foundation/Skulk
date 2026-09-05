@@ -347,6 +347,9 @@ pairing service without constructing a Node. Its local lifetime, protected QR,
 watchdog, tests and source-pinned schema validator are documented in
 [Isolated operator workload fixture](website/docs/operator-workload-fixture.md).
 It is not an observed workload profile or relay capacity result.
+`bench/observe_operator_workload.py` adds fixed-vocabulary flow controls and a
+bounded aggregate recorder pipe. The same contract documents artifact pins,
+opt-in recorder tests, measurement boundaries, and physical-device prerequisites.
 
 The live vision test is deliberately explicit because it places a real image
 through the built-in dashboard and a running model. Provide the dashboard URL,

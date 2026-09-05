@@ -154,6 +154,10 @@ A single Skulk `Node` (src/skulk/main.py) runs multiple components:
   an independent expiry/parent-EOF watchdog. The companion source-pinned app
   schema validator is not physical-device or capacity evidence. See
   `website/docs/operator-workload-fixture.md` for test and privacy boundaries.
+  `bench/observe_operator_workload.py` adds bounded gateway TCP/ASGI metadata
+  observation into a digest-pinned aggregate recorder subprocess. It exports
+  no raw trace/content, and rejects incomplete flows or queue overflow. Its
+  gateway-boundary evidence remains unattested, not released-device capacity.
   A dormant bounded service
   can drive one caller-selected proposal with deadlines, retries, accepted-value
   recovery, local durable commit, and catch-up broadcast; it is not started by

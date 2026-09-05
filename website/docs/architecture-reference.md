@@ -1238,6 +1238,9 @@ rust/                   # libp2p (networking), PyO3 bindings, system_custodian
   parent-EOF watchdog; normal runner teardown removes temporary authority/QR files.
 - Schema validation: `bench/validate_operator_fixture.cjs`; exact app source commit
   and matching installed schema dependency versions, not physical-device evidence.
+- Aggregate observation: `bench/observe_operator_workload.py`; bounded opaque TCP
+  bridge + ASGI categories/lengths; verified-copy local recorder subprocess.
+  Gateway-boundary, unattested aggregate only; no content, traces, or app-wire change.
 - Contract and limits: [operator-workload-fixture](operator-workload-fixture.md).
 
 ## Maintenance discipline

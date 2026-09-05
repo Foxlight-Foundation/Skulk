@@ -5,19 +5,27 @@ import base64
 import hashlib
 import os
 import socket
+from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import cast
 from uuid import UUID
 
+import hypercorn.asyncio as hypercorn_asyncio
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from hypercorn.config import Config
+from hypercorn.typing import ASGIFramework
 from pydantic import ValidationError
 
+import bench.operator_workload_fixture as fixture_module
 from bench.operator_fixture_app import generated_responses
 from bench.operator_fixture_client import request_fixture
+from bench.operator_fixture_observer import FixtureObserver, ObservationEvent
 from bench.operator_workload_fixture import (
     FixtureLeaseExpiredError,
     FixtureSettings,
+    copy_verified_fixture_binary,
     fixture_lease,
     isolated_fixture,
     verify_binary,
@@ -81,7 +89,31 @@ def test_fixture_refuses_unpinned_binary_and_unbounded_lifetime(tmp_path: Path) 
         )
 
 
-async def test_real_fixture_pairs_reads_and_cleans_up() -> None:
+def test_fixture_executes_copied_verified_bytes_after_source_replacement(
+    tmp_path: Path,
+) -> None:
+    """A build at the selected pathname cannot change this fixture's executable."""
+    source = tmp_path / "source"
+    source.write_bytes(b"selected-binary")
+    source.chmod(0o700)
+    settings = FixtureSettings(
+        relay_binary=source,
+        relay_sha256=hashlib.sha256(b"selected-binary").hexdigest(),
+    )
+    destination = copy_verified_fixture_binary(settings, tmp_path / "owned-copy")
+    source.write_bytes(b"new-build")
+    assert destination.read_bytes() == b"selected-binary"
+    assert destination.stat().st_mode & 0o777 == 0o500
+    with pytest.raises(ValueError, match="digest mismatch"):
+        copy_verified_fixture_binary(settings, tmp_path / "rejected-copy")
+    assert (tmp_path / "rejected-copy").stat().st_mode & 0o111 == 0
+
+
+@pytest.mark.parametrize("observed", [False, True])
+async def test_real_fixture_pairs_reads_and_cleans_up(
+    observed: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Exercise the real Rust relay and Python auth, not released-app capacity.
 
     Uses a no-retry, loopback-only TLS-over-WebSocket protocol test adapter.
@@ -95,7 +127,27 @@ async def test_real_fixture_pairs_reads_and_cleans_up() -> None:
     settings = FixtureSettings(
         relay_binary=binary, relay_sha256=digest, lifetime_seconds=60
     )
-    async with isolated_fixture(settings) as fixture:
+    events: list[ObservationEvent] = []
+    observer = FixtureObserver(events.append) if observed else None
+    listener_started = False
+    original_serve = cast(Callable[..., Awaitable[None]], hypercorn_asyncio.serve)
+
+    async def delayed_serve(
+        app: ASGIFramework,
+        config: Config,
+        *,
+        shutdown_trigger: Callable[[], Awaitable[object]],
+    ) -> None:
+        nonlocal listener_started
+        await asyncio.sleep(0.5)
+        listener_started = True
+        await original_serve(app, config, shutdown_trigger=shutdown_trigger)
+
+    monkeypatch.setattr(fixture_module, "_serve", delayed_serve)
+    async with isolated_fixture(settings, observer=observer) as fixture:
+        assert listener_started
+        if observer is not None:
+            observer.begin("cold-launch")
         directory = fixture.directory
         relay_port = fixture.relay_port
         gateway_port = fixture.configuration.operator_api_port
@@ -148,6 +200,20 @@ async def test_real_fixture_pairs_reads_and_cleans_up() -> None:
                 remote, "POST", "/place_instance", body={}, bearer=token
             )
         ).status == 404
+        if observer is not None:
+            async with asyncio.timeout(3):
+                while not observer.idle():
+                    await asyncio.sleep(0.01)
+            observer.end()
+            assert (
+                sum(event["type"] == "connection-open" for event in events)
+                == len(generated_responses()) + 4
+            )
+            assert sum(event.get("outcome") == "failed" for event in events) == 2
+            assert (
+                sum(event.get("outcome") == "completed" for event in events)
+                == len(generated_responses()) + 2
+            )
     assert not directory.exists()
     # Two independent connection attempts after the context exits verify both
     # listeners are gone; this is local lifecycle evidence, not cloud inventory.
