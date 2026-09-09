@@ -2,7 +2,9 @@
 
 import asyncio
 import json
+import socket
 import ssl
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import cast
 from urllib.parse import urlsplit
@@ -61,6 +63,7 @@ async def request_fixture_bytes(
     body: dict[str, object] | None = None,
     bearer: str | None = None,
     close_after_response_body: bool = False,
+    abort_after_response_body: bool = False,
 ) -> FixtureByteResponse:
     """Send one request with real inner TLS and no retries to a local fixture.
 
@@ -68,8 +71,12 @@ async def request_fixture_bytes(
     evidence, not a released-client workload implementation or load generator.
     With `close_after_response_body`, close on HTTP framing completion instead
     of waiting for server EOF, exercising finite and chunked response cleanup.
+    `abort_after_response_body` additionally shuts down the outer socket without
+    inner TLS shutdown, exercising released streaming-carrier cancellation.
     """
     url = urlsplit(remote.app_websocket_url)
+    if abort_after_response_body and not close_after_response_body:
+        raise ValueError("abrupt fixture closure requires HTTP completion mode")
     if (
         url.scheme != "ws"
         or url.hostname != "127.0.0.1"
@@ -89,6 +96,7 @@ async def request_fixture_bytes(
             headers=carrier_headers,
             max_msg_size=1048576,
         ) as websocket:
+            aborted_after_http = False
 
             async def to_websocket(reader: asyncio.StreamReader) -> None:
                 while payload := await reader.read(65536):
@@ -115,6 +123,8 @@ async def request_fixture_bytes(
                     for result in await asyncio.gather(
                         outgoing, incoming, return_exceptions=True
                     ):
+                        if aborted_after_http and isinstance(result, ConnectionError):
+                            continue
                         if isinstance(result, BaseException) and not isinstance(
                             result, asyncio.CancelledError
                         ):
@@ -190,10 +200,22 @@ async def request_fixture_bytes(
                             break
                     if not complete or not status:
                         raise RuntimeError("fixture response incomplete")
+                    if abort_after_response_body:
+                        outer_socket = cast(
+                            socket.socket | None, websocket.get_extra_info("socket")
+                        )
+                        assert outer_socket is not None
+                        aborted_after_http = True
+                        outer_socket.shutdown(socket.SHUT_RDWR)
                 finally:
                     if writer is not None:
-                        writer.close()
-                        await writer.wait_closed()
+                        if aborted_after_http:
+                            writer.transport.abort()
+                            with suppress(ConnectionError, OSError):
+                                await writer.wait_closed()
+                        else:
+                            writer.close()
+                            await writer.wait_closed()
                     server.close()
                     await server.wait_closed()
     return FixtureByteResponse(status, bytes(response))

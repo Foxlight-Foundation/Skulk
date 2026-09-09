@@ -83,11 +83,18 @@ async def observation_proxy(
                 for task in copies:
                     task.cancel()
                 await asyncio.gather(*copies, return_exceptions=True)
-                await _close(writer)
-                writers.discard(writer)
-                if downstream is not None:
-                    await _close(downstream)
-                observer.closed(identifier)
+                try:
+                    if downstream is not None:
+                        await _close(downstream)
+                    # An abrupt outer close can beat successful ASGI final-send
+                    # accounting. Backend EOF must be delivered first because
+                    # the final send may itself be unwinding transport closure.
+                    # Keep our admitted socket until bounded settlement finishes.
+                    await observer.settle_terminal_sends(identifier)
+                finally:
+                    await _close(writer)
+                    writers.discard(writer)
+                    observer.closed(identifier)
 
         async def reject() -> None:
             # Invalidate the entire observation, not a silent partial sample.

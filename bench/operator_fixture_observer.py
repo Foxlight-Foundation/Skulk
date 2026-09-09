@@ -99,6 +99,7 @@ class FixtureObserver:
         self._connections: dict[int, _Connection] = {}
         self._peers: dict[_Peer, int] = {}
         self._requests: dict[int, int] = {}
+        self._terminal_sends: dict[int, asyncio.Event] = {}
 
     def _check(self, condition: bool) -> None:
         if self._invalid or not condition:
@@ -152,6 +153,34 @@ class FixtureObserver:
         self._check(connection.peer is None)
         connection.peer = peer
         self._peers[peer] = identifier
+
+    async def settle_terminal_sends(self, identifier: int) -> None:
+        """Wait at most one second for already-started final sends on a socket.
+
+        `identifier` names an admitted connection. The bridge calls this before
+        closing its admitted socket: a peer may abort immediately after receiving
+        HTTP framing, while the server's final send still unwinds. Only pending
+        terminal sends are awaited; partial streams are never promoted to success.
+        A timeout leaves ordinary close accounting to mark unfinished work failed.
+        Cancellation propagates so fixture shutdown does not acquire a new task.
+        """
+        connection = self._connections.get(identifier)
+        self._check(connection is not None)
+        assert connection is not None
+        pending = tuple(
+            self._terminal_sends[request]
+            for request in connection.requests
+            if request in self._terminal_sends
+        )
+        if pending:
+            try:
+                async with asyncio.timeout(1):
+                    for settled in pending:
+                        await settled.wait()
+            except TimeoutError:
+                # This is a bound on observer cleanup, not permission to treat
+                # a stalled or cancelled terminal send as a completed response.
+                pass
 
     def closed(self, identifier: int) -> None:
         """Close a real TCP lifecycle, failing any still-active gateway requests."""
@@ -220,6 +249,7 @@ class FixtureObserver:
         )
         self._connections[identifier].requests.remove(request)
         del self._requests[request]
+        self._terminal_sends.pop(request, None)
 
     def idle(self) -> bool:
         """Return whether every owned TCP connection and request has closed.
@@ -283,6 +313,8 @@ class FixtureObserver:
                 )
                 if terminal:
                     terminal_pending = True
+                    if request is not None and request in self._requests:
+                        self._terminal_sends[request] = terminal_settled
                 try:
                     await send(message)
                     if message["type"] == "http.response.start":
@@ -309,6 +341,8 @@ class FixtureObserver:
                     if terminal:
                         terminal_pending = False
                         terminal_settled.set()
+                        if request is not None:
+                            self._terminal_sends.pop(request, None)
 
             try:
                 await app(scope, observed_receive, observed_send)

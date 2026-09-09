@@ -419,3 +419,88 @@ async def test_terminal_disconnect_waits_for_send_outcome(send_fails: bool) -> N
     assert [
         event.get("outcome") for event in events if event["type"] == "request-end"
     ] == ["failed" if send_fails else "completed"]
+
+
+@pytest.mark.parametrize("ending", ["complete", "error", "timeout", "cancel"])
+async def test_socket_close_settles_only_inflight_terminal_send(ending: str) -> None:
+    """Close races retain successful sends but never bless errors or stalled sends."""
+    events: list[ObservationEvent] = []
+    clock = _Clock()
+    observer = FixtureObserver(events.append, clock=clock)
+    observer.begin("chat")
+    connection = observer.accepted()
+    observer.bind_peer(connection, ("127.0.0.1", 8))
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def receive() -> Message:
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    async def send(message: Message) -> None:
+        if message["type"] == "http.response.body":
+            entered.set()
+            await release.wait()
+            if ending == "error":
+                raise ConnectionError("synthetic send failure")
+
+    async def app(_scope: Scope, _receive: Receive, send: Send) -> None:
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"synthetic"})
+
+    async def close() -> None:
+        try:
+            await observer.settle_terminal_sends(connection)
+        finally:
+            observer.closed(connection)
+
+    async def run_app() -> None:
+        await observer.wrap(app)(
+            {
+                "type": "http",
+                "path": "/v1/chat/completions",
+                "client": ("127.0.0.1", 8),
+            },
+            receive,
+            send,
+        )
+
+    call = asyncio.create_task(run_app())
+    closing: asyncio.Task[None] | None = None
+    try:
+        async with asyncio.timeout(2):
+            await entered.wait()
+            closing = asyncio.create_task(close())
+            await asyncio.sleep(0)
+            assert not closing.done()
+            if ending in {"complete", "error"}:
+                release.set()
+            elif ending == "cancel":
+                closing.cancel()
+            if ending == "cancel":
+                with pytest.raises(asyncio.CancelledError):
+                    await closing
+            else:
+                await closing
+            if ending == "complete":
+                await call
+            elif ending == "error":
+                with pytest.raises(ConnectionError):
+                    await call
+            else:
+                call.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await call
+    finally:
+        call.cancel()
+        if closing is not None:
+            closing.cancel()
+        await asyncio.gather(
+            call, *(() if closing is None else (closing,)), return_exceptions=True
+        )
+    assert observer.idle()
+    clock.now = 2
+    observer.end()
+    assert [
+        event.get("outcome") for event in events if event["type"] == "request-end"
+    ] == ["completed" if ending == "complete" else "failed"]
