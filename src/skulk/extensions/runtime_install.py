@@ -255,13 +255,15 @@ class RuntimeInstaller:
 
     @contextlib.asynccontextmanager
     async def locked_generation(
-        self, runtime_digest: str
+        self, runtime_digest: str, *, inherit_on_exec: bool = False
     ) -> AsyncIterator[tuple[VerifiedRuntime, QualifiedHost]]:
         """Hold installation ownership around a fully verified staged generation.
 
         Verify trust, current host, cached artifacts and installed files without
         executing plugin code. Activation callers retain this fence through their
         local state transition. Cancellation waits for file verification to finish.
+        Explicit local setup may inherit the fence across exec until its terminal
+        process exits; ordinary owners and verification callers do not inherit it.
         """
         digest = _RUNTIME_DIGEST.validate_python(runtime_digest, strict=True)
         lock = RuntimeLock(self.installer)
@@ -286,6 +288,8 @@ class RuntimeInstaller:
                 return runtime, current_host
 
             verified = await finish_runtime_work(asyncio.create_task(inspect()))
+            if inherit_on_exec:
+                os.set_inheritable(lock.descriptor, True)
             yield verified
         finally:
             lock.close()

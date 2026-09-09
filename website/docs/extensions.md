@@ -704,3 +704,26 @@ host paths. The generic API enforces explicit plugin read authority, exact node
 identity, unique safe filenames and response bounds. The Plugins dashboard offers
 explicit downloads for nodes declaring support. See the
 [HTTP contract](api-guide.md#capability-node-public-setup-files).
+
+
+### Running an installed plugin's local setup
+
+An optional `__setup__.py` in the signed archive supplies provider-owned local
+setup. Owners invoke it with `skulk-plugin-service setup-plugin managed.example --
+<plugin setup fields>`. Skulk resolves the installed ID from its protected local
+service profile and verifies the selected archive, full dependency runtime, current
+publisher trust and Skulk compatibility before executing that fixed entrypoint.
+No archive path, Python path, module name or command string is accepted.
+
+The setup process runs as the existing nonroot owner and inherits terminal input
+and output. Plugins define their own bounded setup fields and prompt for secrets;
+credentials must not be command-line arguments. Only an explicit plugin-local
+setup step may request local elevation through its fixed helper. No HTTP route
+executes local setup, and a remote management grant cannot invoke it.
+
+A disabled selected plugin can be configured this way. The installer ownership
+lock survives process replacement, preventing a concurrent generation switch until
+setup exits. Current services are not stopped by the launcher. Missing entrypoints,
+changed selections, damaged artifacts, lost trust history and foreign local profile
+bindings are refused. The entrypoint and its behavior must be qualified with the
+plugin release; the existence of this launcher is not physical-install acceptance.

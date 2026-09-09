@@ -465,3 +465,11 @@ inspection and durable download/staging are documented in the
 [API guide](website/docs/api-guide.md#private-release-inspection-and-installation).
 Use signed fixture feeds for tests; do not put private feed tokens in shell
 arguments, committed fixtures or ordinary diagnostic output.
+
+
+Optional installed-plugin local setup uses the fixed signed `__setup__.py`
+entrypoint and `skulk-plugin-service setup-plugin <managed-id> -- <setup-fields>`.
+Generic path discovery, runtime verification and inherited installation fencing
+live in `extensions/local_setup.py`; provider-specific prompts stay in the plugin.
+Tests cover actual offline runtime execution and terminal/fence inheritance without
+performing privileged OS registration.

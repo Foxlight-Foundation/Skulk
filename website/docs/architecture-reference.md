@@ -1349,3 +1349,11 @@ initial identity generation; the read returns only bounded public text artifacts
 and observed revisions. Disabled children retain this facet. The dashboard uses
 explicit downloads without changing credentials or granting lifecycle/spending
 authority. Private values remain in the write-only credential path.
+
+- **Installed local plugin setup:** `extensions/local_setup.py` backs
+  `skulk-plugin-service setup-plugin <managed-id> -- <setup-fields>`. It resolves
+  the protected local profile and installation, requires retained release/trust
+  history, verifies the selected complete runtime, and execs only signed
+  `__setup__.py`. The installer lock is inherited until exit; disabled selections
+  are allowed. No provider SDK enters Skulk and no HTTP route launches this path.
+  Plugin setup owns prompts and explicit local registration, never remote grants.

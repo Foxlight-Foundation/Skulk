@@ -4014,3 +4014,29 @@ or missing selections return 404. Refused operations and invalid responses retur
 shared bounded management deadline returns 504. Errors suppress private exception
 text. The Plugins dashboard fetches files only on an explicit action, downloads
 them as inert text, and hides an earlier export after a failed refresh.
+
+
+### Installed plugin local setup command
+
+`skulk-plugin-service setup-plugin <managed-plugin-id> -- <plugin-setup-fields>`
+executes the selected verified archive's optional fixed `__setup__.py` entrypoint.
+The managed plugin ID is the same ID shown by inventory. Installation roots and
+runtime paths resolve from the protected local service connection, never from
+caller-supplied executable or module paths. No new HTTP endpoint is introduced:
+this command is an explicit local owner operation, unavailable to remote grants.
+
+The launcher requires a nonroot owner, matching local service profile, retained
+release/trust history and a selected intact compatible runtime. Disabled selection
+is allowed for setup. Pending selection recovery, missing entrypoints, tampered
+bytes or invalid signatures refuse execution. The plugin owns setup field parsing
+and credential prompts; secrets must be supplied interactively or over protected
+stdin rather than argv. At most 128 fields and 16 KiB of UTF-8 argument bytes are
+accepted. Normal terminal input, output and interrupt behavior are preserved.
+
+The installed-runtime lock is inherited through process replacement and released
+at setup exit. Other runtime activation/staging attempts report contention while
+it is held. Existing services remain supervised; this launcher does not change
+configuration, credentials or lifecycle state itself. Each plugin must document
+and qualify the effects of its own setup entrypoint, including any explicit local
+privileged registration. The public API setup-file export remains a separate,
+read-scoped operation.

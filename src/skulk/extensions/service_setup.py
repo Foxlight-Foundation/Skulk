@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import os
+import sqlite3
 import stat
 import sys
 import time
@@ -14,6 +15,7 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from skulk.extensions import service_bootstrap, service_registration
+from skulk.extensions.local_setup import setup_installed_plugin
 from skulk.extensions.runtime_artifacts import Digest, measure_host
 from skulk.extensions.runtime_attachment import (
     HostSettings,
@@ -337,9 +339,21 @@ async def service_status() -> dict[str, str | bool]:
 def main() -> None:
     """Run one explicit local setup command; remote management never invokes sudo."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("setup", "status", "manage"))
+    parser.add_argument("action", choices=("setup", "status", "manage", "setup-plugin"))
+    parser.add_argument("setup_arguments", nargs=argparse.REMAINDER)
     arguments = parser.parse_args()
     try:
+        remaining = cast(list[str], arguments.setup_arguments)
+        if cast(str, arguments.action) == "setup-plugin":
+            if not remaining:
+                raise ValueError("setup-plugin requires an installed plugin ID")
+            fields = remaining[1:]
+            if fields[:1] == ["--"]:
+                fields = fields[1:]
+            asyncio.run(setup_installed_plugin(remaining[0], tuple(fields)))
+            return
+        if remaining:
+            raise ValueError("this service action accepts no additional arguments")
         if cast(str, arguments.action) == "setup":
             operation = asyncio.run(setup_service())
             print(
@@ -366,7 +380,7 @@ def main() -> None:
             )
         else:
             print(json.dumps(asyncio.run(service_status())))
-    except (OSError, ValueError, TimeoutError):
+    except (OSError, ValueError, TimeoutError, sqlite3.Error):
         print(
             "Plugin service setup incomplete. Rerun the same local command with the qualified Skulk environment; inspect protected setup and OS service status.",
             file=sys.stderr,
