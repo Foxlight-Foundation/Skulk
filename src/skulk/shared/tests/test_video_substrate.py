@@ -611,3 +611,27 @@ def test_output_source_survives_task_deletion(tmp_path: Path) -> None:
     api._record_video_output_source(task)  # pyright: ignore[reportPrivateUsage]
     api.state = State()  # the task and instance are gone once the stream finalizes
     assert api._video_output_source(job.id) == NodeId("worker-1")  # pyright: ignore[reportPrivateUsage]
+
+
+def test_job_registry_invalidates_a_completed_job_after_restart(tmp_path: Path) -> None:
+    registry = VideoJobRegistry(None)
+    job = registry.create(_job("lost"))
+    registry.update(job.id, render_finished=True, media_delivered=True)
+    assert registry.settle(job.id).status == "completed"  # pyright: ignore[reportOptionalMemberAccess]
+    demoted = registry.invalidate(job.id, "artifacts gone")
+    assert demoted is not None and demoted.status == "failed" and demoted.expires_at is None
+
+
+def test_video_store_stash_is_bounded_by_bytes(tmp_path: Path) -> None:
+    from skulk.api import video_store as store_module
+
+    store = VideoStore(tmp_path, default_expiry_seconds=3600)
+    command_id = CommandId("stash-bytes")
+    limit = store_module._MAX_STASHED_BYTES  # pyright: ignore[reportPrivateUsage]
+    chunk = b"x" * (limit // 2 + 1)
+    store.open_assembly(
+        command_id, "video", content_type="video/mp4", total_bytes=len(chunk) * 4, total_chunks=4
+    )
+    store.append(command_id, "video", 3, chunk)
+    with pytest.raises(ValueError, match="reorder window"):
+        store.append(command_id, "video", 4, chunk)

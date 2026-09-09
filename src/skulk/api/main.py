@@ -1933,27 +1933,36 @@ class API:
         for job in self._video_jobs.list(limit=MAX_RETAINED_JOBS):
             if job.status != "completed" or job.output is None or job.expires_at is None:
                 continue
-            if self._video_store.adopt(
+            complete = self._video_store.adopt(
                 job.id,
                 "video",
                 content_type=job.output.content_type,
                 size_bytes=job.output.size_bytes,
                 sha256=job.output.sha256,
                 expires_at=float(job.expires_at),
+            )
+            if (
+                complete
+                and job.output.thumbnail_sha256 is not None
+                and job.output.thumbnail_size_bytes is not None
             ):
+                complete = self._video_store.adopt(
+                    job.id,
+                    "thumbnail",
+                    content_type="image/jpeg",
+                    size_bytes=job.output.thumbnail_size_bytes,
+                    sha256=job.output.thumbnail_sha256,
+                    expires_at=float(job.expires_at),
+                )
+            if complete:
                 adopted.add(job.id)
-                if (
-                    job.output.thumbnail_sha256 is not None
-                    and job.output.thumbnail_size_bytes is not None
-                ):
-                    self._video_store.adopt(
-                        job.id,
-                        "thumbnail",
-                        content_type="image/jpeg",
-                        size_bytes=job.output.thumbnail_size_bytes,
-                        sha256=job.output.thumbnail_sha256,
-                        expires_at=float(job.expires_at),
-                    )
+            else:
+                # Every declared artifact must survive for the job to remain
+                # complete; a partial set is unservable and is dropped.
+                self._video_store.delete(job.id)
+                self._video_jobs.invalidate(
+                    job.id, "the job's artifacts did not survive an API restart"
+                )
         self._video_store.purge_unknown(adopted)
         self._tg: TaskGroup = TaskGroup()
 
@@ -10428,6 +10437,8 @@ class API:
                 update={
                     "sha256": hashlib.sha256(data).hexdigest(),
                     "size_bytes": len(data),
+                    # Worker-local only; never replicated from a caller.
+                    "local_path": None,
                 }
             )
             for spec, data in zip(params.references, attachments, strict=True)
@@ -10494,7 +10505,9 @@ class API:
                         )
                         self._video_store.delete(command_id)
                         self._video_job_media_deadlines.pop(command_id, None)
-                        continue
+                        # A master-declared failure injects the error without
+                        # closing the queue; the stream is over either way.
+                        break
                     changes: dict[str, object] = {
                         "status": "in_progress",
                         "stage": chunk.stage,
@@ -10525,6 +10538,8 @@ class API:
                         )
                     self._video_jobs.update(command_id, **changes)
                     self._settle_video_job(command_id)
+                    if chunk.finish_reason is not None:
+                        break
         finally:
             # The queue closes on cancellation, on a transport-declared failure,
             # or when the producer's terminal frame was delivered. A job that is
@@ -10672,10 +10687,14 @@ class API:
                             packet.error_message or "video output delivery failed",
                         )
                         self._video_job_media_deadlines.pop(command_id, None)
-                except ValueError as error:
+                        self._close_command_queue(command_id)
+                except (ValueError, OSError) as error:
+                    # Validation failures and filesystem failures (a full disk)
+                    # both end this transfer; neither may end the receive loop.
                     self._video_store.delete(command_id)
                     self._video_jobs.fail(command_id, f"video output rejected: {error}")
                     self._video_job_media_deadlines.pop(command_id, None)
+                    self._close_command_queue(command_id)
                     await self._send_output_media_terminal(
                         packet.transport_failure(str(error)[:1024])
                     )

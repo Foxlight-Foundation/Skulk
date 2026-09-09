@@ -201,6 +201,24 @@ class VideoJobRegistry:
             )
         return job
 
+    def invalidate(self, job_id: CommandId, error: str) -> VideoJob | None:
+        """Demote a completed job whose artifacts are no longer servable.
+
+        Only restart reconciliation uses this: a job that completed in a
+        previous process but whose files did not all survive must not be
+        reported as complete.
+        """
+
+        job = self._jobs.get(job_id)
+        if job is None:
+            return None
+        demoted = job.model_copy(
+            update={"status": "failed", "error": error, "expires_at": None}
+        )
+        self._jobs[job_id] = demoted
+        self._persist()
+        return demoted
+
     def fail(self, job_id: CommandId, error: str, *, cancelled: bool = False) -> VideoJob | None:
         """Move a live job to a terminal failure or cancellation."""
 

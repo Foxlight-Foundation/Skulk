@@ -30,6 +30,8 @@ _MAX_ARTIFACT_BYTES = 4 * 1024 * 1024 * 1024
 """Absolute ceiling on one artifact, well above any 15 s 768p container."""
 _MAX_STASHED_CHUNKS = 256
 """Out-of-order chunks held per assembly on a reordering transport."""
+_MAX_STASHED_BYTES = 64 * 1024 * 1024
+"""Bytes of early chunks held per assembly before the transfer is refused."""
 
 
 class StoredVideoArtifact(BaseModel, frozen=True):
@@ -70,6 +72,7 @@ class _Assembly:
     next_sequence: int = 1
     stash: dict[int, bytes] = field(default_factory=dict)
     """Chunks that arrived ahead of ``next_sequence`` on a reordering transport."""
+    stashed_bytes: int = 0
 
 
 def _file_sha256(path: Path) -> str | None:
@@ -145,16 +148,22 @@ class VideoStore:
         if sequence != assembly.next_sequence:
             # Zenoh delivers a stream in order; the gossipsub fallback may not.
             # Hold a bounded window of early chunks and drain them in order.
-            if len(assembly.stash) >= _MAX_STASHED_CHUNKS:
+            if (
+                len(assembly.stash) >= _MAX_STASHED_CHUNKS
+                or assembly.stashed_bytes + len(data) > _MAX_STASHED_BYTES
+            ):
                 raise ValueError(
                     f"artifact reorder window exceeded waiting for chunk "
                     f"{assembly.next_sequence}"
                 )
             assembly.stash[sequence] = data
+            assembly.stashed_bytes += len(data)
             return
         self._write_chunk(assembly, data)
         while assembly.next_sequence in assembly.stash:
-            self._write_chunk(assembly, assembly.stash.pop(assembly.next_sequence))
+            early = assembly.stash.pop(assembly.next_sequence)
+            assembly.stashed_bytes -= len(early)
+            self._write_chunk(assembly, early)
 
     @staticmethod
     def _write_chunk(assembly: _Assembly, data: bytes) -> None:

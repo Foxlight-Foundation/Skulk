@@ -1356,7 +1356,9 @@ class Router:
             assert self._zenoh is not None
             await self._zenoh.zenoh_publish(f"{topic}/{owner}", data)
             return
-        if topic == VISION_MEDIA.topic:
+        if topic in (VISION_MEDIA.topic, OUTPUT_MEDIA.topic):
+            # Bulk media keeps a target-filtered gossipsub fallback on the
+            # trusted fabric; receivers drop frames not addressed to them.
             await self._net.gossipsub_publish(topic, data)
             return
         raise RuntimeError(f"No routed data transport is active for {topic}")
@@ -1568,6 +1570,7 @@ class Router:
                             REALTIME_AUDIO.topic,
                             SPEECH_MEDIA.topic,
                             VISION_MEDIA.topic,
+                            OUTPUT_MEDIA.topic,
                         ):
                             reject_stream(stream)
                             rejection_slot = Semaphore(1)
