@@ -2134,3 +2134,10 @@ an API mutation after authentication failure. Session changes clear caches and p
 drafts; explicit direct-host selection is required after a paired session ends.
 Plugin grant administration refuses a presented paired bearer even on the direct
 listener. Native relay inner TLS remains a separate transport, not a browser shim.
+
+Managed owner proposal observations may include separate receipt reconciliation
+(`ProposalReconciliation`): lifecycle state, journal read time, stale health/access
+and a safe code. The provider owns exact receipt correlation; core only authorizes
+read access and transports bounded metadata. Later confirmed absence never rewrites
+submission uncertainty. Dashboard and terminal show the same facts without retrying
+an effect or claiming inference readiness from resource state.

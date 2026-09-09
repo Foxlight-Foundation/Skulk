@@ -652,6 +652,13 @@ interrupted approval; submitted and uncertain work is never automatically replay
 Managed IPC uses fixed `proposal-approve`, `proposal-operation`, and
 `proposal-resume` operations. The dashboard renders this generic contract; policy,
 approval issuance and provider reconciliation remain plugin responsibilities.
+The optional `ProposalOperation.reconciliation` carries a `ProposalReconciliation`
+with correlated lifecycle `state`, nullable journal-read `observed_at`, `stale`,
+and a nullable safe `code`. Keep original submission `phase` unchanged when cleanup
+later confirms absence. Historical absence must survive failed observations;
+missing receipts never imply absence. Cleanup reads must not depend on current
+spending approval or replay any provider effect. These facts do not prove model
+preparation or inference readiness.
 See the [owner action HTTP contract](api-guide.md#plugin-owner-proposal-actions).
 
 ## Offline runtime verification and staging

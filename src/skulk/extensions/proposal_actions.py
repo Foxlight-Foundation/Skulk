@@ -23,6 +23,23 @@ class ProposalApproval(FrozenModel):
     )
 
 
+class ProposalReconciliation(FrozenModel):
+    """Receipt evidence separate from submission history and inference readiness."""
+
+    state: Literal["pending", "active", "releasing", "absent", "attention", "unknown"] = Field(
+        description="Correlated lifecycle state; absence requires retained evidence."
+    )
+    observed_at: int | None = Field(
+        default=None, gt=0, le=253402300799,
+        description="Cleanup journal read time, UTC seconds; null before observation."
+    )
+    stale: bool = Field(description="Current cleanup access or worker health is unconfirmed.")
+    code: str | None = Field(
+        default=None, pattern=r"^[a-z][a-z0-9_]{0,127}$",
+        description="Safe reconciliation status code, separate from submission errors."
+    )
+
+
 class ProposalOperation(FrozenModel):
     """Safe durable progress; reconnect never replays an uncertain dispatch."""
 
@@ -41,6 +58,10 @@ class ProposalOperation(FrozenModel):
         "uncertain",
     ] = Field(description="Last durable observation, not a new execution grant.")
     updated_at: int = Field(gt=0, description="Observation time as UTC Unix seconds.")
+    reconciliation: ProposalReconciliation | None = Field(
+        default=None,
+        description="Later cleanup evidence; never changes submission history.",
+    )
     code: str | None = Field(
         default=None,
         pattern=r"^[a-z][a-z0-9_]{0,127}$",

@@ -91,6 +91,12 @@ function ProposalControls({ pluginId, nodeId, actionsAvailable }: NodeAddress & 
     {operationId ? <section aria-label={t('plugins.proposalProgress', 'Proposal operation')}>
       <p>{t('plugins.proposalOperationId', 'Operation ID')}: {operationId}</p>
       {observed ? <p role="status">{observed.phase}{observed.code ? ` · ${observed.code}` : ''}{observed.correctiveAction ? ` · ${observed.correctiveAction}` : ''}</p> : null}
+      {observed?.reconciliation ? <section aria-label={t('plugins.proposalCleanup', 'Cleanup observation')}>
+        <p>{observed.reconciliation.state === 'absent' ? t('plugins.proposalAbsent', 'Confirmed absent') : observed.reconciliation.state}</p>
+        {observed.reconciliation.observedAt != null ? <p>{t('plugins.proposalCleanupObserved', 'Cleanup journal observed at')}: {new Date(observed.reconciliation.observedAt * 1000).toISOString()}</p> : null}
+        {observed.reconciliation.stale ? <p role="alert">{t('plugins.proposalCleanupStale', 'Cleanup observation is stale or unavailable. Restore cleanup access and refresh; do not replay the proposal.')}</p> : null}
+        <p>{t('plugins.proposalCleanupHistory', 'Cleanup evidence does not change the submission result or prove inference readiness.')}</p>
+      </section> : null}
       {operation.isError ? <p role="alert">{t('plugins.proposalStatusUnavailable', 'Operation status is unavailable or stale. Restore access and refresh; do not replay the proposal.')}</p> : null}
       <Actions>
         <Button type="button" disabled={operation.isFetching || busy} onClick={() => void operation.refetch()}>{t('plugins.proposalRefreshOperation', 'Refresh operation')}</Button>

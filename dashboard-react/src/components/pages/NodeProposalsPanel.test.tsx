@@ -87,3 +87,15 @@ it('resumes retained approval only on an explicit action without replacement int
   expect(writes[0].path).toBe(`/v1/plugins/managed.fixture/nodes/node/proposal-operations/${'d'.repeat(32)}/resume`);
   expect(writes[0].body).toBe('');
 });
+
+
+it('keeps uncertain submission visible beside confirmed absence and stale cleanup', async () => {
+  operation = { operationId: 'e'.repeat(32), reference: review.proposal.reference, phase: 'uncertain', updatedAt: 102, code: 'submission_uncertain', correctiveAction: 'Never replay.', reconciliation: { state: 'absent', observedAt: 101, stale: true, code: 'reconciliation_unavailable' } };
+  localStorage.setItem(storageKey, operation.operationId);
+  await click('Review proposals'); await contains('Confirmed absent');
+  expect(host.textContent).toContain('uncertain');
+  expect(host.textContent).toContain('Cleanup observation is stale or unavailable');
+  expect(host.textContent).toContain('1970-01-01T00:01:41.000Z');
+  expect(host.textContent).not.toContain('Resume original approval');
+  expect(calls.every((call) => call.method === 'GET')).toBe(true);
+});

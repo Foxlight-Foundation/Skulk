@@ -3834,6 +3834,19 @@ Malformed inputs return 422, missing scopes 403, unsupported facets 404,
 inconsistent references or refused actions 409, and unavailable owners 503/504.
 An unconfirmed HTTP reply does not prove that the action was refused.
 
+An optional nullable `reconciliation` object reports later cleanup evidence without
+rewriting `phase`: `state` is `pending`, `active`, `releasing`, `absent`, `attention`
+or `unknown`; `observedAt` is the cleanup journal read time in UTC seconds (null
+before any successful observation); `stale` marks unconfirmed current access or
+worker health; and `code` is a nullable safe status code. These are historical
+receipt observations, not a new provider inventory query or inference-readiness
+claim. A failed refresh retains previous evidence and marks it stale. Providers
+must correlate the exact retained request, never infer absence from a missing
+record, and never replay uncertain work during observation. Confirmed absence
+remains visible beside the original uncertain submission, including after a
+later cleanup-connection outage. The dashboard labels absence and stale evidence
+separately; terminal clients consume the same response fields.
+
 The Plugins page presents provider facts as text with a distinct **Approve and
 execute reviewed proposal** button. It saves only an operation lookup ID in browser
 storage before POST, then observes status after reconnect. It never stores proof
