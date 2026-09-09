@@ -56,6 +56,8 @@ class VideoReferenceSpec(CamelCaseModel):
     delivered bytes against before it lets a runner see them.
     """
 
+    model_config = ConfigDict(frozen=True)
+
     slot: int = Field(ge=0, lt=MAX_VIDEO_REFERENCES)
     """Position in the request's attachment order; the media-plane slot index."""
     kind: VideoReferenceKind
@@ -215,6 +217,8 @@ class VideoOutputManifest(CamelCaseModel):
     it before the job completes.
     """
 
+    model_config = ConfigDict(frozen=True)
+
     sha256: str = Field(pattern=_SHA256_PATTERN)
     """Digest of the container bytes."""
     size_bytes: int = Field(ge=1)
@@ -251,6 +255,8 @@ class VideoOutputManifest(CamelCaseModel):
 
 class VideoGenerationStats(CamelCaseModel):
     """Runner-reported timing for one render."""
+
+    model_config = ConfigDict(frozen=True)
 
     steps: int = Field(ge=0)
     """Sampling steps actually executed."""

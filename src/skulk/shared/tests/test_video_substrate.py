@@ -377,6 +377,7 @@ def _bare_api(tmp_path: Path) -> API:
     api._chunk_reorder = {}  # pyright: ignore[reportPrivateUsage]
     api._cancelled_command_ids = set()  # pyright: ignore[reportPrivateUsage]
     api._video_job_media_deadlines = {}  # pyright: ignore[reportPrivateUsage]
+    api._video_output_sources = {}  # pyright: ignore[reportPrivateUsage]
     return api
 
 
@@ -563,3 +564,50 @@ def test_video_store_reorders_early_chunks_within_a_bounded_window(tmp_path: Pat
     store.append(other, "video", 2, b"zz")
     with pytest.raises(ValueError, match="still missing"):
         store.commit(other, "video", sha256=DIGEST, total_chunks=2)
+
+
+def test_nested_video_contracts_are_frozen() -> None:
+    spec = _reference(0)
+    with pytest.raises(ValidationError):
+        spec.slot = 3
+    manifest = VideoOutputManifest(
+        sha256=DIGEST, size_bytes=10, width=64, height=64, frame_count=5, fps=24, seconds=0.2
+    )
+    with pytest.raises(ValidationError):
+        manifest.size_bytes = 11
+
+
+def test_output_source_survives_task_deletion(tmp_path: Path) -> None:
+    from skulk.shared.types.tasks import TaskId, TaskStatus
+    from skulk.shared.types.tasks import VideoGeneration as VideoGenerationTask
+    from skulk.shared.types.worker.instances import InstanceId
+
+    api = _bare_api(tmp_path)
+    job = api._video_jobs.create(_job("placed"))  # pyright: ignore[reportPrivateUsage]
+    instance_id = InstanceId("video")
+    task = VideoGenerationTask(
+        task_id=TaskId(),
+        command_id=job.id,
+        instance_id=instance_id,
+        task_status=TaskStatus.Pending,
+        owner_node=NodeId("api"),
+        task_params=VideoGenerationTaskParams(prompt="x", model="org/video", seconds=5),
+    )
+    from skulk.shared.models.model_cards import ModelCard, ModelTask
+    from skulk.shared.types.memory import Memory
+    from skulk.shared.types.worker.instances import MlxRingInstance
+    from skulk.shared.types.worker.runners import RunnerId, ShardAssignments
+    from skulk.shared.types.worker.shards import PipelineShardMetadata
+
+    card = ModelCard(model_id=MODEL, storage_size=Memory.from_mb(1), n_layers=1, hidden_size=1, supports_tensor=False, tasks=[ModelTask.TextGeneration])
+    shard = PipelineShardMetadata(model_card=card, device_rank=0, world_size=1, start_layer=0, end_layer=1, n_layers=1)
+    instance = MlxRingInstance(
+        instance_id=instance_id,
+        shard_assignments=ShardAssignments(model_id=MODEL, node_to_runner={NodeId("worker-1"): RunnerId("r")}, runner_to_shard={RunnerId("r"): shard}),
+        hosts_by_node={},
+        ephemeral_port=1,
+    )
+    api.state = State(instances={instance_id: instance})
+    api._record_video_output_source(task)  # pyright: ignore[reportPrivateUsage]
+    api.state = State()  # the task and instance are gone once the stream finalizes
+    assert api._video_output_source(job.id) == NodeId("worker-1")  # pyright: ignore[reportPrivateUsage]

@@ -1649,6 +1649,10 @@ class API:
         # Deadline by which a job must have received both its render terminal
         # and its container; keyed by command.
         self._video_job_media_deadlines: dict[CommandId, float] = {}
+        # The single node the master placed each video command on, captured at
+        # TaskCreated. The task itself is deleted once the stream finalizes,
+        # which can precede the container's arrival on OUTPUT_MEDIA.
+        self._video_output_sources: dict[CommandId, NodeId] = {}
         self._pending_vision_media: dict[CommandId, _PendingVisionMedia] = {}
         self._pending_vision_media_bytes = 0
         self._active_vision_media_bytes: dict[CommandId, int] = {}
@@ -2055,6 +2059,7 @@ class API:
                     command_id, "the API session reset before the video was delivered"
                 )
         self._video_job_media_deadlines = {}
+        self._video_output_sources = {}
         self._cancelled_command_ids = set()
         self.unpause(result_clock, master_node_id=master_node_id)
         self.event_receiver.close()
@@ -10049,6 +10054,7 @@ class API:
                 record_membership_from_event(self._telemetry_view, event)
 
                 if isinstance(event, TaskCreated):
+                    self._record_video_output_source(event.task)
                     self._dispatch_pending_speech_media(event.task)
                     self._dispatch_pending_vision_media(event.task)
 
@@ -10596,6 +10602,7 @@ class API:
         settled = self._video_jobs.settle(command_id)
         if settled is not None and settled.is_terminal:
             self._video_job_media_deadlines.pop(command_id, None)
+            self._video_output_sources.pop(command_id, None)
             self._video_jobs.update(command_id, expires_at=int(video.expires_at))
 
     async def _apply_output_media(self) -> None:
@@ -10673,20 +10680,27 @@ class API:
                         packet.transport_failure(str(error)[:1024])
                     )
 
+    def _record_video_output_source(self, task: task_types.Task) -> None:
+        """Remember which node may deliver a video command's output."""
+
+        if (
+            not isinstance(task, task_types.VideoGeneration)
+            or task.task_status == task_types.TaskStatus.Failed
+            or task.command_id not in self._video_generation_queues
+            and self._video_jobs.get(task.command_id) is None
+        ):
+            return
+        instance = self.state.instances.get(task.instance_id)
+        if instance is None:
+            return
+        nodes = tuple(instance.shard_assignments.node_to_runner)
+        if len(nodes) == 1:
+            self._video_output_sources[task.command_id] = nodes[0]
+
     def _video_output_source(self, command_id: CommandId) -> NodeId | None:
         """Return the single node the master placed a video command on."""
 
-        for task in self.state.tasks.values():
-            if (
-                isinstance(task, task_types.VideoGeneration)
-                and task.command_id == command_id
-            ):
-                instance = self.state.instances.get(task.instance_id)
-                if instance is None:
-                    return None
-                nodes = tuple(instance.shard_assignments.node_to_runner)
-                return nodes[0] if len(nodes) == 1 else None
-        return None
+        return self._video_output_sources.get(command_id)
 
     async def _send_output_media_terminal(self, packet: OutputMediaPacket) -> None:
         """Send one reverse terminal without letting a stuck peer pin the loop."""
