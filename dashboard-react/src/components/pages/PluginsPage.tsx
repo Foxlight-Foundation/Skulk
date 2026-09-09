@@ -3,6 +3,7 @@ import styled from 'styled-components';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 import { useGetPluginNodesQuery, useGetNodeConfigurationQuery, useConfigurePluginNodeMutation, type ConfigurableNode, type NodeConfiguration } from '../../store/endpoints/plugins';
 import { Button } from '../common/Button';
+import { ManagedRuntimesPanel } from './ManagedRuntimesPanel';
 import { PluginConfigurationFields, supportedConfigurationSchema } from './PluginConfigurationFields';
 
 const Page = styled.section`padding: 24px; width: 100%; max-width: 900px; margin: 0 auto; box-sizing: border-box;`;
@@ -81,10 +82,11 @@ function NodeCard({ pluginId, node }: { pluginId: string; node: ConfigurableNode
 /** Render configuration declared by installed plugins, without provider-specific UI. */
 export function PluginsPage() {
   const { t } = useSkulkTranslation();
-  const query = useGetPluginNodesQuery();
+  const query = useGetPluginNodesQuery(undefined, { pollingInterval: 5000, skipPollingIfUnfocused: true });
   return <Page>
     <h1>{t('plugins.title', 'Plugins')}</h1>
     <p>{t('plugins.intro', 'Manage the settings of capability nodes installed on this Skulk host.')}</p>
+    <ManagedRuntimesPanel />
     <Button type="button" disabled={query.isFetching} onClick={() => void query.refetch()}>{t('plugins.refresh', 'Refresh')}</Button>
     {query.isLoading ? <p>{t('plugins.loading', 'Loading plugins…')}</p> : null}
     {query.error ? <p role="alert">{t('plugins.accessRequired', 'Plugin management is unavailable. Open the host dashboard through localhost or Tailscale, or use a paired operator with plugin access.')}</p> : null}

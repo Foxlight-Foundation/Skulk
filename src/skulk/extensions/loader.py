@@ -10,7 +10,7 @@ import asyncio
 import os
 from collections.abc import AsyncGenerator, Callable, Iterable, Sequence
 from importlib.metadata import EntryPoint, PackageNotFoundError, entry_points, version
-from typing import cast, final
+from typing import TYPE_CHECKING, cast, final
 
 import anyio
 from loguru import logger
@@ -47,6 +47,10 @@ from skulk.shared.types.chunks import (
 )
 from skulk.shared.types.text_generation import TextGenerationTaskParams
 
+if TYPE_CHECKING:
+    from skulk.extensions.managed import ManagedOwner
+    from skulk.extensions.managed_services import ManagedServices
+
 ENTRY_POINT_GROUP = "skulk.extensions"
 _EXTENSION_SHUTDOWN_TIMEOUT_SECONDS = 30.0
 
@@ -76,7 +80,12 @@ class LoadedExtensions:
     call site.
     """
 
-    def __init__(self, extensions: Sequence[SkulkExtension]) -> None:
+    def __init__(
+        self,
+        extensions: Sequence[SkulkExtension],
+        *,
+        managed_services: "ManagedServices | None" = None,
+    ) -> None:
         """Wrap validated extensions (see :func:`load_extensions`).
 
         Every extension attribute access here is guarded too: this runs at
@@ -84,6 +93,7 @@ class LoadedExtensions:
         ``chat_middleware()`` raises must be skipped loudly, never allowed to
         crash the process (the "loader never raises" contract).
         """
+        self.managed_services = managed_services
         self._extension_instances: list[SkulkExtension] = []
         self._configuration_providers: dict[str, NodeConfigurationProvider] = {}
         self._configuration_names: set[str] = set()
@@ -217,7 +227,24 @@ class LoadedExtensions:
     @property
     def configuration_providers(self) -> dict[str, NodeConfigurationProvider]:
         """Return owner-management facets without filtering child readiness."""
-        return dict(self._configuration_providers)
+        result = dict(self._configuration_providers)
+        result.update(
+            {
+                owner.name: owner
+                for owner in self._managed_owners()
+                if owner.name not in self._configuration_names
+            }
+        )
+        return result
+
+    def _managed_owners(self) -> tuple["ManagedOwner", ...]:
+        if self._stopping or self.managed_services is None:
+            return ()
+        return tuple(
+            owner
+            for name, owner in self.managed_services.owners.items()
+            if name not in self._names
+        )
 
     def with_builtin_extensions(
         self, extensions: Sequence[SkulkExtension]
@@ -231,7 +258,7 @@ class LoadedExtensions:
         capability factories may be stateful.
         """
 
-        combined = LoadedExtensions(extensions)
+        combined = LoadedExtensions(extensions, managed_services=self.managed_services)
         combined._extension_instances.extend(self._extension_instances)
         combined._names.extend(self._names)
         combined._chat_middlewares.extend(self._chat_middlewares)
@@ -273,7 +300,7 @@ class LoadedExtensions:
     @property
     def names(self) -> list[str]:
         """Names of all loaded extensions."""
-        return list(self._names)
+        return [*self._names, *(owner.name for owner in self._managed_owners())]
 
     async def steward_tools(
         self, context: ExtensionContext, *, proposals_allowed: bool
@@ -320,16 +347,20 @@ class LoadedExtensions:
     def _dynamic_calls(
         self,
     ) -> dict[str, tuple[str, CapabilityCallHandler, CapabilityDescriptor]]:
-        if self._stopping or len(self._dynamic_providers) > 32:
+        providers: list[tuple[str, SkulkExtension]] = [
+            *self._dynamic_providers,
+            *((owner.name, owner) for owner in self._managed_owners()),
+        ]
+        if self._stopping or len(providers) > 32:
             return {}
         calls: dict[str, tuple[str, CapabilityCallHandler, CapabilityDescriptor]] = {}
         conflicts: set[str] = set()
         reserved = {descriptor.id for descriptor in self._capability_descriptors}
-        for name, provider in self._dynamic_providers:
+        for name, provider in providers:
             try:
-                if not isinstance(provider, DynamicCapabilityProvider) or not isinstance(
-                    provider, CapabilityCallHandler
-                ):
+                if not isinstance(
+                    provider, DynamicCapabilityProvider
+                ) or not isinstance(provider, CapabilityCallHandler):
                     continue
                 descriptors = provider.dynamic_capabilities()
                 if len(descriptors) > 128:
@@ -345,9 +376,9 @@ class LoadedExtensions:
                     # Reserve conflicting identities even when one owner is
                     # unavailable; readiness cannot transfer ownership silently.
                     conflicts.add(qualified_id)
-                    if isinstance(provider, CapabilityReadiness) and not provider.capability_ready(
-                        qualified_id
-                    ):
+                    if isinstance(
+                        provider, CapabilityReadiness
+                    ) and not provider.capability_ready(qualified_id):
                         continue
                     calls[qualified_id] = (name, provider, descriptor)
             except Exception:
@@ -447,6 +478,8 @@ class LoadedExtensions:
             _EXTENSION_SHUTDOWN_TIMEOUT_SECONDS, shield=True
         ) as scope:
             async with anyio.create_task_group() as tasks:
+                if self.managed_services is not None:
+                    tasks.start_soon(stop, self.managed_services)
                 for extension in self._extension_instances:
                     if isinstance(extension, SupportsExtensionShutdown):
                         tasks.start_soon(stop, extension)
@@ -464,7 +497,9 @@ class LoadedExtensions:
         if self._started or self._stopping:
             return
         self._started = True
-        if self._dynamic_providers:
+        if self.managed_services is not None:
+            self.managed_services.on_start(context)
+        if self._dynamic_providers or self.managed_services is not None:
             self._dynamic_observer = asyncio.create_task(self._observe_dynamic(context))
         for name, extension in self._startup_hooks:
             try:
@@ -675,13 +710,21 @@ def load_extensions(
             Skulk version); injectable for tests.
     """
     from skulk.extensions.managed import load_managed_owners
+    from skulk.extensions.managed_services import ManagedServices
     from skulk.shared.constants import SKULK_CONFIG_HOME
 
     disabled = os.environ.get("SKULK_EXTENSIONS_DISABLE", "").strip() == "1"
-    managed = load_managed_owners(SKULK_CONFIG_HOME / "managed-plugins", disabled=disabled)
+    managed = load_managed_owners(
+        SKULK_CONFIG_HOME / "managed-plugins", disabled=disabled
+    )
+    services = ManagedServices(
+        SKULK_CONFIG_HOME / "managed-service" / "connection.json",
+        disabled=disabled,
+        existing_owners=managed,
+    )
     if disabled:
         logger.warning("SKULK_EXTENSIONS_DISABLE=1: skipping extension discovery")
-        return LoadedExtensions(managed)
+        return LoadedExtensions(managed, managed_services=services)
 
     if candidates is None:
         candidates = entry_points(group=ENTRY_POINT_GROUP)
@@ -702,7 +745,7 @@ def load_extensions(
         if extension is not None:
             loaded.append(extension)
 
-    result = LoadedExtensions([*loaded, *managed])
+    result = LoadedExtensions([*loaded, *managed], managed_services=services)
     if result.names:
         # Log via the guarded .names, never by re-reading plugin properties.
         logger.info(

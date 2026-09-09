@@ -177,6 +177,7 @@ class ManagedOwner:
         self.nodes: tuple[_Node, ...] = ()
         self.observed = 0.0
         self.available = False
+        self.manager_available = True
         self.poll_task: asyncio.Task[None] | None = None
         self.refresh_lock = asyncio.Lock()
 
@@ -195,6 +196,7 @@ class ManagedOwner:
         return (
             not self.disabled
             and self.available
+            and self.manager_available
             and time.monotonic() - self.observed < 3
             and any(
                 node.status == "ready"
@@ -292,10 +294,12 @@ class ManagedOwner:
     async def on_stop(self) -> None:
         """Stop observation and admission without stopping independent owner cleanup."""
         self.available = False
-        if self.poll_task is not None:
-            self.poll_task.cancel()
-            await asyncio.gather(self.poll_task, return_exceptions=True)
-            self.poll_task = None
+        # Legacy discovery and live manager inventory can share one adapter.
+        # Claim its observer before yielding so concurrent shutdown releases once.
+        task, self.poll_task = self.poll_task, None
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
             if self.attachment is not None:
                 await self.attachment.release()
 

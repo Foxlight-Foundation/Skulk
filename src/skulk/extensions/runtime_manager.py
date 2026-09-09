@@ -24,7 +24,11 @@ from skulk.extensions.runtime_attachment import (
     finish_attachment,
     recover_attachment,
 )
-from skulk.extensions.runtime_controller import LifecycleRequest, RuntimeController
+from skulk.extensions.runtime_controller import (
+    LifecycleOperation,
+    LifecycleRequest,
+    RuntimeController,
+)
 from skulk.extensions.runtime_files import (
     RuntimeLock,
     private_directory,
@@ -316,8 +320,23 @@ class RuntimeManager:
                 or time.time() - status.observed_at > 90
                 or failed
             )
+            operation = None
+            try:
+                if controller.pending.exists():
+                    pending = LifecycleOperation.model_validate_json(
+                        read_private(controller.pending)
+                    )
+                    operation = controller.operation(pending.request.operation_id)
+                elif selection is not None:
+                    operation = controller.operation(selection.operation_id)
+            except FileNotFoundError:
+                # Older selections created directly by the local selector do not
+                # have a controller operation. Never invent an operation to replay.
+                pass
             return {
                 "plugin_id": identifier,
+                "operation_id": operation.request.operation_id if operation else None,
+                "operation_state": operation.state if operation else None,
                 "error_code": "service_unavailable" if failed else None,
                 "selected_digest": selection.runtime_digest if selection else None,
                 "selection_revision": selection.revision if selection else 0,

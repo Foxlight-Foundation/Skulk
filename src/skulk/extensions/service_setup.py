@@ -15,7 +15,11 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from skulk.extensions import service_bootstrap, service_registration
 from skulk.extensions.runtime_artifacts import Digest, measure_host
-from skulk.extensions.runtime_attachment import HostSettings, ProfileIdentifier
+from skulk.extensions.runtime_attachment import (
+    HostSettings,
+    ProfileIdentifier,
+    ServiceConnection,
+)
 from skulk.extensions.runtime_files import RuntimeLock, read_private, write_private
 from skulk.extensions.runtime_install import finish_runtime_work
 from skulk.extensions.runtime_manager import InventoryRequest, manager_request
@@ -27,25 +31,6 @@ from skulk.extensions.service_snapshot import (
     stage_service_runtime,
 )
 from skulk.shared.constants import SKULK_CONFIG_HOME
-
-
-class ServiceConnection(BaseModel):
-    """Automatically provisioned local API connection to a fixed service profile."""
-
-    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
-    manager_root: str = Field(
-        min_length=1, max_length=4096, description="Absolute local service-state root."
-    )
-    profile_id: ProfileIdentifier = Field(
-        description="Locally generated service profile ID."
-    )
-
-    @model_validator(mode="after")
-    def absolute_root(self) -> Self:
-        """Refuse relative storage that could depend on an API working directory."""
-        if not Path(self.manager_root).is_absolute():
-            raise ValueError("service connection root must be absolute")
-        return self
 
 
 class SetupOperation(BaseModel):

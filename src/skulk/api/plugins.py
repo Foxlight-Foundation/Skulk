@@ -9,6 +9,7 @@ import anyio
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import Field, JsonValue
 
+from skulk.api.managed_plugins import create_managed_plugins_router
 from skulk.api.operator_auth import TailnetPeerVerifier, authorize_plugin_request
 from skulk.connectivity.tailscale import is_tailscale_peer
 from skulk.extensions.configuration import (
@@ -69,6 +70,11 @@ def create_plugins_router(
     is accepted here.
     """
     router = APIRouter(prefix="/v1/plugins", tags=["Plugins"])
+    router.include_router(
+        create_managed_plugins_router(
+            extensions, pairing_service, tailnet_peer_verifier
+        )
+    )
     capacity = anyio.CapacityLimiter(8)
 
     async def invoke(call: Callable[[], Awaitable[_Result]]) -> _Result:

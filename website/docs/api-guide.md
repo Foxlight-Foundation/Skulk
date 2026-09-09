@@ -3705,7 +3705,7 @@ The local socket accepts these typed requests:
 
 | Action | Parameters | Behavior |
 | --- | --- | --- |
-| `list` | None | Lists registered installation IDs, selected versions, selection revisions, observed process status and stale/unavailable observations. Process existence does not imply capability readiness. |
+| `list` | None | Lists registered installation IDs, selected runtime digests, selection revisions, retained operation references, observed process status and stale/unavailable observations. Process existence does not imply capability readiness. |
 | `register` | `plugin_id` | Registers an empty `managed.*` installation, up to sixteen per manager. Provisions its existing host identity automatically; an existing mismatched identity is refused without replacement. No provider request is made. |
 | `get` | `plugin_id` | Returns desired selection and process observation without paths, credentials or raw output. |
 | `submit` | `plugin_id`, `request` | Accepts a local lifecycle request after validating its revision and target. The nested request contains `operation_id` (32 lowercase hexadecimal characters), `action` (`activate` or `disable`), `expected_revision`, and for activation `runtime_digest`, optional `rollback` and `accept_permissions`. No spending authority is conveyed. |
@@ -3726,8 +3726,44 @@ The socket is owner-only and accepts eight concurrent clients, one request per
 connection, at most 16 KiB request and 256 KiB response, with a thirty-second
 request deadline. Errors contain the stable `manager_operation_refused` code;
 local operation records distinguish validation, ownership and local I/O failures.
-This transport is not a LAN listener or remote authorization mechanism. The HTTP
-lifecycle integration must enforce the existing explicit plugin operator scopes.
+This transport is not a LAN listener or remote authorization mechanism. The HTTP lifecycle routes below enforce the existing explicit plugin operator scopes.
+
+
+### Managed plugin HTTP lifecycle
+
+The Plugins page and these routes use the same independently supervised manager
+as terminal operations. All JSON fields in this lifecycle contract use
+`snake_case`. Local `skulk-plugin-service setup` supplies the protected connection;
+HTTP requests cannot choose a manager root, executable or attachment identity.
+A running Skulk API discovers subsequent local setup and installation registration
+without restart. Missing setup returns an actionable unavailable response.
+
+| Method | Path | Parameters and behavior |
+| --- | --- | --- |
+| GET | `/v1/plugins/managed` | Requires `plugins:read`. Returns `installations`, at most sixteen entries, with `plugin_id`, `selected_digest`, `selection_revision`, `enabled`, `service`, `stale`, `error_code`, `operation_id` and `operation_state`. Pending or selected operation references allow reconnect to resume observation without repeating a mutation. |
+| POST | `/v1/plugins/managed/installations` | Requires `plugins:manage`. Body: `plugin_id` in the `managed.*` namespace. Registers an empty installation and returns its observation. Does not download, stage or enable a release. |
+| GET | `/v1/plugins/managed/installations/{plugin_id}` | Requires `plugins:read`. Returns `installation` observation and `selection`, nullable before a release is selected. |
+| POST | `/v1/plugins/managed/installations/{plugin_id}/operations` | Requires `plugins:manage`. Body: `operation_id` (32 lowercase hexadecimal characters), `action` (`activate` or `disable`), `expected_revision` (nonnegative integer), and activation-only `runtime_digest`, optional `rollback` and `accept_permissions` booleans. Returns the retained `LifecycleOperation`. Activation accepts only an already staged, verified generation. |
+| GET | `/v1/plugins/managed/installations/{plugin_id}/operations/{operation_id}` | Requires `plugins:read`. Reads the original local operation's exact `request`, previewed `selection`, `state` and sanitized `error_code`. Never repeats its effect. |
+| POST | `/v1/plugins/managed/installations/{plugin_id}/operations/{operation_id}/recover` | Requires `plugins:manage`. No body. Explicitly resumes the existing journaled local operation; a completed operation is unchanged. |
+
+Direct localhost/Tailscale owner administration remains available under the
+existing origin checks. Remote grants are explicit: a broad operation token does
+not substitute for a plugin grant, and revoked sessions lose access. Responses
+use `Cache-Control: no-store`. Unknown fields and malformed identifiers return
+422; authorization follows the existing 401/403 contract. Capacity exhaustion
+returns 429, unavailable local setup/service or operation returns 503, refused
+selection or conflicting intent returns 409, and a manager deadline returns 504.
+After an uncertain response, read the original operation; do not generate another
+mutation to discover whether the first succeeded. No raw provider response,
+credential value or host-local path is returned.
+
+The dashboard polls inventory and retained operation status, distinguishes stale
+observations, and supports disabling and explicit local recovery. Runtime
+completion does not prove capability readiness. Disabling preserves cleanup
+records and independent supervision. These routes convey neither paid approval
+nor permission to replay an uncertain provider create. Release download/staging,
+credential provisioning and proposal approval are separate operations.
 
 
 ### Stable local manager runtime

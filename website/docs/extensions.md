@@ -558,6 +558,14 @@ request field. Symlinks, unsafe ownership/permissions and duplicate installation
 IDs are refused. Connection failure leaves the configuration provider listed as
 unavailable and removes capability readiness. Other valid connections still load.
 
+The preferred local setup writes `SKULK_CONFIG_HOME/managed-service/connection.json`.
+Skulk watches this fixed connection and the manager inventory, so setup and later
+installation registration appear without restarting the API. The individual
+connection records above remain compatible. Manager health independently fences
+capability admission; a healthy child cannot override missing manager observations.
+The [managed lifecycle HTTP routes](api-guide.md#managed-plugin-http-lifecycle) and
+Plugins dashboard remain available while children are disabled or broken.
+
 The local protocol reads installed node IDs, ordinary settings and cached unary
 descriptors; mutations fence node identity, settings revision and schema digest.
 The owner must report the same Skulk transport identity. Unary calls retain the
