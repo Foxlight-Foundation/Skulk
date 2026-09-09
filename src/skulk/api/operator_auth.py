@@ -298,7 +298,7 @@ async def authorize_plugin_owner_request(
     ):
         raise HTTPException(
             status_code=403,
-            detail="release source changes require direct owner authority",
+            detail="this action requires direct owner authority without a paired credential",
         )
     await _require_direct_dashboard_authority(request, tailnet_peer_verifier)
 
@@ -330,14 +330,14 @@ def create_operator_auth_router(
         description=(
             "List explicit paired-device plugin privileges from the direct localhost "
             "or verified Tailscale dashboard. This route is unavailable through relay "
-            "access and does not expose credentials. Existing pairings have no plugin grants."
+            "access and refuses any paired bearer, including on the direct listener. It does not expose credentials. Existing pairings have no plugin grants."
         ),
     )
     async def list_plugin_grants(
         request: Request, response: Response
     ) -> tuple[PluginGrant, ...]:
         """Return safe grant metadata only after verifying direct owner authority."""
-        await _require_direct_dashboard_authority(request, tailnet_peer_verifier)
+        await authorize_plugin_owner_request(request, tailnet_peer_verifier)
         response.headers["Cache-Control"] = "no-store"
         try:
             return await run_in_threadpool(service.plugin_grants)
@@ -352,7 +352,7 @@ def create_operator_auth_router(
             "Replace plugin read, management and approval grants after a direct owner "
             "dashboard check and expected-revision comparison. An empty scope list "
             "revokes every plugin grant immediately, including for existing access tokens. "
-            "Remote operators cannot call this route or grant themselves privileges."
+            "A presented paired bearer is refused even with matching direct-owner origin headers. Remote operators cannot call this route or grant themselves privileges."
         ),
     )
     async def replace_plugin_grant(
@@ -362,7 +362,7 @@ def create_operator_auth_router(
         response: Response,
     ) -> PluginGrant:
         """Apply a revision-fenced grant without returning or rotating credentials."""
-        await _require_direct_dashboard_authority(request, tailnet_peer_verifier)
+        await authorize_plugin_owner_request(request, tailnet_peer_verifier)
         response.headers["Cache-Control"] = "no-store"
         try:
             return await run_in_threadpool(service.set_plugin_grant, device_id, payload)

@@ -94,7 +94,7 @@ it('requires distinct permission acceptance and activation after installation', 
   expect(posts).toHaveLength(1);
   await act(async () => { host.querySelector<HTMLInputElement>('input[type=checkbox]')?.click(); });
   await click('Activate release');
-  expect(posts).toHaveLength(2);
+  await act(async () => { await vi.waitFor(() => expect(posts).toHaveLength(2)); });
   expect(posts[1]).toMatchObject({ action: 'activate', runtime_digest: review.runtime_digest, expected_revision: 0, accept_permissions: true, rollback: false });
 });
 

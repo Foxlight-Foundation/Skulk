@@ -38,6 +38,8 @@ import { ConversationPanel } from './components/layout/ConversationPanel';
 import { addToast } from './hooks/useToast';
 import type { InstanceStatus, NodeRunnerState } from './components/cluster/RunningInstanceCard';
 import { chatActions } from './store/slices/chatSlice';
+import { operatorSession } from './auth/operatorSession';
+import { apiSlice } from './store/api';
 import { useAppDispatch, useAppSelector } from './store/hooks';
 import { uiActions, type ObservabilityTab } from './store/slices/uiSlice';
 import { useSkulkTranslation, type SkulkTranslate } from './i18n/tolgee';
@@ -247,6 +249,14 @@ export function App() {
   // Observability panel state lives on the global UI store so any component (toolbar
   // nav, per-node bug icons, future cross-links) can open the panel to a specific tab.
   const dispatch = useAppDispatch();
+  useEffect(() => {
+    let identity = operatorSession.snapshot();
+    return operatorSession.subscribe(() => {
+      const next = operatorSession.snapshot();
+      if (next.mode !== identity.mode || next.deviceId !== identity.deviceId) dispatch(apiSlice.util.resetApiState());
+      identity = next;
+    });
+  }, [dispatch]);
   const openObservability = (tab?: ObservabilityTab, nodeId?: string) =>
     dispatch(uiActions.openObservability({ tab, nodeId }));
   const activeRoute = useAppSelector((s) => s.ui.activeRoute);

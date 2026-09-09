@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import styled from 'styled-components';
+import { operatorSession } from '../../auth/operatorSession';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 import { apiSlice } from '../../store/api';
 import { useAppDispatch } from '../../store/hooks';
@@ -60,7 +61,7 @@ export function RuntimeSourceForm({ pluginId, onSaved }: { pluginId: string; onS
         clear_token: clearToken,
       });
       token = '';
-      const response = await fetch(`/v1/plugins/managed/installations/${encodeURIComponent(pluginId)}/source`, {
+      const response = await operatorSession.fetch(`/v1/plugins/managed/installations/${encodeURIComponent(pluginId)}/source`, {
         method: 'POST', credentials: 'same-origin', cache: 'no-store', redirect: 'error',
         headers: { 'Content-Type': 'application/json', 'X-Skulk-Dashboard': 'pairing-v1' },
         body, signal: AbortSignal.timeout(35000),

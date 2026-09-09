@@ -155,6 +155,10 @@ def test_direct_owner_grant_wire_contract_and_origin_boundary(tmp_path: Path) ->
         ).status_code
         == 403
     )
+    paired_headers = {**headers, "Authorization": f"Bearer {exchange.access_token}"}
+    assert client.put(path, json=payload, headers=paired_headers).status_code == 403
+    assert client.get("/v1/auth/plugin-grants", headers=paired_headers).status_code == 403
+    assert service.plugin_grants()[0].revision == 0
     response = client.put(path, json=payload, headers=headers)
     assert response.status_code == 200, response.text
     assert response.json()["revision"] == 1

@@ -1402,3 +1402,13 @@ keeping entrypoints distinct. The plugin derives durable coordinates and owns it
 fixed CLI verbs; core accepts no executable/module selector and adds no HTTP exec
 route. Terminal commands run as the existing nonroot owner and cannot self-approve
 paid effects. The independent manager remains available for owner/runtime recovery.
+
+
+The dashboard's `auth/operatorSession.ts` implements the existing Ed25519 pairing
+and rotating-token protocol for a browser on a protected gateway URL. Its access
+panel reviews cluster identity, retains credentials only in module memory, serializes
+refresh and injects bearer headers below RTK Query request metadata. It never replays
+an API mutation after authentication failure. Session changes clear caches and plugin
+drafts; explicit direct-host selection is required after a paired session ends.
+Plugin grant administration refuses a presented paired bearer even on the direct
+listener. Native relay inner TLS remains a separate transport, not a browser shim.

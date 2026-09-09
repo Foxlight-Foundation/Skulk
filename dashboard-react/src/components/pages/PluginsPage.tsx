@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useSyncExternalStore } from 'react';
 import styled from 'styled-components';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 import { useGetPluginNodesQuery, useGetNodeConfigurationQuery, useConfigurePluginNodeMutation, type ConfigurableNode, type NodeConfiguration } from '../../store/endpoints/plugins';
@@ -10,6 +10,8 @@ import { NodePreflightPanel } from './NodePreflightPanel';
 import { NodeSetupPanel } from './NodeSetupPanel';
 import { NodeSetupActionsPanel } from './NodeSetupActionsPanel';
 import { NodeProposalsPanel } from './NodeProposalsPanel';
+import { OperatorAccessPanel } from './OperatorAccessPanel';
+import { operatorSession } from '../../auth/operatorSession';
 
 const Page = styled.section`padding: 24px; width: 100%; max-width: 900px; margin: 0 auto; box-sizing: border-box;`;
 const Card = styled.article`
@@ -92,10 +94,10 @@ function NodeCard({ pluginId, node }: { pluginId: string; node: ConfigurableNode
 }
 
 /** Render configuration declared by installed plugins, without provider-specific UI. */
-export function PluginsPage() {
+function PluginInventory() {
   const { t } = useSkulkTranslation();
   const query = useGetPluginNodesQuery(undefined, { pollingInterval: 5000, skipPollingIfUnfocused: true });
-  return <Page>
+  return <>
     <h1>{t('plugins.title', 'Plugins')}</h1>
     <p>{t('plugins.intro', 'Manage the settings of capability nodes installed on this Skulk host.')}</p>
     <ManagedRuntimesPanel />
@@ -107,5 +109,11 @@ export function PluginsPage() {
       {!plugin.available ? <p role="status">{plugin.pluginId}: {t('plugins.unavailable', 'Management is unavailable.')}</p> : null}
       {plugin.nodes.map((node) => <NodeCard key={node.nodeId} pluginId={plugin.pluginId} node={node} />)}
     </section>)}
-  </Page>;
+  </>;
+}
+
+/** Remount sensitive drafts when the browser changes its authorization identity. */
+export function PluginsPage() {
+  const session = useSyncExternalStore(operatorSession.subscribe, operatorSession.snapshot);
+  return <Page><OperatorAccessPanel /><PluginInventory key={`${session.mode}:${session.deviceId ?? ''}`} /></Page>;
 }

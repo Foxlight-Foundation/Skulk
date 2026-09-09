@@ -83,6 +83,7 @@ The Skulk dashboard is a React + TypeScript + styled-components app in `dashboar
 - `src/components/chat/` — ChatForm, ChatMessages, ChatModelSelector
 - `src/stores/` — Zustand stores (chatStore, uiStore) with localStorage/sessionStorage persistence
 - `src/hooks/` — useClusterState, useConfig, useModelPicker
+- `src/auth/` — Browser operator pairing and in-memory credential transport; its public protocol fixtures are checked against Python pairing proofs. Credentials must bypass Redux and browser persistence.
 - `e2e/` — Explicit Playwright qualification against a running Skulk dashboard
 
 To run the dashboard in dev mode:

@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react';
 import styled from 'styled-components';
+import { operatorSession } from '../../auth/operatorSession';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 import { useGetNodeCredentialsQuery, type NodeAddress, type NodeCredentials } from '../../store/endpoints/plugins';
 import { Button } from '../common/Button';
@@ -49,7 +50,7 @@ function CredentialEditor({ address, current, reload, unavailable }: { address: 
         ...(operation === 'replace' ? { value } : {}),
       });
       value = '';
-      const response = await fetch(`/v1/plugins/${encodeURIComponent(address.pluginId)}/nodes/${encodeURIComponent(address.nodeId)}/credentials`, {
+      const response = await operatorSession.fetch(`/v1/plugins/${encodeURIComponent(address.pluginId)}/nodes/${encodeURIComponent(address.nodeId)}/credentials`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Skulk-Dashboard': 'pairing-v1' },
         credentials: 'same-origin', cache: 'no-store', redirect: 'error', body, signal: AbortSignal.timeout(35000),
       });

@@ -304,6 +304,32 @@ exchange URLs must use HTTPS; cleartext HTTP is accepted only for loopback
 development URLs. A relay-configured package includes both the protected inner
 origin and relay bootstrap material, and the app prefers the relay path.
 
+### Pair a browser with the current gateway
+
+On the Plugins page, open **Browser access**, paste an owner invitation, select
+**Review invitation**, check the cluster identity/fingerprint and displayed gateway,
+then select **Pair this browser**. Use HTTPS or localhost so WebCrypto can generate
+the ephemeral Ed25519 device key. Legacy session and reusable invitation packages
+use the existing challenge/exchange protocol. Requests stay on the gateway serving
+the page; the browser does not navigate to invitation URLs or implement the native
+relay's pinned inner-TLS carrier. Open a reachable protected gateway URL first.
+
+The browser checks the returned cluster ID and recomputes its public-key fingerprint
+before retaining credentials. Access and rotating refresh tokens remain in module
+memory, outside Redux, request metadata, logs, localStorage and sessionStorage.
+Reloading or disconnecting ends this tab's access; the owner can revoke its retained
+device record. Pairing grants no plugin privileges: the owner separately grants
+`plugins:read`, `plugins:manage` and/or `plugins:approve` to the displayed device ID.
+
+Concurrent requests share one refresh before access expiry. A lost refresh response
+ends the session and is never replayed. Neither a forbidden nor unauthorized request
+is automatically retried, including paid approval POSTs. Revoked authentication ends
+paired access; a 403 for a missing scope keeps the pairing available for an owner
+grant. Session changes clear dashboard query caches and remount plugin drafts.
+A disconnected or failed pairing never silently becomes direct owner access; choose
+**Use direct host access** explicitly to return to independently checked local
+administration. Invitation and credential inputs are cleared before submission.
+
 ### Create a dashboard pairing invitation
 
 **POST** `/v1/auth/pairing-invitations`
@@ -3136,8 +3162,9 @@ failure. Service paths and executable selection are not HTTP request parameters.
 
 Existing pairings and newly paired devices receive no plugin grants automatically.
 `operations:write` does not imply plugin management, and `plugins:manage` does not
-imply approval. Grant routes reject relay access; a remote operator cannot grant
-itself greater authority. Unknown devices return `404`, stale grant revisions
+imply approval. Grant routes reject relay access and any presented paired bearer,
+even with matching direct-owner origin headers; a paired operator cannot grant
+itself greater authority. These refusals return `403`. Unknown devices return `404`, stale grant revisions
 return `409`, and malformed grants return `422`.
 
 Credential values never enter ordinary configuration, replicated State or ordinary
