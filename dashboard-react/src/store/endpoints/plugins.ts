@@ -60,16 +60,16 @@ export interface NodeSetup {
 }
 
 /** Fixed nonbillable setup form supplied by the installed owner. */
-export interface SetupAction { actionId: string; title: string; description: string; parametersSchema: Record<string, unknown>; schemaDigest: string }
+export interface SetupAction { requiresApproval?: boolean; actionId: string; title: string; description: string; parametersSchema: Record<string, unknown>; schemaDigest: string }
 
 /** Safe retained setup observation; complete is separate from preflight and enablement. */
-export interface SetupOperation { operationId: string; nodeId: string; actionId: string; phase: 'queued' | 'running' | 'complete' | 'failed'; code: string | null; correctiveAction: string | null }
+export interface SetupOperation { requiresApproval?: boolean; operationId: string; nodeId: string; actionId: string; phase: 'queued' | 'running' | 'complete' | 'failed'; code: string | null; correctiveAction: string | null }
 
 /** Current setup forms and revision fences, read without starting work. */
 export interface SetupActions { nodeId: string; revision: number; schemaDigest: string; credentialRevision: number; credentialSchemaDigest: string; actions: SetupAction[]; operations: SetupOperation[] }
 
 /** Immutable ordinary setup intent; credentials use their existing separate endpoint. */
-export interface SetupMutation { operationId: string; actionId: string; expectedRevision: number; expectedSchemaDigest: string; expectedCredentialRevision: number; expectedCredentialSchemaDigest: string; expectedActionSchemaDigest: string; values: Record<string, unknown> }
+export interface SetupMutation { expectedRequiresApproval?: boolean; operationId: string; actionId: string; expectedRevision: number; expectedSchemaDigest: string; expectedCredentialRevision: number; expectedCredentialSchemaDigest: string; expectedActionSchemaDigest: string; values: Record<string, unknown> }
 
 /** Declared reference readiness only; credential values are never query/cache data. */
 export interface NodeCredentials {

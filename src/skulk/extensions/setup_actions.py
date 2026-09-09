@@ -10,12 +10,21 @@ from skulk.utils.pydantic_ext import FrozenModel
 SetupOperationId = Annotated[str, Field(pattern=r"^[a-f0-9]{32}$")]
 
 
+def _omit_false(value: object) -> bool:
+    # Preserve serialized legacy intents across the additive authorization field.
+    return value is False
+
+
 class SetupAction(FrozenModel):
     """A fixed installed action form containing ordinary external inputs only."""
 
     action_id: ConfigurationNodeId = Field(description="Stable installed action ID.")
     title: str = Field(min_length=1, max_length=128, description="Owner-facing label.")
     description: str = Field(min_length=1, max_length=512, description="Setup effect.")
+    requires_approval: bool = Field(
+        default=False,
+        description="Setup also requires explicit plugins:approve authority.",
+    )
     parameters_schema: dict[str, JsonValue] = Field(
         description="Ordinary-input JSON Schema; credentials are supplied separately."
     )
@@ -28,6 +37,9 @@ class SetupOperation(FrozenModel):
     operation_id: SetupOperationId = Field(description="Durable accepted operation ID.")
     node_id: ConfigurationNodeId = Field(description="Persistent installed node ID.")
     action_id: ConfigurationNodeId = Field(description="Selected installed action ID.")
+    requires_approval: bool = Field(
+        default=False, description="Retained approval requirement for original intent."
+    )
     phase: Literal["queued", "running", "complete", "failed"] = Field(
         description="Last durable setup observation; unfinished work is reconciled."
     )
@@ -78,6 +90,11 @@ class SetupMutation(FrozenModel):
     )
     expected_action_schema_digest: ConfigurationDigest = Field(
         description="Reviewed action input schema."
+    )
+    expected_requires_approval: bool = Field(
+        default=False,
+        exclude_if=_omit_false,
+        description="Reviewed authorization requirement, never a grant.",
     )
     values: dict[str, JsonValue] = Field(description="Ordinary external inputs only.")
 

@@ -816,8 +816,13 @@ Do not automatically retry ambiguous external effects under this setup contract.
 
 Return safe bounded observations while children are disabled or unavailable.
 Core validates node/operation identities, bounds forms and rejects schemas declaring
-secret fields. It enforces read/manage scopes; this interface cannot grant spending
-approval. The dashboard reuses ordinary configuration controls, preserves drafts
+secret fields. It enforces read/manage scopes. Declare `SetupAction.requires_approval`
+for setup that prepares owner approval access, and retain it in `SetupOperation`.
+Clients send the reviewed `expected_requires_approval`; providers revalidate it
+under their write lock. Core additionally requires `plugins:approve` for these
+actions and whenever either the original operation or current action requires it
+on resume. Defaults preserve existing management-only actions. This interface
+cannot grant spending approval. The dashboard reuses ordinary configuration controls, preserves drafts
 across changed fences and exposes explicit original-operation resume. See the
 [setup API contract](api-guide.md#capability-node-nonbillable-setup-operations).
 

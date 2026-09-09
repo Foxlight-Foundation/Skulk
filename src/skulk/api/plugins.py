@@ -450,7 +450,7 @@ def create_plugins_router(
         "/{plugin_id}/nodes/{node_id}/setup-operations",
         response_model=SetupOperation,
         summary="Start a nonbillable owner setup operation",
-        description="Accept an exact action, ordinary values, operation ID and configuration/credential/action revision and schema fences. The provider durably reserves intent before work and continues independently of browser disconnect. A lost response requires observing the same ID, not starting a replacement. Does not enable a node or approve spending. Requires owner authority or plugins:manage.",
+        description="Accept an exact action, ordinary values, operation ID and configuration/credential/action revision and schema fences. The provider durably reserves intent before work and continues independently of browser disconnect. A lost response requires observing the same ID, not starting a replacement. Does not enable a node or approve spending. Requires owner authority or plugins:manage, plus plugins:approve when the installed action declares requiresApproval.",
     )
     async def start_setup_operation(
         plugin_id: str,
@@ -468,13 +468,34 @@ def create_plugins_router(
             raise HTTPException(status_code=422, detail="setup intent exceeds bound")
         selected = setup_actions_provider(plugin_id)
 
+        async def requirement() -> bool:
+            actions = await selected.node_setup_actions(node_id)
+            matching = tuple(
+                a for a in actions.actions if a.action_id == mutation.action_id
+            )
+            if actions.node_id != node_id or len(matching) != 1:
+                raise ValueError("setup action is unavailable")
+            action = matching[0]
+            _ordinary_schema(action.parameters_schema)
+            if action.requires_approval != mutation.expected_requires_approval:
+                raise ValueError("setup authorization requirement changed")
+            return action.requires_approval
+
+        if await invoke(requirement):
+            await authorize_plugin_request(
+                request, pairing_service, "plugins:approve", tailnet_peer_verifier
+            )
+
         async def start() -> SetupOperation:
             value = setup_observation(
                 await selected.start_node_setup(node_id, mutation),
                 node_id,
                 mutation.operation_id,
             )
-            if value.action_id != mutation.action_id:
+            if (
+                value.action_id != mutation.action_id
+                or value.requires_approval != mutation.expected_requires_approval
+            ):
                 raise ValueError("setup action identity changed")
             return value
 
@@ -513,7 +534,7 @@ def create_plugins_router(
         "/{plugin_id}/nodes/{node_id}/setup-operations/{operation_id}/resume",
         response_model=SetupOperation,
         summary="Resume an accepted owner setup operation",
-        description="Explicitly resume the original retained nonbillable intent by operation ID. No replacement input, new approval or automatic provider-create retry is accepted. Current prerequisites are revalidated. Requires owner authority or plugins:manage.",
+        description="Explicitly resume the original retained nonbillable intent by operation ID. No replacement input, new approval or automatic provider-create retry is accepted. Current prerequisites are revalidated. Requires owner authority or plugins:manage, plus plugins:approve when either the retained or current action requires approval access.",
     )
     async def resume_setup_operation(
         plugin_id: str,
@@ -530,12 +551,40 @@ def create_plugins_router(
         response.headers["Cache-Control"] = "no-store"
         selected = setup_actions_provider(plugin_id)
 
+        async def requirement() -> tuple[SetupOperation, bool]:
+            original = setup_observation(
+                await selected.node_setup_operation(node_id, operation_id),
+                node_id,
+                operation_id,
+            )
+            actions = await selected.node_setup_actions(node_id)
+            matching = tuple(
+                a for a in actions.actions if a.action_id == original.action_id
+            )
+            if actions.node_id != node_id or len(matching) != 1:
+                raise ValueError("retained setup action is unavailable")
+            # The retained requirement cannot be downgraded by a newer manifest;
+            # a newly strengthened requirement also applies before recovery.
+            return original, original.requires_approval or matching[0].requires_approval
+
+        original, requires_approval = await invoke(requirement)
+        if requires_approval:
+            await authorize_plugin_request(
+                request, pairing_service, "plugins:approve", tailnet_peer_verifier
+            )
+
         async def resume() -> SetupOperation:
-            return setup_observation(
+            result = setup_observation(
                 await selected.resume_node_setup(node_id, operation_id),
                 node_id,
                 operation_id,
             )
+            if (
+                result.action_id != original.action_id
+                or result.requires_approval != original.requires_approval
+            ):
+                raise ValueError("retained setup authorization changed")
+            return result
 
         return await invoke(resume)
 

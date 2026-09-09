@@ -17,7 +17,7 @@ function SetupForm({ address, action, snapshot, blocked }: { address: NodeAddres
   const [submitted, setSubmitted] = useState(false);
   const sending = useRef(false);
   const [start, status] = useStartNodeSetupMutation();
-  const changed = snapshot.revision !== baseline.snapshot.revision || snapshot.schemaDigest !== baseline.snapshot.schemaDigest || snapshot.credentialRevision !== baseline.snapshot.credentialRevision || snapshot.credentialSchemaDigest !== baseline.snapshot.credentialSchemaDigest || action.schemaDigest !== baseline.action.schemaDigest;
+  const changed = action.requiresApproval !== baseline.action.requiresApproval || snapshot.revision !== baseline.snapshot.revision || snapshot.schemaDigest !== baseline.snapshot.schemaDigest || snapshot.credentialRevision !== baseline.snapshot.credentialRevision || snapshot.credentialSchemaDigest !== baseline.snapshot.credentialSchemaDigest || action.schemaDigest !== baseline.action.schemaDigest;
   const supported = supportedConfigurationSchema(baseline.action.parametersSchema);
   const disabled = blocked || changed || submitted || status.isLoading || !supported;
   const submit = async () => {
@@ -30,7 +30,7 @@ function SetupForm({ address, action, snapshot, blocked }: { address: NodeAddres
       await start({ ...address, mutation: { operationId, actionId: baseline.action.actionId,
         expectedRevision: baseline.snapshot.revision, expectedSchemaDigest: baseline.snapshot.schemaDigest,
         expectedCredentialRevision: baseline.snapshot.credentialRevision, expectedCredentialSchemaDigest: baseline.snapshot.credentialSchemaDigest,
-        expectedActionSchemaDigest: baseline.action.schemaDigest, values,
+        expectedActionSchemaDigest: baseline.action.schemaDigest, expectedRequiresApproval: baseline.action.requiresApproval === true, values,
       } }).unwrap();
     } catch {
       setNotice(`${t('plugins.setupUnconfirmed', 'Setup response was not confirmed. Reload setup to inspect retained progress before another action. Operation')}: ${operationId}`);
@@ -38,6 +38,7 @@ function SetupForm({ address, action, snapshot, blocked }: { address: NodeAddres
   };
   return <Form onSubmit={(event) => { event.preventDefault(); void submit(); }}>
     <h4>{baseline.action.title}</h4><p>{baseline.action.description}</p>
+    {baseline.action.requiresApproval ? <p>{t('plugins.setupApprovalRequired', 'This setup action also requires owner approval access. It does not approve a paid proposal.')}</p> : null}
     {supported ? <PluginConfigurationFields schema={baseline.action.parametersSchema} values={values} onChange={setValues} disabled={disabled} /> : <p>{t('plugins.setupUnsupported', 'This setup form requires the plugin’s terminal tool.')}</p>}
     {changed ? <p role="status">{t('plugins.setupChanged', 'Setup prerequisites changed. Reload setup before submitting this draft.')}</p> : null}
     <Button type="submit" disabled={disabled}>{t('plugins.startSetup', 'Start setup')}</Button>

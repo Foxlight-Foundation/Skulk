@@ -7,6 +7,7 @@ import pytest
 from fastapi import FastAPI
 from pydantic import JsonValue, TypeAdapter
 
+from skulk.api.operator_gateway import OperatorGatewayAuthorization
 from skulk.api.plugins import create_plugins_router
 from skulk.api.tests.test_operator_gateway import paired_service
 from skulk.api.tests.test_plugins import ManagedExtension
@@ -24,6 +25,9 @@ class SetupExtension(ManagedExtension):
     """Fixture owner holding observations independently of child enablement."""
 
     mode = "normal"
+    requires_approval = False
+    retained_requires_approval = False
+    effects = 0
 
     def observation(self, node_id: str, operation_id: str) -> SetupOperation:
         """Return a safe observation, with deliberate boundary failures for tests."""
@@ -34,6 +38,7 @@ class SetupExtension(ManagedExtension):
             action_id="connect",
             operation_id="f" * 32 if self.mode == "operation" else operation_id,
             phase="running",
+            requires_approval=self.retained_requires_approval,
         )
 
     async def node_setup_actions(self, node_id: str) -> SetupActions:
@@ -53,6 +58,7 @@ class SetupExtension(ManagedExtension):
                 },
             },
             schema_digest="c" * 64,
+            requires_approval=self.requires_approval,
         )
         return SetupActions(
             node_id=node_id,
@@ -68,6 +74,8 @@ class SetupExtension(ManagedExtension):
         self, node_id: str, mutation: SetupMutation
     ) -> SetupOperation:
         """Count effect dispatch independently of observation."""
+        self.effects += 1
+        self.retained_requires_approval = mutation.expected_requires_approval
         self.calls += 1
         return self.observation(node_id, mutation.operation_id)
 
@@ -82,6 +90,7 @@ class SetupExtension(ManagedExtension):
         self, node_id: str, operation_id: str
     ) -> SetupOperation:
         """Resume only the original operation ID."""
+        self.effects += 1
         self.calls += 1
         return self.observation(node_id, operation_id)
 
@@ -240,3 +249,75 @@ def test_setup_routes_are_documented_in_openapi() -> None:
             assert (
                 operation["summary"] and operation["description"] and operation["tags"]
             )
+
+
+async def test_approval_setup_never_inherits_management_authority(
+    tmp_path: Path,
+) -> None:
+    """Both ingress paths check declared and retained approval requirements."""
+    service, exchange = paired_service(tmp_path)
+    provider = SetupExtension()
+    provider.requires_approval = True
+    provider.retained_requires_approval = True
+    app = FastAPI()
+    app.include_router(create_plugins_router(LoadedExtensions([provider]), service))
+    bearer = {"Authorization": f"Bearer {exchange.access_token}"}
+    route = "/v1/plugins/configurable/nodes/stable-node/setup-operations"
+    mutation = intent().model_copy(update={"expected_requires_approval": True})
+    service.set_plugin_grant(
+        exchange.device_id,
+        PluginGrantUpdate(
+            expected_revision=0, scopes=("plugins:read", "plugins:manage")
+        ),
+    )
+    for application in (app, OperatorGatewayAuthorization(app, service)):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=application),
+            base_url="https://localhost",
+            headers=bearer,
+        ) as client:
+            assert (
+                await client.post(route, json=mutation.model_dump(mode="json"))
+            ).status_code == 403
+            assert (
+                await client.post(route + "/" + "d" * 32 + "/resume")
+            ).status_code == 403
+            # Caller-supplied false is a stale expectation, never permission.
+            assert (
+                await client.post(route, json=intent().model_dump(mode="json"))
+            ).status_code == 409
+            provider.requires_approval = False
+            assert (
+                await client.post(route + "/" + "d" * 32 + "/resume")
+            ).status_code == 403
+            provider.requires_approval = True
+    assert provider.effects == 0
+    service.set_plugin_grant(
+        exchange.device_id,
+        PluginGrantUpdate(
+            expected_revision=1,
+            scopes=("plugins:read", "plugins:manage", "plugins:approve"),
+        ),
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=OperatorGatewayAuthorization(app, service)),
+        base_url="https://localhost",
+        headers=bearer,
+    ) as client:
+        assert (
+            await client.post(route, json=mutation.model_dump(mode="json"))
+        ).status_code == 200
+        assert (
+            await client.post(route + "/" + "d" * 32 + "/resume")
+        ).status_code == 200
+        assert provider.effects == 2
+        service.set_plugin_grant(
+            exchange.device_id,
+            PluginGrantUpdate(
+                expected_revision=2, scopes=("plugins:read", "plugins:manage")
+            ),
+        )
+        assert (
+            await client.post(route + "/" + "d" * 32 + "/resume")
+        ).status_code == 403
+        assert provider.effects == 2

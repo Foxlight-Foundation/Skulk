@@ -4122,12 +4122,12 @@ node, approve spending, or replay uncertain provider submissions.
 
 | Method and path | Parameters and behavior |
 | --- | --- |
-| `GET /v1/plugins/{plugin_id}/nodes/{node_id}/setup-actions` | Exact installation/node IDs. Returns `nodeId`, configuration `revision`/`schemaDigest`, `credentialRevision`/`credentialSchemaDigest`, up to eight installed `actions` and 32 retained `operations`. Each action has `actionId`, title, description, ordinary `parametersSchema` and `schemaDigest`. Requires `plugins:read` or direct owner authority. Does not initialize state or perform setup. |
-| `POST /v1/plugins/{plugin_id}/nodes/{node_id}/setup-operations` | Body: `operationId` (32 lowercase hexadecimal characters), `actionId`, `values`, `expectedRevision`, `expectedSchemaDigest`, `expectedCredentialRevision`, `expectedCredentialSchemaDigest`, `expectedActionSchemaDigest`. Encoded intent is bounded to 16 KiB. Requires `plugins:manage` or direct owner authority. The provider reserves exact intent durably before background work and returns promptly. |
+| `GET /v1/plugins/{plugin_id}/nodes/{node_id}/setup-actions` | Exact installation/node IDs. Returns `nodeId`, configuration `revision`/`schemaDigest`, `credentialRevision`/`credentialSchemaDigest`, up to eight installed `actions` and 32 retained `operations`. Each action has `actionId`, title, description, ordinary `parametersSchema`, `schemaDigest`, and `requiresApproval` (default false). Requires `plugins:read` or direct owner authority. Does not initialize state or perform setup. |
+| `POST /v1/plugins/{plugin_id}/nodes/{node_id}/setup-operations` | Body: `operationId` (32 lowercase hexadecimal characters), `actionId`, `values`, `expectedRevision`, `expectedSchemaDigest`, `expectedCredentialRevision`, `expectedCredentialSchemaDigest`, `expectedActionSchemaDigest`, `expectedRequiresApproval` (default false; must match the installed action). Encoded intent is bounded to 16 KiB. Requires `plugins:manage` and, for an action declaring `requiresApproval`, `plugins:approve`, or direct owner authority. The provider reserves exact intent durably before background work and returns promptly. |
 | `GET /v1/plugins/{plugin_id}/nodes/{node_id}/setup-operations/{operation_id}` | Exact retained operation ID. Returns last durable progress without waiting for setup completion. Requires `plugins:read` or direct owner authority. |
-| `POST /v1/plugins/{plugin_id}/nodes/{node_id}/setup-operations/{operation_id}/resume` | Exact retained operation ID; no body or an empty object. Replacement fields are rejected. Revalidates prerequisites and resumes the original accepted intent. Requires `plugins:manage` or direct owner authority. |
+| `POST /v1/plugins/{plugin_id}/nodes/{node_id}/setup-operations/{operation_id}/resume` | Exact retained operation ID; no body or an empty object. Replacement fields are rejected. Revalidates prerequisites and resumes the original accepted intent. Requires `plugins:manage` and also `plugins:approve` when either the retained intent or current action requires approval access, or direct owner authority. |
 
-Progress contains `operationId`, `nodeId`, `actionId`, phase (`queued`, `running`,
+Progress contains `operationId`, `nodeId`, `actionId`, retained `requiresApproval`, phase (`queued`, `running`,
 `complete`, `failed`), optional safe `code` and `correctiveAction`. Completion means
 setup finished, not that preflight passed. Run preflight and the separate enable
 operation afterward. Providers retain enough journal state to reconcile owner
@@ -4136,6 +4136,12 @@ are refused. A lost start response must be reconciled through the same operation
 ID or retained list; reconnect never automatically resubmits. Raw failures and
 credential values are excluded. Damaged state must preserve disable/management and
 refuse unsafe admission rather than create replacement identities or credentials.
+
+Approval access for setup permits protected preparation only; signing a paid
+proposal still requires its distinct review and approval action. Existing setup
+actions default to management-only access. An action upgrade cannot downgrade the
+original operation’s retained authorization requirement. Missing or revoked scope
+returns 403 on direct and relay routes before setup effects.
 
 Responses use `Cache-Control: no-store`. Missing facets/nodes return 404; malformed
 requests return safe 422; conflicting/refused setup returns 409 when the provider

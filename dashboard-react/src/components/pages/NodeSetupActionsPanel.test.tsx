@@ -68,3 +68,19 @@ it('preserves drafts across changed fences and refuses secret forms', async () =
   await click('Reload setup'); await contains('requires the plugin’s terminal tool');
   expect(host.querySelector('input')).toBeNull(); expect(button('Start setup').disabled).toBe(true); expect(calls.every((call) => call.method === 'GET')).toBe(true);
 });
+
+it('shows owner authorization and submits its reviewed requirement', async () => {
+  snapshot.actions = [{ ...snapshot.actions[0], requiresApproval: true, parametersSchema: { type: 'object', properties: {}, additionalProperties: false } }];
+  await click('Set up connection'); await contains('also requires owner approval access');
+  await click('Start setup'); await contains('running');
+  const writes = calls.filter((call) => call.method === 'POST'); expect(writes).toHaveLength(1);
+  expect(JSON.parse(writes[0].body)).toMatchObject({ expectedRequiresApproval: true, values: {} });
+});
+it('requires a new review when setup authorization changes', async () => {
+  await click('Set up connection'); await contains('Connect existing service'); await fill('draft.invalid');
+  snapshot = { ...snapshot, actions: [{ ...snapshot.actions[0], requiresApproval: true }] };
+  await act(async () => { store.dispatch(apiSlice.util.invalidateTags(['Plugins'])); }); await contains('Setup prerequisites changed');
+  expect(button('Start setup').disabled).toBe(true); expect(calls.every((call) => call.method === 'GET')).toBe(true);
+  await click('Reload setup'); await contains('also requires owner approval access');
+  expect(button('Start setup').disabled).toBe(false);
+});

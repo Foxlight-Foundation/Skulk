@@ -1385,7 +1385,10 @@ authority. Private values remain in the write-only credential path.
 Nonbillable setup actions use the optional `NodeSetupActionsProvider` facet in
 `extensions/setup_actions.py`. Installed nodes advertise `setup_actions_available`;
 core exposes fixed form/start/observation/resume routes under `/v1/plugins` with
-separate read/manage authorization. The managed adapter dispatches to the private
+separate read/manage authorization. Actions declaring `requires_approval` also
+require `plugins:approve`; resume preserves the original requirement even if the
+current action changes. This permits protected setup, never paid proposal approval.
+The managed adapter dispatches to the private
 owner, which owns durable intent, reconciliation and background execution outside
 the unary child slot. Dashboard reconnect only observes retained progress. Ordinary
 forms cannot contain credential fields, and setup completion does not imply
