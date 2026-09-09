@@ -269,6 +269,8 @@ from skulk.api.types.openai_responses import (
     ResponsesRequest,
     ResponsesResponse,
 )
+from skulk.api.video_jobs import VideoJob, VideoJobRegistry
+from skulk.api.video_store import VideoStore
 from skulk.connectivity.remote_access import RemoteAccessInfo, build_remote_access_info
 from skulk.connectivity.tailscale import TailscaleStatus, query_tailscale_status
 from skulk.extensions import (
@@ -319,6 +321,7 @@ from skulk.master.placement_utils import (
 )
 from skulk.operator.pairing import OperatorPairingService
 from skulk.operator.relay import OperatorGatewayConnector, OperatorRelayConfiguration
+from skulk.routing.output_media import OutputMediaPacket
 from skulk.routing.provider_streams import ProviderStreamPacket
 from skulk.routing.realtime_audio import RealtimeAudioPacket
 from skulk.routing.speech_media import SpeechMediaPacket
@@ -336,6 +339,7 @@ from skulk.shared.constants import (
     SKULK_MAX_CHUNK_SIZE,
     SKULK_MODELS_DIR,
     SKULK_TRACING_CACHE_DIR,
+    SKULK_VIDEO_STORE_DIR,
     preferred_env_value,
 )
 from skulk.shared.election import ElectionMessage
@@ -409,6 +413,7 @@ from skulk.shared.types.chunks import (
     TokenChunk,
     ToolCallChunk,
     TranscriptionChunk,
+    VideoChunk,
 )
 from skulk.shared.types.commands import (
     AddCustomModelCard,
@@ -437,6 +442,7 @@ from skulk.shared.types.commands import (
     TaskFinished,
     TextEmbedding,
     TextGeneration,
+    VideoGeneration,
 )
 from skulk.shared.types.common import CommandId, Id, NodeId, SystemId
 from skulk.shared.types.diagnostics import (
@@ -506,6 +512,10 @@ from skulk.shared.types.telemetry import (
 from skulk.shared.types.text_generation import (
     InputMessage,
     TextGenerationTaskParams,
+)
+from skulk.shared.types.video import (
+    MAX_VIDEO_REFERENCES,
+    VideoGenerationTaskParams,
 )
 from skulk.shared.types.worker.downloads import (
     DownloadAttemptId,
@@ -1049,7 +1059,15 @@ _REORDER_GAP_FLUSH_SECONDS = 5.0
 _VISION_MEDIA_PENDING_COMMANDS = 64
 _VISION_MEDIA_PENDING_FRAMES = 64
 _VISION_MEDIA_PENDING_COMMAND_BYTES = 32 * 1024 * 1024
-_VISION_MEDIA_PENDING_TOTAL_BYTES = 512 * 1024 * 1024
+# Video reference attachments (clips, audio, keyframes) ride the same media
+# plane as image input with their own per-request bounds; the shared total is
+# raised so one render's attachments do not starve image requests.
+_REFERENCE_MEDIA_PENDING_FRAMES = 512
+_REFERENCE_MEDIA_PENDING_COMMAND_BYTES = 256 * 1024 * 1024
+_VISION_MEDIA_PENDING_TOTAL_BYTES = 1024 * 1024 * 1024
+# A render's terminal frame and its container arrive on different planes; a
+# job waits this long for the second half before it is failed.
+_VIDEO_JOB_MEDIA_TIMEOUT_SECONDS = 10 * 60.0
 _VISION_MEDIA_PENDING_TTL_SECONDS = 5 * 60.0
 _VISION_MEDIA_ACK_TIMEOUT_SECONDS = 5 * 60.0
 _VISION_MEDIA_RAW_IMAGE_BYTES = (_VISION_MEDIA_PENDING_COMMAND_BYTES // 4) * 3
@@ -1107,13 +1125,14 @@ class _ActiveProviderStream:
 
 @dataclass(frozen=True, slots=True)
 class _PendingVisionMedia:
-    """Request-scoped image chunks awaiting authoritative task placement."""
+    """Request-scoped media chunks awaiting authoritative task placement."""
 
     model: ModelId
     chunks: tuple[tuple[int, bytes], ...]
     image_count: int
     sha256: str
     created_at: float
+    payload: Literal["base64_image", "reference_media"] = "base64_image"
 
     @property
     def byte_count(self) -> int:
@@ -1508,6 +1527,8 @@ class API:
         trace_data_receiver: "Receiver[TraceDataPacket] | None" = None,
         vision_media_packet_sender: "Sender[VisionMediaPacket] | None" = None,
         vision_media_packet_receiver: "Receiver[VisionMediaPacket] | None" = None,
+        output_media_packet_sender: "Sender[OutputMediaPacket] | None" = None,
+        output_media_packet_receiver: "Receiver[OutputMediaPacket] | None" = None,
         data_plane_zenoh: bool = False,
         data_plane_egress_provider: (
             Callable[[], DataPlaneEgressDiagnostics] | None
@@ -1618,6 +1639,11 @@ class API:
         self._pending_trace_data: dict[task_types.TaskId, _PendingTraceData] = {}
         self._vision_media_packet_sender = vision_media_packet_sender
         self._vision_media_packet_receiver = vision_media_packet_receiver
+        self._output_media_packet_sender = output_media_packet_sender
+        self._output_media_packet_receiver = output_media_packet_receiver
+        # Deadline by which a job must have received both its render terminal
+        # and its container; keyed by command.
+        self._video_job_media_deadlines: dict[CommandId, float] = {}
         self._pending_vision_media: dict[CommandId, _PendingVisionMedia] = {}
         self._pending_vision_media_bytes = 0
         self._active_vision_media_bytes: dict[CommandId, int] = {}
@@ -1818,6 +1844,9 @@ class API:
         self._image_generation_queues: dict[
             CommandId, Sender[ImageChunk | ErrorChunk]
         ] = {}
+        self._video_generation_queues: dict[
+            CommandId, Sender[VideoChunk | ErrorChunk]
+        ] = {}
         self._embedding_queues: dict[
             CommandId, Sender[EmbeddingChunk | ErrorChunk]
         ] = {}
@@ -1887,6 +1916,8 @@ class API:
         self._vision_media_egress_provider = vision_media_egress_provider
         self._telemetry_plane_provider = telemetry_plane_provider
         self._image_store = ImageStore(SKULK_IMAGE_CACHE_DIR)
+        self._video_store = VideoStore(SKULK_VIDEO_STORE_DIR)
+        self._video_jobs = VideoJobRegistry(SKULK_VIDEO_STORE_DIR / "jobs.json")
         self._tg: TaskGroup = TaskGroup()
 
     def set_runner_diagnostics_provider(
@@ -1952,6 +1983,7 @@ class API:
         self._fail_open_command_streams_for_session_reset()
         self._text_generation_queues = {}
         self._image_generation_queues = {}
+        self._video_generation_queues = {}
         self._embedding_queues = {}
         self._audio_speech_queues = {}
         self._audio_transcription_queues = {}
@@ -1979,6 +2011,7 @@ class API:
         self._vision_media_ack_deadlines = {}
         self._vision_media_models = {}
         self._vision_media_failures = {}
+        self._video_job_media_deadlines = {}
         self._cancelled_command_ids = set()
         self.unpause(result_clock, master_node_id=master_node_id)
         self.event_receiver.close()
@@ -2007,6 +2040,7 @@ class API:
         for queue_map in (
             self._text_generation_queues,
             self._image_generation_queues,
+            self._video_generation_queues,
             self._embedding_queues,
             self._audio_speech_queues,
             self._audio_transcription_queues,
@@ -4238,6 +4272,7 @@ class API:
         sender = (
             self._text_generation_queues.get(command_id)
             or self._image_generation_queues.get(command_id)
+            or self._video_generation_queues.get(command_id)
             or self._embedding_queues.get(command_id)
             or self._audio_speech_queues.get(command_id)
             or self._audio_transcription_queues.get(command_id)
@@ -4967,6 +5002,68 @@ class API:
         self._vision_media_commands.add(command_id)
         self._vision_media_models[command_id] = model
 
+    def _stage_reference_media(
+        self,
+        command_id: CommandId,
+        model: ModelId,
+        attachments: Sequence[bytes],
+    ) -> None:
+        """Retain raw video attachments until the master selects an instance."""
+
+        if self._vision_media_packet_sender is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Reference media transport is unavailable on this node",
+            )
+        if not attachments or len(attachments) > MAX_VIDEO_REFERENCES:
+            raise HTTPException(
+                status_code=400,
+                detail="Reference media must carry between one and "
+                f"{MAX_VIDEO_REFERENCES} attachments",
+            )
+        chunks: list[tuple[int, bytes]] = []
+        for slot, data in enumerate(attachments):
+            if not data:
+                raise HTTPException(
+                    status_code=400, detail=f"Attachment {slot} is empty"
+                )
+            for offset in range(0, len(data), SKULK_MAX_CHUNK_SIZE):
+                chunks.append((slot, data[offset : offset + SKULK_MAX_CHUNK_SIZE]))
+        if len(chunks) > _REFERENCE_MEDIA_PENDING_FRAMES:
+            raise HTTPException(
+                status_code=413,
+                detail="Reference media exceeds the per-request media frame limit",
+            )
+        pending = _PendingVisionMedia(
+            model=model,
+            chunks=tuple(chunks),
+            image_count=len(attachments),
+            sha256=hashlib.sha256(b"".join(data for _, data in chunks)).hexdigest(),
+            created_at=time.monotonic(),
+            payload="reference_media",
+        )
+        if pending.byte_count > _REFERENCE_MEDIA_PENDING_COMMAND_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail="Reference media exceeds the per-request media limit",
+            )
+        if (
+            len(self._pending_vision_media) + len(self._active_vision_media_bytes)
+            >= _VISION_MEDIA_PENDING_COMMANDS
+            or self._pending_vision_media_bytes
+            + pending.byte_count
+            + self._active_vision_media_total_bytes
+            > _VISION_MEDIA_PENDING_TOTAL_BYTES
+        ):
+            raise HTTPException(
+                status_code=503,
+                detail="Media admission capacity is exhausted",
+            )
+        self._pending_vision_media[command_id] = pending
+        self._pending_vision_media_bytes += pending.byte_count
+        self._vision_media_commands.add(command_id)
+        self._vision_media_models[command_id] = model
+
     def _take_pending_vision_media(
         self, command_id: CommandId
     ) -> _PendingVisionMedia | None:
@@ -4999,7 +5096,10 @@ class API:
     def _dispatch_pending_vision_media(self, task: task_types.Task) -> None:
         """Start direct upload after authoritative task placement is replicated."""
 
-        if not isinstance(task, (task_types.TextGeneration, task_types.ImageEdits)):
+        if not isinstance(
+            task,
+            (task_types.TextGeneration, task_types.ImageEdits, task_types.VideoGeneration),
+        ):
             return
         pending = self._take_pending_vision_media(task.command_id)
         if pending is None:
@@ -5095,6 +5195,7 @@ class API:
                 kind="opened",
                 total_chunks=total_chunks,
                 image_count=pending.image_count,
+                payload=pending.payload,
             )
         )
         for sequence, (image_index, data) in enumerate(pending.chunks, start=1):
@@ -5111,6 +5212,7 @@ class API:
                     data=data,
                     image_index=image_index,
                     total_chunks=total_chunks,
+                    payload=pending.payload,
                 )
             )
         if command_id not in self._vision_media_commands:
@@ -5126,6 +5228,7 @@ class API:
                 total_chunks=total_chunks,
                 image_count=pending.image_count,
                 sha256=pending.sha256,
+                payload=pending.payload,
             )
         )
 
@@ -9683,6 +9786,8 @@ class API:
                 tg.start_soon(self._apply_speech_media_transport)
                 tg.start_soon(self._apply_trace_data)
                 tg.start_soon(self._apply_vision_media_transport)
+                tg.start_soon(self._apply_output_media)
+                tg.start_soon(self._sweep_video_jobs)
                 tg.start_soon(self._sweep_pending_speech_media)
                 tg.start_soon(self._sweep_pending_trace_data)
                 tg.start_soon(self._sweep_pending_vision_media)
@@ -10175,6 +10280,291 @@ class API:
                 self._pending_trace_data.pop(task_id, None)
                 logger.warning(f"Expired incomplete trace assembly for {task_id}")
 
+    async def submit_video_generation(
+        self,
+        params: VideoGenerationTaskParams,
+        attachments: Sequence[bytes],
+    ) -> VideoJob:
+        """Validate, stage attachments, and dispatch one audio-video render.
+
+        The caller has already parsed the request; this method is the single
+        internal entry the HTTP job routes and internal callers share. It
+        resolves the generation mode from the attachments, checks the request
+        against the card's declared contract, stages reference media for
+        direct delivery after placement, opens the job's stream queue, and
+        sends the command to the master.
+        """
+
+        card = await ModelCard.load(ModelId(params.model))
+        if card.video is None:
+            raise HTTPException(
+                status_code=400, detail=f"{params.model} is not a video model"
+            )
+        mode = params.implied_mode()
+        if mode not in card.video.modes:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{params.model} does not serve the {mode.value} mode",
+            )
+        if not card.video.min_seconds <= params.seconds <= card.video.max_seconds:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"seconds must lie between {card.video.min_seconds} and "
+                    f"{card.video.max_seconds} for {params.model}"
+                ),
+            )
+        if len(attachments) != len(params.references):
+            raise HTTPException(
+                status_code=400,
+                detail="attachment count does not match the reference list",
+            )
+        canvas = params.width_height
+        if canvas is not None and any(
+            edge % card.video.canvas_multiple for edge in canvas
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=f"size must be a multiple of {card.video.canvas_multiple}",
+            )
+        limits = card.video.reference_limits
+        if limits is not None:
+            counts = {
+                kind: sum(1 for spec in params.references if spec.kind == kind)
+                for kind in ("image", "video", "audio")
+            }
+            if (
+                counts["image"] > limits.max_images
+                or counts["video"] > limits.max_videos
+                or counts["audio"] > limits.max_audio_clips
+                or (
+                    limits.max_files is not None
+                    and len(params.references) > limits.max_files
+                )
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail="reference attachments exceed the model's limits",
+                )
+        command_id = CommandId()
+        references = tuple(
+            spec.model_copy(
+                update={
+                    "sha256": hashlib.sha256(data).hexdigest(),
+                    "size_bytes": len(data),
+                }
+            )
+            for spec, data in zip(params.references, attachments, strict=True)
+        )
+        total_chunks = sum(
+            -(-len(data) // SKULK_MAX_CHUNK_SIZE) for data in attachments
+        )
+        resolved = params.model_copy(
+            update={
+                "mode": mode,
+                "references": references,
+                "total_input_chunks": total_chunks,
+                "reference_bytes": sum(len(data) for data in attachments),
+            }
+        )
+        if attachments:
+            self._stage_reference_media(command_id, ModelId(params.model), attachments)
+        now = int(time.time())
+        job = self._video_jobs.create(
+            VideoJob(
+                id=command_id,
+                model=params.model,
+                prompt=params.prompt,
+                mode=mode.value,
+                seconds=params.seconds,
+                size=params.size,
+                created_at=now,
+            )
+        )
+        receiver = self._open_stream_queue(self._video_generation_queues, command_id)
+        self._tg.start_soon(self._drain_video_job, command_id, receiver)
+        try:
+            await self._send(
+                VideoGeneration(
+                    command_id=command_id,
+                    task_params=resolved,
+                    owner_node=self.node_id,
+                )
+            )
+        except BaseException:
+            self._take_pending_vision_media(command_id)
+            self._vision_media_commands.discard(command_id)
+            self._vision_media_models.pop(command_id, None)
+            self._video_jobs.fail(command_id, "the generation command could not be sent")
+            self._close_command_queue(command_id)
+            raise
+        return job
+
+    async def _drain_video_job(
+        self,
+        command_id: CommandId,
+        receiver: Receiver[VideoChunk | ErrorChunk],
+    ) -> None:
+        """Fold the render's DATA frames into the job record."""
+
+        try:
+            with receiver:
+                async for chunk in receiver:
+                    if isinstance(chunk, ErrorChunk):
+                        self._video_jobs.fail(
+                            command_id,
+                            chunk.error_message,
+                            cancelled=command_id in self._cancelled_command_ids,
+                        )
+                        self._video_store.delete(command_id)
+                        self._video_job_media_deadlines.pop(command_id, None)
+                        continue
+                    changes: dict[str, object] = {
+                        "status": "in_progress",
+                        "stage": chunk.stage,
+                    }
+                    if chunk.progress is not None:
+                        changes["progress"] = min(99, int(chunk.progress * 100))
+                    if chunk.finish_reason is not None:
+                        if chunk.output is None or chunk.finish_reason == "error":
+                            self._video_jobs.fail(
+                                command_id,
+                                chunk.error_message or "the render ended without output",
+                            )
+                            self._video_store.delete(command_id)
+                            self._video_job_media_deadlines.pop(command_id, None)
+                            continue
+                        changes.update(
+                            {
+                                "render_finished": True,
+                                "output": chunk.output,
+                                "stats": chunk.stats,
+                                "progress": 99,
+                                "stage": "uploading",
+                            }
+                        )
+                        self._video_job_media_deadlines.setdefault(
+                            command_id,
+                            time.monotonic() + _VIDEO_JOB_MEDIA_TIMEOUT_SECONDS,
+                        )
+                    self._video_jobs.update(command_id, **changes)
+                    self._settle_video_job(command_id)
+        finally:
+            self._video_generation_queues.pop(command_id, None)
+            self._chunk_reorder.pop(command_id, None)
+            await self._finalize_command_stream(
+                command_id,
+                cast(dict[CommandId, Sender[object]], self._video_generation_queues),
+            )
+
+    def _settle_video_job(self, command_id: CommandId) -> None:
+        """Complete the job once both halves have arrived."""
+
+        job = self._video_jobs.settle(command_id)
+        if job is not None and job.is_terminal:
+            self._video_job_media_deadlines.pop(command_id, None)
+            if job.status == "completed":
+                stored = self._video_store.get(command_id)
+                if stored is not None:
+                    self._video_jobs.update(
+                        command_id, expires_at=int(stored.expires_at)
+                    )
+
+    async def _apply_output_media(self) -> None:
+        """Assemble finished containers streamed by producing workers."""
+
+        if self._output_media_packet_receiver is None:
+            return
+        with self._output_media_packet_receiver as packets:
+            async for packet in packets:
+                if packet.target_node != self.node_id or packet.kind in (
+                    "accepted",
+                    "cancelled",
+                ):
+                    continue
+                command_id = packet.command_id
+                job = self._video_jobs.get(command_id)
+                if job is None or job.is_terminal or packet.model != ModelId(job.model):
+                    continue
+                try:
+                    if packet.kind == "opened":
+                        assert packet.total_bytes is not None
+                        assert packet.total_chunks is not None
+                        assert packet.content_type is not None
+                        self._video_store.open_assembly(
+                            command_id,
+                            packet.purpose,
+                            content_type=packet.content_type,
+                            total_bytes=packet.total_bytes,
+                            total_chunks=packet.total_chunks,
+                        )
+                    elif packet.kind == "chunk":
+                        self._video_store.append(
+                            command_id, packet.purpose, packet.sequence, packet.data
+                        )
+                    elif packet.kind == "completed":
+                        assert packet.sha256 is not None
+                        assert packet.total_chunks is not None
+                        stored = self._video_store.commit(
+                            command_id,
+                            packet.purpose,
+                            sha256=packet.sha256,
+                            total_chunks=packet.total_chunks,
+                        )
+                        if packet.purpose == "video":
+                            self._video_jobs.update(
+                                command_id,
+                                media_delivered=True,
+                                expires_at=int(stored.expires_at),
+                            )
+                            self._settle_video_job(command_id)
+                        await self._send_output_media_terminal(packet.accepted())
+                    elif packet.kind == "transport_failed":
+                        self._video_store.delete(command_id)
+                        self._video_jobs.fail(
+                            command_id,
+                            packet.error_message or "video output delivery failed",
+                        )
+                        self._video_job_media_deadlines.pop(command_id, None)
+                except ValueError as error:
+                    self._video_store.delete(command_id)
+                    self._video_jobs.fail(command_id, f"video output rejected: {error}")
+                    self._video_job_media_deadlines.pop(command_id, None)
+                    await self._send_output_media_terminal(
+                        packet.transport_failure(str(error)[:1024])
+                    )
+
+    async def _send_output_media_terminal(self, packet: OutputMediaPacket) -> None:
+        """Send one reverse terminal without letting a stuck peer pin the loop."""
+
+        sender = self._output_media_packet_sender
+        if sender is None:
+            return
+        with contextlib.suppress(BrokenResourceError, ClosedResourceError, WouldBlock):
+            with anyio.move_on_after(2, shield=True):
+                await sender.send(packet)
+
+    async def _sweep_video_jobs(self) -> None:
+        """Fail jobs whose second half never arrived and expire old artifacts."""
+
+        while True:
+            await anyio.sleep(15)
+            now = time.monotonic()
+            for command_id, deadline in list(self._video_job_media_deadlines.items()):
+                if deadline > now:
+                    continue
+                self._video_job_media_deadlines.pop(command_id, None)
+                job = self._video_jobs.get(command_id)
+                if job is None or job.is_terminal:
+                    continue
+                self._video_store.delete(command_id)
+                self._video_jobs.fail(
+                    command_id,
+                    "the finished video was never delivered to the API node",
+                )
+                self._close_command_queue(command_id)
+            self._video_store.cleanup_expired()
+
     async def _apply_vision_media_transport(self) -> None:
         """Apply worker verification or failure to the source image request."""
 
@@ -10400,6 +10790,7 @@ class API:
         return (
             command_id in self._text_generation_queues
             or command_id in self._image_generation_queues
+            or command_id in self._video_generation_queues
             or command_id in self._embedding_queues
             or command_id in self._audio_speech_queues
             or command_id in self._audio_transcription_queues
@@ -10563,6 +10954,7 @@ class API:
         for queue_map in (
             self._text_generation_queues,
             self._image_generation_queues,
+            self._video_generation_queues,
             self._embedding_queues,
             self._audio_speech_queues,
             self._audio_transcription_queues,
@@ -10590,6 +10982,17 @@ class API:
                 await queue.send(chunk)
             except (BrokenResourceError, ClosedResourceError):
                 self._image_generation_queues.pop(command_id, None)
+        if queue := self._video_generation_queues.get(command_id, None):
+            if not isinstance(chunk, (VideoChunk, ErrorChunk)):
+                logger.warning(
+                    "Dropping unsupported output chunk "
+                    f"{type(chunk).__name__} for video command {command_id}"
+                )
+                return
+            try:
+                await queue.send(chunk)
+            except (BrokenResourceError, ClosedResourceError):
+                self._video_generation_queues.pop(command_id, None)
         if queue := self._text_generation_queues.get(command_id, None):
             if not isinstance(
                 chunk, (TokenChunk, ErrorChunk, ToolCallChunk, PrefillProgressChunk)
@@ -10675,6 +11078,7 @@ class API:
                 task_types.TextGeneration,
                 task_types.ImageGeneration,
                 task_types.ImageEdits,
+                task_types.VideoGeneration,
                 task_types.TextEmbedding,
                 task_types.SpeechSynthesis,
                 task_types.AudioTranscription,
@@ -10704,6 +11108,7 @@ class API:
         for queue_map in (
             self._text_generation_queues,
             self._image_generation_queues,
+            self._video_generation_queues,
             self._embedding_queues,
             self._audio_speech_queues,
             self._audio_transcription_queues,

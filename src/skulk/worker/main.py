@@ -2,6 +2,8 @@ import base64
 import hashlib
 import io
 import ipaddress
+import mimetypes
+import shutil
 import sys
 import time
 from collections import defaultdict, deque
@@ -11,7 +13,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import anyio
-from anyio import BrokenResourceError, ClosedResourceError, fail_after, to_thread
+from anyio import (
+    BrokenResourceError,
+    ClosedResourceError,
+    WouldBlock,
+    fail_after,
+    to_thread,
+)
 from loguru import logger
 from PIL import Image
 
@@ -21,6 +29,7 @@ from skulk.download.download_utils import (
     resolve_model_in_path,
 )
 from skulk.routing.connection_message import ConnectionMessage
+from skulk.routing.output_media import OutputMediaPacket
 from skulk.routing.realtime_audio import RealtimeAudioPacket
 from skulk.routing.router import TelemetrySender
 from skulk.routing.speech_media import SpeechMediaPacket
@@ -28,7 +37,12 @@ from skulk.routing.trace_data import TraceDataPacket
 from skulk.routing.vision_media import VisionMediaPacket
 from skulk.routing.zenoh_status import ZenohPeerSampler
 from skulk.shared.apply import apply
-from skulk.shared.constants import SKULK_IMAGE_TRANSPORT_DEBUG
+from skulk.shared.constants import (
+    SKULK_IMAGE_TRANSPORT_DEBUG,
+    SKULK_MAX_CHUNK_SIZE,
+    SKULK_VIDEO_INPUT_DIR,
+    SKULK_VIDEO_OUTPUT_DIR,
+)
 from skulk.shared.log_summaries import summarize_task_for_log
 from skulk.shared.models.memory_estimate import (
     GPU_VRAM_WORKING_SET_FRACTION,
@@ -50,7 +64,7 @@ from skulk.shared.models.remote_code_approval import (
     require_remote_code_approval,
 )
 from skulk.shared.types.audio import RealtimeAudioInputFrame
-from skulk.shared.types.chunks import DataChunk, InputImageChunk
+from skulk.shared.types.chunks import DataChunk, InputImageChunk, VideoChunk
 from skulk.shared.types.commands import (
     FailInstance,
     ForwarderCommand,
@@ -102,6 +116,7 @@ from skulk.shared.types.tasks import (
     TaskId,
     TaskStatus,
     TextGeneration,
+    VideoGeneration,
 )
 from skulk.shared.types.telemetry import (
     TELEMETRY_PLANE_INFO,
@@ -110,6 +125,12 @@ from skulk.shared.types.telemetry import (
     record_membership_from_event,
 )
 from skulk.shared.types.topology import Connection, SocketConnection
+from skulk.shared.types.video import (
+    VIDEO_OUTPUT_FILENAME,
+    VIDEO_THUMBNAIL_FILENAME,
+    VideoOutputManifest,
+    VideoReferenceSpec,
+)
 from skulk.shared.types.worker.downloads import (
     DownloadAttemptId,
     DownloadCompleted,
@@ -197,7 +218,16 @@ _SPEECH_MEDIA_PENDING_TTL_SECONDS = 30.0
 _VISION_MEDIA_PENDING_STREAMS = 64
 _VISION_MEDIA_PENDING_FRAMES = 64
 _VISION_MEDIA_PENDING_BYTES = 32 * 1024 * 1024
-_VISION_MEDIA_PENDING_TOTAL_BYTES = 512 * 1024 * 1024
+# Video reference media (clips, audio, keyframes) is far larger than an image
+# edit input. It shares the ingress machinery with its own per-stream bounds
+# and a larger shared total so one render's attachments cannot starve images.
+_REFERENCE_MEDIA_PENDING_FRAMES = 512
+_REFERENCE_MEDIA_PENDING_BYTES = 256 * 1024 * 1024
+_VISION_MEDIA_PENDING_TOTAL_BYTES = 1024 * 1024 * 1024
+# Finished video containers stream back to the owning API in bounded raw
+# chunks; the API acknowledges verification before the worker deletes its copy.
+_OUTPUT_MEDIA_ACK_TIMEOUT_SECONDS = 5 * 60.0
+_OUTPUT_MEDIA_SEND_TIMEOUT_SECONDS = 30.0
 _VISION_MEDIA_PENDING_TTL_SECONDS = 5 * 60.0
 _VISION_MEDIA_ACK_SEND_TIMEOUT_SECONDS = 2.0
 
@@ -628,9 +658,106 @@ def _vision_media_cleanup_command_id(
         TaskStatus.TimedOut,
     }:
         task = current_tasks.get(event.task_id) or previous_tasks.get(event.task_id)
-    if isinstance(task, (TextGeneration, ImageEdits)):
+    if isinstance(task, (TextGeneration, ImageEdits, VideoGeneration)):
         return task.command_id
     return None
+
+
+def _media_frame_limit(packet: VisionMediaPacket) -> int:
+    """Per-stream frame bound for the packet's payload family."""
+
+    if packet.payload == "reference_media":
+        return _REFERENCE_MEDIA_PENDING_FRAMES
+    return _VISION_MEDIA_PENDING_FRAMES
+
+
+def _media_byte_limit(packet: VisionMediaPacket) -> int:
+    """Per-stream byte bound for the packet's payload family."""
+
+    if packet.payload == "reference_media":
+        return _REFERENCE_MEDIA_PENDING_BYTES
+    return _VISION_MEDIA_PENDING_BYTES
+
+
+def _write_reference_media(
+    directory: Path,
+    expected: Mapping[int, VideoReferenceSpec],
+    slots: Mapping[int, bytes],
+) -> None:
+    """Write verified attachment bytes to task-local files, atomically per slot."""
+
+    directory.mkdir(parents=True, exist_ok=True)
+    for slot, spec in expected.items():
+        target = directory / f"{slot}{_reference_media_extension(spec)}"
+        staging = target.with_suffix(target.suffix + ".part")
+        staging.write_bytes(slots[slot])
+        staging.replace(target)
+
+
+def _verify_file_digest(path: Path, sha256: str) -> int:
+    """Return the file size when its digest matches, else -1."""
+
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+            size += len(chunk)
+    return size if digest.hexdigest() == sha256 else -1
+
+
+_REFERENCE_MEDIA_EXTENSIONS: dict[str, str] = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/webp": ".webp",
+    "image/heic": ".heic",
+    "image/heif": ".heif",
+    "video/mp4": ".mp4",
+    "video/quicktime": ".mov",
+    "video/webm": ".webm",
+    "audio/wav": ".wav",
+    "audio/x-wav": ".wav",
+    "audio/wave": ".wav",
+    "audio/mpeg": ".mp3",
+    "audio/mp4": ".m4a",
+    "audio/flac": ".flac",
+    "audio/ogg": ".ogg",
+}
+
+
+def _reference_media_extension(spec: VideoReferenceSpec) -> str:
+    """Pick a file extension a runner can hand to a media decoder.
+
+    The common types are mapped explicitly so every node names files the same
+    way; the platform ``mimetypes`` table differs between hosts and is only a
+    fallback.
+    """
+
+    known = _REFERENCE_MEDIA_EXTENSIONS.get(spec.media_type)
+    if known is not None:
+        return known
+    guessed = mimetypes.guess_extension(spec.media_type)
+    if guessed:
+        return guessed
+    return {"image": ".img", "video": ".video", "audio": ".audio"}[spec.kind]
+
+
+def _inject_reference_paths(
+    task: VideoGeneration, paths: Mapping[int, Path]
+) -> VideoGeneration:
+    """Return the task with worker-local attachment paths filled in."""
+
+    references = tuple(
+        spec.model_copy(update={"local_path": str(paths[spec.slot])})
+        for spec in task.task_params.references
+    )
+    return task.model_copy(
+        update={
+            "task_params": task.task_params.model_copy(
+                update={"references": references}
+            )
+        }
+    )
 
 
 def _log_image_transport(message: str) -> None:
@@ -727,6 +854,8 @@ class Worker:
         speech_media_packet_receiver: Receiver[SpeechMediaPacket] | None = None,
         vision_media_packet_sender: Sender[VisionMediaPacket] | None = None,
         vision_media_packet_receiver: Receiver[VisionMediaPacket] | None = None,
+        output_media_packet_sender: Sender[OutputMediaPacket] | None = None,
+        output_media_packet_receiver: Receiver[OutputMediaPacket] | None = None,
         connection_message_receiver: Receiver[ConnectionMessage] | None = None,
         session_connection_snapshot: (
             Callable[[], dict[str, tuple[str, int, int]]] | None
@@ -757,6 +886,8 @@ class Worker:
         self._speech_media_packet_receiver = speech_media_packet_receiver
         self._vision_media_packet_sender = vision_media_packet_sender
         self._vision_media_packet_receiver = vision_media_packet_receiver
+        self._output_media_packet_sender = output_media_packet_sender
+        self._output_media_packet_receiver = output_media_packet_receiver
         self._connection_message_receiver = connection_message_receiver
         self._session_connection_snapshot = session_connection_snapshot
         # Live-session bookkeeping shared between the session-edge ingress
@@ -834,6 +965,13 @@ class Worker:
         self._vision_media_completed_streams = 0
         self._vision_media_rejected_streams = 0
         self._vision_media_expired_streams = 0
+        # Verified raw attachment bytes per slot for video renders, held only
+        # until they are written to task-local files and the plan gate opens.
+        self._reference_media_verified: dict[CommandId, dict[int, bytes]] = {}
+        self._reference_media_ready: set[CommandId] = set()
+        # Finished containers awaiting the owning API's verification.
+        self._output_media_pending: dict[CommandId, tuple[NodeId, float]] = {}
+        self._output_media_aborted: set[CommandId] = set()
         self._realtime_audio_pending: dict[
             CommandId, list[RealtimeAudioInputFrame]
         ] = {}
@@ -1075,6 +1213,9 @@ class Worker:
                 if self._vision_media_packet_receiver is not None:
                     tg.start_soon(self._vision_media_packet_ingress)
                     tg.start_soon(self._vision_media_janitor)
+                if self._output_media_packet_receiver is not None:
+                    tg.start_soon(self._output_media_packet_ingress)
+                    tg.start_soon(self._output_media_janitor)
                 if (
                     self._realtime_audio_receiver is not None
                     or self._realtime_audio_packet_receiver is not None
@@ -1220,7 +1361,9 @@ class Worker:
                         (
                             candidate
                             for candidate in self.state.tasks.values()
-                            if isinstance(candidate, (TextGeneration, ImageEdits))
+                            if isinstance(
+                                candidate, (TextGeneration, ImageEdits, VideoGeneration)
+                            )
                             and candidate.command_id == command_id
                         ),
                         None,
@@ -1261,7 +1404,7 @@ class Worker:
                         continue
                     if (
                         packet.total_chunks is None
-                        or packet.total_chunks > _VISION_MEDIA_PENDING_FRAMES
+                        or packet.total_chunks > _media_frame_limit(packet)
                         or packet.image_count is None
                         or packet.image_count > packet.total_chunks
                     ):
@@ -1311,7 +1454,7 @@ class Worker:
                 opened = self._vision_media_opened.get(command_id)
                 if (
                     packet.total_chunks is None
-                    or packet.total_chunks > _VISION_MEDIA_PENDING_FRAMES
+                    or packet.total_chunks > _media_frame_limit(packet)
                     or (
                         packet.kind == "completed"
                         and (
@@ -1383,8 +1526,8 @@ class Worker:
                 pending_bytes = self._vision_media_pending_bytes.get(command_id, 0)
                 packet_bytes = len(packet.data)
                 if (
-                    len(chunks) >= _VISION_MEDIA_PENDING_FRAMES
-                    or pending_bytes + packet_bytes > _VISION_MEDIA_PENDING_BYTES
+                    len(chunks) >= _media_frame_limit(packet)
+                    or pending_bytes + packet_bytes > _media_byte_limit(packet)
                     or self._vision_media_pending_total_bytes + packet_bytes
                     > _VISION_MEDIA_PENDING_TOTAL_BYTES
                 ):
@@ -1431,6 +1574,29 @@ class Worker:
                 completed, "Vision media failed SHA-256 integrity verification"
             )
             return
+        if completed.payload == "reference_media":
+            if any(packet.payload != "reference_media" for packet in ordered):
+                await self._reject_vision_media(
+                    completed, "Reference media stream mixes payload encodings"
+                )
+                return
+            slots: dict[int, bytearray] = {}
+            for packet in ordered:
+                slots.setdefault(packet.image_index or 0, bytearray()).extend(
+                    packet.data
+                )
+            self._reference_media_verified[command_id] = {
+                slot: bytes(data) for slot, data in slots.items()
+            }
+            self._vision_media_verified[command_id] = completed
+            self._vision_media_completed_streams += 1
+            self._clear_pending_vision_media(
+                command_id,
+                release_bytes=False,
+                clear_age=False,
+            )
+            await self._acknowledge_vision_media_if_admitted(command_id)
+            return
         try:
             verified_chunks = {
                 packet.sequence - 1: InputImageChunk(
@@ -1475,12 +1641,15 @@ class Worker:
             (
                 candidate
                 for candidate in self.state.tasks.values()
-                if isinstance(candidate, (TextGeneration, ImageEdits))
+                if isinstance(candidate, (TextGeneration, ImageEdits, VideoGeneration))
                 and candidate.command_id == command_id
             ),
             None,
         )
         if task is None:
+            return
+        if isinstance(task, VideoGeneration):
+            await self._acknowledge_reference_media(command_id, task, completed)
             return
         chunks = self._vision_media_verified_chunks.get(command_id, {})
         image_indexes = {chunk.image_index for chunk in chunks.values()}
@@ -1544,6 +1713,86 @@ class Worker:
         finally:
             self._vision_media_ack_inflight.discard(command_id)
 
+    async def _acknowledge_reference_media(
+        self,
+        command_id: CommandId,
+        task: VideoGeneration,
+        completed: VisionMediaPacket,
+    ) -> None:
+        """Verify every attachment slot against the task, then expose files.
+
+        The authoritative task carries each attachment's slot, size, and digest.
+        Bytes reach a runner only after all of them match, and only through
+        task-local files the worker owns and deletes at task end.
+        """
+
+        slots = self._reference_media_verified.get(command_id)
+        params = task.task_params
+        expected = {spec.slot: spec for spec in params.references}
+        matches_task = (
+            slots is not None
+            and completed.payload == "reference_media"
+            and completed.model == ModelId(params.model)
+            and task.owner_node is not None
+            and completed.source_node == task.owner_node
+            and completed.total_chunks == params.total_input_chunks
+            and completed.image_count == len(expected)
+            and set(slots) == set(expected)
+            and all(
+                len(slots[slot]) == spec.size_bytes
+                and hashlib.sha256(slots[slot]).hexdigest() == spec.sha256
+                for slot, spec in expected.items()
+            )
+        )
+        if not matches_task or slots is None:
+            await self._reject_vision_media(
+                completed,
+                "Verified reference media does not match the authoritative task",
+            )
+            return
+        sender = self._vision_media_packet_sender
+        if sender is None:
+            await self._reject_vision_media(
+                completed, "Vision media acknowledgement transport is unavailable"
+            )
+            return
+        self._vision_media_ack_inflight.add(command_id)
+        try:
+            try:
+                with anyio.move_on_after(
+                    _VISION_MEDIA_ACK_SEND_TIMEOUT_SECONDS, shield=True
+                ) as acknowledgement_scope:
+                    await sender.send(completed.accepted())
+            except (BrokenResourceError, ClosedResourceError):
+                return
+            if (
+                acknowledgement_scope.cancel_called
+                or command_id not in self._reference_media_verified
+            ):
+                return
+            directory = SKULK_VIDEO_INPUT_DIR / str(command_id)
+            try:
+                await to_thread.run_sync(
+                    _write_reference_media, directory, expected, slots
+                )
+            except OSError as error:
+                await self._reject_vision_media(
+                    completed, f"Reference media could not be written locally: {error}"
+                )
+                return
+            # The bytes now live on disk; drop the in-memory copy and release
+            # the ingress accounting the same way image input does.
+            self._reference_media_verified.pop(command_id, None)
+            released = self._vision_media_pending_bytes.pop(command_id, 0)
+            self._vision_media_pending_total_bytes = max(
+                0, self._vision_media_pending_total_bytes - released
+            )
+            self._reference_media_ready.add(command_id)
+            self._vision_media_accepted.add(command_id)
+            self._vision_media_pending_since.pop(command_id, None)
+        finally:
+            self._vision_media_ack_inflight.discard(command_id)
+
     async def _reject_vision_media(
         self, packet: VisionMediaPacket, message: str
     ) -> None:
@@ -1573,7 +1822,7 @@ class Worker:
             (
                 task
                 for task in self.state.tasks.values()
-                if isinstance(task, (TextGeneration, ImageEdits))
+                if isinstance(task, (TextGeneration, ImageEdits, VideoGeneration))
                 and task.command_id == command_id
             ),
             None,
@@ -1621,6 +1870,203 @@ class Worker:
         self._vision_media_failure_since.pop(command_id, None)
         self.input_chunk_buffer.pop(command_id, None)
         self.input_chunk_counts.pop(command_id, None)
+        self._reference_media_verified.pop(command_id, None)
+        if command_id in self._reference_media_ready:
+            self._reference_media_ready.discard(command_id)
+            shutil.rmtree(SKULK_VIDEO_INPUT_DIR / str(command_id), ignore_errors=True)
+
+    def _schedule_video_output_transfer(
+        self, command_id: CommandId, owner_node: NodeId | None, chunk: VideoChunk
+    ) -> None:
+        """Start streaming a finished container to the owning API node."""
+
+        manifest = chunk.output
+        if manifest is None:
+            return
+        if owner_node is None or self._output_media_packet_sender is None:
+            logger.error(
+                "Cannot deliver video output: no owner or OUTPUT_MEDIA transport "
+                f"(command_id={command_id})"
+            )
+            shutil.rmtree(SKULK_VIDEO_OUTPUT_DIR / str(command_id), ignore_errors=True)
+            return
+        self._output_media_pending[command_id] = (
+            owner_node,
+            time.monotonic() + _OUTPUT_MEDIA_ACK_TIMEOUT_SECONDS,
+        )
+        self._tg.start_soon(
+            self._send_video_output, command_id, owner_node, chunk.model, manifest
+        )
+
+    async def _send_video_output(
+        self,
+        command_id: CommandId,
+        owner_node: NodeId,
+        model: ModelId,
+        manifest: VideoOutputManifest,
+    ) -> None:
+        """Stream the container and optional thumbnail as ordered raw chunks."""
+
+        directory = SKULK_VIDEO_OUTPUT_DIR / str(command_id)
+        sender = self._output_media_packet_sender
+        assert sender is not None
+        artifacts: list[tuple[str, Path, str, int, str]] = [
+            (
+                "video",
+                directory / VIDEO_OUTPUT_FILENAME,
+                manifest.content_type,
+                manifest.size_bytes,
+                manifest.sha256,
+            )
+        ]
+        if manifest.thumbnail_sha256 is not None and manifest.thumbnail_size_bytes:
+            artifacts.append(
+                (
+                    "thumbnail",
+                    directory / VIDEO_THUMBNAIL_FILENAME,
+                    "image/jpeg",
+                    manifest.thumbnail_size_bytes,
+                    manifest.thumbnail_sha256,
+                )
+            )
+        try:
+            for purpose, path, content_type, size_bytes, sha256 in artifacts:
+                if command_id in self._output_media_aborted:
+                    return
+                verified = await to_thread.run_sync(_verify_file_digest, path, sha256)
+                if verified != size_bytes:
+                    raise ValueError(
+                        f"{purpose} output does not match its manifest "
+                        f"(size {verified} vs {size_bytes} or digest mismatch)"
+                    )
+                total_chunks = max(1, -(-size_bytes // SKULK_MAX_CHUNK_SIZE))
+                await self._send_output_packet(
+                    sender,
+                    OutputMediaPacket(
+                        source_node=self.node_id,
+                        target_node=owner_node,
+                        command_id=command_id,
+                        model=model,
+                        purpose=purpose,  # pyright: ignore[reportArgumentType]
+                        sequence=0,
+                        kind="opened",
+                        total_chunks=total_chunks,
+                        total_bytes=size_bytes,
+                        content_type=content_type,
+                    ),
+                )
+                sequence = 0
+                with path.open("rb") as handle:
+                    while True:
+                        data = await to_thread.run_sync(handle.read, SKULK_MAX_CHUNK_SIZE)
+                        if not data:
+                            break
+                        sequence += 1
+                        if command_id in self._output_media_aborted:
+                            return
+                        await self._send_output_packet(
+                            sender,
+                            OutputMediaPacket(
+                                source_node=self.node_id,
+                                target_node=owner_node,
+                                command_id=command_id,
+                                model=model,
+                                purpose=purpose,  # pyright: ignore[reportArgumentType]
+                                sequence=sequence,
+                                kind="chunk",
+                                data=data,
+                                total_chunks=total_chunks,
+                            ),
+                        )
+                if sequence != total_chunks:
+                    raise ValueError("output file changed size while streaming")
+                await self._send_output_packet(
+                    sender,
+                    OutputMediaPacket(
+                        source_node=self.node_id,
+                        target_node=owner_node,
+                        command_id=command_id,
+                        model=model,
+                        purpose=purpose,  # pyright: ignore[reportArgumentType]
+                        sequence=total_chunks + 1,
+                        kind="completed",
+                        total_chunks=total_chunks,
+                        total_bytes=size_bytes,
+                        sha256=sha256,
+                    ),
+                )
+        except anyio.get_cancelled_exc_class():
+            raise
+        except Exception as error:  # noqa: BLE001 - transport boundary
+            logger.opt(exception=error).warning(
+                f"Video output delivery failed for command {command_id}"
+            )
+            with suppress(BrokenResourceError, ClosedResourceError, WouldBlock):
+                with anyio.move_on_after(2, shield=True):
+                    await sender.send(
+                        OutputMediaPacket(
+                            source_node=self.node_id,
+                            target_node=owner_node,
+                            command_id=command_id,
+                            model=model,
+                            purpose="video",
+                            sequence=0,
+                            kind="transport_failed",
+                            error_message=f"video output delivery failed: {error}"[
+                                :1024
+                            ],
+                        )
+                    )
+            self._finish_video_output(command_id)
+
+    async def _send_output_packet(
+        self, sender: Sender[OutputMediaPacket], packet: OutputMediaPacket
+    ) -> None:
+        """Send one frame with a bounded wait so a stuck owner cannot pin the worker."""
+
+        with fail_after(_OUTPUT_MEDIA_SEND_TIMEOUT_SECONDS):
+            await sender.send(packet)
+
+    def _finish_video_output(self, command_id: CommandId) -> None:
+        """Release the local copy of a delivered, failed, or abandoned output."""
+
+        self._output_media_pending.pop(command_id, None)
+        self._output_media_aborted.discard(command_id)
+        shutil.rmtree(SKULK_VIDEO_OUTPUT_DIR / str(command_id), ignore_errors=True)
+
+    async def _output_media_packet_ingress(self) -> None:
+        """Consume the owning API's verification of delivered video output."""
+
+        assert self._output_media_packet_receiver is not None
+        with self._output_media_packet_receiver as packets:
+            async for packet in packets:
+                if packet.target_node != self.node_id:
+                    continue
+                pending = self._output_media_pending.get(packet.command_id)
+                if pending is None or pending[0] != packet.source_node:
+                    continue
+                if packet.kind == "accepted" and packet.purpose == "video":
+                    self._finish_video_output(packet.command_id)
+                elif packet.kind in ("transport_failed", "cancelled"):
+                    self._output_media_aborted.add(packet.command_id)
+                    self._finish_video_output(packet.command_id)
+
+    async def _output_media_janitor(self) -> None:
+        """Drop local output copies the owning API never acknowledged."""
+
+        while True:
+            await anyio.sleep(15)
+            now = time.monotonic()
+            for command_id, (_owner, deadline) in list(
+                self._output_media_pending.items()
+            ):
+                if deadline <= now:
+                    logger.warning(
+                        "Video output for command "
+                        f"{command_id} was never acknowledged; releasing local copy"
+                    )
+                    self._output_media_aborted.add(command_id)
+                    self._finish_video_output(command_id)
 
     async def _vision_media_janitor(self) -> None:
         """Reject incomplete image streams after their bounded lifetime."""
@@ -2309,6 +2755,31 @@ class Worker:
                     self._clear_pending_vision_media(cmd_id)
                     await self._start_runner_task(modified_task)
 
+                case VideoGeneration() if task.task_params.total_input_chunks > 0:
+                    cmd_id = task.command_id
+                    directory = SKULK_VIDEO_INPUT_DIR / str(cmd_id)
+                    paths = {
+                        spec.slot: directory
+                        / f"{spec.slot}{_reference_media_extension(spec)}"
+                        for spec in task.task_params.references
+                    }
+                    if cmd_id not in self._reference_media_ready or not all(
+                        path.is_file() for path in paths.values()
+                    ):
+                        self._clear_vision_media(cmd_id)
+                        await self.event_sender.send(
+                            TaskFailed(
+                                task_id=task.task_id,
+                                error_type="invalid_reference_media",
+                                error_message=(
+                                    "Verified reference media is missing for the "
+                                    "admitted video task"
+                                ),
+                            )
+                        )
+                        continue
+                    await self._start_runner_task(_inject_reference_paths(task, paths))
+
                 case TextGeneration() if (
                     task.task_params.image_hashes
                     or task.task_params.total_input_chunks > 0
@@ -2563,6 +3034,7 @@ class Worker:
                 self.state.tasks,
                 self.input_chunk_buffer,
                 self._speech_media_ready,
+                self._reference_media_ready,
             )
             if not isinstance(task, CreateRunner):
                 return task
@@ -2778,6 +3250,7 @@ class Worker:
             trace_sender=self._trace_data_sender.clone()
             if self._trace_data_sender is not None
             else None,
+            on_video_output=self._schedule_video_output_transfer,
         )
         self.runners[task.bound_instance.bound_runner_id] = runner
         self._tg.start_soon(runner.run)

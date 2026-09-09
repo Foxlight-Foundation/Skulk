@@ -76,6 +76,7 @@ from skulk.shared.types.commands import (
     TestCommand,
     TextEmbedding,
     TextGeneration,
+    VideoGeneration,
 )
 from skulk.shared.types.common import CommandId, NodeId, SessionId, SystemId
 from skulk.shared.types.events import (
@@ -140,6 +141,9 @@ from skulk.shared.types.tasks import (
 )
 from skulk.shared.types.tasks import (
     TextGeneration as TextGenerationTask,
+)
+from skulk.shared.types.tasks import (
+    VideoGeneration as VideoGenerationTask,
 )
 from skulk.shared.types.telemetry import (
     NODE_LIVENESS_TIMEOUT,
@@ -2064,6 +2068,89 @@ class Master:
                             )
 
                             self.command_task_mapping[command.command_id] = task_id
+                        case VideoGeneration():
+                            # A video instance is single-host and serves only
+                            # the modes its card declares. Placement selects the
+                            # least-loaded instance that can serve the resolved
+                            # mode; no eligible instance yields a terminal
+                            # failed task so the caller's job ends promptly.
+                            requested_mode = command.task_params.implied_mode()
+                            for instance in self.state.instances.values():
+                                if (
+                                    instance.shard_assignments.model_id
+                                    != command.task_params.model
+                                ):
+                                    continue
+                                shard = next(
+                                    iter(
+                                        instance.shard_assignments.runner_to_shard.values()
+                                    ),
+                                    None,
+                                )
+                                video = (
+                                    shard.model_card.video if shard is not None else None
+                                )
+                                if video is None or requested_mode not in video.modes:
+                                    continue
+                                instance_task_counts[instance.instance_id] = sum(
+                                    1
+                                    for task in self.state.tasks.values()
+                                    if task.instance_id == instance.instance_id
+                                )
+                            task_id = TaskId()
+                            video_unavailable = not instance_task_counts
+                            selected_instance_id = (
+                                min(
+                                    instance_task_counts,
+                                    key=lambda instance_id: (
+                                        instance_task_counts[instance_id],
+                                        str(instance_id),
+                                    ),
+                                )
+                                if instance_task_counts
+                                else next(
+                                    (
+                                        instance.instance_id
+                                        for instance in self.state.instances.values()
+                                        if instance.shard_assignments.model_id
+                                        == command.task_params.model
+                                    ),
+                                    InstanceId(str(command.command_id)),
+                                )
+                            )
+                            generated_events.append(
+                                TaskCreated(
+                                    task_id=task_id,
+                                    task=VideoGenerationTask(
+                                        task_id=task_id,
+                                        command_id=command.command_id,
+                                        owner_node=command.owner_node,
+                                        instance_id=selected_instance_id,
+                                        task_status=(
+                                            TaskStatus.Failed
+                                            if video_unavailable
+                                            else TaskStatus.Pending
+                                        ),
+                                        task_params=command.task_params.model_copy(
+                                            update={"mode": requested_mode}
+                                        ),
+                                        trace_enabled=self.state.tracing_enabled,
+                                    ),
+                                )
+                            )
+                            self.command_task_mapping[command.command_id] = task_id
+                            if video_unavailable:
+                                generated_events.append(
+                                    TaskFailed(
+                                        task_id=task_id,
+                                        error_type="video_mode_unavailable",
+                                        error_message=(
+                                            "No running instance of "
+                                            f"{command.task_params.model} serves "
+                                            f"the {requested_mode.value} mode"
+                                        ),
+                                    )
+                                )
                         case ImageEdits():
                             for instance in self.state.instances.values():
                                 if (

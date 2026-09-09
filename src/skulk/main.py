@@ -711,6 +711,7 @@ class Node:
         await router.register_topic(topics.SPEECH_MEDIA)
         await router.register_topic(topics.TRACE_DATA)
         await router.register_topic(topics.VISION_MEDIA)
+        await router.register_topic(topics.OUTPUT_MEDIA)
         telemetry_view = TelemetryView()
         realtime_audio_sender, realtime_audio_receiver = channel[
             RealtimeAudioInputFrame
@@ -838,6 +839,8 @@ class Node:
                 trace_data_receiver=router.receiver(topics.TRACE_DATA),
                 vision_media_packet_sender=router.sender(topics.VISION_MEDIA),
                 vision_media_packet_receiver=router.receiver(topics.VISION_MEDIA),
+                output_media_packet_sender=router.sender(topics.OUTPUT_MEDIA),
+                output_media_packet_receiver=router.receiver(topics.OUTPUT_MEDIA),
                 realtime_audio_sender=(
                     None if args.no_worker else realtime_audio_sender
                 ),
@@ -891,6 +894,8 @@ class Node:
                 speech_media_packet_receiver=router.receiver(topics.SPEECH_MEDIA),
                 vision_media_packet_sender=router.sender(topics.VISION_MEDIA),
                 vision_media_packet_receiver=router.receiver(topics.VISION_MEDIA),
+                output_media_packet_sender=router.sender(topics.OUTPUT_MEDIA),
+                output_media_packet_receiver=router.receiver(topics.OUTPUT_MEDIA),
                 connection_message_receiver=router.receiver(topics.CONNECTION_MESSAGES),
                 session_connection_snapshot=router.current_session_connections,
                 store_client=worker_store_client,
@@ -1704,6 +1709,12 @@ class Node:
                             ),
                             vision_media_packet_receiver=self.router.receiver(
                                 topics.VISION_MEDIA
+                            ),
+                            output_media_packet_sender=self.router.sender(
+                                topics.OUTPUT_MEDIA
+                            ),
+                            output_media_packet_receiver=self.router.receiver(
+                                topics.OUTPUT_MEDIA
                             ),
                         )
                         if self.download_coordinator is not None and isinstance(

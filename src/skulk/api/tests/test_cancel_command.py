@@ -20,6 +20,7 @@ def _make_api() -> Any:
     api.app = app
     api._text_generation_queues = {}  # pyright: ignore[reportPrivateUsage]
     api._image_generation_queues = {}  # pyright: ignore[reportPrivateUsage]
+    api._video_generation_queues = {}  # pyright: ignore[reportPrivateUsage]
     api._embedding_queues = {}  # pyright: ignore[reportPrivateUsage]
     api._audio_speech_queues = {}  # pyright: ignore[reportPrivateUsage]
     api._audio_transcription_queues = {}  # pyright: ignore[reportPrivateUsage]

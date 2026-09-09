@@ -27,6 +27,7 @@ def _make_api() -> Any:
     api = object.__new__(API)
     api._text_generation_queues = {}
     api._image_generation_queues = {}
+    api._video_generation_queues = {}
     api._embedding_queues = {}
     api._audio_speech_queues = {}
     api._audio_transcription_queues = {}

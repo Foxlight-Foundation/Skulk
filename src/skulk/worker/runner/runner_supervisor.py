@@ -3,6 +3,7 @@ import multiprocessing as mp
 import signal
 import time
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Self
@@ -24,6 +25,7 @@ from skulk.shared.types.chunks import (
     EmbeddingChunk,
     ErrorChunk,
     GenerationChunk,
+    VideoChunk,
 )
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.diagnostics import (
@@ -59,6 +61,7 @@ from skulk.shared.types.tasks import (
     TaskStatus,
     TextEmbedding,
     TextGeneration,
+    VideoGeneration,
 )
 from skulk.shared.types.worker.instances import BoundInstance
 from skulk.shared.types.worker.runners import (
@@ -146,6 +149,7 @@ class RunnerSupervisor:
     # event log. Production wiring always supplies both senders; the master
     # independently rejects payload events if a malformed participant sends one.
     _data_sender: "Sender[DataChunk] | None" = None
+    _on_video_output: "Callable[[CommandId, NodeId | None, VideoChunk], None] | None" = None
     _trace_sender: "Sender[TraceDataPacket] | None" = None
     _tg: TaskGroup = field(default_factory=TaskGroup, init=False)
     status: RunnerStatus = field(default_factory=RunnerIdle, init=False)
@@ -244,6 +248,7 @@ class RunnerSupervisor:
         context_token_limit: int | None = None,
         data_sender: "Sender[DataChunk] | None" = None,
         trace_sender: "Sender[TraceDataPacket] | None" = None,
+        on_video_output: "Callable[[CommandId, NodeId | None, VideoChunk], None] | None" = None,
     ) -> Self:
         """Spawn the runner subprocess for one shard of a placed instance.
 
@@ -293,6 +298,7 @@ class RunnerSupervisor:
             _event_sender=event_sender,
             _data_sender=data_sender,
             _trace_sender=trace_sender,
+            _on_video_output=on_video_output,
         )
 
         return self
@@ -333,6 +339,20 @@ class RunnerSupervisor:
                 return
             if event.command_id not in self._stream_started:
                 await self._send_data_frame(event.command_id, "started")
+            if (
+                isinstance(event.chunk, VideoChunk)
+                and event.chunk.output is not None
+                and self._on_video_output is not None
+            ):
+                # The finished container never rides DATA. Hand the manifest to
+                # the worker, which streams the file to the owning API on the
+                # OUTPUT_MEDIA plane while the terminal frame below tells the
+                # API to expect it.
+                self._on_video_output(
+                    event.command_id,
+                    self._command_owner.get(event.command_id),
+                    event.chunk,
+                )
             await self._send_data_frame(
                 event.command_id,
                 _stream_frame_kind(event.chunk),
@@ -378,6 +398,7 @@ class RunnerSupervisor:
                     TextGeneration,
                     ImageGeneration,
                     ImageEdits,
+                    VideoGeneration,
                     TextEmbedding,
                     SpeechSynthesis,
                     AudioTranscription,
@@ -555,6 +576,7 @@ class RunnerSupervisor:
                     TextGeneration,
                     ImageGeneration,
                     ImageEdits,
+                    VideoGeneration,
                     TextEmbedding,
                     SpeechSynthesis,
                     AudioTranscription,
@@ -571,6 +593,7 @@ class RunnerSupervisor:
                 TextGeneration,
                 ImageGeneration,
                 ImageEdits,
+                VideoGeneration,
                 TextEmbedding,
                 SpeechSynthesis,
                 AudioTranscription,
@@ -715,6 +738,7 @@ class RunnerSupervisor:
                                 TextGeneration,
                                 ImageGeneration,
                                 ImageEdits,
+                                VideoGeneration,
                                 TextEmbedding,
                                 SpeechSynthesis,
                                 AudioTranscription,
@@ -817,6 +841,7 @@ class RunnerSupervisor:
                     TextGeneration,
                     ImageGeneration,
                     ImageEdits,
+                    VideoGeneration,
                     TextEmbedding,
                     SpeechSynthesis,
                     AudioTranscription,
@@ -965,6 +990,7 @@ class RunnerSupervisor:
                 TextGeneration,
                 ImageGeneration,
                 ImageEdits,
+                VideoGeneration,
                 TextEmbedding,
                 SpeechSynthesis,
                 AudioTranscription,
