@@ -10629,7 +10629,6 @@ class API:
 
         specs: list[VideoReferenceSpec] = []
         blobs: list[VideoAttachment] = []
-        remaining = _REFERENCE_MEDIA_PENDING_COMMAND_BYTES
         fields: tuple[tuple[str, VideoReferenceRole], ...] = (
             ("input_reference", "first_frame"),
             ("first_frame", "first_frame"),
@@ -10648,6 +10647,25 @@ class API:
                         "first_frame, last_frame, or reference"
                     ),
                 )
+        try:
+            await self._read_video_attachment_parts(form, fields, specs, blobs)
+        except BaseException:
+            # Parts read before the failing one are reserved against the
+            # node budget; the caller never sees them, so release them here.
+            self._video_upload_inflight_bytes -= sum(item.size_bytes for item in blobs)
+            raise
+        return specs, blobs
+
+    async def _read_video_attachment_parts(
+        self,
+        form: FormData,
+        fields: tuple[tuple[str, VideoReferenceRole], ...],
+        specs: list[VideoReferenceSpec],
+        blobs: list[VideoAttachment],
+    ) -> None:
+        """Read every recognized file part into ``specs`` and ``blobs`` in slot order."""
+
+        remaining = _REFERENCE_MEDIA_PENDING_COMMAND_BYTES
         for field_name, role in fields:
             for upload in form.getlist(field_name):
                 if not isinstance(upload, StarletteUploadFile):
@@ -10692,7 +10710,6 @@ class API:
                     ) from error
                 specs.append(spec)
                 blobs.append(attachment)
-        return specs, blobs
 
     async def create_video(self, request: Request) -> VideoResource:
         """Create one audio-video generation job and return it immediately."""

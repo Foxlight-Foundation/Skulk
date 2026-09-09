@@ -553,6 +553,24 @@ def test_create_multipart_releases_its_reservation_after_staging(
     assert api._pending_vision_media_bytes == 10
 
 
+def test_create_multipart_releases_earlier_parts_when_a_later_one_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _make_api(monkeypatch)
+    client = TestClient(api.app)
+    response = client.post(
+        "/v1/videos",
+        data={"model": str(MODEL), "prompt": "x"},
+        files=[
+            ("first_frame", ("a.png", b"0123456789", "image/png")),
+            ("reference", ("bad", b"zz", "application/octet-stream")),
+        ],
+    )
+    assert response.status_code == 400
+    assert api._video_upload_inflight_bytes == 0
+    api._send.assert_not_called()
+
+
 def test_create_multipart_rejects_unknown_file_fields(monkeypatch: pytest.MonkeyPatch) -> None:
     api = _make_api(monkeypatch)
     client = TestClient(api.app)
