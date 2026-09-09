@@ -3728,3 +3728,29 @@ request deadline. Errors contain the stable `manager_operation_refused` code;
 local operation records distinguish validation, ownership and local I/O failures.
 This transport is not a LAN listener or remote authorization mechanism. The HTTP
 lifecycle integration must enforce the existing explicit plugin operator scopes.
+
+
+### Stable local manager runtime
+
+The local setup implementation stages a separate service copy through
+`stage_service_runtime(root)` and selects it through
+`activate_service_runtime(root, snapshot)`. These are owner-local setup functions,
+not HTTP operations; callers do not submit executable or dependency paths through
+management APIs. Preparation copies the exact installed dependency files, effective
+Skulk code, native bindings and required declarative resources. It resolves no new
+dependencies and does not modify the existing Skulk environment. Unknown editable
+startup hooks and external links are refused rather than borrowed silently.
+
+A complete staged record contains the generation, manifest digest, qualified
+core digest, copied file count and byte count. An interrupted copy retains its
+incomplete directory without changing the selected service runtime. Activation
+requires a stopped manager and preserves plugin installation/configuration and
+cleanup state. The copied bootstrap runs with `-I -S -B` and verifies file bytes,
+permissions, membership and interpreter identity before Python site initialization
+or manager imports. The manager receives its explicit service state root; stored
+credentials and ordinary Skulk configuration are not copied into this runtime.
+
+This candidate packaging primitive is not yet the one-command OS service installer.
+It targets existing supported isolated Skulk Python environments. Actual system
+service registration and automatic refresh of the local Skulk transport attachment
+remain required before unattended reboot qualification.

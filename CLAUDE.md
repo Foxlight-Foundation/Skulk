@@ -541,6 +541,13 @@ and retain exact operations across client disconnect and manager restart.
 `runtime_manager.py` provides the fixed bounded local management socket, with
 host identity provisioned locally and no remote path/command selection. Unavailable
 plugin runtimes must not remove manager inventory or operation-status access.
+`service_snapshot.py` prepares an exact local service copy without mutating Skulk's
+environment. Include declarative resources, remove editable path indirection, and
+refuse unhandled startup hooks or links. The standard-library-only copied
+`service_bootstrap.py` must run with site initialization disabled and verify the
+complete runtime before exec; it accepts no executable override. Service-runtime
+activation requires the manager stopped. Skulk transport IDs currently change at
+startup; durable plugin identities must not depend on a permanently saved transport ID.
 
 Optional `NodeConfigurationProvider` (`extensions/configuration.py`) exposes stable installed-node settings independently of capability readiness. The `/v1/plugins` API and Plugins dashboard share plugin-owned schema validation and revision-fenced settings with terminal management. No credentials or configuration enter replicated State. Explicit plugin read/manage/approve grants are owner-controlled through `/v1/auth/plugin-grants`; existing pairings receive none, and broad operator write permission does not imply them.
 Separately installed packages register a zero-arg factory in the
