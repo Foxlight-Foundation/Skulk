@@ -47,6 +47,8 @@ class VideoJob(CamelCaseModel):
     """Requested duration."""
     size: str | None = None
     """Requested canvas, if any."""
+    audio: bool = True
+    """Whether the request required a synchronized audio track."""
     status: VideoJobStatus = "queued"
     """Lifecycle state."""
     progress: int = Field(default=0, ge=0, le=100)

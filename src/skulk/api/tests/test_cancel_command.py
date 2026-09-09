@@ -1,3 +1,6 @@
+import tempfile
+from pathlib import Path
+
 # pyright: reportUnusedFunction=false, reportAny=false
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
@@ -8,6 +11,8 @@ from fastapi.testclient import TestClient
 
 from skulk.api.data_plane import DataPlaneObserver
 from skulk.api.main import API
+from skulk.api.video_jobs import VideoJobRegistry
+from skulk.api.video_store import VideoStore
 from skulk.shared.types.common import CommandId
 from skulk.utils.channels import Sender
 
@@ -21,6 +26,11 @@ def _make_api() -> Any:
     api._text_generation_queues = {}  # pyright: ignore[reportPrivateUsage]
     api._image_generation_queues = {}  # pyright: ignore[reportPrivateUsage]
     api._video_generation_queues = {}  # pyright: ignore[reportPrivateUsage]
+    api._video_jobs = VideoJobRegistry(None)  # pyright: ignore[reportPrivateUsage]
+    api._video_store = VideoStore(Path(tempfile.mkdtemp()))  # pyright: ignore[reportPrivateUsage]
+    api._video_job_media_deadlines = {}  # pyright: ignore[reportPrivateUsage]
+    api._video_output_sources = {}  # pyright: ignore[reportPrivateUsage]
+    api._early_output_packets = {}  # pyright: ignore[reportPrivateUsage]
     api._embedding_queues = {}  # pyright: ignore[reportPrivateUsage]
     api._audio_speech_queues = {}  # pyright: ignore[reportPrivateUsage]
     api._audio_transcription_queues = {}  # pyright: ignore[reportPrivateUsage]

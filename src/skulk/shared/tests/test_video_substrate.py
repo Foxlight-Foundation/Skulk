@@ -378,6 +378,7 @@ def _bare_api(tmp_path: Path) -> API:
     api._cancelled_command_ids = set()  # pyright: ignore[reportPrivateUsage]
     api._video_job_media_deadlines = {}  # pyright: ignore[reportPrivateUsage]
     api._video_output_sources = {}  # pyright: ignore[reportPrivateUsage]
+    api._early_output_packets = {}  # pyright: ignore[reportPrivateUsage]
     return api
 
 
@@ -528,6 +529,8 @@ async def test_settle_requires_every_declared_artifact_to_match(tmp_path: Path, 
         seconds=0.2,
         thumbnail_sha256=hashlib.sha256(thumb).hexdigest(),
         thumbnail_size_bytes=len(thumb),
+        audio_sample_rate=32000,
+        audio_channels=2,
     )
     registry.update(job.id, render_finished=True, output=manifest)
     store.open_assembly(job.id, "video", content_type="video/mp4", total_bytes=len(video), total_chunks=1)
@@ -635,3 +638,98 @@ def test_video_store_stash_is_bounded_by_bytes(tmp_path: Path) -> None:
     store.append(command_id, "video", 3, chunk)
     with pytest.raises(ValueError, match="reorder window"):
         store.append(command_id, "video", 4, chunk)
+
+
+async def test_cancel_during_upload_phase_cancels_job_and_notifies_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api = _bare_api(tmp_path)
+    api.node_id = NodeId("api")
+    for name in (
+        "_text_generation_queues",
+        "_image_generation_queues",
+        "_embedding_queues",
+        "_audio_speech_queues",
+        "_audio_transcription_queues",
+    ):
+        setattr(api, name, {})
+    sent: list[OutputMediaPacket] = []
+
+    async def capture(packet: OutputMediaPacket) -> None:
+        sent.append(packet)
+
+    monkeypatch.setattr(api, "_send_output_media_terminal", capture)
+    job = api._video_jobs.create(_job("uploading"))  # pyright: ignore[reportPrivateUsage]
+    api._video_jobs.update(job.id, render_finished=True)  # pyright: ignore[reportPrivateUsage]
+    api._video_output_sources[job.id] = NodeId("worker-1")  # pyright: ignore[reportPrivateUsage]
+    response = await api.cancel_command(job.id)
+    assert response.command_id == job.id
+    cancelled = api._video_jobs.get(job.id)  # pyright: ignore[reportPrivateUsage]
+    assert cancelled is not None and cancelled.status == "cancelled"
+    assert len(sent) == 1 and sent[0].kind == "cancelled" and sent[0].target_node == NodeId("worker-1")
+
+
+async def test_output_frames_overtaking_their_open_are_held_and_replayed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api = _bare_api(tmp_path)
+    api.node_id = NodeId("api")
+    api.state = State()
+    api._close_command_queue = lambda _command_id: None  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
+    acknowledged: list[OutputMediaPacket] = []
+
+    async def capture(packet: OutputMediaPacket) -> None:
+        acknowledged.append(packet)
+
+    monkeypatch.setattr(api, "_send_output_media_terminal", capture)
+    job = api._video_jobs.create(_job("early"))  # pyright: ignore[reportPrivateUsage]
+    payload = b"abcdef"
+    digest = hashlib.sha256(payload).hexdigest()
+    sender, receiver = channel[OutputMediaPacket]()
+    api._output_media_packet_receiver = receiver  # pyright: ignore[reportPrivateUsage]
+
+    def packet(kind: str, sequence: int, **fields: object) -> OutputMediaPacket:
+        return OutputMediaPacket.model_validate(
+            {
+                "source_node": NodeId("worker-1"),
+                "target_node": NodeId("api"),
+                "command_id": job.id,
+                "model": MODEL,
+                "purpose": "video",
+                "sequence": sequence,
+                "kind": kind,
+                **fields,
+            }
+        )
+
+    async with anyio.create_task_group() as group:
+        group.start_soon(api._apply_output_media)  # pyright: ignore[reportPrivateUsage]
+        await sender.send(packet("chunk", 2, data=b"def", total_chunks=2))
+        await sender.send(packet("chunk", 1, data=b"abc", total_chunks=2))
+        await sender.send(packet("opened", 0, total_chunks=2, total_bytes=6, content_type="video/mp4"))
+        await sender.send(packet("completed", 3, total_chunks=2, total_bytes=6, sha256=digest))
+        await anyio.sleep(0.1)
+        sender.close()
+    stored = api._video_store.get(job.id)  # pyright: ignore[reportPrivateUsage]
+    assert stored is not None and stored.file_path.read_bytes() == payload
+    assert [item.kind for item in acknowledged] == ["accepted"]
+    assert not api._early_output_packets  # pyright: ignore[reportPrivateUsage]
+
+
+def test_settle_requires_the_requested_audio_track(tmp_path: Path) -> None:
+    api = _bare_api(tmp_path)
+    api._close_command_queue = lambda _command_id: None  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
+    registry = api._video_jobs  # pyright: ignore[reportPrivateUsage]
+    store = api._video_store  # pyright: ignore[reportPrivateUsage]
+    job = registry.create(_job("silent"))
+    video = b"container"
+    manifest = VideoOutputManifest(
+        sha256=hashlib.sha256(video).hexdigest(), size_bytes=len(video), width=64, height=64, frame_count=5, fps=24, seconds=0.2
+    )
+    registry.update(job.id, render_finished=True, output=manifest)
+    store.open_assembly(job.id, "video", content_type="video/mp4", total_bytes=len(video), total_chunks=1)
+    store.append(job.id, "video", 1, video)
+    store.commit(job.id, "video", sha256=manifest.sha256, total_chunks=1)
+    api._settle_video_job(job.id)  # pyright: ignore[reportPrivateUsage]
+    silent = registry.get(job.id)
+    assert silent is not None and silent.status == "failed" and "audio track" in (silent.error or "")

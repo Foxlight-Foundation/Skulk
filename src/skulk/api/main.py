@@ -1073,6 +1073,9 @@ _VISION_MEDIA_PENDING_TOTAL_BYTES = 1024 * 1024 * 1024
 # A render's terminal frame and its container arrive on different planes; a
 # job waits this long for the second half before it is failed.
 _VIDEO_JOB_MEDIA_TIMEOUT_SECONDS = 10 * 60.0
+# Output frames that overtake their open frame on the reordering fallback are
+# held per artifact until the open arrives; more than this fails the transfer.
+_OUTPUT_MEDIA_EARLY_PACKETS = 64
 _VISION_MEDIA_PENDING_TTL_SECONDS = 5 * 60.0
 _VISION_MEDIA_ACK_TIMEOUT_SECONDS = 5 * 60.0
 _VISION_MEDIA_RAW_IMAGE_BYTES = (_VISION_MEDIA_PENDING_COMMAND_BYTES // 4) * 3
@@ -1653,6 +1656,9 @@ class API:
         # TaskCreated. The task itself is deleted once the stream finalizes,
         # which can precede the container's arrival on OUTPUT_MEDIA.
         self._video_output_sources: dict[CommandId, NodeId] = {}
+        self._early_output_packets: dict[
+            tuple[CommandId, str], list[OutputMediaPacket]
+        ] = {}
         self._pending_vision_media: dict[CommandId, _PendingVisionMedia] = {}
         self._pending_vision_media_bytes = 0
         self._active_vision_media_bytes: dict[CommandId, int] = {}
@@ -2069,6 +2075,7 @@ class API:
                 )
         self._video_job_media_deadlines = {}
         self._video_output_sources = {}
+        self._early_output_packets = {}
         self._cancelled_command_ids = set()
         self.unpause(result_clock, master_node_id=master_node_id)
         self.event_receiver.close()
@@ -4335,6 +4342,33 @@ class API:
             or self._audio_transcription_queues.get(command_id)
         )
         if sender is None:
+            # A video job whose render finished but whose container is still
+            # crossing OUTPUT_MEDIA has no stream queue left; cancel the job
+            # itself and tell the producing worker to stop streaming.
+            job = self._video_jobs.get(command_id)
+            if job is not None and not job.is_terminal:
+                self._video_jobs.fail(command_id, "the job was cancelled", cancelled=True)
+                self._video_store.delete(command_id)
+                self._video_job_media_deadlines.pop(command_id, None)
+                for purpose in ("video", "thumbnail"):
+                    self._early_output_packets.pop((command_id, purpose), None)
+                source = self._video_output_sources.pop(command_id, None)
+                if source is not None:
+                    await self._send_output_media_terminal(
+                        OutputMediaPacket(
+                            source_node=self.node_id,
+                            target_node=source,
+                            command_id=command_id,
+                            model=ModelId(job.model),
+                            purpose="video",
+                            sequence=0,
+                            kind="cancelled",
+                        )
+                    )
+                return CancelCommandResponse(
+                    message="Command cancelled.",
+                    command_id=command_id,
+                )
             raise HTTPException(
                 status_code=404,
                 detail="Command not found or already completed",
@@ -10465,6 +10499,7 @@ class API:
                 mode=mode.value,
                 seconds=params.seconds,
                 size=params.size,
+                audio=params.audio,
                 created_at=now,
             )
         )
@@ -10598,6 +10633,14 @@ class API:
             self._video_job_media_deadlines.pop(command_id, None)
             self._close_command_queue(command_id)
             return
+        if job.audio and manifest.audio_sample_rate is None:
+            self._video_store.delete(command_id)
+            self._video_jobs.fail(
+                command_id, "the request required an audio track and the render has none"
+            )
+            self._video_job_media_deadlines.pop(command_id, None)
+            self._close_command_queue(command_id)
+            return
         if manifest.thumbnail_sha256 is not None:
             thumbnail = self._video_store.get(command_id, "thumbnail")
             if thumbnail is None:
@@ -10636,68 +10679,104 @@ class API:
                 job = self._video_jobs.get(command_id)
                 if job is None or job.is_terminal or packet.model != ModelId(job.model):
                     continue
-                if packet.source_node != self._video_output_source(command_id):
+                expected_source = self._video_output_source(command_id)
+                if expected_source is not None and packet.source_node != expected_source:
                     # Only the node the master placed the render on may deliver
                     # its output; anything else is a stray or misrouted stream.
+                    # Before placement has replicated here the fabric's trust
+                    # applies and the frame is accepted.
                     logger.warning(
                         f"Ignoring video output for command {command_id} from "
                         f"{packet.source_node}, which does not serve it"
                     )
                     continue
-                try:
-                    if packet.kind == "opened":
-                        assert packet.total_bytes is not None
-                        assert packet.total_chunks is not None
-                        assert packet.content_type is not None
-                        # Either half may arrive first; the deadline for the
-                        # other half starts with whichever lands first.
-                        self._video_job_media_deadlines.setdefault(
-                            command_id,
-                            time.monotonic() + _VIDEO_JOB_MEDIA_TIMEOUT_SECONDS,
-                        )
-                        self._video_store.open_assembly(
-                            command_id,
-                            packet.purpose,
-                            content_type=packet.content_type,
-                            total_bytes=packet.total_bytes,
-                            total_chunks=packet.total_chunks,
-                        )
-                    elif packet.kind == "chunk":
-                        self._video_store.append(
-                            command_id, packet.purpose, packet.sequence, packet.data
-                        )
-                    elif packet.kind == "completed":
-                        assert packet.sha256 is not None
-                        assert packet.total_chunks is not None
-                        stored = self._video_store.commit(
-                            command_id,
-                            packet.purpose,
-                            sha256=packet.sha256,
-                            total_chunks=packet.total_chunks,
-                        )
-                        self._video_jobs.update(
-                            command_id, expires_at=int(stored.expires_at)
-                        )
-                        self._settle_video_job(command_id)
-                        await self._send_output_media_terminal(packet.accepted())
-                    elif packet.kind == "transport_failed":
+                key = (command_id, packet.purpose)
+                if packet.kind in ("chunk", "completed") and not (
+                    self._video_store.has_open_assembly(command_id, packet.purpose)
+                ):
+                    # On the reordering fallback a chunk can overtake its open
+                    # frame; hold a bounded few until the open arrives.
+                    early = self._early_output_packets.setdefault(key, [])
+                    if len(early) >= _OUTPUT_MEDIA_EARLY_PACKETS:
                         self._video_store.delete(command_id)
                         self._video_jobs.fail(
-                            command_id,
-                            packet.error_message or "video output delivery failed",
+                            command_id, "video output arrived too far ahead of its open frame"
                         )
                         self._video_job_media_deadlines.pop(command_id, None)
+                        self._early_output_packets.pop(key, None)
                         self._close_command_queue(command_id)
-                except (ValueError, OSError) as error:
-                    # Validation failures and filesystem failures (a full disk)
-                    # both end this transfer; neither may end the receive loop.
-                    self._video_store.delete(command_id)
-                    self._video_jobs.fail(command_id, f"video output rejected: {error}")
-                    self._video_job_media_deadlines.pop(command_id, None)
-                    self._close_command_queue(command_id)
-                    await self._send_output_media_terminal(
-                        packet.transport_failure(str(error)[:1024])
-                    )
+                        await self._send_output_media_terminal(
+                            packet.transport_failure("output stream opened too late")
+                        )
+                    else:
+                        early.append(packet)
+                    continue
+                await self._apply_output_media_packet(packet)
+
+    async def _apply_output_media_packet(self, packet: OutputMediaPacket) -> None:
+        """Apply one lifecycle frame to the job's assembly and settlement."""
+
+        command_id = packet.command_id
+        key = (command_id, packet.purpose)
+        try:
+            if packet.kind == "opened":
+                assert packet.total_bytes is not None
+                assert packet.total_chunks is not None
+                assert packet.content_type is not None
+                # Either half may arrive first; the deadline for the
+                # other half starts with whichever lands first.
+                self._video_job_media_deadlines.setdefault(
+                    command_id,
+                    time.monotonic() + _VIDEO_JOB_MEDIA_TIMEOUT_SECONDS,
+                )
+                self._video_store.open_assembly(
+                    command_id,
+                    packet.purpose,
+                    content_type=packet.content_type,
+                    total_bytes=packet.total_bytes,
+                    total_chunks=packet.total_chunks,
+                )
+                for held in sorted(
+                    self._early_output_packets.pop(key, []),
+                    key=lambda item: item.sequence,
+                ):
+                    await self._apply_output_media_packet(held)
+            elif packet.kind == "chunk":
+                self._video_store.append(
+                    command_id, packet.purpose, packet.sequence, packet.data
+                )
+            elif packet.kind == "completed":
+                assert packet.sha256 is not None
+                assert packet.total_chunks is not None
+                stored = self._video_store.commit(
+                    command_id,
+                    packet.purpose,
+                    sha256=packet.sha256,
+                    total_chunks=packet.total_chunks,
+                )
+                self._video_jobs.update(
+                    command_id, expires_at=int(stored.expires_at)
+                )
+                self._settle_video_job(command_id)
+                await self._send_output_media_terminal(packet.accepted())
+            elif packet.kind == "transport_failed":
+                self._video_store.delete(command_id)
+                self._video_jobs.fail(
+                    command_id,
+                    packet.error_message or "video output delivery failed",
+                )
+                self._video_job_media_deadlines.pop(command_id, None)
+                self._close_command_queue(command_id)
+        except (ValueError, OSError) as error:
+            # Validation failures and filesystem failures (a full disk)
+            # both end this transfer; neither may end the receive loop.
+            self._video_store.delete(command_id)
+            self._video_jobs.fail(command_id, f"video output rejected: {error}")
+            self._video_job_media_deadlines.pop(command_id, None)
+            self._close_command_queue(command_id)
+            await self._send_output_media_terminal(
+                packet.transport_failure(str(error)[:1024])
+            )
 
     def _record_video_output_source(self, task: task_types.Task) -> None:
         """Remember which node may deliver a video command's output."""
