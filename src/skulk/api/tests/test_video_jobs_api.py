@@ -24,7 +24,7 @@ from fastapi.testclient import TestClient
 
 from skulk.api import main as api_main
 from skulk.api.main import API
-from skulk.api.video_jobs import VideoJob, VideoJobRegistry
+from skulk.api.video_jobs import VideoAttachment, VideoJob, VideoJobRegistry
 from skulk.api.video_store import VideoStore
 from skulk.routing.output_media import OutputMediaPacket
 from skulk.shared.models.model_cards import ModelCard, ModelTask, VideoCardConfig
@@ -473,10 +473,42 @@ def test_task_command_id_covers_video_tasks() -> None:
 
 
 def test_reference_staging_hashes_without_a_joined_copy(monkeypatch: pytest.MonkeyPatch) -> None:
+    from skulk.api import video_jobs
+
     api = _make_api(monkeypatch)
-    monkeypatch.setattr(api_main, "SKULK_MAX_CHUNK_SIZE", 4)
-    attachments = [b"abcdefgh", b"ij"]
+    monkeypatch.setattr(video_jobs, "SKULK_MAX_CHUNK_SIZE", 4)
+    raw = [b"abcdefgh", b"ij"]
+    attachments = [VideoAttachment.from_bytes(data) for data in raw]
+    assert [len(item.chunks) for item in attachments] == [2, 1]
     api._stage_reference_media(CommandId("c"), MODEL, attachments)
     pending = api._pending_vision_media[CommandId("c")]
-    assert pending.sha256 == hashlib.sha256(b"".join(attachments)).hexdigest()
+    assert pending.sha256 == hashlib.sha256(b"".join(raw)).hexdigest()
     assert [slot for slot, _ in pending.chunks] == [0, 0, 1]
+    # The staged frames are the attachment's own frames, not copies.
+    assert pending.chunks[0][1] is attachments[0].chunks[0]
+
+
+def test_create_multipart_refuses_uploads_the_node_cannot_hold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _make_api(monkeypatch)
+    api._pending_vision_media_bytes = api_main._VISION_MEDIA_PENDING_TOTAL_BYTES - 4
+    client = TestClient(api.app)
+    response = client.post(
+        "/v1/videos",
+        data={"model": str(MODEL), "prompt": "x"},
+        files=[("first_frame", ("big.png", b"0123456789", "image/png"))],
+    )
+    assert response.status_code == 503
+    api._send.assert_not_called()
+
+
+def test_multipart_openapi_schema_is_one_flat_object() -> None:
+    schema = api_main._video_create_multipart_schema()
+    assert "allOf" not in schema
+    properties = cast("dict[str, Any]", schema["properties"])
+    assert {"prompt", "model", "input_reference", "first_frame", "last_frame", "reference"} <= set(
+        properties
+    )
+    assert properties["reference"]["items"] == {"type": "string", "format": "binary"}
+    assert schema.get("additionalProperties") is False

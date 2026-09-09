@@ -280,6 +280,7 @@ from skulk.api.types.openai_responses import (
 from skulk.api.video_jobs import (
     MAX_ACTIVE_JOBS,
     MAX_RETAINED_JOBS,
+    VideoAttachment,
     VideoJob,
     VideoJobRegistry,
 )
@@ -1102,6 +1103,30 @@ def _validation_detail(error: ValidationError) -> str:
         f"{'.'.join(str(part) for part in item['loc']) or 'body'}: {item['msg']}"
         for item in error.errors()
     )
+
+
+def _video_create_multipart_schema() -> dict[str, object]:
+    """One flat object schema for the multipart create body.
+
+    The request model forbids extra fields, so its schema cannot sit in an
+    ``allOf`` beside the file parts; the parts are merged into a copy of it.
+    """
+
+    schema = cast("dict[str, object]", VideoCreateRequest.model_json_schema())
+    properties = dict(cast("dict[str, object]", schema.get("properties", {})))
+    binary: dict[str, object] = {"type": "string", "format": "binary"}
+    properties["input_reference"] = {
+        **binary,
+        "description": "First-frame image, under OpenAI's field name.",
+    }
+    properties["first_frame"] = {**binary, "description": "First-frame image."}
+    properties["last_frame"] = {**binary, "description": "Last-frame image."}
+    properties["reference"] = {
+        "type": "array",
+        "items": binary,
+        "description": "Reference images, clips, or audio, in slot order.",
+    }
+    return {**schema, "title": "VideoCreateMultipart", "properties": properties}
 _VISION_MEDIA_PENDING_TTL_SECONDS = 5 * 60.0
 _VISION_MEDIA_ACK_TIMEOUT_SECONDS = 5 * 60.0
 _VISION_MEDIA_RAW_IMAGE_BYTES = (_VISION_MEDIA_PENDING_COMMAND_BYTES // 4) * 3
@@ -2582,37 +2607,7 @@ class API:
                             "schema": VideoCreateRequest.model_json_schema()
                         },
                         "multipart/form-data": {
-                            "schema": {
-                                "allOf": [
-                                    VideoCreateRequest.model_json_schema(),
-                                    {
-                                        "type": "object",
-                                        "properties": {
-                                            "input_reference": {
-                                                "type": "string",
-                                                "format": "binary",
-                                                "description": "First-frame image (OpenAI name).",
-                                            },
-                                            "first_frame": {
-                                                "type": "string",
-                                                "format": "binary",
-                                            },
-                                            "last_frame": {
-                                                "type": "string",
-                                                "format": "binary",
-                                            },
-                                            "reference": {
-                                                "type": "array",
-                                                "items": {
-                                                    "type": "string",
-                                                    "format": "binary",
-                                                },
-                                                "description": "Reference images, clips, or audio in order.",
-                                            },
-                                        },
-                                    },
-                                ]
-                            }
+                            "schema": _video_create_multipart_schema()
                         },
                     },
                 }
@@ -5221,9 +5216,9 @@ class API:
         self,
         command_id: CommandId,
         model: ModelId,
-        attachments: Sequence[bytes],
+        attachments: Sequence[VideoAttachment],
     ) -> None:
-        """Retain raw video attachments until the master selects an instance."""
+        """Retain video attachment frames until the master selects an instance."""
 
         if self._vision_media_packet_sender is None:
             raise HTTPException(
@@ -5238,17 +5233,16 @@ class API:
             )
         chunks: list[tuple[int, bytes]] = []
         # The stream digest covers the attachments in slot order, which is
-        # exactly the frame order; hashing here avoids a joined copy of a
-        # request that may be hundreds of megabytes.
+        # exactly the frame order; the frames are the request's only copy.
         digest = hashlib.sha256()
-        for slot, data in enumerate(attachments):
-            if not data:
+        for slot, attachment in enumerate(attachments):
+            if attachment.size_bytes == 0:
                 raise HTTPException(
                     status_code=400, detail=f"Attachment {slot} is empty"
                 )
-            digest.update(data)
-            for offset in range(0, len(data), SKULK_MAX_CHUNK_SIZE):
-                chunks.append((slot, data[offset : offset + SKULK_MAX_CHUNK_SIZE]))
+            for piece in attachment.chunks:
+                digest.update(piece)
+                chunks.append((slot, piece))
         if len(chunks) > _REFERENCE_MEDIA_PENDING_FRAMES:
             raise HTTPException(
                 status_code=413,
@@ -10568,37 +10562,60 @@ class API:
         return job
 
     async def _read_video_attachment(
-        self, upload: StarletteUploadFile, budget: int
-    ) -> bytes:
-        """Drain one multipart part without exceeding the remaining byte budget."""
+        self, upload: StarletteUploadFile, request_budget: int, node_budget: int
+    ) -> VideoAttachment:
+        """Drain one multipart part straight into media-plane frames.
 
-        parts: list[bytes] = []
+        Reading stops the moment the part would exceed the request's own
+        bound (413) or what this node can still admit across every pending
+        upload (503), so no request materializes more than it may send.
+        """
+
+        digest = hashlib.sha256()
+        chunks: list[bytes] = []
         total = 0
         while True:
-            piece = await upload.read(_VIDEO_UPLOAD_READ_BYTES)
+            piece = await upload.read(SKULK_MAX_CHUNK_SIZE)
             if not piece:
                 break
             total += len(piece)
-            if total > budget:
+            if total > request_budget:
                 raise HTTPException(
                     status_code=413,
                     detail="Reference media exceeds the per-request media limit",
                 )
-            parts.append(piece)
-        return b"".join(parts)
+            if total > node_budget:
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "This node cannot admit more reference media until pending "
+                        "uploads finish"
+                    ),
+                )
+            digest.update(piece)
+            chunks.append(piece)
+        return VideoAttachment(chunks=tuple(chunks), size_bytes=total, sha256=digest.hexdigest())
 
     async def _read_video_attachments(
         self, form: FormData
-    ) -> tuple[list[VideoReferenceSpec], list[bytes]]:
-        """Turn the form's file parts into reference specs plus their bytes.
+    ) -> tuple[list[VideoReferenceSpec], list[VideoAttachment]]:
+        """Turn the form's file parts into reference specs plus their frames.
 
         Part order fixes the slot order: an OpenAI-style ``input_reference``
         or a ``first_frame``, then ``last_frame``, then every ``reference``.
         """
 
         specs: list[VideoReferenceSpec] = []
-        blobs: list[bytes] = []
+        blobs: list[VideoAttachment] = []
         remaining = _REFERENCE_MEDIA_PENDING_COMMAND_BYTES
+        # What the node can still hold across every request awaiting
+        # placement; admission re-checks it exactly at staging time.
+        node_remaining = max(
+            0,
+            _VISION_MEDIA_PENDING_TOTAL_BYTES
+            - self._pending_vision_media_bytes
+            - self._active_vision_media_total_bytes,
+        )
         fields: tuple[tuple[str, VideoReferenceRole], ...] = (
             ("input_reference", "first_frame"),
             ("first_frame", "first_frame"),
@@ -10626,12 +10643,15 @@ class API:
                             "content type"
                         ),
                     )
-                data = await self._read_video_attachment(upload, remaining)
-                if not data:
+                attachment = await self._read_video_attachment(
+                    upload, remaining, node_remaining
+                )
+                if attachment.size_bytes == 0:
                     raise HTTPException(
                         status_code=400, detail=f"{field_name} is empty"
                     )
-                remaining -= len(data)
+                remaining -= attachment.size_bytes
+                node_remaining -= attachment.size_bytes
                 filename = upload.filename[:255] if upload.filename else None
                 try:
                     spec = VideoReferenceSpec(
@@ -10639,8 +10659,8 @@ class API:
                         kind=kind,
                         role=role,
                         media_type=media_type,
-                        size_bytes=len(data),
-                        sha256=hashlib.sha256(data).hexdigest(),
+                        size_bytes=attachment.size_bytes,
+                        sha256=attachment.sha256,
                         filename=filename,
                     )
                 except ValidationError as error:
@@ -10648,7 +10668,7 @@ class API:
                         status_code=400, detail=_validation_detail(error)
                     ) from error
                 specs.append(spec)
-                blobs.append(data)
+                blobs.append(attachment)
         return specs, blobs
 
     async def create_video(self, request: Request) -> VideoResource:
@@ -10656,7 +10676,7 @@ class API:
 
         content_type = request.headers.get("content-type", "")
         references: list[VideoReferenceSpec] = []
-        attachments: list[bytes] = []
+        attachments: list[VideoAttachment] = []
         if content_type.startswith("application/json"):
             try:
                 body = cast("object", await request.json())
@@ -10702,10 +10722,8 @@ class API:
                 lora_strength=create.lora_strength,
                 audio=create.audio,
                 references=tuple(references),
-                # Placeholders that satisfy the contract; submission recomputes
-                # both from the bytes it stages.
-                total_input_chunks=len(references),
-                reference_bytes=sum(len(data) for data in attachments),
+                total_input_chunks=sum(len(item.chunks) for item in attachments),
+                reference_bytes=sum(item.size_bytes for item in attachments),
             )
         except ValidationError as error:
             raise HTTPException(
@@ -10852,7 +10870,7 @@ class API:
     async def submit_video_generation(
         self,
         params: VideoGenerationTaskParams,
-        attachments: Sequence[bytes],
+        attachments: Sequence[VideoAttachment],
     ) -> VideoJob:
         """Validate, stage attachments, and dispatch one audio-video render.
 
@@ -10939,23 +10957,20 @@ class API:
         references = tuple(
             spec.model_copy(
                 update={
-                    "sha256": hashlib.sha256(data).hexdigest(),
-                    "size_bytes": len(data),
+                    "sha256": attachment.sha256,
+                    "size_bytes": attachment.size_bytes,
                     # Worker-local only; never replicated from a caller.
                     "local_path": None,
                 }
             )
-            for spec, data in zip(params.references, attachments, strict=True)
-        )
-        total_chunks = sum(
-            -(-len(data) // SKULK_MAX_CHUNK_SIZE) for data in attachments
+            for spec, attachment in zip(params.references, attachments, strict=True)
         )
         resolved = params.model_copy(
             update={
                 "mode": mode,
                 "references": references,
-                "total_input_chunks": total_chunks,
-                "reference_bytes": sum(len(data) for data in attachments),
+                "total_input_chunks": sum(len(item.chunks) for item in attachments),
+                "reference_bytes": sum(item.size_bytes for item in attachments),
             }
         )
         if attachments:

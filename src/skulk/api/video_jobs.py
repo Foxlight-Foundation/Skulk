@@ -10,13 +10,16 @@ API still lists recent jobs, with anything that was in flight marked failed.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, cast
 
 from pydantic import ConfigDict, Field
 
+from skulk.shared.constants import SKULK_MAX_CHUNK_SIZE
 from skulk.shared.types.common import CommandId
 from skulk.shared.types.video import (
     VideoGenerationStats,
@@ -30,6 +33,33 @@ MAX_RETAINED_JOBS: Final[int] = 256
 """Oldest terminal jobs are evicted beyond this bound."""
 MAX_ACTIVE_JOBS: Final[int] = 32
 """Live (non-terminal) jobs one API node accepts before refusing new ones."""
+
+
+@dataclass(frozen=True, slots=True)
+class VideoAttachment:
+    """One conditioning attachment already cut into media-plane frames.
+
+    The frames are the only copy the API keeps: they are what the vision
+    media plane sends, and the digest and size are computed over them as
+    they are read, so a request never holds its attachments twice.
+    """
+
+    chunks: tuple[bytes, ...]
+    """Frames of at most ``SKULK_MAX_CHUNK_SIZE`` bytes, in order."""
+    size_bytes: int
+    """Total attachment size."""
+    sha256: str
+    """Digest of the attachment bytes."""
+
+    @classmethod
+    def from_bytes(cls, data: bytes) -> VideoAttachment:
+        """Cut one in-memory attachment into frames (internal callers, tests)."""
+
+        chunks = tuple(
+            data[offset : offset + SKULK_MAX_CHUNK_SIZE]
+            for offset in range(0, len(data), SKULK_MAX_CHUNK_SIZE)
+        )
+        return cls(chunks=chunks, size_bytes=len(data), sha256=hashlib.sha256(data).hexdigest())
 
 
 class VideoJob(CamelCaseModel):
