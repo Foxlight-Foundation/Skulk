@@ -57,6 +57,31 @@ export interface ManagedOperation {
   error_code: string | null;
 }
 
+/** Signed review returned before artifact download; no credentials or executable paths. */
+export interface RuntimeRelease {
+  runtime_digest: string;
+  source_revision: number;
+  publisher: string;
+  bundle_id: string;
+  version: string;
+  sequence: number;
+  platform: string;
+  python_requires: string;
+  skulk_build_sha256: string;
+  permissions: string[];
+  artifact_bytes: number;
+  expires_at: number;
+}
+
+/** Original server-owned staging intent, separate from activation and paid approval. */
+export interface RuntimeInstallation {
+  request: { operation_id: string; runtime_digest: string; expected_source_revision: number };
+  review: RuntimeRelease;
+  state: 'accepted' | 'downloading' | 'staging' | 'staged' | 'recovery_required';
+  downloaded_bytes: number;
+  error_code: string | null;
+}
+
 /** Address an operation already retained by the installed manager. */
 export interface ManagedOperationAddress { pluginId: string; operationId: string }
 
@@ -66,6 +91,24 @@ const nodePath = ({ pluginId, nodeId }: NodeAddress) =>
 
 const pluginsApi = apiSlice.injectEndpoints({
   endpoints: (build) => ({
+    getRuntimeRelease: build.query<RuntimeRelease, string>({
+      query: (pluginId) => ({ url: `/v1/plugins/managed/installations/${encodeURIComponent(pluginId)}/release`, headers, cache: 'no-store' }),
+    }),
+    getRuntimeInstallation: build.query<{ operation: RuntimeInstallation | null }, string>({
+      query: (pluginId) => ({ url: `/v1/plugins/managed/installations/${encodeURIComponent(pluginId)}/install`, headers, cache: 'no-store' }),
+      providesTags: ['Plugins'],
+    }),
+    installRuntimeRelease: build.mutation<RuntimeInstallation, { pluginId: string; request: RuntimeInstallation['request'] }>({
+      query: ({ pluginId, request }) => ({ url: `/v1/plugins/managed/installations/${encodeURIComponent(pluginId)}/install`, method: 'POST', headers, body: request }),
+      invalidatesTags: ['Plugins'],
+    }),
+    activateRuntimeRelease: build.mutation<ManagedOperation, { pluginId: string; operationId: string; expectedRevision: number; runtimeDigest: string; rollback: boolean }>({
+      query: ({ pluginId, operationId, expectedRevision, runtimeDigest, rollback }) => ({
+        url: `/v1/plugins/managed/installations/${encodeURIComponent(pluginId)}/operations`, method: 'POST', headers,
+        body: { operation_id: operationId, action: 'activate', expected_revision: expectedRevision, runtime_digest: runtimeDigest, rollback, accept_permissions: true },
+      }),
+      invalidatesTags: ['Plugins'],
+    }),
     getManagedRuntimes: build.query<{ installations: ManagedRuntime[] }, void>({
       query: () => ({ url: '/v1/plugins/managed', headers, cache: 'no-store' }),
       providesTags: ['Plugins'],
@@ -106,4 +149,4 @@ const pluginsApi = apiSlice.injectEndpoints({
   }),
 });
 
-export const { useGetManagedRuntimesQuery, useGetManagedOperationQuery, useDisableManagedRuntimeMutation, useRecoverManagedOperationMutation, useGetPluginNodesQuery, useGetNodeConfigurationQuery, useConfigurePluginNodeMutation } = pluginsApi;
+export const { useLazyGetRuntimeReleaseQuery, useGetRuntimeInstallationQuery, useInstallRuntimeReleaseMutation, useActivateRuntimeReleaseMutation, useGetManagedRuntimesQuery, useGetManagedOperationQuery, useDisableManagedRuntimeMutation, useRecoverManagedOperationMutation, useGetPluginNodesQuery, useGetNodeConfigurationQuery, useConfigurePluginNodeMutation } = pluginsApi;

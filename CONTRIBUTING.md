@@ -456,3 +456,12 @@ If you find a bug or have a feature request, please open an issue on GitHub with
 ## Questions?
 
 Open an issue or discussion on the [Skulk repository](https://github.com/foxlight-foundation/Skulk).
+
+
+Managed plugin service development uses `skulk-plugin-service setup` for the
+explicit local system installation and `skulk-plugin-service manage` for subsequent
+typed operations through its generated connection. Source configuration, release
+inspection and durable download/staging are documented in the
+[API guide](website/docs/api-guide.md#private-release-inspection-and-installation).
+Use signed fixture feeds for tests; do not put private feed tokens in shell
+arguments, committed fixtures or ordinary diagnostic output.

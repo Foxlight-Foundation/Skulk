@@ -22,7 +22,11 @@ from skulk.extensions.runtime_attachment import (
 )
 from skulk.extensions.runtime_files import RuntimeLock, read_private, write_private
 from skulk.extensions.runtime_install import finish_runtime_work
-from skulk.extensions.runtime_manager import InventoryRequest, manager_request
+from skulk.extensions.runtime_manager import (
+    MANAGER_REQUEST,
+    InventoryRequest,
+    manager_request,
+)
 from skulk.extensions.service_registration import ServiceLayout, local_layout
 from skulk.extensions.service_snapshot import (
     ServiceSnapshot,
@@ -333,7 +337,7 @@ async def service_status() -> dict[str, str | bool]:
 def main() -> None:
     """Run one explicit local setup command; remote management never invokes sudo."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("setup", "status"))
+    parser.add_argument("action", choices=("setup", "status", "manage"))
     arguments = parser.parse_args()
     try:
         if cast(str, arguments.action) == "setup":
@@ -341,6 +345,23 @@ def main() -> None:
             print(
                 json.dumps(
                     {"operation_id": operation.operation_id, "phase": operation.phase}
+                )
+            )
+        elif cast(str, arguments.action) == "manage":
+            if os.geteuid() == 0:
+                raise ValueError("plugin management requires the nonroot service owner")
+            connection = ServiceConnection.model_validate_json(
+                read_private(
+                    SKULK_CONFIG_HOME / "managed-service" / "connection.json", 8192
+                )
+            )
+            raw = sys.stdin.buffer.read(16385)
+            if len(raw) > 16384:
+                raise ValueError("management request exceeds bound")
+            request = MANAGER_REQUEST.validate_json(raw)
+            print(
+                json.dumps(
+                    asyncio.run(manager_request(Path(connection.manager_root), request))
                 )
             )
         else:

@@ -569,6 +569,19 @@ selection and durable lifecycle operations under `/v1/plugins/managed`. The
 Plugins page restores server-retained operation references after reconnect and
 never automatically repeats a mutation whose response was lost.
 
+
+`extensions/runtime_download.py` owns durable signed-release download/staging for
+one owner-configured HTTPS source per installation. Source/trust updates require
+direct owner authority; remote plugin grants cannot replace publisher keys or
+credential destinations. Feed credentials are write-only protected references.
+Metadata verification precedes artifact transfer; exact signed sizes/hashes,
+redirect refusal and bounded transfers precede offline installation. Manager-owned
+install operations survive browser disconnects and retain interrupted work without
+automatic replay. `/v1/plugins/managed` adds source readiness/configuration,
+release inspection and install/status routes. The dashboard separates release
+review, staging and explicit permission acceptance/activation; `skulk-plugin-service
+manage` uses the same operations through the generated local connection.
+
 Optional `NodeConfigurationProvider` (`extensions/configuration.py`) exposes stable installed-node settings independently of capability readiness. The `/v1/plugins` API and Plugins dashboard share plugin-owned schema validation and revision-fenced settings with terminal management. No credentials or configuration enter replicated State. Explicit plugin read/manage/approve grants are owner-controlled through `/v1/auth/plugin-grants`; existing pairings receive none, and broad operator write permission does not imply them.
 Separately installed packages register a zero-arg factory in the
 `skulk.extensions` entry-point group; `load_extensions()` discovers them once

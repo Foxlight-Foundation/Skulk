@@ -29,6 +29,11 @@ from skulk.extensions.runtime_controller import (
     LifecycleRequest,
     RuntimeController,
 )
+from skulk.extensions.runtime_download import (
+    InstallRequest,
+    RuntimeDownloads,
+    SourceUpdate,
+)
 from skulk.extensions.runtime_files import (
     RuntimeLock,
     private_directory,
@@ -84,12 +89,40 @@ class OperationRequest(_Request):
     )
 
 
+class ReleaseRequest(_Request):
+    """Inspect the configured signed release or read current installation progress."""
+
+    action: Literal["inspect_release", "install_status", "source_status"]
+    plugin_id: PluginIdentifier = Field(description="Exact registered installation.")
+
+
+class InstallSubmission(_Request):
+    """Download and stage an exact reviewed runtime without activating it."""
+
+    action: Literal["install"] = "install"
+    plugin_id: PluginIdentifier = Field(description="Exact registered installation.")
+    request: InstallRequest = Field(description="Immutable reviewed release intent.")
+
+
+class SourceRegistration(_Request):
+    """Direct owner source/trust provisioning, never an ordinary remote management grant."""
+
+    action: Literal["configure_source"] = "configure_source"
+    plugin_id: PluginIdentifier = Field(description="Exact registered installation.")
+    request: SourceUpdate = Field(
+        description="Owner-reviewed source, trust and write-only credential."
+    )
+
+
 type ManagerRequest = (
     InventoryRequest
     | InstallationRequest
     | SubmitRequest
     | OperationRequest
     | AttachmentRequest
+    | ReleaseRequest
+    | InstallSubmission
+    | SourceRegistration
 )
 MANAGER_REQUEST: TypeAdapter[ManagerRequest] = TypeAdapter(ManagerRequest)
 
@@ -119,6 +152,7 @@ class RuntimeManager:
         private_directory(self.installations)
         self.path = manager_socket(self.root)
         self.controllers: dict[str, RuntimeController] = {}
+        self.downloads: dict[str, RuntimeDownloads] = {}
         self.errors: dict[str, str] = {}
         self.server: asyncio.Server | None = None
         self.lock: RuntimeLock | None = None
@@ -240,6 +274,8 @@ class RuntimeManager:
                 raise ValueError("installation transport identity differs")
             controller = RuntimeController(root)
             await controller.start()
+            if identifier not in self.downloads:
+                self.downloads[identifier] = RuntimeDownloads(root)
             self.controllers[identifier] = controller
             self.errors.pop(identifier, None)
         except (OSError, ValueError):
@@ -364,11 +400,25 @@ class RuntimeManager:
             }
         if isinstance(request, AttachmentRequest):
             return await finish_runtime_work(asyncio.create_task(self._attach(request)))
+        if isinstance(request, ReleaseRequest) and request.action == "inspect_release":
+            async with self.guard:
+                downloads = self.downloads.get(request.plugin_id)
+                if request.plugin_id not in self.controllers or downloads is None:
+                    raise ValueError("installation is unavailable")
+            # A slow release server must not block inventory, attachment renewal
+            # or another installation's lifecycle behind the manager-wide lock.
+            return (await downloads.inspect()).model_dump(mode="json")
         async with self.guard:
             return await self._dispatch_installation(request)
 
     async def _dispatch_installation(
-        self, request: InstallationRequest | SubmitRequest | OperationRequest
+        self,
+        request: InstallationRequest
+        | SubmitRequest
+        | OperationRequest
+        | ReleaseRequest
+        | InstallSubmission
+        | SourceRegistration,
     ) -> dict[str, JsonValue]:
         identifier = request.plugin_id
         try:
@@ -398,6 +448,24 @@ class RuntimeManager:
         controller = self.controllers.get(identifier)
         if controller is None:
             raise ValueError("installation is unavailable")
+        if isinstance(request, SourceRegistration):
+            return (
+                await self.downloads[identifier].configure(request.request)
+            ).model_dump(mode="json")
+        if isinstance(request, ReleaseRequest):
+            downloads = self.downloads[identifier]
+            if request.action == "source_status":
+                return downloads.source_status().model_dump(mode="json")
+            if request.action == "inspect_release":
+                raise ValueError("release inspection requires independent dispatch")
+            operation = downloads.current()
+            return {
+                "operation": operation.model_dump(mode="json") if operation else None
+            }
+        if isinstance(request, InstallSubmission):
+            return (
+                await self.downloads[identifier].submit(request.request)
+            ).model_dump(mode="json")
         if isinstance(request, InstallationRequest):
             selection = controller.selector.current()
             return {
@@ -432,6 +500,7 @@ class RuntimeManager:
             try:
                 results = await asyncio.gather(
                     *(controller.close() for controller in self.controllers.values()),
+                    *(downloads.close() for downloads in self.downloads.values()),
                     return_exceptions=True,
                 )
                 if any(isinstance(result, BaseException) for result in results):
@@ -466,7 +535,15 @@ async def manager_request(root: Path, request: ManagerRequest) -> dict[str, Json
     async with asyncio.timeout(35):
         reader, writer = await asyncio.open_unix_connection(path, limit=262145)
         try:
-            writer.write(request.model_dump_json().encode() + b"\n")
+            payload = request.model_dump(mode="json")
+            if (
+                isinstance(request, SourceRegistration)
+                and request.request.token is not None
+            ):
+                # SecretStr redacts diagnostics by default. Only this protected
+                # local wire path replaces the redaction with the supplied value.
+                payload["request"]["token"] = request.request.token.get_secret_value()
+            writer.write(json.dumps(payload).encode() + b"\n")
             await writer.drain()
             payload = await reader.readline()
             if len(payload) > 262144:

@@ -7,6 +7,7 @@ import {
   type ManagedRuntime,
 } from '../../store/endpoints/plugins';
 import { Button } from '../common/Button';
+import { RuntimeReleasePanel } from './RuntimeReleasePanel';
 
 const RuntimeCard = styled.article`
   margin: 12px 0; padding: 16px; border: 1px solid ${({ theme }) => theme.colors.border};
@@ -20,6 +21,7 @@ function RuntimeControls({ runtime, unavailable }: { runtime: ManagedRuntime; un
   const { t } = useSkulkTranslation();
   const [notice, setNotice] = useState('');
   const [submitted, setSubmitted] = useState<string | null>(null);
+  const [releaseOpen, setReleaseOpen] = useState(false);
   const [disable, disabling] = useDisableManagedRuntimeMutation();
   const [recover, recovering] = useRecoverManagedOperationMutation();
   const operationId = submitted ?? runtime.operation_id;
@@ -73,6 +75,8 @@ function RuntimeControls({ runtime, unavailable }: { runtime: ManagedRuntime; un
     </Actions>
     <p>{t('plugins.runtimeCleanup', 'Disabling stops future capability work. Existing cleanup records and independent cleanup supervision are retained.')}</p>
     {notice && state !== 'complete' ? <p role="status">{notice}</p> : null}
+    <Button type="button" onClick={() => setReleaseOpen(!releaseOpen)}>{releaseOpen ? t('plugins.closeReleaseInstallation', 'Close release installation') : t('plugins.openReleaseInstallation', 'Install a release')}</Button>
+    {releaseOpen ? <RuntimeReleasePanel runtime={runtime} /> : null}
   </RuntimeCard>;
 }
 

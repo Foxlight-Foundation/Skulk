@@ -284,6 +284,24 @@ async def authorize_plugin_request(
         )
 
 
+async def authorize_plugin_owner_request(
+    request: Request,
+    tailnet_peer_verifier: TailnetPeerVerifier = is_tailscale_peer,
+) -> None:
+    """Reserve publisher trust and credential destinations for direct owner administration."""
+    from skulk.api.operator_gateway import OPERATOR_GATEWAY_AUTHORIZED_SCOPE_KEY
+
+    if (
+        request.headers.getlist("authorization")
+        or request.scope.get(OPERATOR_GATEWAY_AUTHORIZED_SCOPE_KEY) is True
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="release source changes require direct owner authority",
+        )
+    await _require_direct_dashboard_authority(request, tailnet_peer_verifier)
+
+
 def create_operator_auth_router(
     service: OperatorPairingService,
     *,

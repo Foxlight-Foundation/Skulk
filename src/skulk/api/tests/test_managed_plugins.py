@@ -1,5 +1,9 @@
 """Scoped HTTP lifecycle operations backed by the real independent local manager."""
 
+import asyncio
+import json
+import os
+import sys
 from dataclasses import replace
 from pathlib import Path
 
@@ -12,7 +16,12 @@ from skulk.api.tests.test_operator_gateway import paired_service
 from skulk.extensions import LoadedExtensions
 from skulk.extensions.managed_services import ManagedInventory, ManagedServices
 from skulk.extensions.runtime_controller import LifecycleOperation, LifecycleRequest
-from skulk.extensions.runtime_files import read_private, write_private
+from skulk.extensions.runtime_download import (
+    InstallOperation,
+    ReleaseReview,
+    SourceStatus,
+)
+from skulk.extensions.runtime_files import read_private
 from skulk.extensions.runtime_manager import OperationRequest, manager_request
 from skulk.extensions.tests.test_managed_services import connect, manager_fixture
 from skulk.extensions.tests.test_runtime_install import artifacts
@@ -111,18 +120,126 @@ async def test_http_scopes_lifecycle_status_and_api_loss(
             metadata, trust, _ = artifacts(
                 tmp_path / "source", owner_source=OWNER_SOURCE
             )
-            write_private(
-                controller.root / "publisher-trust.json",
-                trust.model_dump_json().encode(),
+            source_url = prefix + "/installations/managed.fixture/source"
+            source_body = {
+                "expected_revision": 0,
+                "base_url": "https://releases.example.test/private/",
+                "metadata_filename": "runtime.json",
+                "trust": trust.model_dump(mode="json"),
+                "token": "private-feed-test-secret",
+            }
+            assert (
+                await client.post(source_url, headers=bearer, json=source_body)
+            ).status_code == 403
+            assert (
+                await client.post(
+                    source_url,
+                    headers={**owner, "Origin": "https://foreign.example"},
+                    json=source_body,
+                )
+            ).status_code == 403
+            invalid = await client.post(
+                source_url, headers=owner, json={**source_body, "unexpected": "value"}
             )
-            staged = await controller.selector.installer.stage(
-                metadata, tmp_path / "source"
+            assert (
+                invalid.status_code == 422
+                and "private-feed-test-secret" not in invalid.text
             )
+            configured = await client.post(source_url, headers=owner, json=source_body)
+            assert (
+                configured.status_code == 200
+                and "private-feed-test-secret" not in configured.text
+            )
+            source_status = SourceStatus.model_validate_json(configured.content)
+            assert source_status.revision == 1 and source_status.credential_ready
+            assert source_status.credential_reference is not None
+            assert (
+                read_private(
+                    controller.root
+                    / "feed-credentials"
+                    / source_status.credential_reference
+                )
+                == b"private-feed-test-secret"
+            )
+            assert (
+                await client.post(source_url, headers=owner, json=source_body)
+            ).status_code == 409
+            terminal = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-m",
+                "skulk.extensions.service_setup",
+                "manage",
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env={
+                    **os.environ,
+                    "SKULK_HOME": str(tmp_path / "config"),
+                    "PYTHONPATH": str(Path(__file__).parents[3]),
+                },
+            )
+            output, error = await terminal.communicate(
+                json.dumps(
+                    {"action": "source_status", "plugin_id": "managed.fixture"}
+                ).encode()
+            )
+            assert terminal.returncode == 0 and not error
+            assert b"private-feed-test-secret" not in output
+            assert (
+                json.loads(output)["result"]["credential_reference"]
+                == source_status.credential_reference
+            )
+            observed_source = await client.get(source_url, headers=bearer)
+            assert (
+                observed_source.status_code == 200
+                and "private-feed-test-secret" not in observed_source.text
+            )
+            downloads = manager.downloads["managed.fixture"]
+
+            def feed(request: httpx.Request) -> httpx.Response:
+                assert (
+                    request.headers["Authorization"]
+                    == "Bearer private-feed-test-secret"
+                )
+                name = request.url.path.rsplit("/", 1)[1]
+                return httpx.Response(
+                    200,
+                    content=metadata
+                    if name == "runtime.json"
+                    else read_private(tmp_path / "source" / name),
+                )
+
+            downloads.transport = httpx.MockTransport(feed)
+            release_url = prefix + "/installations/managed.fixture/release"
+            reviewed = await client.get(release_url, headers=bearer)
+            assert reviewed.status_code == 200
+            review = ReleaseReview.model_validate_json(reviewed.content)
+            install_url = prefix + "/installations/managed.fixture/install"
+            installed = await client.post(
+                install_url,
+                headers=bearer,
+                json={
+                    "operation_id": "3" * 32,
+                    "runtime_digest": review.runtime_digest,
+                    "expected_source_revision": review.source_revision,
+                },
+            )
+            assert installed.status_code == 200
+            assert (
+                InstallOperation.model_validate_json(installed.content).state
+                == "accepted"
+            )
+            assert downloads.work is not None
+            await downloads.work
+            staged = downloads.current()
+            assert staged is not None and staged.state == "staged"
+            assert (await client.get(install_url, headers=bearer)).status_code == 200
+            assert controller.selector.current() is None
             activate = LifecycleRequest(
                 operation_id="2" * 32,
                 action="activate",
                 expected_revision=0,
-                runtime_digest=staged.runtime_digest,
+                runtime_digest=staged.review.runtime_digest,
             )
             operations = prefix + "/installations/managed.fixture/operations"
             response = await client.post(

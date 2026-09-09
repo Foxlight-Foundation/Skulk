@@ -290,6 +290,15 @@ class RuntimeInstaller:
         finally:
             lock.close()
 
+    async def inspect_metadata(self, metadata: bytes) -> VerifiedRuntime:
+        """Verify signed metadata and trust floors without downloading or executing code."""
+        lock = RuntimeLock(self.installer)
+        try:
+            host = await asyncio.to_thread(measure_host)
+            return self._verify(metadata, host)
+        finally:
+            lock.close()
+
     async def stage(
         self, metadata: bytes, artifacts: Path, *, operation_id: str | None = None
     ) -> RuntimeOperation:

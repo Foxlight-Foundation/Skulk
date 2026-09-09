@@ -1663,6 +1663,19 @@ selection and durable lifecycle operations under `/v1/plugins/managed`. The
 Plugins page restores server-retained operation references after reconnect and
 never automatically repeats a mutation whose response was lost.
 
+
+`extensions/runtime_download.py` owns durable signed-release download/staging for
+one owner-configured HTTPS source per installation. Source/trust updates require
+direct owner authority; remote plugin grants cannot replace publisher keys or
+credential destinations. Feed credentials are write-only protected references.
+Metadata verification precedes artifact transfer; exact signed sizes/hashes,
+redirect refusal and bounded transfers precede offline installation. Manager-owned
+install operations survive browser disconnects and retain interrupted work without
+automatic replay. `/v1/plugins/managed` adds source readiness/configuration,
+release inspection and install/status routes. The dashboard separates release
+review, staging and explicit permission acceptance/activation; `skulk-plugin-service
+manage` uses the same operations through the generated local connection.
+
 Plugins may also implement the optional `NodeConfigurationProvider` facet.
 It lists stable installed node identities and exposes their ordinary-settings
 schemas, values, validation and revision-fenced changes through `/v1/plugins`.

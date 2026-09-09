@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import replace
 from pathlib import Path
 
+import httpx
 import pytest
 from pydantic import JsonValue
 
@@ -14,10 +15,12 @@ from skulk.extensions.managed_services import ManagedServices
 from skulk.extensions.runtime_artifacts import QualifiedHost
 from skulk.extensions.runtime_attachment import HostSettings, ServiceConnection
 from skulk.extensions.runtime_controller import LifecycleRequest
+from skulk.extensions.runtime_download import ReleaseSource
 from skulk.extensions.runtime_files import RuntimeLock, read_private, write_private
 from skulk.extensions.runtime_manager import (
     InstallationRequest,
     InventoryRequest,
+    ReleaseRequest,
     RuntimeManager,
     SubmitRequest,
     manager_request,
@@ -189,6 +192,7 @@ async def test_shared_adapter_concurrent_shutdown_releases_attachment_once(
     )
     attachment.retain("test-node")
     attachment.lock = RuntimeLock(tmp_path, "attachment.lock")
+
     async def observer() -> None:
         await asyncio.Event().wait()
 
@@ -197,3 +201,64 @@ async def test_shared_adapter_concurrent_shutdown_releases_attachment_once(
     assert attachment.users == 0
     assert attachment.lock is None
     RuntimeLock(tmp_path, "attachment.lock").close()
+
+
+async def test_slow_release_inspection_does_not_block_inventory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both API attachment and manager inventory remain responsive during source HTTPS."""
+    root, path = tmp_path / "manager", tmp_path / "connection.json"
+    manager = manager_fixture(root, monkeypatch)
+    await manager.start()
+    connect(path, root)
+    services = ManagedServices(path)
+    services.on_start(replace(context(), skulk_version="1.5.2"))
+    started, release = asyncio.Event(), asyncio.Event()
+    operation: asyncio.Task[dict[str, JsonValue]] | None = None
+    try:
+        await services.request(
+            InstallationRequest(action="register", plugin_id="managed.fixture")
+        )
+        downloads = manager.downloads["managed.fixture"]
+        metadata, trust, _ = artifacts(tmp_path / "source")
+        write_private(
+            downloads.root / "publisher-trust.json", trust.model_dump_json().encode()
+        )
+        write_private(
+            downloads.root / "release-source.json",
+            ReleaseSource(
+                revision=1,
+                base_url="https://release.example.test/",
+                metadata_filename="runtime.json",
+            )
+            .model_dump_json()
+            .encode(),
+        )
+
+        async def delayed(_: httpx.Request) -> httpx.Response:
+            started.set()
+            await release.wait()
+            return httpx.Response(200, content=metadata)
+
+        downloads.transport = httpx.MockTransport(delayed)
+        operation = asyncio.create_task(
+            services.request(
+                ReleaseRequest(action="inspect_release", plugin_id="managed.fixture")
+            )
+        )
+        async with asyncio.timeout(5):
+            await started.wait()
+            assert services.attachment is not None
+            services.attachment.observed = 0
+            inventory = await services.refresh()
+            assert len(inventory.installations) == 1
+            assert not operation.done()
+        release.set()
+        assert "runtime_digest" in await operation
+    finally:
+        release.set()
+        if operation is not None:
+            await asyncio.gather(operation, return_exceptions=True)
+        await services.on_stop()
+        await manager.close()

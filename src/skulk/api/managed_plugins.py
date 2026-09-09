@@ -3,13 +3,19 @@
 
 import asyncio
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 
 import anyio
 from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi.exceptions import RequestValidationError
+from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field
 
-from skulk.api.operator_auth import TailnetPeerVerifier, authorize_plugin_request
+from skulk.api.operator_auth import (
+    TailnetPeerVerifier,
+    authorize_plugin_owner_request,
+    authorize_plugin_request,
+)
 from skulk.extensions.loader import LoadedExtensions
 from skulk.extensions.managed_services import (
     ManagedInstallation,
@@ -21,14 +27,44 @@ from skulk.extensions.runtime_attachment import (
     ProfileIdentifier,
 )
 from skulk.extensions.runtime_controller import LifecycleOperation, LifecycleRequest
+from skulk.extensions.runtime_download import (
+    InstallOperation,
+    InstallRequest,
+    ReleaseReview,
+    SourceStatus,
+    SourceUpdate,
+)
 from skulk.extensions.runtime_manager import (
     InstallationRequest,
+    InstallSubmission,
     OperationRequest,
+    ReleaseRequest,
+    SourceRegistration,
     SubmitRequest,
 )
 from skulk.extensions.runtime_selection import RuntimeSelection
 from skulk.operator.pairing import OperatorPairingService
 from skulk.operator.plugin_scopes import PluginScope
+
+
+class ProtectedManagementRoute(APIRoute):
+    """Keep write-only source credentials out of FastAPI validation error responses."""
+
+    def get_route_handler(
+        self,
+    ) -> Callable[[Request], Coroutine[object, object, Response]]:
+        """Preserve typed OpenAPI bodies while returning no rejected input values."""
+        handler = super().get_route_handler()
+
+        async def protected(request: Request) -> Response:
+            try:
+                return await handler(request)
+            except RequestValidationError:
+                raise HTTPException(
+                    status_code=422, detail="invalid plugin management request"
+                ) from None
+
+        return protected
 
 
 class RegistrationRequest(BaseModel):
@@ -52,13 +88,24 @@ class ManagedSelection(BaseModel):
     )
 
 
+class InstallStatus(BaseModel):
+    """Server-retained installation progress, separate from local activation."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+    operation: InstallOperation | None = Field(
+        description="Latest accepted installation, if any."
+    )
+
+
 def create_managed_plugins_router(
     extensions: LoadedExtensions,
     pairing_service: OperatorPairingService | None,
     tailnet_peer_verifier: TailnetPeerVerifier,
 ) -> APIRouter:
     """Bind fixed local management verbs to explicit plugin grants and owner origin checks."""
-    router = APIRouter(prefix="/managed", tags=["Plugins"])
+    router = APIRouter(
+        prefix="/managed", tags=["Plugins"], route_class=ProtectedManagementRoute
+    )
     capacity = anyio.CapacityLimiter(8)
 
     async def authorized(
@@ -225,6 +272,115 @@ def create_managed_plugins_router(
                 )
             )
             return LifecycleOperation.model_validate_json(json.dumps(result))
+
+        return await invoke(action)
+
+    @router.get(
+        "/installations/{plugin_id}/release",
+        response_model=ReleaseReview,
+        summary="Inspect the configured signed plugin release",
+        description="Verify metadata from the owner-configured HTTPS source against current publisher trust and exact host compatibility before artifact download. Requires plugins:read or direct owner authority. Returns immutable digest, version, permissions and size without source paths or credentials; does not stage, activate or approve spending.",
+    )
+    async def release(
+        plugin_id: InstallationIdentifier, request: Request, response: Response
+    ) -> ReleaseReview:
+        """Review the one configured private source without downloading its artifacts."""
+        services = await authorized(request, response, "plugins:read")
+
+        async def action() -> ReleaseReview:
+            result = await services.request(
+                ReleaseRequest(action="inspect_release", plugin_id=plugin_id)
+            )
+            return ReleaseReview.model_validate_json(json.dumps(result))
+
+        return await invoke(action)
+
+    @router.post(
+        "/installations/{plugin_id}/install",
+        response_model=InstallOperation,
+        summary="Download and stage a reviewed plugin release",
+        description="Journal an exact reviewed runtime digest, source revision and operation ID, then download signed artifacts and stage an isolated offline runtime under independent manager ownership. Requires plugins:manage or direct owner authority. Disconnect does not abandon accepted work. This does not activate a runtime or grant spending approval.",
+    )
+    async def install(
+        plugin_id: InstallationIdentifier,
+        body: InstallRequest,
+        request: Request,
+        response: Response,
+    ) -> InstallOperation:
+        """Accept immutable staging intent without a caller URL or executable path."""
+        services = await authorized(request, response, "plugins:manage")
+
+        async def action() -> InstallOperation:
+            result = await services.request(
+                InstallSubmission(plugin_id=plugin_id, request=body)
+            )
+            return InstallOperation.model_validate_json(json.dumps(result))
+
+        return await invoke(action)
+
+    @router.get(
+        "/installations/{plugin_id}/install",
+        response_model=InstallStatus,
+        summary="Read retained plugin installation progress",
+        description="Read the latest original installation after reconnect or manager restart. Requires plugins:read or direct owner authority. Interrupted work reports recovery_required and is never automatically repeated. Staged is separate from activation and capability readiness.",
+    )
+    async def installation_status(
+        plugin_id: InstallationIdentifier, request: Request, response: Response
+    ) -> InstallStatus:
+        """Restore installation observation from the server without another POST."""
+        services = await authorized(request, response, "plugins:read")
+
+        async def action() -> InstallStatus:
+            result = await services.request(
+                ReleaseRequest(action="install_status", plugin_id=plugin_id)
+            )
+            return InstallStatus.model_validate_json(json.dumps(result))
+
+        return await invoke(action)
+
+    @router.get(
+        "/installations/{plugin_id}/source",
+        response_model=SourceStatus,
+        summary="Read plugin release source readiness",
+        description="Read source/trust revisions and write-only credential reference readiness without network access or stored secret values. Requires plugins:read or direct owner authority.",
+    )
+    async def source_status(
+        plugin_id: InstallationIdentifier,
+        request: Request,
+        response: Response,
+    ) -> SourceStatus:
+        """Observe readiness without disclosing the stored feed token or local path."""
+        services = await authorized(request, response, "plugins:read")
+
+        async def action() -> SourceStatus:
+            result = await services.request(
+                ReleaseRequest(action="source_status", plugin_id=plugin_id)
+            )
+            return SourceStatus.model_validate_json(json.dumps(result))
+
+        return await invoke(action)
+
+    @router.post(
+        "/installations/{plugin_id}/source",
+        response_model=SourceStatus,
+        summary="Configure an owner-trusted plugin release source",
+        description="Direct localhost/Tailscale owner administration only: replace the HTTPS directory, metadata basename and publisher trust at expected_revision, optionally provisioning a write-only feed token. Paired or relay plugin grants cannot replace trust or credential destinations. Omitted token retains its reference; changing a credential-bearing source requires explicit replacement or clear_token. No download, activation or paid request is made.",
+    )
+    async def configure_source(
+        plugin_id: InstallationIdentifier,
+        body: SourceUpdate,
+        request: Request,
+        response: Response,
+    ) -> SourceStatus:
+        """Provision explicit owner trust through a fixed operation without root authority."""
+        await authorize_plugin_owner_request(request, tailnet_peer_verifier)
+        services = await authorized(request, response, "plugins:manage")
+
+        async def action() -> SourceStatus:
+            result = await services.request(
+                SourceRegistration(plugin_id=plugin_id, request=body)
+            )
+            return SourceStatus.model_validate_json(json.dumps(result))
 
         return await invoke(action)
 

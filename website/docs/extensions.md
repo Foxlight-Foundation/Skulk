@@ -672,3 +672,16 @@ See the [local setup contract](api-guide.md#local-system-service-setup) for supp
 paths, interruption recovery, privileges and current qualification boundaries.
 This installs no private SDK into Skulk, provisions no provider credentials, and
 grants no spending approval. Existing independent cleanup supervision is untouched.
+
+
+## Owner-configured private release source
+
+The [private release HTTP and terminal contract](api-guide.md#private-release-inspection-and-installation)
+adds one trusted HTTPS source per managed installation. Direct owner administration
+provisions publisher trust and a write-only feed credential; remote plugin grants
+can inspect and stage releases but cannot redirect that credential or replace the
+trust root. The manager retains exact installation IDs and verifies metadata before
+artifact transfer, then passes only signed bytes to the offline installer. Browser
+disconnect does not abandon accepted staging. The dashboard separates review,
+installation and explicit activation. Interrupted installation and protected partial
+evidence remain available for local recovery rather than automatic replay.

@@ -19,8 +19,11 @@ from skulk.extensions.runtime_attachment import (
 from skulk.extensions.runtime_files import read_private
 from skulk.extensions.runtime_manager import (
     InstallationRequest,
+    InstallSubmission,
     InventoryRequest,
     OperationRequest,
+    ReleaseRequest,
+    SourceRegistration,
     SubmitRequest,
     manager_request,
 )
@@ -84,7 +87,13 @@ class ManagedInventory(BaseModel):
 
 
 type ManagementRequest = (
-    InventoryRequest | InstallationRequest | SubmitRequest | OperationRequest
+    InventoryRequest
+    | InstallationRequest
+    | SubmitRequest
+    | OperationRequest
+    | ReleaseRequest
+    | InstallSubmission
+    | SourceRegistration
 )
 
 
@@ -159,11 +168,14 @@ class ManagedServices:
         async with self.guard:
             await self._connect()
             assert self.connection is not None
-            result = await manager_request(Path(self.connection.manager_root), request)
-            payload = result.get("result")
-            if set(result) != {"result"} or not isinstance(payload, dict):
-                raise ValueError("managed service request refused")
-            return payload
+            root = Path(self.connection.manager_root)
+        # Source HTTPS and durable operations must not monopolize membership
+        # observation. The fixed connection is captured before this request starts.
+        result = await manager_request(root, request)
+        payload = result.get("result")
+        if set(result) != {"result"} or not isinstance(payload, dict):
+            raise ValueError("managed service request refused")
+        return payload
 
     async def refresh(self) -> ManagedInventory:
         """Reconcile current manager membership without restarting Skulk's API."""

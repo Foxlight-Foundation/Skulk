@@ -3762,8 +3762,70 @@ The dashboard polls inventory and retained operation status, distinguishes stale
 observations, and supports disabling and explicit local recovery. Runtime
 completion does not prove capability readiness. Disabling preserves cleanup
 records and independent supervision. These routes convey neither paid approval
-nor permission to replay an uncertain provider create. Release download/staging,
-credential provisioning and proposal approval are separate operations.
+nor permission to replay an uncertain provider create. Release download/staging uses the routes below; provider credential provisioning
+and proposal approval are separate operations.
+
+
+### Private release inspection and installation
+
+Each registered installation has one owner-configured HTTPS release directory and
+publisher trust view. The release directory contains signed v2 metadata, its
+`bundle.pyz` and every exact wheel named by that metadata. URLs are never supplied
+on install requests. The manager verifies metadata, current publisher trust and
+exact host compatibility before requesting any artifact, refuses redirects and
+encoded responses, and checks every artifact size and SHA-256 before offline
+staging. It resolves no dependency versions and does not modify Skulk's environment.
+
+| Method | Path | Parameters and behavior |
+| --- | --- | --- |
+| GET | `/v1/plugins/managed/installations/{plugin_id}/source` | Requires `plugins:read`. Returns `revision`, `configured`, opaque `credential_reference`, `credential_ready` and `trust_revision`; no network request or stored token value. |
+| POST | `/v1/plugins/managed/installations/{plugin_id}/source` | Direct localhost/Tailscale owner only; paired bearers and relay requests are refused. Body: `expected_revision` (zero initially), HTTPS `base_url` ending in `/`, `metadata_filename`, `trust`, optional write-only `token`, optional `clear_token`. Returns source readiness. `trust` contains monotonic `revision`, Unix `expires_at`, `publishers` mapping publisher IDs to Ed25519 public-key hex, and optional `revoked_publishers`/`revoked_artifacts` arrays. Same-revision trust changes, stale source revisions and expired trust are refused. |
+| GET | `/v1/plugins/managed/installations/{plugin_id}/release` | Requires `plugins:read`. Downloads and verifies only metadata, returning `runtime_digest`, `source_revision`, `publisher`, `bundle_id`, `version`, `sequence`, `platform`, `python_requires`, `skulk_build_sha256`, declared `permissions`, total `artifact_bytes` and Unix `expires_at`. The exact verified metadata is retained for a later install request. |
+| POST | `/v1/plugins/managed/installations/{plugin_id}/install` | Requires `plugins:manage`. Body: `operation_id` (32 lowercase hexadecimal characters), exact reviewed `runtime_digest`, `expected_source_revision`. Journals intent before returning `InstallOperation`, then downloads and stages under independent manager ownership. Reusing the ID with the same request reads its retained state; different intent is refused. Does not activate or approve spending. |
+| GET | `/v1/plugins/managed/installations/{plugin_id}/install` | Requires `plugins:read`. Returns `operation`, nullable before installation. The retained operation contains exact `request`, signed `review`, `state`, `downloaded_bytes` and sanitized `error_code`. Reconnect polls this route, never resubmits an uncertain request. |
+
+Installation states are `accepted`, `downloading`, `staging`, `staged` and
+`recovery_required`. Failure codes distinguish `download_failed`,
+`installation_failed` and `installation_interrupted`. Accepted work outlives an
+HTTP/browser disconnect. Manager shutdown cancels network transfer and waits for
+owned offline staging; an interrupted operation is retained and never automatically
+replayed after restart. Partial artifacts and incomplete runtime evidence remain
+protected for local recovery. A `staged` result proves preparation, not activation,
+current release trust or capability readiness; activation repeats verification.
+
+The source token is written into a generated protected file before publishing its
+reference. Omission retains the prior reference; `clear_token` explicitly selects
+an anonymous source. Changing a credential-bearing source requires supplying the
+credential again or clearing it, so management cannot silently forward a stored
+token elsewhere. Replaced credentials are retained as protected history. Ordinary
+responses and validation errors never echo token values. A disk fault can apply a
+stricter trust view before source replacement; runtime admission then refuses
+invalid releases and the unchanged source revision permits owner correction.
+
+Metadata is bounded to 128 KiB with a twenty-second download deadline. Artifact
+transfer has a 180-second total deadline and enforces the signed per-file and
+aggregate bounds. Review and operation histories each retain at most 128 entries;
+exhaustion requires local maintenance rather than silent deletion. Only one
+installation download per registered plugin runs at a time. Source replacement
+is refused while its installation is active. Existing inference and other plugins
+remain outside this staging lifetime.
+
+After local service setup, `skulk-plugin-service manage` reads one typed JSON
+request from standard input and uses the generated protected connection. It needs
+no service root or executable path argument and invokes no sudo. The existing
+`register`, `get`, `submit`, `operation` and `recover` actions remain available.
+Release actions are `configure_source` with `plugin_id` and nested source-update
+`request`; `source_status`, `inspect_release` and `install_status` with `plugin_id`;
+and `install` with `plugin_id` and nested installation `request`. Keep credential
+input out of shell arguments and shell history. The wire limit remains 16 KiB.
+
+The dashboard's **Install a release** controls inspect the configured release,
+show its version/permissions and size, stage exact bytes, and require a separate
+permission acceptance and activation action. Installation progress is restored
+from the server after reconnect. Source/trust entry is available through terminal
+and direct-owner HTTP; its dashboard form and guided interrupted-install recovery
+are not yet available. Provider credential setup, nonbillable preflight and paid
+proposal approval remain separate from these release-feed operations.
 
 
 ### Stable local manager runtime
