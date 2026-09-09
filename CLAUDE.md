@@ -1051,3 +1051,16 @@ API/master card checks or the final resource-derived `context_token_limit`.
 Exact-instance creation does not atomically revalidate topology or backend/build
 support; controllers must obtain fresh previews and recheck live target support
 before submission and throughout readiness.
+
+
+Managed-plugin system setup is `skulk-plugin-service setup`, implemented by
+`extensions/service_setup.py`. Run it as the existing nonroot owner. It journals
+setup stages, preserves generated profile identity and copies exact qualified
+runtime dependencies without modifying Skulk's environment. Its fixed local sudo
+entrypoint `service_registration.py` must remain standard-library-only and execute
+directly with `-I -S -B`; never import Skulk/provider packages as root. Only fixed
+system unit registration and parent ownership belong there. Never expose this
+helper to remote management or accept caller-supplied commands/unit contents.
+System daemons run as the nonroot account; API, management, plugin and independent
+cleanup lifetimes remain distinct. Test registration effects with isolated fixtures;
+real system-service and reboot claims require explicit physical qualification.

@@ -222,6 +222,27 @@ async def _qualify(runtime: Path, lock: RuntimeLock) -> bytes:
         await finish_runtime_work(asyncio.create_task(process.wait()))
 
 
+def service_source_identity() -> str:
+    """Fingerprint the current core, dependency inventory and exact base interpreter.
+
+    Local setup uses this identity to distinguish an unchanged service copy from
+    an explicitly requested setup using a new Python or dependency environment.
+    Runtime activation still verifies the complete copied tree independently.
+    """
+    host = measure_host()
+    base = Path(sys.executable).resolve(strict=True)
+    identity = {
+        "platform": host.platform,
+        "python_version": host.python_version,
+        "skulk_version": host.skulk_version,
+        "skulk_build_sha256": host.skulk_build_sha256,
+        "inventory": _distributions(),
+        "base_python": str(base),
+        "base_sha256": service_bootstrap.digest_file(base),
+    }
+    return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+
+
 async def stage_service_runtime(root: Path) -> ServiceSnapshot:
     """Stage and qualify an exact copy without altering the live Skulk environment.
 

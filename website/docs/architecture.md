@@ -1624,7 +1624,13 @@ transport renewal after stopping affected owners; recovery finishes only exact
 recorded local metadata before owner startup. Durable plugin identities and cleanup
 records remain independent of Skulk's changing transport ID. Profiles and builds
 must match, and foreign installation bindings are never silently adopted.
-OS service registration and HTTP lifecycle integration remain separate setup work.
+`service_setup.py` now owns the resumable local setup command. It stages a verified
+runtime as the owner, generates the profile connection, and invokes the standalone
+standard-library-only `service_registration.py` helper for fixed system definitions.
+Only that local helper runs elevated; LaunchDaemons/systemd run the manager as the
+existing nonroot account from durable system storage. Retained setup phase is
+separate from current runtime integrity and manager availability. HTTP lifecycle,
+dynamic registration and physical service/reboot qualification remain open.
 
 Extension startup and serving share one event loop. The API starts hooks only
 once its runtime begins and invokes optional asynchronous shutdown hooks before

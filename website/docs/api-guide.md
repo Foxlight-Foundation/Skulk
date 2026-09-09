@@ -3698,8 +3698,8 @@ when a plugin child is disabled or broken. Local setup provisions its protected
 `host.json` with a generated local profile ID and the current Skulk transport identity. Its fixed service command
 is `python -m skulk.extensions.runtime_manager serve --root <service-root>`.
 The terminal transport is `python -m skulk.extensions.runtime_manager call --root
-<service-root>`, reading one JSON request from standard input. These development
-entry points do not replace the pending one-command OS service installer.
+<service-root>`, reading one JSON request from standard input. These low-level lifecycle entry points share the installed service created by
+`skulk-plugin-service setup`.
 
 The local socket accepts these typed requests:
 
@@ -3750,9 +3750,9 @@ permissions, membership and interpreter identity before Python site initializati
 or manager imports. The manager receives its explicit service state root; stored
 credentials and ordinary Skulk configuration are not copied into this runtime.
 
-This candidate packaging primitive is not yet the one-command OS service installer.
-It targets existing supported isolated Skulk Python environments. Actual system
-service registration remains required before unattended reboot qualification.
+The local setup command below uses this packaging primitive for existing supported
+isolated Skulk Python environments. Real system-service/reboot qualification on
+both release platforms remains an acceptance gate.
 
 
 ### Automatic local transport attachment
@@ -3780,3 +3780,54 @@ owner. A foreign installation binding is refused before stopping healthy owners.
 An incomplete write exposes `attachment_recovery_required` until local recovery
 succeeds. Disconnect does not cancel accepted local renewal. API shutdown releases
 its attachment fence without terminating independent cleanup services.
+
+
+### Local system-service setup
+
+Run `skulk-plugin-service setup` in the existing qualified Skulk environment, as
+the nonroot Skulk owner. From a source environment the equivalent is
+`python -m skulk.extensions.service_setup setup`. Do not run the whole command
+under sudo. Setup invokes a fixed standard-library-only local helper through sudo
+for parent-directory provisioning and OS registration; runtime copying, activation,
+configuration and all manager/plugin processes execute as the existing owner.
+No HTTP route invokes this helper, supplies unit contents or accepts an executable.
+
+The command creates an independent verified manager runtime, a generated local
+profile ID, protected setup operations and `SKULK_CONFIG_HOME/managed-service.json`.
+Internal paths and IDs are generated. One service is associated with one Skulk
+configuration per OS account; a different configuration is refused without
+adopting or rewriting its binding. The base Python installation and existing Skulk
+configuration must live outside Git checkouts and remain available after boot.
+
+| Platform | Durable service root | System registration |
+| --- | --- | --- |
+| Apple Silicon macOS | `/Library/Application Support/SkulkPluginServices/<uid>` | `/Library/LaunchDaemons/foundation.foxlight.skulk.plugins.u<uid>.plist`, using the system domain and a nonroot `UserName` |
+| Ubuntu 24.04 x86_64 | `/var/lib/skulk-plugin-services/<uid>` | `/etc/systemd/system/foundation.foxlight.skulk.plugins.u<uid>.service`, using a nonroot numeric `User` and `multi-user.target` |
+
+Setup records a generated `operation_id` and phases `preparing`, `staged`,
+`selected`, `registered`, `ready`. Rerunning after interruption reuses the exact
+completed staged copy and generated profile. A changed source core, Python or
+dependency inventory requires a new setup operation after the prior one completes;
+prior operations and runtime generations remain retained. Preparation does not stop
+the existing manager. Activation stops only its fixed service, verifies the copied
+runtime again, preserves the latest transport attachment, and starts the registered
+service. An unrelated definition occupying the reserved service name is refused.
+No provider request, credential provisioning, approval or implicit enable occurs.
+
+`skulk-plugin-service status` reports the last setup phase separately from current
+`registered_runtime_verified` and `management_available`. An old `ready` phase
+is historical completion, not current service health. Corrective error codes are
+`registration_or_integrity_unavailable` and `service_unavailable`; rerun the same
+local setup command using its qualified environment after correcting OS access or
+runtime integrity. Root-owned unit definitions have fixed arguments; service output
+is not a channel for private plugin diagnostics. Protected plugin evidence remains
+host-local.
+
+These are system services, so qualification begins after OS boot and disk unlock;
+setup does not bypass encryption authentication. Apple's
+[launchd guidance](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html)
+distinguishes system daemons from login-session agents. Linux uses the systemd
+[service](https://github.com/systemd/systemd/blob/v255/man/systemd.service.xml) and
+[process-lifetime](https://github.com/systemd/systemd/blob/v255/man/systemd.kill.xml)
+contracts. Dynamic API registration, dashboard installation and real reboot
+qualification remain separate integration/acceptance work for this candidate.

@@ -648,3 +648,19 @@ Selection is a local primitive: it does not register system services, automatica
 stop an owner, provide full node preflight, or approve a paid proposal. The service
 launcher must revalidate the selected generation against the live core before
 executing the fixed private owner entry point.
+
+
+### Installing the local manager service
+
+The candidate `skulk-plugin-service setup` command prepares a verified independent
+manager runtime and registers a fixed nonroot system service on Apple Silicon
+macOS or Ubuntu 24.04 x86_64. Run it as the existing Skulk owner in the qualified
+isolated environment; only its fixed registration helper requests local elevation.
+It generates service storage and a local profile connection without configuration
+file editing. `skulk-plugin-service status` separates retained setup progress from
+current management availability and registered-runtime integrity.
+
+See the [local setup contract](api-guide.md#local-system-service-setup) for supported
+paths, interruption recovery, privileges and current qualification boundaries.
+This installs no private SDK into Skulk, provisions no provider credentials, and
+grants no spending approval. Existing independent cleanup supervision is untouched.
