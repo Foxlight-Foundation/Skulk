@@ -22,6 +22,8 @@ export const apiSlice = createApi({
     'Trace',
     'NodeDiagnostics',
     'PairingInvitations',
+    'Plugins',
+    'PluginConfiguration',
     'StewardStatus',
     'StewardProposals',
   ] as const,

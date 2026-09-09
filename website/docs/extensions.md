@@ -524,3 +524,25 @@ readiness, and independent resource cleanup.
 - Extension hooks currently cover the chat serving path. The surface will
   grow deliberately; anything an extension can reach is a public contract
   Skulk has to honor across versions.
+
+## Installed node configuration
+
+An extension can implement `NodeConfigurationProvider` from `skulk.extensions`
+to expose ordinary settings through the Plugins dashboard and HTTP API. This
+optional facet is independent of readiness and does not change existing extension
+compatibility. Implement `configuration_nodes()`, `node_configuration(node_id)`,
+and `configure_node(node_id, mutation)` using the plugin's existing owner store.
+
+Identify each installed node persistently: multiple advertised capabilities can
+share one configuration, while separate installations must never share mutable
+settings accidentally. Include disabled nodes in inventory. Changes must check
+both `expected_revision` and `expected_schema_digest` before validation and
+atomic persistence. The plugin must enforce its own preflight before enabling,
+and must retain cleanup obligations when disabling a node. Skulk authorizes
+management but cannot approve provider spending through this facet.
+
+Declare ordinary fields in `configuration_schema`; do not return credential
+values or local protected-file paths. The dashboard currently renders scalar,
+enumerated and nested-object fields with local schema references. Unsupported
+forms are identified explicitly; server-side schema validation remains
+authoritative. See the [HTTP contract](api-guide.md#plugin-node-configuration).

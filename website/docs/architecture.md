@@ -1582,6 +1582,16 @@ discovers it at startup through the `skulk.extensions` entry-point group.
 The developer guide, with a complete worked example, is at
 [Extensions (Plugins)](extensions.md).
 
+Plugins may also implement the optional `NodeConfigurationProvider` facet.
+It lists stable installed node identities and exposes their ordinary-settings
+schemas, values, validation and revision-fenced changes through `/v1/plugins`.
+Management availability is separate from capability readiness, so a disabled
+child can still be configured. The dashboard renders plugin-declared fields;
+provider-specific settings and validation remain in the plugin. Configuration
+stays out of replicated cluster State. Explicit paired-operator plugin scopes
+are checked before broad operation permissions; grant changes require direct
+owner administration. See [Plugin Node Configuration](api-guide.md#plugin-node-configuration).
+
 The contract is deliberately small (`src/skulk/extensions/`):
 
 - An extension exposes a zero-argument factory in the entry-point group. The

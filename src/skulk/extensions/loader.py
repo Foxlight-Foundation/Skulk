@@ -18,6 +18,7 @@ from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 
 from skulk.extensions.capabilities import CapabilityDescriptor
+from skulk.extensions.configuration import NodeConfigurationProvider
 from skulk.extensions.steward import (
     StewardToolBinding,
     StewardToolProvider,
@@ -83,6 +84,8 @@ class LoadedExtensions:
         crash the process (the "loader never raises" contract).
         """
         self._extension_instances: list[SkulkExtension] = []
+        self._configuration_providers: dict[str, NodeConfigurationProvider] = {}
+        self._configuration_names: set[str] = set()
         self._capability_providers: dict[str, SkulkExtension] = {}
         self._started = False
         self._stopping = False
@@ -120,6 +123,19 @@ class LoadedExtensions:
                 )
                 middleware = None
             self._names.append(name)
+            try:
+                if isinstance(extension, NodeConfigurationProvider):
+                    if name in self._configuration_names:
+                        # Ambiguous owner routing must never choose the last plugin.
+                        logger.error(
+                            "Duplicate configuration provider name; refusing management"
+                        )
+                        self._configuration_providers.pop(name, None)
+                    else:
+                        self._configuration_providers[name] = extension
+                    self._configuration_names.add(name)
+            except Exception:  # noqa: BLE001 - optional plugin metadata is untrusted
+                logger.error("Extension configuration facet could not be loaded")
             if middleware is not None:
                 self._chat_middlewares.append((name, middleware))
             # Provider facet (fabric-citizenship): collect this extension's
@@ -192,6 +208,11 @@ class LoadedExtensions:
             if isinstance(extension, SupportsExtensionStartup):
                 self._startup_hooks.append((name, extension))
 
+    @property
+    def configuration_providers(self) -> dict[str, NodeConfigurationProvider]:
+        """Return owner-management facets without filtering child readiness."""
+        return dict(self._configuration_providers)
+
     def with_builtin_extensions(
         self, extensions: Sequence[SkulkExtension]
     ) -> "LoadedExtensions":
@@ -209,6 +230,14 @@ class LoadedExtensions:
         combined._names.extend(self._names)
         combined._chat_middlewares.extend(self._chat_middlewares)
         combined._startup_hooks.extend(self._startup_hooks)
+        for name in self._configuration_names:
+            if name in combined._configuration_names:
+                combined._configuration_providers.pop(name, None)
+            elif name in self._configuration_providers:
+                combined._configuration_providers[name] = self._configuration_providers[
+                    name
+                ]
+        combined._configuration_names.update(self._configuration_names)
 
         seen_qualified_ids = {
             descriptor.qualified_id for descriptor in combined._capability_descriptors

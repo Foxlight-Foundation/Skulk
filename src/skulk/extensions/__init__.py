@@ -22,6 +22,13 @@ from skulk.extensions.capabilities import (
     CapabilityIoMode,
     descriptor_revision,
 )
+from skulk.extensions.configuration import (
+    ConfigurableNode,
+    ConfigurationMutation,
+    ConfigurationResult,
+    NodeConfiguration,
+    NodeConfigurationProvider,
+)
 from skulk.extensions.loader import (
     ENTRY_POINT_GROUP,
     LoadedExtensions,
@@ -86,6 +93,11 @@ from skulk.extensions.vad import (
 from skulk.extensions.validation import validate_against_schema
 
 __all__ = [
+    "ConfigurableNode",
+    "ConfigurationMutation",
+    "ConfigurationResult",
+    "NodeConfiguration",
+    "NodeConfigurationProvider",
     "StewardTool",
     "StewardToolProvider",
     "DEFAULT_CALL_TIMEOUT_SECONDS",

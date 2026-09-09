@@ -382,6 +382,8 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 
 ### Extensions (plugins)
 
+- **Node configuration:** optional `NodeConfigurationProvider` in `extensions/configuration.py`; stable installed node IDs, schema/ordinary values, enabled state, revision and schema digest. `api/plugins.py` exposes `/v1/plugins` inventory and per-node GET/POST configuration. Provider-owned storage and validation, independent of child readiness, never replicated State. `plugins:read/manage/approve` are explicit grants with no pairing defaults; `operator/plugin_scopes.py` precedes broad operation fallback on direct and relay routes. Owner-only `/v1/auth/plugin-grants` uses current encrypted pairing records and revision fences. Plugins dashboard renders ordinary schemas and preserves drafts on conflicts.
+
 - **Role:** load separately installed packages and call them at serving-path hooks; deployment-specific behavior without forking Skulk
 - **Lives in:** `src/skulk/extensions/` (`types.py` contract, `loader.py` discovery + guarded dispatch); call sites in `API.chat_completions` and `API._steward_chat_completions`
 - **Discovery:** `skulk.extensions` entry-point group, scanned once at node startup (`load_extensions()` in `src/skulk/main.py`, API-spawning nodes only); entry point value = zero-arg factory returning a `SkulkExtension`

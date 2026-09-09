@@ -3110,6 +3110,46 @@ curl http://localhost:52415/v1/traces/cluster/<task_id>/stats
 curl -OJ http://localhost:52415/v1/traces/cluster/<task_id>/raw
 ```
 
+## Plugin Node Configuration
+
+Plugin management addresses a stable installed node, not a capability method or
+transient cluster peer. Several capabilities can share one node's settings.
+The Plugins dashboard page uses the same plugin-owned configuration store and
+validation as its terminal interface. These endpoints expose ordinary settings;
+credential values must use a separate write-only provider interface.
+
+| Method and path | Parameters | Behavior |
+| --- | --- | --- |
+| `GET /v1/plugins` | None | Returns installed plugins with `pluginId`, `available`, and `nodes`; each node has `nodeId`, `bundleId`, `version`, `status`, and `configurable`. Disabled nodes remain listed. An unavailable management provider has `available: false`. Requires `plugins:read`. |
+| `GET /v1/plugins/{plugin_id}/nodes/{node_id}/configuration` | Exact installed plugin and stable node IDs | Returns `nodeId`, `revision`, `schemaDigest`, `configurationSchema`, ordinary `values`, and `enabled`. Requires `plugins:read`. |
+| `POST /v1/plugins/{plugin_id}/nodes/{node_id}/configuration` | JSON `operation` (`validate`, `edit`, `enable`, `disable`), `expectedRevision`, `expectedSchemaDigest`; `values` is required only for `validate`/`edit` | Validates a draft or changes one node through its provider. Both revision and schema fences must match. Returns `configuration` and `validated`. The provider owns validation, persistence, preflight and any necessary child restart. Requires `plugins:manage`; this route cannot approve spending. |
+| `GET /v1/auth/plugin-grants` | None | Direct owner administration only: lists device `deviceId`, `deviceName`, grant `revision`, explicit plugin `scopes`, and `active`. No credential material. |
+| `PUT /v1/auth/plugin-grants/{device_id}` | JSON `expectedRevision`, `scopes` (unique subset of `plugins:read`, `plugins:manage`, `plugins:approve`) | Direct owner administration only: replaces that device's plugin grants, retaining other scopes. An empty list revokes all plugin grants. Existing tokens use current grants immediately. |
+
+Existing pairings and newly paired devices receive no plugin grants automatically.
+`operations:write` does not imply plugin management, and `plugins:manage` does not
+imply approval. Grant routes reject relay access; a remote operator cannot grant
+itself greater authority. Unknown devices return `404`, stale grant revisions
+return `409`, and malformed grants return `422`.
+
+Direct owner requests use the existing dashboard boundary: the actual socket
+peer must be loopback or verified Tailscale, the browser Origin/Referer must
+exactly match the direct dashboard URL, and `X-Skulk-Dashboard: pairing-v1` must
+be present. Forwarding headers are refused. Scoped paired operators send
+`Authorization: Bearer <access token>` over HTTPS, the authenticated relay, or
+the verified direct owner transport. An invalid bearer token never falls back
+to local owner authority. Read and mutation responses use `Cache-Control: no-store`.
+
+Unknown providers or nodes return `404`. Revision/schema conflicts and provider
+validation refusals return `409`; callers must reload before retrying a stale
+edit. Malformed actions return `422`, saturated management returns `429`, and
+unavailable/timed-out providers return `503`/`504`. Provider exception text is
+never returned. Ordinary configuration responses are bounded to 128 KiB;
+password/write-only schemas are refused. Inventory is bounded to 32 providers
+and 128 nodes per provider. Configuration dispatch has an eight-request
+concurrency limit and a cooperative thirty-second deadline. In-process
+extensions remain trusted code.
+
 ## Extension Capabilities
 
 Providers with a dynamic readiness facet appear in capability discovery only

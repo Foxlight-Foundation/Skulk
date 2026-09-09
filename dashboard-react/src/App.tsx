@@ -32,6 +32,7 @@ import { ChatView } from './components/pages/ChatView';
 import { OperatorPage } from './components/pages/OperatorPage';
 import { StewardChatView } from './components/pages/StewardChatView';
 import { IntegrationsPage } from './components/pages/IntegrationsPage';
+import { PluginsPage } from './components/pages/PluginsPage';
 import { InstancePanel, type InstanceCardData } from './components/layout/InstancePanel';
 import { ConversationPanel } from './components/layout/ConversationPanel';
 import { addToast } from './hooks/useToast';
@@ -269,7 +270,7 @@ export function App() {
   // On load, honour the URL path so /operator (and future deep-links) work.
   useEffect(() => {
     const path = window.location.pathname.replace(/^\//, '') || 'cluster';
-    const valid: typeof activeRoute[] = ['cluster', 'model-store', 'chat', 'steward', 'integrations', 'operator'];
+    const valid: typeof activeRoute[] = ['cluster', 'model-store', 'chat', 'steward', 'integrations', 'plugins', 'operator'];
     if (valid.includes(path as typeof activeRoute)) {
       dispatch(uiActions.setActiveRoute(path as typeof activeRoute));
     }
@@ -715,6 +716,8 @@ export function App() {
               <IntegrationsPage readyInstances={instanceCards} />
             ) : activeRoute === 'operator' ? (
               <OperatorPage />
+            ) : activeRoute === 'plugins' ? (
+              <PluginsPage />
             ) : topology ? (
               <TopologyGraph
                 data={topology}

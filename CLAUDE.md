@@ -507,6 +507,8 @@ Rust code in `rust/` provides:
 - `system_custodian`: System-level operations
 
 ### Extension API (plugins)
+
+Optional `NodeConfigurationProvider` (`extensions/configuration.py`) exposes stable installed-node settings independently of capability readiness. The `/v1/plugins` API and Plugins dashboard share plugin-owned schema validation and revision-fenced settings with terminal management. No credentials or configuration enter replicated State. Explicit plugin read/manage/approve grants are owner-controlled through `/v1/auth/plugin-grants`; existing pairings receive none, and broad operator write permission does not imply them.
 Separately installed packages register a zero-arg factory in the
 `skulk.extensions` entry-point group; `load_extensions()` discovers them once
 at node startup (API-spawning nodes) with PEP 440 version gating against the
