@@ -4,10 +4,12 @@ import { useSkulkTranslation } from '../../i18n/tolgee';
 import {
   useGetManagedRuntimesQuery, useGetManagedOperationQuery,
   useDisableManagedRuntimeMutation, useRecoverManagedOperationMutation,
+  useRegisterManagedRuntimeMutation,
   type ManagedRuntime,
 } from '../../store/endpoints/plugins';
 import { Button } from '../common/Button';
 import { RuntimeReleasePanel } from './RuntimeReleasePanel';
+import { RuntimeSourceForm } from './RuntimeSourceForm';
 
 const RuntimeCard = styled.article`
   margin: 12px 0; padding: 16px; border: 1px solid ${({ theme }) => theme.colors.border};
@@ -84,8 +86,25 @@ function RuntimeControls({ runtime, unavailable }: { runtime: ManagedRuntime; un
 export function ManagedRuntimesPanel() {
   const { t } = useSkulkTranslation();
   const query = useGetManagedRuntimesQuery(undefined, { pollingInterval: 5000, skipPollingIfUnfocused: true });
+  const [register, registering] = useRegisterManagedRuntimeMutation();
+  const [setupId, setSetupId] = useState<string | null>(null);
+  const [registrationUncertain, setRegistrationUncertain] = useState(false);
+  const addPlugin = async () => {
+    const id = setupId ?? `managed.${crypto.randomUUID().replaceAll('-', '')}`;
+    setSetupId(id);
+    setRegistrationUncertain(false);
+    try { await register(id).unwrap(); }
+    catch { setRegistrationUncertain(true); }
+  };
   return <section aria-label={t('plugins.managedRuntimes', 'Managed runtimes')}>
     <h2>{t('plugins.managedRuntimes', 'Managed runtimes')}</h2>
+    <Button type="button" disabled={registering.isLoading || !!query.error || query.isLoading || !!setupId} onClick={() => void addPlugin()}>{t('plugins.addManagedPlugin', 'Add plugin')}</Button>
+    {registrationUncertain ? <p role="status">{t('plugins.registrationUncertain', 'Registration was not confirmed. Refresh source status to check the retained installation before continuing.')}</p> : null}
+    {registrationUncertain ? <Button type="button" disabled={registering.isLoading} onClick={() => void addPlugin()}>{t('plugins.retryRegistration', 'Retry the same registration')}</Button> : null}
+    {setupId && !registering.isLoading ? <>
+      <RuntimeSourceForm pluginId={setupId} onSaved={() => { setSetupId(null); setRegistrationUncertain(false); }} />
+      <Button type="button" onClick={() => { setSetupId(null); setRegistrationUncertain(false); }}>{t('plugins.closeSourceSetup', 'Close source setup')}</Button>
+    </> : null}
     {query.isLoading ? <p>{t('plugins.loadingRuntimes', 'Loading local services…')}</p> : null}
     {query.error ? <p role="status">{t('plugins.managerUnavailable', 'Local runtime management is unavailable. Check local service setup and your plugin permissions.')}</p> : null}
     {query.data?.installations.length === 0 ? <p>{t('plugins.noManagedRuntimes', 'No managed runtimes are installed.')}</p> : null}

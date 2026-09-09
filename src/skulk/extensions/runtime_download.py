@@ -97,14 +97,19 @@ class SourceUpdate(BaseModel):
     expected_revision: int = Field(
         ge=0, description="Current source revision, zero before setup."
     )
-    base_url: str = Field(
-        max_length=2048, description="Trusted HTTPS release directory."
+    base_url: str | None = Field(
+        default=None,
+        max_length=2048,
+        description="Trusted HTTPS release directory; omission retains the configured directory.",
     )
-    metadata_filename: str = Field(
-        max_length=206, description="Signed metadata basename."
+    metadata_filename: str | None = Field(
+        default=None,
+        max_length=206,
+        description="Signed metadata basename; omission retains the configured name.",
     )
-    trust: Annotated[RuntimeTrust, BeforeValidator(_source_trust)] = Field(
-        description="Explicit owner publisher keys and revocation view."
+    trust: Annotated[RuntimeTrust, BeforeValidator(_source_trust)] | None = Field(
+        default=None,
+        description="Explicit owner publisher keys and revocation view; omission retains trust. Existing revocations cannot be removed through source configuration.",
     )
     token: SecretStr | None = Field(
         default=None,
@@ -120,8 +125,12 @@ class SourceUpdate(BaseModel):
         """Validate source and credential shape before changing any local files."""
         ReleaseSource(
             revision=self.expected_revision + 1,
-            base_url=self.base_url,
-            metadata_filename=self.metadata_filename,
+            base_url=self.base_url
+            if self.base_url is not None
+            else "https://unused.invalid/",
+            metadata_filename=self.metadata_filename
+            if self.metadata_filename is not None
+            else "runtime.json",
         )
         if self.token is not None:
             token = self.token.get_secret_value()
@@ -194,6 +203,17 @@ class InstallOperation(BaseModel):
     """Durable staging progress; accepted work belongs to the independent manager."""
 
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+    attempt: int = Field(
+        default=0,
+        ge=0,
+        le=8,
+        description="Original attempt is zero; explicitly requested recovery attempts retain separate evidence.",
+    )
+    attempt_source_revision: int | None = Field(
+        default=None,
+        ge=1,
+        description="Owner-reviewed current source revision for a recovery attempt; original intent remains unchanged.",
+    )
     request: InstallRequest = Field(
         description="Original immutable installation request."
     )
@@ -256,16 +276,21 @@ class RuntimeDownloads:
     def source_status(self) -> SourceStatus:
         """Read source readiness without network I/O or disclosing its credential."""
         try:
-            source = self.source()
-        except FileNotFoundError:
-            return SourceStatus(revision=0, configured=False, credential_ready=False)
-        try:
             trust = RuntimeTrust.model_validate_json(
                 read_private(self.root / "publisher-trust.json")
             )
             trust_revision = trust.revision
         except (OSError, ValueError):
             trust_revision = None
+        try:
+            source = self.source()
+        except FileNotFoundError:
+            return SourceStatus(
+                revision=0,
+                configured=False,
+                credential_ready=False,
+                trust_revision=trust_revision,
+            )
         ready = True
         if source.credential_reference is not None:
             try:
@@ -311,17 +336,56 @@ class RuntimeDownloads:
                     )
                 except FileNotFoundError:
                     trust = None
-                if update.trust.expires_at <= time.time() or (
+                next_trust = update.trust if update.trust is not None else trust
+                base_url = (
+                    update.base_url
+                    if update.base_url is not None
+                    else previous.base_url
+                    if previous
+                    else None
+                )
+                metadata_filename = (
+                    update.metadata_filename
+                    if update.metadata_filename is not None
+                    else previous.metadata_filename
+                    if previous
+                    else None
+                )
+                if next_trust is None or base_url is None or metadata_filename is None:
+                    raise ValueError(
+                        "initial source setup requires directory, metadata name and publisher trust"
+                    )
+                if next_trust.expires_at <= time.time() or (
                     trust is not None
                     and (
-                        update.trust.revision < trust.revision
+                        next_trust.revision < trust.revision
                         or (
-                            update.trust.revision == trust.revision
-                            and update.trust != trust
+                            next_trust.revision == trust.revision
+                            and next_trust != trust
                         )
                     )
                 ):
                     raise ValueError("publisher trust revision conflict or expiry")
+                if trust is not None and next_trust.revision > trust.revision:
+                    # Source credential rotation must never silently restore a
+                    # publisher or artifact previously rejected by the owner.
+                    next_trust = RuntimeTrust.model_validate(
+                        {
+                            **next_trust.model_dump(),
+                            "revoked_publishers": tuple(
+                                sorted(
+                                    set(trust.revoked_publishers)
+                                    | set(next_trust.revoked_publishers)
+                                )
+                            ),
+                            "revoked_artifacts": tuple(
+                                sorted(
+                                    set(trust.revoked_artifacts)
+                                    | set(next_trust.revoked_artifacts)
+                                )
+                            ),
+                        }
+                    )
                 reference = previous.credential_reference if previous else None
                 if update.clear_token:
                     reference = None
@@ -333,7 +397,7 @@ class RuntimeDownloads:
                     )
                 elif (
                     previous is not None
-                    and previous.base_url != update.base_url
+                    and previous.base_url != base_url
                     and reference is not None
                 ):
                     # A stored bearer is bound to the owner-approved source. A
@@ -343,13 +407,13 @@ class RuntimeDownloads:
                     )
                 source = ReleaseSource(
                     revision=update.expected_revision + 1,
-                    base_url=update.base_url,
-                    metadata_filename=update.metadata_filename,
+                    base_url=base_url,
+                    metadata_filename=metadata_filename,
                     credential_reference=reference,
                 )
                 write_private(
                     self.root / "publisher-trust.json",
-                    update.trust.model_dump_json().encode(),
+                    next_trust.model_dump_json().encode(),
                 )
                 write_private(
                     self.root / "release-source.json", source.model_dump_json().encode()
@@ -566,7 +630,10 @@ class RuntimeDownloads:
         try:
             operation = operation.model_copy(update={"state": "downloading"})
             self._save(operation)
-            directory = self.directory / "artifacts" / operation.request.operation_id
+            name = operation.request.operation_id
+            if operation.attempt:
+                name += f".{operation.attempt}"
+            directory = self.directory / "artifacts" / name
             private_directory(directory)
             release = runtime.claims.release
             artifacts = [
@@ -594,7 +661,10 @@ class RuntimeDownloads:
             operation = operation.model_copy(update={"state": "staging"})
             self._save(operation)
             staged = await self.installer.stage(
-                runtime.metadata, directory, operation_id=operation.request.operation_id
+                runtime.metadata,
+                directory,
+                operation_id=operation.request.operation_id,
+                recover=operation.attempt > 0,
             )
             if staged.state != "staged":
                 raise ValueError("offline installation requires recovery")
@@ -618,6 +688,59 @@ class RuntimeDownloads:
                     }
                 )
             )
+
+    async def recover(
+        self, operation_id: str, expected_source_revision: int
+    ) -> InstallOperation:
+        """Explicitly resume the original signed release under the reviewed current source.
+
+        Credential rotation may change the source revision, but cannot change the
+        original runtime digest, permissions, identity or request. Prior download
+        attempts and incomplete offline generations remain protected evidence.
+        """
+        if self.guard.locked():
+            raise ValueError("release source is busy")
+        async with self.guard:
+            if self.closed:
+                raise ValueError("release downloads closed")
+            prior = self.operation(operation_id)
+            if prior.state != "recovery_required":
+                return prior
+            if self.work is not None and not self.work.done():
+                raise ValueError("installation is busy")
+            if prior.attempt >= 8:
+                raise ValueError(
+                    "installation recovery history requires local maintenance"
+                )
+            source = self.source()
+            if source.revision != expected_source_revision:
+                raise ValueError("release source revision conflict")
+            runtime = await self.installer.inspect_metadata(
+                read_private(
+                    self.directory
+                    / "reviews"
+                    / (prior.request.runtime_digest + ".json")
+                )
+            )
+            if runtime.digest != prior.request.runtime_digest:
+                raise ValueError("reviewed release differs")
+            write_private(
+                self.directory / "attempts" / operation_id / f"{prior.attempt}.json",
+                prior.model_dump_json().encode(),
+            )
+            operation = prior.model_copy(
+                update={
+                    "attempt": prior.attempt + 1,
+                    "attempt_source_revision": source.revision,
+                    "state": "accepted",
+                    "downloaded_bytes": 0,
+                    "error_code": None,
+                }
+            )
+            self._save(operation)
+            self.active_id = operation_id
+            self.work = asyncio.create_task(self._install(operation, runtime, source))
+            return operation
 
     async def close(self) -> None:
         """Cancel bounded downloads and finish owned offline staging before releasing state."""

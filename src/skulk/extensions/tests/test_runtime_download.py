@@ -14,7 +14,8 @@ from skulk.extensions.runtime_download import (
     RuntimeDownloads,
     SourceUpdate,
 )
-from skulk.extensions.runtime_files import read_private, write_private
+from skulk.extensions.runtime_files import RuntimeLock, read_private, write_private
+from skulk.extensions.runtime_selection import RuntimeSelector
 from skulk.extensions.tests.test_runtime_install import artifacts
 
 
@@ -247,4 +248,191 @@ async def test_source_rotation_preserves_old_credentials_and_fences_destination(
     )
     with pytest.raises(ValueError, match="revision"):
         await downloads.configure(update)
+    await downloads.close()
+
+
+async def test_partial_source_setup_retains_trust_and_never_removes_revocations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Credential-only updates preserve destination and all existing trust decisions."""
+    downloads, _, _, _ = prepared(tmp_path, monkeypatch)
+    original = downloads.source()
+    path = downloads.root / "publisher-trust.json"
+    trust = RuntimeTrust.model_validate_json(read_private(path))
+    revoked = trust.model_copy(
+        update={"revoked_publishers": ("retired",), "revoked_artifacts": ("d" * 64,)}
+    )
+    write_private(path, revoked.model_dump_json().encode())
+    result = await downloads.configure(
+        SourceUpdate(expected_revision=1, token=SecretStr("rotated-token"))
+    )
+    assert result.revision == 2 and result.credential_ready
+    assert downloads.source().base_url == original.base_url
+    assert downloads.source().metadata_filename == original.metadata_filename
+    assert RuntimeTrust.model_validate_json(read_private(path)) == revoked
+    await downloads.configure(
+        SourceUpdate(
+            expected_revision=2,
+            trust=trust.model_copy(update={"revision": trust.revision + 1}),
+        )
+    )
+    renewed = RuntimeTrust.model_validate_json(read_private(path))
+    assert renewed.revoked_publishers == revoked.revoked_publishers
+    assert renewed.revoked_artifacts == revoked.revoked_artifacts
+    assert renewed.revision == trust.revision + 1
+    (downloads.root / "release-source.json").unlink()
+    assert downloads.source_status().trust_revision == renewed.revision
+    with pytest.raises(ValueError, match="initial source setup"):
+        await downloads.configure(
+            SourceUpdate(expected_revision=0, token=SecretStr("not-written"))
+        )
+    assert not (downloads.root / "release-source.json").exists()
+    assert len(tuple((downloads.root / "feed-credentials").iterdir())) == 2
+    await downloads.close()
+
+
+async def test_recovery_uses_rotated_credential_without_changing_original_intent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit retries preserve failed transfer evidence and exact reviewed bytes."""
+    downloads, _, source, _ = prepared(tmp_path, monkeypatch)
+    review = await downloads.inspect()
+    request = InstallRequest(
+        operation_id="b" * 32,
+        runtime_digest=review.runtime_digest,
+        expected_source_revision=1,
+    )
+    downloads.transport = httpx.MockTransport(
+        lambda _: httpx.Response(200, content=b"truncated")
+    )
+    await downloads.submit(request)
+    assert downloads.work is not None
+    await downloads.work
+    failed = downloads.current()
+    assert failed is not None and failed.state == "recovery_required"
+    await downloads.configure(
+        SourceUpdate(
+            expected_revision=1,
+            token=SecretStr("rotated-token"),
+        )
+    )
+    requests: list[str] = []
+
+    def restored(request: httpx.Request) -> httpx.Response:
+        assert request.headers["Authorization"] == "Bearer rotated-token"
+        requests.append(request.url.path)
+        return httpx.Response(
+            200, content=read_private(source / request.url.path.rsplit("/", 1)[1])
+        )
+
+    downloads.transport = httpx.MockTransport(restored)
+    with pytest.raises(ValueError, match="revision"):
+        await downloads.recover(request.operation_id, 1)
+    assert not requests
+    accepted = await downloads.recover(request.operation_id, 2)
+    assert accepted.request == request and accepted.review == failed.review
+    assert accepted.attempt == 1 and accepted.attempt_source_revision == 2
+    assert downloads.work is not None
+    await downloads.work
+    staged = downloads.current()
+    assert staged is not None and staged.state == "staged"
+    assert (
+        read_private(
+            downloads.directory
+            / "artifacts"
+            / request.operation_id
+            / "bundle.pyz.partial"
+        )
+        == b"truncated"
+    )
+    assert (downloads.directory / "attempts" / request.operation_id / "0.json").exists()
+    assert await downloads.recover(request.operation_id, 2) == staged
+    assert len(requests) == 2
+    await downloads.close()
+
+
+async def test_interrupted_offline_stage_is_retained_before_explicit_rebuild(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A surviving installer fence blocks recovery; released partial state is archived."""
+    downloads, _, _, _ = prepared(tmp_path, monkeypatch)
+    review = await downloads.inspect()
+    request = InstallRequest(
+        operation_id="b" * 32,
+        runtime_digest=review.runtime_digest,
+        expected_source_revision=1,
+    )
+
+    async def failed_process(
+        arguments: tuple[str, ...], directory: Path, lock: RuntimeLock, timeout: float
+    ) -> bytes:
+        raise OSError("injected local installation failure")
+
+    with monkeypatch.context() as failing:
+        failing.setattr("skulk.extensions.runtime_install._execute", failed_process)
+        await downloads.submit(request)
+        assert downloads.work is not None
+        await downloads.work
+    failed = downloads.current()
+    assert failed is not None and failed.error_code == "installation_failed"
+    generation = downloads.root / "generations" / review.runtime_digest
+    assert generation.is_dir() and not (generation / "staged.json").exists()
+    lock = RuntimeLock(downloads.installer.installer)
+    try:
+        with pytest.raises(BlockingIOError):
+            await downloads.recover(request.operation_id, 1)
+        assert downloads.current() == failed
+    finally:
+        lock.close()
+    await downloads.recover(request.operation_id, 1)
+    assert downloads.work is not None
+    await downloads.work
+    staged = downloads.current()
+    assert staged is not None and staged.state == "staged" and staged.request == request
+    history = tuple(
+        (downloads.installer.installer / "recovery" / request.operation_id).iterdir()
+    )
+    assert len(history) == 1
+    assert (history[0] / "generation" / "artifacts" / "bundle.pyz").is_file()
+    assert (history[0] / "operation.json").is_file()
+    async with downloads.installer.locked_generation(review.runtime_digest) as (
+        verified,
+        _,
+    ):
+        assert verified.digest == review.runtime_digest
+    await downloads.close()
+
+
+@pytest.mark.parametrize("selected", [False, True])
+async def test_recovery_never_reseals_completed_or_moves_selected_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    selected: bool,
+) -> None:
+    """Explicit recovery cannot bypass immutable completion or active-selection fences."""
+    downloads, metadata, source, _ = prepared(tmp_path, monkeypatch)
+    staged = await downloads.installer.stage(metadata, source, operation_id="b" * 32)
+    generation = downloads.root / "generations" / staged.runtime_digest
+    if selected:
+        selector = RuntimeSelector(downloads.root)
+        await selector.activate(
+            staged.runtime_digest, expected_revision=0, operation_id="c" * 32
+        )
+        (generation / "staged.json").unlink()
+    else:
+        write_private(generation / "artifacts" / "bundle.pyz", b"tampered")
+    with pytest.raises(ValueError):
+        await downloads.installer.stage(
+            metadata, source, operation_id="b" * 32, recover=True
+        )
+    assert (
+        generation.is_dir()
+        and not (downloads.installer.installer / "recovery").exists()
+    )
+    if selected:
+        assert RuntimeSelector(downloads.root).current() is not None
+    else:
+        assert read_private(generation / "artifacts" / "bundle.pyz") == b"tampered"
     await downloads.close()

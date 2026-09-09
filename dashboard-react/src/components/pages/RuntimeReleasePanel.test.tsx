@@ -17,6 +17,8 @@ let root: Root;
 let host: HTMLDivElement;
 let operation: RuntimeInstallation | null;
 let posts: Record<string, unknown>[];
+let recoveryPaths: string[];
+let sourceAvailable: boolean;
 let store: ReturnType<typeof makeStore>;
 function makeStore() { return configureStore({ reducer: { [apiSlice.reducerPath]: apiSlice.reducer }, middleware: (defaults) => defaults().concat(apiSlice.middleware) }); }
 function response(body: unknown, status = 200) { return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } }); }
@@ -35,18 +37,26 @@ async function click(label: string) {
 beforeEach(async () => {
   operation = null;
   posts = [];
+  recoveryPaths = [];
+  sourceAvailable = true;
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
     const request = new Request(input, init);
     const path = new URL(request.url).pathname;
     if (request.method === 'POST') {
       const body = await request.json() as Record<string, unknown>;
       posts.push(body);
+      if (path.endsWith('/recover') && operation) {
+        recoveryPaths.push(path);
+        operation = { ...operation, attempt: 1, attempt_source_revision: Number(body.expected_source_revision), state: 'staged', downloaded_bytes: 100, error_code: null };
+        return response({}, 503);
+      }
       if (path.endsWith('/install')) {
         operation = { request: { operation_id: String(body.operation_id), runtime_digest: String(body.runtime_digest), expected_source_revision: Number(body.expected_source_revision) }, review, state: 'staged', downloaded_bytes: 100, error_code: null };
         return response({}, 503);
       }
       return response({ request: body, state: 'accepted', error_code: null });
     }
+    if (path.endsWith('/source')) return sourceAvailable ? response({ revision: 2, configured: true, credential_ready: true, credential_reference: null, trust_revision: 1 }) : response({}, 503);
     return response(path.endsWith('/release') ? review : { operation });
   });
   store = makeStore();
@@ -100,4 +110,38 @@ it('does not transfer permission acceptance to another release observed after re
   expect(host.querySelector<HTMLInputElement>('input[type=checkbox]')?.checked).toBe(false);
   await click('Activate release');
   expect(posts).toHaveLength(0);
+});
+
+it('recovers the original installation with the current source and only observes after a lost response', async () => {
+  const original = { operation_id: 'c'.repeat(32), runtime_digest: review.runtime_digest, expected_source_revision: 1 };
+  operation = { request: original, review, state: 'recovery_required', downloaded_bytes: 0, error_code: 'download_failed' };
+  await act(async () => { store.dispatch(apiSlice.util.invalidateTags(['Plugins'])); });
+  await contains('Installation needs recovery');
+  await act(async () => { await vi.waitFor(() => expect([...host.querySelectorAll('button')].find((item) => item.textContent === 'Retry this installation')?.disabled).toBe(false)); });
+  expect(posts).toHaveLength(0);
+  await click('Retry this installation');
+  await contains('Ready for activation');
+  expect(posts).toEqual([{ expected_source_revision: 2 }]);
+  expect(recoveryPaths).toEqual([`/v1/plugins/managed/installations/${runtime.plugin_id}/install/${original.operation_id}/recover`]);
+  expect(operation?.request).toEqual(original);
+  await act(async () => { root.unmount(); store.dispatch(apiSlice.util.resetApiState()); });
+  await mount();
+  await contains('Ready for activation');
+  await click('Refresh installation status');
+  expect(posts).toHaveLength(1);
+});
+
+it('withholds recovery when source readiness is unavailable and permits an explicit status refresh', async () => {
+  sourceAvailable = false;
+  operation = { request: { operation_id: 'c'.repeat(32), runtime_digest: review.runtime_digest, expected_source_revision: 1 }, review, state: 'recovery_required', downloaded_bytes: 0, error_code: 'download_failed' };
+  await act(async () => { store.dispatch(apiSlice.util.invalidateTags(['Plugins'])); });
+  await contains('Restore the release source');
+  await click('Retry this installation');
+  expect(posts).toHaveLength(0);
+  sourceAvailable = true;
+  await click('Refresh installation status');
+  await act(async () => { await vi.waitFor(() => expect([...host.querySelectorAll('button')].find((item) => item.textContent === 'Retry this installation')?.disabled).toBe(false)); });
+  await click('Retry this installation');
+  await contains('Ready for activation');
+  expect(posts).toEqual([{ expected_source_revision: 2 }]);
 });

@@ -36,6 +36,7 @@ from skulk.extensions.runtime_download import (
 )
 from skulk.extensions.runtime_manager import (
     InstallationRequest,
+    InstallRecoveryRequest,
     InstallSubmission,
     OperationRequest,
     ReleaseRequest,
@@ -94,6 +95,15 @@ class InstallStatus(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
     operation: InstallOperation | None = Field(
         description="Latest accepted installation, if any."
+    )
+
+
+class InstallRecoveryBody(BaseModel):
+    """Review the current source revision without changing the original release intent."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+    expected_source_revision: int = Field(
+        ge=1, description="Owner-reviewed current release source revision."
     )
 
 
@@ -364,7 +374,7 @@ def create_managed_plugins_router(
         "/installations/{plugin_id}/source",
         response_model=SourceStatus,
         summary="Configure an owner-trusted plugin release source",
-        description="Direct localhost/Tailscale owner administration only: replace the HTTPS directory, metadata basename and publisher trust at expected_revision, optionally provisioning a write-only feed token. Paired or relay plugin grants cannot replace trust or credential destinations. Omitted token retains its reference; changing a credential-bearing source requires explicit replacement or clear_token. No download, activation or paid request is made.",
+        description="Direct localhost/Tailscale owner administration only: update the HTTPS directory, metadata basename and publisher trust at expected_revision, optionally provisioning a write-only feed token. Omitted fields retain configured values; initial setup requires missing directory, metadata and trust. Existing revocations remain in force. Paired or relay plugin grants cannot replace trust or credential destinations. Omitted token retains its reference; changing a credential-bearing source requires explicit replacement or clear_token. No download, activation or paid request is made.",
     )
     async def configure_source(
         plugin_id: InstallationIdentifier,
@@ -381,6 +391,34 @@ def create_managed_plugins_router(
                 SourceRegistration(plugin_id=plugin_id, request=body)
             )
             return SourceStatus.model_validate_json(json.dumps(result))
+
+        return await invoke(action)
+
+    @router.post(
+        "/installations/{plugin_id}/install/{operation_id}/recover",
+        response_model=InstallOperation,
+        summary="Recover an interrupted plugin installation",
+        description="Explicitly resume the original signed release under expected_source_revision. Requires plugins:manage or direct owner authority. Credential rotation may change the source but never the original digest or intent. Retains prior attempts and incomplete runtime evidence; refuses rebuilding a selected or pending generation. Completed work is not repeated. Does not activate or make provider requests.",
+    )
+    async def recover_installation(
+        plugin_id: InstallationIdentifier,
+        operation_id: ProfileIdentifier,
+        body: InstallRecoveryBody,
+        request: Request,
+        response: Response,
+    ) -> InstallOperation:
+        """Retry only the original nonbillable installation after explicit operator action."""
+        services = await authorized(request, response, "plugins:manage")
+
+        async def action() -> InstallOperation:
+            result = await services.request(
+                InstallRecoveryRequest(
+                    plugin_id=plugin_id,
+                    operation_id=operation_id,
+                    expected_source_revision=body.expected_source_revision,
+                )
+            )
+            return InstallOperation.model_validate_json(json.dumps(result))
 
         return await invoke(action)
 

@@ -3779,10 +3779,11 @@ staging. It resolves no dependency versions and does not modify Skulk's environm
 | Method | Path | Parameters and behavior |
 | --- | --- | --- |
 | GET | `/v1/plugins/managed/installations/{plugin_id}/source` | Requires `plugins:read`. Returns `revision`, `configured`, opaque `credential_reference`, `credential_ready` and `trust_revision`; no network request or stored token value. |
-| POST | `/v1/plugins/managed/installations/{plugin_id}/source` | Direct localhost/Tailscale owner only; paired bearers and relay requests are refused. Body: `expected_revision` (zero initially), HTTPS `base_url` ending in `/`, `metadata_filename`, `trust`, optional write-only `token`, optional `clear_token`. Returns source readiness. `trust` contains monotonic `revision`, Unix `expires_at`, `publishers` mapping publisher IDs to Ed25519 public-key hex, and optional `revoked_publishers`/`revoked_artifacts` arrays. Same-revision trust changes, stale source revisions and expired trust are refused. |
+| POST | `/v1/plugins/managed/installations/{plugin_id}/source` | Direct localhost/Tailscale owner only; paired bearers and relay requests are refused. Body: `expected_revision` (zero initially), optional HTTPS `base_url` ending in `/`, `metadata_filename`, `trust`, write-only `token`, and `clear_token`. Omitted directory, filename and trust retain current values; initial setup must supply any missing values. Returns source readiness. `trust` contains monotonic `revision`, Unix `expires_at`, `publishers` mapping publisher IDs to Ed25519 public-key hex, and optional `revoked_publishers`/`revoked_artifacts` arrays. New trust revisions retain all prior revocations; these cannot be removed through source configuration. Same-revision trust changes, stale source revisions and expired trust are refused. |
 | GET | `/v1/plugins/managed/installations/{plugin_id}/release` | Requires `plugins:read`. Downloads and verifies only metadata, returning `runtime_digest`, `source_revision`, `publisher`, `bundle_id`, `version`, `sequence`, `platform`, `python_requires`, `skulk_build_sha256`, declared `permissions`, total `artifact_bytes` and Unix `expires_at`. The exact verified metadata is retained for a later install request. |
 | POST | `/v1/plugins/managed/installations/{plugin_id}/install` | Requires `plugins:manage`. Body: `operation_id` (32 lowercase hexadecimal characters), exact reviewed `runtime_digest`, `expected_source_revision`. Journals intent before returning `InstallOperation`, then downloads and stages under independent manager ownership. Reusing the ID with the same request reads its retained state; different intent is refused. Does not activate or approve spending. |
-| GET | `/v1/plugins/managed/installations/{plugin_id}/install` | Requires `plugins:read`. Returns `operation`, nullable before installation. The retained operation contains exact `request`, signed `review`, `state`, `downloaded_bytes` and sanitized `error_code`. Reconnect polls this route, never resubmits an uncertain request. |
+| GET | `/v1/plugins/managed/installations/{plugin_id}/install` | Requires `plugins:read`. Returns `operation`, nullable before installation. The retained operation contains exact `request`, signed `review`, `state`, `downloaded_bytes`, sanitized `error_code`, `attempt` (zero initially) and nullable `attempt_source_revision` for explicit recovery. Reconnect polls this route, never resubmits an uncertain request. |
+| POST | `/v1/plugins/managed/installations/{plugin_id}/install/{operation_id}/recover` | Requires `plugins:manage`. `operation_id` is the original 32-character lowercase hexadecimal ID. Body: `expected_source_revision` from current source readiness, including any explicit credential rotation. Revalidates the original signed metadata against current trust and host compatibility, retains prior attempt evidence, and journals another download/staging attempt for the same exact digest. Only `recovery_required` work is retried; other states return unchanged. Refuses busy installers, changed source revisions and more than eight recovery attempts. Does not activate or approve spending. |
 
 Installation states are `accepted`, `downloading`, `staging`, `staged` and
 `recovery_required`. Failure codes distinguish `download_failed`,
@@ -3790,7 +3791,11 @@ Installation states are `accepted`, `downloading`, `staging`, `staged` and
 HTTP/browser disconnect. Manager shutdown cancels network transfer and waits for
 owned offline staging; an interrupted operation is retained and never automatically
 replayed after restart. Partial artifacts and incomplete runtime evidence remain
-protected for local recovery. A `staged` result proves preparation, not activation,
+protected for explicit recovery. Recovery retains prior operations, downloaded
+files and incomplete generations before rebuilding. It never moves a selected
+generation or one pending activation, and never reseals a damaged completed
+generation. The original request and review remain immutable even when a rotated
+credential supplies the next attempt. A `staged` result proves preparation, not activation,
 current release trust or capability readiness; activation repeats verification.
 
 The source token is written into a generated protected file before publishing its
@@ -3816,8 +3821,22 @@ no service root or executable path argument and invokes no sudo. The existing
 `register`, `get`, `submit`, `operation` and `recover` actions remain available.
 Release actions are `configure_source` with `plugin_id` and nested source-update
 `request`; `source_status`, `inspect_release` and `install_status` with `plugin_id`;
-and `install` with `plugin_id` and nested installation `request`. Keep credential
+`install` with `plugin_id` and nested installation `request`; and `recover_install`
+with `plugin_id`, original `operation_id` and `expected_source_revision`. Keep credential
 input out of shell arguments and shell history. The wire limit remains 16 KiB.
+
+In the Plugins dashboard, **Add plugin** generates a stable installation identity,
+then opens the same source setup operation. The owner enters the HTTPS directory,
+metadata filename, publisher identity/public key, trust expiry and any feed
+credential. Changing publisher details requires distinct trust confirmation and
+replaces the publisher list with that key while retaining all revocations. Existing
+installations expose **Configure release source** for settings and credential
+rotation. Credential inputs are cleared before submission and excluded from Redux,
+browser storage and ordinary errors. Changed source revisions require an explicit
+status refresh before saving. **Retry this installation** recovers only the original
+failed installation after checking current source readiness; reconnect only reads
+the retained operation. Release activation still requires separate permission
+acceptance, and paid-capacity approval remains a separate plugin operation.
 
 The dashboard's **Install a release** controls inspect the configured release,
 show its version/permissions and size, stage exact bytes, and require a separate

@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Literal, cast, final
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
 
 from skulk.extensions.runtime_artifacts import (
     Digest,
@@ -300,7 +300,12 @@ class RuntimeInstaller:
             lock.close()
 
     async def stage(
-        self, metadata: bytes, artifacts: Path, *, operation_id: str | None = None
+        self,
+        metadata: bytes,
+        artifacts: Path,
+        *,
+        operation_id: str | None = None,
+        recover: bool = False,
     ) -> RuntimeOperation:
         """Stage one verified artifact set offline with a reconnectable operation ID.
 
@@ -308,7 +313,12 @@ class RuntimeInstaller:
         return recovery_required and cannot spawn another installer implicitly.
         Callers must persist the returned ID; a new browser connection reads
         operation status instead of resubmitting installation.
+        Explicit recovery preserves incomplete generations as evidence before
+        rebuilding the same signed bytes. Selected or completed generations are
+        never moved or resealed by recovery.
         """
+        if recover and operation_id is None:
+            raise ValueError("recovery requires the original operation ID")
         lock = RuntimeLock(self.installer)
         operation: RuntimeOperation | None = None
         record_started = False
@@ -327,7 +337,7 @@ class RuntimeInstaller:
             if prior is not None:
                 if prior.runtime_digest != runtime.digest:
                     raise ValueError("operation identity differs")
-                if prior.state != "staged":
+                if prior.state != "staged" and not recover:
                     interrupted = prior.model_copy(
                         update={
                             "state": "recovery_required",
@@ -342,14 +352,17 @@ class RuntimeInstaller:
             private_directory(self.root / "generations")
             generation = self.root / "generations" / runtime.digest
             if generation.exists() and not (generation / "staged.json").exists():
-                operation = operation.model_copy(
-                    update={
-                        "state": "recovery_required",
-                        "error_code": "installation_interrupted",
-                    }
-                )
-                self._save(operation)
-                return operation
+                if recover:
+                    self._retain_incomplete(generation, prior or operation)
+                else:
+                    operation = operation.model_copy(
+                        update={
+                            "state": "recovery_required",
+                            "error_code": "installation_interrupted",
+                        }
+                    )
+                    self._save(operation)
+                    return operation
 
             staged_operation = operation.model_copy(update={"state": "staged"})
 
@@ -461,3 +474,36 @@ class RuntimeInstaller:
             raise
         finally:
             lock.close()
+
+    def _retain_incomplete(self, generation: Path, operation: RuntimeOperation) -> None:
+        # The installer fence excludes surviving pip/venv processes. A selected
+        # runtime or pending activation must never be repaired underneath an owner.
+        for path in (
+            self.root / "runtime-selection.json",
+            self.root / "lifecycle-operations" / "pending.json",
+            self.installer / "selections" / "pending.json",
+        ):
+            try:
+                record = TypeAdapter(dict[str, JsonValue]).validate_json(
+                    read_private(path)
+                )
+            except FileNotFoundError:
+                continue
+            selection = record.get("selection", record)
+            if not isinstance(selection, dict) or not isinstance(
+                selection.get("runtime_digest"), str
+            ):
+                raise ValueError("selection state requires recovery first")
+            if selection["runtime_digest"] == operation.runtime_digest:
+                raise ValueError("selected runtime cannot be rebuilt in place")
+        private_directory(generation)
+        history = self.installer / "recovery" / operation.operation_id / uuid4().hex
+        private_directory(history)
+        write_private(history / "operation.json", operation.model_dump_json().encode())
+        os.rename(generation, history / "generation")
+        for directory in (generation.parent, history):
+            descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)

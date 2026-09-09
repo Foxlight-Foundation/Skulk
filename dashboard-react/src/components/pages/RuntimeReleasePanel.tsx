@@ -3,9 +3,11 @@ import { useSkulkTranslation } from '../../i18n/tolgee';
 import {
   useLazyGetRuntimeReleaseQuery, useGetRuntimeInstallationQuery,
   useInstallRuntimeReleaseMutation, useActivateRuntimeReleaseMutation,
+  useGetRuntimeSourceStatusQuery, useRecoverRuntimeInstallationMutation,
   type ManagedRuntime,
 } from '../../store/endpoints/plugins';
 import { Button } from '../common/Button';
+import { RuntimeSourceForm } from './RuntimeSourceForm';
 
 /** Review, stage and explicitly activate one trusted source without replaying a lost request. */
 export function RuntimeReleasePanel({ runtime }: { runtime: ManagedRuntime }) {
@@ -14,15 +16,18 @@ export function RuntimeReleasePanel({ runtime }: { runtime: ManagedRuntime }) {
   const installation = useGetRuntimeInstallationQuery(runtime.plugin_id, { pollingInterval: 3000, skipPollingIfUnfocused: true });
   const [install, installing] = useInstallRuntimeReleaseMutation();
   const [activate, activating] = useActivateRuntimeReleaseMutation();
+  const [recover, recovering] = useRecoverRuntimeInstallationMutation();
   const [submitted, setSubmitted] = useState<string | null>(null);
   const [activationSubmitted, setActivationSubmitted] = useState(false);
   const [acceptedDigest, setAcceptedDigest] = useState<string | null>(null);
   const [rollback, setRollback] = useState(false);
   const [notice, setNotice] = useState('');
+  const [sourceOpen, setSourceOpen] = useState(false);
   const operation = installation.currentData?.operation;
+  const source = useGetRuntimeSourceStatusQuery(runtime.plugin_id, { skip: operation?.state !== 'recovery_required', refetchOnMountOrArgChange: true });
   const review = inspection.currentData ?? operation?.review;
   const permissionsAccepted = !!review && acceptedDigest === review.runtime_digest;
-  const busy = installing.isLoading || activating.isLoading || inspection.isFetching;
+  const busy = installing.isLoading || activating.isLoading || recovering.isLoading || inspection.isFetching;
   const pending = operation && ['accepted', 'downloading', 'staging'].includes(operation.state);
   const uncertain = submitted && operation?.request.operation_id !== submitted;
   const staged = operation?.state === 'staged' && operation.review.runtime_digest === review?.runtime_digest;
@@ -33,7 +38,7 @@ export function RuntimeReleasePanel({ runtime }: { runtime: ManagedRuntime }) {
     downloading: t('plugins.installDownloading', 'Downloading verified artifacts'),
     staging: t('plugins.installStaging', 'Preparing isolated runtime'),
     staged: t('plugins.installStaged', 'Ready for activation'),
-    recovery_required: t('plugins.installRecovery', 'Installation requires local recovery'),
+    recovery_required: t('plugins.installRecovery', 'Installation needs recovery'),
   }[operation.state] : '';
   const inspectRelease = async () => {
     setAcceptedDigest(null);
@@ -62,7 +67,19 @@ export function RuntimeReleasePanel({ runtime }: { runtime: ManagedRuntime }) {
       setNotice(t('plugins.activationUncertain', 'The activation response was not confirmed. Check the retained lifecycle operation above before another action.'));
     }
   };
+  const recoverInstallation = async () => {
+    if (operation?.state !== 'recovery_required' || !source.currentData?.configured || !source.currentData.credential_ready) return;
+    setSubmitted(operation.request.operation_id);
+    setNotice('');
+    try {
+      await recover({ pluginId: runtime.plugin_id, operationId: operation.request.operation_id, expectedSourceRevision: source.currentData.revision }).unwrap();
+    } catch {
+      setNotice(t('plugins.recoveryUncertain', 'Recovery was not confirmed. Refresh installation status before trying again.'));
+    }
+  };
   return <section aria-label={t('plugins.releaseInstallation', 'Release installation')}>
+    <Button type="button" disabled={busy || !!pending} onClick={() => setSourceOpen(!sourceOpen)}>{sourceOpen ? t('plugins.closeSourceSetup', 'Close source setup') : t('plugins.configureReleaseSource', 'Configure release source')}</Button>
+    {sourceOpen ? <RuntimeSourceForm pluginId={runtime.plugin_id} onSaved={() => setSourceOpen(false)} /> : null}
     <Button type="button" disabled={busy || !!pending} onClick={() => void inspectRelease()}>{t('plugins.inspectRelease', 'Inspect configured release')}</Button>
     {installation.error ? <p role="status">{t('plugins.installStatusUnavailable', 'Installation status is unavailable. No request has been repeated.')}</p> : null}
     {review ? <>
@@ -80,7 +97,12 @@ export function RuntimeReleasePanel({ runtime }: { runtime: ManagedRuntime }) {
       </> : null}
     </> : null}
     {operation ? <p role="status">{stateLabel} · {(operation.downloaded_bytes / 1048576).toFixed(1)} MiB</p> : null}
-    <Button type="button" disabled={installation.isFetching || busy} onClick={() => void installation.refetch()}>{t('plugins.refreshInstallation', 'Refresh installation status')}</Button>
+    {operation?.state === 'recovery_required' ? <>
+      <p>{t('plugins.recoveryTerms', 'Retry downloads the originally reviewed release again and retains previous attempts. It does not activate the plugin.')}</p>
+      <Button type="button" disabled={busy || !!installation.error || source.isFetching || !!source.error || !source.currentData?.configured || !source.currentData.credential_ready} onClick={() => void recoverInstallation()}>{t('plugins.retryInstallation', 'Retry this installation')}</Button>
+      {source.error || (source.currentData && (!source.currentData.configured || !source.currentData.credential_ready)) ? <p role="status">{t('plugins.recoverySourceUnavailable', 'Restore the release source and credential before retrying installation.')}</p> : null}
+    </> : null}
+    <Button type="button" disabled={installation.isFetching || busy} onClick={() => { void installation.refetch(); if (operation?.state === 'recovery_required') void source.refetch(); }}>{t('plugins.refreshInstallation', 'Refresh installation status')}</Button>
     {notice && !(operation?.request.operation_id === submitted && operation.state === 'staged') ? <p role="status">{notice}</p> : null}
     <p>{t('plugins.installSeparateApproval', 'Installation and activation do not approve paid capacity. Provider setup and owner spending approval remain separate.')}</p>
   </section>;

@@ -19,6 +19,7 @@ from skulk.extensions.runtime_attachment import (
 from skulk.extensions.runtime_files import read_private
 from skulk.extensions.runtime_manager import (
     InstallationRequest,
+    InstallRecoveryRequest,
     InstallSubmission,
     InventoryRequest,
     OperationRequest,
@@ -94,6 +95,7 @@ type ManagementRequest = (
     | ReleaseRequest
     | InstallSubmission
     | SourceRegistration
+    | InstallRecoveryRequest
 )
 
 

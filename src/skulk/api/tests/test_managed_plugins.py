@@ -195,13 +195,18 @@ async def test_http_scopes_lifecycle_status_and_api_loss(
                 and "private-feed-test-secret" not in observed_source.text
             )
             downloads = manager.downloads["managed.fixture"]
+            fail_download = True
 
             def feed(request: httpx.Request) -> httpx.Response:
+                nonlocal fail_download
                 assert (
                     request.headers["Authorization"]
                     == "Bearer private-feed-test-secret"
                 )
                 name = request.url.path.rsplit("/", 1)[1]
+                if name == "bundle.pyz" and fail_download:
+                    fail_download = False
+                    return httpx.Response(503)
                 return httpx.Response(
                     200,
                     content=metadata
@@ -231,8 +236,32 @@ async def test_http_scopes_lifecycle_status_and_api_loss(
             )
             assert downloads.work is not None
             await downloads.work
+            interrupted = downloads.current()
+            assert interrupted is not None and interrupted.state == "recovery_required"
+            recovery_url = install_url + "/" + "3" * 32 + "/recover"
+            refused_recovery = await client.post(
+                recovery_url, headers=bearer, json={"expected_source_revision": 2}
+            )
+            assert (
+                refused_recovery.status_code == 409
+                and downloads.current() == interrupted
+            )
+            recovered = await client.post(
+                recovery_url, headers=bearer, json={"expected_source_revision": 1}
+            )
+            assert recovered.status_code == 200
+            assert (
+                InstallOperation.model_validate_json(recovered.content).request
+                == interrupted.request
+            )
+            assert downloads.work is not None
+            await downloads.work
             staged = downloads.current()
             assert staged is not None and staged.state == "staged"
+            repeated = await client.post(
+                recovery_url, headers=bearer, json={"expected_source_revision": 1}
+            )
+            assert InstallOperation.model_validate_json(repeated.content) == staged
             assert (await client.get(install_url, headers=bearer)).status_code == 200
             assert controller.selector.current() is None
             activate = LifecycleRequest(

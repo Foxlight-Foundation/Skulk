@@ -114,6 +114,20 @@ class SourceRegistration(_Request):
     )
 
 
+class InstallRecoveryRequest(_Request):
+    """Explicitly recover one original installation using the reviewed current source."""
+
+    action: Literal["recover_install"] = "recover_install"
+    plugin_id: PluginIdentifier = Field(description="Exact registered installation.")
+    operation_id: str = Field(
+        pattern=r"^[a-f0-9]{32}$", description="Original installation operation ID."
+    )
+    expected_source_revision: int = Field(
+        ge=1,
+        description="Reviewed current source revision, including any credential rotation.",
+    )
+
+
 type ManagerRequest = (
     InventoryRequest
     | InstallationRequest
@@ -123,6 +137,7 @@ type ManagerRequest = (
     | ReleaseRequest
     | InstallSubmission
     | SourceRegistration
+    | InstallRecoveryRequest
 )
 MANAGER_REQUEST: TypeAdapter[ManagerRequest] = TypeAdapter(ManagerRequest)
 
@@ -418,7 +433,8 @@ class RuntimeManager:
         | OperationRequest
         | ReleaseRequest
         | InstallSubmission
-        | SourceRegistration,
+        | SourceRegistration
+        | InstallRecoveryRequest,
     ) -> dict[str, JsonValue]:
         identifier = request.plugin_id
         try:
@@ -448,6 +464,12 @@ class RuntimeManager:
         controller = self.controllers.get(identifier)
         if controller is None:
             raise ValueError("installation is unavailable")
+        if isinstance(request, InstallRecoveryRequest):
+            return (
+                await self.downloads[identifier].recover(
+                    request.operation_id, request.expected_source_revision
+                )
+            ).model_dump(mode="json")
         if isinstance(request, SourceRegistration):
             return (
                 await self.downloads[identifier].configure(request.request)

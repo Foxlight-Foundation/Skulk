@@ -1676,6 +1676,13 @@ release inspection and install/status routes. The dashboard separates release
 review, staging and explicit permission acceptance/activation; `skulk-plugin-service
 manage` uses the same operations through the generated local connection.
 
+The dashboard generates installation identities and provides an owner source form
+with explicit publisher-key confirmation. Credential-only rotation retains source
+and trust, and trust renewal preserves earlier revocations. Credential values
+bypass Redux and browser persistence. Explicit installation recovery keeps the
+original digest and operation ID while retaining separate attempt evidence;
+selected, pending and sealed generations cannot be repaired in place.
+
 Plugins may also implement the optional `NodeConfigurationProvider` facet.
 It lists stable installed node identities and exposes their ordinary-settings
 schemas, values, validation and revision-fenced changes through `/v1/plugins`.
