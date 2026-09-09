@@ -1,0 +1,370 @@
+"""Provider-neutral adapter to a separately supervised local plugin owner."""
+
+import asyncio
+import contextlib
+import hashlib
+import json
+import os
+import stat
+import time
+from itertools import islice
+from pathlib import Path
+from typing import final
+
+from loguru import logger
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
+
+from skulk.extensions.calls import CapabilityCall
+from skulk.extensions.capabilities import CapabilityDescriptor
+from skulk.extensions.configuration import (
+    ConfigurableNode,
+    ConfigurationMutation,
+    ConfigurationResult,
+    NodeConfiguration,
+)
+from skulk.extensions.types import ExtensionContext
+
+_OBJECT = TypeAdapter(dict[str, JsonValue])
+
+
+class _WireModel(BaseModel):
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+
+class ManagedConnection(_WireModel):
+    """Owner-local setup record; never accepted through management HTTP requests."""
+
+    plugin_id: str = Field(
+        pattern=r"^managed\.[a-z0-9][a-z0-9._-]{0,80}$",
+        description="Stable local installation identifier.",
+    )
+    state_root: str = Field(
+        min_length=1,
+        max_length=4096,
+        description="Locally provisioned absolute service-state directory.",
+    )
+
+
+class _Node(_WireModel):
+    node_id: str
+    bundle_id: str
+    version: str
+    status: str
+    configurable: bool
+    descriptors: tuple[CapabilityDescriptor, ...] = Field(max_length=8)
+
+    def public(self) -> ConfigurableNode:
+        """Project an installed node onto the ordinary management inventory."""
+        return ConfigurableNode(
+            node_id=self.node_id,
+            bundle_id=self.bundle_id,
+            version=self.version,
+            status=self.status,
+            configurable=self.configurable,
+        )
+
+
+class _Description(_WireModel):
+    transport_node_id: str
+    nodes: tuple[_Node, ...] = Field(max_length=16)
+
+
+class _Settings(_WireModel):
+    revision: int = Field(ge=0)
+    enabled: bool
+    schema_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    values: dict[str, JsonValue]
+
+
+class _Configuration(_WireModel):
+    configuration_schema: dict[str, JsonValue] = Field(alias="schema")
+    settings: _Settings
+
+
+def _private_directory(path: Path) -> None:
+    info = path.lstat()
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.getuid()
+        or info.st_mode & 0o077
+    ):
+        raise ValueError("managed plugin directory is not protected")
+
+
+def _read_connection(path: Path) -> ManagedConnection:
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.getuid()
+            or info.st_mode & 0o077
+        ):
+            raise ValueError("managed connection is not protected")
+        with os.fdopen(descriptor, "rb", closefd=False) as source:
+            raw = source.read(8193)
+        if len(raw) > 8192:
+            raise ValueError("managed connection exceeds bound")
+        return ManagedConnection.model_validate_json(raw)
+    finally:
+        os.close(descriptor)
+
+
+@final
+class ManagedOwner:
+    """Adapt a fixed local owner channel without importing or launching its SDK.
+
+    Owner process failure withdraws cached readiness. This adapter never starts
+    services, substitutes an executable, retries a mutation or grants approval.
+    Configuration remains an optional facet separate from capability admission.
+    """
+
+    skulk_requires = ">=1.5.2,<2"
+
+    def __init__(
+        self, connection: ManagedConnection, *, disabled: bool = False
+    ) -> None:
+        """Bind an explicitly installed local connection and admission kill switch."""
+        self.name = connection.plugin_id
+        self.root = Path(connection.state_root)
+        if not self.root.is_absolute():
+            raise ValueError("managed state root must be absolute")
+        self.disabled = disabled
+        self.context: ExtensionContext | None = None
+        self.nodes: tuple[_Node, ...] = ()
+        self.observed = 0.0
+        self.available = False
+        self.poll_task: asyncio.Task[None] | None = None
+        self.refresh_lock = asyncio.Lock()
+
+    def chat_middleware(self) -> None:
+        """Managed owners do not intercept inference output."""
+        return None
+
+    def dynamic_capabilities(self) -> tuple[CapabilityDescriptor, ...]:
+        """Return bounded cached contracts, preserving ownership during failure."""
+        return tuple(
+            descriptor for node in self.nodes for descriptor in node.descriptors
+        )
+
+    def capability_ready(self, qualified_id: str) -> bool:
+        """Admit only recently observed ready capacity while the adapter is active."""
+        return (
+            not self.disabled
+            and self.available
+            and time.monotonic() - self.observed < 3
+            and any(
+                node.status == "ready"
+                and any(d.qualified_id == qualified_id for d in node.descriptors)
+                for node in self.nodes
+            )
+        )
+
+    async def _request(
+        self, message: dict[str, JsonValue], *, timeout: float = 30
+    ) -> dict[str, JsonValue]:
+        raw = json.dumps(message, allow_nan=False).encode() + b"\n"
+        if len(raw) > (65536 if message.get("operation") == "invoke" else 16384):
+            raise ValueError("managed request exceeds bound")
+        _private_directory(self.root)
+        digest = hashlib.sha256(str(self.root.absolute()).encode()).hexdigest()[:24]
+        directory = Path("/tmp") / f"skulk-control-{os.getuid()}-{digest}"
+        _private_directory(directory)
+        socket = directory / "control.sock"
+        info = socket.lstat()
+        if (
+            not stat.S_ISSOCK(info.st_mode)
+            or info.st_uid != os.getuid()
+            or info.st_mode & 0o077
+        ):
+            raise ValueError("managed socket is not protected")
+        async with asyncio.timeout(timeout):
+            reader, writer = await asyncio.open_unix_connection(socket, limit=131073)
+            try:
+                writer.write(raw)
+                await writer.drain()
+                response = await reader.readline()
+                if not response.endswith(b"\n") or len(response) > 131072:
+                    raise ValueError("invalid managed response frame")
+                result = _OBJECT.validate_json(response)
+                if set(result) == {"error"}:
+                    raise ValueError("managed operation refused")
+                payload = result.get("result")
+                if set(result) != {"result"} or not isinstance(payload, dict):
+                    raise ValueError("invalid managed response")
+                return payload
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+    async def refresh(self) -> None:
+        """Refresh the exact local host snapshot; failures immediately remove readiness."""
+        async with self.refresh_lock:
+            try:
+                result = await self._request({"operation": "describe"}, timeout=1)
+                snapshot = _Description.model_validate_json(json.dumps(result))
+                if self.context is None or snapshot.transport_node_id != str(
+                    self.context.node_id
+                ):
+                    raise ValueError("managed owner belongs to a different Skulk host")
+                identities = [node.node_id for node in snapshot.nodes]
+                bundles = [node.bundle_id for node in snapshot.nodes]
+                contracts = [
+                    d.qualified_id for node in snapshot.nodes for d in node.descriptors
+                ]
+                if (
+                    len(set(identities)) != len(identities)
+                    or len(set(bundles)) != len(bundles)
+                    or len(set(contracts)) != len(contracts)
+                ):
+                    raise ValueError("ambiguous managed owner inventory")
+                for node in snapshot.nodes:
+                    node.public()
+                    if any(d.io_mode != "unary" for d in node.descriptors):
+                        raise ValueError("managed owner requires unary contracts")
+                self.nodes = snapshot.nodes
+                self.observed = time.monotonic()
+                self.available = True
+            except (OSError, ValueError, TimeoutError):
+                self.available = False
+                raise RuntimeError("managed owner unavailable") from None
+
+    def on_start(self, context: ExtensionContext) -> None:
+        """Begin nonblocking local health observation; the OS owns the service."""
+        if self.poll_task is not None:
+            return
+        self.context = context
+        self.poll_task = asyncio.create_task(self._poll())
+
+    async def _poll(self) -> None:
+        while True:
+            with contextlib.suppress(RuntimeError):
+                await self.refresh()
+            await asyncio.sleep(1)
+
+    async def on_stop(self) -> None:
+        """Stop observation and admission without stopping independent owner cleanup."""
+        self.available = False
+        if self.poll_task is not None:
+            self.poll_task.cancel()
+            await asyncio.gather(self.poll_task, return_exceptions=True)
+            self.poll_task = None
+
+    async def configuration_nodes(self) -> tuple[ConfigurableNode, ...]:
+        """Read all installed nodes, including disabled children."""
+        await self.refresh()
+        return tuple(node.public() for node in self.nodes)
+
+    def _node(self, node_id: str) -> _Node:
+        for node in self.nodes:
+            if node.node_id == node_id:
+                return node
+        raise LookupError("managed node is not installed")
+
+    async def node_configuration(self, node_id: str) -> NodeConfiguration:
+        """Read ordinary settings from the exact observed node with an identity fence."""
+        await self.refresh()
+        node = self._node(node_id)
+        response = await self._request(
+            {"operation": "get", "bundle_id": node.bundle_id, "node_id": node_id}
+        )
+        current = _Configuration.model_validate_json(json.dumps(response))
+        return NodeConfiguration(
+            node_id=node_id,
+            configuration_schema=current.configuration_schema,
+            revision=current.settings.revision,
+            enabled=current.settings.enabled,
+            schema_digest=current.settings.schema_digest,
+            values=current.settings.values,
+        )
+
+    async def configure_node(
+        self, node_id: str, mutation: ConfigurationMutation
+    ) -> ConfigurationResult:
+        """Send one exact revision/schema-fenced action; never replay a lost response."""
+        await self.refresh()
+        node = self._node(node_id)
+        if (mutation.operation in {"validate", "edit"}) != (
+            mutation.values is not None
+        ):
+            raise ValueError("invalid configuration mutation")
+        await self._request(
+            {
+                "operation": mutation.operation,
+                "bundle_id": node.bundle_id,
+                "node_id": node_id,
+                "values": mutation.values,
+                "expected_revision": mutation.expected_revision,
+                "expected_schema_digest": mutation.expected_schema_digest,
+            }
+        )
+        return ConfigurationResult(
+            configuration=await self.node_configuration(node_id), validated=True
+        )
+
+    async def handle_call(
+        self, context: ExtensionContext, call: CapabilityCall
+    ) -> dict[str, object]:
+        """Forward one admitted unary call with its exact installed node and deadline."""
+        qualified_id = f"{call.capability_id}@{call.version}"
+        if self.context is not context or not self.capability_ready(qualified_id):
+            raise RuntimeError("managed capability unavailable")
+        node = next(
+            node
+            for node in self.nodes
+            if any(d.qualified_id == qualified_id for d in node.descriptors)
+        )
+        payload = _OBJECT.validate_json(json.dumps(call.payload, allow_nan=False))
+        result = await self._request(
+            {
+                "operation": "invoke",
+                "node_id": node.node_id,
+                "invoke": {
+                    "protocol": 1,
+                    "kind": "invoke",
+                    "call_id": call.call_id,
+                    "capability_id": call.capability_id,
+                    "version": call.version,
+                    "descriptor_revision": call.descriptor_revision,
+                    "remaining_seconds": min(call.timeout_seconds, 30.0),
+                    "payload": payload,
+                },
+            },
+            timeout=min(call.timeout_seconds, 30.0),
+        )
+        return dict(result)
+
+
+def load_managed_owners(
+    directory: Path, *, disabled: bool = False
+) -> tuple[ManagedOwner, ...]:
+    """Read bounded owner-only connection records, without importing private code.
+
+    Missing configuration leaves the existing host unchanged. Invalid records
+    are reported without local details and cannot affect inference startup.
+    """
+    try:
+        if not directory.exists():
+            return ()
+        _private_directory(directory)
+        paths = sorted(islice(directory.glob("*.json"), 17))
+        if len(paths) > 16:
+            raise ValueError("too many managed owners")
+        owners: dict[str, ManagedOwner] = {}
+        conflicts: set[str] = set()
+        for path in paths:
+            try:
+                owner = ManagedOwner(_read_connection(path), disabled=disabled)
+                if owner.name in owners or owner.name in conflicts:
+                    owners.pop(owner.name, None)
+                    conflicts.add(owner.name)
+                else:
+                    owners[owner.name] = owner
+            except (OSError, ValueError):
+                logger.warning(
+                    "A managed plugin connection is unavailable; check local setup"
+                )
+        return tuple(owners.values())
+    except (OSError, ValueError):
+        logger.warning("Managed plugin connections are unavailable; check local setup")
+        return ()

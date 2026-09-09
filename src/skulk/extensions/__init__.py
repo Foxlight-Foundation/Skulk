@@ -73,6 +73,7 @@ from skulk.extensions.types import (
     ChatMiddleware,
     ChatResponseSummary,
     DescribeNode,
+    DynamicCapabilityProvider,
     EmbedTexts,
     ExtensionContext,
     ReadClusterTelemetry,
@@ -93,6 +94,7 @@ from skulk.extensions.vad import (
 from skulk.extensions.validation import validate_against_schema
 
 __all__ = [
+    "DynamicCapabilityProvider",
     "ConfigurableNode",
     "ConfigurationMutation",
     "ConfigurationResult",

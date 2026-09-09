@@ -33,6 +33,7 @@ from skulk.extensions.types import (
     CapabilityStreamHandler,
     ChatMiddleware,
     ChatResponseSummary,
+    DynamicCapabilityProvider,
     ExtensionContext,
     SkulkExtension,
     SupportsExtensionShutdown,
@@ -87,6 +88,9 @@ class LoadedExtensions:
         self._configuration_providers: dict[str, NodeConfigurationProvider] = {}
         self._configuration_names: set[str] = set()
         self._capability_providers: dict[str, SkulkExtension] = {}
+        self._dynamic_providers: list[tuple[str, SkulkExtension]] = []
+        self._dynamic_observer: asyncio.Task[None] | None = None
+        self._dynamic_advertised: set[str] = set()
         self._started = False
         self._stopping = False
         self._names: list[str] = []
@@ -114,6 +118,8 @@ class LoadedExtensions:
                 logger.error(f"extension name property raised; skipping: {exc}")
                 continue
             self._extension_instances.append(extension)
+            if isinstance(extension, DynamicCapabilityProvider):
+                self._dynamic_providers.append((name, extension))
             try:
                 middleware = extension.chat_middleware()
             except Exception as exc:  # noqa: BLE001 - plugin must not crash startup
@@ -230,6 +236,7 @@ class LoadedExtensions:
         combined._names.extend(self._names)
         combined._chat_middlewares.extend(self._chat_middlewares)
         combined._startup_hooks.extend(self._startup_hooks)
+        combined._dynamic_providers.extend(self._dynamic_providers)
         for name in self._configuration_names:
             if name in combined._configuration_names:
                 combined._configuration_providers.pop(name, None)
@@ -308,7 +315,46 @@ class LoadedExtensions:
             descriptor
             for descriptor in self._capability_descriptors
             if self.capability_ready(descriptor.qualified_id)
-        )
+        ) + tuple(entry[2] for entry in self._dynamic_calls().values())
+
+    def _dynamic_calls(
+        self,
+    ) -> dict[str, tuple[str, CapabilityCallHandler, CapabilityDescriptor]]:
+        if self._stopping or len(self._dynamic_providers) > 32:
+            return {}
+        calls: dict[str, tuple[str, CapabilityCallHandler, CapabilityDescriptor]] = {}
+        conflicts: set[str] = set()
+        reserved = {descriptor.id for descriptor in self._capability_descriptors}
+        for name, provider in self._dynamic_providers:
+            try:
+                if not isinstance(provider, DynamicCapabilityProvider) or not isinstance(
+                    provider, CapabilityCallHandler
+                ):
+                    continue
+                descriptors = provider.dynamic_capabilities()
+                if len(descriptors) > 128:
+                    continue
+                for descriptor in descriptors:
+                    qualified_id = descriptor.qualified_id
+                    if descriptor.id in reserved or descriptor.io_mode != "unary":
+                        continue
+                    if qualified_id in calls or qualified_id in conflicts:
+                        calls.pop(qualified_id, None)
+                        conflicts.add(qualified_id)
+                        continue
+                    # Reserve conflicting identities even when one owner is
+                    # unavailable; readiness cannot transfer ownership silently.
+                    conflicts.add(qualified_id)
+                    if isinstance(provider, CapabilityReadiness) and not provider.capability_ready(
+                        qualified_id
+                    ):
+                        continue
+                    calls[qualified_id] = (name, provider, descriptor)
+            except Exception:
+                # Cached optional providers cannot break discovery or leak their
+                # exception payloads. Discard this provider's partial projection.
+                calls = {key: item for key, item in calls.items() if item[0] != name}
+        return calls
 
     def call_handler(
         self, qualified_id: str
@@ -319,9 +365,11 @@ class LoadedExtensions:
         loaded provider serves unary calls for that capability (unknown id,
         wrong version, or a discovery-only descriptor without a handler).
         """
-        if not self.capability_ready(qualified_id):
-            return None
-        return self._call_handlers.get(qualified_id)
+        if qualified_id in self._capability_providers:
+            if not self.capability_ready(qualified_id):
+                return None
+            return self._call_handlers.get(qualified_id)
+        return self._dynamic_calls().get(qualified_id)
 
     def handled_capability_ids(self) -> frozenset[str]:
         """Capability ids (bare, unversioned) with at least one call handler."""
@@ -329,7 +377,7 @@ class LoadedExtensions:
             entry[2].id
             for entry in self._call_handlers.values()
             if self.capability_ready(entry[2].qualified_id)
-        )
+        ) | frozenset(entry[2].id for entry in self._dynamic_calls().values())
 
     def stream_handler(
         self, qualified_id: str
@@ -359,8 +407,10 @@ class LoadedExtensions:
     def capability_ready(self, qualified_id: str) -> bool:
         """Read cached provider readiness; unknown, stopping and broken fail closed."""
         provider = self._capability_providers.get(qualified_id)
-        if provider is None or self._stopping:
+        if self._stopping:
             return False
+        if provider is None:
+            return qualified_id in self._dynamic_calls()
         try:
             return (
                 provider.capability_ready(qualified_id) is True
@@ -382,6 +432,10 @@ class LoadedExtensions:
         if self._stopping:
             return
         self._stopping = True
+        if self._dynamic_observer is not None:
+            self._dynamic_observer.cancel()
+            await asyncio.gather(self._dynamic_observer, return_exceptions=True)
+            self._dynamic_observer = None
 
         async def stop(extension: SupportsExtensionShutdown) -> None:
             try:
@@ -410,6 +464,8 @@ class LoadedExtensions:
         if self._started or self._stopping:
             return
         self._started = True
+        if self._dynamic_providers:
+            self._dynamic_observer = asyncio.create_task(self._observe_dynamic(context))
         for name, extension in self._startup_hooks:
             try:
                 extension.on_start(context)
@@ -418,6 +474,21 @@ class LoadedExtensions:
                     f"extension '{name}' on_start failed; continuing without "
                     f"its startup work: {exc}"
                 )
+
+    async def _observe_dynamic(self, context: ExtensionContext) -> None:
+        try:
+            while True:
+                current = {entry[2].id for entry in self._dynamic_calls().values()}
+                for tag in self._dynamic_advertised - current:
+                    context.withdraw_capability(tag)
+                for tag in current - self._dynamic_advertised:
+                    context.advertise_capability(tag)
+                self._dynamic_advertised = current
+                await asyncio.sleep(1)
+        finally:
+            for tag in self._dynamic_advertised:
+                context.withdraw_capability(tag)
+            self._dynamic_advertised.clear()
 
     async def transform_chat_request(
         self,
@@ -603,9 +674,14 @@ def load_extensions(
         skulk_version: Version to gate against (defaults to the installed
             Skulk version); injectable for tests.
     """
-    if os.environ.get("SKULK_EXTENSIONS_DISABLE", "").strip() == "1":
+    from skulk.extensions.managed import load_managed_owners
+    from skulk.shared.constants import SKULK_CONFIG_HOME
+
+    disabled = os.environ.get("SKULK_EXTENSIONS_DISABLE", "").strip() == "1"
+    managed = load_managed_owners(SKULK_CONFIG_HOME / "managed-plugins", disabled=disabled)
+    if disabled:
         logger.warning("SKULK_EXTENSIONS_DISABLE=1: skipping extension discovery")
-        return LoadedExtensions([])
+        return LoadedExtensions(managed)
 
     if candidates is None:
         candidates = entry_points(group=ENTRY_POINT_GROUP)
@@ -626,7 +702,7 @@ def load_extensions(
         if extension is not None:
             loaded.append(extension)
 
-    result = LoadedExtensions(loaded)
+    result = LoadedExtensions([*loaded, *managed])
     if result.names:
         # Log via the guarded .names, never by re-reading plugin properties.
         logger.info(

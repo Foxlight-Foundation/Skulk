@@ -517,8 +517,8 @@ readiness, and independent resource cleanup.
 - **Install on every node.** Chat middleware runs on the API node that owns
   the request, and any node can serve API traffic, so install extensions
   fleet-wide (the same discipline as Skulk versions).
-- **Kill switch:** `SKULK_EXTENSIONS_DISABLE=1` skips discovery entirely on
-  that node.
+- **Kill switch:** `SKULK_EXTENSIONS_DISABLE=1` skips Python entry-point discovery
+  and disables managed capability admission. Managed-owner configuration remains available.
 - **`BaseChatMiddleware`** is a no-op base class; subclass it and override
   only the hook you need.
 - Extension hooks currently cover the chat serving path. The surface will
@@ -546,3 +546,35 @@ values or local protected-file paths. The dashboard currently renders scalar,
 enumerated and nested-object fields with local schema references. Unsupported
 forms are identified explicitly; server-side schema validation remains
 authoritative. See the [HTTP contract](api-guide.md#plugin-node-configuration).
+
+## Separately supervised plugin owners
+
+`ManagedOwner` connects to a locally installed owner process through an owner-only
+Unix socket. Skulk imports no plugin SDK and does not launch an executable through
+this adapter. Local setup registers a protected JSON connection under
+`SKULK_CONFIG_HOME/managed-plugins/` with `plugin_id` (the `managed.` namespace)
+and an absolute `state_root`. This record is host-local setup data, not an HTTP
+request field. Symlinks, unsafe ownership/permissions and duplicate installation
+IDs are refused. Connection failure leaves the configuration provider listed as
+unavailable and removes capability readiness. Other valid connections still load.
+
+The local protocol reads installed node IDs, ordinary settings and cached unary
+descriptors; mutations fence node identity, settings revision and schema digest.
+The owner must report the same Skulk transport identity. Unary calls retain the
+negotiated contract and deadline, and are never replayed after a lost response.
+Management and call responses are bounded to 128 KiB; ordinary requests to 16 KiB
+and invocation requests to 64 KiB. The socket grants no remote operator scope or
+provider spending approval. The existing HTTP authorization boundary still applies.
+
+`DynamicCapabilityProvider.dynamic_capabilities()` is an optional synchronous,
+cached unary snapshot. It performs no I/O. The loader consults current snapshots
+for discovery and dispatch, so an owner's later arrival or activation needs no
+Skulk restart. Static capability IDs retain priority. Duplicate dynamic contracts
+are hidden even when one claimant is unavailable. The loader reconciles dynamic
+telemetry tags once per second; the managed adapter polls local health with a
+one-second timeout and refuses observations older than three seconds.
+
+Shutting down Skulk stops its observer and withdraws dynamic tags. The independent
+owner service and its cleanup obligations remain supervised separately. This
+adapter provides unary and ordinary configuration integration; service installation,
+release activation and steward proposal transport are separate owner operations.

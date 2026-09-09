@@ -3118,6 +3118,12 @@ The Plugins dashboard page uses the same plugin-owned configuration store and
 validation as its terminal interface. These endpoints expose ordinary settings;
 credential values must use a separate write-only provider interface.
 
+Locally registered managed owners use these same routes through the generic
+Unix-socket adapter. They remain in inventory when their process is unavailable;
+no private SDK is loaded into the API process. The adapter fences the exact node,
+revision and schema and never automatically replays a mutation after transport
+failure. Service paths and executable selection are not HTTP request parameters.
+
 | Method and path | Parameters | Behavior |
 | --- | --- | --- |
 | `GET /v1/plugins` | None | Returns installed plugins with `pluginId`, `available`, and `nodes`; each node has `nodeId`, `bundleId`, `version`, `status`, and `configurable`. Disabled nodes remain listed. An unavailable management provider has `available: false`. Requires `plugins:read`. |

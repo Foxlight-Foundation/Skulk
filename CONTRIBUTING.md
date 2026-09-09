@@ -6,6 +6,12 @@ Thank you for your interest in contributing to Skulk! Skulk is maintained by [Fo
 
 ## Getting Started
 
+Managed plugin adapter work belongs in `src/skulk/extensions/managed.py`; keep
+provider implementations and their dependency environments outside Skulk.
+Use isolated test state for owner connection records, never production setup.
+The optional cached discovery contract and local registration format are documented
+in [Extensions](website/docs/extensions.md#separately-supervised-plugin-owners).
+
 To run Skulk from source:
 
 **Prerequisites:**

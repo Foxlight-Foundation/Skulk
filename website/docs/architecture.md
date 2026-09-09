@@ -1564,6 +1564,16 @@ The adapters live in `src/skulk/api/adapters/`. Each one handles request normali
 
 ## Extensions (plugins)
 
+Separately supervised plugin owners connect through `extensions/managed.py`, a
+generic owner-only Unix-socket adapter. Local protected registrations identify
+the installation and service-state root; the API process imports no plugin SDK.
+The adapter exposes ordinary node configuration and recently observed unary
+contracts. `DynamicCapabilityProvider` lets the loader refresh discovery and
+dispatch from cached snapshots without restarting inference. Static capability
+IDs retain priority, conflicting dynamic claims are hidden, and owner failure
+withdraws readiness. A loader-owned observer reconciles dynamic telemetry tags;
+Skulk shutdown stops observation without stopping independent cleanup services.
+
 Extension startup and serving share one event loop. The API starts hooks only
 once its runtime begins and invokes optional asynchronous shutdown hooks before
 closing its lifetime, with discovery withdrawn and a shared thirty-second cleanup

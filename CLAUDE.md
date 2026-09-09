@@ -508,6 +508,15 @@ Rust code in `rust/` provides:
 
 ### Extension API (plugins)
 
+`extensions/managed.py` connects protected local owner registrations to separately
+supervised runtimes without importing their SDKs. `DynamicCapabilityProvider`
+supplies cached unary contracts for live loader lookup; static IDs retain priority
+and conflicting dynamic claims are hidden. The loader reconciles dynamic telemetry
+tags once per second. Owner health expires after three seconds; configuration
+remains a separate facet when capacity is disabled or unavailable. Local setup
+records live under `SKULK_CONFIG_HOME/managed-plugins/`; HTTP accepts no executable
+paths. Shutdown stops observation, not independent owner/cleanup services.
+
 Optional `NodeConfigurationProvider` (`extensions/configuration.py`) exposes stable installed-node settings independently of capability readiness. The `/v1/plugins` API and Plugins dashboard share plugin-owned schema validation and revision-fenced settings with terminal management. No credentials or configuration enter replicated State. Explicit plugin read/manage/approve grants are owner-controlled through `/v1/auth/plugin-grants`; existing pairings receive none, and broad operator write permission does not imply them.
 Separately installed packages register a zero-arg factory in the
 `skulk.extensions` entry-point group; `load_extensions()` discovers them once
