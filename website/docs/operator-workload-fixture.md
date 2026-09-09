@@ -50,11 +50,26 @@ resources are created; this is not a hosted campaign cleanup mechanism.
 
 ## Device and privacy boundary
 
-Released app schemas permit clear outer WebSockets only on loopback; pinned
-inner TLS still encrypts the API exchange. This fixture does not expose a LAN
-listener or weaken transport rules. Verify Android USB forwarding or simulator
-reachability separately. Physical iOS reachability remains a separate gate:
-do not substitute the operating relay or publish the fixture to work around it.
+An app schema accepting loopback WebSockets does not prove the installed app's
+native networking stack permits cleartext. In particular, Android's release
+network-security policy can prohibit a loopback `ws://` connection even when USB
+forwarding works. Never weaken that policy or substitute a debug build for
+released-client evidence. Verify trusted outer WSS on each physical platform.
+
+The CLI remains loopback-only. A programmatic `private_ingress` context hook on
+`isolated_fixture` and `observe_fixture` supports an independently expiring,
+device-allowlisted private TLS bridge to the generated relay port. For this
+pilot, the advertised origin must be an explicit `wss://` tailnet hostname and
+port; public domains, credentials, paths, and cleartext origins are rejected.
+The bridge must prohibit public Funnel access, independently stop on parent
+death, bound traffic and connections, preserve backpressure, and verify removal.
+Origin syntax validation alone is not an access-control check.
+
+Provisioning uses the same private WSS origin for app and gateway roles; all
+local listeners remain loopback-bound and signed authority and pinned inner
+TLS are unchanged. The context closes the ingress even when provisioning fails.
+There is no existing-authority or production-target input. Do not substitute
+the operating relay, expose a public fixture, or silently change artifact pins.
 
 Use only generated test prompts and speech input, never personal information.
 Generated handlers discard input and do not echo or persist it. Access logs
@@ -95,8 +110,14 @@ partial evidence. Control acknowledgements never echo input text.
 The observer adds one bounded opaque TCP bridge before the real inner-TLS
 listener. Socket lifetimes are measured at this **gateway TCP boundary**, not
 at the device's outer WebSocket. ASGI counters measure request bodies consumed
-and response bodies offered by the gateway. A completed gateway response is
-not proof the device received or rendered it. No paths, query strings, headers,
+and response bodies offered by the gateway. Completion is recorded when the
+final body (or promised trailers) successfully returns from ASGI `send`, not
+when application cleanup finishes. A disconnect notification concurrent with
+that final send waits for its outcome; this prevents normal streaming teardown
+from cancelling its own completion bookkeeping. Early transport closure,
+incomplete bodies/trailers, send errors, cancellation and non-2xx statuses remain
+failures. A completed gateway response is not proof the device received or
+rendered it. No paths, query strings, headers,
 peer addresses, credentials, prompts, responses, hashes of bodies, or packet
 traces are exported. Unknown paths become the fixed category `other`.
 
@@ -146,11 +167,13 @@ uv run pytest bench/tests/test_operator_workload_fixture.py
 ```
 
 The joined test uses a loopback-only, no-retry WebSocket/TLS client, not the
-mobile app. It checks actual pairing, generated reads, mutation rejection,
+mobile app. It checks actual pairing, generated reads and complete SSE/PCM
+streams with both server-EOF and client-close-on-framing behavior, mutation rejection,
 protected files and teardown. Other tests cover real token rotation/revocation,
 oversized input, generated streams, watchdog expiry and parent EOF.
 
-Observer tests cover real TCP lifetime, ASGI privacy, fail-closed bounds,
+Observer tests cover real TCP lifetime, ASGI privacy, terminal send/disconnect
+ordering, failed sends, cancellation, trailer completion, fail-closed bounds,
 incomplete capture, delayed TLS listener readiness, and verified-copy execution.
 The real relay integration runs both with and without observation. To also
 exercise the compiled recorder grammar, explicitly select its local directory
@@ -177,7 +200,18 @@ uv run python -c 'import json; from bench.operator_fixture_app import generated_
 
 The validator reads a fixed schema-module allowlist with `git show`, without
 changing the app checkout. It checks stable identity, ready model projections,
-and streaming speech metadata. Output explicitly marks physical-device and
+and streaming speech metadata. Generated models use canonical `TextGeneration`
+and `TextToSpeech` task values, not model-hub pipeline names. Validation also
+requires the text runtime to be chat-selectable; a ready runtime alone is
+insufficient. Output explicitly marks physical-device and
 capacity evidence false. Source compatibility does not prove the installed
 binary, native socket behavior, observed polling/stream profiles, capacity,
 endurance, or hosted behavior.
+
+Pass `--streams` as the validator's third argument and include `_chatChunks`
+(the decoded chunks from `bench.operator_fixture_app.generated_chat_chunks`) in its
+input to exercise the pinned app's actual SSE parser. This requires a complete
+text response and exactly one successful completion. Every synthetic SSE chunk,
+including the terminal chunk, carries a stable completion `id` and choice
+`index: 0`. Speech uses bounded mono PCM16 silence with explicit sample-rate,
+channel-count, and sample-format headers; no model inference is performed.

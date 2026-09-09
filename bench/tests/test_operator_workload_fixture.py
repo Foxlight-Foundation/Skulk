@@ -6,8 +6,9 @@ import hashlib
 import os
 import socket
 from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import cast
+from typing import TypedDict, cast
 from uuid import UUID
 
 import hypercorn.asyncio as hypercorn_asyncio
@@ -16,11 +17,15 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from hypercorn.config import Config
 from hypercorn.typing import ASGIFramework
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 import bench.operator_workload_fixture as fixture_module
-from bench.operator_fixture_app import generated_responses
-from bench.operator_fixture_client import request_fixture
+from bench.operator_fixture_app import (
+    generated_chat_chunks,
+    generated_responses,
+    generated_speech_chunks,
+)
+from bench.operator_fixture_client import request_fixture, request_fixture_bytes
 from bench.operator_fixture_observer import FixtureObserver, ObservationEvent
 from bench.operator_workload_fixture import (
     FixtureLeaseExpiredError,
@@ -28,9 +33,120 @@ from bench.operator_workload_fixture import (
     copy_verified_fixture_binary,
     fixture_lease,
     isolated_fixture,
+    validate_private_fixture_origin,
     verify_binary,
 )
 from skulk.operator.pairing import pairing_signature_message
+
+
+def test_generated_models_use_canonical_task_vocabulary() -> None:
+    """Released clients gate chat and speech using the canonical task values."""
+    models = cast(list[dict[str, object]], generated_responses()["/v1/models"]["data"])
+    assert models[0]["tasks"] == ["TextGeneration"]
+    assert models[1]["tasks"] == ["TextToSpeech"]
+
+
+class _ChatDelta(TypedDict, total=False):
+    content: str
+
+
+class _ChatChoice(TypedDict):
+    index: int
+    delta: _ChatDelta
+    finish_reason: str | None
+
+
+class _ChatChunk(TypedDict):
+    id: str
+    object: str
+    model: str
+    choices: list[_ChatChoice]
+
+
+async def test_generated_chat_contains_required_stream_identity() -> None:
+    """All SSE chunks, including the terminal chunk, satisfy client identity gates."""
+    chunks = [chunk async for chunk in generated_chat_chunks()]
+    assert chunks[-1] == b"data: [DONE]\n\n"
+    content: list[str] = []
+    finish_reason: str | None = None
+    adapter = TypeAdapter(_ChatChunk)
+    for chunk in chunks[:-1]:
+        payload = adapter.validate_json(
+            chunk.removeprefix(b"data: ").strip(), strict=True
+        )
+        assert payload["id"] == "fixture-generated-chat"
+        assert payload["object"] == "chat.completion.chunk"
+        assert payload["model"] == "fixture/generated-chat"
+        assert payload["choices"][0]["index"] == 0
+        content.append(payload["choices"][0]["delta"].get("content", ""))
+        finish_reason = payload["choices"][0]["finish_reason"]
+    assert "".join(content) == "Synthetic fixture response. No model was run."
+    assert finish_reason == "stop"
+
+
+async def test_generated_speech_is_bounded_frame_aligned_silence() -> None:
+    """Synthetic speech is three seconds of mono PCM16 at 24 kHz, not inference."""
+    chunks = [chunk async for chunk in generated_speech_chunks()]
+    assert len(chunks) == 30
+    assert all(chunk == bytes(4800) for chunk in chunks)
+    assert sum(map(len, chunks)) == 24000 * 2 * 3
+
+
+def test_private_fixture_origin_rejects_public_and_ambiguous_targets() -> None:
+    """The opt-in pilot cannot advertise public, cleartext, or credential URLs."""
+    assert validate_private_fixture_origin("wss://fixture.tail-test.ts.net:8443")
+    for origin in (
+        "ws://fixture.tail-test.ts.net:8443",
+        "wss://example.com:8443",
+        "wss://fixture.tail-test.ts.net",
+        "wss://user@fixture.tail-test.ts.net:8443",
+        "wss://fixture.tail-test.ts.net:8443/",
+        "wss://fixture.tail-test.ts.net:8443?x=y",
+        "wss://fixture.tail-test.ts.net:8443#fragment",
+        "wss://fixture.tail-test.ts.net:0",
+        "wss://fixture.tail-test.ts.net:65536",
+        "wss://fixture.tail-test.ts.net.evil:8443",
+        "wss://fixture.tail-test.ts.net:8443\n",
+    ):
+        with pytest.raises(ValueError):
+            validate_private_fixture_origin(origin)
+
+
+@pytest.mark.parametrize("valid_origin", [False, True])
+async def test_ingress_is_closed_on_startup_failure(
+    tmp_path: Path, valid_origin: bool
+) -> None:
+    """Origin rejection and partial provisioning both exit their owned ingress."""
+    from collections.abc import AsyncIterator
+
+    binary = tmp_path / "relay"
+    binary.write_bytes(b"#!/bin/sh\nexit 1\n")
+    binary.chmod(0o700)
+    settings = FixtureSettings(
+        relay_binary=binary,
+        relay_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
+    )
+    closed = False
+
+    @asynccontextmanager
+    async def ingress(port: int) -> AsyncIterator[str]:
+        nonlocal closed
+        assert 0 < port < 65536
+        try:
+            yield (
+                "wss://fixture.tail-test.ts.net:8443"
+                if valid_origin
+                else "wss://production.example:443"
+            )
+        finally:
+            closed = True
+
+    expected = RuntimeError if valid_origin else ValueError
+    message = "provisioning failed" if valid_origin else "tailnet WSS"
+    with pytest.raises(expected, match=message):
+        async with isolated_fixture(settings, private_ingress=ingress):
+            pytest.fail("invalid ingress must not reach fixture readiness")
+    assert closed
 
 
 def _base64url(value: bytes) -> str:
@@ -110,8 +226,10 @@ def test_fixture_executes_copied_verified_bytes_after_source_replacement(
 
 
 @pytest.mark.parametrize("observed", [False, True])
+@pytest.mark.parametrize("close_after_response_body", [False, True])
 async def test_real_fixture_pairs_reads_and_cleans_up(
     observed: bool,
+    close_after_response_body: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Exercise the real Rust relay and Python auth, not released-app capacity.
@@ -191,9 +309,41 @@ async def test_real_fixture_pairs_reads_and_cleans_up(
         assert exchange.status == 200
         token = str(exchange.body["accessToken"])
         for path, expected in generated_responses().items():
-            response = await request_fixture(remote, "GET", path, bearer=token)
+            response = await request_fixture(
+                remote,
+                "GET",
+                path,
+                bearer=token,
+                close_after_response_body=close_after_response_body,
+            )
             assert response.status == 200
             assert response.body == expected
+        chat_response = await request_fixture_bytes(
+            remote,
+            "POST",
+            "/v1/chat/completions",
+            bearer=token,
+            body={"model": "fixture/generated-chat", "messages": [], "stream": True},
+            close_after_response_body=close_after_response_body,
+        )
+        assert chat_response.status == 200
+        assert chat_response.body == b"".join(
+            [chunk async for chunk in generated_chat_chunks()]
+        )
+        speech_response = await request_fixture_bytes(
+            remote,
+            "POST",
+            "/v1/audio/speech",
+            bearer=token,
+            body={
+                "model": "fixture/generated-speech",
+                "input": "synthetic",
+                "stream": True,
+            },
+            close_after_response_body=close_after_response_body,
+        )
+        assert speech_response.status == 200
+        assert speech_response.body == bytes(144000)
         # The fixture cannot forward an arbitrary cluster mutation.
         assert (
             await request_fixture(
@@ -207,12 +357,12 @@ async def test_real_fixture_pairs_reads_and_cleans_up(
             observer.end()
             assert (
                 sum(event["type"] == "connection-open" for event in events)
-                == len(generated_responses()) + 4
+                == len(generated_responses()) + 6
             )
             assert sum(event.get("outcome") == "failed" for event in events) == 2
             assert (
                 sum(event.get("outcome") == "completed" for event in events)
-                == len(generated_responses()) + 2
+                == len(generated_responses()) + 4
             )
     assert not directory.exists()
     # Two independent connection attempts after the context exits verify both
