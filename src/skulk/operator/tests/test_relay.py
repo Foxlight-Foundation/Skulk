@@ -926,6 +926,81 @@ async def test_on_demand_connector_uses_control_plus_requested_data_socket(
 
 
 @pytest.mark.asyncio
+async def test_on_demand_cancellation_reaps_both_control_children(
+    tmp_path: Path,
+) -> None:
+    """Parent cancellation cannot strand receiver or heartbeat on a closed socket."""
+
+    release_server = asyncio.Event()
+
+    async def control(request: web.Request) -> web.WebSocketResponse:
+        """Accept the signed hello and hold control until the test releases it."""
+        websocket = web.WebSocketResponse()
+        await websocket.prepare(request)
+        message = await websocket.receive(timeout=2)
+        assert message.type is aiohttp.WSMsgType.BINARY
+        kind, fields = _test_control_fields(cast(bytes, message.data))
+        assert kind == 1
+        await websocket.send_bytes(
+            _test_control_message(
+                2, struct.pack(">HH", 1, 0), fields[4], fields[5],
+                fields[6], fields[7], fields[9],
+                (5_000).to_bytes(4, "big"),
+                (20_000).to_bytes(4, "big"), bytes(8),
+            )
+        )
+        await release_server.wait()
+        return websocket
+
+    application = web.Application()
+    application.router.add_get("/v1/connector/control", control)
+    runner = web.AppRunner(application)
+    await runner.setup()
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    listener.setblocking(False)
+    port = cast(tuple[str, int], listener.getsockname())[1]
+    await web.SockSite(runner, listener).start()
+    service, _ = _service(tmp_path)
+    connector = OperatorGatewayConnector(
+        service.configure_relay(
+            _on_demand_provisioning(f"ws://127.0.0.1:{port}"),
+            operator_api_port=52416,
+        ),
+        next_connector_generation=service.reserve_relay_connector_generation,
+        now_unix_millis=lambda: 1_000_000,
+    )
+    previous_tasks = asyncio.all_tasks()
+    connector_task = asyncio.create_task(connector.run())
+    children: set[asyncio.Task[object]] = set()
+    try:
+        async with asyncio.timeout(3):
+            while len(children) < 2:
+                children = {
+                    task for task in asyncio.all_tasks() - previous_tasks
+                    if task.get_name() in {
+                        "operator-relay-control-receiver",
+                        "operator-relay-control-heartbeat",
+                    }
+                }
+                await asyncio.sleep(0)
+        assert all(not task.done() for task in children)
+        connector_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await connector_task
+        assert all(task.cancelled() for task in children)
+    finally:
+        # The regression must clean up even when run against the broken parent.
+        connector_task.cancel()
+        for child in children:
+            child.cancel()
+        await asyncio.gather(connector_task, *children, return_exceptions=True)
+        release_server.set()
+        await runner.cleanup()
+
+
+@pytest.mark.asyncio
 async def test_on_demand_connector_backs_off_after_clean_control_close(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
