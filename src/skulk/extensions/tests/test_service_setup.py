@@ -114,6 +114,7 @@ async def test_setup_resumes_same_snapshot_and_preserves_latest_transport(
         tmp_path / "config",
         tmp_path / "system.service",
     )
+    config.mkdir(mode=0o755)
     layout = ServiceLayout("macos-arm64", os.getuid(), os.getgid(), "owner", "owners")
 
     def service_root(self: ServiceLayout) -> Path:
@@ -176,9 +177,11 @@ async def test_setup_resumes_same_snapshot_and_preserves_latest_transport(
     settings = HostSettings.model_validate_json(read_private(root / "host.json"))
     assert settings.transport_node_id == "latest-live-transport"
     connection = ServiceConnection.model_validate_json(
-        read_private(config / "managed-service.json")
+        read_private(config / "managed-service/connection.json")
     )
     assert settings.profile_id == connection.profile_id == interrupted.profile_id
+    assert config.stat().st_mode & 0o777 == 0o755
+    assert (config / "managed-service").stat().st_mode & 0o777 == 0o700
     fail = False
     completed = await setup_service()
     assert completed.phase == "ready"

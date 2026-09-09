@@ -3793,8 +3793,9 @@ configuration and all manager/plugin processes execute as the existing owner.
 No HTTP route invokes this helper, supplies unit contents or accepts an executable.
 
 The command creates an independent verified manager runtime, a generated local
-profile ID, protected setup operations and `SKULK_CONFIG_HOME/managed-service.json`.
-Internal paths and IDs are generated. One service is associated with one Skulk
+profile ID, protected setup operations and `SKULK_CONFIG_HOME/managed-service/connection.json`.
+Internal paths and IDs are generated. The connection lives in a private subdirectory;
+existing non-writable-by-others Skulk configuration directory permissions are preserved. One service is associated with one Skulk
 configuration per OS account; a different configuration is refused without
 adopting or rewriting its binding. The base Python installation and existing Skulk
 configuration must live outside Git checkouts and remain available after boot.

@@ -169,7 +169,7 @@ async def setup_service() -> SetupOperation:
         raise ValueError("run setup as the existing Skulk owner, not under sudo")
     layout = local_layout(os.getuid())
     base = Path(sys.executable).resolve(strict=True)
-    configuration = SKULK_CONFIG_HOME.absolute()
+    configuration = SKULK_CONFIG_HOME.resolve()
     _outside_checkout(base)
     _outside_checkout(configuration)
     host = await asyncio.to_thread(measure_host)
@@ -213,7 +213,19 @@ async def setup_service() -> SetupOperation:
             connection = ServiceConnection(
                 manager_root=str(layout.root), profile_id=profile_id
             )
-            connection_path = configuration / "managed-service.json"
+            configuration.mkdir(mode=0o700, parents=True, exist_ok=True)
+            info = configuration.lstat()
+            if (
+                not stat.S_ISDIR(info.st_mode)
+                or info.st_uid != os.getuid()
+                or info.st_mode & 0o022
+            ):
+                raise ValueError(
+                    "Skulk configuration must be owned by this account and not writable by others"
+                )
+            # Existing Skulk configuration commonly uses 0755. Keep its permissions
+            # intact and create a private child for managed-service connection data.
+            connection_path = configuration / "managed-service" / "connection.json"
             try:
                 previous = ServiceConnection.model_validate_json(
                     read_private(connection_path)
