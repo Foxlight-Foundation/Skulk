@@ -167,6 +167,62 @@ class VideoStore:
         self._artifacts[(command_id, purpose)] = stored
         return stored
 
+    def adopt(
+        self,
+        command_id: CommandId,
+        purpose: VideoArtifactPurpose,
+        *,
+        content_type: str,
+        size_bytes: int,
+        sha256: str,
+        expires_at: float,
+    ) -> bool:
+        """Re-attach an artifact committed by a previous process.
+
+        The job registry is the durable record of what was verified; the file
+        is accepted when it exists with the recorded size. Returns whether the
+        artifact is now served.
+        """
+
+        path = self._storage_dir / str(command_id) / _ARTIFACT_FILENAMES[purpose]
+        try:
+            if not path.is_file() or path.stat().st_size != size_bytes:
+                return False
+        except OSError:
+            return False
+        if time.time() > expires_at:
+            return False
+        self._artifacts[(command_id, purpose)] = StoredVideoArtifact(
+            command_id=command_id,
+            purpose=purpose,
+            file_path=path,
+            content_type=content_type,
+            size_bytes=size_bytes,
+            sha256=sha256,
+            expires_at=expires_at,
+        )
+        return True
+
+    def purge_unknown(self, keep: set[CommandId]) -> int:
+        """Delete job directories that no served or in-flight job owns."""
+
+        removed = 0
+        try:
+            entries = list(self._storage_dir.iterdir())
+        except OSError:
+            return 0
+        for entry in entries:
+            if not entry.is_dir():
+                continue
+            command_id = CommandId(entry.name)
+            if command_id in keep or any(
+                key[0] == command_id for key in (*self._artifacts, *self._assemblies)
+            ):
+                continue
+            shutil.rmtree(entry, ignore_errors=True)
+            removed += 1
+        return removed
+
     def abort_assembly(self, command_id: CommandId, purpose: VideoArtifactPurpose) -> None:
         """Discard a partial artifact."""
 

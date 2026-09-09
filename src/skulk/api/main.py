@@ -269,7 +269,7 @@ from skulk.api.types.openai_responses import (
     ResponsesRequest,
     ResponsesResponse,
 )
-from skulk.api.video_jobs import VideoJob, VideoJobRegistry
+from skulk.api.video_jobs import MAX_RETAINED_JOBS, VideoJob, VideoJobRegistry
 from skulk.api.video_store import VideoStore
 from skulk.connectivity.remote_access import RemoteAccessInfo, build_remote_access_info
 from skulk.connectivity.tailscale import TailscaleStatus, query_tailscale_status
@@ -1918,6 +1918,34 @@ class API:
         self._image_store = ImageStore(SKULK_IMAGE_CACHE_DIR)
         self._video_store = VideoStore(SKULK_VIDEO_STORE_DIR)
         self._video_jobs = VideoJobRegistry(SKULK_VIDEO_STORE_DIR / "jobs.json")
+        # Re-attach completed jobs' artifacts from the previous process and
+        # purge directories no job can ever serve again.
+        adopted: set[CommandId] = set()
+        for job in self._video_jobs.list(limit=MAX_RETAINED_JOBS):
+            if job.status != "completed" or job.output is None or job.expires_at is None:
+                continue
+            if self._video_store.adopt(
+                job.id,
+                "video",
+                content_type=job.output.content_type,
+                size_bytes=job.output.size_bytes,
+                sha256=job.output.sha256,
+                expires_at=float(job.expires_at),
+            ):
+                adopted.add(job.id)
+                if (
+                    job.output.thumbnail_sha256 is not None
+                    and job.output.thumbnail_size_bytes is not None
+                ):
+                    self._video_store.adopt(
+                        job.id,
+                        "thumbnail",
+                        content_type="image/jpeg",
+                        size_bytes=job.output.thumbnail_size_bytes,
+                        sha256=job.output.thumbnail_sha256,
+                        expires_at=float(job.expires_at),
+                    )
+        self._video_store.purge_unknown(adopted)
         self._tg: TaskGroup = TaskGroup()
 
     def set_runner_diagnostics_provider(
@@ -10450,6 +10478,22 @@ class API:
                     self._video_jobs.update(command_id, **changes)
                     self._settle_video_job(command_id)
         finally:
+            # The queue closes on cancellation, on a transport-declared failure,
+            # or when the producer's terminal frame was delivered. A job that is
+            # still live here can never receive another frame, so it becomes
+            # terminal now rather than lingering as active until a restart.
+            job = self._video_jobs.get(command_id)
+            if job is not None and not job.is_terminal:
+                cancelled = command_id in self._cancelled_command_ids
+                self._video_jobs.fail(
+                    command_id,
+                    "the job was cancelled"
+                    if cancelled
+                    else "the render stream closed before the job finished",
+                    cancelled=cancelled,
+                )
+                self._video_store.delete(command_id)
+            self._video_job_media_deadlines.pop(command_id, None)
             self._video_generation_queues.pop(command_id, None)
             self._chunk_reorder.pop(command_id, None)
             await self._finalize_command_stream(

@@ -41,6 +41,7 @@ from skulk.shared.models.memory_estimate import (
 from skulk.shared.models.model_cards import (
     ModelCard,
     ModelId,
+    VideoMode,
     get_card,
     get_current_registry_card,
     get_custom_card_storage_collision,
@@ -736,6 +737,45 @@ def text_generation_instances(state: State, model_id: ModelId) -> list[InstanceI
         ranked.append(
             (not ready, instance.system_role is not None, active, instance.instance_id)
         )
+    return [identifier for _, _, _, identifier in sorted(ranked)]
+
+
+def video_generation_instances(
+    state: State, model_id: ModelId, mode: VideoMode
+) -> list[InstanceId]:
+    """Rank viable video placements for one generation mode.
+
+    An instance qualifies only when its card declares the mode and no rank is
+    failed, stopping, or unreported; a still-loading rank may queue behind
+    ready capacity, as text routing allows. Ties break on active render load
+    and then on the instance identifier so placement is deterministic.
+    """
+    ranked: list[tuple[bool, int, str, InstanceId]] = []
+    for instance in state.instances.values():
+        assignments = instance.shard_assignments
+        if assignments.model_id != model_id or not assignments.runner_to_shard:
+            continue
+        shard = next(iter(assignments.runner_to_shard.values()))
+        video = shard.model_card.video
+        if video is None or mode not in video.modes:
+            continue
+        statuses = [state.runners.get(runner) for runner in assignments.runner_to_shard]
+        if any(
+            status is None
+            or isinstance(status, (RunnerFailed, RunnerShuttingDown, RunnerShutdown))
+            for status in statuses
+        ):
+            continue
+        ready = all(
+            isinstance(status, (RunnerReady, RunnerRunning)) for status in statuses
+        )
+        active = sum(
+            isinstance(task, VideoGenerationTask)
+            and task.instance_id == instance.instance_id
+            and task.task_status in (TaskStatus.Pending, TaskStatus.Running)
+            for task in state.tasks.values()
+        )
+        ranked.append((not ready, active, str(instance.instance_id), instance.instance_id))
     return [identifier for _, _, _, identifier in sorted(ranked)]
 
 
@@ -2075,39 +2115,16 @@ class Master:
                             # mode; no eligible instance yields a terminal
                             # failed task so the caller's job ends promptly.
                             requested_mode = command.task_params.implied_mode()
-                            for instance in self.state.instances.values():
-                                if (
-                                    instance.shard_assignments.model_id
-                                    != command.task_params.model
-                                ):
-                                    continue
-                                shard = next(
-                                    iter(
-                                        instance.shard_assignments.runner_to_shard.values()
-                                    ),
-                                    None,
-                                )
-                                video = (
-                                    shard.model_card.video if shard is not None else None
-                                )
-                                if video is None or requested_mode not in video.modes:
-                                    continue
-                                instance_task_counts[instance.instance_id] = sum(
-                                    1
-                                    for task in self.state.tasks.values()
-                                    if task.instance_id == instance.instance_id
-                                )
+                            video_candidates = video_generation_instances(
+                                self.state,
+                                ModelId(command.task_params.model),
+                                requested_mode,
+                            )
                             task_id = TaskId()
-                            video_unavailable = not instance_task_counts
+                            video_unavailable = not video_candidates
                             selected_instance_id = (
-                                min(
-                                    instance_task_counts,
-                                    key=lambda instance_id: (
-                                        instance_task_counts[instance_id],
-                                        str(instance_id),
-                                    ),
-                                )
-                                if instance_task_counts
+                                video_candidates[0]
+                                if video_candidates
                                 else next(
                                     (
                                         instance.instance_id

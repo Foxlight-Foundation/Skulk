@@ -15,7 +15,7 @@ from __future__ import annotations
 import re
 from typing import Annotated, Literal, cast
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from skulk.shared.models.model_cards import VideoMode
 from skulk.utils.pydantic_ext import CamelCaseModel
@@ -98,8 +98,11 @@ class VideoGenerationTaskParams(BaseModel):
     (``prompt``, ``model``, ``seconds``, ``size``) plus documented extensions
     (``mode``, ``steps``, ``seed``, ``lora``, ``audio``, attachments). The API
     resolves ``mode`` from the attachments before sending, so downstream
-    consumers always see an explicit mode.
+    consumers always see an explicit mode. The model is frozen and strict
+    because it is replicated verbatim from API to master to worker.
     """
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
     prompt: str = Field(min_length=1, max_length=MAX_VIDEO_PROMPT_CHARS)
     """Generation prompt; structured prompts are passed through verbatim."""

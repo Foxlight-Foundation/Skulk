@@ -11,9 +11,11 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
+import anyio
 import pytest
 from pydantic import ValidationError
 
+from skulk.api.main import API
 from skulk.api.video_jobs import MAX_RETAINED_JOBS, VideoJob, VideoJobRegistry
 from skulk.api.video_store import VideoStore
 from skulk.routing import topics
@@ -28,13 +30,14 @@ from skulk.routing.vision_media import (
     encode_vision_media_packet,
 )
 from skulk.shared.models.model_cards import ModelId, VideoMode
-from skulk.shared.types.chunks import DataChunk, VideoChunk
+from skulk.shared.types.chunks import DataChunk, ErrorChunk, VideoChunk
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.video import (
     VideoGenerationTaskParams,
     VideoOutputManifest,
     VideoReferenceSpec,
 )
+from skulk.utils.channels import channel
 
 DIGEST = "a" * 64
 MODEL = ModelId("org/video")
@@ -307,3 +310,92 @@ def test_job_registry_bounds_retained_terminal_jobs(tmp_path: Path) -> None:
         CommandId(f"j{MAX_RETAINED_JOBS + 3}"),
         CommandId(f"j{MAX_RETAINED_JOBS + 2}"),
     ]
+
+
+def test_video_store_adopts_committed_artifacts_after_restart(tmp_path: Path) -> None:
+    store = VideoStore(tmp_path, default_expiry_seconds=3600)
+    command_id = CommandId("job-restart")
+    payload = b"mp4" * 50
+    digest = hashlib.sha256(payload).hexdigest()
+    store.open_assembly(
+        command_id, "video", content_type="video/mp4", total_bytes=len(payload), total_chunks=1
+    )
+    store.append(command_id, "video", 1, payload)
+    stored = store.commit(command_id, "video", sha256=digest, total_chunks=1)
+    (tmp_path / "orphan").mkdir()
+    (tmp_path / "orphan" / "output.mp4").write_bytes(b"x")
+    restarted = VideoStore(tmp_path, default_expiry_seconds=3600)
+    assert restarted.get(command_id) is None
+    assert restarted.adopt(
+        command_id,
+        "video",
+        content_type="video/mp4",
+        size_bytes=len(payload),
+        sha256=digest,
+        expires_at=stored.expires_at,
+    )
+    adopted = restarted.get(command_id)
+    assert adopted is not None and adopted.file_path == stored.file_path
+    assert not restarted.adopt(
+        command_id,
+        "video",
+        content_type="video/mp4",
+        size_bytes=len(payload) + 1,
+        sha256=digest,
+        expires_at=stored.expires_at,
+    )
+    assert restarted.purge_unknown({command_id}) == 1
+    assert not (tmp_path / "orphan").exists() and (tmp_path / str(command_id)).exists()
+
+
+def _bare_api(tmp_path: Path) -> API:
+    api = object.__new__(API)
+    api._video_jobs = VideoJobRegistry(None)  # pyright: ignore[reportPrivateUsage]
+    api._video_store = VideoStore(tmp_path)  # pyright: ignore[reportPrivateUsage]
+    api._video_generation_queues = {}  # pyright: ignore[reportPrivateUsage]
+    api._chunk_reorder = {}  # pyright: ignore[reportPrivateUsage]
+    api._cancelled_command_ids = set()  # pyright: ignore[reportPrivateUsage]
+    api._video_job_media_deadlines = {}  # pyright: ignore[reportPrivateUsage]
+    return api
+
+
+async def test_cancelled_video_job_becomes_terminal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    api = _bare_api(tmp_path)
+    finalized: list[CommandId] = []
+
+    async def finalize(command_id: CommandId, _queue_map: object) -> None:
+        finalized.append(command_id)
+
+    monkeypatch.setattr(api, "_finalize_command_stream", finalize)
+    job = api._video_jobs.create(_job("cancel-me"))  # pyright: ignore[reportPrivateUsage]
+    sender, receiver = channel[VideoChunk | ErrorChunk]()
+    api._video_generation_queues[job.id] = sender  # pyright: ignore[reportPrivateUsage]
+    api._cancelled_command_ids.add(job.id)  # pyright: ignore[reportPrivateUsage]
+    async with anyio.create_task_group() as group:
+        group.start_soon(api._drain_video_job, job.id, receiver)  # pyright: ignore[reportPrivateUsage]
+        await sender.send(VideoChunk(model=MODEL, stage="sampling", progress=0.25))
+        await anyio.sleep(0.05)
+        sender.close()
+    drained = api._video_jobs.get(job.id)  # pyright: ignore[reportPrivateUsage]
+    assert drained is not None and drained.status == "cancelled"
+    assert drained.progress == 25
+    assert finalized == [job.id]
+
+
+async def test_render_error_fails_the_job(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    api = _bare_api(tmp_path)
+
+    async def finalize(_command_id: CommandId, _queue_map: object) -> None:
+        return None
+
+    monkeypatch.setattr(api, "_finalize_command_stream", finalize)
+    job = api._video_jobs.create(_job("boom"))  # pyright: ignore[reportPrivateUsage]
+    sender, receiver = channel[VideoChunk | ErrorChunk]()
+    api._video_generation_queues[job.id] = sender  # pyright: ignore[reportPrivateUsage]
+    async with anyio.create_task_group() as group:
+        group.start_soon(api._drain_video_job, job.id, receiver)  # pyright: ignore[reportPrivateUsage]
+        await sender.send(ErrorChunk(model=MODEL, error_message="runner died"))
+        await anyio.sleep(0.05)
+        sender.close()
+    failed = api._video_jobs.get(job.id)  # pyright: ignore[reportPrivateUsage]
+    assert failed is not None and failed.status == "failed" and failed.error == "runner died"

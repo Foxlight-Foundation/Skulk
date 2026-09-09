@@ -28,8 +28,10 @@ from skulk.shared.types.tasks import VideoGeneration as VideoGenerationTask
 from skulk.shared.types.video import VideoGenerationTaskParams
 from skulk.shared.types.worker.instances import InstanceId, MlxRingInstance
 from skulk.shared.types.worker.runners import (
+    RunnerFailed,
     RunnerId,
     RunnerReady,
+    RunnerStatus,
     ShardAssignments,
 )
 from skulk.shared.types.worker.shards import PipelineShardMetadata
@@ -38,7 +40,9 @@ from skulk.utils.channels import channel
 MODEL = ModelId("org/video")
 
 
-def _state(modes: list[str]) -> State:
+def _state(modes: list[str], status: RunnerStatus | None = None) -> State:
+    if status is None:
+        status = RunnerReady()
     card = ModelCard(
         model_id=MODEL,
         storage_size=Memory.from_mb(128),
@@ -70,7 +74,7 @@ def _state(modes: list[str]) -> State:
         hosts_by_node={},
         ephemeral_port=50000,
     )
-    return State(instances={instance.instance_id: instance}, runners={runner_id: RunnerReady()})
+    return State(instances={instance.instance_id: instance}, runners={runner_id: status})
 
 
 async def _dispatch(state: State, params: VideoGenerationTaskParams, expected: int) -> list[Event]:
@@ -134,3 +138,15 @@ async def test_unserved_mode_fails_terminally() -> None:
     assert isinstance(failure, TaskFailed)
     assert failure.error_type == "video_mode_unavailable"
     assert "t2va" in failure.error_message
+
+
+async def test_failed_runner_is_not_a_video_placement() -> None:
+    """A failed rank cannot render; the job must end instead of queueing forever."""
+    params = VideoGenerationTaskParams(prompt="a fox", model=str(MODEL), seconds=5)
+    events = await _dispatch(_state(["t2va"], RunnerFailed()), params, 2)
+    created = events[0]
+    assert isinstance(created, TaskCreated)
+    assert created.task.task_status == TaskStatus.Failed
+    failure = events[1]
+    assert isinstance(failure, TaskFailed)
+    assert failure.error_type == "video_mode_unavailable"

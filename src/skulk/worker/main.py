@@ -969,8 +969,9 @@ class Worker:
         # until they are written to task-local files and the plan gate opens.
         self._reference_media_verified: dict[CommandId, dict[int, bytes]] = {}
         self._reference_media_ready: set[CommandId] = set()
-        # Finished containers awaiting the owning API's verification.
-        self._output_media_pending: dict[CommandId, tuple[NodeId, float]] = {}
+        # Finished containers awaiting the owning API's verification, with the
+        # artifact purposes still unacknowledged.
+        self._output_media_pending: dict[CommandId, tuple[NodeId, float, set[str]]] = {}
         self._output_media_aborted: set[CommandId] = set()
         self._realtime_audio_pending: dict[
             CommandId, list[RealtimeAudioInputFrame]
@@ -1890,9 +1891,13 @@ class Worker:
             )
             shutil.rmtree(SKULK_VIDEO_OUTPUT_DIR / str(command_id), ignore_errors=True)
             return
+        expected = {"video"}
+        if manifest.thumbnail_sha256 is not None:
+            expected.add("thumbnail")
         self._output_media_pending[command_id] = (
             owner_node,
             time.monotonic() + _OUTPUT_MEDIA_ACK_TIMEOUT_SECONDS,
+            expected,
         )
         self._tg.start_soon(
             self._send_video_output, command_id, owner_node, chunk.model, manifest
@@ -2045,8 +2050,13 @@ class Worker:
                 pending = self._output_media_pending.get(packet.command_id)
                 if pending is None or pending[0] != packet.source_node:
                     continue
-                if packet.kind == "accepted" and packet.purpose == "video":
-                    self._finish_video_output(packet.command_id)
+                if packet.kind == "accepted":
+                    # Every declared artifact must be acknowledged before the
+                    # local directory goes away, or a still-streaming thumbnail
+                    # loses its source file mid-transfer.
+                    pending[2].discard(packet.purpose)
+                    if not pending[2]:
+                        self._finish_video_output(packet.command_id)
                 elif packet.kind in ("transport_failed", "cancelled"):
                     self._output_media_aborted.add(packet.command_id)
                     self._finish_video_output(packet.command_id)
@@ -2057,7 +2067,7 @@ class Worker:
         while True:
             await anyio.sleep(15)
             now = time.monotonic()
-            for command_id, (_owner, deadline) in list(
+            for command_id, (_owner, deadline, _remaining) in list(
                 self._output_media_pending.items()
             ):
                 if deadline <= now:
