@@ -725,6 +725,32 @@ declares what the model truthfully supports (streaming, realtime, reference
 audio, translation, fixed voices), and every serving surface below gates on
 those declarations rather than assuming them per family.
 
+## Video generation cards
+
+Audio-video generation models are ordinary model cards with a `[video]`
+section. The section states model truth and names no engine: the generation
+modes (`t2va` text only, `fl2va` first and/or last frame, `ref2va` reference
+images, clips, and audio), the trained duration range and frame grid (a frame
+count is valid when `count % frame_grid_multiple == frame_grid_offset`, and
+Skulk snaps requests up to that grid), canvas rules, whether output carries a
+synchronized audio track and at what rate, sampling defaults, reference
+bounds, and pinned companion artifacts (turbo LoRAs with their trained step
+counts and sigma shifts, model patches such as a ControlNet union, prompt
+embeddings, and engine graph templates). Every mode implies exactly one task
+family (`TextToVideo`, `ImageToVideo`, `ReferenceToVideo`) and the card's
+`tasks` list must agree, so placement, dispatch, and the catalog read one
+story. An external companion repository must carry its own immutable
+revision, the same rule as MTP sidecars and vision weights. A card may also
+carry a `[license]` section with operator-facing facts, including a
+`display_name` that user interfaces must show prominently when the license
+requires attribution; Skulk surfaces it and never enforces it. Video cards
+stay out of the catalog until `SKULK_ENABLE_VIDEO_MODELS=true`, mirroring the
+image gate, so a fleet without a video engine does not advertise models it
+cannot serve. The bundled MiniMax H3 cards under
+`resources/video_model_cards/` are the transition fallback for the signed
+registry cards and pin every file of the ComfyUI repack by size and content
+identity.
+
 ### Text to speech
 
 `POST /v1/audio/speech` serves mounted TTS models. The API validates the

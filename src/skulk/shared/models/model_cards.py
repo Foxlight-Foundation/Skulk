@@ -36,6 +36,7 @@ from skulk.shared.constants import (
     RESOURCES_DIR,
     SKULK_CUSTOM_MODEL_CARDS_DIR,
     SKULK_ENABLE_IMAGE_MODELS,
+    SKULK_ENABLE_VIDEO_MODELS,
     SKULK_MODEL_REGISTRY_CACHE_DIR,
     SKULK_MODEL_REGISTRY_ENABLED,
     SKULK_MODEL_REGISTRY_MAX_STALE_DAYS,
@@ -84,6 +85,7 @@ _BUILTIN_CARD_DIRS = [
     Path(RESOURCES_DIR) / "image_model_cards",
     Path(RESOURCES_DIR) / "embedding_model_cards",
     Path(RESOURCES_DIR) / "speech_model_cards",
+    Path(RESOURCES_DIR) / "video_model_cards",
 ]
 
 _card_cache: dict[ModelId, "ModelCard"] = {}
@@ -745,6 +747,10 @@ def _is_image_card(card: "ModelCard") -> bool:
     return any(t in (ModelTask.TextToImage, ModelTask.ImageToImage) for t in card.tasks)
 
 
+def _is_video_card(card: "ModelCard") -> bool:
+    return card_serves_video(card)
+
+
 def get_card(model_id: ModelId) -> "ModelCard | None":
     """Look up a single model card from the cache by ID."""
     return _card_cache.get(model_id)
@@ -896,9 +902,12 @@ def _cached_registry_card_by_id(card_id: str) -> "ModelCard | None":
 async def get_model_cards() -> list["ModelCard"]:
     """Return model cards visible under this node's feature configuration."""
     cards = await get_all_model_cards()
-    if SKULK_ENABLE_IMAGE_MODELS:
-        return cards
-    return [card for card in cards if not _is_image_card(card)]
+    return [
+        card
+        for card in cards
+        if (SKULK_ENABLE_IMAGE_MODELS or not _is_image_card(card))
+        and (SKULK_ENABLE_VIDEO_MODELS or not _is_video_card(card))
+    ]
 
 
 async def get_bundled_card(model_id: ModelId) -> "ModelCard | None":
@@ -934,6 +943,18 @@ class ModelTask(str, Enum):
     TextToSpeech = "TextToSpeech"
     SpeechToText = "SpeechToText"
     SpeechTranslation = "SpeechTranslation"
+    TextToVideo = "TextToVideo"
+    ImageToVideo = "ImageToVideo"
+    ReferenceToVideo = "ReferenceToVideo"
+
+
+_VIDEO_MODEL_TASKS: Final[frozenset[ModelTask]] = frozenset(
+    {
+        ModelTask.TextToVideo,
+        ModelTask.ImageToVideo,
+        ModelTask.ReferenceToVideo,
+    }
+)
 
 
 _SPEECH_MODEL_TASKS: Final[frozenset[ModelTask]] = frozenset(
@@ -1010,6 +1031,372 @@ def card_serves_speech(card: "ModelCard") -> bool:
         card.audio is not None
         or any(task in _SPEECH_MODEL_TASKS for task in card.tasks)
         or bool(_SPEECH_MODEL_CAPABILITIES.intersection(card.capabilities))
+    )
+
+
+class VideoMode(str, Enum):
+    """Generation modes an audio-video model card can declare."""
+
+    TextToAudioVideo = "t2va"
+    """Text prompt only."""
+    FramesToAudioVideo = "fl2va"
+    """Text plus an optional first frame, last frame, or both."""
+    ReferenceToAudioVideo = "ref2va"
+    """Text plus reference images, video clips, and audio clips."""
+
+
+_VIDEO_MODE_TASKS: Final[dict[VideoMode, ModelTask]] = {
+    VideoMode.TextToAudioVideo: ModelTask.TextToVideo,
+    VideoMode.FramesToAudioVideo: ModelTask.ImageToVideo,
+    VideoMode.ReferenceToAudioVideo: ModelTask.ReferenceToVideo,
+}
+
+
+class VideoCompanionKind(str, Enum):
+    """Kinds of separately downloadable video companion artifacts."""
+
+    Lora = "lora"
+    """A low-rank adapter applied to the transformer (for example a turbo
+    distillation adapter that cuts the step count)."""
+    ModelPatch = "model_patch"
+    """A model patch injected into the transformer (for example a ControlNet
+    union)."""
+    Embedding = "embedding"
+    """A prompt embedding referenced from the prompt text."""
+    GraphTemplate = "graph_template"
+    """An engine graph template bound with request parameters at render time."""
+
+
+class VideoCompanionConfig(CamelCaseModel):
+    """One pinned companion artifact used alongside the base video weights."""
+
+    kind: VideoCompanionKind
+    """What the companion is; selects how an engine applies it."""
+    name: str
+    """Stable companion identifier callers and engines refer to."""
+    path: str
+    """Canonical repository-relative POSIX path of the companion file."""
+    repo: ModelId | None = None
+    """Repository hosting the companion; ``None`` means the card's artifact
+    repository, whose ``source_revision`` then also pins this file."""
+    revision: Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")] | None = None
+    """Immutable commit of ``repo``; required whenever ``repo`` is external."""
+    size_bytes: int | None = None
+    """Exact upstream byte size at the pinned revision when known."""
+    modes: tuple[VideoMode, ...] = ()
+    """Generation modes the companion applies to; empty means every mode."""
+    steps: PositiveInt | None = None
+    """For distillation adapters, the sampling step count they were trained for."""
+    strength: float | None = None
+    """Default application strength when the engine supports one."""
+    video_shift: float | None = None
+    """Video sigma shift the companion expects, when it differs from the card."""
+    audio_shift: float | None = None
+    """Audio sigma shift the companion expects, when it differs from the card."""
+
+    @field_validator("kind", mode="before")
+    @classmethod
+    def _validate_kind(cls, value: str | VideoCompanionKind) -> VideoCompanionKind:
+        if isinstance(value, VideoCompanionKind):
+            return value
+        return VideoCompanionKind(value)
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, value: str) -> str:
+        if re.fullmatch(r"[a-z0-9][a-z0-9_.-]{0,63}", value) is None:
+            raise ValueError("companion name must be a short lowercase identifier")
+        return value
+
+    @field_validator("path")
+    @classmethod
+    def _validate_path(cls, value: str) -> str:
+        path = PurePosixPath(value)
+        if (
+            path.is_absolute()
+            or value != path.as_posix()
+            or "\\" in value
+            or any(part in {"", ".", ".."} for part in path.parts)
+        ):
+            raise ValueError("companion paths must be canonical and relative")
+        return value
+
+    @field_validator("modes", mode="before")
+    @classmethod
+    def _coerce_modes(cls, value: object) -> tuple[VideoMode, ...]:
+        if value is None:
+            return ()
+        if not isinstance(value, Iterable) or isinstance(value, (str, bytes)):
+            raise ValueError("modes must be a list of video modes")
+        modes = tuple(
+            item if isinstance(item, VideoMode) else VideoMode(item)
+            for item in cast("Iterable[str | VideoMode]", value)
+        )
+        if len(set(modes)) != len(modes):
+            raise ValueError("modes must not contain duplicates")
+        return modes
+
+    @field_serializer("modes")
+    def _serialize_modes(self, value: tuple[VideoMode, ...]) -> list[str]:
+        return [item.value for item in value]
+
+    @field_validator("size_bytes")
+    @classmethod
+    def _validate_size(cls, value: int | None) -> int | None:
+        if value is not None and value < 0:
+            raise ValueError("companion size cannot be negative")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_kind_fields(self) -> "VideoCompanionConfig":
+        if self.repo is not None and self.revision is None:
+            raise ValueError("an external companion repo requires an immutable revision")
+        if self.kind is not VideoCompanionKind.Lora and (
+            self.steps is not None
+            or self.video_shift is not None
+            or self.audio_shift is not None
+        ):
+            raise ValueError("steps and sigma shifts apply only to lora companions")
+        if self.kind is VideoCompanionKind.GraphTemplate and not self.modes:
+            raise ValueError("a graph template must name the modes it renders")
+        if self.strength is not None and self.kind not in (
+            VideoCompanionKind.Lora,
+            VideoCompanionKind.ModelPatch,
+        ):
+            raise ValueError("strength applies only to lora and model_patch companions")
+        return self
+
+
+class VideoReferenceLimits(CamelCaseModel):
+    """Bounds on the reference material a reference-to-video mode accepts."""
+
+    max_images: int = 0
+    """Maximum reference images per request."""
+    max_videos: int = 0
+    """Maximum reference video clips per request."""
+    max_audio_clips: int = 0
+    """Maximum reference audio clips per request."""
+    max_files: int | None = None
+    """Maximum files across every reference type; ``None`` means the sum."""
+    clip_min_seconds: PositiveInt | None = None
+    """Minimum duration of one reference video or audio clip."""
+    clip_max_seconds: PositiveInt | None = None
+    """Maximum duration of one reference video or audio clip."""
+    total_clip_seconds: PositiveInt | None = None
+    """Maximum combined duration of reference clips of one type."""
+
+    @model_validator(mode="after")
+    def _validate_limits(self) -> "VideoReferenceLimits":
+        if min(self.max_images, self.max_videos, self.max_audio_clips) < 0:
+            raise ValueError("reference limits cannot be negative")
+        if self.max_files is not None and self.max_files < 0:
+            raise ValueError("max_files cannot be negative")
+        if (
+            self.clip_min_seconds is not None
+            and self.clip_max_seconds is not None
+            and self.clip_min_seconds > self.clip_max_seconds
+        ):
+            raise ValueError("clip_min_seconds cannot exceed clip_max_seconds")
+        return self
+
+
+class VideoCardConfig(CamelCaseModel):
+    """Declarative audio-video generation contract for a model card.
+
+    The section states model truth: which modes exist, the duration and frame
+    grid the model was trained on, canvas rules, audio output, reference
+    bounds, sampling defaults, and pinned companion artifacts. Engines map
+    these facts onto their own mechanisms; nothing here names an engine.
+    """
+
+    modes: tuple[VideoMode, ...]
+    """Generation modes this artifact serves; each implies a ``ModelTask``."""
+    min_seconds: PositiveInt = 4
+    """Shortest output duration the model supports."""
+    max_seconds: PositiveInt = 15
+    """Longest output duration the model supports."""
+    fps: PositiveInt = 24
+    """Output frame rate."""
+    frame_grid_multiple: PositiveInt = 1
+    """Frame counts must satisfy ``count % frame_grid_multiple == frame_grid_offset``."""
+    frame_grid_offset: int = 0
+    """Residue a valid frame count leaves modulo ``frame_grid_multiple``."""
+    canvas_multiple: PositiveInt = 1
+    """Width and height must be multiples of this many pixels."""
+    default_short_edge: PositiveInt | None = None
+    """Trained short-edge resolution used when a request gives no size."""
+    max_pixels: PositiveInt | None = None
+    """Largest width times height the model serves at native quality."""
+    aspect_ratios: tuple[str, ...] = ()
+    """Advertised aspect ratios as ``W:H`` strings; empty means unconstrained."""
+    audio_output: bool = False
+    """Whether generated video carries a synchronized audio track."""
+    audio_sample_rate: PositiveInt | None = None
+    """Sample rate of generated audio in hertz."""
+    audio_channels: PositiveInt | None = None
+    """Channel count of generated audio."""
+    default_steps: PositiveInt = 20
+    """Sampling steps used when a request and its companions do not decide."""
+    video_shift: float | None = None
+    """Trained video sigma shift, when the sampler exposes one."""
+    audio_shift: float | None = None
+    """Trained audio sigma shift, when the sampler exposes one."""
+    reference_limits: VideoReferenceLimits | None = None
+    """Reference bounds; required when ``ref2va`` is among the modes."""
+    companions: tuple[VideoCompanionConfig, ...] = ()
+    """Pinned adapters, patches, embeddings, and graph templates."""
+
+    @field_validator("modes", mode="before")
+    @classmethod
+    def _coerce_modes(cls, value: object) -> tuple[VideoMode, ...]:
+        if not isinstance(value, Iterable) or isinstance(value, (str, bytes)):
+            raise ValueError("modes must be a list of video modes")
+        modes = tuple(
+            item if isinstance(item, VideoMode) else VideoMode(item)
+            for item in cast("Iterable[str | VideoMode]", value)
+        )
+        if not modes:
+            raise ValueError("a video card must declare at least one mode")
+        if len(set(modes)) != len(modes):
+            raise ValueError("modes must not contain duplicates")
+        return modes
+
+    @field_serializer("modes")
+    def _serialize_modes(self, value: tuple[VideoMode, ...]) -> list[str]:
+        return [item.value for item in value]
+
+    @field_validator("aspect_ratios", mode="before")
+    @classmethod
+    def _coerce_aspect_ratios(cls, value: object) -> tuple[str, ...]:
+        if value is None:
+            return ()
+        if not isinstance(value, Iterable) or isinstance(value, (str, bytes)):
+            raise ValueError("aspect_ratios must be a list of W:H strings")
+        ratios = tuple(str(item).strip() for item in cast("Iterable[object]", value))
+        for ratio in ratios:
+            if re.fullmatch(r"[1-9][0-9]*:[1-9][0-9]*", ratio) is None:
+                raise ValueError(f"invalid aspect ratio {ratio!r}; expected W:H")
+        if len(set(ratios)) != len(ratios):
+            raise ValueError("aspect_ratios must not contain duplicates")
+        return ratios
+
+    @field_serializer("aspect_ratios")
+    def _serialize_aspect_ratios(self, value: tuple[str, ...]) -> list[str]:
+        return list(value)
+
+    @field_validator("companions", mode="before")
+    @classmethod
+    def _coerce_companions(cls, value: object) -> tuple[VideoCompanionConfig, ...]:
+        if value is None:
+            return ()
+        if not isinstance(value, Iterable) or isinstance(value, (str, bytes)):
+            raise ValueError("companions must be a list of companion tables")
+        return tuple(
+            item
+            if isinstance(item, VideoCompanionConfig)
+            else VideoCompanionConfig.model_validate(item)
+            for item in cast("Iterable[object]", value)
+        )
+
+    @model_validator(mode="after")
+    def _validate_contract(self) -> "VideoCardConfig":
+        if self.min_seconds > self.max_seconds:
+            raise ValueError("min_seconds cannot exceed max_seconds")
+        if not 0 <= self.frame_grid_offset < self.frame_grid_multiple:
+            raise ValueError("frame_grid_offset must lie inside the frame grid multiple")
+        if self.audio_output and (
+            self.audio_sample_rate is None or self.audio_channels is None
+        ):
+            raise ValueError("audio_output requires audio_sample_rate and audio_channels")
+        if (
+            VideoMode.ReferenceToAudioVideo in self.modes
+            and self.reference_limits is None
+        ):
+            raise ValueError("ref2va requires reference_limits")
+        keys = [(item.kind, item.name) for item in self.companions]
+        if len(set(keys)) != len(keys):
+            raise ValueError("companions must be unique per kind and name")
+        declared = set(self.modes)
+        for item in self.companions:
+            unknown = set(item.modes) - declared
+            if unknown:
+                raise ValueError(
+                    f"companion {item.name} names undeclared modes "
+                    f"{sorted(mode.value for mode in unknown)}"
+                )
+        templates = [
+            (mode, item.name)
+            for item in self.companions
+            if item.kind is VideoCompanionKind.GraphTemplate
+            for mode in item.modes
+        ]
+        if len({mode for mode, _ in templates}) != len(templates):
+            raise ValueError("each mode may have at most one graph template")
+        return self
+
+    @property
+    def tasks(self) -> frozenset[ModelTask]:
+        """Return the task families implied by the declared modes."""
+        return frozenset(_VIDEO_MODE_TASKS[mode] for mode in self.modes)
+
+    def align_frame_count(self, frame_count: int) -> int:
+        """Snap a frame count up to the nearest value on the trained grid."""
+        if frame_count < 1:
+            raise ValueError("frame_count must be positive")
+        aligned = frame_count
+        while aligned % self.frame_grid_multiple != self.frame_grid_offset:
+            aligned += 1
+        return aligned
+
+    def frame_count_for_seconds(self, seconds: float) -> int:
+        """Return the aligned frame count for a requested duration."""
+        if not self.min_seconds <= seconds <= self.max_seconds:
+            raise ValueError(
+                f"duration must lie between {self.min_seconds} and {self.max_seconds}"
+            )
+        return self.align_frame_count(max(1, round(seconds * self.fps)))
+
+
+class LicenseCardConfig(CamelCaseModel):
+    """Operator-facing license facts for a model artifact.
+
+    Skulk fetches weights only on an explicit request and never redistributes
+    them, so the card surfaces the terms and lets the operator decide. Nothing
+    here is enforced by placement or download.
+    """
+
+    name: str
+    """Human-readable license name."""
+    url: str | None = None
+    """Where the license text lives."""
+    spdx_id: str | None = None
+    """SPDX identifier when one exists; custom community licenses have none."""
+    notice: str | None = None
+    """Short operator-facing note, for example a territorial scope or an
+    application requirement."""
+    display_name: str | None = None
+    """Product attribution the license requires user interfaces to show
+    prominently, for example the model's brand name."""
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("license name must not be empty")
+        return value.strip()
+
+    @field_validator("url")
+    @classmethod
+    def _validate_url(cls, value: str | None) -> str | None:
+        if value is not None and not value.startswith(("https://", "http://")):
+            raise ValueError("license url must be an http(s) URL")
+        return value
+
+
+def card_serves_video(card: "ModelCard") -> bool:
+    """Return whether the card declares an audio-video generation workload."""
+    return card.video is not None or any(
+        task in _VIDEO_MODEL_TASKS for task in card.tasks
     )
 
 
@@ -1938,7 +2325,8 @@ class ModelCard(CamelCaseModel):
     tasks: list[ModelTask]
     """The task types this model serves (``TextGeneration``, ``TextEmbedding``,
     ``TextToImage``, ``ImageToImage``, ``TextToSpeech``, ``SpeechToText``,
-    ``SpeechTranslation``); selects which runner handles it."""
+    ``SpeechTranslation``, ``TextToVideo``, ``ImageToVideo``,
+    ``ReferenceToVideo``); selects which runner handles it."""
     components: list[ComponentInfo] | None = None
     """For multi-component models (e.g. a diffusion stack), the per-component
     weight layout. ``None`` for a single-weights model."""
@@ -2018,6 +2406,13 @@ class ModelCard(CamelCaseModel):
     """Optional speech-serving configuration (TTS/STT kind, audio formats,
     streaming/realtime support, voices, reference audio, translation, sample
     rates); ``None`` for non-speech models."""
+    video: VideoCardConfig | None = None
+    """Optional audio-video generation contract (modes, duration and frame
+    grid, canvas rules, audio output, reference bounds, sampling defaults,
+    pinned companions); ``None`` for models that do not generate video."""
+    license: LicenseCardConfig | None = None
+    """Optional operator-facing license facts surfaced by the catalog and
+    user interfaces; never enforced by download or placement."""
     tooling: ToolingCardConfig | None = None
     """Optional tool-calling configuration (support, call format, builtin tools);
     ``None`` falls back to family defaults."""
@@ -2038,6 +2433,21 @@ class ModelCard(CamelCaseModel):
                 self.vision.model_copy(
                     update={"weights_repo": str(self.artifact_repository)}
                 ),
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_video_tasks_agree(self) -> "ModelCard":
+        """Keep the video section and the task list telling one story."""
+
+        declared = {task for task in self.tasks if task in _VIDEO_MODEL_TASKS}
+        if self.video is None:
+            if declared:
+                raise ValueError("video tasks require a [video] section")
+            return self
+        if self.video.tasks != frozenset(declared):
+            raise ValueError(
+                "tasks must list exactly the families implied by video.modes"
             )
         return self
 
@@ -2181,6 +2591,15 @@ class ModelCard(CamelCaseModel):
                         self.runtime.vllm_spec_draft_revision,
                     ),
                 )
+            )
+        if self.video is not None:
+            companions.extend(
+                (
+                    f"video.companions[{item.name}].repo",
+                    item.repo,
+                    item.revision,
+                )
+                for item in self.video.companions
             )
         for field_name, repository, revision in companions:
             if repository and repository != base_repository and revision is None:

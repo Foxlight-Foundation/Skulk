@@ -204,6 +204,13 @@ SKULK_ENABLE_IMAGE_MODELS = (
     _env("SKULK_ENABLE_IMAGE_MODELS", "false") or "false"
 ).lower() == "true"
 
+# Video cards stay out of the catalog until a node can serve them; the served
+# video engines flip this by default once they exist, the same way image
+# models are gated today.
+SKULK_ENABLE_VIDEO_MODELS = (
+    _env("SKULK_ENABLE_VIDEO_MODELS", "false") or "false"
+).lower() == "true"
+
 SKULK_OFFLINE = (_env("SKULK_OFFLINE", "false") or "false").lower() == "true"
 
 SKULK_TRACING_ENABLED = (

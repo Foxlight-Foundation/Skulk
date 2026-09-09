@@ -308,6 +308,14 @@ class BoundInstance(CamelCaseModel):
         )
 
     @property
+    def is_video_model(self) -> bool:
+        return (
+            ModelTask.TextToVideo in self.bound_shard.model_card.tasks
+            or ModelTask.ImageToVideo in self.bound_shard.model_card.tasks
+            or ModelTask.ReferenceToVideo in self.bound_shard.model_card.tasks
+        )
+
+    @property
     def is_embedding_model(self) -> bool:
         return ModelTask.TextEmbedding in self.bound_shard.model_card.tasks
 

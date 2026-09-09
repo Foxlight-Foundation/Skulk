@@ -551,7 +551,7 @@ card-content digest from the same effective catalog/installed precedence as
 place resources; controllers must repeat identity and live compatibility checks.
 
 Skulk now treats model capability handling as two layers:
-- **Model cards**: persisted declarative metadata, including optional `reasoning`, `modalities`, `audio`, `tooling`, and `runtime` sections for refined model support
+- **Model cards**: persisted declarative metadata, including optional `reasoning`, `modalities`, `audio`, `video`, `license`, `tooling`, and `runtime` sections for refined model support. The `video` section declares audio-video generation truth (modes `t2va`/`fl2va`/`ref2va`, each implying one of `TextToVideo`/`ImageToVideo`/`ReferenceToVideo`; duration, fps and frame grid; canvas; audio output; reference limits; pinned lora/model_patch/embedding/graph_template companions) and names no engine; video cards are hidden until `SKULK_ENABLE_VIDEO_MODELS=true`, like the image gate
 - **Resolved capability profiles**: normalized runtime behavior contracts derived from the card plus conservative family defaults
 
 This capability spine is the source of truth for model-aware reasoning defaults, prompt rendering, output parsing, tool-call handling, speech/TTS/STT metadata, and additive `/v1/models` metadata consumed by the dashboard.
