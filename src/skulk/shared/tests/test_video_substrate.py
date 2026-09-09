@@ -37,6 +37,7 @@ from skulk.routing.vision_media import (
 from skulk.shared.models.model_cards import ModelId, VideoMode
 from skulk.shared.types.chunks import DataChunk, ErrorChunk, VideoChunk
 from skulk.shared.types.common import CommandId, NodeId
+from skulk.shared.types.state import State
 from skulk.shared.types.video import (
     VideoGenerationTaskParams,
     VideoOutputManifest,
@@ -232,7 +233,7 @@ def test_video_store_assembles_and_verifies(tmp_path: Path) -> None:
         command_id, "video", content_type="video/mp4", total_bytes=len(payload), total_chunks=2
     )
     store.append(command_id, "video", 1, payload[:500])
-    with pytest.raises(ValueError, match="out-of-order"):
+    with pytest.raises(ValueError, match="exceeds the declared count"):
         store.append(command_id, "video", 3, payload[500:])
     store.append(command_id, "video", 2, payload[500:])
     stored = store.commit(command_id, "video", sha256=digest, total_chunks=2)
@@ -448,6 +449,8 @@ async def test_terminal_frame_keeps_job_waiting_for_media(tmp_path: Path, monkey
     manifest = VideoOutputManifest(
         sha256=DIGEST, size_bytes=10, width=64, height=64, frame_count=5, fps=24, seconds=0.2
     )
+    api._close_command_queue = lambda _command_id: None  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
+    api.state = State()
     sender, receiver = channel[VideoChunk | ErrorChunk]()
     api._video_generation_queues[job.id] = sender  # pyright: ignore[reportPrivateUsage]
     async with anyio.create_task_group() as group:
@@ -461,9 +464,15 @@ async def test_terminal_frame_keeps_job_waiting_for_media(tmp_path: Path, monkey
     assert waiting is not None and waiting.status == "in_progress"
     assert waiting.render_finished and waiting.stage == "uploading"
     assert job.id in api._video_job_media_deadlines  # pyright: ignore[reportPrivateUsage]
-    api._video_jobs.update(job.id, media_delivered=True)  # pyright: ignore[reportPrivateUsage]
+    store = api._video_store  # pyright: ignore[reportPrivateUsage]
+    payload = b"0123456789"
+    store.open_assembly(job.id, "video", content_type="video/mp4", total_bytes=10, total_chunks=1)
+    store.append(job.id, "video", 1, payload)
+    store.commit(job.id, "video", sha256=hashlib.sha256(payload).hexdigest(), total_chunks=1)
     api._settle_video_job(job.id)  # pyright: ignore[reportPrivateUsage]
-    assert api._video_jobs.get(job.id).status == "completed"  # pyright: ignore[reportOptionalMemberAccess, reportPrivateUsage]
+    mismatched = api._video_jobs.get(job.id)  # pyright: ignore[reportPrivateUsage]
+    assert mismatched is not None and mismatched.status == "failed"
+    assert "does not match its manifest" in (mismatched.error or "")
 
 
 def test_adopted_artifact_is_hashed_before_it_is_served(tmp_path: Path) -> None:
@@ -482,3 +491,60 @@ def test_adopted_artifact_is_hashed_before_it_is_served(tmp_path: Path) -> None:
     )
     assert store.get(command_id) is None
     assert not directory.exists()
+
+
+async def test_settle_requires_every_declared_artifact_to_match(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    api = _bare_api(tmp_path)
+    api._close_command_queue = lambda _command_id: None  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
+    api.state = State()
+    registry = api._video_jobs  # pyright: ignore[reportPrivateUsage]
+    store = api._video_store  # pyright: ignore[reportPrivateUsage]
+    job = registry.create(_job("declared"))
+    video = b"container"
+    thumb = b"jpeg"
+    manifest = VideoOutputManifest(
+        sha256=hashlib.sha256(video).hexdigest(),
+        size_bytes=len(video),
+        width=64,
+        height=64,
+        frame_count=5,
+        fps=24,
+        seconds=0.2,
+        thumbnail_sha256=hashlib.sha256(thumb).hexdigest(),
+        thumbnail_size_bytes=len(thumb),
+    )
+    registry.update(job.id, render_finished=True, output=manifest)
+    store.open_assembly(job.id, "video", content_type="video/mp4", total_bytes=len(video), total_chunks=1)
+    store.append(job.id, "video", 1, video)
+    store.commit(job.id, "video", sha256=manifest.sha256, total_chunks=1)
+    api._settle_video_job(job.id)  # pyright: ignore[reportPrivateUsage]
+    pending = registry.get(job.id)
+    assert pending is not None and not pending.is_terminal and not pending.media_delivered
+    store.open_assembly(job.id, "thumbnail", content_type="image/jpeg", total_bytes=len(thumb), total_chunks=1)
+    store.append(job.id, "thumbnail", 1, thumb)
+    store.commit(job.id, "thumbnail", sha256=hashlib.sha256(thumb).hexdigest(), total_chunks=1)
+    api._settle_video_job(job.id)  # pyright: ignore[reportPrivateUsage]
+    done = registry.get(job.id)
+    assert done is not None and done.status == "completed" and done.media_delivered
+
+
+def test_video_store_reorders_early_chunks_within_a_bounded_window(tmp_path: Path) -> None:
+    store = VideoStore(tmp_path, default_expiry_seconds=3600)
+    command_id = CommandId("reorder")
+    parts = [b"aa", b"bb", b"cc", b"dd"]
+    payload = b"".join(parts)
+    store.open_assembly(
+        command_id, "video", content_type="video/mp4", total_bytes=len(payload), total_chunks=4
+    )
+    store.append(command_id, "video", 3, parts[2])
+    store.append(command_id, "video", 1, parts[0])
+    store.append(command_id, "video", 4, parts[3])
+    store.append(command_id, "video", 4, parts[3])  # duplicate re-delivery is ignored
+    store.append(command_id, "video", 2, parts[1])
+    stored = store.commit(command_id, "video", sha256=hashlib.sha256(payload).hexdigest(), total_chunks=4)
+    assert stored.file_path.read_bytes() == payload
+    other = CommandId("gap")
+    store.open_assembly(other, "video", content_type="video/mp4", total_bytes=4, total_chunks=2)
+    store.append(other, "video", 2, b"zz")
+    with pytest.raises(ValueError, match="still missing"):
+        store.commit(other, "video", sha256=DIGEST, total_chunks=2)

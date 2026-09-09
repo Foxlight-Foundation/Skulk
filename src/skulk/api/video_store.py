@@ -28,6 +28,8 @@ _ARTIFACT_FILENAMES: dict[VideoArtifactPurpose, str] = {
 }
 _MAX_ARTIFACT_BYTES = 4 * 1024 * 1024 * 1024
 """Absolute ceiling on one artifact, well above any 15 s 768p container."""
+_MAX_STASHED_CHUNKS = 256
+"""Out-of-order chunks held per assembly on a reordering transport."""
 
 
 class StoredVideoArtifact(BaseModel, frozen=True):
@@ -66,6 +68,8 @@ class _Assembly:
     digest: _Digest = field(default_factory=hashlib.sha256)
     received_bytes: int = 0
     next_sequence: int = 1
+    stash: dict[int, bytes] = field(default_factory=dict)
+    """Chunks that arrived ahead of ``next_sequence`` on a reordering transport."""
 
 
 def _file_sha256(path: Path) -> str | None:
@@ -134,10 +138,26 @@ class VideoStore:
         assembly = self._assemblies.get((command_id, purpose))
         if assembly is None:
             raise ValueError("no open assembly for this artifact")
+        if sequence < assembly.next_sequence or sequence in assembly.stash:
+            return  # duplicate re-delivery
+        if sequence > assembly.total_chunks:
+            raise ValueError(f"artifact chunk {sequence} exceeds the declared count")
         if sequence != assembly.next_sequence:
-            raise ValueError(
-                f"out-of-order artifact chunk {sequence}, expected {assembly.next_sequence}"
-            )
+            # Zenoh delivers a stream in order; the gossipsub fallback may not.
+            # Hold a bounded window of early chunks and drain them in order.
+            if len(assembly.stash) >= _MAX_STASHED_CHUNKS:
+                raise ValueError(
+                    f"artifact reorder window exceeded waiting for chunk "
+                    f"{assembly.next_sequence}"
+                )
+            assembly.stash[sequence] = data
+            return
+        self._write_chunk(assembly, data)
+        while assembly.next_sequence in assembly.stash:
+            self._write_chunk(assembly, assembly.stash.pop(assembly.next_sequence))
+
+    @staticmethod
+    def _write_chunk(assembly: _Assembly, data: bytes) -> None:
         if assembly.received_bytes + len(data) > assembly.total_bytes:
             raise ValueError("artifact chunks exceed the declared size")
         assembly.handle.write(data)
@@ -160,6 +180,8 @@ class VideoStore:
             raise ValueError("no open assembly for this artifact")
         assembly.handle.close()
         try:
+            if assembly.stash:
+                raise ValueError("artifact completed with chunks still missing")
             if assembly.next_sequence - 1 != total_chunks or total_chunks != assembly.total_chunks:
                 raise ValueError("artifact chunk count does not match its declaration")
             if assembly.received_bytes != assembly.total_bytes:

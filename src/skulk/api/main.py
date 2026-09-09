@@ -2044,6 +2044,16 @@ class API:
         self._vision_media_ack_deadlines = {}
         self._vision_media_models = {}
         self._vision_media_failures = {}
+        # A new session cannot deliver the previous session's containers; a
+        # job still waiting for its media (its DATA queue is already gone) has
+        # no other path to a terminal state.
+        for command_id in list(self._video_job_media_deadlines):
+            job = self._video_jobs.get(command_id)
+            if job is not None and not job.is_terminal:
+                self._video_store.delete(command_id)
+                self._video_jobs.fail(
+                    command_id, "the API session reset before the video was delivered"
+                )
         self._video_job_media_deadlines = {}
         self._cancelled_command_ids = set()
         self.unpause(result_clock, master_node_id=master_node_id)
@@ -5136,6 +5146,13 @@ class API:
             return
         pending = self._take_pending_vision_media(task.command_id)
         if pending is None:
+            return
+        if task.task_status == task_types.TaskStatus.Failed:
+            # The master created a terminal task (no instance serves this
+            # request); the following TaskFailed ends the stream, and nothing
+            # should upload bytes to the placeholder instance meanwhile.
+            self._vision_media_commands.discard(task.command_id)
+            self._vision_media_models.pop(task.command_id, None)
             return
         self._retain_active_vision_media(task.command_id, pending.byte_count)
         instance = self.state.instances.get(task.instance_id)
@@ -10530,17 +10547,56 @@ class API:
             )
 
     def _settle_video_job(self, command_id: CommandId) -> None:
-        """Complete the job once both halves have arrived."""
+        """Complete the job once the manifest and every declared artifact agree.
 
-        job = self._video_jobs.settle(command_id)
-        if job is not None and job.is_terminal:
+        The terminal frame and the container travel on different planes, so
+        completion is decided here from both: the stored container must match
+        the manifest's digest, size, and content type, and a declared thumbnail
+        must be stored and match too. A mismatch is a producer defect and fails
+        the job rather than serving bytes the manifest does not describe.
+        """
+
+        job = self._video_jobs.get(command_id)
+        if job is None or job.is_terminal or not job.render_finished:
+            return
+        manifest = job.output
+        if manifest is None:
+            return
+        video = self._video_store.get(command_id, "video")
+        if video is None:
+            return
+        if (
+            video.sha256 != manifest.sha256
+            or video.size_bytes != manifest.size_bytes
+            or video.content_type != manifest.content_type
+        ):
+            self._video_store.delete(command_id)
+            self._video_jobs.fail(
+                command_id, "the delivered video does not match its manifest"
+            )
             self._video_job_media_deadlines.pop(command_id, None)
-            if job.status == "completed":
-                stored = self._video_store.get(command_id)
-                if stored is not None:
-                    self._video_jobs.update(
-                        command_id, expires_at=int(stored.expires_at)
-                    )
+            self._close_command_queue(command_id)
+            return
+        if manifest.thumbnail_sha256 is not None:
+            thumbnail = self._video_store.get(command_id, "thumbnail")
+            if thumbnail is None:
+                return
+            if (
+                thumbnail.sha256 != manifest.thumbnail_sha256
+                or thumbnail.size_bytes != manifest.thumbnail_size_bytes
+            ):
+                self._video_store.delete(command_id)
+                self._video_jobs.fail(
+                    command_id, "the delivered thumbnail does not match its manifest"
+                )
+                self._video_job_media_deadlines.pop(command_id, None)
+                self._close_command_queue(command_id)
+                return
+        self._video_jobs.update(command_id, media_delivered=True)
+        settled = self._video_jobs.settle(command_id)
+        if settled is not None and settled.is_terminal:
+            self._video_job_media_deadlines.pop(command_id, None)
+            self._video_jobs.update(command_id, expires_at=int(video.expires_at))
 
     async def _apply_output_media(self) -> None:
         """Assemble finished containers streamed by producing workers."""
@@ -10556,17 +10612,15 @@ class API:
                     continue
                 command_id = packet.command_id
                 job = self._video_jobs.get(command_id)
-                if job is None or packet.model != ModelId(job.model):
+                if job is None or job.is_terminal or packet.model != ModelId(job.model):
                     continue
-                # A completed job still accepts the thumbnail its manifest
-                # declared, which normally arrives after the container settled
-                # the job; failed or cancelled jobs accept nothing.
-                if job.is_terminal and not (
-                    job.status == "completed"
-                    and packet.purpose == "thumbnail"
-                    and job.output is not None
-                    and job.output.thumbnail_sha256 is not None
-                ):
+                if packet.source_node != self._video_output_source(command_id):
+                    # Only the node the master placed the render on may deliver
+                    # its output; anything else is a stray or misrouted stream.
+                    logger.warning(
+                        f"Ignoring video output for command {command_id} from "
+                        f"{packet.source_node}, which does not serve it"
+                    )
                     continue
                 try:
                     if packet.kind == "opened":
@@ -10599,13 +10653,10 @@ class API:
                             sha256=packet.sha256,
                             total_chunks=packet.total_chunks,
                         )
-                        if packet.purpose == "video":
-                            self._video_jobs.update(
-                                command_id,
-                                media_delivered=True,
-                                expires_at=int(stored.expires_at),
-                            )
-                            self._settle_video_job(command_id)
+                        self._video_jobs.update(
+                            command_id, expires_at=int(stored.expires_at)
+                        )
+                        self._settle_video_job(command_id)
                         await self._send_output_media_terminal(packet.accepted())
                     elif packet.kind == "transport_failed":
                         self._video_store.delete(command_id)
@@ -10621,6 +10672,21 @@ class API:
                     await self._send_output_media_terminal(
                         packet.transport_failure(str(error)[:1024])
                     )
+
+    def _video_output_source(self, command_id: CommandId) -> NodeId | None:
+        """Return the single node the master placed a video command on."""
+
+        for task in self.state.tasks.values():
+            if (
+                isinstance(task, task_types.VideoGeneration)
+                and task.command_id == command_id
+            ):
+                instance = self.state.instances.get(task.instance_id)
+                if instance is None:
+                    return None
+                nodes = tuple(instance.shard_assignments.node_to_runner)
+                return nodes[0] if len(nodes) == 1 else None
+        return None
 
     async def _send_output_media_terminal(self, packet: OutputMediaPacket) -> None:
         """Send one reverse terminal without letting a stuck peer pin the loop."""
