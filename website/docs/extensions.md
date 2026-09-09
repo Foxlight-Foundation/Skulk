@@ -753,3 +753,21 @@ secret fields. It enforces read/manage scopes; this interface cannot grant spend
 approval. The dashboard reuses ordinary configuration controls, preserves drafts
 across changed fences and exposes explicit original-operation resume. See the
 [setup API contract](api-guide.md#capability-node-nonbillable-setup-operations).
+
+
+### Installed terminal management
+
+A selected signed archive may provide a fixed optional `__manage__.py` entrypoint.
+`skulk-plugin-service manage-plugin MANAGED_ID -- PLUGIN_ARGUMENTS` discovers the
+protected service connection and selected installation, verifies its full runtime,
+compatibility, trust and retained release history, then executes only that entrypoint.
+The publisher supplies fixed management verbs; the caller cannot select an executable
+or module. The plugin derives its internal coordinates from its verified installed
+source. The generation lock survives exec to prevent upgrades during the command.
+
+This local nonroot command retains terminal I/O and does not itself invoke sudo,
+change release selection or authorize paid effects. Disabled node management remains
+plugin-owned. Missing or invalid runtimes refuse local execution; use the independent
+installation manager for recovery when the owner cannot start. Existing
+`setup-plugin` behavior and extensions without `__manage__.py` remain compatible.
+Plugin-specific commands belong in that plugin's documentation.

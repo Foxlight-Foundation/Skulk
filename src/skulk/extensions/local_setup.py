@@ -5,6 +5,7 @@ import sqlite3
 import zipfile
 from contextlib import closing
 from pathlib import Path
+from typing import Literal
 
 from pydantic import TypeAdapter
 
@@ -17,7 +18,8 @@ from skulk.extensions.runtime_files import read_private
 from skulk.extensions.runtime_selection import RuntimeSelection, RuntimeSelector
 from skulk.shared.constants import SKULK_CONFIG_HOME
 
-_ENTRYPOINT = "import runpy,sys;sys.path.insert(0,sys.argv.pop(1));runpy.run_module('__setup__',run_name='__main__')"
+_SETUP_ENTRYPOINT = "import runpy,sys;sys.path.insert(0,sys.argv.pop(1));runpy.run_module('__setup__',run_name='__main__')"
+_MANAGEMENT_ENTRYPOINT = "import runpy,sys;sys.path.insert(0,sys.argv.pop(1));runpy.run_module('__manage__',run_name='__main__')"
 
 
 def _retained_history(root: Path, selection: RuntimeSelection) -> None:
@@ -45,6 +47,22 @@ async def setup_installed_plugin(plugin_id: str, arguments: tuple[str, ...]) -> 
     fields, never a command/module selector. The inherited installation lock blocks
     generation changes until setup exits. No remote route invokes this operation.
     """
+    await _run_installed_plugin(plugin_id, arguments, "setup")
+
+
+async def manage_installed_plugin(plugin_id: str, arguments: tuple[str, ...]) -> None:
+    """Run the installed plugin's fixed local management entrypoint by identity.
+
+    Verify the same selected runtime and inherited generation fence as setup.
+    The plugin discovers its durable state from the verified installation and
+    owns fixed terminal verbs; callers never select a path, module or executable.
+    """
+    await _run_installed_plugin(plugin_id, arguments, "manage")
+
+
+async def _run_installed_plugin(
+    plugin_id: str, arguments: tuple[str, ...], action: Literal["setup", "manage"]
+) -> None:
     if os.geteuid() == 0 or os.geteuid() != os.getuid():
         raise ValueError("plugin setup requires the existing nonroot owner")
     identifier = TypeAdapter[str](InstallationIdentifier).validate_python(
@@ -76,11 +94,15 @@ async def setup_installed_plugin(plugin_id: str, arguments: tuple[str, ...]) -> 
             raise ValueError("plugin selection changed or requires recovery")
         generation = root / "generations" / selection.runtime_digest
         artifact = generation / "artifacts/bundle.pyz"
+        entrypoint = "__setup__.py" if action == "setup" else "__manage__.py"
+        bootstrap = _SETUP_ENTRYPOINT if action == "setup" else _MANAGEMENT_ENTRYPOINT
         with zipfile.ZipFile(artifact) as archive:
             try:
-                entry = archive.getinfo("__setup__.py")
+                entry = archive.getinfo(entrypoint)
             except KeyError:
-                raise ValueError("this plugin has no local setup entrypoint") from None
+                raise ValueError(
+                    "this plugin has no selected local entrypoint"
+                ) from None
             if entry.is_dir() or entry.file_size > 16384:
                 raise ValueError("invalid plugin setup entrypoint")
         python = str(generation / "runtime/bin/python")
@@ -88,6 +110,6 @@ async def setup_installed_plugin(plugin_id: str, arguments: tuple[str, ...]) -> 
         # generation and fixed module come from us; provider prompts remain private.
         os.execve(
             python,
-            (python, "-I", "-B", "-c", _ENTRYPOINT, str(artifact), *arguments),
+            (python, "-I", "-B", "-c", bootstrap, str(artifact), *arguments),
             {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
         )

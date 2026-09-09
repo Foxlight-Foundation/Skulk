@@ -2090,3 +2090,12 @@ owner, which owns durable intent, reconciliation and background execution outsid
 the unary child slot. Dashboard reconnect only observes retained progress. Ordinary
 forms cannot contain credential fields, and setup completion does not imply
 preflight, enablement or paid approval. Public setup-file reads remain separate.
+
+
+Installed plugin terminal management uses `skulk-plugin-service manage-plugin`
+and the selected archive's fixed optional `__manage__.py`. `extensions/local_setup.py`
+shares verification and inherited generation ownership with `setup-plugin`, while
+keeping entrypoints distinct. The plugin derives durable coordinates and owns its
+fixed CLI verbs; core accepts no executable/module selector and adds no HTTP exec
+route. Terminal commands run as the existing nonroot owner and cannot self-approve
+paid effects. The independent manager remains available for owner/runtime recovery.

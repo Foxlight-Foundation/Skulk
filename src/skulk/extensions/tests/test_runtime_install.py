@@ -38,6 +38,7 @@ def artifacts(
     owner_entrypoint: bool = True,
     owner_source: str = "print('owner fixture')\n",
     setup_source: str | None = None,
+    management_source: str | None = None,
     signing_key: Ed25519PrivateKey | None = None,
     permissions: tuple[str, ...] = ("local synthetic operation",),
 ) -> tuple[bytes, RuntimeTrust, QualifiedHost]:
@@ -68,6 +69,8 @@ def artifacts(
         )
         if setup_source is not None:
             archive.writestr("__setup__.py", setup_source)
+        if management_source is not None:
+            archive.writestr("__manage__.py", management_source)
     bundle = bundle_buffer.getvalue()
     write_private(directory / "bundle.pyz", bundle)
     filename = "example_dep-1.0-py3-none-any.whl"

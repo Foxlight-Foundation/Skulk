@@ -4078,3 +4078,15 @@ polls retained progress while open. Drafts retain their observed revision fences
 changed prerequisites require an explicit reload. Failed reads mark observations
 stale and disable actions. Failed operations can be explicitly resumed by ID.
 Closing or reopening the panel does not cancel or repeat server-owned setup.
+
+
+### Installed plugin terminal command
+
+`skulk-plugin-service manage-plugin MANAGED_ID -- PLUGIN_ARGUMENTS` is a local
+terminal command, not an HTTP route. It verifies the protected service profile,
+selected signed runtime, qualified host and retained trust before executing the
+archive's fixed optional `__manage__.py`. Paths and module names cannot be supplied.
+The generation fence and terminal I/O survive process replacement; the plugin
+supplies fixed management verbs and derives its durable state coordinates.
+Neither this command nor generic management grants mint paid approval. The existing
+`skulk-plugin-service manage` installation-manager interface is unchanged.

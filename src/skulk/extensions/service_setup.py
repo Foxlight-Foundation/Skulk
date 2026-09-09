@@ -9,13 +9,13 @@ import stat
 import sys
 import time
 from pathlib import Path
-from typing import Literal, Self, cast
+from typing import Literal, Self
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
 from skulk.extensions import service_bootstrap, service_registration
-from skulk.extensions.local_setup import setup_installed_plugin
+from skulk.extensions.local_setup import manage_installed_plugin, setup_installed_plugin
 from skulk.extensions.runtime_artifacts import Digest, measure_host
 from skulk.extensions.runtime_attachment import (
     HostSettings,
@@ -336,32 +336,50 @@ async def service_status() -> dict[str, str | bool]:
     }
 
 
+class _ServiceArguments(argparse.Namespace):
+    def __init__(self) -> None:
+        super().__init__()
+        self.action: str = ""
+        self.setup_arguments: list[str] = []
+
+
 def main() -> None:
     """Run one explicit local setup command; remote management never invokes sudo."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("setup", "status", "manage", "setup-plugin"))
+    parser.add_argument(
+        "action", choices=("setup", "status", "manage", "setup-plugin", "manage-plugin")
+    )
     parser.add_argument("setup_arguments", nargs=argparse.REMAINDER)
-    arguments = parser.parse_args()
+    arguments = _ServiceArguments()
+    _ = parser.parse_args(namespace=arguments)
     try:
-        remaining = cast(list[str], arguments.setup_arguments)
-        if cast(str, arguments.action) == "setup-plugin":
+        remaining = TypeAdapter[list[str]](list[str]).validate_python(
+            arguments.setup_arguments
+        )
+        action = TypeAdapter[str](str).validate_python(arguments.action)
+        if action in {"setup-plugin", "manage-plugin"}:
             if not remaining:
-                raise ValueError("setup-plugin requires an installed plugin ID")
+                raise ValueError("plugin command requires an installed plugin ID")
             fields = remaining[1:]
             if fields[:1] == ["--"]:
                 fields = fields[1:]
-            asyncio.run(setup_installed_plugin(remaining[0], tuple(fields)))
+            command = (
+                setup_installed_plugin
+                if action == "setup-plugin"
+                else manage_installed_plugin
+            )
+            asyncio.run(command(remaining[0], tuple(fields)))
             return
         if remaining:
             raise ValueError("this service action accepts no additional arguments")
-        if cast(str, arguments.action) == "setup":
+        if action == "setup":
             operation = asyncio.run(setup_service())
             print(
                 json.dumps(
                     {"operation_id": operation.operation_id, "phase": operation.phase}
                 )
             )
-        elif cast(str, arguments.action) == "manage":
+        elif action == "manage":
             if os.geteuid() == 0:
                 raise ValueError("plugin management requires the nonroot service owner")
             connection = ServiceConnection.model_validate_json(
@@ -382,7 +400,7 @@ def main() -> None:
             print(json.dumps(asyncio.run(service_status())))
     except (OSError, ValueError, TimeoutError, sqlite3.Error):
         print(
-            "Plugin service setup incomplete. Rerun the same local command with the qualified Skulk environment; inspect protected setup and OS service status.",
+            "Plugin service command incomplete. Rerun the same local command with the qualified Skulk environment; inspect protected setup and OS service status.",
             file=sys.stderr,
         )
         raise SystemExit(1) from None

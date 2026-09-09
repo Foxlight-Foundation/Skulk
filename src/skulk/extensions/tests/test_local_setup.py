@@ -5,11 +5,11 @@ import os
 import sqlite3
 import sys
 from pathlib import Path
-from typing import NoReturn
+from typing import Literal, NoReturn
 
 import pytest
 
-from skulk.extensions.local_setup import setup_installed_plugin
+from skulk.extensions.local_setup import manage_installed_plugin, setup_installed_plugin
 from skulk.extensions.runtime_attachment import HostSettings, ServiceConnection
 from skulk.extensions.runtime_files import (
     RuntimeLock,
@@ -25,19 +25,26 @@ class ExecutedError(Exception):
     """Stop the test at the process replacement boundary after checking arguments."""
 
 
+@pytest.mark.parametrize("action", ["setup", "manage"])
 @pytest.mark.parametrize(
     "fault", ["none", "disabled", "missing_entry", "damaged", "history", "profile"]
 )
 async def test_local_setup_verifies_before_process_replacement(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fault: str,
+    action: Literal["setup", "manage"],
 ) -> None:
     """Real offline fixture staging covers selection, integrity and retained authority."""
+    command = setup_installed_plugin if action == "setup" else manage_installed_plugin
     manager = tmp_path / "service"
     private_directory(manager)
     root = manager / "installations/managed.example"
     source = tmp_path / "source"
     metadata, trust, host = artifacts(
-        source, setup_source=None if fault == "missing_entry" else "print('setup')\n"
+        source,
+        setup_source=None if fault == "missing_entry" else "print('setup')\n",
+        management_source=None if fault == "missing_entry" else "print('manage')\n",
     )
     monkeypatch.setattr("skulk.extensions.runtime_install.measure_host", lambda: host)
     monkeypatch.setattr(
@@ -88,7 +95,7 @@ async def test_local_setup_verifies_before_process_replacement(
             root / "generations" / staged.runtime_digest / "runtime/bin/python"
         )
         assert arguments[1:4] == ("-I", "-B", "-c")
-        assert "run_module('__setup__'" in arguments[4]
+        assert f"run_module('__{action}__'" in arguments[4]
         assert arguments[-2:] == ("--example-input", "$(inert)")
         assert "PYTHONPATH" not in environment
         with pytest.raises(BlockingIOError):
@@ -98,13 +105,11 @@ async def test_local_setup_verifies_before_process_replacement(
     monkeypatch.setattr(os, "execve", replace_process)
     if fault in ("none", "disabled"):
         with pytest.raises(ExecutedError):
-            await setup_installed_plugin(
-                "managed.example", ("--example-input", "$(inert)")
-            )
+            await command("managed.example", ("--example-input", "$(inert)"))
         assert executed
     else:
         with pytest.raises((OSError, ValueError)):
-            await setup_installed_plugin("managed.example", ())
+            await command("managed.example", ())
         assert not executed
     RuntimeLock(selector.installer.installer).close()
     if fault == "history":
@@ -124,8 +129,9 @@ async def test_local_setup_refuses_paths_before_discovery(identifier: str) -> No
         await setup_installed_plugin(identifier, ())
 
 
+@pytest.mark.parametrize("action", ["setup", "manage"])
 async def test_setup_exec_keeps_terminal_io_and_generation_fence(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, action: Literal["setup", "manage"]
 ) -> None:
     """Execute a real signed offline entrypoint and check inherited lock ownership."""
     manager = tmp_path / "service"
@@ -142,7 +148,9 @@ with (root/'installer/installer.lock').open('rb') as stream:
     else: raise RuntimeError('generation fence lost on exec')
 print('setup:'+input(),flush=True)
 """
-    metadata, trust, host = artifacts(source, setup_source=entrypoint)
+    metadata, trust, host = artifacts(
+        source, setup_source=entrypoint, management_source=entrypoint
+    )
     monkeypatch.setattr("skulk.extensions.runtime_install.measure_host", lambda: host)
     selector = RuntimeSelector(root)
     write_private(root / "publisher-trust.json", trust.model_dump_json().encode())
@@ -162,17 +170,19 @@ print('setup:'+input(),flush=True)
     )
     script = """import asyncio,sys
 from pathlib import Path
-from skulk.extensions import local_setup,runtime_install
+from skulk.extensions import local_setup,runtime_install,service_setup
 from skulk.extensions.runtime_artifacts import QualifiedHost
 local_setup.SKULK_CONFIG_HOME=Path(sys.argv[1])
 runtime_install.measure_host=lambda:QualifiedHost('macos-arm64','3.13.13','1.5.2','a'*64)
-asyncio.run(local_setup.setup_installed_plugin('managed.example',()))
+sys.argv=['skulk-plugin-service',sys.argv[2]+'-plugin','managed.example']
+service_setup.main()
 """
     process = await asyncio.create_subprocess_exec(
         sys.executable,
         "-c",
         script,
         str(config),
+        action,
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
