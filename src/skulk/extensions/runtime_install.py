@@ -33,6 +33,7 @@ from skulk.extensions.runtime_files import (
     read_private,
     write_private,
 )
+from skulk.extensions.runtime_integrity import seal_runtime, verify_installed_runtime
 
 _INVENTORY = """import importlib.metadata,json,re
 def name(d): return re.sub(r"[-_.]+", "-", d.metadata["Name"].lower())
@@ -313,6 +314,9 @@ class RuntimeInstaller:
                     await asyncio.to_thread(
                         verified_artifacts, runtime, generation / "artifacts"
                     )
+                    await asyncio.to_thread(
+                        verify_installed_runtime, generation, runtime.digest
+                    )
                 else:
                     supplied = await asyncio.to_thread(
                         verified_artifacts, runtime, artifacts
@@ -348,6 +352,7 @@ class RuntimeInstaller:
                         (
                             python,
                             "-I",
+                            "-B",
                             "-m",
                             "pip",
                             "--isolated",
@@ -368,17 +373,19 @@ class RuntimeInstaller:
                     )
                 python = str(generation / "runtime" / "bin" / "python")
                 await _execute(
-                    (python, "-I", "-m", "pip", "--isolated", "check"),
+                    (python, "-I", "-B", "-m", "pip", "--isolated", "check"),
                     generation,
                     lock,
                     30,
                 )
                 inventory = await _execute(
-                    (python, "-I", "-c", _INVENTORY), generation, lock, 30
+                    (python, "-I", "-B", "-c", _INVENTORY), generation, lock, 30
                 )
                 if json.loads(inventory) != runtime.inventory:
                     raise ValueError("installed runtime inventory differs")
                 self._verify(metadata, await asyncio.to_thread(measure_host))
+                if not (generation / "staged.json").exists():
+                    await asyncio.to_thread(seal_runtime, generation, runtime.digest)
                 write_private(generation / "staged.json", runtime.metadata)
                 # Completion belongs to the owned work, not the waiting browser
                 # or terminal. A cancelled waiter must still see staged on reconnect.

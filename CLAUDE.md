@@ -523,6 +523,9 @@ no plugin SDK import or host dependency installation is allowed. Offline stages
 retain operation IDs, trust floors and interrupted generations under service-owned
 storage. Cancellation must finish owned work and record successful completion;
 it must never release the installer fence while a subprocess is still running.
+`runtime_integrity.py` seals complete installed files and interpreter identity.
+Verify the seal before starting private Python; use `-B` to prevent runtime
+bytecode writes. A changed or missing seal requires explicit recovery.
 
 Optional `NodeConfigurationProvider` (`extensions/configuration.py`) exposes stable installed-node settings independently of capability readiness. The `/v1/plugins` API and Plugins dashboard share plugin-owned schema validation and revision-fenced settings with terminal management. No credentials or configuration enter replicated State. Explicit plugin read/manage/approve grants are owner-controlled through `/v1/auth/plugin-grants`; existing pairings receive none, and broad operator write permission does not imply them.
 Separately installed packages register a zero-arg factory in the

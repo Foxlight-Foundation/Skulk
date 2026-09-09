@@ -1582,6 +1582,9 @@ journal retains operation IDs, monotonic trust and interrupted generations.
 Cancellation of a waiting interface does not abandon owned installation work;
 only the fsynced completion marker publishes a staged generation. Staging never
 switches the active owner or changes cleanup state.
+`runtime_integrity.py` seals installed files, permissions and interpreter identity.
+Cached verification refuses a missing or changed seal before private Python can
+execute startup code; runtime commands disable bytecode writes.
 
 Extension startup and serving share one event loop. The API starts hooks only
 once its runtime begins and invokes optional asynchronous shutdown hooks before

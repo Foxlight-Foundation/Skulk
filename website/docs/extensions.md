@@ -606,6 +606,14 @@ its evidence; another call with that ID does not implicitly run installation aga
 Completed stages can be reverified from their cached artifacts. Completion requires
 a fsynced marker and a fresh measurement of the qualified core build.
 
+Completion also seals the installed runtime's file membership, bytes, permissions
+and interpreter target. Cached verification checks that seal before starting
+Python, so an added startup file or modified dependency cannot execute during
+validation. Runtime commands disable bytecode writes. The seal is protected local
+installation evidence, not publisher metadata or a sandbox against the service
+user. A missing or mismatched seal requires explicit recovery; the installer does
+not bless existing changed files by creating a replacement seal.
+
 Staging does not change active selection, logical plugin identities, configuration,
 credentials or cleanup obligations. Installer output is bounded and stored only
 as protected host-local evidence. These are local installation primitives; the
