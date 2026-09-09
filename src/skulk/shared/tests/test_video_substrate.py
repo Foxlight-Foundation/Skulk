@@ -16,7 +16,12 @@ import pytest
 from pydantic import ValidationError
 
 from skulk.api.main import API
-from skulk.api.video_jobs import MAX_RETAINED_JOBS, VideoJob, VideoJobRegistry
+from skulk.api.video_jobs import (
+    MAX_ACTIVE_JOBS,
+    MAX_RETAINED_JOBS,
+    VideoJob,
+    VideoJobRegistry,
+)
 from skulk.api.video_store import VideoStore
 from skulk.routing import topics
 from skulk.routing.output_media import (
@@ -399,3 +404,12 @@ async def test_render_error_fails_the_job(tmp_path: Path, monkeypatch: pytest.Mo
         sender.close()
     failed = api._video_jobs.get(job.id)  # pyright: ignore[reportPrivateUsage]
     assert failed is not None and failed.status == "failed" and failed.error == "runner died"
+
+
+def test_job_registry_counts_live_jobs() -> None:
+    registry = VideoJobRegistry(None)
+    for index in range(MAX_ACTIVE_JOBS):
+        registry.create(_job(f"live{index}", created_at=index))
+    assert registry.active_count() == MAX_ACTIVE_JOBS
+    registry.fail(CommandId("live0"), "done")
+    assert registry.active_count() == MAX_ACTIVE_JOBS - 1

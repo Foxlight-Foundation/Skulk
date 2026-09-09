@@ -47,6 +47,7 @@ from skulk.utils.task_group import TaskGroup
 
 from .connection_message import ConnectionMessage
 from .data_plane import DataPlaneEgressObserver
+from .output_media import OutputMediaPacket
 from .provider_streams import (
     ProviderStreamPacket,
     provider_stream_rejection_packets,
@@ -59,6 +60,7 @@ from .topics import (
     CONNECTION_MESSAGES,
     DATA,
     ELECTION_MESSAGES,
+    OUTPUT_MEDIA,
     PROVIDER_DATA,
     REALTIME_AUDIO,
     SPEECH_MEDIA,
@@ -290,9 +292,12 @@ class TopicRouter[T: CamelCaseModel]:
                 f"{self.topic.topic} from {origin}"
             )
             return
-        if self.topic.topic == VISION_MEDIA.topic and not self._routes_to_local_node(
-            item
-        ):
+        if self.topic.topic in (
+            VISION_MEDIA.topic,
+            OUTPUT_MEDIA.topic,
+        ) and not self._routes_to_local_node(item):
+            # On the gossipsub fallback every node receives the broadcast;
+            # node-addressed media is delivered only to its target.
             return
         await self.publish(item, origin=origin)
 
@@ -613,6 +618,7 @@ class Router:
             SPEECH_MEDIA.topic,
             TRACE_DATA.topic,
             VISION_MEDIA.topic,
+            OUTPUT_MEDIA.topic,
         )
 
     async def zenoh_connected_peer_count(self) -> int | None:
@@ -1196,6 +1202,7 @@ class Router:
                             REALTIME_AUDIO.topic,
                             SPEECH_MEDIA.topic,
                             VISION_MEDIA.topic,
+                            OUTPUT_MEDIA.topic,
                         ):
                             sender.close()
                             reject_stream(stream)
@@ -1343,6 +1350,8 @@ class Router:
                 rejection_topic = cast(TypedTopic[CamelCaseModel], SPEECH_MEDIA)
             elif packet.topic == VISION_MEDIA.topic:
                 rejection_topic = cast(TypedTopic[CamelCaseModel], VISION_MEDIA)
+            elif packet.topic == OUTPUT_MEDIA.topic:
+                rejection_topic = cast(TypedTopic[CamelCaseModel], OUTPUT_MEDIA)
             else:
                 return
             original = rejection_topic.deserialize(packet.data)
@@ -1385,7 +1394,12 @@ class Router:
                 )
             elif isinstance(
                 original,
-                (RealtimeAudioPacket, SpeechMediaPacket, VisionMediaPacket),
+                (
+                    RealtimeAudioPacket,
+                    SpeechMediaPacket,
+                    VisionMediaPacket,
+                    OutputMediaPacket,
+                ),
             ):
                 rejection_frames = [original.transport_failure(failure_message)]
             else:

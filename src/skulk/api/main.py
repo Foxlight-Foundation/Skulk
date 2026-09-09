@@ -269,7 +269,12 @@ from skulk.api.types.openai_responses import (
     ResponsesRequest,
     ResponsesResponse,
 )
-from skulk.api.video_jobs import MAX_RETAINED_JOBS, VideoJob, VideoJobRegistry
+from skulk.api.video_jobs import (
+    MAX_ACTIVE_JOBS,
+    MAX_RETAINED_JOBS,
+    VideoJob,
+    VideoJobRegistry,
+)
 from skulk.api.video_store import VideoStore
 from skulk.connectivity.remote_access import RemoteAccessInfo, build_remote_access_info
 from skulk.connectivity.tailscale import TailscaleStatus, query_tailscale_status
@@ -10374,6 +10379,14 @@ class API:
                     status_code=400,
                     detail="reference attachments exceed the model's limits",
                 )
+        if self._video_jobs.active_count() >= MAX_ACTIVE_JOBS:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    f"this node already has {MAX_ACTIVE_JOBS} video jobs in flight; "
+                    "retry when one finishes"
+                ),
+            )
         command_id = CommandId()
         references = tuple(
             spec.model_copy(
@@ -10535,6 +10548,12 @@ class API:
                         assert packet.total_bytes is not None
                         assert packet.total_chunks is not None
                         assert packet.content_type is not None
+                        # Either half may arrive first; the deadline for the
+                        # other half starts with whichever lands first.
+                        self._video_job_media_deadlines.setdefault(
+                            command_id,
+                            time.monotonic() + _VIDEO_JOB_MEDIA_TIMEOUT_SECONDS,
+                        )
                         self._video_store.open_assembly(
                             command_id,
                             packet.purpose,

@@ -646,11 +646,18 @@ def _vision_media_cleanup_command_id(
     previous_tasks: Mapping[TaskId, Task],
     current_tasks: Mapping[TaskId, Task],
 ) -> CommandId | None:
-    """Return the vision command whose ephemeral input can be released."""
+    """Return the vision command whose ephemeral input can be released.
+
+    ``TaskFailed`` is a terminal event in its own right (the master emits it,
+    for example, when no instance serves a video mode), so staged or written
+    media for that command must not wait for a later status update.
+    """
 
     task: Task | None = None
     if isinstance(event, TaskDeleted):
         task = previous_tasks.get(event.task_id)
+    elif isinstance(event, TaskFailed):
+        task = current_tasks.get(event.task_id) or previous_tasks.get(event.task_id)
     elif isinstance(event, TaskStatusUpdated) and event.task_status in {
         TaskStatus.Cancelled,
         TaskStatus.Complete,

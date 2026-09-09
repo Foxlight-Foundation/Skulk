@@ -6,12 +6,14 @@ import hashlib
 from pathlib import Path
 
 from skulk.shared.types.common import CommandId, NodeId
+from skulk.shared.types.events import TaskFailed
 from skulk.shared.types.tasks import TaskId, TaskStatus
 from skulk.shared.types.tasks import VideoGeneration as VideoGenerationTask
 from skulk.shared.types.video import VideoGenerationTaskParams, VideoReferenceSpec
 from skulk.shared.types.worker.instances import InstanceId
 from skulk.worker.main import (
     _inject_reference_paths,  # pyright: ignore[reportPrivateUsage]
+    _vision_media_cleanup_command_id,  # pyright: ignore[reportPrivateUsage]
     _reference_media_extension,  # pyright: ignore[reportPrivateUsage]
     _verify_file_digest,  # pyright: ignore[reportPrivateUsage]
     _write_reference_media,  # pyright: ignore[reportPrivateUsage]
@@ -74,3 +76,18 @@ def test_verify_file_digest_returns_size_only_on_match(tmp_path: Path) -> None:
     path.write_bytes(payload)
     assert _verify_file_digest(path, hashlib.sha256(payload).hexdigest()) == len(payload)
     assert _verify_file_digest(path, "0" * 64) == -1
+
+
+def test_task_failed_releases_video_reference_media() -> None:
+    params = VideoGenerationTaskParams(prompt="x", model="org/video", seconds=5)
+    task = VideoGenerationTask(
+        task_id=TaskId("t"),
+        command_id=CommandId("c"),
+        instance_id=InstanceId("i"),
+        task_status=TaskStatus.Failed,
+        owner_node=NodeId("api"),
+        task_params=params,
+    )
+    event = TaskFailed(task_id=TaskId("t"), error_type="video_mode_unavailable", error_message="no")
+    assert _vision_media_cleanup_command_id(event, {}, {task.task_id: task}) == CommandId("c")
+    assert _vision_media_cleanup_command_id(event, {}, {}) is None

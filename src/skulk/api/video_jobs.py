@@ -28,6 +28,8 @@ from skulk.utils.pydantic_ext import CamelCaseModel
 
 MAX_RETAINED_JOBS: Final[int] = 256
 """Oldest terminal jobs are evicted beyond this bound."""
+MAX_ACTIVE_JOBS: Final[int] = 32
+"""Live (non-terminal) jobs one API node accepts before refusing new ones."""
 
 
 class VideoJob(CamelCaseModel):
@@ -128,6 +130,9 @@ class VideoJobRegistry:
         """Register a new job, evicting the oldest terminal jobs beyond the bound."""
 
         self._jobs[job.id] = job
+        # Only terminal jobs are evictable; the live set is bounded separately
+        # by MAX_ACTIVE_JOBS at admission, so the table cannot grow past the
+        # sum of the two.
         overflow = len(self._jobs) - MAX_RETAINED_JOBS
         if overflow > 0:
             terminal = sorted(
@@ -142,6 +147,10 @@ class VideoJobRegistry:
     def get(self, job_id: CommandId) -> VideoJob | None:
         """Return one job."""
         return self._jobs.get(job_id)
+
+    def active_count(self) -> int:
+        """Number of jobs that have not reached a terminal state."""
+        return sum(1 for job in self._jobs.values() if not job.is_terminal)
 
     def list(self, *, limit: int = 20, after: CommandId | None = None, descending: bool = True) -> list[VideoJob]:
         """Return jobs ordered by creation, newest first by default."""
