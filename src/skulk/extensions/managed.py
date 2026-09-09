@@ -33,6 +33,7 @@ from skulk.extensions.credentials import CredentialMutation, NodeCredentials
 from skulk.extensions.managed_attachment import ManagedAttachment
 from skulk.extensions.preflight import NodePreflight
 from skulk.extensions.runtime_attachment import ProfileIdentifier
+from skulk.extensions.setup import NodeSetup
 from skulk.extensions.types import ExtensionContext
 
 _OBJECT = TypeAdapter(dict[str, JsonValue])
@@ -88,6 +89,7 @@ class _Node(_WireModel):
     configurable: bool
     credentials_configurable: bool = False
     preflight_available: bool = False
+    setup_available: bool = False
     descriptors: tuple[CapabilityDescriptor, ...] = Field(max_length=8)
 
     def public(self) -> ConfigurableNode:
@@ -100,6 +102,7 @@ class _Node(_WireModel):
             configurable=self.configurable,
             credentials_configurable=self.credentials_configurable,
             preflight_available=self.preflight_available,
+            setup_available=self.setup_available,
         )
 
 
@@ -371,6 +374,17 @@ class ManagedOwner:
             {"operation": "preflight", "bundle_id": node.bundle_id, "node_id": node_id}
         )
         return NodePreflight.model_validate_json(json.dumps(response))
+
+    async def node_setup(self, node_id: str) -> NodeSetup:
+        """Read public setup artifacts; the owner never initializes keys on this read."""
+        await self.refresh()
+        node = self._node(node_id)
+        if not node.setup_available:
+            raise LookupError("managed node does not provide setup exports")
+        response = await self._request(
+            {"operation": "setup", "bundle_id": node.bundle_id, "node_id": node_id}
+        )
+        return NodeSetup.model_validate_json(json.dumps(response))
 
     async def node_credentials(self, node_id: str) -> NodeCredentials:
         """Read reference readiness through the protected owner connection, without values."""

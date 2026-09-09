@@ -29,6 +29,7 @@ from skulk.extensions.credentials import (
 )
 from skulk.extensions.loader import LoadedExtensions
 from skulk.extensions.preflight import NodePreflight, NodePreflightProvider
+from skulk.extensions.setup import NodeSetup, NodeSetupProvider
 from skulk.operator.pairing import OperatorPairingService
 from skulk.utils.pydantic_ext import FrozenModel
 
@@ -264,6 +265,37 @@ def create_plugins_router(
                 or len(result.model_dump_json().encode()) > 65536
             ):
                 raise ValueError("invalid preflight response")
+            return result
+
+        return await invoke(read)
+
+    @router.get(
+        "/{plugin_id}/nodes/{node_id}/setup",
+        response_model=NodeSetup,
+        summary="Read a capability node's public setup files",
+        description="Read bounded plugin-declared public setup files for an exact installed node, including disabled children. Returns the current configuration and credential revisions. This read never generates keys, replaces credentials, enables a node or approves spending. Requires direct owner authority or plugins:read. Secret values and executable content are outside this contract; file names and inert text media types are bounded.",
+    )
+    async def get_setup(
+        plugin_id: str, node_id: str, request: Request, response: Response
+    ) -> NodeSetup:
+        """Return current public setup artifacts under explicit plugin read authority."""
+        await authorize_plugin_request(
+            request, pairing_service, "plugins:read", tailnet_peer_verifier
+        )
+        response.headers["Cache-Control"] = "no-store"
+        selected = provider(plugin_id)
+        if not isinstance(selected, NodeSetupProvider):
+            raise HTTPException(status_code=404, detail="setup export is not supported")
+
+        async def read() -> NodeSetup:
+            result = await selected.node_setup(node_id)
+            if (
+                result.node_id != node_id
+                or len({item.name for item in result.artifacts})
+                != len(result.artifacts)
+                or len(result.model_dump_json().encode()) > 65536
+            ):
+                raise ValueError("invalid setup response")
             return result
 
         return await invoke(read)

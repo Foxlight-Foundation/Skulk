@@ -2061,3 +2061,12 @@ bounded prerequisite results and observed revision metadata independently of
 child readiness. Skulk owns authorization and response bounds; the plugin owns
 provider-specific checks and fresh enable/restart enforcement. Dashboard setup
 checks do not grant acquisition or spending authority.
+
+
+Public setup files use the optional `NodeSetupProvider` facet in
+`extensions/setup.py` and the read-scoped
+`/v1/plugins/{plugin_id}/nodes/{node_id}/setup` route. The management provider owns
+initial identity generation; the read returns only bounded public text artifacts
+and observed revisions. Disabled children retain this facet. The dashboard uses
+explicit downloads without changing credentials or granting lifecycle/spending
+authority. Private values remain in the write-only credential path.

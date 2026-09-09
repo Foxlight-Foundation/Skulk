@@ -3987,3 +3987,30 @@ the node, approve spending or create paid resources. Results describe the observ
 configuration and are not reusable admission tokens. Supporting plugins enforce
 fresh preflight on enable and restart and retain fresh dispatch admission. The
 Plugins dashboard exposes explicit setup checks and individual corrective actions.
+
+
+### Capability-node public setup files
+
+`GET /v1/plugins/{plugin_id}/nodes/{node_id}/setup` reads public setup exports
+for an exact installed plugin and persistent node. The path parameters select
+that node; there are no body, query, command or executable-path parameters.
+Requires direct owner administration or `plugins:read` on direct and relay routes.
+Inventory `setupAvailable` indicates support. Disabled children can expose setup
+files while their management provider is available.
+
+The response contains `nodeId`, observed configuration `revision` and
+`schemaDigest`, `credentialRevision`, and one to eight `artifacts`. Each artifact
+has a safe `name`, owner-facing `title`, `mediaType` (`application/json` or
+`text/plain`), and public `content` of at most 16,384 characters. Names must be
+unique; the complete response is bounded to 64 KiB and uses `Cache-Control:
+no-store`. Credential values, executable content, protected local paths and raw
+provider evidence must never appear in these exports.
+
+This read cannot generate keys, replace credentials, enable a node or approve
+spending. Revisions describe an observation, not a lock against later changes;
+providers must revalidate bindings at enable and dispatch. Unsupported providers
+or missing selections return 404. Refused operations and invalid responses return
+409, unavailable providers return 503, exhausted admission returns 429, and the
+shared bounded management deadline returns 504. Errors suppress private exception
+text. The Plugins dashboard fetches files only on an explicit action, downloads
+them as inert text, and hides an earlier export after a failed refresh.

@@ -685,3 +685,22 @@ artifact transfer, then passes only signed bytes to the offline installer. Brows
 disconnect does not abandon accepted staging. The dashboard separates review,
 installation and explicit activation. Interrupted installation and protected partial
 evidence remain available for local recovery rather than automatic replay.
+
+
+## Public node setup exports
+
+An installed management provider may implement `NodeSetupProvider` from
+`skulk.extensions.setup` and set its inventory node's `setup_available` flag.
+Its asynchronous `node_setup(node_id)` returns `NodeSetup` with observed
+configuration and credential revisions and bounded `SetupArtifact` text files.
+Use this for generated public identities or public keys that another local setup
+command needs. Keep secrets in the write-only credential workflow.
+
+The facet remains available independently of child readiness. Generate required
+internal identities during authorized local installation or owner initialization;
+this read must neither generate keys nor change settings, lifecycle state or
+spending authority. Return only public data, never executable files or private
+host paths. The generic API enforces explicit plugin read authority, exact node
+identity, unique safe filenames and response bounds. The Plugins dashboard offers
+explicit downloads for nodes declaring support. See the
+[HTTP contract](api-guide.md#capability-node-public-setup-files).
