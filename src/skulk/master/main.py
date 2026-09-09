@@ -41,6 +41,7 @@ from skulk.shared.models.memory_estimate import (
 from skulk.shared.models.model_cards import (
     ModelCard,
     ModelId,
+    VideoMode,
     get_card,
     get_current_registry_card,
     get_custom_card_storage_collision,
@@ -76,6 +77,7 @@ from skulk.shared.types.commands import (
     TestCommand,
     TextEmbedding,
     TextGeneration,
+    VideoGeneration,
 )
 from skulk.shared.types.common import CommandId, NodeId, SessionId, SystemId
 from skulk.shared.types.events import (
@@ -140,6 +142,9 @@ from skulk.shared.types.tasks import (
 )
 from skulk.shared.types.tasks import (
     TextGeneration as TextGenerationTask,
+)
+from skulk.shared.types.tasks import (
+    VideoGeneration as VideoGenerationTask,
 )
 from skulk.shared.types.telemetry import (
     NODE_LIVENESS_TIMEOUT,
@@ -732,6 +737,51 @@ def text_generation_instances(state: State, model_id: ModelId) -> list[InstanceI
         ranked.append(
             (not ready, instance.system_role is not None, active, instance.instance_id)
         )
+    return [identifier for _, _, _, identifier in sorted(ranked)]
+
+
+def video_generation_instances(
+    state: State, model_id: ModelId, mode: VideoMode
+) -> list[InstanceId]:
+    """Rank viable video placements for one generation mode.
+
+    An instance qualifies only when its card declares the mode and no rank is
+    failed, stopping, or unreported; a still-loading rank may queue behind
+    ready capacity, as text routing allows. Ties break on active render load
+    and then on the instance identifier so placement is deterministic.
+    """
+    ranked: list[tuple[bool, int, str, InstanceId]] = []
+    for instance in state.instances.values():
+        assignments = instance.shard_assignments
+        if (
+            assignments.model_id != model_id
+            or len(assignments.runner_to_shard) != 1
+            or len(assignments.node_to_runner) != 1
+        ):
+            # Video engines are single-host; a multi-rank instance has no
+            # single output owner and never qualifies.
+            continue
+        shard = next(iter(assignments.runner_to_shard.values()))
+        video = shard.model_card.video
+        if video is None or mode not in video.modes:
+            continue
+        statuses = [state.runners.get(runner) for runner in assignments.runner_to_shard]
+        if any(
+            status is None
+            or isinstance(status, (RunnerFailed, RunnerShuttingDown, RunnerShutdown))
+            for status in statuses
+        ):
+            continue
+        ready = all(
+            isinstance(status, (RunnerReady, RunnerRunning)) for status in statuses
+        )
+        active = sum(
+            isinstance(task, VideoGenerationTask)
+            and task.instance_id == instance.instance_id
+            and task.task_status in (TaskStatus.Pending, TaskStatus.Running)
+            for task in state.tasks.values()
+        )
+        ranked.append((not ready, active, str(instance.instance_id), instance.instance_id))
     return [identifier for _, _, _, identifier in sorted(ranked)]
 
 
@@ -2064,6 +2114,66 @@ class Master:
                             )
 
                             self.command_task_mapping[command.command_id] = task_id
+                        case VideoGeneration():
+                            # A video instance is single-host and serves only
+                            # the modes its card declares. Placement selects the
+                            # least-loaded instance that can serve the resolved
+                            # mode; no eligible instance yields a terminal
+                            # failed task so the caller's job ends promptly.
+                            requested_mode = command.task_params.implied_mode()
+                            video_candidates = video_generation_instances(
+                                self.state,
+                                ModelId(command.task_params.model),
+                                requested_mode,
+                            )
+                            task_id = TaskId()
+                            video_unavailable = not video_candidates
+                            selected_instance_id = (
+                                video_candidates[0]
+                                if video_candidates
+                                else next(
+                                    (
+                                        instance.instance_id
+                                        for instance in self.state.instances.values()
+                                        if instance.shard_assignments.model_id
+                                        == command.task_params.model
+                                    ),
+                                    InstanceId(str(command.command_id)),
+                                )
+                            )
+                            generated_events.append(
+                                TaskCreated(
+                                    task_id=task_id,
+                                    task=VideoGenerationTask(
+                                        task_id=task_id,
+                                        command_id=command.command_id,
+                                        owner_node=command.owner_node,
+                                        instance_id=selected_instance_id,
+                                        task_status=(
+                                            TaskStatus.Failed
+                                            if video_unavailable
+                                            else TaskStatus.Pending
+                                        ),
+                                        task_params=command.task_params.model_copy(
+                                            update={"mode": requested_mode}
+                                        ),
+                                        trace_enabled=self.state.tracing_enabled,
+                                    ),
+                                )
+                            )
+                            self.command_task_mapping[command.command_id] = task_id
+                            if video_unavailable:
+                                generated_events.append(
+                                    TaskFailed(
+                                        task_id=task_id,
+                                        error_type="video_mode_unavailable",
+                                        error_message=(
+                                            "No running instance of "
+                                            f"{command.task_params.model} serves "
+                                            f"the {requested_mode.value} mode"
+                                        ),
+                                    )
+                                )
                         case ImageEdits():
                             for instance in self.state.instances.values():
                                 if (

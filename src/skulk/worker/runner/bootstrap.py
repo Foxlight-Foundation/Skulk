@@ -546,6 +546,14 @@ def entrypoint(
         # failure-reporting boundary so a denied card becomes an actionable
         # RunnerFailed state rather than an unreported process-exit retry loop.
         require_remote_code_approval(shard.model_card)
+        if bound_instance.is_video_model:
+            # The video substrate ships ahead of its engines. Fail loudly with
+            # the reason instead of letting a text runner try to load a
+            # diffusion stack and report something unrelated.
+            raise RuntimeError(
+                "no video engine is installed on this node; the served video "
+                "engines are the next deliverable of the video arc"
+            )
         if bound_instance.is_image_model:
             from skulk.worker.runner.image_models.runner import Runner as ImageRunner
 

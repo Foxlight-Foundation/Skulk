@@ -7,11 +7,15 @@ responses close with an error and non-streaming handlers raise — instead of
 the HTTP connection hanging until the client's own timeout.
 """
 
+import tempfile
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from skulk.api.main import API
+from skulk.api.video_jobs import VideoJobRegistry
+from skulk.api.video_store import VideoStore
 from skulk.shared.types.audio import RealtimeAudioTranscriptionTaskParams
 from skulk.shared.types.chunks import ErrorChunk
 from skulk.shared.types.common import CommandId, ModelId, NodeId
@@ -27,6 +31,12 @@ def _make_api() -> Any:
     api = object.__new__(API)
     api._text_generation_queues = {}
     api._image_generation_queues = {}
+    api._video_generation_queues = {}
+    api._video_jobs = VideoJobRegistry(None)
+    api._video_store = VideoStore(Path(tempfile.mkdtemp()))
+    api._video_job_media_deadlines = {}
+    api._video_output_sources = {}
+    api._early_output_packets = {}
     api._embedding_queues = {}
     api._audio_speech_queues = {}
     api._audio_transcription_queues = {}

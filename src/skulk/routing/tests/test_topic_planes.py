@@ -22,4 +22,5 @@ def test_every_runtime_topic_has_one_explicit_plane() -> None:
         "speech_media": MessagePlane.Data,
         "trace_data": MessagePlane.Data,
         "vision_media": MessagePlane.Data,
+        "output_media": MessagePlane.Data,
     } == TOPIC_PLANE_CENSUS
