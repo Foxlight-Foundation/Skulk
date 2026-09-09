@@ -436,6 +436,28 @@ async def test_post_render_task_failure_ends_the_job_directly(
     assert job.id not in api._video_job_media_deadlines
 
 
+async def test_late_task_failure_leaves_a_completed_job_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _make_api(monkeypatch)
+    payload = b"done bytes"
+    _complete_job(api, "finished", payload)
+    task = VideoGenerationTask(
+        task_id=TaskId("t"),
+        command_id=CommandId("finished"),
+        instance_id=InstanceId("i"),
+        task_status=TaskStatus.Failed,
+        owner_node=NodeId("api-node"),
+        task_params=VideoGenerationTaskParams(prompt="p", model=str(MODEL), seconds=5),
+    )
+    api.state = State(tasks={task.task_id: task})
+    await api._terminate_command_stream(task.task_id, "instance lost after completion")
+    job = api._video_jobs.get(CommandId("finished"))
+    assert job is not None and job.status == "completed" and job.error is None
+    stored = api._video_store.get(CommandId("finished"))
+    assert stored is not None and stored.file_path.read_bytes() == payload
+
+
 async def test_task_failure_with_a_live_queue_still_streams_the_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

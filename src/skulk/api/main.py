@@ -10858,9 +10858,15 @@ class API:
 
         Every failure path funnels through here so that no buffer, deadline,
         partial file, or placement record outlives its job, whichever half of
-        the pipeline failed and in whatever order the halves arrived.
+        the pipeline failed and in whatever order the halves arrived. A job
+        that already reached a terminal state is left exactly as it is: a
+        late control-plane failure must never delete a completed job's
+        content out from under its record.
         """
 
+        job = self._video_jobs.get(command_id)
+        if job is None or job.is_terminal:
+            return job
         self._video_store.delete(command_id)
         self._release_video_job_buffers(command_id)
         job = self._video_jobs.fail(command_id, error, cancelled=cancelled)
