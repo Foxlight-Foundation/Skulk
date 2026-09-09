@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, Literal, Protocol
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from skulk.shared.types.common import CommandId
 
@@ -34,8 +34,10 @@ _MAX_STASHED_BYTES = 64 * 1024 * 1024
 """Bytes of early chunks held per assembly before the transfer is refused."""
 
 
-class StoredVideoArtifact(BaseModel, frozen=True):
+class StoredVideoArtifact(BaseModel):
     """One committed artifact on the owning API's disk."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
     command_id: CommandId
     purpose: VideoArtifactPurpose

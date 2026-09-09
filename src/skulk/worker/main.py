@@ -2034,6 +2034,7 @@ class Worker:
                     ),
                 )
         except anyio.get_cancelled_exc_class():
+            self._output_media_aborted.discard(command_id)
             raise
         except Exception as error:  # noqa: BLE001 - transport boundary
             logger.opt(exception=error).warning(
@@ -2056,6 +2057,8 @@ class Worker:
                         )
                     )
             self._finish_video_output(command_id)
+        finally:
+            self._output_media_aborted.discard(command_id)
 
     async def _send_output_packet(
         self, sender: Sender[OutputMediaPacket], packet: OutputMediaPacket
@@ -2066,10 +2069,15 @@ class Worker:
             await sender.send(packet)
 
     def _finish_video_output(self, command_id: CommandId) -> None:
-        """Release the local copy of a delivered, failed, or abandoned output."""
+        """Release the local copy of a delivered, failed, or abandoned output.
+
+        The abort marker is deliberately left in place: the sending coroutine
+        checks it between chunks and clears it itself when it exits, so a
+        cancelled multi-gigabyte stream actually stops instead of running to
+        the end against a receiver that ignores it.
+        """
 
         self._output_media_pending.pop(command_id, None)
-        self._output_media_aborted.discard(command_id)
         shutil.rmtree(SKULK_VIDEO_OUTPUT_DIR / str(command_id), ignore_errors=True)
 
     async def _output_media_packet_ingress(self) -> None:

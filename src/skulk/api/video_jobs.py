@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 from typing import Final, cast
 
-from pydantic import Field
+from pydantic import ConfigDict, Field
 
 from skulk.shared.types.common import CommandId
 from skulk.shared.types.video import (
@@ -34,6 +34,8 @@ MAX_ACTIVE_JOBS: Final[int] = 32
 
 class VideoJob(CamelCaseModel):
     """One audio-video generation as seen by the job API."""
+
+    model_config = ConfigDict(frozen=True)
 
     id: CommandId
     """Job identifier; equal to the generation command id."""
