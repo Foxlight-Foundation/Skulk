@@ -618,3 +618,33 @@ Staging does not change active selection, logical plugin identities, configurati
 credentials or cleanup obligations. Installer output is bounded and stored only
 as protected host-local evidence. These are local installation primitives; the
 configuration HTTP routes do not accept artifact paths or expose raw installer logs.
+
+## Stopped-owner runtime selection
+
+`extensions/runtime_selection.py:RuntimeSelector` provides local activation,
+explicit rollback, retained-state disable/uninstall and interrupted-selection
+recovery. It holds both the installer fence and the existing supervisor lock;
+the caller must stop the affected plugin owner first. Skulk inference and an
+independent cleanup service are outside this operation's process ownership.
+
+Activation repeats current publisher trust, exact host compatibility, cached
+artifact verification and installed-file integrity. One atomic
+`runtime-selection.json` publishes the selected generation with a revision and
+operation ID. This is desired installation state, not proof of process health.
+Operation records and pending intent let reconnect read the result and explicit
+recovery finish the same local switch after an interruption. Recovery performs
+no provider acquisition and does not replay uncertain provider creates.
+
+An installation keeps its bundle identity and stable state directory across
+generations. Expanded permissions need explicit acceptance. Lower release
+sequences need explicit rollback, and the highest selected sequence is retained
+even after rollback. State changes require declared compatibility; configuration
+schema changes require migration tooling. Existing development manifests cannot
+be mixed into a managed selection. Disable retains the selected release, files,
+identities, configuration, credential history and cleanup obligations, and remains
+available when release trust is invalid.
+
+Selection is a local primitive: it does not register system services, automatically
+stop an owner, provide full node preflight, or approve a paid proposal. The service
+launcher must revalidate the selected generation against the live core before
+executing the fixed private owner entry point.

@@ -10,7 +10,7 @@ import sqlite3
 import stat
 import sys
 import time
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from typing import Literal, cast, final
 from uuid import uuid4
@@ -46,6 +46,7 @@ _OPERATION_ROW: TypeAdapter[tuple[str, str] | None] = TypeAdapter(
 )
 _TRUST_ROW: TypeAdapter[tuple[int, str] | None] = TypeAdapter(tuple[int, str] | None)
 _DIGEST_ROW: TypeAdapter[tuple[str] | None] = TypeAdapter(tuple[str] | None)
+_RUNTIME_DIGEST: TypeAdapter[str] = TypeAdapter(Digest)
 
 
 class RuntimeOperation(BaseModel):
@@ -250,6 +251,43 @@ class RuntimeInstaller:
                 (release.manifest.bundle_id, release.sequence, runtime.digest),
             )
         return runtime
+
+    @contextlib.asynccontextmanager
+    async def locked_generation(
+        self, runtime_digest: str
+    ) -> AsyncIterator[tuple[VerifiedRuntime, QualifiedHost]]:
+        """Hold installation ownership around a fully verified staged generation.
+
+        Verify trust, current host, cached artifacts and installed files without
+        executing plugin code. Activation callers retain this fence through their
+        local state transition. Cancellation waits for file verification to finish.
+        """
+        digest = _RUNTIME_DIGEST.validate_python(runtime_digest, strict=True)
+        lock = RuntimeLock(self.installer)
+        try:
+            generation = self.root / "generations" / digest
+
+            async def inspect() -> tuple[VerifiedRuntime, QualifiedHost]:
+                if not generation.is_dir():
+                    raise FileNotFoundError("staged generation is unavailable")
+                private_directory(self.root / "generations")
+                private_directory(generation)
+                host = await asyncio.to_thread(measure_host)
+                runtime = self._verify(read_private(generation / "staged.json"), host)
+                if runtime.digest != digest:
+                    raise ValueError("staged runtime identity differs")
+                await asyncio.to_thread(
+                    verified_artifacts, runtime, generation / "artifacts"
+                )
+                await asyncio.to_thread(verify_installed_runtime, generation, digest)
+                current_host = await asyncio.to_thread(measure_host)
+                self._verify(runtime.metadata, current_host)
+                return runtime, current_host
+
+            verified = await _finish(asyncio.create_task(inspect()))
+            yield verified
+        finally:
+            lock.close()
 
     async def stage(
         self, metadata: bytes, artifacts: Path, *, operation_id: str | None = None

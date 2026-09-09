@@ -36,6 +36,8 @@ def artifacts(
     dependency: str | None = None,
     sequence: int = 1,
     owner_entrypoint: bool = True,
+    signing_key: Ed25519PrivateKey | None = None,
+    permissions: tuple[str, ...] = ("local synthetic operation",),
 ) -> tuple[bytes, RuntimeTrust, QualifiedHost]:
     """Create an independently signed generic package with no private SDK metadata."""
     private_directory(directory)
@@ -68,7 +70,7 @@ def artifacts(
     write_private(directory / filename, wheel)
     now = int(time.time())
     host = QualifiedHost("macos-arm64", "3.13.13", "1.5.2", "a" * 64)
-    key = Ed25519PrivateKey.generate()
+    key = signing_key or Ed25519PrivateKey.generate()
     trust = RuntimeTrust(
         revision=1,
         expires_at=now + 3600,
@@ -102,7 +104,7 @@ def artifacts(
             ).hexdigest(),
             "state_schema": "example.v1",
             "compatible_state_schemas": [],
-            "permissions": ["local synthetic operation"],
+            "permissions": list(permissions),
         },
         "wheels": [
             {

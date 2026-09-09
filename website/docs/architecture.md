@@ -1585,6 +1585,13 @@ switches the active owner or changes cleanup state.
 `runtime_integrity.py` seals installed files, permissions and interpreter identity.
 Cached verification refuses a missing or changed seal before private Python can
 execute startup code; runtime commands disable bytecode writes.
+`runtime_selection.py` adds revision-fenced stopped-owner activation and rollback.
+It revalidates the staged runtime under installer ownership, acquires the existing
+supervisor lock, journals intent and atomically publishes one desired selection.
+Explicit recovery completes only that local transition. Disable retains all
+logical state and cleanup material, including when release trust is invalid.
+The highest selected sequence survives rollback; incompatible state/configuration
+changes require migration. Selection is separate from observed service health.
 
 Extension startup and serving share one event loop. The API starts hooks only
 once its runtime begins and invokes optional asynchronous shutdown hooks before
