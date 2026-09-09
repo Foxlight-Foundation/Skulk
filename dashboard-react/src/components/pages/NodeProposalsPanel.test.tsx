@@ -99,3 +99,13 @@ it('keeps uncertain submission visible beside confirmed absence and stale cleanu
   expect(host.textContent).not.toContain('Resume original approval');
   expect(calls.every((call) => call.method === 'GET')).toBe(true);
 });
+
+
+it('observes controller acknowledgement without offering to replay it', async () => {
+  operation = { operationId: 'f'.repeat(32), reference: review.proposal.reference, phase: 'acknowledged', updatedAt: 102, code: null, correctiveAction: null, reconciliation: { state: 'pending', observedAt: 101, stale: false, code: null } };
+  localStorage.setItem(storageKey, operation.operationId);
+  await click('Review proposals'); await contains('acknowledged');
+  expect(host.textContent).toContain('pending');
+  expect(host.textContent).not.toContain('Resume original approval');
+  expect(calls.every((call) => call.method === 'GET')).toBe(true);
+});

@@ -2141,3 +2141,10 @@ and a safe code. The provider owns exact receipt correlation; core only authoriz
 read access and transports bounded metadata. Later confirmed absence never rewrites
 submission uncertainty. Dashboard and terminal show the same facts without retrying
 an effect or claiming inference readiness from resource state.
+
+
+Managed proposal phase `acknowledged` records durable asynchronous controller
+acceptance, before any claim of provider completion. The private owner validates
+request correlation, preserves acknowledgement across restart and reconciles later
+receipt state without replay. Core and dashboard transport/display this bounded
+phase alongside independent cleanup observations.

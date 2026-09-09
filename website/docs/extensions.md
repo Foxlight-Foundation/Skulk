@@ -850,3 +850,10 @@ plugin-owned. Missing or invalid runtimes refuse local execution; use the indepe
 installation manager for recovery when the owner cannot start. Existing
 `setup-plugin` behavior and extensions without `__manage__.py` remain compatible.
 Plugin-specific commands belong in that plugin's documentation.
+
+
+Asynchronous proposal execution can report `ProposalOperation.phase = acknowledged`
+after the capability controller durably accepts the exact approved request. The
+provider request may remain queued. Preserve this observation across restart and
+use receipt reconciliation for later active/absent state; neither reconnection nor
+status reads may repeat the effect. A lost or uncorrelated response remains uncertain.

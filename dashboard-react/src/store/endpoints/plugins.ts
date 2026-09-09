@@ -50,7 +50,7 @@ export interface ProposalApproval { operationId: string; reference: ProposalRefe
 /** Safe operation observation; uncertain dispatch must never be replayed. */
 /** Historical cleanup evidence, independent of the original submission result. */
 export interface ProposalReconciliation { state: 'pending' | 'active' | 'releasing' | 'absent' | 'attention' | 'unknown'; observedAt: number | null; stale: boolean; code: string | null }
-export interface ProposalOperation { operationId: string; reference: ProposalReference; phase: 'accepted' | 'approving' | 'approved' | 'dispatching' | 'succeeded' | 'refused' | 'approval_interrupted' | 'uncertain'; reconciliation?: ProposalReconciliation | null; updatedAt: number; code: string | null; correctiveAction: string | null }
+export interface ProposalOperation { operationId: string; reference: ProposalReference; phase: 'accepted' | 'approving' | 'approved' | 'dispatching' | 'acknowledged' | 'succeeded' | 'refused' | 'approval_interrupted' | 'uncertain'; reconciliation?: ProposalReconciliation | null; updatedAt: number; code: string | null; correctiveAction: string | null }
 
 /** Public setup files from the installed owner; never private keys or credentials. */
 export interface NodeSetup {

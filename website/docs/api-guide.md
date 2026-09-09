@@ -3828,7 +3828,11 @@ contain at most 16 KiB of safe progress metadata.
 Responses contain `operationId`, exact `reference`, `phase`, `updatedAt` (UTC Unix
 seconds), nullable safe `code`, and nullable `correctiveAction` (up to 512
 characters). Phases are `accepted`, `approving`, `approved`, `dispatching`,
-`succeeded`, `refused`, `approval_interrupted`, and `uncertain`. Success describes
+`acknowledged`, `succeeded`, `refused`, `approval_interrupted`, and `uncertain`.
+`acknowledged` means the capability controller durably accepted the exact approved
+request for asynchronous processing. The provider request may still be queued; this
+is neither provider completion nor inference readiness. Observe `reconciliation`;
+acknowledged work survives owner restart and cannot be replayed or resumed. Success describes
 completion of the selected action; it does not universally mean resource absence.
 Malformed inputs return 422, missing scopes 403, unsupported facets 404,
 inconsistent references or refused actions 409, and unavailable owners 503/504.

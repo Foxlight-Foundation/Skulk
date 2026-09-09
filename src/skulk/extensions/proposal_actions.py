@@ -52,6 +52,7 @@ class ProposalOperation(FrozenModel):
         "approving",
         "approved",
         "dispatching",
+        "acknowledged",
         "succeeded",
         "refused",
         "approval_interrupted",
