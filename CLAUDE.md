@@ -589,6 +589,15 @@ bypass Redux and browser persistence. Explicit installation recovery keeps the
 original digest and operation ID while retaining separate attempt evidence;
 selected, pending and sealed generations cannot be repaired in place.
 
+
+The optional `NodeCredentialProvider` facet (`extensions/credentials.py`) exposes
+separate write-only replacement/retirement and reference readiness for each
+installed node. The generic API and managed-owner adapter carry bounded values
+only on authenticated requests and protected IPC. Providers own durable operation
+IDs, credential revision/declaration fences and cleanup history. The dashboard
+keeps values out of Redux/browser persistence and reads metadata after uncertain
+writes. Ordinary settings and replicated State never carry credential values.
+
 Optional `NodeConfigurationProvider` (`extensions/configuration.py`) exposes stable installed-node settings independently of capability readiness. The `/v1/plugins` API and Plugins dashboard share plugin-owned schema validation and revision-fenced settings with terminal management. No credentials or configuration enter replicated State. Explicit plugin read/manage/approve grants are owner-controlled through `/v1/auth/plugin-grants`; existing pairings receive none, and broad operator write permission does not imply them.
 Separately installed packages register a zero-arg factory in the
 `skulk.extensions` entry-point group; `load_extensions()` discovers them once

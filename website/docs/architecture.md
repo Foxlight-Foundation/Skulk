@@ -1683,6 +1683,15 @@ bypass Redux and browser persistence. Explicit installation recovery keeps the
 original digest and operation ID while retaining separate attempt evidence;
 selected, pending and sealed generations cannot be repaired in place.
 
+
+The optional `NodeCredentialProvider` facet (`extensions/credentials.py`) exposes
+separate write-only replacement/retirement and reference readiness for each
+installed node. The generic API and managed-owner adapter carry bounded values
+only on authenticated requests and protected IPC. Providers own durable operation
+IDs, credential revision/declaration fences and cleanup history. The dashboard
+keeps values out of Redux/browser persistence and reads metadata after uncertain
+writes. Ordinary settings and replicated State never carry credential values.
+
 Plugins may also implement the optional `NodeConfigurationProvider` facet.
 It lists stable installed node identities and exposes their ordinary-settings
 schemas, values, validation and revision-fenced changes through `/v1/plugins`.

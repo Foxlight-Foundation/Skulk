@@ -29,6 +29,12 @@ from skulk.extensions.configuration import (
     NodeConfiguration,
     NodeConfigurationProvider,
 )
+from skulk.extensions.credentials import (
+    CredentialMutation,
+    CredentialStatus,
+    NodeCredentialProvider,
+    NodeCredentials,
+)
 from skulk.extensions.loader import (
     ENTRY_POINT_GROUP,
     LoadedExtensions,
@@ -100,6 +106,10 @@ __all__ = [
     "ConfigurationResult",
     "NodeConfiguration",
     "NodeConfigurationProvider",
+    "CredentialMutation",
+    "CredentialStatus",
+    "NodeCredentials",
+    "NodeCredentialProvider",
     "StewardTool",
     "StewardToolProvider",
     "DEFAULT_CALL_TIMEOUT_SECONDS",

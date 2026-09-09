@@ -3126,9 +3126,11 @@ failure. Service paths and executable selection are not HTTP request parameters.
 
 | Method and path | Parameters | Behavior |
 | --- | --- | --- |
-| `GET /v1/plugins` | None | Returns installed plugins with `pluginId`, `available`, and `nodes`; each node has `nodeId`, `bundleId`, `version`, `status`, and `configurable`. Disabled nodes remain listed. An unavailable management provider has `available: false`. Requires `plugins:read`. |
+| `GET /v1/plugins` | None | Returns installed plugins with `pluginId`, `available`, and `nodes`; each node has `nodeId`, `bundleId`, `version`, `status`, `configurable`, and `credentialsConfigurable` (false for legacy nodes without credential inputs). Disabled nodes remain listed. An unavailable management provider has `available: false`. Requires `plugins:read`. |
 | `GET /v1/plugins/{plugin_id}/nodes/{node_id}/configuration` | Exact installed plugin and stable node IDs | Returns `nodeId`, `revision`, `schemaDigest`, `configurationSchema`, ordinary `values`, and `enabled`. Requires `plugins:read`. |
 | `POST /v1/plugins/{plugin_id}/nodes/{node_id}/configuration` | JSON `operation` (`validate`, `edit`, `enable`, `disable`), `expectedRevision`, `expectedSchemaDigest`; `values` is required only for `validate`/`edit` | Validates a draft or changes one node through its provider. Both revision and schema fences must match. Returns `configuration` and `validated`. The provider owns validation, persistence, preflight and any necessary child restart. Requires `plugins:manage`; this route cannot approve spending. |
+| `GET /v1/plugins/{plugin_id}/nodes/{node_id}/credentials` | Exact installed plugin and stable node IDs | Optional credential-management facet. Returns `nodeId`, credential `revision`, `schemaDigest`, and up to sixteen `credentials`, each with `credentialId`, `title`, `description`, `required` and `ready`. No values, value fingerprints or backend paths. Requires `plugins:read`. |
+| `POST /v1/plugins/{plugin_id}/nodes/{node_id}/credentials` | JSON `operation` (`replace` or `retire`), `operationId` (32 lowercase hexadecimal characters), plugin-declared `credentialId`, `expectedRevision`, `expectedSchemaDigest`, and write-only `value` for replacement only | Applies one revision-fenced credential mutation and returns metadata. Values are nonempty UTF-8 and at most 4096 bytes. The provider durably deduplicates exact operation IDs, preserves prior credential versions needed for cleanup, and owns readiness checks. Retirement withdraws future credential use; it does not erase cleanup history. Requires `plugins:manage`; no enable or spending approval is conveyed. |
 | `GET /v1/auth/plugin-grants` | None | Direct owner administration only: lists device `deviceId`, `deviceName`, grant `revision`, explicit plugin `scopes`, and `active`. No credential material. |
 | `PUT /v1/auth/plugin-grants/{device_id}` | JSON `expectedRevision`, `scopes` (unique subset of `plugins:read`, `plugins:manage`, `plugins:approve`) | Direct owner administration only: replaces that device's plugin grants, retaining other scopes. An empty list revokes all plugin grants. Existing tokens use current grants immediately. |
 
@@ -3137,6 +3139,18 @@ Existing pairings and newly paired devices receive no plugin grants automaticall
 imply approval. Grant routes reject relay access; a remote operator cannot grant
 itself greater authority. Unknown devices return `404`, stale grant revisions
 return `409`, and malformed grants return `422`.
+
+Credential values never enter ordinary configuration, replicated State or ordinary
+diagnostic exports. Validation failures and provider exceptions do not echo them.
+Credential metadata responses are bounded to 64 KiB. Unsupported credential facets
+return `404`; declarations, revisions and retention remain plugin-owned. A lost
+credential response requires a status read before further action. Exact operation
+ID reuse must not repeat a committed backend write; changed intent must be refused.
+The Plugins page renders these inputs separately, clears values before submission,
+and keeps them out of Redux/browser persistence. A concurrent or unconfirmed
+change requires explicit metadata refresh before another write. Required
+credential readiness is an admission prerequisite, not full provider preflight
+or proof that external services are reachable.
 
 Direct owner requests use the existing dashboard boundary: the actual socket
 peer must be loopback or verified Tailscale, the browser Origin/Referer must

@@ -24,6 +24,10 @@ class ConfigurableNode(FrozenModel):
     configurable: bool = Field(
         description="Whether this node declares a configuration schema."
     )
+    credentials_configurable: bool = Field(
+        default=False,
+        description="Whether this node declares separate write-only credential inputs.",
+    )
 
 
 class NodeConfiguration(FrozenModel):

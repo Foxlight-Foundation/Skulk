@@ -5,6 +5,7 @@ import { useGetPluginNodesQuery, useGetNodeConfigurationQuery, useConfigurePlugi
 import { Button } from '../common/Button';
 import { ManagedRuntimesPanel } from './ManagedRuntimesPanel';
 import { PluginConfigurationFields, supportedConfigurationSchema } from './PluginConfigurationFields';
+import { NodeCredentialsPanel } from './NodeCredentialsPanel';
 
 const Page = styled.section`padding: 24px; width: 100%; max-width: 900px; margin: 0 auto; box-sizing: border-box;`;
 const Card = styled.article`
@@ -69,6 +70,7 @@ function NodeEditor({ pluginId, configuration, reload }: { pluginId: string; con
 function NodeCard({ pluginId, node }: { pluginId: string; node: ConfigurableNode }) {
   const { t } = useSkulkTranslation();
   const [expanded, setExpanded] = useState(false);
+  const [credentialsOpen, setCredentialsOpen] = useState(false);
   const query = useGetNodeConfigurationQuery({ pluginId, nodeId: node.nodeId }, { skip: !expanded || !node.configurable });
   return <Card>
     <h3>{node.bundleId} · {node.version}</h3><p>{node.status}</p>
@@ -76,6 +78,8 @@ function NodeCard({ pluginId, node }: { pluginId: string; node: ConfigurableNode
     {expanded && query.isLoading ? <p>{t('plugins.loadingSettings', 'Loading settings…')}</p> : null}
     {expanded && query.error ? <p role="alert">{t('plugins.settingsUnavailable', 'Settings are unavailable. Check node health and your plugin permissions.')}</p> : null}
     {expanded && query.data ? <NodeEditor pluginId={pluginId} configuration={query.data} reload={() => query.refetch().unwrap()} /> : null}
+    {node.credentialsConfigurable ? <Button type="button" aria-expanded={credentialsOpen} onClick={() => setCredentialsOpen(!credentialsOpen)}>{credentialsOpen ? t('plugins.closeCredentials', 'Close credentials') : t('plugins.manageCredentials', 'Manage credentials')}</Button> : null}
+    {credentialsOpen ? <NodeCredentialsPanel pluginId={pluginId} nodeId={node.nodeId} /> : null}
   </Card>;
 }
 

@@ -9,7 +9,10 @@ import anyio
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import Field, JsonValue
 
-from skulk.api.managed_plugins import create_managed_plugins_router
+from skulk.api.managed_plugins import (
+    ProtectedManagementRoute,
+    create_managed_plugins_router,
+)
 from skulk.api.operator_auth import TailnetPeerVerifier, authorize_plugin_request
 from skulk.connectivity.tailscale import is_tailscale_peer
 from skulk.extensions.configuration import (
@@ -18,6 +21,11 @@ from skulk.extensions.configuration import (
     ConfigurationResult,
     NodeConfiguration,
     NodeConfigurationProvider,
+)
+from skulk.extensions.credentials import (
+    CredentialMutation,
+    NodeCredentialProvider,
+    NodeCredentials,
 )
 from skulk.extensions.loader import LoadedExtensions
 from skulk.operator.pairing import OperatorPairingService
@@ -69,7 +77,9 @@ def create_plugins_router(
     and payload-safe failure responses. No cloud effect or executable selection
     is accepted here.
     """
-    router = APIRouter(prefix="/v1/plugins", tags=["Plugins"])
+    router = APIRouter(
+        prefix="/v1/plugins", tags=["Plugins"], route_class=ProtectedManagementRoute
+    )
     router.include_router(
         create_managed_plugins_router(
             extensions, pairing_service, tailnet_peer_verifier
@@ -224,6 +234,81 @@ def create_plugins_router(
             result = await selected.configure_node(node_id, mutation)
             _public_configuration(result.configuration, node_id)
             return result
+
+        return await invoke(change)
+
+    def credentials_provider(plugin_id: str) -> NodeCredentialProvider:
+        selected = provider(plugin_id)
+        if not isinstance(selected, NodeCredentialProvider):
+            raise HTTPException(
+                status_code=404, detail="credential management is not supported"
+            )
+        return selected
+
+    def public_credentials(value: NodeCredentials, node_id: str) -> NodeCredentials:
+        if (
+            value.node_id != node_id
+            or len(value.model_dump_json().encode()) > 65536
+            or len({item.credential_id for item in value.credentials})
+            != len(value.credentials)
+        ):
+            raise ValueError("invalid credential metadata")
+        return value
+
+    @router.get(
+        "/{plugin_id}/nodes/{node_id}/credentials",
+        response_model=NodeCredentials,
+        summary="Read capability-node credential readiness",
+        description="Return plugin-declared credential references, labels, requirements and readiness with the current credential revision and declaration digest. Never returns values, value fingerprints or backend paths. Requires direct owner authority or plugins:read. Available independently of capability readiness when the plugin supports credential management.",
+    )
+    async def get_credentials(
+        plugin_id: str, node_id: str, request: Request, response: Response
+    ) -> NodeCredentials:
+        """Read only safe metadata from the exact installed node's credential provider."""
+        await authorize_plugin_request(
+            request, pairing_service, "plugins:read", tailnet_peer_verifier
+        )
+        response.headers["Cache-Control"] = "no-store"
+        selected = credentials_provider(plugin_id)
+
+        async def read() -> NodeCredentials:
+            return public_credentials(await selected.node_credentials(node_id), node_id)
+
+        return await invoke(read)
+
+    @router.post(
+        "/{plugin_id}/nodes/{node_id}/credentials",
+        response_model=NodeCredentials,
+        summary="Replace or retire a capability-node credential",
+        description="Apply one plugin-declared write-only credential replacement or retirement using operation_id, credential_id, expected_revision and expected_schema_digest. Replacement requires value; retirement prohibits it. Providers retain credential history needed by cleanup and durably deduplicate exact operation IDs. Does not enable a capability or approve spending. Requires direct owner authority or plugins:manage. An unconfirmed response requires reading current metadata before another action; values are excluded from validation errors.",
+    )
+    async def change_credentials(
+        plugin_id: str,
+        node_id: str,
+        mutation: CredentialMutation,
+        request: Request,
+        response: Response,
+    ) -> NodeCredentials:
+        """Forward one bounded secret-bearing operation and return metadata only."""
+        await authorize_plugin_request(
+            request, pairing_service, "plugins:manage", tailnet_peer_verifier
+        )
+        response.headers["Cache-Control"] = "no-store"
+        if (mutation.operation == "replace") != (mutation.value is not None):
+            raise HTTPException(
+                status_code=422, detail="value is required only for replacement"
+            )
+        if (
+            mutation.value is not None
+            and not 0 < len(mutation.value.get_secret_value().encode()) <= 4096
+        ):
+            raise HTTPException(status_code=422, detail="credential exceeds bound")
+        selected = credentials_provider(plugin_id)
+
+        async def change() -> NodeCredentials:
+            return public_credentials(
+                await selected.change_node_credential(node_id, mutation), node_id
+            )
 
         return await invoke(change)
 
