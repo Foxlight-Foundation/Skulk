@@ -10360,6 +10360,18 @@ class API:
                 status_code=400,
                 detail=f"size must be a multiple of {card.video.canvas_multiple}",
             )
+        if (
+            canvas is not None
+            and card.video.max_pixels is not None
+            and canvas[0] * canvas[1] > card.video.max_pixels
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"size exceeds the model's maximum canvas of "
+                    f"{card.video.max_pixels} pixels"
+                ),
+            )
         limits = card.video.reference_limits
         if limits is not None:
             counts = {
@@ -10495,8 +10507,11 @@ class API:
             # or when the producer's terminal frame was delivered. A job that is
             # still live here can never receive another frame, so it becomes
             # terminal now rather than lingering as active until a restart.
+            # The queue also closes right after a successful terminal frame
+            # while the container is still crossing OUTPUT_MEDIA; that job keeps
+            # its media deadline and settles when the container lands.
             job = self._video_jobs.get(command_id)
-            if job is not None and not job.is_terminal:
+            if job is not None and not job.is_terminal and not job.render_finished:
                 cancelled = command_id in self._cancelled_command_ids
                 self._video_jobs.fail(
                     command_id,
@@ -10506,7 +10521,7 @@ class API:
                     cancelled=cancelled,
                 )
                 self._video_store.delete(command_id)
-            self._video_job_media_deadlines.pop(command_id, None)
+                self._video_job_media_deadlines.pop(command_id, None)
             self._video_generation_queues.pop(command_id, None)
             self._chunk_reorder.pop(command_id, None)
             await self._finalize_command_stream(
@@ -10541,7 +10556,17 @@ class API:
                     continue
                 command_id = packet.command_id
                 job = self._video_jobs.get(command_id)
-                if job is None or job.is_terminal or packet.model != ModelId(job.model):
+                if job is None or packet.model != ModelId(job.model):
+                    continue
+                # A completed job still accepts the thumbnail its manifest
+                # declared, which normally arrives after the container settled
+                # the job; failed or cancelled jobs accept nothing.
+                if job.is_terminal and not (
+                    job.status == "completed"
+                    and packet.purpose == "thumbnail"
+                    and job.output is not None
+                    and job.output.thumbnail_sha256 is not None
+                ):
                     continue
                 try:
                     if packet.kind == "opened":

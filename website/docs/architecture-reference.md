@@ -465,6 +465,7 @@ Defined in `src/skulk/routing/topics.py`.
 | `AUTHORITY_MESSAGES` | `AuthorityNetworkEnvelope` | signed stable-installation-addressed prepare/promise/accept/vote/commit/catch-up metadata; no secret authority payloads | Future authority service; deterministic harness today | Future authority service; registered router topic is otherwise dormant |
 | `CONNECTION_MESSAGES` | libp2p connection updates | peer arrivals / departures | Router | All nodes |
 | `TELEMETRY` | `NodeTelemetry` | `GatheredInfo` plus non-terminal `DownloadPending` / `DownloadOngoing`; bounded latest-value admission and an isolated gossipsub protocol | Workers | All nodes (applied into `TelemetryView`) |
+| `OUTPUT_MEDIA` | `OutputMediaPacket` | finished video container or thumbnail as raw frames: `opened -> chunk* -> completed` from the producing worker, `accepted` / `transport_failed` back from the owning API; node-addressed by `target_node`, stream-keyed by command, purpose, and source | Worker (render output) and API (acknowledgements) | Owning API (`VideoStore` assembly) and the producing worker |
 | `DATA` | `DataChunk` | `{command_id, kind, chunk?, sequence, owner_node}`: explicit `started/chunk/completed/failed/cancelled` lifecycle for token, image, video progress, embedding, transcription, and audio output | One serving output worker: rank 0 for text/embedding/speech, primary terminal stage for image generation | Owning API node only on Zenoh; API nodes on gossipsub; master does NOT consume it |
 
 ### Telemetry plane (#279)

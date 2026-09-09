@@ -150,3 +150,28 @@ async def test_failed_runner_is_not_a_video_placement() -> None:
     failure = events[1]
     assert isinstance(failure, TaskFailed)
     assert failure.error_type == "video_mode_unavailable"
+
+
+async def test_multi_rank_instance_is_not_a_video_placement() -> None:
+    state = _state(["t2va"])
+    instance = state.instances[InstanceId("video")]
+    runner_b = RunnerId("runner-b")
+    shard = next(iter(instance.shard_assignments.runner_to_shard.values()))
+    widened = instance.model_copy(
+        update={
+            "shard_assignments": ShardAssignments(
+                model_id=MODEL,
+                node_to_runner={NodeId("node-a"): RunnerId("runner-video"), NodeId("node-b"): runner_b},
+                runner_to_shard={RunnerId("runner-video"): shard, runner_b: shard},
+            )
+        }
+    )
+    state = State(
+        instances={widened.instance_id: widened},
+        runners={RunnerId("runner-video"): RunnerReady(), runner_b: RunnerReady()},
+    )
+    params = VideoGenerationTaskParams(prompt="a fox", model=str(MODEL), seconds=5)
+    events = await _dispatch(state, params, 2)
+    failure = events[1]
+    assert isinstance(failure, TaskFailed)
+    assert failure.error_type == "video_mode_unavailable"

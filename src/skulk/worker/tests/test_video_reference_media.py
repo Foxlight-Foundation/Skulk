@@ -13,9 +13,10 @@ from skulk.shared.types.video import VideoGenerationTaskParams, VideoReferenceSp
 from skulk.shared.types.worker.instances import InstanceId
 from skulk.worker.main import (
     _inject_reference_paths,  # pyright: ignore[reportPrivateUsage]
-    _vision_media_cleanup_command_id,  # pyright: ignore[reportPrivateUsage]
+    _purge_stale_video_directories,  # pyright: ignore[reportPrivateUsage]
     _reference_media_extension,  # pyright: ignore[reportPrivateUsage]
     _verify_file_digest,  # pyright: ignore[reportPrivateUsage]
+    _vision_media_cleanup_command_id,  # pyright: ignore[reportPrivateUsage]
     _write_reference_media,  # pyright: ignore[reportPrivateUsage]
 )
 
@@ -91,3 +92,23 @@ def test_task_failed_releases_video_reference_media() -> None:
     event = TaskFailed(task_id=TaskId("t"), error_type="video_mode_unavailable", error_message="no")
     assert _vision_media_cleanup_command_id(event, {}, {task.task_id: task}) == CommandId("c")
     assert _vision_media_cleanup_command_id(event, {}, {}) is None
+
+
+def test_startup_purges_stale_video_directories(tmp_path: Path, monkeypatch: object) -> None:
+    import pytest
+
+    assert isinstance(monkeypatch, pytest.MonkeyPatch)
+    from skulk.worker import main as worker_main
+
+    inputs = tmp_path / "in"
+    outputs = tmp_path / "out"
+    (inputs / "cmd-a").mkdir(parents=True)
+    (inputs / "cmd-a" / "0.png").write_bytes(b"x")
+    (outputs / "cmd-b").mkdir(parents=True)
+    (outputs / "cmd-b" / "output.mp4").write_bytes(b"y")
+    (outputs / "stray.txt").write_bytes(b"z")
+    monkeypatch.setattr(worker_main, "SKULK_VIDEO_INPUT_DIR", inputs)
+    monkeypatch.setattr(worker_main, "SKULK_VIDEO_OUTPUT_DIR", outputs)
+    _purge_stale_video_directories()
+    assert not (inputs / "cmd-a").exists() and not (outputs / "cmd-b").exists()
+    assert (outputs / "stray.txt").exists()

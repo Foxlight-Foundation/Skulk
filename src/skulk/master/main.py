@@ -753,7 +753,13 @@ def video_generation_instances(
     ranked: list[tuple[bool, int, str, InstanceId]] = []
     for instance in state.instances.values():
         assignments = instance.shard_assignments
-        if assignments.model_id != model_id or not assignments.runner_to_shard:
+        if (
+            assignments.model_id != model_id
+            or len(assignments.runner_to_shard) != 1
+            or len(assignments.node_to_runner) != 1
+        ):
+            # Video engines are single-host; a multi-rank instance has no
+            # single output owner and never qualifies.
             continue
         shard = next(iter(assignments.runner_to_shard.values()))
         video = shard.model_card.video

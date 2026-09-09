@@ -656,14 +656,16 @@ def _vision_media_cleanup_command_id(
     task: Task | None = None
     if isinstance(event, TaskDeleted):
         task = previous_tasks.get(event.task_id)
-    elif isinstance(event, TaskFailed):
-        task = current_tasks.get(event.task_id) or previous_tasks.get(event.task_id)
-    elif isinstance(event, TaskStatusUpdated) and event.task_status in {
-        TaskStatus.Cancelled,
-        TaskStatus.Complete,
-        TaskStatus.Failed,
-        TaskStatus.TimedOut,
-    }:
+    elif isinstance(event, TaskFailed) or (
+        isinstance(event, TaskStatusUpdated)
+        and event.task_status
+        in {
+            TaskStatus.Cancelled,
+            TaskStatus.Complete,
+            TaskStatus.Failed,
+            TaskStatus.TimedOut,
+        }
+    ):
         task = current_tasks.get(event.task_id) or previous_tasks.get(event.task_id)
     if isinstance(task, (TextGeneration, ImageEdits, VideoGeneration)):
         return task.command_id
@@ -699,6 +701,19 @@ def _write_reference_media(
         staging = target.with_suffix(target.suffix + ".part")
         staging.write_bytes(slots[slot])
         staging.replace(target)
+
+
+def _purge_stale_video_directories() -> None:
+    """Delete task-local video media left behind by an earlier worker process."""
+
+    for root in (SKULK_VIDEO_INPUT_DIR, SKULK_VIDEO_OUTPUT_DIR):
+        try:
+            entries = list(root.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.is_dir():
+                shutil.rmtree(entry, ignore_errors=True)
 
 
 def _verify_file_digest(path: Path, sha256: str) -> int:
@@ -976,6 +991,9 @@ class Worker:
         # until they are written to task-local files and the plan gate opens.
         self._reference_media_verified: dict[CommandId, dict[int, bytes]] = {}
         self._reference_media_ready: set[CommandId] = set()
+        # When a video task with attachments was first observed without its
+        # media; the janitor fails tasks whose owning API never delivers.
+        self._reference_media_awaited: dict[CommandId, float] = {}
         # Finished containers awaiting the owning API's verification, with the
         # artifact purposes still unacknowledged.
         self._output_media_pending: dict[CommandId, tuple[NodeId, float, set[str]]] = {}
@@ -1203,6 +1221,9 @@ class Worker:
         )
 
         try:
+            # Reference files and unacknowledged containers from a previous
+            # process have no tracking record; nothing can ever release them.
+            _purge_stale_video_directories()
             async with self._tg as tg:
                 tg.start_soon(info_gatherer.run)
                 tg.start_soon(self._forward_info, info_recv)
@@ -1221,6 +1242,7 @@ class Worker:
                 if self._vision_media_packet_receiver is not None:
                     tg.start_soon(self._vision_media_packet_ingress)
                     tg.start_soon(self._vision_media_janitor)
+                    tg.start_soon(self._reference_media_janitor)
                 if self._output_media_packet_receiver is not None:
                     tg.start_soon(self._output_media_packet_ingress)
                     tg.start_soon(self._output_media_janitor)
@@ -1766,18 +1788,8 @@ class Worker:
             return
         self._vision_media_ack_inflight.add(command_id)
         try:
-            try:
-                with anyio.move_on_after(
-                    _VISION_MEDIA_ACK_SEND_TIMEOUT_SECONDS, shield=True
-                ) as acknowledgement_scope:
-                    await sender.send(completed.accepted())
-            except (BrokenResourceError, ClosedResourceError):
-                return
-            if (
-                acknowledgement_scope.cancel_called
-                or command_id not in self._reference_media_verified
-            ):
-                return
+            # Persist first: the acknowledgement releases the API's only staged
+            # copy, so the bytes must already be durable on this node.
             directory = SKULK_VIDEO_INPUT_DIR / str(command_id)
             try:
                 await to_thread.run_sync(
@@ -1787,6 +1799,20 @@ class Worker:
                 await self._reject_vision_media(
                     completed, f"Reference media could not be written locally: {error}"
                 )
+                return
+            try:
+                with anyio.move_on_after(
+                    _VISION_MEDIA_ACK_SEND_TIMEOUT_SECONDS, shield=True
+                ) as acknowledgement_scope:
+                    await sender.send(completed.accepted())
+            except (BrokenResourceError, ClosedResourceError):
+                shutil.rmtree(directory, ignore_errors=True)
+                return
+            if (
+                acknowledgement_scope.cancel_called
+                or command_id not in self._reference_media_verified
+            ):
+                shutil.rmtree(directory, ignore_errors=True)
                 return
             # The bytes now live on disk; drop the in-memory copy and release
             # the ingress accounting the same way image input does.
@@ -2084,6 +2110,59 @@ class Worker:
                     )
                     self._output_media_aborted.add(command_id)
                     self._finish_video_output(command_id)
+
+    async def _reference_media_janitor(self) -> None:
+        """Fail video tasks whose attachments never arrive from the owning API.
+
+        The vision janitor only sees streams that opened. A task whose owner
+        vanished after placement has no stream at all, so its lease is keyed
+        on the replicated task instead.
+        """
+
+        while True:
+            await anyio.sleep(5)
+            now = time.monotonic()
+            awaiting: set[CommandId] = set()
+            for task in self.state.tasks.values():
+                if (
+                    isinstance(task, VideoGeneration)
+                    and task.task_status == TaskStatus.Pending
+                    and task.task_params.total_input_chunks > 0
+                    and task.command_id not in self._reference_media_ready
+                    and task.instance_id in self.state.instances
+                    and self.node_id
+                    in self.state.instances[task.instance_id].shard_assignments.node_to_runner
+                ):
+                    awaiting.add(task.command_id)
+                    self._reference_media_awaited.setdefault(task.command_id, now)
+            for command_id in [key for key in self._reference_media_awaited if key not in awaiting]:
+                self._reference_media_awaited.pop(command_id, None)
+            for command_id, since in list(self._reference_media_awaited.items()):
+                if now - since < _VISION_MEDIA_PENDING_TTL_SECONDS:
+                    continue
+                self._reference_media_awaited.pop(command_id, None)
+                task = next(
+                    (
+                        candidate
+                        for candidate in self.state.tasks.values()
+                        if isinstance(candidate, VideoGeneration)
+                        and candidate.command_id == command_id
+                    ),
+                    None,
+                )
+                if task is None:
+                    continue
+                self._clear_vision_media(command_id)
+                await self.event_sender.send(
+                    TaskFailed(
+                        task_id=task.task_id,
+                        error_type="reference_media_timeout",
+                        error_message=(
+                            "Reference media for the video task never arrived from "
+                            "the owning API node"
+                        ),
+                    )
+                )
 
     async def _vision_media_janitor(self) -> None:
         """Reject incomplete image streams after their bounded lifetime."""

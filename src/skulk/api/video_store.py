@@ -40,6 +40,9 @@ class StoredVideoArtifact(BaseModel, frozen=True):
     size_bytes: int
     sha256: str
     expires_at: float
+    verified: bool = True
+    """Whether the bytes on disk were hashed by this process. Adopted
+    artifacts start unverified and are hashed on first access."""
 
 
 class _Digest(Protocol):
@@ -63,6 +66,19 @@ class _Assembly:
     digest: _Digest = field(default_factory=hashlib.sha256)
     received_bytes: int = 0
     next_sequence: int = 1
+
+
+def _file_sha256(path: Path) -> str | None:
+    """Hash one file; ``None`` when it cannot be read."""
+
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                digest.update(chunk)
+    except OSError:
+        return None
+    return digest.hexdigest()
 
 
 class VideoStore:
@@ -180,8 +196,9 @@ class VideoStore:
         """Re-attach an artifact committed by a previous process.
 
         The job registry is the durable record of what was verified; the file
-        is accepted when it exists with the recorded size. Returns whether the
-        artifact is now served.
+        is registered when it exists with the recorded size and is hashed
+        against the recorded digest on first access before it is served.
+        Returns whether the artifact is now registered.
         """
 
         path = self._storage_dir / str(command_id) / _ARTIFACT_FILENAMES[purpose]
@@ -200,6 +217,7 @@ class VideoStore:
             size_bytes=size_bytes,
             sha256=sha256,
             expires_at=expires_at,
+            verified=False,
         )
         return True
 
@@ -247,6 +265,14 @@ class VideoStore:
         if time.time() > stored.expires_at:
             self.delete(command_id)
             return None
+        if not stored.verified:
+            # A previous process verified these bytes; anything could have
+            # touched the file since. Hash once before serving it as verified.
+            if _file_sha256(stored.file_path) != stored.sha256:
+                self.delete(command_id)
+                return None
+            stored = stored.model_copy(update={"verified": True})
+            self._artifacts[(command_id, purpose)] = stored
         return stored
 
     def delete(self, command_id: CommandId) -> None:

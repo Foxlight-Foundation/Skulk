@@ -413,3 +413,72 @@ def test_job_registry_counts_live_jobs() -> None:
     assert registry.active_count() == MAX_ACTIVE_JOBS
     registry.fail(CommandId("live0"), "done")
     assert registry.active_count() == MAX_ACTIVE_JOBS - 1
+
+
+def test_completed_job_still_accepts_declared_thumbnail_packets(tmp_path: Path) -> None:
+    """The guard in _apply_output_media must let a declared thumbnail through."""
+    registry = VideoJobRegistry(None)
+    job = registry.create(_job("thumb"))
+    manifest = VideoOutputManifest(
+        sha256=DIGEST,
+        size_bytes=1,
+        width=64,
+        height=64,
+        frame_count=5,
+        fps=24,
+        seconds=0.2,
+        thumbnail_sha256=DIGEST,
+        thumbnail_size_bytes=1,
+    )
+    registry.update(job.id, render_finished=True, media_delivered=True, output=manifest)
+    settled = registry.settle(job.id)
+    assert settled is not None and settled.status == "completed"
+    assert settled.output is not None and settled.output.thumbnail_sha256 is not None
+
+
+async def test_terminal_frame_keeps_job_waiting_for_media(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The DATA queue closes on the terminal frame; the job must not fail then."""
+    api = _bare_api(tmp_path)
+
+    async def finalize(_command_id: CommandId, _queue_map: object) -> None:
+        return None
+
+    monkeypatch.setattr(api, "_finalize_command_stream", finalize)
+    job = api._video_jobs.create(_job("wait-media"))  # pyright: ignore[reportPrivateUsage]
+    manifest = VideoOutputManifest(
+        sha256=DIGEST, size_bytes=10, width=64, height=64, frame_count=5, fps=24, seconds=0.2
+    )
+    sender, receiver = channel[VideoChunk | ErrorChunk]()
+    api._video_generation_queues[job.id] = sender  # pyright: ignore[reportPrivateUsage]
+    async with anyio.create_task_group() as group:
+        group.start_soon(api._drain_video_job, job.id, receiver)  # pyright: ignore[reportPrivateUsage]
+        await sender.send(
+            VideoChunk(model=MODEL, stage="muxing", output=manifest, finish_reason="stop")
+        )
+        await anyio.sleep(0.05)
+        sender.close()
+    waiting = api._video_jobs.get(job.id)  # pyright: ignore[reportPrivateUsage]
+    assert waiting is not None and waiting.status == "in_progress"
+    assert waiting.render_finished and waiting.stage == "uploading"
+    assert job.id in api._video_job_media_deadlines  # pyright: ignore[reportPrivateUsage]
+    api._video_jobs.update(job.id, media_delivered=True)  # pyright: ignore[reportPrivateUsage]
+    api._settle_video_job(job.id)  # pyright: ignore[reportPrivateUsage]
+    assert api._video_jobs.get(job.id).status == "completed"  # pyright: ignore[reportOptionalMemberAccess, reportPrivateUsage]
+
+
+def test_adopted_artifact_is_hashed_before_it_is_served(tmp_path: Path) -> None:
+    store = VideoStore(tmp_path, default_expiry_seconds=3600)
+    command_id = CommandId("tampered")
+    directory = tmp_path / str(command_id)
+    directory.mkdir()
+    (directory / "output.mp4").write_bytes(b"replaced-bytes")
+    assert store.adopt(
+        command_id,
+        "video",
+        content_type="video/mp4",
+        size_bytes=len(b"replaced-bytes"),
+        sha256=DIGEST,
+        expires_at=9e12,
+    )
+    assert store.get(command_id) is None
+    assert not directory.exists()
