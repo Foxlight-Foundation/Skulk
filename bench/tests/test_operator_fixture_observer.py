@@ -213,3 +213,209 @@ async def test_proxy_observes_socket_lifetime_not_request_duration() -> None:
         "connection-close",
         "flow-end",
     ]
+
+
+@pytest.mark.parametrize("completion", ["disconnect", "transport-close", "normal"])
+@pytest.mark.parametrize("status", [200, 401])
+async def test_response_completion_precedes_handler_unwind(
+    completion: str, status: int
+) -> None:
+    """A completed HTTP body survives later connection or handler cleanup."""
+    clock = _Clock()
+    events: list[ObservationEvent] = []
+    observer = FixtureObserver(events.append, clock=clock)
+    observer.begin("foreground-refresh")
+    connection = observer.accepted()
+    observer.bind_peer(connection, ("127.0.0.1", 8))
+
+    async def receive() -> Message:
+        return {"type": "http.disconnect"}
+
+    async def send(_message: Message) -> None:
+        pass
+
+    async def app(_scope: Scope, receive: Receive, send: Send) -> None:
+        await send({"type": "http.response.start", "status": status, "headers": []})
+        clock.now = 0.1
+        await send({"type": "http.response.body", "body": b"synthetic"})
+        clock.now = 0.5
+        if completion == "disconnect":
+            await receive()
+        elif completion == "transport-close":
+            observer.closed(connection)
+
+    await observer.wrap(app)(
+        {"type": "http", "path": "/state", "client": ("127.0.0.1", 8)},
+        receive,
+        send,
+    )
+    if completion != "transport-close":
+        observer.closed(connection)
+    observer.end()
+    finished = [event for event in events if event["type"] == "request-end"]
+    assert finished == [
+        {
+            "type": "request-end",
+            "id": 1,
+            "outcome": "completed" if status == 200 else "failed",
+            "at": 100,
+        }
+    ]
+
+
+@pytest.mark.parametrize("failure", ["partial", "disconnect", "send", "cancel"])
+async def test_incomplete_or_failed_send_never_becomes_success(failure: str) -> None:
+    """Completion accounting must retain truncation, disconnect and send failure."""
+    clock = _Clock()
+    events: list[ObservationEvent] = []
+    observer = FixtureObserver(events.append, clock=clock)
+    observer.begin("chat")
+    connection = observer.accepted()
+    observer.bind_peer(connection, ("127.0.0.1", 8))
+
+    async def receive() -> Message:
+        return {"type": "http.disconnect"}
+
+    async def send(message: Message) -> None:
+        if message["type"] == "http.response.body":
+            if failure == "send":
+                raise ConnectionError("synthetic send failure")
+            if failure == "cancel":
+                raise asyncio.CancelledError
+
+    async def app(_scope: Scope, receive: Receive, send: Send) -> None:
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        if failure == "disconnect":
+            await receive()
+        clock.now = 0.1
+        await send(
+            {
+                "type": "http.response.body",
+                "body": b"synthetic",
+                "more_body": failure == "partial",
+            }
+        )
+
+    call = observer.wrap(app)(
+        {"type": "http", "path": "/state", "client": ("127.0.0.1", 8)},
+        receive,
+        send,
+    )
+    if failure in {"send", "cancel"}:
+        with pytest.raises(
+            ConnectionError if failure == "send" else asyncio.CancelledError
+        ):
+            await call
+    else:
+        await call
+    observer.closed(connection)
+    observer.end()
+    assert [
+        event.get("outcome") for event in events if event["type"] == "request-end"
+    ] == ["failed"]
+
+
+@pytest.mark.parametrize("finish_trailers", [False, True])
+async def test_announced_trailers_are_part_of_response_completion(
+    finish_trailers: bool,
+) -> None:
+    """A final body cannot complete a response that promised trailing headers."""
+    clock = _Clock()
+    events: list[ObservationEvent] = []
+    observer = FixtureObserver(events.append, clock=clock)
+    observer.begin("chat")
+    connection = observer.accepted()
+    observer.bind_peer(connection, ("127.0.0.1", 8))
+
+    async def receive() -> Message:
+        return {"type": "http.request", "body": b""}
+
+    async def send(_message: Message) -> None:
+        pass
+
+    async def app(_scope: Scope, _receive: Receive, send: Send) -> None:
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [],
+                "trailers": True,
+            }
+        )
+        await send({"type": "http.response.body", "body": b"synthetic"})
+        assert not any(event["type"] == "request-end" for event in events)
+        clock.now = 0.1
+        if finish_trailers:
+            await send(
+                {
+                    "type": "http.response.trailers",
+                    "headers": [],
+                    "more_trailers": False,
+                }
+            )
+
+    await observer.wrap(app)(
+        {"type": "http", "path": "/state", "client": ("127.0.0.1", 8)},
+        receive,
+        send,
+    )
+    observer.closed(connection)
+    observer.end()
+    assert [
+        event.get("outcome") for event in events if event["type"] == "request-end"
+    ] == ["completed" if finish_trailers else "failed"]
+
+
+@pytest.mark.parametrize("send_fails", [False, True])
+async def test_terminal_disconnect_waits_for_send_outcome(send_fails: bool) -> None:
+    """Normal stream teardown cannot cancel accounting; send errors still fail."""
+    events: list[ObservationEvent] = []
+    observer = FixtureObserver(events.append)
+    observer.begin("speech")
+    connection = observer.accepted()
+    observer.bind_peer(connection, ("127.0.0.1", 8))
+    final_send_entered = asyncio.Event()
+    disconnect_observed = asyncio.Event()
+
+    async def receive() -> Message:
+        await final_send_entered.wait()
+        disconnect_observed.set()
+        return {"type": "http.disconnect"}
+
+    async def send(message: Message) -> None:
+        if message["type"] == "http.response.body":
+            final_send_entered.set()
+            await disconnect_observed.wait()
+            await asyncio.sleep(0)
+            if send_fails:
+                raise ConnectionError("synthetic final send failure")
+
+    async def app(_scope: Scope, receive: Receive, send: Send) -> None:
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+
+        async def listen() -> Message:
+            return await receive()
+
+        listener = asyncio.create_task(listen())
+        try:
+            await send({"type": "http.response.body", "body": b"synthetic"})
+        finally:
+            assert (await listener)["type"] == "http.disconnect"
+
+    async with asyncio.timeout(1):
+        call = observer.wrap(app)(
+            {"type": "http", "path": "/v1/audio/speech", "client": ("127.0.0.1", 8)},
+            receive,
+            send,
+        )
+        if send_fails:
+            with pytest.raises(ConnectionError):
+                await call
+        else:
+            await call
+    observer.closed(connection)
+    await asyncio.sleep(0.002)
+    observer.end()
+    assert [
+        event.get("outcome") for event in events if event["type"] == "request-end"
+    ] == ["failed" if send_fails else "completed"]

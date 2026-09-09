@@ -7,6 +7,7 @@ The sink receives only fixed vocabulary and numeric counters, never payloads.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -234,7 +235,7 @@ class FixtureObserver:
         self._check(False)
 
     def wrap(self, app: ASGIApp) -> ASGIApp:
-        """Observe body lengths and gateway completion without changing responses."""
+        """Observe lengths and HTTP send completion, not client receipt or app unwind."""
 
         async def observed(scope: Scope, receive: Receive, send: Send) -> None:
             if scope["type"] != "http":
@@ -247,6 +248,9 @@ class FixtureObserver:
             status = 0
             complete = False
             disconnected = False
+            trailers = False
+            terminal_pending = False
+            terminal_settled = asyncio.Event()
 
             async def observed_receive() -> Message:
                 nonlocal disconnected
@@ -258,27 +262,59 @@ class FixtureObserver:
                         response=False,
                     )
                 elif message["type"] == "http.disconnect":
-                    disconnected = True
+                    # Hypercorn also emits disconnect while finishing a normal
+                    # response. Let the in-flight final send settle before a
+                    # streaming response's listener cancels its own sender.
+                    # Send errors/cancellation still wake this wait in finally.
+                    if terminal_pending:
+                        await terminal_settled.wait()
+                    disconnected = not complete
                 return message
 
             async def observed_send(message: Message) -> None:
-                nonlocal status, complete
-                await send(message)
-                if message["type"] == "http.response.start":
-                    status = cast(int, message["status"])
-                elif message["type"] == "http.response.body":
-                    self.body_bytes(
-                        request,
-                        len(cast(bytes, message.get("body", b""))),
-                        response=True,
-                    )
-                    complete = not message.get("more_body", False)
+                nonlocal status, complete, trailers, terminal_pending
+                terminal = (
+                    message["type"] == "http.response.body"
+                    and not message.get("more_body", False)
+                    and not trailers
+                ) or (
+                    message["type"] == "http.response.trailers"
+                    and not message.get("more_trailers", False)
+                )
+                if terminal:
+                    terminal_pending = True
+                try:
+                    await send(message)
+                    if message["type"] == "http.response.start":
+                        status = cast(int, message["status"])
+                        trailers = cast(bool, message.get("trailers", False))
+                    elif message["type"] == "http.response.body":
+                        self.body_bytes(
+                            request,
+                            len(cast(bytes, message.get("body", b""))),
+                            response=True,
+                        )
+                        complete = not message.get("more_body", False) and not trailers
+                    elif message["type"] == "http.response.trailers":
+                        complete = not message.get("more_trailers", False)
+                    if complete:
+                        # Released clients may close their lane as soon as HTTP
+                        # framing completes. Later ASGI cleanup/disconnect must not
+                        # reclassify a response or inflate its observed duration.
+                        # This records server send completion, not client receipt.
+                        self.finished(
+                            request, successful=200 <= status < 300 and not disconnected
+                        )
+                finally:
+                    if terminal:
+                        terminal_pending = False
+                        terminal_settled.set()
 
-            succeeded = False
             try:
                 await app(scope, observed_receive, observed_send)
-                succeeded = complete and 200 <= status < 300 and not disconnected
             finally:
-                self.finished(request, successful=succeeded)
+                # Idempotent for a completed response; incomplete sends,
+                # exceptions, and cancellation remain failures.
+                self.finished(request, successful=False)
 
         return observed

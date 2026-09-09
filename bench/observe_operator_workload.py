@@ -21,7 +21,11 @@ from bench.operator_fixture_observer import (
     ObservationFlow,
 )
 from bench.operator_fixture_recorder import RecorderSettings, aggregate_recorder
-from bench.operator_workload_fixture import FixtureSettings, isolated_fixture
+from bench.operator_workload_fixture import (
+    FixtureSettings,
+    PrivateFixtureIngress,
+    isolated_fixture,
+)
 
 _FLOWS: frozenset[str] = frozenset(
     (
@@ -88,7 +92,10 @@ async def capture_controls(
 
 
 async def observe_fixture(
-    settings: FixtureSettings, recorder_settings: RecorderSettings
+    settings: FixtureSettings,
+    recorder_settings: RecorderSettings,
+    *,
+    private_ingress: PrivateFixtureIngress | None = None,
 ) -> None:
     """Run local generated services and export only a complete aggregate to stdout.
 
@@ -98,10 +105,14 @@ async def observe_fixture(
     This gateway-boundary observation is explicitly unattested; actual installed
     application provenance and capacity acceptance remain separate requirements.
     Services, pipes, and ephemeral verified modules are closed on every exit.
+    `private_ingress` optionally owns a private, expiring device bridge; the CLI
+    remains loopback-only. It cannot select existing relay or authority state.
     """
     async with aggregate_recorder(recorder_settings) as recorder:
         observer = FixtureObserver(recorder.record)
-        async with isolated_fixture(settings, observer=observer) as fixture:
+        async with isolated_fixture(
+            settings, observer=observer, private_ingress=private_ingress
+        ) as fixture:
             print(
                 json.dumps(
                     {

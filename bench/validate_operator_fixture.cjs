@@ -5,7 +5,8 @@ const { execFileSync } = require('node:child_process');
 const { createRequire } = require('node:module');
 const path = require('node:path');
 
-const [repository, commit] = process.argv.slice(2);
+const [repository, commit, streamMode] = process.argv.slice(2);
+assert(streamMode === undefined || streamMode === '--streams', 'unknown validation mode');
 assert(repository && path.isAbsolute(repository), 'an absolute app checkout is required');
 assert(/^[a-f0-9]{40}$/.test(commit || ''), 'an exact source commit is required');
 const dependencies = createRequire(path.join(repository, 'package.json'));
@@ -22,6 +23,7 @@ for (const dependency of ['typescript', 'zod']) {
 }
 const allowed = new Set([
   'src/transport/canonical-read-projection.ts',
+  'src/transport/canonical-chat-stream.ts',
   'src/domain/operator.ts', 'src/domain/speech.ts', 'src/security/base64url.ts',
 ]);
 const cache = new Map();
@@ -67,10 +69,27 @@ process.stdin.on('end', () => {
     assert.equal(model.runtimes.length, 1);
     assert.equal(model.runtimes[0].state, 'ready');
   }
+  assert.equal(snapshot.models.find((model) => model.modelId === 'fixture/generated-chat')
+    .runtimes[0].readyForChat, true, 'generated chat must appear in the released client selector');
   assert.equal(snapshot.models.find((model) => model.modelId === 'fixture/generated-speech')
     .speechSynthesis.streaming, true);
+  if (streamMode === '--streams') {
+    assert(Array.isArray(fixture._chatChunks) && fixture._chatChunks.length <= 16);
+    const { CanonicalChatSseParser } = load('src/transport/canonical-chat-stream.ts');
+    const parser = new CanonicalChatSseParser('synthetic-request');
+    const deltas = fixture._chatChunks.flatMap(chunk => parser.feed(new TextEncoder().encode(chunk)));
+    deltas.push(...parser.finish());
+    assert.equal(deltas.filter(delta => delta.kind === 'completed').length, 1);
+    assert.equal(deltas.filter(delta => delta.kind === 'text').map(delta => delta.text).join(''),
+      'Synthetic fixture response. No model was run.');
+    assert.equal(deltas.filter(delta => delta.kind === 'failed').length, 0);
+    const speech = load('src/domain/speech.ts').speechStreamFormatSchema.parse({
+      encoding:'pcm_s16le', channels:1, sampleRate:24000,
+    });
+    assert.equal(speech.sampleRate,24000);
+  }
   console.log(JSON.stringify({ schema: 'operator-fixture-contract.v1', source: commit,
-    nodes: snapshot.nodes.length, readyModels: snapshot.models.length,
+    nodes: snapshot.nodes.length, readyModels: snapshot.models.length, chatStreamValidated:streamMode === '--streams',
     dependencyVersions: { typescript: typescript.version, zod: dependencies('zod/package.json').version },
     physicalDeviceEvidence: false, capacityQualified: false }));
 });

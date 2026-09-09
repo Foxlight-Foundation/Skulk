@@ -33,13 +33,14 @@ def generated_responses() -> dict[str, dict[str, object]]:
         {
             "id": _CHAT,
             "name": "Synthetic chat (no model loaded)",
-            "tasks": ["text-generation"],
+            # Canonical ModelTask values, not model-hub pipeline task names.
+            "tasks": ["TextGeneration"],
             "placement": {"compatible_backends": ["mlx"]},
         },
         {
             "id": _SPEECH,
             "name": "Synthetic silence (no model loaded)",
-            "tasks": ["text-to-speech"],
+            "tasks": ["TextToSpeech"],
             "placement": {"compatible_backends": ["mlx_audio"]},
             "resolved_capabilities": {
                 "supports_speech_synthesis": True,
@@ -148,18 +149,31 @@ def generated_responses() -> dict[str, dict[str, object]]:
     }
 
 
-async def _generated_chat() -> AsyncIterator[bytes]:
+async def generated_chat_chunks() -> AsyncIterator[bytes]:
+    """Yield bounded canonical SSE chunks for deterministic client compatibility checks."""
     # Stable output deliberately does not echo the caller's prompt. Timing is
     # a fixture setting, not an observed model performance claim.
     for text in ("Synthetic ", "fixture ", "response. ", "No model was run."):
         await asyncio.sleep(0.1)
-        delta = {"choices": [{"delta": {"content": text}, "finish_reason": None}]}
+        delta = {
+            "id": "fixture-generated-chat",
+            "object": "chat.completion.chunk",
+            "model": _CHAT,
+            "choices": [
+                {"index": 0, "delta": {"content": text}, "finish_reason": None}
+            ],
+        }
         yield f"data: {json.dumps(delta)}\n\n".encode()
-    yield b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+    yield (
+        b'data: {"id":"fixture-generated-chat","object":"chat.completion.chunk",'
+        b'"model":"fixture/generated-chat",'
+        b'"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n'
+    )
     yield b"data: [DONE]\n\n"
 
 
-async def _generated_speech() -> AsyncIterator[bytes]:
+async def generated_speech_chunks() -> AsyncIterator[bytes]:
+    """Yield three seconds of silent mono PCM16 at 24 kHz without model inference."""
     for _ in range(30):
         await asyncio.sleep(0.1)
         yield bytes(4800)  # 100 ms, mono signed PCM16, 24 kHz.
@@ -225,13 +239,13 @@ def create_fixture_app(service: OperatorPairingService) -> ASGIApp:
     async def chat(request: Request) -> Response:
         async for _chunk in request.stream():
             pass
-        return StreamingResponse(_generated_chat(), media_type="text/event-stream")
+        return StreamingResponse(generated_chat_chunks(), media_type="text/event-stream")
 
     async def speech(request: Request) -> Response:
         async for _chunk in request.stream():
             pass
         return StreamingResponse(
-            _generated_speech(),
+            generated_speech_chunks(),
             media_type="audio/pcm",
             headers={
                 "x-audio-sample-rate": "24000",

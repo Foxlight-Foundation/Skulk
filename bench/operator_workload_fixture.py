@@ -16,12 +16,13 @@ import socket
 import ssl
 import sys
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
-from contextlib import AsyncExitStack, asynccontextmanager
+from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Literal, Protocol, cast, final
+from urllib.parse import urlsplit
 
 import aiohttp
 import hypercorn.asyncio as hypercorn_asyncio
@@ -84,6 +85,50 @@ class RunningFixture:
 
 class FixtureLeaseExpiredError(Exception):
     """The whole-session deadline cancelled an otherwise clean fixture."""
+
+
+class PrivateFixtureIngress(Protocol):
+    """Own an expiring, device-allowlisted private TLS bridge to a generated port.
+
+    Implementations must bind their upstream to the supplied loopback relay port,
+    restrict callers before forwarding, enforce bounded memory and traffic, and
+    independently expire on parent death. Exit must verify bridge removal. The
+    yielded origin is advertised for both app and gateway roles; no authority or
+    inner TLS validation is bypassed. This hook is not exposed by the CLI.
+    """
+
+    def __call__(self, relay_port: int, /) -> AbstractAsyncContextManager[str]:
+        """Start private ingress for this generated port, yielding its WSS origin."""
+        ...
+
+
+def validate_private_fixture_origin(origin: str) -> str:
+    """Accept only an explicit HTTPS-capable tailnet origin for the pilot bridge.
+
+    This validates syntax, not Serve access policy. The injected ingress owner
+    must separately prohibit Funnel and allowlist the selected devices. Arbitrary
+    public relay URLs, credentials, paths, fragments, and cleartext are rejected.
+    """
+    parsed = urlsplit(origin)
+    if (
+        parsed.scheme != "wss"
+        or parsed.hostname is None
+        or not parsed.hostname.endswith(".ts.net")
+        or len(parsed.hostname.split(".")) != 4
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+        or parsed.port is None
+        or not 1 <= parsed.port <= 65535
+        or any(character.isspace() for character in origin)
+        or origin != f"wss://{parsed.hostname}:{parsed.port}"
+    ):
+        raise ValueError(
+            "fixture private ingress requires an explicit tailnet WSS origin"
+        )
+    return origin
 
 
 @asynccontextmanager
@@ -246,6 +291,7 @@ async def isolated_fixture(
     settings: FixtureSettings,
     *,
     observer: FixtureObserver | None = None,
+    private_ingress: PrivateFixtureIngress | None = None,
 ) -> AsyncIterator[RunningFixture]:
     """Start real local relay/gateway/auth with synthetic API bodies, then reap all.
 
@@ -254,6 +300,10 @@ async def isolated_fixture(
     watchdog also observes parent death and expiry. No production URL is accepted.
     Optional `observer` adds a bounded opaque TCP bridge before the local TLS
     listener and fixed-category ASGI counters; it never changes released apps.
+    Optional `private_ingress` owns an expiring private TLS bridge to the generated
+    loopback relay. All advertised roles use that same origin. Default behavior
+    and CLI remain loopback-only. Ingress must be removed even if provisioning
+    fails, and cannot accept existing authority or a production relay target.
     """
     verify_binary(settings)
     deadline = asyncio.get_running_loop().time() + settings.lifetime_seconds
@@ -271,10 +321,15 @@ async def isolated_fixture(
                 )
             relay_path = directory / "relay.json"
             provisioning_path = directory / "provisioning.json"
+            relay_origin = f"ws://127.0.0.1:{relay_port}"
+            if private_ingress is not None:
+                relay_origin = validate_private_fixture_origin(
+                    await stack.enter_async_context(private_ingress(relay_port))
+                )
             provisioning_process = await asyncio.create_subprocess_exec(
                 str(binary),
                 "provision-on-demand",
-                f"ws://127.0.0.1:{relay_port}",
+                relay_origin,
                 str(relay_path),
                 str(provisioning_path),
                 stdout=asyncio.subprocess.DEVNULL,
