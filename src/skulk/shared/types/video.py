@@ -179,6 +179,11 @@ class VideoGenerationTaskParams(BaseModel):
             raise ValueError("reference_bytes must equal the attachment total")
         if not self.references and (self.reference_bytes or self.total_input_chunks):
             raise ValueError("reference accounting requires attachments")
+        if self.references and self.total_input_chunks < len(self.references):
+            # Every attachment occupies at least one media frame; a smaller
+            # count would let the worker's ingress gate treat the task as
+            # having no attachments and dispatch it without their bytes.
+            raise ValueError("total_input_chunks must cover every attachment")
         return self
 
     @property

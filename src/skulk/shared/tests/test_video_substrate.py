@@ -95,7 +95,12 @@ def test_params_imply_mode_from_attachments() -> None:
 def test_params_reject_inconsistent_attachments() -> None:
     with pytest.raises(ValidationError, match="contiguous"):
         VideoGenerationTaskParams(
-            prompt="x", model="m", seconds=5, references=(_reference(1),), reference_bytes=10
+            prompt="x",
+            model="m",
+            seconds=5,
+            references=(_reference(1),),
+            reference_bytes=10,
+            total_input_chunks=1,
         )
     with pytest.raises(ValidationError, match="at most one first_frame"):
         VideoGenerationTaskParams(
@@ -104,10 +109,20 @@ def test_params_reject_inconsistent_attachments() -> None:
             seconds=5,
             references=(_reference(0, role="first_frame"), _reference(1, role="first_frame")),
             reference_bytes=20,
+            total_input_chunks=2,
         )
     with pytest.raises(ValidationError, match="reference_bytes"):
         VideoGenerationTaskParams(
-            prompt="x", model="m", seconds=5, references=(_reference(0),), reference_bytes=99
+            prompt="x",
+            model="m",
+            seconds=5,
+            references=(_reference(0),),
+            reference_bytes=99,
+            total_input_chunks=1,
+        )
+    with pytest.raises(ValidationError, match="cover every attachment"):
+        VideoGenerationTaskParams(
+            prompt="x", model="m", seconds=5, references=(_reference(0),), reference_bytes=10
         )
     with pytest.raises(ValidationError, match="WIDTHxHEIGHT"):
         VideoGenerationTaskParams(prompt="x", model="m", seconds=5, size="wide")
