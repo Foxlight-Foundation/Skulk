@@ -1592,6 +1592,16 @@ Explicit recovery completes only that local transition. Disable retains all
 logical state and cleanup material, including when release trust is invalid.
 The highest selected sequence survives rollback; incompatible state/configuration
 changes require migration. Selection is separate from observed service health.
+`runtime_service.py` is the separate nonroot launcher for that selected generation.
+It recovers pending local selection, verifies current trust/core/artifacts and the
+installed seal before executing the fixed archive owner entrypoint, and repeats
+verification during its lifetime. A protected status record distinguishes selected
+and observed active versions; process existence does not imply capability readiness.
+Owner output is counted and discarded. Shutdown closes an inherited lifetime pipe,
+reaps the owner within a bounded grace period and checks the supervisor fence before
+reporting stopped. Surviving children must retain that fence. The launcher never
+owns independent cleanup services or restarts a failed owner within its lifetime.
+OS service registration and management integration are separate setup operations.
 
 Extension startup and serving share one event loop. The API starts hooks only
 once its runtime begins and invokes optional asynchronous shutdown hooks before

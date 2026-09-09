@@ -531,6 +531,11 @@ and retained-state disable. Selection must hold installer and supervisor locks,
 preserve the highest selected sequence and never migrate configuration implicitly.
 The atomic selection is desired state; service launch must revalidate current
 core compatibility and runtime integrity before executing private code.
+`runtime_service.py` provides that separate nonroot launcher. Keep its entrypoint
+fixed, inherit a lifetime pipe and service fence, discard private owner output,
+and revalidate current trust and installed integrity while running. Process health
+is distinct from capability readiness. Never report fully stopped while a surviving
+child still holds the supervisor fence, or couple independent cleanup to this service.
 
 Optional `NodeConfigurationProvider` (`extensions/configuration.py`) exposes stable installed-node settings independently of capability readiness. The `/v1/plugins` API and Plugins dashboard share plugin-owned schema validation and revision-fenced settings with terminal management. No credentials or configuration enter replicated State. Explicit plugin read/manage/approve grants are owner-controlled through `/v1/auth/plugin-grants`; existing pairings receive none, and broad operator write permission does not imply them.
 Separately installed packages register a zero-arg factory in the

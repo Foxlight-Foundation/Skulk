@@ -69,7 +69,8 @@ class RuntimeOperation(BaseModel):
     )
 
 
-async def _finish[Value](task: asyncio.Task[Value]) -> Value:
+async def finish_runtime_work[Value](task: asyncio.Task[Value]) -> Value:
+    """Finish owned asynchronous work before propagating caller cancellation."""
     cancelled = False
     while not task.done():
         try:
@@ -115,9 +116,9 @@ async def _execute(
             if process.returncode is None:
                 with contextlib.suppress(ProcessLookupError):
                     os.killpg(process.pid, signal.SIGKILL)
-            await _finish(asyncio.create_task(process.wait()))
+            await finish_runtime_work(asyncio.create_task(process.wait()))
 
-    return await _finish(asyncio.create_task(owned()))
+    return await finish_runtime_work(asyncio.create_task(owned()))
 
 
 @final
@@ -284,7 +285,7 @@ class RuntimeInstaller:
                 self._verify(runtime.metadata, current_host)
                 return runtime, current_host
 
-            verified = await _finish(asyncio.create_task(inspect()))
+            verified = await finish_runtime_work(asyncio.create_task(inspect()))
             yield verified
         finally:
             lock.close()
@@ -430,7 +431,7 @@ class RuntimeInstaller:
                 self._save(staged_operation)
                 return staged_operation
 
-            return await _finish(asyncio.create_task(prepare()))
+            return await finish_runtime_work(asyncio.create_task(prepare()))
         except (OSError, ValueError, TimeoutError, asyncio.CancelledError) as error:
             if (
                 operation is not None

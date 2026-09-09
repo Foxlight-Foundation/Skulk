@@ -36,6 +36,7 @@ def artifacts(
     dependency: str | None = None,
     sequence: int = 1,
     owner_entrypoint: bool = True,
+    owner_source: str = "print('owner fixture')\n",
     signing_key: Ed25519PrivateKey | None = None,
     permissions: tuple[str, ...] = ("local synthetic operation",),
 ) -> tuple[bytes, RuntimeTrust, QualifiedHost]:
@@ -62,7 +63,7 @@ def artifacts(
     with zipfile.ZipFile(bundle_buffer, "w") as archive:
         archive.writestr(
             "__owner__.py" if owner_entrypoint else "__main__.py",
-            "print('owner fixture')\n",
+            owner_source,
         )
     bundle = bundle_buffer.getvalue()
     write_private(directory / "bundle.pyz", bundle)
