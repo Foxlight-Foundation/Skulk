@@ -11,6 +11,10 @@ provider implementations and their dependency environments outside Skulk.
 Use isolated test state for owner connection records, never production setup.
 The optional cached discovery contract and local registration format are documented
 in [Extensions](website/docs/extensions.md#separately-supervised-plugin-owners).
+Generic offline installer changes belong in `extensions/runtime_artifacts.py`,
+`runtime_files.py` and `runtime_install.py`. Exercise them with synthetic signed
+artifacts and empty protected test roots; never install test dependencies into
+the Skulk environment or reuse production operation journals.
 
 To run Skulk from source:
 

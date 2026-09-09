@@ -578,3 +578,35 @@ Shutting down Skulk stops its observer and withdraws dynamic tags. The independe
 owner service and its cleanup obligations remain supervised separately. This
 adapter provides unary and ordinary configuration integration; service installation,
 release activation and steward proposal transport are separate owner operations.
+
+## Offline runtime verification and staging
+
+Skulk's `extensions/runtime_artifacts.py` verifies the v2 signed runtime envelope
+without importing a plugin SDK. Generic claims bind the publisher, exact bundle
+and wheel bytes, supported platform/Python version, qualified Skulk build, state
+schema and permission summary. Plugin-specific manifest policy stays opaque but
+is covered by the signature. Trust comes from owner-provisioned protected local
+storage, not the release. Revoked or expired artifacts and incompatible hosts
+are refused. Supported targets are Apple Silicon macOS and Ubuntu 24.04 x86_64.
+
+`RuntimeInstaller` in `extensions/runtime_install.py` stages complete supplied
+artifacts under a stable service root. It verifies wheel tags, archive paths,
+metadata identities and dependencies before running offline pip with exact hashes,
+no index, no dependency resolution and no source builds. The archive must contain
+the fixed `__owner__.py` entry point; HTTP callers cannot select an executable or
+Python module. Staging creates a separate virtual environment and checks its exact
+inventory without changing the Skulk environment. The base interpreter remains
+an explicitly supported host prerequisite.
+
+The installer journals operation IDs, release-sequence identities and monotonic
+trust revisions. `operation(id)` reads progress without replaying work. A disconnected
+waiter does not release the installer lock or prevent successful work from recording
+`staged`. A failed or interrupted generation remains `recovery_required`, retaining
+its evidence; another call with that ID does not implicitly run installation again.
+Completed stages can be reverified from their cached artifacts. Completion requires
+a fsynced marker and a fresh measurement of the qualified core build.
+
+Staging does not change active selection, logical plugin identities, configuration,
+credentials or cleanup obligations. Installer output is bounded and stored only
+as protected host-local evidence. These are local installation primitives; the
+configuration HTTP routes do not accept artifact paths or expose raw installer logs.

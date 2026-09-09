@@ -1,0 +1,408 @@
+"""Durable offline staging owned by Skulk, independent of plugin runtime health."""
+
+import asyncio
+import contextlib
+import hashlib
+import json
+import os
+import signal
+import sqlite3
+import stat
+import sys
+import time
+from collections.abc import Iterator
+from pathlib import Path
+from typing import Literal, cast, final
+from uuid import uuid4
+
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+
+from skulk.extensions.runtime_artifacts import (
+    Digest,
+    QualifiedHost,
+    RuntimeTrust,
+    VerifiedRuntime,
+    canonical_json,
+    measure_host,
+    verified_artifacts,
+    verify_runtime,
+)
+from skulk.extensions.runtime_files import (
+    RuntimeLock,
+    private_directory,
+    read_private,
+    write_private,
+)
+
+_INVENTORY = """import importlib.metadata,json,re
+def name(d): return re.sub(r"[-_.]+", "-", d.metadata["Name"].lower())
+print(json.dumps({name(d):d.version for d in importlib.metadata.distributions()
+if name(d) != 'pip'},sort_keys=True))
+"""
+
+_OPERATION_ROW: TypeAdapter[tuple[str, str] | None] = TypeAdapter(
+    tuple[str, str] | None
+)
+_TRUST_ROW: TypeAdapter[tuple[int, str] | None] = TypeAdapter(tuple[int, str] | None)
+_DIGEST_ROW: TypeAdapter[tuple[str] | None] = TypeAdapter(tuple[str] | None)
+
+
+class RuntimeOperation(BaseModel):
+    """Payload-safe durable progress for one offline staging operation."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+    operation_id: str = Field(
+        pattern=r"^[a-f0-9]{32}$",
+        description="Stable operation ID; reconnect reads this operation.",
+    )
+    runtime_digest: Digest = Field(description="Exact selected signed runtime.")
+    state: Literal["staging", "staged", "recovery_required"] = Field(
+        description="Durable progress; interrupted work is never replayed implicitly."
+    )
+    error_code: Literal["installation_interrupted", "installation_failed"] | None = (
+        Field(
+            default=None,
+            description="Sanitized failure class; raw output stays host-local.",
+        )
+    )
+
+
+async def _finish[Value](task: asyncio.Task[Value]) -> Value:
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+    result = task.result()
+    if cancelled:
+        raise asyncio.CancelledError
+    return result
+
+
+async def _execute(
+    arguments: tuple[str, ...], directory: Path, lock: RuntimeLock, timeout: float
+) -> bytes:
+    async def owned() -> bytes:
+        process = await asyncio.create_subprocess_exec(
+            *arguments,
+            cwd=directory,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            start_new_session=True,
+            pass_fds=(lock.descriptor,),
+            env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
+        )
+        output = bytearray()
+        try:
+            assert process.stdout is not None
+            async with asyncio.timeout(timeout):
+                while block := await process.stdout.read(16384):
+                    output.extend(block)
+                    if len(output) > 262144:
+                        raise ValueError("runtime installer output exceeds bound")
+                await process.wait()
+            if process.returncode != 0:
+                raise ValueError("runtime installer failed")
+            return bytes(output)
+        except (OSError, ValueError, TimeoutError):
+            write_private(directory / "installer-evidence.log", bytes(output[:262144]))
+            raise
+        finally:
+            if process.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
+            await _finish(asyncio.create_task(process.wait()))
+
+    return await _finish(asyncio.create_task(owned()))
+
+
+@final
+class RuntimeInstaller:
+    """Verify and stage complete runtimes without importing their SDKs.
+
+    Each generation is installed at its final path to preserve virtual-environment
+    shebangs. Only a fsynced completion record publishes it as staged. Logical
+    plugin state, active selection and independently supervised cleanup are not
+    modified by staging. Trust is read from protected local owner provisioning.
+    """
+
+    def __init__(self, root: Path) -> None:
+        """Select stable nonroot service storage and initialize a protected journal."""
+        if os.geteuid() == 0:
+            raise ValueError("runtime installer must run without root authority")
+        private_directory(root)
+        self.root = root.resolve()
+        self.installer = self.root / "installer"
+        private_directory(self.installer)
+        self.database = self.installer / "operations.sqlite3"
+        descriptor = os.open(
+            self.database, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600
+        )
+        try:
+            info = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.getuid()
+                or info.st_mode & 0o077
+            ):
+                raise ValueError("runtime journal must be owner-only")
+        finally:
+            os.close(descriptor)
+        with self._connect() as connection:
+            connection.executescript(
+                "CREATE TABLE IF NOT EXISTS operations "
+                "(id TEXT PRIMARY KEY, digest TEXT NOT NULL, record TEXT NOT NULL);"
+                "CREATE TABLE IF NOT EXISTS trust_floor "
+                "(singleton INTEGER PRIMARY KEY CHECK(singleton=1), revision INTEGER NOT NULL, digest TEXT NOT NULL);"
+                "CREATE TABLE IF NOT EXISTS releases "
+                "(bundle TEXT NOT NULL, sequence INTEGER NOT NULL, digest TEXT NOT NULL, PRIMARY KEY(bundle,sequence));"
+            )
+
+    @contextlib.contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        connection = sqlite3.connect(self.database, timeout=5)
+        try:
+            connection.execute("PRAGMA synchronous=FULL")
+            with connection:
+                yield connection
+        finally:
+            connection.close()
+
+    def _save(self, operation: RuntimeOperation) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO operations VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET record=excluded.record",
+                (
+                    operation.operation_id,
+                    operation.runtime_digest,
+                    operation.model_dump_json(),
+                ),
+            )
+
+    def operation(self, operation_id: str) -> RuntimeOperation:
+        """Read retained operation progress without starting or replaying work."""
+        with self._connect() as connection:
+            row = _OPERATION_ROW.validate_python(
+                cast(
+                    object,
+                    connection.execute(
+                        "SELECT digest,record FROM operations WHERE id=?",
+                        (operation_id,),
+                    ).fetchone(),
+                ),
+                strict=True,
+            )
+        if row is None:
+            raise LookupError("runtime operation not found")
+        operation = RuntimeOperation.model_validate_json(row[1])
+        if operation.operation_id != operation_id or operation.runtime_digest != row[0]:
+            raise ValueError("runtime operation journal is inconsistent")
+        return operation
+
+    def _verify(self, metadata: bytes, host: QualifiedHost) -> VerifiedRuntime:
+        trust = RuntimeTrust.model_validate_json(
+            read_private(self.root / "publisher-trust.json")
+        )
+        trust_digest = hashlib.sha256(
+            canonical_json(trust.model_dump(mode="json"))
+        ).hexdigest()
+        with self._connect() as connection:
+            prior = _TRUST_ROW.validate_python(
+                cast(
+                    object,
+                    connection.execute(
+                        "SELECT revision,digest FROM trust_floor WHERE singleton=1"
+                    ).fetchone(),
+                ),
+                strict=True,
+            )
+            if prior is not None and (
+                trust.revision < prior[0]
+                or (trust.revision == prior[0] and trust_digest != prior[1])
+            ):
+                raise ValueError("runtime trust rollback or equivocation refused")
+            # Trust is local owner authority, independent of release validity.
+            # Even a refused artifact must not let an older trust view return.
+            connection.execute(
+                "INSERT INTO trust_floor VALUES (1,?,?) ON CONFLICT(singleton) DO UPDATE SET revision=excluded.revision,digest=excluded.digest",
+                (trust.revision, trust_digest),
+            )
+        runtime = verify_runtime(metadata, trust, host, now=int(time.time()))
+        with self._connect() as connection:
+            release = runtime.claims.release
+            previous = _DIGEST_ROW.validate_python(
+                cast(
+                    object,
+                    connection.execute(
+                        "SELECT digest FROM releases WHERE bundle=? AND sequence=?",
+                        (release.manifest.bundle_id, release.sequence),
+                    ).fetchone(),
+                ),
+                strict=True,
+            )
+            if previous is not None and previous[0] != runtime.digest:
+                raise ValueError("runtime release sequence equivocation refused")
+            connection.execute(
+                "INSERT OR IGNORE INTO releases VALUES (?,?,?)",
+                (release.manifest.bundle_id, release.sequence, runtime.digest),
+            )
+        return runtime
+
+    async def stage(
+        self, metadata: bytes, artifacts: Path, *, operation_id: str | None = None
+    ) -> RuntimeOperation:
+        """Stage one verified artifact set offline with a reconnectable operation ID.
+
+        A reused ID must name the same digest. Failed or interrupted operations
+        return recovery_required and cannot spawn another installer implicitly.
+        Callers must persist the returned ID; a new browser connection reads
+        operation status instead of resubmitting installation.
+        """
+        lock = RuntimeLock(self.installer)
+        operation: RuntimeOperation | None = None
+        record_started = False
+        try:
+            host = await asyncio.to_thread(measure_host)
+            runtime = self._verify(metadata, host)
+            operation = RuntimeOperation(
+                operation_id=operation_id or uuid4().hex,
+                runtime_digest=runtime.digest,
+                state="staging",
+            )
+            try:
+                prior = self.operation(operation.operation_id)
+            except LookupError:
+                prior = None
+            if prior is not None:
+                if prior.runtime_digest != runtime.digest:
+                    raise ValueError("operation identity differs")
+                if prior.state != "staged":
+                    interrupted = prior.model_copy(
+                        update={
+                            "state": "recovery_required",
+                            "error_code": prior.error_code
+                            or "installation_interrupted",
+                        }
+                    )
+                    self._save(interrupted)
+                    return interrupted
+            self._save(operation)
+            record_started = True
+            private_directory(self.root / "generations")
+            generation = self.root / "generations" / runtime.digest
+            if generation.exists() and not (generation / "staged.json").exists():
+                operation = operation.model_copy(
+                    update={
+                        "state": "recovery_required",
+                        "error_code": "installation_interrupted",
+                    }
+                )
+                self._save(operation)
+                return operation
+
+            staged_operation = operation.model_copy(update={"state": "staged"})
+
+            async def prepare() -> RuntimeOperation:
+                self._verify(metadata, host)
+                if generation.exists():
+                    private_directory(generation)
+                    if read_private(generation / "staged.json") != runtime.metadata:
+                        raise ValueError("runtime completion record differs")
+                    await asyncio.to_thread(
+                        verified_artifacts, runtime, generation / "artifacts"
+                    )
+                else:
+                    supplied = await asyncio.to_thread(
+                        verified_artifacts, runtime, artifacts
+                    )
+                    private_directory(self.root / "generations")
+                    private_directory(generation)
+                    artifact_directory = generation / "artifacts"
+                    private_directory(artifact_directory)
+                    for name, content in supplied.items():
+                        write_private(artifact_directory / name, content)
+                    write_private(
+                        generation / "requirements.txt",
+                        "".join(
+                            f"./artifacts/{wheel.filename} --hash=sha256:{wheel.sha256}\n"
+                            for wheel in runtime.claims.wheels
+                        ).encode(),
+                    )
+                    await _execute(
+                        (
+                            str(Path(sys.executable).resolve()),
+                            "-I",
+                            "-m",
+                            "venv",
+                            "--symlinks",
+                            str(generation / "runtime"),
+                        ),
+                        generation,
+                        lock,
+                        120,
+                    )
+                    python = str(generation / "runtime" / "bin" / "python")
+                    await _execute(
+                        (
+                            python,
+                            "-I",
+                            "-m",
+                            "pip",
+                            "--isolated",
+                            "--disable-pip-version-check",
+                            "--no-cache-dir",
+                            "install",
+                            "--no-index",
+                            "--no-deps",
+                            "--require-hashes",
+                            "--only-binary=:all:",
+                            "--no-compile",
+                            "-r",
+                            "requirements.txt",
+                        ),
+                        generation,
+                        lock,
+                        120,
+                    )
+                python = str(generation / "runtime" / "bin" / "python")
+                await _execute(
+                    (python, "-I", "-m", "pip", "--isolated", "check"),
+                    generation,
+                    lock,
+                    30,
+                )
+                inventory = await _execute(
+                    (python, "-I", "-c", _INVENTORY), generation, lock, 30
+                )
+                if json.loads(inventory) != runtime.inventory:
+                    raise ValueError("installed runtime inventory differs")
+                self._verify(metadata, await asyncio.to_thread(measure_host))
+                write_private(generation / "staged.json", runtime.metadata)
+                # Completion belongs to the owned work, not the waiting browser
+                # or terminal. A cancelled waiter must still see staged on reconnect.
+                self._save(staged_operation)
+                return staged_operation
+
+            return await _finish(asyncio.create_task(prepare()))
+        except (OSError, ValueError, TimeoutError, asyncio.CancelledError) as error:
+            if (
+                operation is not None
+                and record_started
+                and not (
+                    isinstance(error, asyncio.CancelledError)
+                    and self.operation(operation.operation_id).state == "staged"
+                )
+            ):
+                self._save(
+                    operation.model_copy(
+                        update={
+                            "state": "recovery_required",
+                            "error_code": "installation_failed",
+                        }
+                    )
+                )
+            raise
+        finally:
+            lock.close()

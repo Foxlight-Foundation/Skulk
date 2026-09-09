@@ -1574,6 +1574,15 @@ IDs retain priority, conflicting dynamic claims are hidden, and owner failure
 withdraws readiness. A loader-owned observer reconciles dynamic telemetry tags;
 Skulk shutdown stops observation without stopping independent cleanup services.
 
+Generic runtime verification and offline staging live beside the adapter in
+`runtime_artifacts.py`, `runtime_files.py` and `runtime_install.py`. They authenticate
+complete signed artifacts without loading a provider SDK, measure the exact core
+build and install dependencies into a separate environment. A protected local
+journal retains operation IDs, monotonic trust and interrupted generations.
+Cancellation of a waiting interface does not abandon owned installation work;
+only the fsynced completion marker publishes a staged generation. Staging never
+switches the active owner or changes cleanup state.
+
 Extension startup and serving share one event loop. The API starts hooks only
 once its runtime begins and invokes optional asynchronous shutdown hooks before
 closing its lifetime, with discovery withdrawn and a shared thirty-second cleanup
