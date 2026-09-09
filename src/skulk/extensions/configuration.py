@@ -43,6 +43,10 @@ class ConfigurableNode(FrozenModel):
         default=False,
         description="Whether this node exposes retained proposal reviews.",
     )
+    proposal_actions_available: bool = Field(
+        default=False,
+        description="Whether distinct owner approval actions are supported.",
+    )
 
 
 class NodeConfiguration(FrozenModel):

@@ -29,6 +29,12 @@ from skulk.extensions.credentials import (
 )
 from skulk.extensions.loader import LoadedExtensions
 from skulk.extensions.preflight import NodePreflight, NodePreflightProvider
+from skulk.extensions.proposal_actions import (
+    NodeProposalActionsProvider,
+    ProposalApproval,
+    ProposalOperation,
+    ProposalOperationId,
+)
 from skulk.extensions.proposal_review import (
     NodeProposalReviewProvider,
     ProposalPage,
@@ -95,8 +101,8 @@ def create_plugins_router(
 
     Management is intentionally independent of capability readiness. Providers
     validate their own settings; the API owns authorization, bounded dispatch
-    and payload-safe failure responses. No cloud effect or executable selection
-    is accepted here.
+    and payload-safe failure responses. Distinct reviewed owner actions use approval
+    scopes; executable selection and replacement provider inputs are never accepted.
     """
     router = APIRouter(
         prefix="/v1/plugins", tags=["Plugins"], route_class=ProtectedManagementRoute
@@ -623,5 +629,118 @@ def create_plugins_router(
             return result
 
         return await invoke(read)
+
+    def action_provider(plugin_id: str) -> NodeProposalActionsProvider:
+        selected = provider(plugin_id)
+        if not isinstance(selected, NodeProposalActionsProvider):
+            raise HTTPException(
+                status_code=404, detail="proposal actions are not supported"
+            )
+        return selected
+
+    def check_operation(
+        value: ProposalOperation, plugin_id: str, node_id: str, operation_id: str
+    ) -> ProposalOperation:
+        if (
+            value.reference.plugin_id != plugin_id
+            or value.reference.node_id != node_id
+            or value.operation_id != operation_id
+            or len(value.model_dump_json().encode()) > 16384
+        ):
+            raise ValueError("proposal action response differs")
+        return value
+
+    @router.post(
+        "/{plugin_id}/nodes/{node_id}/proposals/{proposal_id}/approve",
+        response_model=ProposalOperation,
+        summary="Approve and execute an exact reviewed plugin proposal",
+        description="Distinct owner action requiring plugins:approve, independent of plugins:manage. Accepts only the complete retained reference, provider review revision and durable operation ID. The provider revalidates current terms and retains approval/dispatch progress. Repeated requests observe the same action; reconnect never replays an uncertain submission. Signing credentials and proof remain in the provider.",
+    )
+    async def approve_proposal(
+        plugin_id: str,
+        node_id: str,
+        proposal_id: str,
+        payload: ProposalApproval,
+        request: Request,
+        response: Response,
+    ) -> ProposalOperation:
+        """Supply the authenticated actor independently of caller-controlled input."""
+        operator_id = await authorize_plugin_request(
+            request, pairing_service, "plugins:approve", tailnet_peer_verifier
+        )
+        response.headers["Cache-Control"] = "no-store"
+
+        async def approve() -> ProposalOperation:
+            reference = payload.reference
+            if (
+                reference.plugin_id != plugin_id
+                or reference.node_id != node_id
+                or reference.proposal_id != proposal_id
+            ):
+                raise ValueError("proposal reference differs from route")
+            result = await action_provider(plugin_id).approve_node_proposal(
+                payload, operator_id
+            )
+            if result.reference != reference:
+                raise ValueError("proposal action returned another reference")
+            return check_operation(result, plugin_id, node_id, payload.operation_id)
+
+        return await invoke(approve)
+
+    @router.get(
+        "/{plugin_id}/nodes/{node_id}/proposal-operations/{operation_id}",
+        response_model=ProposalOperation,
+        summary="Read retained owner proposal action status",
+        description="Read one safe durable owner action observation with plugins:read. This route performs no approval, dispatch or retry; interrupted or uncertain work remains explicitly recorded. No credentials, canonical input or signed proof are returned.",
+    )
+    async def proposal_operation(
+        plugin_id: str,
+        node_id: str,
+        operation_id: ProposalOperationId,
+        request: Request,
+        response: Response,
+    ) -> ProposalOperation:
+        """Read status after reconnect without repeating any effect."""
+        await authorize_plugin_request(
+            request, pairing_service, "plugins:read", tailnet_peer_verifier
+        )
+        response.headers["Cache-Control"] = "no-store"
+
+        async def observe() -> ProposalOperation:
+            result = await action_provider(plugin_id).node_proposal_operation(
+                node_id, operation_id
+            )
+            return check_operation(result, plugin_id, node_id, operation_id)
+
+        return await invoke(observe)
+
+    @router.post(
+        "/{plugin_id}/nodes/{node_id}/proposal-operations/{operation_id}/resume",
+        response_model=ProposalOperation,
+        summary="Explicitly resume interrupted owner approval",
+        description="Requires current plugins:approve authority. The provider may recover interrupted approval under the same retained intent after fresh policy checks, retaining the original signing identity and auditing the current operator. Submitted execution is never automatically replayed; an uncertain dispatch remains observable. The request accepts no replacement proposal or credentials.",
+    )
+    async def resume_proposal(
+        plugin_id: str,
+        node_id: str,
+        operation_id: ProposalOperationId,
+        request: Request,
+        response: Response,
+        payload: SetupResume | None = None,
+    ) -> ProposalOperation:
+        """Recover only the original owner approval after explicit authorization."""
+        del payload
+        operator_id = await authorize_plugin_request(
+            request, pairing_service, "plugins:approve", tailnet_peer_verifier
+        )
+        response.headers["Cache-Control"] = "no-store"
+
+        async def resume() -> ProposalOperation:
+            result = await action_provider(plugin_id).resume_node_proposal(
+                node_id, operation_id, operator_id
+            )
+            return check_operation(result, plugin_id, node_id, operation_id)
+
+        return await invoke(resume)
 
     return router

@@ -11,6 +11,8 @@ export interface ConfigurableNode {
   preflightAvailable?: boolean;
   setupAvailable?: boolean;
   setupActionsAvailable?: boolean;
+  proposalsAvailable?: boolean;
+  proposalActionsAvailable?: boolean;
 }
 
 /** A plugin's installed nodes remain visible while disabled or unavailable. */
@@ -32,6 +34,21 @@ export interface NodeConfiguration {
 
 /** An exact node, rather than a capability method or transient peer address. */
 export interface NodeAddress { pluginId: string; nodeId: string }
+
+/** Opaque provider journal identity; it contains no executable input or proof. */
+export interface ProposalReference extends NodeAddress { proposalId: string; proposalDigest: string }
+
+/** Bounded plain-text metadata for selecting an immutable proposal. */
+export interface ProposalSummary { reference: ProposalReference; summary: string; expiresAt: number; state: 'pending_approval' | 'approved' | 'execution_recorded' | 'expired' | 'unavailable' }
+
+/** Exact reviewed terms; a missing fence means approval is unavailable. */
+export interface ProposalReview { proposal: ProposalSummary; observedAt: number; approvalRevision: string | null; fields: { label: string; value: string }[] }
+
+/** Original owner intent, accepted once under a durable operation identity. */
+export interface ProposalApproval { operationId: string; reference: ProposalReference; reviewRevision: string }
+
+/** Safe operation observation; uncertain dispatch must never be replayed. */
+export interface ProposalOperation { operationId: string; reference: ProposalReference; phase: 'accepted' | 'approving' | 'approved' | 'dispatching' | 'succeeded' | 'refused' | 'approval_interrupted' | 'uncertain'; updatedAt: number; code: string | null; correctiveAction: string | null }
 
 /** Public setup files from the installed owner; never private keys or credentials. */
 export interface NodeSetup {
@@ -146,6 +163,24 @@ const nodePath = ({ pluginId, nodeId }: NodeAddress) =>
 
 const pluginsApi = apiSlice.injectEndpoints({
   endpoints: (build) => ({
+    getNodeProposals: build.query<{ proposals: ProposalSummary[]; nextOffset: number | null }, NodeAddress & { offset: number }>({
+      query: ({ offset, ...address }) => ({ url: nodePath(address).replace(/configuration$/, 'proposals'), params: { offset }, headers, cache: 'no-store' }),
+      keepUnusedDataFor: 0,
+    }),
+    getNodeProposalReview: build.query<ProposalReview, ProposalReference>({
+      query: ({ proposalId, proposalDigest, ...address }) => ({ url: nodePath(address).replace(/configuration$/, `proposals/${encodeURIComponent(proposalId)}`), params: { proposal_digest: proposalDigest }, headers, cache: 'no-store' }),
+      keepUnusedDataFor: 0,
+    }),
+    approveNodeProposal: build.mutation<ProposalOperation, ProposalApproval>({
+      query: (body) => ({ url: nodePath(body.reference).replace(/configuration$/, `proposals/${encodeURIComponent(body.reference.proposalId)}/approve`), headers, method: 'POST', body }),
+    }),
+    getNodeProposalOperation: build.query<ProposalOperation, NodeAddress & { operationId: string }>({
+      query: ({ operationId, ...address }) => ({ url: nodePath(address).replace(/configuration$/, `proposal-operations/${encodeURIComponent(operationId)}`), headers, cache: 'no-store' }),
+      keepUnusedDataFor: 0,
+    }),
+    resumeNodeProposal: build.mutation<ProposalOperation, NodeAddress & { operationId: string }>({
+      query: ({ operationId, ...address }) => ({ url: nodePath(address).replace(/configuration$/, `proposal-operations/${encodeURIComponent(operationId)}/resume`), headers, method: 'POST' }),
+    }),
     getNodeSetupActions: build.query<SetupActions, NodeAddress>({
       query: (address) => ({ url: nodePath(address).replace(/configuration$/, 'setup-actions'), headers, cache: 'no-store' }),
       providesTags: ['Plugins'],
@@ -243,4 +278,4 @@ const pluginsApi = apiSlice.injectEndpoints({
   }),
 });
 
-export const { useGetNodeSetupActionsQuery, useStartNodeSetupMutation, useResumeNodeSetupMutation, useLazyGetNodeSetupQuery, useLazyGetNodePreflightQuery, useGetNodeCredentialsQuery, useRegisterManagedRuntimeMutation, useGetRuntimeSourceStatusQuery, useRecoverRuntimeInstallationMutation, useLazyGetRuntimeReleaseQuery, useGetRuntimeInstallationQuery, useInstallRuntimeReleaseMutation, useActivateRuntimeReleaseMutation, useGetManagedRuntimesQuery, useGetManagedOperationQuery, useDisableManagedRuntimeMutation, useRecoverManagedOperationMutation, useGetPluginNodesQuery, useGetNodeConfigurationQuery, useConfigurePluginNodeMutation } = pluginsApi;
+export const { useGetNodeProposalsQuery, useGetNodeProposalReviewQuery, useApproveNodeProposalMutation, useGetNodeProposalOperationQuery, useResumeNodeProposalMutation, useGetNodeSetupActionsQuery, useStartNodeSetupMutation, useResumeNodeSetupMutation, useLazyGetNodeSetupQuery, useLazyGetNodePreflightQuery, useGetNodeCredentialsQuery, useRegisterManagedRuntimeMutation, useGetRuntimeSourceStatusQuery, useRecoverRuntimeInstallationMutation, useLazyGetRuntimeReleaseQuery, useGetRuntimeInstallationQuery, useInstallRuntimeReleaseMutation, useActivateRuntimeReleaseMutation, useGetManagedRuntimesQuery, useGetManagedOperationQuery, useDisableManagedRuntimeMutation, useRecoverManagedOperationMutation, useGetPluginNodesQuery, useGetNodeConfigurationQuery, useConfigurePluginNodeMutation } = pluginsApi;

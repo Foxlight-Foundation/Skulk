@@ -3774,6 +3774,46 @@ The core receives safe review data. Canonical execution arguments, approvals and
 execution journals remain with the provider. These GET requests neither create
 intent, grant approval nor replay a prior effect. Clients render fields as text.
 
+### Plugin owner proposal actions
+
+Review responses carry `approvalRevision`: a 64-character lowercase hex fence
+binding the provider's reviewed terms, or `null` when approval is unavailable.
+The optional owner action facet uses the exact reference returned by review.
+Direct owner authority or explicit `plugins:approve` is required for both POST
+routes on direct and relay connections. `plugins:manage` cannot approve;
+`plugins:read` authorizes observation. Responses use `Cache-Control: no-store` and
+contain at most 16 KiB of safe progress metadata.
+
+- `POST /v1/plugins/{plugin_id}/nodes/{node_id}/proposals/{proposal_id}/approve`
+  accepts `operationId` (32 lowercase hexadecimal characters), `reference`, and
+  `reviewRevision` (the exact review fence). The route and reference must match.
+  The API supplies the authenticated operator identity; caller-selected actors,
+  executable inputs and approval proofs are rejected. Providers durably accept
+  intent before work and revalidate terms and authority before execution.
+- `GET /v1/plugins/{plugin_id}/nodes/{node_id}/proposal-operations/{operation_id}`
+  observes the original action without signing, executing or replaying it.
+- `POST /v1/plugins/{plugin_id}/nodes/{node_id}/proposal-operations/{operation_id}/resume`
+  takes no replacement intent (empty body or `{}`). It explicitly recovers an
+  interrupted approval using the original action ID. A currently authorized owner
+  may recover another owner's retained action. Submitted or uncertain work must
+  only be observed, never replayed.
+
+Responses contain `operationId`, exact `reference`, `phase`, `updatedAt` (UTC Unix
+seconds), nullable safe `code`, and nullable `correctiveAction` (up to 512
+characters). Phases are `accepted`, `approving`, `approved`, `dispatching`,
+`succeeded`, `refused`, `approval_interrupted`, and `uncertain`. Success describes
+completion of the selected action; it does not universally mean resource absence.
+Malformed inputs return 422, missing scopes 403, unsupported facets 404,
+inconsistent references or refused actions 409, and unavailable owners 503/504.
+An unconfirmed HTTP reply does not prove that the action was refused.
+
+The Plugins page presents provider facts as text with a distinct **Approve and
+execute reviewed proposal** button. It saves only an operation lookup ID in browser
+storage before POST, then observes status after reconnect. It never stores proof
+or credentials and never automatically resumes an interrupted approval. The
+separate **Resume original approval** action is available only for that phase.
+Providers retain raw failure evidence in protected host-local storage.
+
 ### Managed plugin HTTP lifecycle
 
 The Plugins page and these routes use the same independently supervised manager

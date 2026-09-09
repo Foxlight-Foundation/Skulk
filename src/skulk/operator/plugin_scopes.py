@@ -22,6 +22,11 @@ def required_plugin_scope(method: str, path: str) -> PluginScope | None:
         return None
     if method.upper() in {"GET", "HEAD", "OPTIONS"}:
         return "plugins:read"
-    if parts[-1] in {"approve", "release"}:
+    if parts[-1] in {"approve", "release"} or (
+        len(parts) == 9
+        and parts[4] == "nodes"
+        and parts[6] == "proposal-operations"
+        and parts[8] == "resume"
+    ):
         return "plugins:approve"
     return "plugins:manage"

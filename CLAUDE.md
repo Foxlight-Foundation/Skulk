@@ -514,6 +514,15 @@ in `api/plugins.py` list and review exact retained intent; managed owner IPC ada
 the same facet. Providers retain canonical input and approval/execution journals.
 The read facet has no signing or execution method.
 
+`extensions/proposal_actions.py` adds the distinct `NodeProposalActionsProvider`
+facet: exact reviewed reference/revision approval, durable status, and explicit
+interrupted-approval recovery. Both action routes require `plugins:approve` on
+direct and relay paths; observations require `plugins:read`. Authenticated actors
+come from the API, never request bodies. The Plugins dashboard renders safe terms
+and retains only operation IDs across reconnect; it never replays submissions.
+Provider policy, signatures, journals and cleanup remain outside core.
+
+
 `extensions/managed_host.py` supplies fixed live policy/descriptor observations and
 exact installed-target Fabric callbacks to isolated owners over protected local
 IPC. `managed.py` adapts their steward discovery and inert invocation to the existing

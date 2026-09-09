@@ -2095,6 +2095,15 @@ any local registration policy stay in the plugin. Remote HTTP management never
 executes this entrypoint or accepts a module/executable path.
 
 
+
+`extensions/proposal_actions.py` adds the distinct `NodeProposalActionsProvider`
+facet: exact reviewed reference/revision approval, durable status, and explicit
+interrupted-approval recovery. Both action routes require `plugins:approve` on
+direct and relay paths; observations require `plugins:read`. Authenticated actors
+come from the API, never request bodies. The Plugins dashboard renders safe terms
+and retains only operation IDs across reconnect; it never replays submissions.
+Provider policy, signatures, journals and cleanup remain outside core.
+
 Nonbillable setup actions use the optional `NodeSetupActionsProvider` facet in
 `extensions/setup_actions.py`. Installed nodes advertise `setup_actions_available`;
 core exposes fixed form/start/observation/resume routes under `/v1/plugins` with

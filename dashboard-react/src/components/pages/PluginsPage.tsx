@@ -9,6 +9,7 @@ import { NodeCredentialsPanel } from './NodeCredentialsPanel';
 import { NodePreflightPanel } from './NodePreflightPanel';
 import { NodeSetupPanel } from './NodeSetupPanel';
 import { NodeSetupActionsPanel } from './NodeSetupActionsPanel';
+import { NodeProposalsPanel } from './NodeProposalsPanel';
 
 const Page = styled.section`padding: 24px; width: 100%; max-width: 900px; margin: 0 auto; box-sizing: border-box;`;
 const Card = styled.article`
@@ -82,6 +83,7 @@ function NodeCard({ pluginId, node }: { pluginId: string; node: ConfigurableNode
     {expanded && query.error ? <p role="alert">{t('plugins.settingsUnavailable', 'Settings are unavailable. Check node health and your plugin permissions.')}</p> : null}
     {expanded && query.data ? <NodeEditor pluginId={pluginId} configuration={query.data} reload={() => query.refetch().unwrap()} /> : null}
     {node.preflightAvailable ? <NodePreflightPanel pluginId={pluginId} nodeId={node.nodeId} /> : null}
+    {node.proposalsAvailable ? <NodeProposalsPanel pluginId={pluginId} nodeId={node.nodeId} actionsAvailable={node.proposalActionsAvailable === true} /> : null}
     {node.setupActionsAvailable ? <NodeSetupActionsPanel pluginId={pluginId} nodeId={node.nodeId} /> : null}
     {node.setupAvailable ? <NodeSetupPanel pluginId={pluginId} nodeId={node.nodeId} /> : null}
     {node.credentialsConfigurable ? <Button type="button" aria-expanded={credentialsOpen} onClick={() => setCredentialsOpen(!credentialsOpen)}>{credentialsOpen ? t('plugins.closeCredentials', 'Close credentials') : t('plugins.manageCredentials', 'Manage credentials')}</Button> : null}

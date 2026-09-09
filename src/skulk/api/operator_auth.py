@@ -244,7 +244,7 @@ async def authorize_plugin_request(
     service: OperatorPairingService | None,
     required_scope: PluginScope,
     tailnet_peer_verifier: TailnetPeerVerifier = is_tailscale_peer,
-) -> None:
+) -> str:
     """Require direct owner authority or an explicitly scoped paired operator.
 
     A presented bearer is always checked, never silently replaced by ambient
@@ -256,11 +256,11 @@ async def authorize_plugin_request(
     authorization = request.headers.getlist("authorization")
     if not authorization:
         await _require_direct_dashboard_authority(request, tailnet_peer_verifier)
-        return
+        return "local-owner"
     if len(authorization) != 1 or service is None:
         raise HTTPException(status_code=401, detail="operator credential invalid")
     try:
-        await run_in_threadpool(
+        operator = await run_in_threadpool(
             service.validate_access_token,
             _require_bearer(authorization[0]),
             required_scopes=(required_scope,),
@@ -282,6 +282,7 @@ async def authorize_plugin_request(
         raise HTTPException(
             status_code=403, detail="plugin management requires protected transport"
         )
+    return str(operator.device_id)
 
 
 async def authorize_plugin_owner_request(

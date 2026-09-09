@@ -41,6 +41,12 @@ from skulk.extensions.loader import (
     load_extensions,
     resolve_skulk_version,
 )
+from skulk.extensions.proposal_actions import (
+    NodeProposalActionsProvider,
+    ProposalApproval,
+    ProposalOperation,
+    ProposalOperationId,
+)
 from skulk.extensions.proposal_review import (
     NodeProposalReviewProvider,
     ProposalField,
@@ -121,6 +127,10 @@ __all__ = [
     "StewardTool",
     "StewardToolProvider",
     "NodeProposalReviewProvider",
+    "NodeProposalActionsProvider",
+    "ProposalApproval",
+    "ProposalOperation",
+    "ProposalOperationId",
     "ProposalField",
     "ProposalPage",
     "ProposalReference",

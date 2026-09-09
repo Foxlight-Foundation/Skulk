@@ -632,6 +632,28 @@ Listing remains advisory under concurrent changes; a selected record needs a
 fresh exact review. This facet provides no signing or execution method. See the
 [read-only HTTP contract](api-guide.md#plugin-proposal-review).
 
+## Distinct owner proposal actions
+
+The optional `NodeProposalActionsProvider` facet in `proposal_actions.py` exposes
+`approve_node_proposal(mutation, operator_id)`,
+`node_proposal_operation(node_id, operation_id)` and
+`resume_node_proposal(node_id, operation_id, operator_id)`. Advertise
+`proposal_actions_available` independently of review availability. `ProposalApproval`
+contains only the durable operation ID, exact reference and `review_revision`;
+`ProposalReview.approval_revision` is the provider's current review fence or null.
+The API supplies the authenticated actor after explicit approval-scope checks.
+This facet must never be exposed as a steward tool or authorized by management
+permission alone.
+
+Providers retain original intent before effects, keep signing material private,
+revalidate exact reviewed terms, and return bounded `ProposalOperation` observations.
+Identical accepted requests observe retained work. Explicit recovery can resume
+interrupted approval; submitted and uncertain work is never automatically replayed.
+Managed IPC uses fixed `proposal-approve`, `proposal-operation`, and
+`proposal-resume` operations. The dashboard renders this generic contract; policy,
+approval issuance and provider reconciliation remain plugin responsibilities.
+See the [owner action HTTP contract](api-guide.md#plugin-owner-proposal-actions).
+
 ## Offline runtime verification and staging
 
 Skulk's `extensions/runtime_artifacts.py` verifies the v2 signed runtime envelope

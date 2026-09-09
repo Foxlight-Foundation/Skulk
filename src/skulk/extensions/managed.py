@@ -33,6 +33,7 @@ from skulk.extensions.credentials import CredentialMutation, NodeCredentials
 from skulk.extensions.managed_attachment import ManagedAttachment
 from skulk.extensions.managed_host import HostCallbacks, HostCapability
 from skulk.extensions.preflight import NodePreflight
+from skulk.extensions.proposal_actions import ProposalApproval, ProposalOperation
 from skulk.extensions.proposal_review import (
     ProposalPage,
     ProposalReference,
@@ -100,6 +101,7 @@ class _Node(_WireModel):
     setup_available: bool = False
     setup_actions_available: bool = False
     proposals_available: bool = False
+    proposal_actions_available: bool = False
     descriptors: tuple[CapabilityDescriptor, ...] = Field(max_length=8)
 
     def public(self) -> ConfigurableNode:
@@ -115,6 +117,7 @@ class _Node(_WireModel):
             setup_available=self.setup_available,
             setup_actions_available=self.setup_actions_available,
             proposals_available=self.proposals_available,
+            proposal_actions_available=self.proposal_actions_available,
         )
 
 
@@ -410,6 +413,69 @@ class ManagedOwner:
         if reviewed.proposal.reference != reference:
             raise ValueError("proposal response differs from selected reference")
         return reviewed
+
+    async def approve_node_proposal(
+        self, mutation: ProposalApproval, operator_id: str
+    ) -> ProposalOperation:
+        """Forward an explicitly authorized owner action, never replacement canonical input."""
+        reference = mutation.reference
+        if reference.plugin_id != self.name:
+            raise ValueError("proposal belongs to another installation")
+        await self.refresh()
+        if not self._node(reference.node_id).proposal_actions_available:
+            raise LookupError("proposal actions unavailable")
+        result = await self._request(
+            {
+                "operation": "proposal-approve",
+                "plugin_id": self.name,
+                "node_id": reference.node_id,
+                "operation_id": mutation.operation_id,
+                "mutation": mutation.model_dump(mode="json"),
+                "operator_id": operator_id,
+            }
+        )
+        operation = ProposalOperation.model_validate_json(json.dumps(result))
+        if (
+            operation.reference != reference
+            or operation.operation_id != mutation.operation_id
+        ):
+            raise ValueError("proposal action response differs")
+        return operation
+
+    async def node_proposal_operation(
+        self, node_id: str, operation_id: str
+    ) -> ProposalOperation:
+        """Observe retained progress without replaying the original owner action."""
+        return await self._proposal_operation(node_id, operation_id, None)
+
+    async def resume_node_proposal(
+        self, node_id: str, operation_id: str, operator_id: str
+    ) -> ProposalOperation:
+        """Request explicit approval recovery; submitted execution is never replayed."""
+        return await self._proposal_operation(node_id, operation_id, operator_id)
+
+    async def _proposal_operation(
+        self, node_id: str, operation_id: str, operator_id: str | None
+    ) -> ProposalOperation:
+        result = await self._request(
+            {
+                "operation": "proposal-operation"
+                if operator_id is None
+                else "proposal-resume",
+                "plugin_id": self.name,
+                "node_id": node_id,
+                "operation_id": operation_id,
+                "operator_id": operator_id,
+            }
+        )
+        operation = ProposalOperation.model_validate_json(json.dumps(result))
+        if (
+            operation.reference.plugin_id != self.name
+            or operation.reference.node_id != node_id
+            or operation.operation_id != operation_id
+        ):
+            raise ValueError("proposal action response differs")
+        return operation
 
     async def handle_steward_tool(
         self,

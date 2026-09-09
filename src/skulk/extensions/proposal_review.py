@@ -59,6 +59,10 @@ class ProposalReview(FrozenModel):
         description="Retained proposal and current state."
     )
     observed_at: int = Field(gt=0, description="UTC Unix seconds of this review read.")
+    approval_revision: ConfigurationDigest | None = Field(
+        default=None,
+        description="Current approval fence, or null when approval is unavailable.",
+    )
     fields: tuple[ProposalField, ...] = Field(
         min_length=1,
         max_length=32,
