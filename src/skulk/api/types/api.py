@@ -15,6 +15,7 @@ from skulk.shared.models.registry import (
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.text_generation import ReasoningEffort
+from skulk.shared.types.video import MAX_VIDEO_PROMPT_CHARS, VideoJobStatus
 from skulk.shared.types.worker.instances import Instance, InstanceId, InstanceMeta
 from skulk.shared.types.worker.shards import Sharding, ShardMetadata
 from skulk.store.installed_cards import InstalledArtifactRole, InstalledCardRecord
@@ -2068,6 +2069,159 @@ class ImageListItem(BaseModel, frozen=True):
 
 class ImageListResponse(BaseModel, frozen=True):
     data: list[ImageListItem]
+
+
+class VideoCreateRequest(BaseModel):
+    """Body of ``POST /v1/videos``.
+
+    Sent as JSON for text-to-video, or as the string fields of a multipart
+    form whose file parts are the conditioning attachments. Types are
+    coerced leniently because form values arrive as strings.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    prompt: str = Field(min_length=1, max_length=MAX_VIDEO_PROMPT_CHARS)
+    """Generation prompt; structured prompts pass through verbatim."""
+    model: str
+    """Card identifier of the placed video model."""
+    seconds: int | None = Field(default=None, ge=1, le=120)
+    """Requested duration; omitted means the card's shortest supported clip."""
+    size: str | None = None
+    """Output canvas as ``WIDTHxHEIGHT``; omitted lets the engine pick the
+    card's trained canvas."""
+    aspect_ratio: str | None = None
+    """Advisory ``W:H`` ratio used when ``size`` is omitted."""
+    mode: Literal["t2va", "fl2va", "ref2va"] | None = None
+    """Generation mode; omitted derives it from the attachments."""
+    steps: int | None = Field(default=None, ge=1, le=200)
+    """Sampling steps; omitted defers to the adapter or the card."""
+    seed: int | None = Field(default=None, ge=0)
+    """Deterministic seed."""
+    lora: str | None = None
+    """Name of a card companion adapter to apply."""
+    lora_strength: float | None = Field(default=None, ge=0.0, le=2.0)
+    """Adapter strength override."""
+    audio: bool = True
+    """Whether the output must carry the model's synchronized audio track."""
+
+
+class VideoError(BaseModel, frozen=True):
+    """Why a video job ended without a result."""
+
+    code: str
+    """Stable code: ``job_failed`` or ``job_cancelled``."""
+    message: str
+    """Human-readable detail."""
+
+
+class VideoOutputInfo(BaseModel, frozen=True):
+    """Facts about the finished container as the producer described it."""
+
+    sha256: str
+    """Digest of the container bytes."""
+    size_bytes: int
+    """Container size in bytes."""
+    content_type: str
+    """Container MIME type."""
+    width: int
+    """Frame width in pixels."""
+    height: int
+    """Frame height in pixels."""
+    frame_count: int
+    """Number of video frames."""
+    fps: int
+    """Frames per second."""
+    seconds: float
+    """Duration as muxed."""
+    audio_sample_rate: int | None
+    """Audio sample rate when a track is present."""
+    audio_channels: int | None
+    """Audio channel count when a track is present."""
+    has_thumbnail: bool
+    """Whether ``variant=thumbnail`` content is available."""
+
+
+class VideoStatsInfo(BaseModel, frozen=True):
+    """Runner-reported timing for one render."""
+
+    steps: int
+    """Sampling steps executed."""
+    seconds_per_step: float
+    """Mean wall time per step."""
+    total_generation_time: float
+    """Wall time from dispatch to a finished container."""
+    peak_memory_bytes: int | None
+    """Peak accelerator memory when the engine reports one."""
+
+
+class VideoResource(BaseModel, frozen=True):
+    """One video generation job in the OpenAI ``video`` object shape.
+
+    The first block mirrors OpenAI's fields; the fields after ``error`` are
+    Skulk extensions.
+    """
+
+    id: str
+    """Job identifier."""
+    object: Literal["video"] = "video"
+    """Object type discriminator."""
+    model: str
+    """Card the job was placed on."""
+    status: VideoJobStatus
+    """``queued``, ``in_progress``, ``completed``, ``failed``, or ``cancelled``."""
+    progress: int
+    """Approximate completion percentage."""
+    created_at: int
+    """Creation time, unix seconds."""
+    completed_at: int | None
+    """Terminal time, unix seconds."""
+    expires_at: int | None
+    """When downloadable content expires, unix seconds."""
+    seconds: str
+    """Requested duration as a string, matching OpenAI's schema."""
+    size: str | None
+    """Requested canvas, if any."""
+    error: VideoError | None
+    """Failure detail for failed and cancelled jobs."""
+    prompt: str
+    """Prompt as submitted."""
+    mode: str
+    """Resolved generation mode."""
+    audio: bool
+    """Whether an audio track was required."""
+    stage: str | None
+    """Latest reported render phase."""
+    output: VideoOutputInfo | None
+    """Container facts once the render finished."""
+    stats: VideoStatsInfo | None
+    """Runner timing once the render finished."""
+
+
+class VideoListResponse(BaseModel, frozen=True):
+    """One page of video jobs, newest first by default."""
+
+    object: Literal["list"] = "list"
+    """Object type discriminator."""
+    data: list[VideoResource]
+    """Jobs on this page."""
+    first_id: str | None
+    """Id of the first job on the page."""
+    last_id: str | None
+    """Id of the last job on the page; pass it as ``after`` for the next page."""
+    has_more: bool
+    """Whether another page follows."""
+
+
+class VideoDeletedResponse(BaseModel, frozen=True):
+    """Acknowledgement of ``DELETE /v1/videos/{video_id}``."""
+
+    id: str
+    """Deleted job identifier."""
+    object: Literal["video.deleted"] = "video.deleted"
+    """Object type discriminator."""
+    deleted: bool = True
+    """Always true."""
 
 
 class StartDownloadParams(CamelCaseModel):

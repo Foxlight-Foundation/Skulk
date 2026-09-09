@@ -223,6 +223,22 @@ class VideoJobRegistry:
         self._persist()
         return demoted
 
+    def mark_expired(self, job_id: CommandId) -> VideoJob | None:
+        """Record that a completed job's artifacts are gone before their expiry.
+
+        The store evicts whole jobs when a new artifact needs the room; the
+        job stays completed, its ``expires_at`` moves to now, and content
+        requests answer 404 like any expired job.
+        """
+
+        job = self._jobs.get(job_id)
+        if job is None or job.status != "completed":
+            return job
+        expired = job.model_copy(update={"expires_at": int(time.time())})
+        self._jobs[job_id] = expired
+        self._persist()
+        return expired
+
     def fail(self, job_id: CommandId, error: str, *, cancelled: bool = False) -> VideoJob | None:
         """Move a live job to a terminal failure or cancellation."""
 

@@ -4,7 +4,10 @@ The worker that rendered a clip streams it here over the ``OUTPUT_MEDIA``
 plane in bounded raw chunks. The store assembles each artifact into a staging
 file, verifies size and digest against what the producer declared, and only
 then commits it under the job's directory. Committed artifacts expire after a
-bounded lifetime so an API node's disk is never an unbounded archive.
+bounded lifetime, the store holds at most a configured number of bytes, and a
+new artifact evicts the oldest committed ones when it would not otherwise fit
+or when the disk is nearly full, so an API node's disk is never an unbounded
+archive.
 """
 
 from __future__ import annotations
@@ -32,6 +35,10 @@ _MAX_STASHED_CHUNKS = 256
 """Out-of-order chunks held per assembly on a reordering transport."""
 _MAX_STASHED_BYTES = 64 * 1024 * 1024
 """Bytes of early chunks held per assembly before the transfer is refused."""
+DEFAULT_MAX_STORE_BYTES = 32 * 1024 * 1024 * 1024
+"""Default ceiling on committed plus in-flight artifact bytes per API node."""
+_DISK_RESERVE_BYTES = 1024 * 1024 * 1024
+"""Free space the store leaves on its filesystem for everything else."""
 
 
 class StoredVideoArtifact(BaseModel):
@@ -93,9 +100,16 @@ def _file_sha256(path: Path) -> str | None:
 class VideoStore:
     """Disk-backed, expiring store for generated video artifacts."""
 
-    def __init__(self, storage_dir: Path, default_expiry_seconds: int = 24 * 3600) -> None:
+    def __init__(
+        self,
+        storage_dir: Path,
+        default_expiry_seconds: int = 24 * 3600,
+        *,
+        max_total_bytes: int = DEFAULT_MAX_STORE_BYTES,
+    ) -> None:
         self._storage_dir = storage_dir
         self._default_expiry_seconds = default_expiry_seconds
+        self._max_total_bytes = max_total_bytes
         self._artifacts: dict[tuple[CommandId, VideoArtifactPurpose], StoredVideoArtifact] = {}
         self._assemblies: dict[tuple[CommandId, VideoArtifactPurpose], _Assembly] = {}
         self._storage_dir.mkdir(parents=True, exist_ok=True)
@@ -105,6 +119,52 @@ class VideoStore:
         """Root directory holding one subdirectory per job."""
         return self._storage_dir
 
+    def reserved_bytes(self) -> int:
+        """Bytes committed on disk plus bytes declared by open assemblies."""
+
+        return sum(stored.size_bytes for stored in self._artifacts.values()) + sum(
+            assembly.total_bytes for assembly in self._assemblies.values()
+        )
+
+    def _fits(self, total_bytes: int) -> bool:
+        if self.reserved_bytes() + total_bytes > self._max_total_bytes:
+            return False
+        try:
+            free = shutil.disk_usage(self._storage_dir).free
+        except OSError:
+            # An unmeasurable filesystem is not a reason to refuse; the write
+            # itself fails loudly if the disk is really full.
+            return True
+        return free - total_bytes >= _DISK_RESERVE_BYTES
+
+    def _oldest_evictable(self, exclude: CommandId) -> CommandId | None:
+        assembling = {command_id for command_id, _purpose in self._assemblies}
+        expiry: dict[CommandId, float] = {}
+        for (command_id, _purpose), stored in self._artifacts.items():
+            if command_id == exclude or command_id in assembling:
+                continue
+            expiry[command_id] = min(expiry.get(command_id, stored.expires_at), stored.expires_at)
+        if not expiry:
+            return None
+        return min(expiry, key=expiry.__getitem__)
+
+    def _make_room(self, command_id: CommandId, total_bytes: int) -> tuple[CommandId, ...]:
+        """Evict whole jobs, oldest expiry first, until the artifact fits.
+
+        Eviction never touches a job that is still receiving an artifact and
+        never the job the artifact belongs to. Raises ``ValueError`` when the
+        artifact cannot fit even with every evictable job gone.
+        """
+
+        evicted: list[CommandId] = []
+        while not self._fits(total_bytes):
+            victim = self._oldest_evictable(command_id)
+            if victim is None:
+                raise ValueError("the video store has no room for this artifact")
+            self.delete(victim)
+            evicted.append(victim)
+        return tuple(evicted)
+
     def open_assembly(
         self,
         command_id: CommandId,
@@ -113,12 +173,17 @@ class VideoStore:
         content_type: str,
         total_bytes: int,
         total_chunks: int,
-    ) -> None:
-        """Begin receiving one artifact; replaces any half-received attempt."""
+    ) -> tuple[CommandId, ...]:
+        """Begin receiving one artifact; replaces any half-received attempt.
+
+        Returns the ids of jobs whose artifacts were evicted to make room, so
+        the caller can mark those jobs expired.
+        """
 
         if total_bytes <= 0 or total_bytes > _MAX_ARTIFACT_BYTES:
             raise ValueError("artifact size is outside the accepted range")
         self.abort_assembly(command_id, purpose)
+        evicted = self._make_room(command_id, total_bytes)
         directory = self._storage_dir / str(command_id)
         directory.mkdir(parents=True, exist_ok=True)
         staging_path = directory / f"{_ARTIFACT_FILENAMES[purpose]}.part"
@@ -130,6 +195,7 @@ class VideoStore:
             staging_path=staging_path,
             handle=staging_path.open("wb"),
         )
+        return evicted
 
     def append(
         self,
@@ -286,6 +352,16 @@ class VideoStore:
     def has_open_assembly(self, command_id: CommandId, purpose: VideoArtifactPurpose) -> bool:
         """Whether an artifact is currently being received."""
         return (command_id, purpose) in self._assemblies
+
+    def assembly_complete(self, command_id: CommandId, purpose: VideoArtifactPurpose) -> bool:
+        """Whether an open assembly has received every declared chunk in order."""
+
+        assembly = self._assemblies.get((command_id, purpose))
+        return (
+            assembly is not None
+            and not assembly.stash
+            and assembly.next_sequence - 1 == assembly.total_chunks
+        )
 
     def get(
         self, command_id: CommandId, purpose: VideoArtifactPurpose = "video"

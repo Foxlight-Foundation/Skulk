@@ -9,6 +9,23 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- Audio-video generation substrate and the `/v1/videos` job API. Model
+  cards gain a `[video]` section (modes `t2va` / `fl2va` / `ref2va`,
+  duration and frame grid, canvas rules, audio output, reference limits,
+  pinned LoRA / model-patch / embedding / graph-template companions) and a
+  `[license]` section, gated behind `SKULK_ENABLE_VIDEO_MODELS`, with
+  bundled MiniMax H3 fallback cards. A `VideoGeneration` command and task
+  place on a single-host instance whose card serves the requested mode,
+  reference attachments ride the vision media plane as raw slot-keyed bytes
+  with per-slot digest verification, render progress rides `DATA` as
+  `VideoChunk`, and the finished container returns on the new
+  `OUTPUT_MEDIA` plane into the API node's expiring, byte-bounded
+  `VideoStore`. The OpenAI-shaped job routes create (JSON or multipart with
+  `input_reference`, `first_frame`, `last_frame`, and repeated `reference`
+  parts), list, retrieve, download (`content` with a `variant`), cancel,
+  and delete jobs; a job completes only when the render's terminal report
+  and the verified container both arrive. No video engine ships yet, so a
+  create request fails at placement until one does.
 - Muse Glimmer (Meta, August 2026) is a first-class model family on every
   serving lane. The capability resolver now derives the family's wire
   contract from the card family or model id, the same way it does for

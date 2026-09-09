@@ -31,6 +31,8 @@ def _make_api() -> Any:
     api._video_job_media_deadlines = {}  # pyright: ignore[reportPrivateUsage]
     api._video_output_sources = {}  # pyright: ignore[reportPrivateUsage]
     api._early_output_packets = {}  # pyright: ignore[reportPrivateUsage]
+    api._early_output_packet_bytes = 0  # pyright: ignore[reportPrivateUsage]
+    api._pending_output_completions = {}  # pyright: ignore[reportPrivateUsage]
     api._embedding_queues = {}  # pyright: ignore[reportPrivateUsage]
     api._audio_speech_queues = {}  # pyright: ignore[reportPrivateUsage]
     api._audio_transcription_queues = {}  # pyright: ignore[reportPrivateUsage]

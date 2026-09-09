@@ -31,6 +31,7 @@ token.
 - OpenAI embeddings: [OpenAI Embeddings API](#openai-embeddings-api)
 - OpenAI text-to-speech: [OpenAI Audio Speech API](#openai-audio-speech-api)
 - Image generation: [Image Generation and Editing](#image-generation-and-editing)
+- Video generation: [Video Generation Jobs](#video-generation-jobs)
 - Claude format: [Claude Messages API](#claude-messages-api)
 - Ollama compatibility: [Ollama API](#ollama-api)
 - Placement and launch: [Placement and Instance Management](#placement-and-instance-management)
@@ -115,6 +116,15 @@ The Ollama group also serves alias paths (`/ollama/api/api/...`,
 - `POST /v1/images/edits`
 - `GET /images`
 - `GET /images/{image_id}`
+
+### Videos
+
+- `POST /v1/videos`
+- `GET /v1/videos`
+- `GET /v1/videos/{video_id}`
+- `DELETE /v1/videos/{video_id}`
+- `GET /v1/videos/{video_id}/content`
+- `POST /v1/videos/{video_id}/cancel`
 
 ### Benchmarking
 
@@ -1404,6 +1414,182 @@ Stored images are node-local and expire one hour after creation; a missing or
 expired id returns **404 Image not found or expired**. Use
 `response_format: "b64_json"` when you need the image bytes to outlive the
 cache.
+
+## Video Generation Jobs
+
+Skulk renders audio-video clips through an asynchronous job family shaped
+like the OpenAI `/v1/videos` API. A render takes minutes, so a create request
+returns a job object at once and the caller polls it, then downloads the
+finished MP4. Requests are validated against the model card's declared
+contract (modes, duration range, canvas rules, reference limits) before
+anything is dispatched.
+
+Availability note: these routes are always registered. Video model cards are
+hidden from the catalog unless the node runs with
+`SKULK_ENABLE_VIDEO_MODELS=true`, and a create request needs a placed
+instance of the model on a node with a video engine; without one the job
+fails at placement with `video_mode_unavailable`.
+
+### The video object
+
+Every route returns or lists this object. The first block matches OpenAI's
+`video` schema; the fields after `error` are Skulk extensions.
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `id` | string | Job id; also the command id accepted by `POST /v1/cancel/{command_id}` |
+| `object` | string | Always `video` |
+| `model` | string | Card the job was placed on |
+| `status` | string | `queued`, `in_progress`, `completed`, `failed`, or `cancelled` |
+| `progress` | integer | Approximate percent complete |
+| `created_at`, `completed_at`, `expires_at` | integer or null | Unix seconds; `expires_at` says when downloadable content disappears |
+| `seconds` | string | Requested duration (a string, as in OpenAI's schema) |
+| `size` | string or null | Requested canvas |
+| `error` | object or null | `{ "code": "job_failed" or "job_cancelled", "message": ... }` |
+| `prompt` | string | Prompt as submitted |
+| `mode` | string | Resolved generation mode: `t2va` (text), `fl2va` (first and/or last frame), or `ref2va` (reference images, clips, audio) |
+| `audio` | boolean | Whether a synchronized audio track was required |
+| `stage` | string or null | Latest render phase: `queued`, `encoding`, `sampling`, `decoding`, `muxing`, `uploading` |
+| `output` | object or null | Container facts once rendered: `sha256`, `size_bytes`, `content_type`, `width`, `height`, `frame_count`, `fps`, `seconds`, `audio_sample_rate`, `audio_channels`, `has_thumbnail` |
+| `stats` | object or null | Runner timing: `steps`, `seconds_per_step`, `total_generation_time`, `peak_memory_bytes` |
+
+### Create a video job
+
+**POST** `/v1/videos`
+
+Text-to-video takes a JSON body:
+
+```bash
+curl -X POST http://localhost:52415/v1/videos \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "Comfy-Org/MiniMax-H3-FL2VA-comfy-int8",
+    "prompt": "A red fox trots through fresh snow at dawn, breath steaming.",
+    "seconds": 8,
+    "size": "1280x720"
+  }'
+```
+
+Conditioning attachments make it a multipart form. The string fields are
+the same; the file parts decide the mode:
+
+```bash
+curl -X POST http://localhost:52415/v1/videos \
+  -F model=Comfy-Org/MiniMax-H3-Ref2VA-comfy-int8 \
+  -F prompt='The fox from the photo walks toward the camera' \
+  -F seconds=6 \
+  -F input_reference=@first.png \
+  -F reference=@fox.jpg \
+  -F reference=@voice.wav
+```
+
+Request fields (JSON keys or form fields):
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `model` | string | Required placed video model id |
+| `prompt` | string | Required; up to 8000 characters, structured prompts pass through verbatim |
+| `seconds` | integer | Clip length; any integer inside the card's supported range (MiniMax H3: 4 to 15). Omitted means the card's shortest clip. A string such as `"8"` is accepted for OpenAI SDK compatibility |
+| `size` | string | `WIDTHxHEIGHT`; must be a multiple of the card's canvas grid and inside its pixel budget. Omitted lets the engine pick the trained canvas |
+| `aspect_ratio` | string | Advisory `W:H` used when `size` is omitted |
+| `mode` | string | `t2va`, `fl2va`, or `ref2va`; omitted derives it from the attachments |
+| `steps` | integer | Sampling steps; omitted defers to the selected adapter or the card |
+| `seed` | integer | Deterministic seed |
+| `lora` | string | Name of a card companion adapter, for example a turbo LoRA |
+| `lora_strength` | number | 0.0 to 2.0 |
+| `audio` | boolean | Default `true`; the job fails at settlement if the render carries no audio track |
+
+File parts (multipart only), in slot order:
+
+| Part | Role | Notes |
+|------|------|-------|
+| `input_reference` | first frame | OpenAI's name for the keyframe image; `first_frame` is the same thing |
+| `last_frame` | last frame | Image |
+| `reference` | reference | Repeatable; images, video clips, or audio in the order given |
+
+Each part must carry an `image/*`, `video/*`, or `audio/*` content type. At
+most 16 attachments and 256 MiB per request; larger uploads return
+**413**. Keyframe roles allow one first and one last frame. The card's
+`reference_limits` bound the counts per kind. Attachments travel to the
+selected worker over the bounded vision media path; they are never written
+to the event log or replicated state.
+
+The response is the video object with `status: "queued"`. One API node
+accepts 32 live jobs; beyond that the route returns **503** until one
+finishes.
+
+### Poll a job
+
+**GET** `/v1/videos/{video_id}`
+
+```bash
+curl http://localhost:52415/v1/videos/<video_id>
+```
+
+`progress` and `stage` advance while the render runs. A job reaches
+`completed` only after both the render's terminal report and the verified
+container have arrived on the API node; the two travel on different planes
+and may land in either order. If the container never arrives within ten
+minutes of the first half, the job fails with a delivery error.
+
+### List jobs
+
+**GET** `/v1/videos`
+
+| Query | Notes |
+|-------|-------|
+| `limit` | 1 to 100, default 20 |
+| `after` | Id of the last job on the previous page |
+| `order` | `desc` (default, newest first) or `asc` |
+
+Returns `{ "object": "list", "data": [...], "first_id", "last_id", "has_more" }`.
+The node retains the newest 256 jobs; older terminal jobs are evicted from
+the list.
+
+### Download content
+
+**GET** `/v1/videos/{video_id}/content?variant=video|thumbnail`
+
+```bash
+curl -o clip.mp4 http://localhost:52415/v1/videos/<video_id>/content
+curl -o clip.jpg 'http://localhost:52415/v1/videos/<video_id>/content?variant=thumbnail'
+```
+
+Returns the MP4 (H.264 video, AAC audio when present) or the JPEG
+thumbnail with its content type. Responds **409** while the job is not
+`completed` and **404** once the content has expired or when the job has no
+thumbnail. Content is node-local: fetch it from the API node that created
+the job. Stored content expires 24 hours after completion, and the node's
+video store also holds at most `SKULK_VIDEO_STORE_MAX_BYTES` (default 32 GiB)
+or the free space on its filesystem minus a reserve; when a new render needs
+the room, the oldest completed jobs lose their content early and their
+`expires_at` moves to the eviction time.
+
+### Cancel a job
+
+**POST** `/v1/videos/{video_id}/cancel`
+
+Stops a queued or running render, or stops the container transfer when the
+render already finished, and returns the job with `status: "cancelled"`.
+Cancelling a finished job returns it unchanged. `POST /v1/cancel/{video_id}`
+does the same for callers that already use the generic cancel route.
+
+### Delete a job
+
+**DELETE** `/v1/videos/{video_id}`
+
+Cancels the job if it is still live, deletes its stored content, and forgets
+it. Returns `{ "id": ..., "object": "video.deleted", "deleted": true }`.
+
+### Differences from OpenAI
+
+- `seconds` accepts any integer inside the card's range rather than a fixed
+  set of values, and `size` is any canvas the card allows.
+- `cancelled` is a distinct terminal status.
+- Multipart accepts a last frame and repeated references, not only the single
+  `input_reference`, and the JSON body accepts the `mode`, `aspect_ratio`,
+  `steps`, `seed`, `lora`, `lora_strength`, and `audio` extensions.
+- There is no remix route; submit a new job with the changed prompt.
 
 ## Benchmark Endpoints
 
