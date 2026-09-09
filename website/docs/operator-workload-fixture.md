@@ -121,6 +121,16 @@ rendered it. No paths, query strings, headers,
 peer addresses, credentials, prompts, responses, hashes of bodies, or packet
 traces are exported. Unknown paths become the fixed category `other`.
 
+On peer closure, the bridge first closes its backend leg and then allows any
+already-running terminal ASGI sends at most one second to settle before closing
+its admitted socket and recording connection closure. This prevents an abrupt
+streaming-carrier close after complete HTTP framing from being counted as a
+failure solely because server cleanup finishes later. Errors, cancellation and
+the settlement timeout still fail unfinished requests; partial streams do not
+receive a grace period. Observed bridge lifetimes include this bounded settlement
+overhead and must not be treated as uninstrumented carrier lifetimes. No extra
+background tasks or unbounded queues are introduced.
+
 Per-observer bounds are 512 live connections/requests, 100,000 events, two hours,
 and 10 GiB of application-body bytes. The recorder pipe holds at most 512
 metadata events of at most 512 bytes each; overflow invalidates capture rather

@@ -226,10 +226,14 @@ def test_fixture_executes_copied_verified_bytes_after_source_replacement(
 
 
 @pytest.mark.parametrize("observed", [False, True])
-@pytest.mark.parametrize("close_after_response_body", [False, True])
+@pytest.mark.parametrize(
+    "close_after_response_body,abort_after_response_body",
+    [(False, False), (True, False), (True, True)],
+)
 async def test_real_fixture_pairs_reads_and_cleans_up(
     observed: bool,
     close_after_response_body: bool,
+    abort_after_response_body: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Exercise the real Rust relay and Python auth, not released-app capacity.
@@ -325,6 +329,7 @@ async def test_real_fixture_pairs_reads_and_cleans_up(
             bearer=token,
             body={"model": "fixture/generated-chat", "messages": [], "stream": True},
             close_after_response_body=close_after_response_body,
+            abort_after_response_body=abort_after_response_body,
         )
         assert chat_response.status == 200
         assert chat_response.body == b"".join(
@@ -341,6 +346,7 @@ async def test_real_fixture_pairs_reads_and_cleans_up(
                 "stream": True,
             },
             close_after_response_body=close_after_response_body,
+            abort_after_response_body=abort_after_response_body,
         )
         assert speech_response.status == 200
         assert speech_response.body == bytes(144000)
