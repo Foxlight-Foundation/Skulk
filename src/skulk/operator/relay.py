@@ -910,10 +910,19 @@ class OperatorGatewayConnector:
                 name="operator-relay-control-heartbeat",
             )
             tasks = (receiver, heartbeat)
-            _, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-            for task in pending:
-                task.cancel()
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+            try:
+                _, pending = await asyncio.wait(
+                    tasks, return_when=asyncio.FIRST_COMPLETED
+                )
+                for task in pending:
+                    task.cancel()
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+            finally:
+                # Cancellation of the connector must reap both children before
+                # its socket closes; otherwise heartbeats outlive their owner.
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
             for result in results:
                 if isinstance(result, asyncio.CancelledError):
                     continue
