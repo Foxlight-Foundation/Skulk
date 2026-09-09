@@ -73,6 +73,7 @@ class RuntimeLock:
             "supervisor.lock",
             "service.lock",
             "manager.lock",
+            "attachment.lock",
         }:
             raise ValueError("unknown runtime lock")
         private_directory(root)

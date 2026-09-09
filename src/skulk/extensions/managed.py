@@ -9,10 +9,17 @@ import stat
 import time
 from itertools import islice
 from pathlib import Path
-from typing import final
+from typing import Self, final
 
 from loguru import logger
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    TypeAdapter,
+    model_validator,
+)
 
 from skulk.extensions.calls import CapabilityCall
 from skulk.extensions.capabilities import CapabilityDescriptor
@@ -22,6 +29,8 @@ from skulk.extensions.configuration import (
     ConfigurationResult,
     NodeConfiguration,
 )
+from skulk.extensions.managed_attachment import ManagedAttachment
+from skulk.extensions.runtime_attachment import ProfileIdentifier
 from skulk.extensions.types import ExtensionContext
 
 _OBJECT = TypeAdapter(dict[str, JsonValue])
@@ -43,6 +52,30 @@ class ManagedConnection(_WireModel):
         max_length=4096,
         description="Locally provisioned absolute service-state directory.",
     )
+
+    manager_root: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=4096,
+        description="Locally provisioned manager root for automatic transport renewal.",
+    )
+    profile_id: ProfileIdentifier | None = Field(
+        default=None,
+        description="Exact locally generated manager profile identity.",
+    )
+
+    @model_validator(mode="after")
+    def complete_attachment(self) -> Self:
+        """Require the complete local profile, without changing legacy connections."""
+        if (self.manager_root is None) != (self.profile_id is None):
+            raise ValueError("incomplete managed attachment")
+        if self.manager_root is not None and (
+            not Path(self.manager_root).is_absolute()
+            or Path(self.state_root)
+            != Path(self.manager_root) / "installations" / self.plugin_id
+        ):
+            raise ValueError("managed installation is outside its configured manager")
+        return self
 
 
 class _Node(_WireModel):
@@ -122,13 +155,23 @@ class ManagedOwner:
     skulk_requires = ">=1.5.2,<2"
 
     def __init__(
-        self, connection: ManagedConnection, *, disabled: bool = False
+        self,
+        connection: ManagedConnection,
+        *,
+        disabled: bool = False,
+        attachment: ManagedAttachment | None = None,
     ) -> None:
         """Bind an explicitly installed local connection and admission kill switch."""
         self.name = connection.plugin_id
         self.root = Path(connection.state_root)
         if not self.root.is_absolute():
             raise ValueError("managed state root must be absolute")
+        self.attachment = attachment
+        if self.attachment is None and connection.manager_root is not None:
+            assert connection.profile_id is not None
+            self.attachment = ManagedAttachment(
+                Path(connection.manager_root), connection.profile_id
+            )
         self.disabled = disabled
         self.context: ExtensionContext | None = None
         self.nodes: tuple[_Node, ...] = ()
@@ -201,6 +244,8 @@ class ManagedOwner:
         """Refresh the exact local host snapshot; failures immediately remove readiness."""
         async with self.refresh_lock:
             try:
+                if self.attachment is not None:
+                    await self.attachment.ensure()
                 result = await self._request({"operation": "describe"}, timeout=1)
                 snapshot = _Description.model_validate_json(json.dumps(result))
                 if self.context is None or snapshot.transport_node_id != str(
@@ -234,6 +279,8 @@ class ManagedOwner:
         if self.poll_task is not None:
             return
         self.context = context
+        if self.attachment is not None:
+            self.attachment.retain(str(context.node_id))
         self.poll_task = asyncio.create_task(self._poll())
 
     async def _poll(self) -> None:
@@ -249,6 +296,8 @@ class ManagedOwner:
             self.poll_task.cancel()
             await asyncio.gather(self.poll_task, return_exceptions=True)
             self.poll_task = None
+            if self.attachment is not None:
+                await self.attachment.release()
 
     async def configuration_nodes(self) -> tuple[ConfigurableNode, ...]:
         """Read all installed nodes, including disabled children."""
@@ -352,9 +401,23 @@ def load_managed_owners(
             raise ValueError("too many managed owners")
         owners: dict[str, ManagedOwner] = {}
         conflicts: set[str] = set()
+        attachments: dict[tuple[str, str], ManagedAttachment] = {}
         for path in paths:
             try:
-                owner = ManagedOwner(_read_connection(path), disabled=disabled)
+                connection = _read_connection(path)
+                attachment = None
+                if connection.manager_root is not None:
+                    assert connection.profile_id is not None
+                    key = (connection.manager_root, connection.profile_id)
+                    attachment = attachments.get(key)
+                    if attachment is None:
+                        attachment = ManagedAttachment(
+                            Path(connection.manager_root), connection.profile_id
+                        )
+                        attachments[key] = attachment
+                owner = ManagedOwner(
+                    connection, disabled=disabled, attachment=attachment
+                )
                 if owner.name in owners or owner.name in conflicts:
                     owners.pop(owner.name, None)
                     conflicts.add(owner.name)

@@ -1618,8 +1618,13 @@ Source identity and dependency inventory must remain unchanged throughout copyin
 `service_bootstrap.py` uses only the standard library with Python site initialization
 disabled to verify the selected complete file seal before starting the fixed manager.
 Core-runtime activation requires a stopped manager and leaves plugin state intact.
-OS service registration, automatic local transport reattachment and HTTP lifecycle
-integration remain separate setup work.
+`managed_attachment.py` shares one local profile fence across an API's adapters
+and reports the live process's measured core build. `runtime_attachment.py` journals
+transport renewal after stopping affected owners; recovery finishes only exact
+recorded local metadata before owner startup. Durable plugin identities and cleanup
+records remain independent of Skulk's changing transport ID. Profiles and builds
+must match, and foreign installation bindings are never silently adopted.
+OS service registration and HTTP lifecycle integration remain separate setup work.
 
 Extension startup and serving share one event loop. The API starts hooks only
 once its runtime begins and invokes optional asynchronous shutdown hooks before

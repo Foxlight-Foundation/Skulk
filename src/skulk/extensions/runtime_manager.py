@@ -15,6 +15,15 @@ from typing import Annotated, Literal, cast, final
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
 
+from skulk.extensions.runtime_artifacts import measure_host
+from skulk.extensions.runtime_attachment import (
+    AttachmentJournal,
+    AttachmentRequest,
+    HostSettings,
+    OwnerBinding,
+    finish_attachment,
+    recover_attachment,
+)
 from skulk.extensions.runtime_controller import LifecycleRequest, RuntimeController
 from skulk.extensions.runtime_files import (
     RuntimeLock,
@@ -30,18 +39,6 @@ PluginIdentifier = Annotated[
 ]
 _PLUGIN_ID: TypeAdapter[str] = TypeAdapter(PluginIdentifier)
 _OBJECT = TypeAdapter(dict[str, JsonValue])
-
-
-class HostSettings(BaseModel):
-    """Local setup binding to an existing Skulk transport identity."""
-
-    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
-    transport_node_id: str = Field(
-        min_length=1,
-        max_length=128,
-        pattern=r"^[a-zA-Z0-9._:@-]+$",
-        description="Existing Skulk identity, provisioned locally without a browser-supplied override.",
-    )
 
 
 class _Request(BaseModel):
@@ -84,7 +81,11 @@ class OperationRequest(_Request):
 
 
 type ManagerRequest = (
-    InventoryRequest | InstallationRequest | SubmitRequest | OperationRequest
+    InventoryRequest
+    | InstallationRequest
+    | SubmitRequest
+    | OperationRequest
+    | AttachmentRequest
 )
 MANAGER_REQUEST: TypeAdapter[ManagerRequest] = TypeAdapter(ManagerRequest)
 
@@ -147,8 +148,79 @@ class RuntimeManager:
 
     async def _restore(self) -> None:
         async with self.guard:
+            await self._restore_locked()
+
+    async def _restore_locked(self) -> None:
+        try:
+            self.settings = await asyncio.to_thread(recover_attachment, self.root)
+        except (OSError, ValueError):
             for identifier in self._identifiers():
-                await self._load(identifier)
+                self.errors[identifier] = "attachment_recovery_required"
+            return
+        for identifier in self._identifiers():
+            await self._load(identifier)
+
+    async def _attach(self, request: AttachmentRequest) -> dict[str, JsonValue]:
+        async with self.guard:
+            if self.settings.profile_id != request.profile_id:
+                raise ValueError("attachment profile differs")
+            host = await asyncio.to_thread(measure_host)
+            if request.skulk_build_sha256 != host.skulk_build_sha256:
+                raise ValueError("live Skulk build differs from manager")
+            # The bridge holds this fence for its whole API lifetime. Two local
+            # Skulk profiles must not alternately attach this manager to themselves.
+            try:
+                lock = RuntimeLock(self.root, "attachment.lock")
+            except BlockingIOError:
+                pass
+            else:
+                lock.close()
+                raise ValueError("attachment requires a live local bridge")
+            recovered = await asyncio.to_thread(recover_attachment, self.root)
+            self.settings = recovered
+            if self.settings.transport_node_id != request.transport_node_id:
+                identifiers = self._identifiers()
+                # Validate all existing bindings before disturbing a healthy owner.
+                for identifier in identifiers:
+                    binding = OwnerBinding.model_validate_json(
+                        read_private(self.installations / identifier / "owner.json")
+                    )
+                    if binding != self.settings.owner_binding():
+                        raise ValueError("installation transport identity differs")
+                results = await asyncio.gather(
+                    *(controller.close() for controller in self.controllers.values()),
+                    return_exceptions=True,
+                )
+                self.controllers.clear()
+                if any(isinstance(result, BaseException) for result in results):
+                    # A completed close task can retain its original failure.
+                    # Keep disk/process fences authoritative so a later attempt
+                    # can recover after the surviving owner actually exits.
+                    for identifier in identifiers:
+                        self.errors[identifier] = "attachment_recovery_required"
+                    raise ValueError("attachment could not stop all owners")
+                journal = AttachmentJournal(
+                    previous=self.settings,
+                    current=self.settings.model_copy(
+                        update={"transport_node_id": request.transport_node_id}
+                    ),
+                    installations=tuple(identifiers),
+                    state="pending",
+                )
+                try:
+                    self.settings = await asyncio.to_thread(
+                        finish_attachment, self.root, journal
+                    )
+                finally:
+                    await self._restore_locked()
+            else:
+                for identifier in self._identifiers():
+                    if identifier not in self.controllers:
+                        await self._load(identifier)
+            return {
+                "transport_node_id": self.settings.transport_node_id,
+                "skulk_build_sha256": host.skulk_build_sha256,
+            }
 
     async def _load(self, identifier: str) -> None:
         root = self.installations / identifier
@@ -157,10 +229,10 @@ class RuntimeManager:
             private_directory(root)
             # A stale or copied binding must never be silently reattached to a
             # different host by a manager restart or repeated register request.
-            binding = HostSettings.model_validate_json(
+            binding = OwnerBinding.model_validate_json(
                 read_private(root / "owner.json")
             )
-            if binding != self.settings:
+            if binding != self.settings.owner_binding():
                 raise ValueError("installation transport identity differs")
             controller = RuntimeController(root)
             await controller.start()
@@ -271,20 +343,38 @@ class RuntimeManager:
                     self._summary(identifier) for identifier in self._identifiers()
                 ]
             }
+        if isinstance(request, AttachmentRequest):
+            return await finish_runtime_work(asyncio.create_task(self._attach(request)))
+        async with self.guard:
+            return await self._dispatch_installation(request)
+
+    async def _dispatch_installation(
+        self, request: InstallationRequest | SubmitRequest | OperationRequest
+    ) -> dict[str, JsonValue]:
         identifier = request.plugin_id
+        try:
+            attachment = AttachmentJournal.model_validate_json(
+                read_private(self.root / "attachment.json")
+            )
+        except FileNotFoundError:
+            attachment = None
+        if attachment is not None and attachment.state == "pending":
+            # Registration must not introduce an owner outside the recorded
+            # membership while a partially written attachment is unresolved.
+            raise ValueError("attachment recovery is required")
         if isinstance(request, InstallationRequest) and request.action == "register":
-            async with self.guard:
-                identifiers = self._identifiers()
-                if identifier not in identifiers:
-                    if len(identifiers) >= 16:
-                        raise ValueError("installation count exceeds bound")
-                    root = self.installations / identifier
-                    private_directory(root)
-                    write_private(
-                        root / "owner.json", self.settings.model_dump_json().encode()
-                    )
-                if identifier not in self.controllers:
-                    await self._load(identifier)
+            identifiers = self._identifiers()
+            if identifier not in identifiers:
+                if len(identifiers) >= 16:
+                    raise ValueError("installation count exceeds bound")
+                root = self.installations / identifier
+                private_directory(root)
+                write_private(
+                    root / "owner.json",
+                    self.settings.owner_binding().model_dump_json().encode(),
+                )
+            if identifier not in self.controllers:
+                await self._load(identifier)
             return self._summary(identifier)
         controller = self.controllers.get(identifier)
         if controller is None:

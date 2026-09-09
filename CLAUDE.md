@@ -548,6 +548,13 @@ refuse unhandled startup hooks or links. The standard-library-only copied
 complete runtime before exec; it accepts no executable override. Service-runtime
 activation requires the manager stopped. Skulk transport IDs currently change at
 startup; durable plugin identities must not depend on a permanently saved transport ID.
+`managed_attachment.py` shares an API-lifetime local profile fence. Its internal
+request must carry the actual live core measurement, not the manager's measurement
+substituted for the API. `runtime_attachment.py` renews only journaled transport
+metadata with affected owners stopped and their controller/service/child locks held.
+Recover pending writes before owner startup; refuse foreign profiles/bindings and
+preserve logical identities, selected generations, settings, receipts and budgets.
+Keep attachment off remote HTTP management; it is local setup/lifecycle wiring.
 
 Optional `NodeConfigurationProvider` (`extensions/configuration.py`) exposes stable installed-node settings independently of capability readiness. The `/v1/plugins` API and Plugins dashboard share plugin-owned schema validation and revision-fenced settings with terminal management. No credentials or configuration enter replicated State. Explicit plugin read/manage/approve grants are owner-controlled through `/v1/auth/plugin-grants`; existing pairings receive none, and broad operator write permission does not imply them.
 Separately installed packages register a zero-arg factory in the

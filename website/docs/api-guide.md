@@ -3695,7 +3695,7 @@ by llama.cpp at runtime; UMA nodes retain their combined host/GPU memory rules.
 
 The candidate local manager is separate from the HTTP API and remains available
 when a plugin child is disabled or broken. Local setup provisions its protected
-`host.json` with the existing Skulk transport identity. Its fixed service command
+`host.json` with a generated local profile ID and the current Skulk transport identity. Its fixed service command
 is `python -m skulk.extensions.runtime_manager serve --root <service-root>`.
 The terminal transport is `python -m skulk.extensions.runtime_manager call --root
 <service-root>`, reading one JSON request from standard input. These development
@@ -3752,5 +3752,31 @@ credentials and ordinary Skulk configuration are not copied into this runtime.
 
 This candidate packaging primitive is not yet the one-command OS service installer.
 It targets existing supported isolated Skulk Python environments. Actual system
-service registration and automatic refresh of the local Skulk transport attachment
-remain required before unattended reboot qualification.
+service registration remains required before unattended reboot qualification.
+
+
+### Automatic local transport attachment
+
+Skulk currently generates a new transport identity on each process start. Local
+setup records may include `manager_root` and `profile_id` together; the installation
+must be exactly that manager's `installations/<plugin_id>`. These protected local
+fields are never accepted from HTTP callers. Legacy records without them retain
+manual attachment behavior until migrated by local setup.
+
+The in-process adapters share one process-lifetime `attachment.lock`. Their internal
+`attach` socket request contains the provisioned `profile_id`, the actual live
+`transport_node_id`, and the measured live `skulk_build_sha256`. The manager refuses
+foreign profiles, competing bridge lifetimes, missing bridge ownership and a live
+core build different from its independently installed core. A manager's own build
+measurement alone is not evidence of compatibility with the live API process.
+This operation is local lifecycle metadata, not a remote operator grant or provider
+submission; no new cleanup pairing or enrollment protocol is involved.
+
+Renewal stops affected owners, acquires controller/service/child fences, journals the
+exact old/new attachment, and replaces only transport metadata. Durable plugin IDs,
+selected generations, configuration revisions, receipts and approval reservations
+remain unchanged. Startup completes interrupted journaled writes before loading any
+owner. A foreign installation binding is refused before stopping healthy owners.
+An incomplete write exposes `attachment_recovery_required` until local recovery
+succeeds. Disconnect does not cancel accepted local renewal. API shutdown releases
+its attachment fence without terminating independent cleanup services.
