@@ -2054,3 +2054,10 @@ hardware restrictions. Launchable placement previews expose the same complete
 the API/master card checks and resource-derived context ceiling still apply.
 Exact-instance creation does not atomically revalidate topology or backend/build
 support, so controllers must check live node support before and after submission.
+
+Managed capability nodes may expose the optional `NodePreflightProvider` facet.
+The generic `/v1/plugins/{plugin_id}/nodes/{node_id}/preflight` read returns
+bounded prerequisite results and observed revision metadata independently of
+child readiness. Skulk owns authorization and response bounds; the plugin owns
+provider-specific checks and fresh enable/restart enforcement. Dashboard setup
+checks do not grant acquisition or spending authority.

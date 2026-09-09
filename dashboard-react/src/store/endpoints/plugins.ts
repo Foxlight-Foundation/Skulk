@@ -8,6 +8,7 @@ export interface ConfigurableNode {
   status: string;
   configurable: boolean;
   credentialsConfigurable?: boolean;
+  preflightAvailable?: boolean;
 }
 
 /** A plugin's installed nodes remain visible while disabled or unavailable. */
@@ -36,6 +37,17 @@ export interface NodeCredentials {
   revision: number;
   schemaDigest: string;
   credentials: { credentialId: string; title: string; description: string; required: boolean; ready: boolean }[];
+}
+
+/** Safe prerequisite observations; enabling always performs fresh server checks. */
+export interface NodePreflight {
+  nodeId: string;
+  revision: number;
+  schemaDigest: string;
+  valuesDigest: string;
+  credentialRevision: number | null;
+  observedAt: number;
+  checks: { code: string; passed: boolean; correctiveAction: string | null }[];
 }
 
 /** Compare-and-set mutation shared with the plugin's terminal configuration store. */
@@ -111,6 +123,9 @@ const nodePath = ({ pluginId, nodeId }: NodeAddress) =>
 
 const pluginsApi = apiSlice.injectEndpoints({
   endpoints: (build) => ({
+    getNodePreflight: build.query<NodePreflight, NodeAddress>({
+      query: ({ pluginId, nodeId }) => ({ url: `/v1/plugins/${encodeURIComponent(pluginId)}/nodes/${encodeURIComponent(nodeId)}/preflight`, headers, cache: 'no-store' }),
+    }),
     getNodeCredentials: build.query<NodeCredentials, NodeAddress>({
       query: ({ pluginId, nodeId }) => ({ url: `/v1/plugins/${encodeURIComponent(pluginId)}/nodes/${encodeURIComponent(nodeId)}/credentials`, headers, cache: 'no-store' }),
       providesTags: ['Plugins'],
@@ -188,4 +203,4 @@ const pluginsApi = apiSlice.injectEndpoints({
   }),
 });
 
-export const { useGetNodeCredentialsQuery, useRegisterManagedRuntimeMutation, useGetRuntimeSourceStatusQuery, useRecoverRuntimeInstallationMutation, useLazyGetRuntimeReleaseQuery, useGetRuntimeInstallationQuery, useInstallRuntimeReleaseMutation, useActivateRuntimeReleaseMutation, useGetManagedRuntimesQuery, useGetManagedOperationQuery, useDisableManagedRuntimeMutation, useRecoverManagedOperationMutation, useGetPluginNodesQuery, useGetNodeConfigurationQuery, useConfigurePluginNodeMutation } = pluginsApi;
+export const { useLazyGetNodePreflightQuery, useGetNodeCredentialsQuery, useRegisterManagedRuntimeMutation, useGetRuntimeSourceStatusQuery, useRecoverRuntimeInstallationMutation, useLazyGetRuntimeReleaseQuery, useGetRuntimeInstallationQuery, useInstallRuntimeReleaseMutation, useActivateRuntimeReleaseMutation, useGetManagedRuntimesQuery, useGetManagedOperationQuery, useDisableManagedRuntimeMutation, useRecoverManagedOperationMutation, useGetPluginNodesQuery, useGetNodeConfigurationQuery, useConfigurePluginNodeMutation } = pluginsApi;

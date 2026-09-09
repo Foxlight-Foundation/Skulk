@@ -28,6 +28,7 @@ from skulk.extensions.credentials import (
     NodeCredentials,
 )
 from skulk.extensions.loader import LoadedExtensions
+from skulk.extensions.preflight import NodePreflight, NodePreflightProvider
 from skulk.operator.pairing import OperatorPairingService
 from skulk.utils.pydantic_ext import FrozenModel
 
@@ -236,6 +237,36 @@ def create_plugins_router(
             return result
 
         return await invoke(change)
+
+    @router.get(
+        "/{plugin_id}/nodes/{node_id}/preflight",
+        response_model=NodePreflight,
+        summary="Check a capability node's setup prerequisites",
+        description="Run bounded nonbillable plugin-declared prerequisite checks for the exact installed node, including disabled or failed children. Returns stable check codes, corrective actions, observed configuration and credential revisions, ordinary-values digest and observation time. Local storage probes may create and remove protected test files; this does not approve spending or enable the node. Enable and restart enforce fresh checks in the plugin. Requires direct owner authority or plugins:read. Results are observations, never reusable admission tokens.",
+    )
+    async def get_preflight(
+        plugin_id: str, node_id: str, request: Request, response: Response
+    ) -> NodePreflight:
+        """Return bounded safe prerequisite results without changing node enablement."""
+        await authorize_plugin_request(
+            request, pairing_service, "plugins:read", tailnet_peer_verifier
+        )
+        response.headers["Cache-Control"] = "no-store"
+        selected = provider(plugin_id)
+        if not isinstance(selected, NodePreflightProvider):
+            raise HTTPException(status_code=404, detail="preflight is not supported")
+
+        async def read() -> NodePreflight:
+            result = await selected.node_preflight(node_id)
+            if (
+                result.node_id != node_id
+                or len({item.code for item in result.checks}) != len(result.checks)
+                or len(result.model_dump_json().encode()) > 65536
+            ):
+                raise ValueError("invalid preflight response")
+            return result
+
+        return await invoke(read)
 
     def credentials_provider(plugin_id: str) -> NodeCredentialProvider:
         selected = provider(plugin_id)

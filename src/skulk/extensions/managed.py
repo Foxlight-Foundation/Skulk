@@ -31,6 +31,7 @@ from skulk.extensions.configuration import (
 )
 from skulk.extensions.credentials import CredentialMutation, NodeCredentials
 from skulk.extensions.managed_attachment import ManagedAttachment
+from skulk.extensions.preflight import NodePreflight
 from skulk.extensions.runtime_attachment import ProfileIdentifier
 from skulk.extensions.types import ExtensionContext
 
@@ -86,6 +87,7 @@ class _Node(_WireModel):
     status: str
     configurable: bool
     credentials_configurable: bool = False
+    preflight_available: bool = False
     descriptors: tuple[CapabilityDescriptor, ...] = Field(max_length=8)
 
     def public(self) -> ConfigurableNode:
@@ -97,6 +99,7 @@ class _Node(_WireModel):
             status=self.status,
             configurable=self.configurable,
             credentials_configurable=self.credentials_configurable,
+            preflight_available=self.preflight_available,
         )
 
 
@@ -357,6 +360,17 @@ class ManagedOwner:
         return ConfigurationResult(
             configuration=await self.node_configuration(node_id), validated=True
         )
+
+    async def node_preflight(self, node_id: str) -> NodePreflight:
+        """Read fresh setup checks from the exact installed private owner."""
+        await self.refresh()
+        node = self._node(node_id)
+        if not node.preflight_available:
+            raise LookupError("managed node does not provide preflight")
+        response = await self._request(
+            {"operation": "preflight", "bundle_id": node.bundle_id, "node_id": node_id}
+        )
+        return NodePreflight.model_validate_json(json.dumps(response))
 
     async def node_credentials(self, node_id: str) -> NodeCredentials:
         """Read reference readiness through the protected owner connection, without values."""

@@ -1106,3 +1106,8 @@ helper to remote management or accept caller-supplied commands/unit contents.
 System daemons run as the nonroot account; API, management, plugin and independent
 cleanup lifetimes remain distinct. Test registration effects with isolated fixtures;
 real system-service and reboot claims require explicit physical qualification.
+
+Managed node setup checks use the optional provider-neutral `NodePreflightProvider`
+facet and `/v1/plugins/{plugin_id}/nodes/{node_id}/preflight`. The plugin retains
+nonbillable checks and enable/restart enforcement; core enforces explicit plugin
+read authority and bounded safe responses.

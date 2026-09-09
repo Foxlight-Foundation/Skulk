@@ -3963,3 +3963,27 @@ distinguishes system daemons from login-session agents. Linux uses the systemd
 [process-lifetime](https://github.com/systemd/systemd/blob/v255/man/systemd.kill.xml)
 contracts. Dynamic API registration, dashboard installation and real reboot
 qualification remain separate integration/acceptance work for this candidate.
+
+### Capability-node preflight
+
+`GET /v1/plugins/{plugin_id}/nodes/{node_id}/preflight` runs the installed plugin's
+bounded, nonbillable setup checks. Path parameters select an exact installed plugin
+and persistent node; there is no request body or command/path input. Requires
+direct owner administration or the explicit `plugins:read` grant. Inventory
+`preflightAvailable` indicates support. Disabled or failed children may be checked
+while their management provider remains available.
+
+The response contains `nodeId`, configuration `revision`, `schemaDigest`,
+`valuesDigest`, optional `credentialRevision`, `observedAt` in UTC seconds, and
+`checks` (one to 32 distinct `code`, `passed`, `correctiveAction` records). No
+credentials or protected host evidence are returned. The response uses
+`Cache-Control: no-store`; unknown/unsupported management returns 404, refused
+observations 409, capacity exhaustion 429, unavailable providers 503 and timeout
+504. Responses are bounded to 64 KiB and calls share the plugin-management
+concurrency and deadline limits.
+
+A check may create and remove a protected local storage probe. It does not enable
+the node, approve spending or create paid resources. Results describe the observed
+configuration and are not reusable admission tokens. Supporting plugins enforce
+fresh preflight on enable and restart and retain fresh dispatch admission. The
+Plugins dashboard exposes explicit setup checks and individual corrective actions.

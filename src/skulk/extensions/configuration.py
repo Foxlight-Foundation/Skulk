@@ -29,6 +29,10 @@ class ConfigurableNode(FrozenModel):
         description="Whether this node declares separate write-only credential inputs.",
     )
 
+    preflight_available: bool = Field(
+        default=False, description="Whether this node provides managed setup checks."
+    )
+
 
 class NodeConfiguration(FrozenModel):
     """Schema and ordinary settings for one node; credential values are excluded."""
