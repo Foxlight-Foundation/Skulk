@@ -39,6 +39,7 @@ def _make_api() -> Any:
     api._early_output_packets = {}
     api._early_output_packet_bytes = 0
     api._pending_output_completions = {}
+    api._video_upload_inflight_bytes = 0
     api._embedding_queues = {}
     api._audio_speech_queues = {}
     api._audio_transcription_queues = {}

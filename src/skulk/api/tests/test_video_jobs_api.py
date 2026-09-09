@@ -90,6 +90,7 @@ def _make_api(monkeypatch: pytest.MonkeyPatch) -> Any:
     api._early_output_packets = {}
     api._early_output_packet_bytes = 0
     api._pending_output_completions = {}
+    api._video_upload_inflight_bytes = 0
     api._pending_stream_failures = {}
     api._pending_vision_media = {}
     api._pending_vision_media_bytes = 0
@@ -522,6 +523,46 @@ def test_create_multipart_refuses_uploads_the_node_cannot_hold(
         files=[("first_frame", ("big.png", b"0123456789", "image/png"))],
     )
     assert response.status_code == 503
+    api._send.assert_not_called()
+    # A refused read releases its reservation; a concurrent request that is
+    # still reading counts against the budget exactly like staged media.
+    assert api._video_upload_inflight_bytes == 0
+    api._pending_vision_media_bytes = 0
+    api._video_upload_inflight_bytes = api_main._VISION_MEDIA_PENDING_TOTAL_BYTES - 4
+    response = client.post(
+        "/v1/videos",
+        data={"model": str(MODEL), "prompt": "x"},
+        files=[("first_frame", ("big.png", b"0123456789", "image/png"))],
+    )
+    assert response.status_code == 503
+    assert api._video_upload_inflight_bytes == api_main._VISION_MEDIA_PENDING_TOTAL_BYTES - 4
+
+
+def test_create_multipart_releases_its_reservation_after_staging(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _make_api(monkeypatch)
+    client = TestClient(api.app)
+    response = client.post(
+        "/v1/videos",
+        data={"model": str(MODEL), "prompt": "x"},
+        files=[("first_frame", ("a.png", b"0123456789", "image/png"))],
+    )
+    assert response.status_code == 200, response.text
+    assert api._video_upload_inflight_bytes == 0
+    assert api._pending_vision_media_bytes == 10
+
+
+def test_create_multipart_rejects_unknown_file_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    api = _make_api(monkeypatch)
+    client = TestClient(api.app)
+    response = client.post(
+        "/v1/videos",
+        data={"model": str(MODEL), "prompt": "x"},
+        files=[("frist_frame", ("a.png", b"0123456789", "image/png"))],
+    )
+    assert response.status_code == 400
+    assert "frist_frame" in response.json()["error"]["message"]
     api._send.assert_not_called()
 
 

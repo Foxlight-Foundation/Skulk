@@ -388,6 +388,7 @@ def _bare_api(tmp_path: Path) -> API:
     api._early_output_packets = {}  # pyright: ignore[reportPrivateUsage]
     api._early_output_packet_bytes = 0  # pyright: ignore[reportPrivateUsage]
     api._pending_output_completions = {}  # pyright: ignore[reportPrivateUsage]
+    api._video_upload_inflight_bytes = 0  # pyright: ignore[reportPrivateUsage]
     return api
 
 

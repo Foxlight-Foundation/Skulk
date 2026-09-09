@@ -1711,6 +1711,10 @@ class API:
             tuple[CommandId, str], list[OutputMediaPacket]
         ] = {}
         self._early_output_packet_bytes = 0
+        # Bytes of multipart attachments currently being read by create
+        # requests, before staging accounts for them, so concurrent uploads
+        # share the node's admission budget while they are still arriving.
+        self._video_upload_inflight_bytes = 0
         # Completion frames that overtook a chunk on the reordering fallback,
         # held until the assembly fills or the media deadline fails the job.
         self._pending_output_completions: dict[
@@ -10561,39 +10565,57 @@ class API:
             raise HTTPException(status_code=404, detail="Video not found")
         return job
 
+    def _video_upload_budget(self) -> int:
+        """Bytes this node can still admit across uploads pending or arriving."""
+
+        return max(
+            0,
+            _VISION_MEDIA_PENDING_TOTAL_BYTES
+            - self._pending_vision_media_bytes
+            - self._active_vision_media_total_bytes
+            - self._video_upload_inflight_bytes,
+        )
+
     async def _read_video_attachment(
-        self, upload: StarletteUploadFile, request_budget: int, node_budget: int
+        self, upload: StarletteUploadFile, request_budget: int
     ) -> VideoAttachment:
         """Drain one multipart part straight into media-plane frames.
 
-        Reading stops the moment the part would exceed the request's own
-        bound (413) or what this node can still admit across every pending
-        upload (503), so no request materializes more than it may send.
+        Every accepted frame is reserved against the node's admission budget
+        as it is read, so concurrent requests cannot each read against the
+        same free space. Reading stops the moment the part would exceed the
+        request's own bound (413) or the node's remaining budget (503); a
+        failed read releases what it reserved.
         """
 
         digest = hashlib.sha256()
         chunks: list[bytes] = []
         total = 0
-        while True:
-            piece = await upload.read(SKULK_MAX_CHUNK_SIZE)
-            if not piece:
-                break
-            total += len(piece)
-            if total > request_budget:
-                raise HTTPException(
-                    status_code=413,
-                    detail="Reference media exceeds the per-request media limit",
-                )
-            if total > node_budget:
-                raise HTTPException(
-                    status_code=503,
-                    detail=(
-                        "This node cannot admit more reference media until pending "
-                        "uploads finish"
-                    ),
-                )
-            digest.update(piece)
-            chunks.append(piece)
+        try:
+            while True:
+                piece = await upload.read(SKULK_MAX_CHUNK_SIZE)
+                if not piece:
+                    break
+                if total + len(piece) > request_budget:
+                    raise HTTPException(
+                        status_code=413,
+                        detail="Reference media exceeds the per-request media limit",
+                    )
+                if len(piece) > self._video_upload_budget():
+                    raise HTTPException(
+                        status_code=503,
+                        detail=(
+                            "This node cannot admit more reference media until pending "
+                            "uploads finish"
+                        ),
+                    )
+                self._video_upload_inflight_bytes += len(piece)
+                total += len(piece)
+                digest.update(piece)
+                chunks.append(piece)
+        except BaseException:
+            self._video_upload_inflight_bytes -= total
+            raise
         return VideoAttachment(chunks=tuple(chunks), size_bytes=total, sha256=digest.hexdigest())
 
     async def _read_video_attachments(
@@ -10608,20 +10630,24 @@ class API:
         specs: list[VideoReferenceSpec] = []
         blobs: list[VideoAttachment] = []
         remaining = _REFERENCE_MEDIA_PENDING_COMMAND_BYTES
-        # What the node can still hold across every request awaiting
-        # placement; admission re-checks it exactly at staging time.
-        node_remaining = max(
-            0,
-            _VISION_MEDIA_PENDING_TOTAL_BYTES
-            - self._pending_vision_media_bytes
-            - self._active_vision_media_total_bytes,
-        )
         fields: tuple[tuple[str, VideoReferenceRole], ...] = (
             ("input_reference", "first_frame"),
             ("first_frame", "first_frame"),
             ("last_frame", "last_frame"),
             ("reference", "reference"),
         )
+        recognized = {field_name for field_name, _role in fields}
+        for key, value in form.multi_items():
+            if isinstance(value, StarletteUploadFile) and key not in recognized:
+                # A misspelled part would otherwise vanish and the request
+                # would run an expensive unconditioned render.
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"{key} is not an attachment field; use input_reference, "
+                        "first_frame, last_frame, or reference"
+                    ),
+                )
         for field_name, role in fields:
             for upload in form.getlist(field_name):
                 if not isinstance(upload, StarletteUploadFile):
@@ -10643,15 +10669,12 @@ class API:
                             "content type"
                         ),
                     )
-                attachment = await self._read_video_attachment(
-                    upload, remaining, node_remaining
-                )
+                attachment = await self._read_video_attachment(upload, remaining)
                 if attachment.size_bytes == 0:
                     raise HTTPException(
                         status_code=400, detail=f"{field_name} is empty"
                     )
                 remaining -= attachment.size_bytes
-                node_remaining -= attachment.size_bytes
                 filename = upload.filename[:255] if upload.filename else None
                 try:
                     spec = VideoReferenceSpec(
@@ -10696,6 +10719,23 @@ class API:
                 status_code=415,
                 detail="send application/json or multipart/form-data",
             )
+        try:
+            return await self._create_video_from_parts(raw, references, attachments)
+        finally:
+            # Staging charged the attachments to pending admission (or the
+            # request failed); either way the read-time reservation ends.
+            self._video_upload_inflight_bytes -= sum(
+                item.size_bytes for item in attachments
+            )
+
+    async def _create_video_from_parts(
+        self,
+        raw: object,
+        references: list[VideoReferenceSpec],
+        attachments: list[VideoAttachment],
+    ) -> VideoResource:
+        """Validate the parsed fields and submit the job."""
+
         try:
             create = VideoCreateRequest.model_validate(raw)
         except ValidationError as error:
