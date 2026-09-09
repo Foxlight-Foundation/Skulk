@@ -135,9 +135,9 @@ class RuntimeService:
             self.writer = None
         process = self.process
         if process is not None:
-            if process.returncode is None:
-                with contextlib.suppress(ProcessLookupError):
-                    process.terminate()
+            # Pipe EOF is the managed owner's graceful shutdown request. Sending
+            # SIGTERM as well can race its final interpreter shutdown and turn a
+            # successful teardown into a signal failure after handlers reset.
             try:
                 async with asyncio.timeout(_SHUTDOWN_SECONDS):
                     await process.wait()

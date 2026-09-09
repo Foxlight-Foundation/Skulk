@@ -68,7 +68,12 @@ class RuntimeLock:
 
     def __init__(self, root: Path, name: str = "installer.lock") -> None:
         """Fence this service-owned directory using a fixed local lock name."""
-        if name not in {"installer.lock", "supervisor.lock", "service.lock"}:
+        if name not in {
+            "installer.lock",
+            "supervisor.lock",
+            "service.lock",
+            "manager.lock",
+        }:
             raise ValueError("unknown runtime lock")
         private_directory(root)
         self.descriptor = os.open(

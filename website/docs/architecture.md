@@ -1601,7 +1601,15 @@ Owner output is counted and discarded. Shutdown closes an inherited lifetime pip
 reaps the owner within a bounded grace period and checks the supervisor fence before
 reporting stopped. Surviving children must retain that fence. The launcher never
 owns independent cleanup services or restarts a failed owner within its lifetime.
-OS service registration and management integration are separate setup operations.
+`runtime_controller.py` adds durable stop/select/start operations. Target preview
+checks the current revision, signed artifacts, permissions and migration compatibility
+before interrupting a healthy owner. Accepted intent survives client disconnect;
+restart reconciles the exact local selection across its atomic publication boundary.
+`runtime_manager.py` exposes a fixed protected Unix socket shared by terminal and
+future HTTP management integration. It registers up to sixteen installations,
+provisions their existing transport binding, supervises controllers and keeps broken
+installations visible. It accepts no executable/path overrides or paid approvals.
+OS service registration and HTTP lifecycle integration remain separate setup work.
 
 Extension startup and serving share one event loop. The API starts hooks only
 once its runtime begins and invokes optional asynchronous shutdown hooks before

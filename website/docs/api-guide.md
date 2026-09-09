@@ -3689,3 +3689,42 @@ controllers should use this terminal evidence rather than wait for a runner.
 Removing a placement does not promise immediate GPU memory release. RPC instances
 continue using observed memory because their per-device allocations are chosen
 by llama.cpp at runtime; UMA nodes retain their combined host/GPU memory rules.
+
+
+### Local managed-runtime lifecycle control
+
+The candidate local manager is separate from the HTTP API and remains available
+when a plugin child is disabled or broken. Local setup provisions its protected
+`host.json` with the existing Skulk transport identity. Its fixed service command
+is `python -m skulk.extensions.runtime_manager serve --root <service-root>`.
+The terminal transport is `python -m skulk.extensions.runtime_manager call --root
+<service-root>`, reading one JSON request from standard input. These development
+entry points do not replace the pending one-command OS service installer.
+
+The local socket accepts these typed requests:
+
+| Action | Parameters | Behavior |
+| --- | --- | --- |
+| `list` | None | Lists registered installation IDs, selected versions, selection revisions, observed process status and stale/unavailable observations. Process existence does not imply capability readiness. |
+| `register` | `plugin_id` | Registers an empty `managed.*` installation, up to sixteen per manager. Provisions its existing host identity automatically; an existing mismatched identity is refused without replacement. No provider request is made. |
+| `get` | `plugin_id` | Returns desired selection and process observation without paths, credentials or raw output. |
+| `submit` | `plugin_id`, `request` | Accepts a local lifecycle request after validating its revision and target. The nested request contains `operation_id` (32 lowercase hexadecimal characters), `action` (`activate` or `disable`), `expected_revision`, and for activation `runtime_digest`, optional `rollback` and `accept_permissions`. No spending authority is conveyed. |
+| `operation` | `plugin_id`, `operation_id` | Reads retained progress. Reconnect reads this result; reusing an ID with different intent is refused. |
+| `recover` | `plugin_id`, `operation_id` | Explicitly resumes only that retained local intent after its fault is corrected. A completed operation remains unchanged. No new request or provider operation is created. |
+
+Activation validates signed artifacts, permission expansion and migration
+compatibility before stopping the owner; it repeats admission checks before
+switching. Disable retains runtime generations, identities and cleanup material.
+Operations move through `accepted`, `applying`, `complete`, `failed` or
+`recovery_required`; completion confirms the local desired-state change, with
+service and capability readiness observed separately. Pending local selection
+recovery never replays provider requests. A retained accepted record without live
+owned work is reported as `recovery_required`. An accepted operation outlives its
+requesting socket. Validation failures do not interrupt a healthy owner.
+
+The socket is owner-only and accepts eight concurrent clients, one request per
+connection, at most 16 KiB request and 256 KiB response, with a thirty-second
+request deadline. Errors contain the stable `manager_operation_refused` code;
+local operation records distinguish validation, ownership and local I/O failures.
+This transport is not a LAN listener or remote authorization mechanism. The HTTP
+lifecycle integration must enforce the existing explicit plugin operator scopes.

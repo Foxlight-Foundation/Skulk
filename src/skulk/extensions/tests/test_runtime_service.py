@@ -10,7 +10,7 @@ from skulk.extensions.runtime_selection import RuntimeSelector
 from skulk.extensions.runtime_service import RuntimeService, RuntimeServiceStatus
 from skulk.extensions.tests.test_runtime_install import artifacts
 
-_OWNER = """import argparse,fcntl,os,signal,time
+OWNER_SOURCE = """import argparse,fcntl,os,signal,time
 p=argparse.ArgumentParser()
 p.add_argument('--root');p.add_argument('--lifetime-fd',type=int)
 a=p.parse_args()
@@ -24,7 +24,7 @@ os.close(f)
 
 
 async def installed(
-    root: Path, monkeypatch: pytest.MonkeyPatch, source: str = _OWNER
+    root: Path, monkeypatch: pytest.MonkeyPatch, source: str = OWNER_SOURCE
 ) -> RuntimeSelector:
     """Stage a real signed fixture in an empty offline runtime and select it."""
     metadata, trust, host = artifacts(root / "source", owner_source=source)
@@ -166,7 +166,7 @@ async def test_owner_ignoring_shutdown_is_killed_within_bound(
     selector = await installed(
         tmp_path,
         monkeypatch,
-        _OWNER.replace("os.read(a.lifetime_fd,1)", "time.sleep(60)"),
+        OWNER_SOURCE.replace("os.read(a.lifetime_fd,1)", "time.sleep(60)"),
     )
     monkeypatch.setattr("skulk.extensions.runtime_service._SHUTDOWN_SECONDS", 0.05)
     service = RuntimeService(selector.root)

@@ -536,6 +536,11 @@ fixed, inherit a lifetime pipe and service fence, discard private owner output,
 and revalidate current trust and installed integrity while running. Process health
 is distinct from capability readiness. Never report fully stopped while a surviving
 child still holds the supervisor fence, or couple independent cleanup to this service.
+`runtime_controller.py` owns durable local lifecycle intent; preview before stopping
+and retain exact operations across client disconnect and manager restart.
+`runtime_manager.py` provides the fixed bounded local management socket, with
+host identity provisioned locally and no remote path/command selection. Unavailable
+plugin runtimes must not remove manager inventory or operation-status access.
 
 Optional `NodeConfigurationProvider` (`extensions/configuration.py`) exposes stable installed-node settings independently of capability readiness. The `/v1/plugins` API and Plugins dashboard share plugin-owned schema validation and revision-fenced settings with terminal management. No credentials or configuration enter replicated State. Explicit plugin read/manage/approve grants are owner-controlled through `/v1/auth/plugin-grants`; existing pairings receive none, and broad operator write permission does not imply them.
 Separately installed packages register a zero-arg factory in the

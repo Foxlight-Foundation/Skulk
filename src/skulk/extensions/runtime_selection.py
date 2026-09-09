@@ -221,6 +221,85 @@ class RuntimeSelector:
             )
         )
 
+    def _candidate(
+        self,
+        runtime: VerifiedRuntime,
+        host: QualifiedHost,
+        *,
+        expected_revision: int,
+        operation_id: str,
+        rollback: bool,
+        accept_permissions: bool,
+    ) -> RuntimeSelection:
+        current = self.current()
+        release = runtime.claims.release
+        schema = _manifest(runtime).get("configuration_schema")
+        if current is not None:
+            if current.bundle_id != release.manifest.bundle_id:
+                raise ValueError("installation bundle identity differs")
+            if release.sequence < current.highest_sequence and not rollback:
+                raise ValueError("rollback requires explicit selection")
+            if (
+                set(release.permissions) - set(current.permissions)
+                and not accept_permissions
+            ):
+                raise ValueError("expanded permissions require acceptance")
+            if (
+                current.state_schema != release.state_schema
+                and current.state_schema not in release.compatible_state_schemas
+            ):
+                raise ValueError("incompatible state migration")
+            if current.configuration_schema != schema:
+                raise ValueError("configuration schema requires migration")
+        elif rollback:
+            raise ValueError("rollback requires an existing selection")
+        return RuntimeSelection(
+            revision=expected_revision + 1,
+            operation_id=operation_id or uuid4().hex,
+            runtime_digest=runtime.digest,
+            enabled=True,
+            bundle_id=release.manifest.bundle_id,
+            sequence=release.sequence,
+            highest_sequence=max(
+                current.highest_sequence if current else 0, release.sequence
+            ),
+            state_schema=release.state_schema,
+            permissions=release.permissions,
+            configuration_schema=schema,
+            platform=host.platform,
+            python_version=host.python_version,
+            skulk_version=host.skulk_version,
+            skulk_build_sha256=host.skulk_build_sha256,
+        )
+
+    async def preview(
+        self,
+        runtime_digest: str,
+        *,
+        expected_revision: int,
+        operation_id: str,
+        rollback: bool = False,
+        accept_permissions: bool = False,
+    ) -> RuntimeSelection:
+        """Validate an exact local selection without interrupting a running owner.
+
+        This nonbillable inspection holds installer ownership, verifies the target
+        and checks revision, permissions and migration compatibility. Activation
+        repeats these checks under stopped-owner ownership before publication.
+        """
+        async with self.installer.locked_generation(runtime_digest) as (runtime, host):
+            current = self.current()
+            if (current.revision if current else 0) != expected_revision:
+                raise ValueError("selection revision conflict")
+            return self._candidate(
+                runtime,
+                host,
+                expected_revision=expected_revision,
+                operation_id=operation_id,
+                rollback=rollback,
+                accept_permissions=accept_permissions,
+            )
+
     async def activate(
         self,
         runtime_digest: str,
@@ -239,45 +318,13 @@ class RuntimeSelector:
         async with self.installer.locked_generation(runtime_digest) as (runtime, host):
             owner = RuntimeLock(self.root, "supervisor.lock")
             try:
-                current = self.current()
-                release = runtime.claims.release
-                schema = _manifest(runtime).get("configuration_schema")
-                if current is not None:
-                    if current.bundle_id != release.manifest.bundle_id:
-                        raise ValueError("installation bundle identity differs")
-                    if release.sequence < current.highest_sequence and not rollback:
-                        raise ValueError("rollback requires explicit selection")
-                    if (
-                        set(release.permissions) - set(current.permissions)
-                        and not accept_permissions
-                    ):
-                        raise ValueError("expanded permissions require acceptance")
-                    if (
-                        current.state_schema != release.state_schema
-                        and current.state_schema not in release.compatible_state_schemas
-                    ):
-                        raise ValueError("incompatible state migration")
-                    if current.configuration_schema != schema:
-                        raise ValueError("configuration schema requires migration")
-                elif rollback:
-                    raise ValueError("rollback requires an existing selection")
-                selection = RuntimeSelection(
-                    revision=expected_revision + 1,
+                selection = self._candidate(
+                    runtime,
+                    host,
+                    expected_revision=expected_revision,
                     operation_id=operation_id or uuid4().hex,
-                    runtime_digest=runtime.digest,
-                    enabled=True,
-                    bundle_id=release.manifest.bundle_id,
-                    sequence=release.sequence,
-                    highest_sequence=max(
-                        current.highest_sequence if current else 0, release.sequence
-                    ),
-                    state_schema=release.state_schema,
-                    permissions=release.permissions,
-                    configuration_schema=schema,
-                    platform=host.platform,
-                    python_version=host.python_version,
-                    skulk_version=host.skulk_version,
-                    skulk_build_sha256=host.skulk_build_sha256,
+                    rollback=rollback,
+                    accept_permissions=accept_permissions,
                 )
                 return self._start(selection, expected_revision)
             finally:
