@@ -605,6 +605,33 @@ proposal review, independent approval and approved execution are separate contra
 Shutting down Skulk closes its host binding, stops observation and withdraws dynamic
 tags. The independent owner and its cleanup obligations remain supervised separately.
 
+## Retained proposal references and review
+
+The optional `NodeProposalReviewProvider` facet exposes bounded journal metadata
+through `node_proposals(node_id, offset)` and `node_proposal(reference)`. Exported
+`ProposalReference` binds `plugin_id`, stable `node_id`, provider-owned opaque
+`proposal_id` and immutable `proposal_digest`. Core never equates the ID with its
+digest or accepts replacement canonical input. A provider must require both to
+match its retained record and repeat current eligibility checks before approval
+or dispatch. The reference itself grants no authority.
+
+`ProposalPage` contains at most sixteen `ProposalSummary` entries and an optional
+next offset. A summary has plain text bounded to 1,024 characters, expiry in UTC
+Unix seconds and observed journal state. `ProposalReview` adds observation time
+and up to 32 plain-text fields (label 64 characters, value 2,048 characters).
+Review data covers the facts an owner needs for the exact operation. Secrets,
+canonical executable input and approval material must remain provider-local.
+All responses have an additional 128 KiB aggregate bound. The HTTP representation
+uses the standard camel-case aliases; Python field names remain snake_case.
+
+Managed owners advertise `proposals_available` per node and implement fixed
+`proposal-list` / `proposal-review` control operations. Listing carries plugin/node
+identity and offset; review carries those identities plus the complete reference.
+Skulk resolves the actual installation first and validates returned identities.
+Listing remains advisory under concurrent changes; a selected record needs a
+fresh exact review. This facet provides no signing or execution method. See the
+[read-only HTTP contract](api-guide.md#plugin-proposal-review).
+
 ## Offline runtime verification and staging
 
 Skulk's `extensions/runtime_artifacts.py` verifies the v2 signed runtime envelope

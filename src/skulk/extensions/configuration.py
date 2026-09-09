@@ -39,6 +39,10 @@ class ConfigurableNode(FrozenModel):
     setup_available: bool = Field(
         default=False, description="Whether this node exposes public setup files."
     )
+    proposals_available: bool = Field(
+        default=False,
+        description="Whether this node exposes retained proposal reviews.",
+    )
 
 
 class NodeConfiguration(FrozenModel):

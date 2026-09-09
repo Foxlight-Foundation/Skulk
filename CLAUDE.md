@@ -508,6 +508,12 @@ Rust code in `rust/` provides:
 
 ### Extension API (plugins)
 
+`extensions/proposal_review.py` supplies provider-neutral proposal references and
+safe review models through `NodeProposalReviewProvider`. Two `plugins:read` routes
+in `api/plugins.py` list and review exact retained intent; managed owner IPC adapts
+the same facet. Providers retain canonical input and approval/execution journals.
+The read facet has no signing or execution method.
+
 `extensions/managed_host.py` supplies fixed live policy/descriptor observations and
 exact installed-target Fabric callbacks to isolated owners over protected local
 IPC. `managed.py` adapts their steward discovery and inert invocation to the existing

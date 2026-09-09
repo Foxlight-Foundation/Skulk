@@ -382,6 +382,13 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 
 ### Extensions (plugins)
 
+- **Proposal review:** `proposal_review.py` exports `ProposalReference`, summary,
+  field, page and review models plus `NodeProposalReviewProvider`. `api/plugins.py`
+  exposes read-scoped per-node proposal listing and exact-ID/digest review. Maximum
+  16 summaries per page, 32 text fields per review and 128 KiB per response. Managed
+  owners advertise per-node `proposals_available`. Canonical input, approval and
+  execution remain provider-local; these methods cannot sign or dispatch.
+
 - **Isolated steward callbacks:** `managed_host.py` binds one protected local owner
   to live policy, owned descriptor revisions and exact-target Fabric invocation.
   `managed.py` exposes the optional steward provider facet through fixed owner IPC.

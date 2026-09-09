@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable
 from typing import TypeVar
 
 import anyio
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import Field, JsonValue
 
 from skulk.api.managed_plugins import (
@@ -29,6 +29,12 @@ from skulk.extensions.credentials import (
 )
 from skulk.extensions.loader import LoadedExtensions
 from skulk.extensions.preflight import NodePreflight, NodePreflightProvider
+from skulk.extensions.proposal_review import (
+    NodeProposalReviewProvider,
+    ProposalPage,
+    ProposalReference,
+    ProposalReview,
+)
 from skulk.extensions.setup import NodeSetup, NodeSetupProvider
 from skulk.extensions.setup_actions import (
     NodeSetupActionsProvider,
@@ -526,5 +532,96 @@ def create_plugins_router(
             )
 
         return await invoke(resume)
+
+    def proposal_provider(plugin_id: str) -> NodeProposalReviewProvider:
+        selected = provider(plugin_id)
+        if not isinstance(selected, NodeProposalReviewProvider):
+            raise HTTPException(
+                status_code=404, detail="proposal review is not supported"
+            )
+        return selected
+
+    @router.get(
+        "/{plugin_id}/nodes/{node_id}/proposals",
+        response_model=ProposalPage,
+        summary="List retained plugin proposals",
+        description="Read up to sixteen safe retained proposal summaries at offset 0–127 for one installed node. Requires owner authority or plugins:read. Pagination is advisory under concurrent journal changes; selecting a proposal requires a fresh exact-ID-and-digest review. This read creates no proposal, issues no approval and never replays execution.",
+    )
+    async def list_proposals(
+        plugin_id: str,
+        node_id: str,
+        request: Request,
+        response: Response,
+        offset: int = Query(
+            default=0, ge=0, le=127, description="Advisory journal offset."
+        ),
+    ) -> ProposalPage:
+        """Authorize before asking the exact installation for safe journal metadata."""
+        await authorize_plugin_request(
+            request, pairing_service, "plugins:read", tailnet_peer_verifier
+        )
+        response.headers["Cache-Control"] = "no-store"
+        selected = proposal_provider(plugin_id)
+
+        async def read() -> ProposalPage:
+            page = await selected.node_proposals(node_id, offset)
+            if (
+                any(
+                    item.reference.plugin_id != plugin_id
+                    or item.reference.node_id != node_id
+                    for item in page.proposals
+                )
+                or len({item.reference.proposal_id for item in page.proposals})
+                != len(page.proposals)
+                or (page.next_offset is not None and page.next_offset <= offset)
+                or len(page.model_dump_json().encode()) > 131072
+            ):
+                raise ValueError("invalid proposal listing")
+            return page
+
+        return await invoke(read)
+
+    @router.get(
+        "/{plugin_id}/nodes/{node_id}/proposals/{proposal_id}",
+        response_model=ProposalReview,
+        summary="Review an exact retained plugin proposal",
+        description="Resolve the provider-owned opaque proposal ID and required immutable proposal_digest for the exact installed plugin/node. Returns bounded plain-text review facts, expiry and observation time; canonical executable input, approval material and credentials remain in the provider. Requires owner authority or plugins:read. A missing or changed reference is refused; this observation grants no execution authority.",
+    )
+    async def review_proposal(
+        plugin_id: str,
+        node_id: str,
+        proposal_id: str,
+        request: Request,
+        response: Response,
+        proposal_digest: str = Query(
+            pattern=r"^[a-f0-9]{64}$",
+            description="Digest of the exact reviewed immutable intent.",
+        ),
+    ) -> ProposalReview:
+        """Require the complete immutable reference before returning safe review fields."""
+        await authorize_plugin_request(
+            request, pairing_service, "plugins:read", tailnet_peer_verifier
+        )
+        response.headers["Cache-Control"] = "no-store"
+        selected = proposal_provider(plugin_id)
+
+        async def read() -> ProposalReview:
+            reference = ProposalReference(
+                plugin_id=plugin_id,
+                node_id=node_id,
+                proposal_id=proposal_id,
+                proposal_digest=proposal_digest,
+            )
+            result = await selected.node_proposal(reference)
+            if (
+                result.proposal.reference != reference
+                or len(result.model_dump_json().encode()) > 131072
+            ):
+                raise ValueError(
+                    "proposal review does not match the selected reference"
+                )
+            return result
+
+        return await invoke(read)
 
     return router

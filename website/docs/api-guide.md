@@ -3743,6 +3743,37 @@ local operation records distinguish validation, ownership and local I/O failures
 This transport is not a LAN listener or remote authorization mechanism. The HTTP lifecycle routes below enforce the existing explicit plugin operator scopes.
 
 
+### Plugin proposal review
+
+These read-only routes require direct owner authority or explicit `plugins:read`.
+Responses use `Cache-Control: no-store`. Disabled installed nodes may retain
+reviewable intent; proposal state is an observation, never execution authority.
+
+- `GET /v1/plugins/{plugin_id}/nodes/{node_id}/proposals` accepts integer `offset`
+  (default `0`, range `0..127`). It returns at most sixteen summaries in `proposals`
+  and an optional `nextOffset`. Each summary includes an exact `reference`, plain
+  text `summary` (1–1,024 characters), `expiresAt` (UTC Unix seconds) and `state`.
+  Concurrent journal changes can move entries between pages; review a selection
+  freshly before taking any later action.
+- `GET /v1/plugins/{plugin_id}/nodes/{node_id}/proposals/{proposal_id}` requires
+  query parameter `proposal_digest` (64 lowercase hexadecimal characters). The
+  provider must match both its opaque ID and immutable intent digest. The response
+  contains `proposal`, `observedAt` (UTC Unix seconds), and 1–32 `fields`, each with
+  a plain-text `label` (1–64 characters) and `value` (1–2,048 characters). Facts cover
+  applicable model/context, resource selection, prices, limits and cleanup terms.
+
+The reference contains `pluginId`, `nodeId`, `proposalId`, and `proposalDigest`.
+Proposal IDs are 1–128 characters from `a-zA-Z0-9._:@-`; they are opaque identifiers,
+not paths or serialized workflows. A digest need not equal its proposal ID. Read
+responses are bounded to 128 KiB and reject another installation's reference.
+Malformed parameters return 422; unsupported nodes/providers return 404; changed
+or inconsistent references return 409; unavailable providers return 503 or 504.
+Failures contain no rejected canonical input or private provider diagnostics.
+
+The core receives safe review data. Canonical execution arguments, approvals and
+execution journals remain with the provider. These GET requests neither create
+intent, grant approval nor replay a prior effect. Clients render fields as text.
+
 ### Managed plugin HTTP lifecycle
 
 The Plugins page and these routes use the same independently supervised manager

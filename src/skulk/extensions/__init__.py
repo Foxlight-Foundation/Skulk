@@ -41,6 +41,14 @@ from skulk.extensions.loader import (
     load_extensions,
     resolve_skulk_version,
 )
+from skulk.extensions.proposal_review import (
+    NodeProposalReviewProvider,
+    ProposalField,
+    ProposalPage,
+    ProposalReference,
+    ProposalReview,
+    ProposalSummary,
+)
 from skulk.extensions.speech import (
     REALTIME_STT_CAPABILITY_DESCRIPTOR,
     STT_CAPABILITY_DESCRIPTOR,
@@ -112,6 +120,12 @@ __all__ = [
     "NodeCredentialProvider",
     "StewardTool",
     "StewardToolProvider",
+    "NodeProposalReviewProvider",
+    "ProposalField",
+    "ProposalPage",
+    "ProposalReference",
+    "ProposalReview",
+    "ProposalSummary",
     "DEFAULT_CALL_TIMEOUT_SECONDS",
     "ENTRY_POINT_GROUP",
     "MAX_CALL_PAYLOAD_BYTES",

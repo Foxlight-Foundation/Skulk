@@ -33,6 +33,11 @@ from skulk.extensions.credentials import CredentialMutation, NodeCredentials
 from skulk.extensions.managed_attachment import ManagedAttachment
 from skulk.extensions.managed_host import HostCallbacks, HostCapability
 from skulk.extensions.preflight import NodePreflight
+from skulk.extensions.proposal_review import (
+    ProposalPage,
+    ProposalReference,
+    ProposalReview,
+)
 from skulk.extensions.runtime_attachment import ProfileIdentifier
 from skulk.extensions.setup import NodeSetup
 from skulk.extensions.setup_actions import SetupActions, SetupMutation, SetupOperation
@@ -94,6 +99,7 @@ class _Node(_WireModel):
     preflight_available: bool = False
     setup_available: bool = False
     setup_actions_available: bool = False
+    proposals_available: bool = False
     descriptors: tuple[CapabilityDescriptor, ...] = Field(max_length=8)
 
     def public(self) -> ConfigurableNode:
@@ -108,6 +114,7 @@ class _Node(_WireModel):
             preflight_available=self.preflight_available,
             setup_available=self.setup_available,
             setup_actions_available=self.setup_actions_available,
+            proposals_available=self.proposals_available,
         )
 
 
@@ -368,6 +375,41 @@ class ManagedOwner:
         if len(tools) > 16:
             raise ValueError("too many managed steward tools")
         return tools
+
+    async def node_proposals(self, node_id: str, offset: int = 0) -> ProposalPage:
+        """Read a bounded journal page without preparing or executing an effect."""
+        await self.refresh()
+        if not self._node(node_id).proposals_available or not 0 <= offset <= 127:
+            raise LookupError("proposal review unavailable")
+        result = await self._request(
+            {
+                "operation": "proposal-list",
+                "plugin_id": self.name,
+                "node_id": node_id,
+                "offset": offset,
+            }
+        )
+        return ProposalPage.model_validate_json(json.dumps(result))
+
+    async def node_proposal(self, reference: ProposalReference) -> ProposalReview:
+        """Resolve the exact owned reference; caller canonical input is never accepted."""
+        if reference.plugin_id != self.name:
+            raise ValueError("proposal belongs to another installation")
+        await self.refresh()
+        if not self._node(reference.node_id).proposals_available:
+            raise LookupError("proposal review unavailable")
+        result = await self._request(
+            {
+                "operation": "proposal-review",
+                "plugin_id": self.name,
+                "node_id": reference.node_id,
+                "reference": reference.model_dump(mode="json"),
+            }
+        )
+        reviewed = ProposalReview.model_validate_json(json.dumps(result))
+        if reviewed.proposal.reference != reference:
+            raise ValueError("proposal response differs from selected reference")
+        return reviewed
 
     async def handle_steward_tool(
         self,

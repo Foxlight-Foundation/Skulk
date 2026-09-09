@@ -1564,6 +1564,12 @@ The adapters live in `src/skulk/api/adapters/`. Each one handles request normali
 
 ## Extensions (plugins)
 
+`extensions/proposal_review.py` defines provider-owned opaque references and bounded
+plain-text proposal reviews. The optional node facet and two read-scoped plugin
+HTTP routes retain canonical input, signing material and execution journals in the
+provider. Pagination is advisory; review requires exact installed ID and digest
+matching. This read path has no approval or execution method.
+
 Managed owners can supply steward tools through fixed local control operations.
 `extensions/managed_host.py` connects the separately supervised owner to live
 steward policy, owned descriptor observations and exact-target ordinary Fabric
