@@ -30,6 +30,14 @@ from skulk.extensions.credentials import (
 from skulk.extensions.loader import LoadedExtensions
 from skulk.extensions.preflight import NodePreflight, NodePreflightProvider
 from skulk.extensions.setup import NodeSetup, NodeSetupProvider
+from skulk.extensions.setup_actions import (
+    NodeSetupActionsProvider,
+    SetupActions,
+    SetupMutation,
+    SetupOperation,
+    SetupOperationId,
+    SetupResume,
+)
 from skulk.operator.pairing import OperatorPairingService
 from skulk.utils.pydantic_ext import FrozenModel
 
@@ -52,7 +60,13 @@ def _public_configuration(value: NodeConfiguration, node_id: str) -> NodeConfigu
     """Bound ordinary responses and reject credentials misdeclared as settings."""
     if value.node_id != node_id or len(value.model_dump_json().encode()) > 131072:
         raise ValueError("invalid configuration response")
-    pending: list[JsonValue] = [value.configuration_schema]
+    _ordinary_schema(value.configuration_schema)
+    return value
+
+
+def _ordinary_schema(schema: dict[str, JsonValue]) -> None:
+    """Reject secret-bearing forms before returning ordinary management schemas."""
+    pending: list[JsonValue] = [schema]
     while pending:
         item = pending.pop()
         if isinstance(item, dict):
@@ -63,7 +77,6 @@ def _public_configuration(value: NodeConfiguration, node_id: str) -> NodeConfigu
             pending.extend(item.values())
         elif isinstance(item, list):
             pending.extend(item)
-    return value
 
 
 def create_plugins_router(
@@ -374,5 +387,144 @@ def create_plugins_router(
             )
 
         return await invoke(change)
+
+    def setup_actions_provider(plugin_id: str) -> NodeSetupActionsProvider:
+        selected = provider(plugin_id)
+        if not isinstance(selected, NodeSetupActionsProvider):
+            raise HTTPException(status_code=404, detail="setup actions unavailable")
+        return selected
+
+    def setup_observation(
+        value: SetupOperation, node_id: str, operation_id: str
+    ) -> SetupOperation:
+        if value.node_id != node_id or value.operation_id != operation_id:
+            raise ValueError("setup observation identity changed")
+        return value
+
+    @router.get(
+        "/{plugin_id}/nodes/{node_id}/setup-actions",
+        response_model=SetupActions,
+        summary="Read installed nonbillable setup actions",
+        description="Return ordinary action forms, configuration and credential fences, and retained safe progress. Reads do not initialize credentials or perform setup. Available independently of child readiness. Requires owner authority or plugins:read.",
+    )
+    async def get_setup_actions(
+        plugin_id: str, node_id: str, request: Request, response: Response
+    ) -> SetupActions:
+        """Read bounded ordinary forms and progress for this installed node."""
+        await authorize_plugin_request(
+            request, pairing_service, "plugins:read", tailnet_peer_verifier
+        )
+        response.headers["Cache-Control"] = "no-store"
+        selected = setup_actions_provider(plugin_id)
+
+        async def read() -> SetupActions:
+            value = await selected.node_setup_actions(node_id)
+            if (
+                value.node_id != node_id
+                or len(value.model_dump_json().encode()) > 65536
+                or len({a.action_id for a in value.actions}) != len(value.actions)
+                or len({o.operation_id for o in value.operations})
+                != len(value.operations)
+                or any(o.node_id != node_id for o in value.operations)
+            ):
+                raise ValueError("invalid setup actions")
+            for action in value.actions:
+                _ordinary_schema(action.parameters_schema)
+            return value
+
+        return await invoke(read)
+
+    @router.post(
+        "/{plugin_id}/nodes/{node_id}/setup-operations",
+        response_model=SetupOperation,
+        summary="Start a nonbillable owner setup operation",
+        description="Accept an exact action, ordinary values, operation ID and configuration/credential/action revision and schema fences. The provider durably reserves intent before work and continues independently of browser disconnect. A lost response requires observing the same ID, not starting a replacement. Does not enable a node or approve spending. Requires owner authority or plugins:manage.",
+    )
+    async def start_setup_operation(
+        plugin_id: str,
+        node_id: str,
+        mutation: SetupMutation,
+        request: Request,
+        response: Response,
+    ) -> SetupOperation:
+        """Dispatch one bounded setup intent with no executable or secret fields."""
+        await authorize_plugin_request(
+            request, pairing_service, "plugins:manage", tailnet_peer_verifier
+        )
+        response.headers["Cache-Control"] = "no-store"
+        if len(mutation.model_dump_json().encode()) > 16384:
+            raise HTTPException(status_code=422, detail="setup intent exceeds bound")
+        selected = setup_actions_provider(plugin_id)
+
+        async def start() -> SetupOperation:
+            value = setup_observation(
+                await selected.start_node_setup(node_id, mutation),
+                node_id,
+                mutation.operation_id,
+            )
+            if value.action_id != mutation.action_id:
+                raise ValueError("setup action identity changed")
+            return value
+
+        return await invoke(start)
+
+    @router.get(
+        "/{plugin_id}/nodes/{node_id}/setup-operations/{operation_id}",
+        response_model=SetupOperation,
+        summary="Read retained setup progress",
+        description="Read the last durable observation for an exact installed node and accepted operation ID. This does not wait for running setup or infer readiness from completion. Requires owner authority or plugins:read.",
+    )
+    async def get_setup_operation(
+        plugin_id: str,
+        node_id: str,
+        operation_id: SetupOperationId,
+        request: Request,
+        response: Response,
+    ) -> SetupOperation:
+        """Observe setup independently of the original browser connection."""
+        await authorize_plugin_request(
+            request, pairing_service, "plugins:read", tailnet_peer_verifier
+        )
+        response.headers["Cache-Control"] = "no-store"
+        selected = setup_actions_provider(plugin_id)
+
+        async def read() -> SetupOperation:
+            return setup_observation(
+                await selected.node_setup_operation(node_id, operation_id),
+                node_id,
+                operation_id,
+            )
+
+        return await invoke(read)
+
+    @router.post(
+        "/{plugin_id}/nodes/{node_id}/setup-operations/{operation_id}/resume",
+        response_model=SetupOperation,
+        summary="Resume an accepted owner setup operation",
+        description="Explicitly resume the original retained nonbillable intent by operation ID. No replacement input, new approval or automatic provider-create retry is accepted. Current prerequisites are revalidated. Requires owner authority or plugins:manage.",
+    )
+    async def resume_setup_operation(
+        plugin_id: str,
+        node_id: str,
+        operation_id: SetupOperationId,
+        request: Request,
+        response: Response,
+        body: SetupResume | None = None,
+    ) -> SetupOperation:
+        """Resume retained intent without redefining its reviewed inputs."""
+        await authorize_plugin_request(
+            request, pairing_service, "plugins:manage", tailnet_peer_verifier
+        )
+        response.headers["Cache-Control"] = "no-store"
+        selected = setup_actions_provider(plugin_id)
+
+        async def resume() -> SetupOperation:
+            return setup_observation(
+                await selected.resume_node_setup(node_id, operation_id),
+                node_id,
+                operation_id,
+            )
+
+        return await invoke(resume)
 
     return router

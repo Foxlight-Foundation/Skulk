@@ -1357,3 +1357,13 @@ authority. Private values remain in the write-only credential path.
   `__setup__.py`. The installer lock is inherited until exit; disabled selections
   are allowed. No provider SDK enters Skulk and no HTTP route launches this path.
   Plugin setup owns prompts and explicit local registration, never remote grants.
+
+
+Nonbillable setup actions use the optional `NodeSetupActionsProvider` facet in
+`extensions/setup_actions.py`. Installed nodes advertise `setup_actions_available`;
+core exposes fixed form/start/observation/resume routes under `/v1/plugins` with
+separate read/manage authorization. The managed adapter dispatches to the private
+owner, which owns durable intent, reconciliation and background execution outside
+the unary child slot. Dashboard reconnect only observes retained progress. Ordinary
+forms cannot contain credential fields, and setup completion does not imply
+preflight, enablement or paid approval. Public setup-file reads remain separate.

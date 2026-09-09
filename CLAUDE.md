@@ -1129,3 +1129,13 @@ The installer fence survives exec; disabled selection is allowed and lost retain
 trust history is refused before constructor initialization. Keep setup prompts and
 provider policy in the plugin. Do not expose this local entrypoint as an HTTP
 command runner or accept arbitrary module/executable paths.
+
+
+Nonbillable setup actions use the optional `NodeSetupActionsProvider` facet in
+`extensions/setup_actions.py`. Installed nodes advertise `setup_actions_available`;
+core exposes fixed form/start/observation/resume routes under `/v1/plugins` with
+separate read/manage authorization. The managed adapter dispatches to the private
+owner, which owns durable intent, reconciliation and background execution outside
+the unary child slot. Dashboard reconnect only observes retained progress. Ordinary
+forms cannot contain credential fields, and setup completion does not imply
+preflight, enablement or paid approval. Public setup-file reads remain separate.

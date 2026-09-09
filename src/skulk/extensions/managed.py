@@ -34,6 +34,7 @@ from skulk.extensions.managed_attachment import ManagedAttachment
 from skulk.extensions.preflight import NodePreflight
 from skulk.extensions.runtime_attachment import ProfileIdentifier
 from skulk.extensions.setup import NodeSetup
+from skulk.extensions.setup_actions import SetupActions, SetupMutation, SetupOperation
 from skulk.extensions.types import ExtensionContext
 
 _OBJECT = TypeAdapter(dict[str, JsonValue])
@@ -90,6 +91,7 @@ class _Node(_WireModel):
     credentials_configurable: bool = False
     preflight_available: bool = False
     setup_available: bool = False
+    setup_actions_available: bool = False
     descriptors: tuple[CapabilityDescriptor, ...] = Field(max_length=8)
 
     def public(self) -> ConfigurableNode:
@@ -103,6 +105,7 @@ class _Node(_WireModel):
             credentials_configurable=self.credentials_configurable,
             preflight_available=self.preflight_available,
             setup_available=self.setup_available,
+            setup_actions_available=self.setup_actions_available,
         )
 
 
@@ -385,6 +388,50 @@ class ManagedOwner:
             {"operation": "setup", "bundle_id": node.bundle_id, "node_id": node_id}
         )
         return NodeSetup.model_validate_json(json.dumps(response))
+
+    async def _setup_request(
+        self, node_id: str, operation: str, extra: dict[str, JsonValue] | None = None
+    ) -> dict[str, JsonValue]:
+        await self.refresh()
+        node = self._node(node_id)
+        if not node.setup_actions_available:
+            raise LookupError("managed node does not provide setup actions")
+        return await self._request(
+            {"operation": operation, "bundle_id": node.bundle_id, "node_id": node_id}
+            | (extra or {})
+        )
+
+    async def node_setup_actions(self, node_id: str) -> SetupActions:
+        """Read fixed setup forms and retained progress without doing setup work."""
+        response = await self._setup_request(node_id, "setup-actions")
+        return SetupActions.model_validate_json(json.dumps(response))
+
+    async def start_node_setup(
+        self, node_id: str, mutation: SetupMutation
+    ) -> SetupOperation:
+        """Submit exact durable intent once, independently of the browser lifetime."""
+        response = await self._setup_request(
+            node_id, "setup-start", {"mutation": mutation.model_dump(mode="json")}
+        )
+        return SetupOperation.model_validate_json(json.dumps(response))
+
+    async def node_setup_operation(
+        self, node_id: str, operation_id: str
+    ) -> SetupOperation:
+        """Read retained progress without occupying the child's invocation slot."""
+        response = await self._setup_request(
+            node_id, "setup-operation", {"operation_id": operation_id}
+        )
+        return SetupOperation.model_validate_json(json.dumps(response))
+
+    async def resume_node_setup(
+        self, node_id: str, operation_id: str
+    ) -> SetupOperation:
+        """Explicitly resume the same accepted setup intent through its durable ID."""
+        response = await self._setup_request(
+            node_id, "setup-resume", {"operation_id": operation_id}
+        )
+        return SetupOperation.model_validate_json(json.dumps(response))
 
     async def node_credentials(self, node_id: str) -> NodeCredentials:
         """Read reference readiness through the protected owner connection, without values."""

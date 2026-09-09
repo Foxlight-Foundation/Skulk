@@ -10,6 +10,7 @@ export interface ConfigurableNode {
   credentialsConfigurable?: boolean;
   preflightAvailable?: boolean;
   setupAvailable?: boolean;
+  setupActionsAvailable?: boolean;
 }
 
 /** A plugin's installed nodes remain visible while disabled or unavailable. */
@@ -40,6 +41,18 @@ export interface NodeSetup {
   credentialRevision: number;
   artifacts: { name: string; title: string; mediaType: 'application/json' | 'text/plain'; content: string }[];
 }
+
+/** Fixed nonbillable setup form supplied by the installed owner. */
+export interface SetupAction { actionId: string; title: string; description: string; parametersSchema: Record<string, unknown>; schemaDigest: string }
+
+/** Safe retained setup observation; complete is separate from preflight and enablement. */
+export interface SetupOperation { operationId: string; nodeId: string; actionId: string; phase: 'queued' | 'running' | 'complete' | 'failed'; code: string | null; correctiveAction: string | null }
+
+/** Current setup forms and revision fences, read without starting work. */
+export interface SetupActions { nodeId: string; revision: number; schemaDigest: string; credentialRevision: number; credentialSchemaDigest: string; actions: SetupAction[]; operations: SetupOperation[] }
+
+/** Immutable ordinary setup intent; credentials use their existing separate endpoint. */
+export interface SetupMutation { operationId: string; actionId: string; expectedRevision: number; expectedSchemaDigest: string; expectedCredentialRevision: number; expectedCredentialSchemaDigest: string; expectedActionSchemaDigest: string; values: Record<string, unknown> }
 
 /** Declared reference readiness only; credential values are never query/cache data. */
 export interface NodeCredentials {
@@ -133,6 +146,19 @@ const nodePath = ({ pluginId, nodeId }: NodeAddress) =>
 
 const pluginsApi = apiSlice.injectEndpoints({
   endpoints: (build) => ({
+    getNodeSetupActions: build.query<SetupActions, NodeAddress>({
+      query: (address) => ({ url: nodePath(address).replace(/configuration$/, 'setup-actions'), headers, cache: 'no-store' }),
+      providesTags: ['Plugins'],
+      keepUnusedDataFor: 0,
+    }),
+    startNodeSetup: build.mutation<SetupOperation, NodeAddress & { mutation: SetupMutation }>({
+      query: ({ mutation, ...address }) => ({ url: nodePath(address).replace(/configuration$/, 'setup-operations'), headers, method: 'POST', body: mutation }),
+      invalidatesTags: ['Plugins'],
+    }),
+    resumeNodeSetup: build.mutation<SetupOperation, NodeAddress & { operationId: string }>({
+      query: ({ operationId, ...address }) => ({ url: nodePath(address).replace(/configuration$/, `setup-operations/${encodeURIComponent(operationId)}/resume`), headers, method: 'POST' }),
+      invalidatesTags: ['Plugins'],
+    }),
     getNodeSetup: build.query<NodeSetup, NodeAddress>({
       query: ({ pluginId, nodeId }) => ({ url: `/v1/plugins/${encodeURIComponent(pluginId)}/nodes/${encodeURIComponent(nodeId)}/setup`, headers, cache: 'no-store' }),
       providesTags: ['Plugins'],
@@ -217,4 +243,4 @@ const pluginsApi = apiSlice.injectEndpoints({
   }),
 });
 
-export const { useLazyGetNodeSetupQuery, useLazyGetNodePreflightQuery, useGetNodeCredentialsQuery, useRegisterManagedRuntimeMutation, useGetRuntimeSourceStatusQuery, useRecoverRuntimeInstallationMutation, useLazyGetRuntimeReleaseQuery, useGetRuntimeInstallationQuery, useInstallRuntimeReleaseMutation, useActivateRuntimeReleaseMutation, useGetManagedRuntimesQuery, useGetManagedOperationQuery, useDisableManagedRuntimeMutation, useRecoverManagedOperationMutation, useGetPluginNodesQuery, useGetNodeConfigurationQuery, useConfigurePluginNodeMutation } = pluginsApi;
+export const { useGetNodeSetupActionsQuery, useStartNodeSetupMutation, useResumeNodeSetupMutation, useLazyGetNodeSetupQuery, useLazyGetNodePreflightQuery, useGetNodeCredentialsQuery, useRegisterManagedRuntimeMutation, useGetRuntimeSourceStatusQuery, useRecoverRuntimeInstallationMutation, useLazyGetRuntimeReleaseQuery, useGetRuntimeInstallationQuery, useInstallRuntimeReleaseMutation, useActivateRuntimeReleaseMutation, useGetManagedRuntimesQuery, useGetManagedOperationQuery, useDisableManagedRuntimeMutation, useRecoverManagedOperationMutation, useGetPluginNodesQuery, useGetNodeConfigurationQuery, useConfigurePluginNodeMutation } = pluginsApi;

@@ -4040,3 +4040,41 @@ configuration, credentials or lifecycle state itself. Each plugin must document
 and qualify the effects of its own setup entrypoint, including any explicit local
 privileged registration. The public API setup-file export remains a separate,
 read-scoped operation.
+
+
+### Capability-node nonbillable setup operations
+
+An optional installed owner facet exposes fixed setup actions independently of
+child readiness. Credentials use the existing write-only credential endpoints;
+setup forms contain ordinary external inputs. These operations do not enable a
+node, approve spending, or replay uncertain provider submissions.
+
+| Method and path | Parameters and behavior |
+| --- | --- |
+| `GET /v1/plugins/{plugin_id}/nodes/{node_id}/setup-actions` | Exact installation/node IDs. Returns `nodeId`, configuration `revision`/`schemaDigest`, `credentialRevision`/`credentialSchemaDigest`, up to eight installed `actions` and 32 retained `operations`. Each action has `actionId`, title, description, ordinary `parametersSchema` and `schemaDigest`. Requires `plugins:read` or direct owner authority. Does not initialize state or perform setup. |
+| `POST /v1/plugins/{plugin_id}/nodes/{node_id}/setup-operations` | Body: `operationId` (32 lowercase hexadecimal characters), `actionId`, `values`, `expectedRevision`, `expectedSchemaDigest`, `expectedCredentialRevision`, `expectedCredentialSchemaDigest`, `expectedActionSchemaDigest`. Encoded intent is bounded to 16 KiB. Requires `plugins:manage` or direct owner authority. The provider reserves exact intent durably before background work and returns promptly. |
+| `GET /v1/plugins/{plugin_id}/nodes/{node_id}/setup-operations/{operation_id}` | Exact retained operation ID. Returns last durable progress without waiting for setup completion. Requires `plugins:read` or direct owner authority. |
+| `POST /v1/plugins/{plugin_id}/nodes/{node_id}/setup-operations/{operation_id}/resume` | Exact retained operation ID; no body or an empty object. Replacement fields are rejected. Revalidates prerequisites and resumes the original accepted intent. Requires `plugins:manage` or direct owner authority. |
+
+Progress contains `operationId`, `nodeId`, `actionId`, phase (`queued`, `running`,
+`complete`, `failed`), optional safe `code` and `correctiveAction`. Completion means
+setup finished, not that preflight passed. Run preflight and the separate enable
+operation afterward. Providers retain enough journal state to reconcile owner
+restarts and deduplicate exact intents. Conflicting IDs or revision/schema changes
+are refused. A lost start response must be reconciled through the same operation
+ID or retained list; reconnect never automatically resubmits. Raw failures and
+credential values are excluded. Damaged state must preserve disable/management and
+refuse unsafe admission rather than create replacement identities or credentials.
+
+Responses use `Cache-Control: no-store`. Missing facets/nodes return 404; malformed
+requests return safe 422; conflicting/refused setup returns 409 when the provider
+reports a validation refusal; busy dispatch returns 429; unavailable management or
+timeouts return 503/504. A timeout does not prove setup was rejected. The same
+explicit scopes apply through paired-operator relay routes. All nonbillable setup
+work remains in the plugin owner; core accepts no commands or executable paths.
+
+The Plugins dashboard renders supported ordinary forms from this contract and
+polls retained progress while open. Drafts retain their observed revision fences;
+changed prerequisites require an explicit reload. Failed reads mark observations
+stale and disable actions. Failed operations can be explicitly resumed by ID.
+Closing or reopening the panel does not cancel or repeat server-owned setup.

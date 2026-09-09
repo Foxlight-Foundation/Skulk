@@ -32,6 +32,10 @@ class ConfigurableNode(FrozenModel):
     preflight_available: bool = Field(
         default=False, description="Whether this node provides managed setup checks."
     )
+    setup_actions_available: bool = Field(
+        default=False,
+        description="Whether this node exposes durable nonbillable setup actions.",
+    )
     setup_available: bool = Field(
         default=False, description="Whether this node exposes public setup files."
     )

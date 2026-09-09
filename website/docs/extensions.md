@@ -727,3 +727,29 @@ setup exits. Current services are not stopped by the launcher. Missing entrypoin
 changed selections, damaged artifacts, lost trust history and foreign local profile
 bindings are refused. The entrypoint and its behavior must be qualified with the
 plugin release; the existence of this launcher is not physical-install acceptance.
+
+
+### Durable nonbillable setup actions
+
+`skulk.extensions.setup_actions.NodeSetupActionsProvider` is an optional management
+facet alongside the read-only public setup-files facet. Implement
+`node_setup_actions`, `start_node_setup`, `node_setup_operation`, and
+`resume_node_setup`; advertise `ConfigurableNode.setup_actions_available` only
+when this node supports them. The isolated managed adapter delegates these to the
+owner's fixed `setup-actions`, `setup-start`, `setup-operation`, and `setup-resume`
+IPC operations. Existing owners omit the flag and remain compatible.
+
+Forms declare only ordinary external inputs. Generate internal paths and identities
+inside the owner, and provision credentials through protected owner mechanisms.
+A start carries exact configuration/credential/action fences and a durable operation
+ID. Reserve intent before effects and return promptly; neither the browser request
+nor the unary child invocation slot owns the background task. Preserve progress
+and original intent across reconnect, process restart and partial local writes.
+Do not automatically retry ambiguous external effects under this setup contract.
+
+Return safe bounded observations while children are disabled or unavailable.
+Core validates node/operation identities, bounds forms and rejects schemas declaring
+secret fields. It enforces read/manage scopes; this interface cannot grant spending
+approval. The dashboard reuses ordinary configuration controls, preserves drafts
+across changed fences and exposes explicit original-operation resume. See the
+[setup API contract](api-guide.md#capability-node-nonbillable-setup-operations).
