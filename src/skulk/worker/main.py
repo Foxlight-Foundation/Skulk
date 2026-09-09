@@ -1598,8 +1598,13 @@ class Worker:
                 completed, "Vision media completion does not match its chunks"
             )
             return
-        payload = b"".join(packet.data for packet in ordered)
-        if hashlib.sha256(payload).hexdigest() != completed.sha256:
+        # Hash the frames in place: a joined copy of a 256 MiB reference
+        # stream is a second full-size allocation on a worker whose memory
+        # belongs to the model it hosts.
+        digest = hashlib.sha256()
+        for packet in ordered:
+            digest.update(packet.data)
+        if digest.hexdigest() != completed.sha256:
             await self._reject_vision_media(
                 completed, "Vision media failed SHA-256 integrity verification"
             )
@@ -1610,13 +1615,14 @@ class Worker:
                     completed, "Reference media stream mixes payload encodings"
                 )
                 return
-            slots: dict[int, bytearray] = {}
+            # One join per slot is the only copy made during assembly, so a
+            # stream peaks at twice its size (frames plus assembled slots)
+            # rather than four times; the frames are released on return.
+            slot_frames: dict[int, list[bytes]] = {}
             for packet in ordered:
-                slots.setdefault(packet.image_index or 0, bytearray()).extend(
-                    packet.data
-                )
+                slot_frames.setdefault(packet.image_index or 0, []).append(packet.data)
             self._reference_media_verified[command_id] = {
-                slot: bytes(data) for slot, data in slots.items()
+                slot: b"".join(frames) for slot, frames in slot_frames.items()
             }
             self._vision_media_verified[command_id] = completed
             self._vision_media_completed_streams += 1

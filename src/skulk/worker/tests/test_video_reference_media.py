@@ -5,13 +5,15 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-from skulk.shared.types.common import CommandId, NodeId
+from skulk.routing.vision_media import VisionMediaPacket
+from skulk.shared.types.common import CommandId, ModelId, NodeId
 from skulk.shared.types.events import TaskFailed
 from skulk.shared.types.tasks import TaskId, TaskStatus
 from skulk.shared.types.tasks import VideoGeneration as VideoGenerationTask
 from skulk.shared.types.video import VideoGenerationTaskParams, VideoReferenceSpec
 from skulk.shared.types.worker.instances import InstanceId
 from skulk.worker.main import (
+    Worker,
     _inject_reference_paths,  # pyright: ignore[reportPrivateUsage]
     _purge_stale_video_directories,  # pyright: ignore[reportPrivateUsage]
     _reference_media_extension,  # pyright: ignore[reportPrivateUsage]
@@ -112,3 +114,107 @@ def test_startup_purges_stale_video_directories(tmp_path: Path, monkeypatch: obj
     _purge_stale_video_directories()
     assert not (inputs / "cmd-a").exists() and not (outputs / "cmd-b").exists()
     assert (outputs / "stray.txt").exists()
+
+
+def _packet(
+    command_id: CommandId, *, sequence: int, kind: str, data: bytes = b"", slot: int | None = None
+) -> VisionMediaPacket:
+    return VisionMediaPacket(
+        source_node=NodeId("api"),
+        target_node=NodeId("worker"),
+        command_id=command_id,
+        model=ModelId("org/video"),
+        sequence=sequence,
+        kind=kind,  # pyright: ignore[reportArgumentType]
+        data=data,
+        image_index=slot,
+        total_chunks=3,
+        image_count=2 if kind != "chunk" else None,
+        sha256=hashlib.sha256(b"abcdefghij").hexdigest() if kind == "completed" else None,
+        payload="reference_media",
+    )
+
+
+def _bare_worker() -> Worker:
+    """A Worker with only the vision-media bookkeeping the finalize path reads."""
+
+    worker = object.__new__(Worker)
+    worker._vision_media_opened = {}  # pyright: ignore[reportPrivateUsage]
+    worker._vision_media_chunks = {}  # pyright: ignore[reportPrivateUsage]
+    worker._vision_media_completed = {}  # pyright: ignore[reportPrivateUsage]
+    worker._vision_media_verified = {}  # pyright: ignore[reportPrivateUsage]
+    worker._vision_media_verified_chunks = {}  # pyright: ignore[reportPrivateUsage]
+    worker._reference_media_verified = {}  # pyright: ignore[reportPrivateUsage]
+    worker._vision_media_pending_bytes = {}  # pyright: ignore[reportPrivateUsage]
+    worker._vision_media_pending_since = {}  # pyright: ignore[reportPrivateUsage]
+    worker._vision_media_pending_total_bytes = 0  # pyright: ignore[reportPrivateUsage]
+    worker._vision_media_completed_streams = 0  # pyright: ignore[reportPrivateUsage]
+    return worker
+
+
+async def test_reference_stream_assembles_slots_from_frames(monkeypatch: object) -> None:
+    """Frames verify against the stream digest and land in per-slot buffers."""
+
+    import pytest
+
+    assert isinstance(monkeypatch, pytest.MonkeyPatch)
+    worker = _bare_worker()
+    command_id = CommandId("cmd")
+    admitted: list[CommandId] = []
+    rejected: list[str] = []
+
+    async def _admit(command: CommandId) -> None:
+        admitted.append(command)
+
+    async def _reject(packet: VisionMediaPacket, message: str) -> None:
+        rejected.append(message)
+
+    monkeypatch.setattr(worker, "_acknowledge_vision_media_if_admitted", _admit)
+    monkeypatch.setattr(worker, "_reject_vision_media", _reject)
+    worker._vision_media_opened[command_id] = _packet(  # pyright: ignore[reportPrivateUsage]
+        command_id, sequence=0, kind="opened"
+    )
+    worker._vision_media_chunks[command_id] = {  # pyright: ignore[reportPrivateUsage]
+        1: _packet(command_id, sequence=1, kind="chunk", data=b"abcd", slot=0),
+        2: _packet(command_id, sequence=2, kind="chunk", data=b"efg", slot=1),
+        3: _packet(command_id, sequence=3, kind="chunk", data=b"hij", slot=1),
+    }
+    worker._vision_media_completed[command_id] = _packet(  # pyright: ignore[reportPrivateUsage]
+        command_id, sequence=4, kind="completed"
+    )
+    await worker._finalize_vision_media(command_id)  # pyright: ignore[reportPrivateUsage]
+    assert rejected == []
+    assert admitted == [command_id]
+    assert worker._reference_media_verified[command_id] == {  # pyright: ignore[reportPrivateUsage]
+        0: b"abcd",
+        1: b"efghij",
+    }
+    assert command_id not in worker._vision_media_chunks  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_reference_stream_digest_mismatch_is_rejected(monkeypatch: object) -> None:
+    import pytest
+
+    assert isinstance(monkeypatch, pytest.MonkeyPatch)
+    worker = _bare_worker()
+    command_id = CommandId("cmd")
+    rejected: list[str] = []
+
+    async def _reject(packet: VisionMediaPacket, message: str) -> None:
+        rejected.append(message)
+
+    monkeypatch.setattr(worker, "_reject_vision_media", _reject)
+    worker._vision_media_opened[command_id] = _packet(  # pyright: ignore[reportPrivateUsage]
+        command_id, sequence=0, kind="opened"
+    )
+    worker._vision_media_chunks[command_id] = {  # pyright: ignore[reportPrivateUsage]
+        1: _packet(command_id, sequence=1, kind="chunk", data=b"abcd", slot=0),
+        2: _packet(command_id, sequence=2, kind="chunk", data=b"efg", slot=1),
+        3: _packet(command_id, sequence=3, kind="chunk", data=b"xxx", slot=1),
+    }
+    worker._vision_media_completed[command_id] = _packet(  # pyright: ignore[reportPrivateUsage]
+        command_id, sequence=4, kind="completed"
+    )
+    await worker._finalize_vision_media(command_id)  # pyright: ignore[reportPrivateUsage]
+    assert rejected == ["Vision media failed SHA-256 integrity verification"]
+    assert command_id not in worker._reference_media_verified  # pyright: ignore[reportPrivateUsage]
