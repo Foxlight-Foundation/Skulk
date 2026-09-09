@@ -341,6 +341,13 @@ retaining the same app pairing material. Test listeners use generated loopback
 ports and protected temporary files. This does not prove relay-side durable
 fencing, physical-device compatibility, or hosted capacity.
 
+The separate `bench/operator_workload_fixture.py` serves deterministic canonical
+reads and synthetic chat/PCM streams behind the real on-demand gateway and
+pairing service without constructing a Node. Its local lifetime, protected QR,
+watchdog, tests and source-pinned schema validator are documented in
+[Isolated operator workload fixture](website/docs/operator-workload-fixture.md).
+It is not an observed workload profile or relay capacity result.
+
 The live vision test is deliberately explicit because it places a real image
 through the built-in dashboard and a running model. Provide the dashboard URL,
 the exact mounted model ID, and a local PNG fixture:

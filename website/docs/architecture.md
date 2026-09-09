@@ -1845,6 +1845,16 @@ rust/                   # Rust crates: networking (libp2p), skulk_pyo3_bindings,
 
 **Worker**: The per-node process responsible for downloads, runner supervision, and task dispatch. Every node runs a worker.
 
+## Isolated operator qualification boundary
+
+`bench/operator_workload_fixture.py` is a separate opt-in local process, not a
+Node component. It combines real pairing, the encrypted authority journal,
+signed on-demand connector and TLS authorization with a generated FastAPI app.
+It starts no discovery, inference, or store clients. An independent watchdog
+reaps its generated relay on expiry or parent EOF. See
+[the fixture contract](operator-workload-fixture.md) for lifecycle and evidence
+limits; generated data does not qualify released-device capacity.
+
 ## Where to read next
 
 - [Architecture Reference](architecture-reference): dense, structured fact-sheet for AI assistants and operators who prefer reference style over narrative
