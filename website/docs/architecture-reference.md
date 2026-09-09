@@ -382,6 +382,13 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 
 ### Extensions (plugins)
 
+- **Isolated steward callbacks:** `managed_host.py` binds one protected local owner
+  to live policy, owned descriptor revisions and exact-target Fabric invocation.
+  `managed.py` exposes the optional steward provider facet through fixed owner IPC.
+  Frames are bounded and sequenced; reconnection admits future calls without replay.
+  No signing key crosses this interface. Overall tool deadlines: reads 5 seconds,
+  inert proposal preparation 20 seconds.
+
 - **Node configuration:** optional `NodeConfigurationProvider` in `extensions/configuration.py`; stable installed node IDs, schema/ordinary values, enabled state, revision and schema digest. `api/plugins.py` exposes `/v1/plugins` inventory and per-node GET/POST configuration. Provider-owned storage and validation, independent of child readiness, never replicated State. `plugins:read/manage/approve` are explicit grants with no pairing defaults; `operator/plugin_scopes.py` precedes broad operation fallback on direct and relay routes. Owner-only `/v1/auth/plugin-grants` uses current encrypted pairing records and revision fences. Plugins dashboard renders ordinary schemas and preserves drafts on conflicts.
 - **Node credentials:** optional `NodeCredentialProvider` in `extensions/credentials.py`; separate per-node GET/POST credential routes expose declarations/readiness and accept bounded write-only values with exact operation/revision/schema fences. Explicit plugin scopes precede broad authorization. Managed IPC never loads the private SDK into core. Providers retain cleanup versions and admission checks; the dashboard keeps values outside Redux/browser persistence and requires refresh after conflicts or unconfirmed writes. No values enter ordinary settings, diagnostics or replicated State.
 

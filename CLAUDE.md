@@ -508,6 +508,12 @@ Rust code in `rust/` provides:
 
 ### Extension API (plugins)
 
+`extensions/managed_host.py` supplies fixed live policy/descriptor observations and
+exact installed-target Fabric callbacks to isolated owners over protected local
+IPC. `managed.py` adapts their steward discovery and inert invocation to the existing
+steward provider facet. Host loss closes callbacks without replay; no approval key
+is supplied. Inert proposal tools have a 20-second deadline, reads retain 5 seconds.
+
 `extensions/managed.py` connects protected local owner registrations to separately
 supervised runtimes without importing their SDKs. `DynamicCapabilityProvider`
 supplies cached unary contracts for live loader lookup; static IDs retain priority

@@ -1564,6 +1564,13 @@ The adapters live in `src/skulk/api/adapters/`. Each one handles request normali
 
 ## Extensions (plugins)
 
+Managed owners can supply steward tools through fixed local control operations.
+`extensions/managed_host.py` connects the separately supervised owner to live
+steward policy, owned descriptor observations and exact-target ordinary Fabric
+calls over a protected local socket. Connection loss invalidates pending callbacks;
+reconnection never replays them. This channel supplies no approval authority.
+Inert proposal preparation has a twenty-second steward deadline; reads retain five.
+
 Separately supervised plugin owners connect through `extensions/managed.py`, a
 generic owner-only Unix-socket adapter. Local protected registrations identify
 the installation and service-state root; the API process imports no plugin SDK.

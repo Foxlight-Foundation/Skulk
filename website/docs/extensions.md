@@ -582,10 +582,28 @@ are hidden even when one claimant is unavailable. The loader reconciles dynamic
 telemetry tags once per second; the managed adapter polls local health with a
 one-second timeout and refuses observations older than three seconds.
 
-Shutting down Skulk stops its observer and withdraws dynamic tags. The independent
-owner service and its cleanup obligations remain supervised separately. This
-adapter provides unary and ordinary configuration integration; service installation,
-release activation and steward proposal transport are separate owner operations.
+Owners may advertise `host_callbacks_available: true` in their local description
+and expose the fixed `host.sock` beside `control.sock`, with the same owner-only
+directory and socket protections. Skulk binds protocol `1` and its transport node
+ID; the owner acknowledges `{"ready":true}`. One sequenced callback is outstanding
+at a time. The fixed operations are `actions` (live global steward policy),
+`revisions` (currently visible owned descriptor revisions), and `invoke` (exact
+installed node ID, capability ID/version/revision and JSON arguments). Invocation
+uses ordinary Fabric routing and admission. Frames are complete newline-delimited
+JSON, bounded to 64 KiB; callbacks have a three-second owner deadline. No callback
+accepts an executable, remote address or approval key. Lost calls are never replayed
+when the local connection returns.
+
+Such owners also support fixed `steward-tools` and `steward-invoke` control requests.
+The former returns at most 16 ordinary `StewardTool` contracts; the latter carries
+the exact tool and arguments for fresh owner validation. Discovery and invocation
+use the existing steward eligibility, schema and response limits. Reads have a
+five-second overall deadline; inert proposal preparation has twenty seconds for
+bounded catalog and placement reads. Neither tool mode approves spending. Provider
+proposal review, independent approval and approved execution are separate contracts.
+
+Shutting down Skulk closes its host binding, stops observation and withdraws dynamic
+tags. The independent owner and its cleanup obligations remain supervised separately.
 
 ## Offline runtime verification and staging
 

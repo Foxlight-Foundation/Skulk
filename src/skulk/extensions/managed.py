@@ -9,7 +9,7 @@ import stat
 import time
 from itertools import islice
 from pathlib import Path
-from typing import Self, final
+from typing import Literal, Self, final
 
 from loguru import logger
 from pydantic import (
@@ -31,10 +31,12 @@ from skulk.extensions.configuration import (
 )
 from skulk.extensions.credentials import CredentialMutation, NodeCredentials
 from skulk.extensions.managed_attachment import ManagedAttachment
+from skulk.extensions.managed_host import HostCallbacks, HostCapability
 from skulk.extensions.preflight import NodePreflight
 from skulk.extensions.runtime_attachment import ProfileIdentifier
 from skulk.extensions.setup import NodeSetup
 from skulk.extensions.setup_actions import SetupActions, SetupMutation, SetupOperation
+from skulk.extensions.steward import StewardTool
 from skulk.extensions.types import ExtensionContext
 
 _OBJECT = TypeAdapter(dict[str, JsonValue])
@@ -111,6 +113,7 @@ class _Node(_WireModel):
 
 class _Description(_WireModel):
     transport_node_id: str
+    host_callbacks_available: bool = False
     nodes: tuple[_Node, ...] = Field(max_length=16)
 
 
@@ -191,6 +194,8 @@ class ManagedOwner:
         self.available = False
         self.manager_available = True
         self.poll_task: asyncio.Task[None] | None = None
+        self.host_task: asyncio.Task[None] | None = None
+        self.host_callbacks_available = False
         self.refresh_lock = asyncio.Lock()
 
     def chat_middleware(self) -> None:
@@ -217,17 +222,12 @@ class ManagedOwner:
             )
         )
 
-    async def _request(
-        self, message: dict[str, JsonValue], *, timeout: float = 30
-    ) -> dict[str, JsonValue]:
-        raw = json.dumps(message, allow_nan=False).encode() + b"\n"
-        if len(raw) > (65536 if message.get("operation") == "invoke" else 16384):
-            raise ValueError("managed request exceeds bound")
+    def _socket_path(self, name: Literal["control.sock", "host.sock"]) -> Path:
         _private_directory(self.root)
         digest = hashlib.sha256(str(self.root.absolute()).encode()).hexdigest()[:24]
         directory = Path("/tmp") / f"skulk-control-{os.getuid()}-{digest}"
         _private_directory(directory)
-        socket = directory / "control.sock"
+        socket = directory / name
         info = socket.lstat()
         if (
             not stat.S_ISSOCK(info.st_mode)
@@ -235,6 +235,15 @@ class ManagedOwner:
             or info.st_mode & 0o077
         ):
             raise ValueError("managed socket is not protected")
+        return socket
+
+    async def _request(
+        self, message: dict[str, JsonValue], *, timeout: float = 30
+    ) -> dict[str, JsonValue]:
+        raw = json.dumps(message, allow_nan=False).encode() + b"\n"
+        if len(raw) > (65536 if message.get("operation") == "invoke" else 16384):
+            raise ValueError("managed request exceeds bound")
+        socket = self._socket_path("control.sock")
         async with asyncio.timeout(timeout):
             reader, writer = await asyncio.open_unix_connection(socket, limit=131073)
             try:
@@ -282,10 +291,12 @@ class ManagedOwner:
                     if any(d.io_mode != "unary" for d in node.descriptors):
                         raise ValueError("managed owner requires unary contracts")
                 self.nodes = snapshot.nodes
+                self.host_callbacks_available = snapshot.host_callbacks_available
                 self.observed = time.monotonic()
                 self.available = True
             except (OSError, ValueError, TimeoutError):
                 self.available = False
+                self.host_callbacks_available = False
                 raise RuntimeError("managed owner unavailable") from None
 
     def on_start(self, context: ExtensionContext) -> None:
@@ -296,6 +307,23 @@ class ManagedOwner:
         if self.attachment is not None:
             self.attachment.retain(str(context.node_id))
         self.poll_task = asyncio.create_task(self._poll())
+        self.host_task = asyncio.create_task(self._host_loop(context))
+
+    def _host_capabilities(self) -> tuple[HostCapability, ...]:
+        return tuple(
+            HostCapability(node.node_id, descriptor)
+            for node in self.nodes
+            for descriptor in node.descriptors
+            if self.capability_ready(descriptor.qualified_id)
+        )
+
+    async def _host_loop(self, context: ExtensionContext) -> None:
+        callbacks = HostCallbacks(context, self._host_capabilities)
+        while True:
+            if self.host_callbacks_available and self.available:
+                with contextlib.suppress(OSError, ValueError, TimeoutError):
+                    await callbacks.serve(self._socket_path("host.sock"))
+            await asyncio.sleep(1)
 
     async def _poll(self) -> None:
         while True:
@@ -309,6 +337,10 @@ class ManagedOwner:
         # Legacy discovery and live manager inventory can share one adapter.
         # Claim its observer before yielding so concurrent shutdown releases once.
         task, self.poll_task = self.poll_task, None
+        host_task, self.host_task = self.host_task, None
+        if host_task is not None:
+            host_task.cancel()
+            await asyncio.gather(host_task, return_exceptions=True)
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
@@ -319,6 +351,42 @@ class ManagedOwner:
         """Read all installed nodes, including disabled children."""
         await self.refresh()
         return tuple(node.public() for node in self.nodes)
+
+    async def steward_tools(self, context: ExtensionContext) -> tuple[StewardTool, ...]:
+        """Discover optional private tools without importing provider policy into core."""
+        if self.context is not context:
+            return ()
+        await self.refresh()
+        if not self.host_callbacks_available:
+            return ()
+        result = await self._request({"operation": "steward-tools"}, timeout=1.5)
+        if set(result) != {"tools"}:
+            raise ValueError("invalid managed steward discovery")
+        tools = TypeAdapter(tuple[StewardTool, ...]).validate_json(
+            json.dumps(result["tools"])
+        )
+        if len(tools) > 16:
+            raise ValueError("too many managed steward tools")
+        return tools
+
+    async def handle_steward_tool(
+        self,
+        context: ExtensionContext,
+        tool: StewardTool,
+        arguments: dict[str, JsonValue],
+    ) -> dict[str, JsonValue]:
+        """Route a fresh exact tool to the owner; this facet cannot approve spending."""
+        if self.context is not context or not self.host_callbacks_available:
+            raise ValueError("managed steward unavailable")
+        await self.refresh()
+        return await self._request(
+            {
+                "operation": "steward-invoke",
+                "tool": tool.model_dump(mode="json"),
+                "arguments": arguments,
+            },
+            timeout=20,
+        )
 
     def _node(self, node_id: str) -> _Node:
         for node in self.nodes:
