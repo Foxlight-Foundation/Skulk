@@ -43,11 +43,13 @@ def _bundle_id(files: list[dict[str, str | int]]) -> str:
     return "bundle_" + base64.b32encode(digest).decode().rstrip("=").lower()
 
 
-def _card() -> ModelCard:
+def _card(root: str | None = None) -> ModelCard:
     files = [
         {"path": path, "size_bytes": len(payload), "object_id": "sha256:" + hashlib.sha256(payload).hexdigest()}
         for path, payload in FILES.items()
     ]
+    if root is not None:
+        files = [{**item, "path": f"{root}/{item['path']}"} for item in files]
     return ModelCard.model_validate(
         {
             "model_id": "org/bundle-model",
@@ -61,6 +63,7 @@ def _card() -> ModelCard:
             "trust_remote_code": False,
             "artifact_bundle": {
                 "bundle_id": _bundle_id(files),
+                "root": root,
                 "download_size": sum(len(v) for v in FILES.values()),
                 "files": files,
             },
@@ -70,9 +73,11 @@ def _card() -> ModelCard:
 
 def _install(root: Path, card: ModelCard) -> Path:
     artifact = root / card.model_id.normalize()
+    bundle_root = card.artifact_bundle.root if card.artifact_bundle is not None else None
     for path, payload in FILES.items():
-        (artifact / path).parent.mkdir(parents=True, exist_ok=True)
-        (artifact / path).write_bytes(payload)
+        target = artifact / (f"{bundle_root}/{path}" if bundle_root else path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(payload)
     (artifact / ".skulk-source-revision").write_text(f"{REVISION}\n")
     write_installed_card(artifact, build_installed_card_record(artifact, card))
     return artifact
@@ -105,3 +110,27 @@ def test_resolver_finds_a_staged_bundle(tmp_path: Path, monkeypatch: pytest.Monk
     assert resolve_model_in_path(ModelId(card.model_id), REVISION) == artifact
     assert build_model_path(ModelId(card.model_id), REVISION) == artifact
     assert resolve_model_in_path(ModelId(card.model_id), "b" * 40) is None
+
+
+def test_bundle_entry_pointing_outside_the_artifact_is_not_complete(tmp_path: Path) -> None:
+    card = _card()
+    artifact = _install(tmp_path / "models", card)
+    outside = tmp_path / "elsewhere.safetensors"
+    target = artifact / "vae/audio_vae.safetensors"
+    outside.write_bytes(target.read_bytes())
+    target.unlink()
+    target.symlink_to(outside)
+    assert not is_model_directory_complete(artifact)
+    # A directory entry of the right name is not a file either.
+    target.unlink()
+    target.mkdir()
+    assert not is_model_directory_complete(artifact)
+
+
+def test_resolver_finds_a_rooted_bundle_by_its_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    card = _card(root="comfy")
+    artifact = _install(tmp_path, card)
+    monkeypatch.setattr(constants, "SKULK_MODELS_PATH", (tmp_path,))
+    monkeypatch.setattr(constants, "SKULK_MODELS_DIR", tmp_path / "unused")
+    assert resolve_model_in_path(ModelId(card.model_id), REVISION, artifact_root="comfy") == artifact
+    assert build_model_path(ModelId(card.model_id), REVISION, "comfy") == artifact / "comfy"

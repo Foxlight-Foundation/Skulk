@@ -392,6 +392,9 @@ def resolve_model_in_path(
                 else (
                     (load_candidate / "config.json").is_file()
                     or directory_has_gguf_weights(load_candidate)
+                    # The bundle manifest lives at the installation root,
+                    # not beneath the loader root.
+                    or _installed_bundle_is_complete(candidate)
                 )
             )
             if (
@@ -866,6 +869,7 @@ def build_model_path(
         and (
             (default_load_root / "config.json").exists()
             or directory_has_gguf_weights(default_load_root)
+            or _installed_bundle_is_complete(default)
         )
         and _source_revision_matches(default, source_revision)
     ):
@@ -885,6 +889,7 @@ def build_model_path(
         and (
             (staging_load_root / "config.json").exists()
             or directory_has_gguf_weights(staging_load_root)
+            or _installed_bundle_is_complete(staging_fallback)
         )
         and _source_revision_matches(staging_fallback, source_revision)
     ):
@@ -1082,9 +1087,18 @@ def _installed_bundle_is_complete(model_dir: Path) -> bool:
         return False
     if record is None or record.schema_version != 2 or not record.files:
         return False
+    # Same containment rule as verify_installed_file: a manifest entry must
+    # resolve to a regular file beneath the artifact root, so an equal-sized
+    # symlink pointing outside the artifact never reads as its bytes.
+    resolved_root = model_dir.resolve()
     for entry in record.files:
         try:
-            if (model_dir / entry.path).stat().st_size != entry.size_bytes:
+            candidate = (resolved_root / entry.path).resolve()
+            if (
+                not candidate.is_relative_to(resolved_root)
+                or not candidate.is_file()
+                or candidate.stat().st_size != entry.size_bytes
+            ):
                 return False
         except OSError:
             return False
