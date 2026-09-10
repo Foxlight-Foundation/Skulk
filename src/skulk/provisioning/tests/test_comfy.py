@@ -195,9 +195,12 @@ def test_ensure_degrades_when_provisioning_fails(monkeypatch: pytest.MonkeyPatch
 def test_sanitized_environment_drops_index_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("UV_INDEX_URL", "https://mirror.example")
     monkeypatch.setenv("PIP_EXTRA_INDEX_URL", "https://mirror.example")
+    monkeypatch.setenv("UV_NO_INDEX", "1")
+    monkeypatch.setenv("PIP_NO_INDEX", "1")
     monkeypatch.setenv("KEEP_ME", "1")
     env = comfy.sanitized_index_environment()
     assert "UV_INDEX_URL" not in env and "PIP_EXTRA_INDEX_URL" not in env
+    assert "UV_NO_INDEX" not in env and "PIP_NO_INDEX" not in env
     assert env["KEEP_ME"] == "1"
 
 

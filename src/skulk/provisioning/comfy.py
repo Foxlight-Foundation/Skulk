@@ -74,10 +74,12 @@ def sanitized_index_environment() -> dict[str, str]:
         and key
         not in (
             "UV_FIND_LINKS",
+            "UV_NO_INDEX",
             "UV_CONFIG_FILE",
             "PIP_INDEX_URL",
             "PIP_EXTRA_INDEX_URL",
             "PIP_FIND_LINKS",
+            "PIP_NO_INDEX",
         )
     }
 
