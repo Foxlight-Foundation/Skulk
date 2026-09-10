@@ -107,6 +107,13 @@ from .api import TraceTaskKind as TraceTaskKind
 from .api import TracingStateResponse as TracingStateResponse
 from .api import UpdateTracingStateRequest as UpdateTracingStateRequest
 from .api import Usage as Usage
+from .api import VideoCreateRequest as VideoCreateRequest
+from .api import VideoDeletedResponse as VideoDeletedResponse
+from .api import VideoError as VideoError
+from .api import VideoListResponse as VideoListResponse
+from .api import VideoOutputInfo as VideoOutputInfo
+from .api import VideoResource as VideoResource
+from .api import VideoStatsInfo as VideoStatsInfo
 from .api import WebSearchResult as WebSearchResult
 from .api import WebSearchToolRequest as WebSearchToolRequest
 from .api import WebSearchToolResponse as WebSearchToolResponse

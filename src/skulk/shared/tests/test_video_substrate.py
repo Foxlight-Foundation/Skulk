@@ -9,12 +9,14 @@ binary framing, and the reference-media payload marker on the vision plane.
 from __future__ import annotations
 
 import hashlib
+import time
 from pathlib import Path
 
 import anyio
 import pytest
 from pydantic import ValidationError
 
+from skulk.api import main as api_main
 from skulk.api.main import API
 from skulk.api.video_jobs import (
     MAX_ACTIVE_JOBS,
@@ -374,11 +376,19 @@ def _bare_api(tmp_path: Path) -> API:
     api._video_jobs = VideoJobRegistry(None)  # pyright: ignore[reportPrivateUsage]
     api._video_store = VideoStore(tmp_path)  # pyright: ignore[reportPrivateUsage]
     api._video_generation_queues = {}  # pyright: ignore[reportPrivateUsage]
+    api._text_generation_queues = {}  # pyright: ignore[reportPrivateUsage]
+    api._image_generation_queues = {}  # pyright: ignore[reportPrivateUsage]
+    api._embedding_queues = {}  # pyright: ignore[reportPrivateUsage]
+    api._audio_speech_queues = {}  # pyright: ignore[reportPrivateUsage]
+    api._audio_transcription_queues = {}  # pyright: ignore[reportPrivateUsage]
     api._chunk_reorder = {}  # pyright: ignore[reportPrivateUsage]
     api._cancelled_command_ids = set()  # pyright: ignore[reportPrivateUsage]
     api._video_job_media_deadlines = {}  # pyright: ignore[reportPrivateUsage]
     api._video_output_sources = {}  # pyright: ignore[reportPrivateUsage]
     api._early_output_packets = {}  # pyright: ignore[reportPrivateUsage]
+    api._early_output_packet_bytes = 0  # pyright: ignore[reportPrivateUsage]
+    api._pending_output_completions = {}  # pyright: ignore[reportPrivateUsage]
+    api._video_upload_inflight_bytes = 0  # pyright: ignore[reportPrivateUsage]
     return api
 
 
@@ -733,3 +743,152 @@ def test_settle_requires_the_requested_audio_track(tmp_path: Path) -> None:
     api._settle_video_job(job.id)  # pyright: ignore[reportPrivateUsage]
     silent = registry.get(job.id)
     assert silent is not None and silent.status == "failed" and "audio track" in (silent.error or "")
+
+
+def _packet_for(job_id: CommandId, kind: str, sequence: int, **fields: object) -> OutputMediaPacket:
+    return OutputMediaPacket.model_validate(
+        {
+            "source_node": NodeId("worker-1"),
+            "target_node": NodeId("api"),
+            "command_id": job_id,
+            "model": MODEL,
+            "purpose": "video",
+            "sequence": sequence,
+            "kind": kind,
+            **fields,
+        }
+    )
+
+
+async def test_completion_frame_overtaking_a_chunk_is_held(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On the reordering fallback the completion may land before the last chunk."""
+
+    api = _bare_api(tmp_path)
+    api.node_id = NodeId("api")
+    api._close_command_queue = lambda _command_id: None  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
+    acknowledged: list[OutputMediaPacket] = []
+
+    async def capture(packet: OutputMediaPacket) -> None:
+        acknowledged.append(packet)
+
+    monkeypatch.setattr(api, "_send_output_media_terminal", capture)
+    job = api._video_jobs.create(_job("held"))  # pyright: ignore[reportPrivateUsage]
+    payload = b"abcdef"
+    digest = hashlib.sha256(payload).hexdigest()
+    apply = api._apply_output_media_packet  # pyright: ignore[reportPrivateUsage]
+    await apply(_packet_for(job.id, "opened", 0, total_chunks=2, total_bytes=6, content_type="video/mp4"))
+    await apply(_packet_for(job.id, "chunk", 2, data=b"def", total_chunks=2))
+    await apply(_packet_for(job.id, "completed", 3, total_chunks=2, total_bytes=6, sha256=digest))
+    assert acknowledged == []
+    assert (job.id, "video") in api._pending_output_completions  # pyright: ignore[reportPrivateUsage]
+    assert api._video_store.get(job.id) is None  # pyright: ignore[reportPrivateUsage]
+    await apply(_packet_for(job.id, "chunk", 1, data=b"abc", total_chunks=2))
+    stored = api._video_store.get(job.id)  # pyright: ignore[reportPrivateUsage]
+    assert stored is not None and stored.file_path.read_bytes() == payload
+    assert [item.kind for item in acknowledged] == ["accepted"]
+    assert not api._pending_output_completions  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_early_frames_share_one_byte_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api = _bare_api(tmp_path)
+    api.node_id = NodeId("api")
+    api.state = State()
+    api._close_command_queue = lambda _command_id: None  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
+    failures: list[OutputMediaPacket] = []
+
+    async def capture(packet: OutputMediaPacket) -> None:
+        failures.append(packet)
+
+    monkeypatch.setattr(api, "_send_output_media_terminal", capture)
+    monkeypatch.setattr(api_main, "_OUTPUT_MEDIA_EARLY_BYTES_TOTAL", 4)
+    first = api._video_jobs.create(_job("first"))  # pyright: ignore[reportPrivateUsage]
+    second = api._video_jobs.create(_job("second"))  # pyright: ignore[reportPrivateUsage]
+    sender, receiver = channel[OutputMediaPacket]()
+    api._output_media_packet_receiver = receiver  # pyright: ignore[reportPrivateUsage]
+    async with anyio.create_task_group() as group:
+        group.start_soon(api._apply_output_media)  # pyright: ignore[reportPrivateUsage]
+        await sender.send(_packet_for(first.id, "chunk", 2, data=b"abc", total_chunks=2))
+        await sender.send(_packet_for(second.id, "chunk", 2, data=b"xy", total_chunks=2))
+        await anyio.sleep(0.1)
+        sender.close()
+    assert api._early_output_packet_bytes == 3  # pyright: ignore[reportPrivateUsage]
+    assert list(api._early_output_packets) == [(first.id, "video")]  # pyright: ignore[reportPrivateUsage]
+    failed = api._video_jobs.get(second.id)  # pyright: ignore[reportPrivateUsage]
+    assert failed is not None and failed.status == "failed"
+    assert [item.kind for item in failures] == ["transport_failed"]
+    assert api._video_jobs.get(first.id).status == "queued"  # pyright: ignore[reportPrivateUsage, reportOptionalMemberAccess]
+
+
+def test_finish_video_job_releases_everything_held(tmp_path: Path) -> None:
+    api = _bare_api(tmp_path)
+    closed: list[CommandId] = []
+    api._close_command_queue = closed.append  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
+    job = api._video_jobs.create(_job("messy"))  # pyright: ignore[reportPrivateUsage]
+    api._video_store.open_assembly(  # pyright: ignore[reportPrivateUsage]
+        job.id, "video", content_type="video/mp4", total_bytes=6, total_chunks=2
+    )
+    api._video_job_media_deadlines[job.id] = 1.0  # pyright: ignore[reportPrivateUsage]
+    api._video_output_sources[job.id] = NodeId("worker-1")  # pyright: ignore[reportPrivateUsage]
+    api._early_output_packets[(job.id, "thumbnail")] = [  # pyright: ignore[reportPrivateUsage]
+        _packet_for(job.id, "chunk", 2, data=b"abcd", total_chunks=2)
+    ]
+    api._early_output_packet_bytes = 4  # pyright: ignore[reportPrivateUsage]
+    api._pending_output_completions[(job.id, "video")] = _packet_for(  # pyright: ignore[reportPrivateUsage]
+        job.id, "completed", 3, total_chunks=2, total_bytes=6, sha256="0" * 64
+    )
+    finished = api._finish_video_job(job.id, "boom")  # pyright: ignore[reportPrivateUsage]
+    assert finished is not None and finished.status == "failed" and finished.error == "boom"
+    assert not api._video_store.has_open_assembly(job.id, "video")  # pyright: ignore[reportPrivateUsage]
+    assert not (tmp_path / str(job.id)).exists()
+    assert not api._video_job_media_deadlines  # pyright: ignore[reportPrivateUsage]
+    assert not api._video_output_sources  # pyright: ignore[reportPrivateUsage]
+    assert not api._early_output_packets  # pyright: ignore[reportPrivateUsage]
+    assert api._early_output_packet_bytes == 0  # pyright: ignore[reportPrivateUsage]
+    assert not api._pending_output_completions  # pyright: ignore[reportPrivateUsage]
+    assert closed == [job.id]
+
+
+def _commit(store: VideoStore, identifier: str, payload: bytes) -> None:
+    command_id = CommandId(identifier)
+    store.open_assembly(
+        command_id, "video", content_type="video/mp4", total_bytes=len(payload), total_chunks=1
+    )
+    store.append(command_id, "video", 1, payload)
+    store.commit(command_id, "video", sha256=hashlib.sha256(payload).hexdigest(), total_chunks=1)
+
+
+def test_video_store_evicts_oldest_completed_jobs_to_fit(tmp_path: Path) -> None:
+    store = VideoStore(tmp_path, max_total_bytes=10)
+    _commit(store, "oldest", b"123456")
+    _commit(store, "newer", b"abc")
+    assert store.reserved_bytes() == 9
+    evicted = store.open_assembly(
+        CommandId("incoming"), "video", content_type="video/mp4", total_bytes=6, total_chunks=1
+    )
+    assert evicted == (CommandId("oldest"),)
+    assert store.get(CommandId("oldest")) is None and store.get(CommandId("newer")) is not None
+    assert not (tmp_path / "oldest").exists()
+    # An assembly in flight is never a victim, and an artifact that cannot
+    # fit even with every finished job gone is refused outright.
+    with pytest.raises(ValueError, match="no room"):
+        store.open_assembly(
+            CommandId("huge"), "video", content_type="video/mp4", total_bytes=20, total_chunks=1
+        )
+    assert store.has_open_assembly(CommandId("incoming"), "video")
+    assert store.get(CommandId("newer")) is None or store.reserved_bytes() <= 10
+
+
+def test_job_registry_marks_completed_jobs_expired() -> None:
+    registry = VideoJobRegistry(None)
+    live = registry.create(_job("live"))
+    assert registry.mark_expired(live.id) is live
+    done = registry.create(_job("done", created_at=1))
+    registry.update(done.id, render_finished=True, media_delivered=True, expires_at=10**10)
+    registry.settle(done.id)
+    expired = registry.mark_expired(done.id)
+    assert expired is not None and expired.status == "completed"
+    assert expired.expires_at is not None and expired.expires_at <= int(time.time())

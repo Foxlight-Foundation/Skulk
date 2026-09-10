@@ -751,6 +751,29 @@ cannot serve. The bundled MiniMax H3 cards under
 registry cards and pin every file of the ComfyUI repack by size and content
 identity.
 
+### Video jobs
+
+Renders take minutes, so the API exposes them as jobs rather than a held
+request: `POST /v1/videos` validates the request against the card (mode,
+duration range, canvas grid, reference limits), stages any attachments for
+the vision media path, records a `VideoJob`, opens the command's stream
+queue, and sends `VideoGeneration` to the master. The master places it on a
+single-host instance whose card serves the resolved mode. Progress frames on
+`DATA` update the job; the terminal frame carries the output manifest; the
+container itself arrives on `OUTPUT_MEDIA` and is assembled and verified in
+the API node's `VideoStore`. The job completes only when both halves agree.
+`GET /v1/videos/{id}` polls it, `GET /v1/videos/{id}/content` downloads the
+MP4 or thumbnail, and cancel and delete stop whichever phase the job is in:
+a running render is cancelled through the master, a container still in
+flight is stopped at the producing worker. Every failure path, whichever
+half fails first, funnels through one cleanup that deletes partial files,
+releases held frames and deadlines, fails the job, and closes its queue.
+Completed content expires after 24 hours, and the store evicts the oldest
+completed jobs when a new artifact would exceed its byte ceiling or the
+filesystem's reserve. Job records are mirrored to a JSON index so a
+restarted API still lists recent jobs, with anything in flight marked
+failed and completed artifacts re-verified before they are served.
+
 ### Text to speech
 
 `POST /v1/audio/speech` serves mounted TTS models. The API validates the
