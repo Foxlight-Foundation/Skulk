@@ -224,7 +224,9 @@ class VideoOutputManifest(CamelCaseModel):
     size_bytes: int = Field(ge=1)
     """Exact container size."""
     content_type: Literal["video/mp4"] = "video/mp4"
-    """Container MIME type; MP4 with H.264 video and AAC audio in v1."""
+    """Container MIME type. The codecs inside are the engine's (the MiniMax H3
+    engines mux H.264 video with AAC audio; the test engine muxes MJPEG frames
+    with 16-bit PCM), so consumers read them from the file."""
     width: int = Field(ge=1)
     """Frame width in pixels."""
     height: int = Field(ge=1)

@@ -366,6 +366,9 @@ async def test_runner_subprocess_renders_and_hands_the_manifest_to_the_worker(
     from skulk.utils.channels import channel
     from skulk.worker.runner.runner_supervisor import RunnerSupervisor
 
+    # The supervisor spawns the runner the way the node does; restore the
+    # process-wide start method afterwards so later tests see the default.
+    previous_method = multiprocessing.get_start_method(allow_none=True)
     multiprocessing.set_start_method("spawn", force=True)
     # The supervisor hands the logger to the spawned process, which pickles
     # its sinks; pytest's captured stderr is not picklable, so log to an
@@ -421,6 +424,7 @@ async def test_runner_subprocess_renders_and_hands_the_manifest_to_the_worker(
     finally:
         logger.remove(sink_id)
         logger.add(sys.stderr)
+        multiprocessing.set_start_method(previous_method, force=True)
     frames: list[DataChunk] = []
     while True:
         try:
