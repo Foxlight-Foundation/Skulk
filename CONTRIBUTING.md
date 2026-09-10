@@ -66,6 +66,8 @@ The Skulk dashboard is a React + TypeScript + styled-components app in `dashboar
 - `src/components/cluster/` — ClusterCard, PlacementManager, RunningInstanceCard
 - `src/components/layout/` — HeaderNav, SettingsPanel, InstancePanel, ConversationPanel, StoreRegistryTable
 - `src/components/chat/` — ChatForm, ChatMessages, ChatModelSelector
+- `src/components/topology/` — TopologyGraph, ClusterNode, capability satellites and flyout (`CapabilitySatellite`, `CapabilityFlyout`, `capabilityActions.ts`)
+- `src/components/capabilities/` — CapabilityPanel, the drawer for one capability node (overview, surfaces, actions)
 - `src/stores/` — Zustand stores (chatStore, uiStore) with localStorage/sessionStorage persistence
 - `src/hooks/` — useClusterState, useConfig, useModelPicker
 - `e2e/` — Explicit Playwright qualification against a running Skulk dashboard

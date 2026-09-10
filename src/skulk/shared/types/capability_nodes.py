@@ -191,6 +191,13 @@ class CapabilityNodeAction(FrozenModel):
     def _check_text(cls, value: str) -> str:
         return _validate_identifier(value)
 
+    @field_validator("surface_id", "capability_id")
+    @classmethod
+    def _check_targets(cls, value: str | None) -> str | None:
+        # Targets are bounded like every other identifier so a malformed
+        # action cannot smuggle an unbounded string into the reading.
+        return None if value is None else _validate_identifier(value)
+
     @field_validator("url")
     @classmethod
     def _check_url(cls, value: str | None) -> str | None:

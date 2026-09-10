@@ -85,6 +85,10 @@ def test_action_shapes_require_their_target() -> None:
         CapabilityNodeAction(action_id="a", title="A", kind="link", url="http://h/", payload={"x": 1})
     with pytest.raises(ValidationError):
         CapabilityNodeAction(action_id="a", title="A", kind="surface", surface_id="s", payload={"x": 1})
+    with pytest.raises(ValidationError):
+        CapabilityNodeAction(action_id="a", title="A", kind="surface", surface_id="s" * 201)
+    with pytest.raises(ValidationError):
+        CapabilityNodeAction(action_id="a", title="A", kind="descriptor", capability_id=" video.plan")
     oversized: dict[str, JsonValue] = {"blob": "x" * MAX_ACTION_PAYLOAD_BYTES}
     with pytest.raises(ValidationError):
         CapabilityNodeAction(
