@@ -455,3 +455,12 @@ def test_served_cpp_declaration_still_falls_back_when_probe_inconclusive() -> No
     )
     derivation = derive_node_backends(facts)
     assert "llama_server-vulkan" in derivation.backends
+
+
+def test_test_video_engine_is_advertised_only_when_asked() -> None:
+    quiet = derive_node_backends(make_facts())
+    assert not {"test_video", "test_video-cpu"} & quiet.backends
+    asked = derive_node_backends(make_facts().model_copy(update={"test_video_engine": True}))
+    assert {"test_video", "test_video-cpu"} <= asked.backends
+    assert not asked.conflicts
+    assert any("test video" in note for note in asked.notes)

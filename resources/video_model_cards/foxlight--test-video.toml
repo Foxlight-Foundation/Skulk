@@ -1,0 +1,40 @@
+# Skulk test video engine: a deterministic synthetic clip renderer that
+# exercises the audio-video substrate without a GPU. Served only by nodes
+# advertising the test_video engine (SKULK_TEST_VIDEO_ENGINE); it needs no
+# weights, the worker provisions a stand-in directory on startup.
+model_id = "foxlight/test-video"
+n_layers = 1
+hidden_size = 8
+supports_tensor = false
+tasks = ["TextToVideo", "ImageToVideo", "ReferenceToVideo"]
+family = "test-video"
+capabilities = ["video_gen"]
+trust_remote_code = false
+
+[storage_size]
+in_bytes = 4096
+
+[placement]
+compatible_backends = ["test_video", "test_video-cpu"]
+backend_preference = ["test_video-cpu"]
+
+[video]
+modes = ["t2va", "fl2va", "ref2va"]
+min_seconds = 1
+max_seconds = 15
+fps = 8
+frame_grid_multiple = 4
+frame_grid_offset = 1
+canvas_multiple = 8
+default_short_edge = 64
+max_pixels = 1048576
+aspect_ratios = ["16:9", "4:3", "1:1", "3:4", "9:16"]
+audio_output = true
+audio_sample_rate = 32000
+audio_channels = 2
+default_steps = 8
+
+[video.reference_limits]
+max_images = 4
+max_videos = 1
+max_audio_clips = 1

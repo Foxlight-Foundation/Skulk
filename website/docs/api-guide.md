@@ -1428,7 +1428,10 @@ Availability note: these routes are always registered. Video model cards are
 hidden from the catalog unless the node runs with
 `SKULK_ENABLE_VIDEO_MODELS=true`, and a create request needs a placed
 instance of the model on a node with a video engine; without one the job
-fails at placement with `video_mode_unavailable`.
+fails at placement with `video_mode_unavailable`. To exercise the routes
+without a GPU, start a node with `SKULK_TEST_VIDEO_ENGINE=1` and place the
+bundled `foxlight/test-video` card: it renders small seeded synthetic clips
+through the whole pipeline.
 
 ### The video object
 

@@ -49,6 +49,10 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 - **Spawns:** `mp.Process(target=entrypoint, daemon=True)` with the runner subtype's main loop
 - **Cleanup chain:** `join(5s)` → `terminate()` (SIGTERM) → `join(5s)` → `kill()` (SIGKILL); plus parent-pid watchdog inside the subprocess for reparenting (SIGKILL of agent)
 
+### Test video engine
+
+`src/skulk/worker/runner/test_video/`: `render.py` (request-to-plan resolution against the card, seeded frame and tone synthesis, minimal ISO BMFF muxer with MJPEG and `sowt` PCM tracks), `runner.py` (duck-typed `Runner` with the image runner's state machine; emits progress `VideoChunk` frames and the terminal manifest), `provision.py` (stand-in model directory so `foxlight/test-video` places without a download). Selected in `bootstrap.entrypoint` when the shard's stamped backend resolves to the `test_video` engine; advertised by `facts.derive._derive_test_video` when `SKULK_TEST_VIDEO_ENGINE` is set.
+
 ### Runner subprocess
 
 - **Role:** owns one MLX model; serves inference tasks for it; participates in distributed collectives with peer runners across ranks
@@ -1135,6 +1139,8 @@ Only `SKULK_*` names are read. The legacy `EXO_*` deprecation runway was removed
 | `SKULK_TEST_DISTRIBUTED_MODEL` | Tests only: force the distributed/prefix-cache slow-test model (`gpt-oss-20b` or `llama-3.2-1b`); default auto-selects by Metal working-set size |
 | `MLX_METAL_FAST_SYNCH` | Set by Skulk based on resolved card preference; not for direct operator use |
 | `MLX_HOSTFILE`, `MLX_RANK`, `MLX_RING_VERBOSE`, `MLX_IBV_DEVICES`, `MLX_JACCL_COORDINATOR` | MLX upstream env vars; auto-set by Skulk during distributed init. Ring hostfile addresses are chosen per neighbor pair from OBSERVED libp2p connections, ranked thunderbolt > maybe_ethernet > ethernet > wifi > unknown > VPN/overlay. Tailscale CGNAT (100.64/10, fd7a:115c:a1e0::/48) addresses are detected by ADDRESS (utun types don't gossip) and rank strictly last: the overlay exists for external reachability and may be DERP-relayed, so it is only used when a pair has no local candidate (#265). Selection lives in `_find_ip_prioritised` / `get_mlx_ring_hosts_by_node` (`src/skulk/master/placement_utils.py`) |
+| `SKULK_TEST_VIDEO_ENGINE` | Truthy value advertises the deterministic test video engine (`test_video` / `test_video-cpu`) on this node; serves only the bundled `foxlight/test-video` card. Test instrument only |
+| `SKULK_TEST_VIDEO_STEP_SECONDS` | Simulated wall time per sampling step in the test video engine (default 0.02) |
 | `SKULK_VIDEO_STORE_MAX_BYTES` | Ceiling on committed plus in-flight video artifacts one API node keeps under its video store (default 32 GiB); the store evicts the oldest completed jobs to fit a new artifact |
 
 ### CLI flags

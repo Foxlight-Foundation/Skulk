@@ -703,6 +703,19 @@ def _write_reference_media(
         staging.replace(target)
 
 
+def _provision_test_video_engine() -> None:
+    """Give the test video engine its stand-in weights when the node advertises it."""
+
+    from skulk.shared.backends import probe_node_backends
+
+    if "test_video" not in probe_node_backends():
+        return
+    from skulk.worker.runner.test_video.provision import provision_test_video_model
+
+    directory = provision_test_video_model()
+    logger.info(f"test video engine advertised; stand-in model at {directory}")
+
+
 def _purge_stale_video_directories() -> None:
     """Delete task-local video media left behind by an earlier worker process."""
 
@@ -1224,6 +1237,7 @@ class Worker:
             # Reference files and unacknowledged containers from a previous
             # process have no tracking record; nothing can ever release them.
             _purge_stale_video_directories()
+            _provision_test_video_engine()
             async with self._tg as tg:
                 tg.start_soon(info_gatherer.run)
                 tg.start_soon(self._forward_info, info_recv)

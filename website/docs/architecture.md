@@ -774,6 +774,23 @@ filesystem's reserve. Job records are mirrored to a JSON index so a
 restarted API still lists recent jobs, with anything in flight marked
 failed and completed artifacts re-verified before they are served.
 
+### Test video engine
+
+Before any served video engine exists, and on nodes that will never run
+one, `SKULK_TEST_VIDEO_ENGINE=1` advertises the deterministic test engine
+(`test_video`, `test_video-cpu`). It serves only the bundled
+`foxlight/test-video` card; the worker writes a stand-in model directory at
+startup so the card places without a download. A render walks every real
+stage: the request is resolved against the card's duration grid, canvas
+rules, and step default, progress frames report encoding, sampling,
+decoding, and muxing, the runner writes a seeded synthetic clip (MJPEG
+frames and a stereo PCM tone in a minimal MP4, plus a JPEG thumbnail), and
+the terminal frame carries the manifest the worker streams from. The same
+seed always produces the same bytes, cancellation between sampling steps
+leaves nothing behind, and `SKULK_TEST_VIDEO_STEP_SECONDS` stretches a
+render so cancel and progress paths can be exercised at human speed. It is
+a test instrument, not a product engine.
+
 ### Text to speech
 
 `POST /v1/audio/speech` serves mounted TTS models. The API validates the

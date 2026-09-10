@@ -367,6 +367,17 @@ A model card's `placement.compatible_backends` selects which engine serves it
   `AcceleratorMetrics.compute_capability` (+ `native_fp4`/`native_fp8`, via NVML)
   is the capability signal for keying placement on GPU generation, not vendor.
 
+- **`test_video`** (`worker/runner/test_video/`): deterministic test video
+  engine for the audio-video substrate. Advertised as `test_video` /
+  `test_video-cpu` only when `SKULK_TEST_VIDEO_ENGINE` is set; serves only the
+  bundled `foxlight/test-video` card, for which the worker provisions a
+  stand-in model directory at startup. Renders a seeded synthetic clip
+  (MJPEG video plus 16-bit PCM audio in a hand-muxed MP4, JPEG thumbnail)
+  through the real card rules, progress frames, terminal manifest,
+  `OUTPUT_MEDIA` transfer, and job settlement, so `/v1/videos` works end to
+  end on a node without a GPU. `SKULK_TEST_VIDEO_STEP_SECONDS` sets the
+  simulated per-step wall time. Never enable it on a production node.
+
 ### Intelligent fabric (steward)
 Optional resident operator assistant, config-gated (`intelligent_fabric` in
 skulk.yaml, default off). Identity = `BaseInstance.system_role` flagged

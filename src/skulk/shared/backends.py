@@ -38,7 +38,7 @@ def _is_executable_file(path: str) -> bool:
     """Whether ``path`` names an existing executable file."""
     return os.path.isfile(path) and os.access(path, os.X_OK)
 
-EngineType = Literal["mlx", "mlx_audio", "llama_cpp", "llama_server", "vllm"]
+EngineType = Literal["mlx", "mlx_audio", "llama_cpp", "llama_server", "vllm", "test_video"]
 """Inference runtime that loads and runs a model; selects the worker runner.
 
 ``llama_server`` is a *served-backend* engine: instead of loading the model
@@ -65,6 +65,11 @@ in-process engines can beat it for one request). GPU-only in scope: ``cuda``
 ``mlx-audio`` package. It is kept separate from ``mlx`` because TTS/STT model
 loading, generation, and future realtime session contracts are not the same as
 the text/vision MLX runner.
+
+``test_video`` is the deterministic test video engine: it renders synthetic
+audio-video clips in-process so the video substrate can be exercised end to
+end without a GPU. A node advertises it only when ``SKULK_TEST_VIDEO_ENGINE``
+is set, and it serves only the bundled ``foxlight/test-video`` card.
 """
 
 ComputeBackend = Literal["metal", "vulkan", "rocm", "cuda", "cpu"]
@@ -78,6 +83,7 @@ _ENGINES: Final[tuple[EngineType, ...]] = (
     "llama_cpp",
     "llama_server",
     "vllm",
+    "test_video",
 )
 _COMPUTE_BACKENDS: Final[tuple[ComputeBackend, ...]] = (
     "metal",
@@ -127,6 +133,12 @@ VLLM_BACKENDS_ENV: Final = "SKULK_VLLM_BACKENDS"
 # vLLM compute backends we support advertising. GPU-only: NVIDIA CUDA and AMD
 # CDNA ROCm. vLLM's Vulkan/Metal/CPU paths are out of scope for placement.
 _VLLM_COMPUTE_BACKENDS: Final[tuple[ComputeBackend, ...]] = ("cuda", "rocm")
+
+# Advertise the deterministic test video engine (``test_video`` /
+# ``test_video-cpu``) when set to a truthy value. The engine needs no hardware
+# and no weights; it exists to drive the video substrate in tests and on nodes
+# that cannot run a real video engine. Never set on a production node.
+TEST_VIDEO_ENGINE_ENV: Final = "SKULK_TEST_VIDEO_ENGINE"
 
 # Path to the ``ggml-rpc-server`` binary an RPC memory-donor runner launches
 # (#328, multi-node GGUF pooling). Optional: when unset, the donor looks for
