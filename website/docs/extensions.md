@@ -104,10 +104,11 @@ Notes:
   so callers stop selecting this node for it. When the last tag is withdrawn,
   one final empty reading is published so peers clear their entry; a node's
   tags also disappear when the node leaves the cluster.
-- A node must run a worker to gossip its advertisement (the worker owns the
-  telemetry emit path). The mainstream node runs both an API and a worker, so
-  this is automatic; a rare API-only (`--no-worker`) node records the tag but
-  does not gossip it.
+- On the mainstream node (API plus worker) the worker's info gatherer gossips
+  the tag on its poll. A management-only (`--no-worker`) node has no gatherer;
+  its node lifecycle publishes the tag set alongside its resource reading
+  every two seconds instead, so installed services stay discoverable without
+  a model worker.
 
 ### Publishing a capability node (`publish_capability_node`)
 
@@ -159,9 +160,10 @@ Notes:
   unreachable when the dashboard is served by another node.
 - `withdraw_capability_node(plugin_id, node_id)` removes the summary. When the
   last one goes, one empty reading clears the host's entry everywhere.
-- Unlike capability tags, management-only (`--no-worker`) hosts gossip these
-  summaries too, so a capability node on a host without a model worker still
-  appears in the topology.
+- Management-only (`--no-worker`) hosts gossip these summaries the same way
+  they gossip capability tags (from the node lifecycle, every two seconds), so
+  a capability node on a host without a model worker still appears in the
+  topology.
 - Set `SKULK_TEST_CAPABILITY_NODE=<url>` on a host to publish one stand-in
   node with a single link surface and see the satellite without a plugin.
 
