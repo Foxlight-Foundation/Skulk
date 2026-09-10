@@ -218,7 +218,7 @@ def create_managed_plugins_router(
         "/installations/{plugin_id}/operations",
         response_model=LifecycleOperation,
         summary="Submit a local plugin lifecycle operation",
-        description="Submit revision-fenced activate or disable with a retained operation_id. Activation selects only an already staged verified runtime; explicit rollback and permission acceptance are separate flags. Requires plugins:manage or direct owner authority. Client disconnect does not abandon accepted work. This never approves spending or replays provider requests.",
+        description="Submit revision-fenced activate, select or disable with a retained operation_id. Activation and stopped selection require an already staged verified runtime. Select keeps the owner stopped for offline setup or migration until a later explicit activation; explicit rollback and permission acceptance are separate flags. Requires plugins:manage or direct owner authority. Client disconnect does not abandon accepted work. This never approves spending or replays provider requests.",
     )
     async def submit(
         plugin_id: InstallationIdentifier,

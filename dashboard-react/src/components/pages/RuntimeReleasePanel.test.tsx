@@ -145,3 +145,26 @@ it('withholds recovery when source readiness is unavailable and permits an expli
   await contains('Ready for activation');
   expect(posts).toEqual([{ expected_source_revision: 2 }]);
 });
+
+
+it('selects a stopped runtime after permission review and permits later explicit activation', async () => {
+  await click('Inspect configured release');
+  await contains('example.plugin 1.2.3');
+  await click('Download and install');
+  await contains('Ready for activation');
+  await click('Select with owner stopped');
+  expect(posts).toHaveLength(1);
+  await act(async () => { host.querySelector<HTMLInputElement>('input[type=checkbox]')?.click(); });
+  await click('Select with owner stopped');
+  await act(async () => { await vi.waitFor(() => expect(posts).toHaveLength(2)); });
+  expect(posts[1]).toMatchObject({ action: 'select', runtime_digest: review.runtime_digest, expected_revision: 0, accept_permissions: true });
+  await click('Activate release');
+  expect(posts).toHaveLength(2);
+  const selected: ManagedRuntime = { ...runtime, selected_digest: review.runtime_digest, selection_revision: 1, operation_id: String(posts[1].operation_id), operation_state: 'complete' };
+  await act(async () => { root.render(<Provider store={store}><ThemeProvider theme={darkTheme}><RuntimeReleasePanel runtime={selected} /></ThemeProvider></Provider>); });
+  await click('Select with owner stopped');
+  expect(posts).toHaveLength(2);
+  await click('Activate release');
+  await act(async () => { await vi.waitFor(() => expect(posts).toHaveLength(3)); });
+  expect(posts[2]).toMatchObject({ action: 'activate', expected_revision: 1 });
+});

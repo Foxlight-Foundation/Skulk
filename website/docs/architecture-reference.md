@@ -1426,3 +1426,12 @@ acceptance, before any claim of provider completion. The private owner validates
 request correlation, preserves acknowledgement across restart and reconciles later
 receipt state without replay. Core and dashboard transport/display this bounded
 phase alongside independent cleanup observations.
+
+- **Selected but stopped plugins:** `LifecycleRequest.action=select` uses the same
+  revision, trust, compatibility and permission checks as activation but publishes
+  `RuntimeSelection.enabled=false`. Terminal and dashboard clients share the
+  operation; a later explicit `activate` permits owner startup. Local signed
+  setup/management entrypoints can use the selected runtime before owner identity
+  initialization. Interrupted selection journals retain `verify_runtime=true` and
+  revalidate trust/artifacts; ordinary disable preserves invalid-trust withdrawal.
+  Selection performs no plugin state migration or paid operation.

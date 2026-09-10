@@ -6,7 +6,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from skulk.extensions.runtime_files import RuntimeLock, read_private, write_private
-from skulk.extensions.runtime_selection import RuntimeSelector
+from skulk.extensions.runtime_selection import RuntimeSelector, SelectionOperation
 from skulk.extensions.tests.test_runtime_install import artifacts
 
 
@@ -78,6 +78,9 @@ async def test_selection_preserves_state_and_requires_explicit_changes(
     )
     disabled = selector.disable(expected_revision=3)
     assert not disabled.selection.enabled
+    legacy = disabled.model_dump_json()
+    assert "verify_runtime" not in legacy
+    assert SelectionOperation.model_validate_json(legacy) == disabled
     assert selector.current() == disabled.selection
     assert read_private(selector.root / "identity") == b"retained identity"
     assert read_private(selector.root / "receipts") == b"retained cleanup obligation"

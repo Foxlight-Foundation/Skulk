@@ -559,6 +559,9 @@ is distinct from capability readiness. Never report fully stopped while a surviv
 child still holds the supervisor fence, or couple independent cleanup to this service.
 `runtime_controller.py` owns durable local lifecycle intent; preview before stopping
 and retain exact operations across client disconnect and manager restart.
+`select` retains a verified runtime with its owner stopped for local setup/migration
+before identity initialization. Require later explicit activation and revalidate
+trust during interrupted selection; never confuse it with invalid-trust disable.
 `runtime_manager.py` provides the fixed bounded local management socket, with
 host identity provisioned locally and no remote path/command selection. Unavailable
 plugin runtimes must not remove manager inventory or operation-status access.

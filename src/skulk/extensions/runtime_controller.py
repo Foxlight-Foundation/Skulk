@@ -34,8 +34,8 @@ class LifecycleRequest(BaseModel):
         pattern=r"^[a-f0-9]{32}$",
         description="Caller-retained idempotent local operation ID.",
     )
-    action: Literal["activate", "disable"] = Field(
-        description="Activate a retained generation or withdraw future work."
+    action: Literal["activate", "select", "disable"] = Field(
+        description="Activate a retained generation, select it while keeping its owner stopped, or withdraw future work."
     )
     expected_revision: int = Field(
         ge=0, description="Reviewed current installation selection revision."
@@ -55,8 +55,8 @@ class LifecycleRequest(BaseModel):
     @model_validator(mode="after")
     def valid_action(self) -> Self:
         """Reject ambiguous or irrelevant fields before any local operation starts."""
-        if self.action == "activate" and self.runtime_digest is None:
-            raise ValueError("activation requires a runtime digest")
+        if self.action in ("activate", "select") and self.runtime_digest is None:
+            raise ValueError("runtime selection requires a runtime digest")
         if self.action == "disable" and (
             self.runtime_digest is not None or self.rollback or self.accept_permissions
         ):
@@ -97,7 +97,7 @@ class LifecycleOperation(BaseModel):
         if self.selection.enabled != (self.request.action == "activate"):
             raise ValueError("lifecycle selection action differs")
         if (
-            self.selection.enabled
+            self.request.action in ("activate", "select")
             and self.selection.runtime_digest != self.request.runtime_digest
         ):
             raise ValueError("lifecycle selected runtime differs")
@@ -191,7 +191,7 @@ class RuntimeController:
             os.close(descriptor)
 
     async def _preview(self, request: LifecycleRequest) -> RuntimeSelection:
-        if request.action == "activate":
+        if request.action in ("activate", "select"):
             assert request.runtime_digest is not None
             return await self.selector.preview(
                 request.runtime_digest,
@@ -199,6 +199,7 @@ class RuntimeController:
                 operation_id=request.operation_id,
                 rollback=request.rollback,
                 accept_permissions=request.accept_permissions,
+                enabled=request.action == "activate",
             )
         current = self.selector.current()
         if current is None or current.revision != request.expected_revision:
@@ -304,7 +305,10 @@ class RuntimeController:
                 pending = SelectionOperation.model_validate_json(
                     read_private(self.selector.pending)
                 )
-                if pending.selection != operation.selection:
+                if (
+                    pending.selection != operation.selection
+                    or pending.verify_runtime != (operation.request.action == "select")
+                ):
                     raise ValueError("different selection needs recovery")
                 await self._stop_service()
                 await self.selector.recover()
@@ -315,7 +319,7 @@ class RuntimeController:
                 self._save(result)
                 await self._stop_service()
                 request = operation.request
-                if request.action == "activate":
+                if request.action in ("activate", "select"):
                     assert request.runtime_digest is not None
                     selected = await self.selector.activate(
                         request.runtime_digest,
@@ -323,6 +327,7 @@ class RuntimeController:
                         operation_id=request.operation_id,
                         rollback=request.rollback,
                         accept_permissions=request.accept_permissions,
+                        enabled=request.action == "activate",
                     )
                 else:
                     selected = self.selector.disable(

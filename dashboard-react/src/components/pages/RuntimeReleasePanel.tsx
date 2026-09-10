@@ -9,7 +9,7 @@ import {
 import { Button } from '../common/Button';
 import { RuntimeSourceForm } from './RuntimeSourceForm';
 
-/** Review, stage and explicitly activate one trusted source without replaying a lost request. */
+/** Review, stage and select or activate a trusted release without replaying a lost request. */
 export function RuntimeReleasePanel({ runtime }: { runtime: ManagedRuntime }) {
   const { t } = useSkulkTranslation();
   const [inspect, inspection] = useLazyGetRuntimeReleaseQuery();
@@ -18,7 +18,7 @@ export function RuntimeReleasePanel({ runtime }: { runtime: ManagedRuntime }) {
   const [activate, activating] = useActivateRuntimeReleaseMutation();
   const [recover, recovering] = useRecoverRuntimeInstallationMutation();
   const [submitted, setSubmitted] = useState<string | null>(null);
-  const [activationSubmitted, setActivationSubmitted] = useState(false);
+  const [activationSubmitted, setActivationSubmitted] = useState<string | null>(null);
   const [acceptedDigest, setAcceptedDigest] = useState<string | null>(null);
   const [rollback, setRollback] = useState(false);
   const [notice, setNotice] = useState('');
@@ -32,6 +32,8 @@ export function RuntimeReleasePanel({ runtime }: { runtime: ManagedRuntime }) {
   const uncertain = submitted && operation?.request.operation_id !== submitted;
   const staged = operation?.state === 'staged' && operation.review.runtime_digest === review?.runtime_digest;
   const lifecyclePending = runtime.operation_state === 'accepted' || runtime.operation_state === 'applying' || runtime.operation_state === 'recovery_required';
+  const selectionPending = !!activationSubmitted && (runtime.operation_id !== activationSubmitted || lifecyclePending);
+  const alreadySelected = !runtime.enabled && runtime.selected_digest === review?.runtime_digest;
   const alreadyActive = runtime.enabled && runtime.selected_digest === review?.runtime_digest;
   const stateLabel = operation ? {
     accepted: t('plugins.installAccepted', 'Accepted'),
@@ -57,14 +59,15 @@ export function RuntimeReleasePanel({ runtime }: { runtime: ManagedRuntime }) {
       setNotice(t('plugins.installUncertain', 'The installation response was not confirmed. Read installation status before another action.'));
     }
   };
-  const activateRelease = async () => {
+  const activateRelease = async (action: 'activate' | 'select' = 'activate') => {
     if (!review || !permissionsAccepted) return;
-    setActivationSubmitted(true);
+    const operationId = crypto.randomUUID().replaceAll('-', '');
+    setActivationSubmitted(operationId);
     setNotice('');
     try {
-      await activate({ pluginId: runtime.plugin_id, operationId: crypto.randomUUID().replaceAll('-', ''), expectedRevision: runtime.selection_revision, runtimeDigest: review.runtime_digest, rollback }).unwrap();
+      await activate({ pluginId: runtime.plugin_id, operationId, expectedRevision: runtime.selection_revision, runtimeDigest: review.runtime_digest, rollback, action }).unwrap();
     } catch {
-      setNotice(t('plugins.activationUncertain', 'The activation response was not confirmed. Check the retained lifecycle operation above before another action.'));
+      setNotice(t('plugins.selectionUncertain', 'The selection response was not confirmed. Check the retained lifecycle operation above before another action.'));
     }
   };
   const recoverInstallation = async () => {
@@ -93,7 +96,9 @@ export function RuntimeReleasePanel({ runtime }: { runtime: ManagedRuntime }) {
       {staged ? <>
         <p><label><input type="checkbox" checked={permissionsAccepted} onChange={(event) => setAcceptedDigest(event.target.checked ? review.runtime_digest : null)} /> {t('plugins.acceptReleasePermissions', 'I accept the permissions listed for this release.')}</label></p>
         <p><label><input type="checkbox" checked={rollback} onChange={(event) => setRollback(event.target.checked)} /> {t('plugins.allowReleaseRollback', 'Allow rollback to this older retained release.')}</label></p>
-        <Button type="button" disabled={busy || !permissionsAccepted || activationSubmitted || lifecyclePending || alreadyActive || !!installation.error} onClick={() => void activateRelease()}>{t('plugins.activateRelease', 'Activate release')}</Button>
+        <p>{t('plugins.selectStoppedHelp', 'Select with the owner stopped for offline setup or migration. Activate the release when that work is complete.')}</p>
+        <Button type="button" disabled={busy || !permissionsAccepted || selectionPending || lifecyclePending || alreadySelected || !!installation.error} onClick={() => void activateRelease('select')}>{t('plugins.selectStoppedRelease', 'Select with owner stopped')}</Button>
+        <Button type="button" disabled={busy || !permissionsAccepted || selectionPending || lifecyclePending || alreadyActive || !!installation.error} onClick={() => void activateRelease()}>{t('plugins.activateRelease', 'Activate release')}</Button>
       </> : null}
     </> : null}
     {operation ? <p role="status">{stateLabel} · {(operation.downloaded_bytes / 1048576).toFixed(1)} MiB</p> : null}

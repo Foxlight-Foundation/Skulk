@@ -80,6 +80,10 @@ class RuntimeSelection(_Contract):
     )
 
 
+def _omit_false(value: bool) -> bool:
+    return not value
+
+
 class SelectionOperation(_Contract):
     """Durable local selection intent and safe reconnect/recovery status."""
 
@@ -94,6 +98,11 @@ class SelectionOperation(_Contract):
     )
     selection: RuntimeSelection = Field(
         description="Exact authorized target; no paths or credentials."
+    )
+    verify_runtime: bool = Field(
+        default=False,
+        exclude_if=_omit_false,
+        description="Reverify a newly selected stopped runtime during recovery; legacy disable journals omit this field.",
     )
 
     @model_validator(mode="after")
@@ -195,7 +204,7 @@ class RuntimeSelector:
             raise
 
     def _start(
-        self, selection: RuntimeSelection, expected_revision: int
+        self, selection: RuntimeSelection, expected_revision: int, *, verify_runtime: bool = False
     ) -> SelectionOperation:
         if self.pending.exists():
             raise ValueError("pending selection requires recovery")
@@ -207,6 +216,7 @@ class RuntimeSelector:
             if (
                 prior.selection != selection
                 or prior.expected_revision != expected_revision
+                or prior.verify_runtime != verify_runtime
             ):
                 raise ValueError("selection operation identity conflict")
             if prior.state != "complete":
@@ -218,6 +228,7 @@ class RuntimeSelector:
                 state="pending",
                 expected_revision=expected_revision,
                 selection=selection,
+                verify_runtime=verify_runtime,
             )
         )
 
@@ -230,6 +241,7 @@ class RuntimeSelector:
         operation_id: str,
         rollback: bool,
         accept_permissions: bool,
+        enabled: bool = True,
     ) -> RuntimeSelection:
         current = self.current()
         release = runtime.claims.release
@@ -257,7 +269,7 @@ class RuntimeSelector:
             revision=expected_revision + 1,
             operation_id=operation_id or uuid4().hex,
             runtime_digest=runtime.digest,
-            enabled=True,
+            enabled=enabled,
             bundle_id=release.manifest.bundle_id,
             sequence=release.sequence,
             highest_sequence=max(
@@ -280,12 +292,14 @@ class RuntimeSelector:
         operation_id: str,
         rollback: bool = False,
         accept_permissions: bool = False,
+        enabled: bool = True,
     ) -> RuntimeSelection:
         """Validate an exact local selection without interrupting a running owner.
 
         This nonbillable inspection holds installer ownership, verifies the target
         and checks revision, permissions and migration compatibility. Activation
         repeats these checks under stopped-owner ownership before publication.
+        Set enabled=False to preview a verified selection that keeps the owner stopped.
         """
         async with self.installer.locked_generation(runtime_digest) as (runtime, host):
             current = self.current()
@@ -298,6 +312,7 @@ class RuntimeSelector:
                 operation_id=operation_id,
                 rollback=rollback,
                 accept_permissions=accept_permissions,
+                enabled=enabled,
             )
 
     async def activate(
@@ -308,12 +323,15 @@ class RuntimeSelector:
         operation_id: str | None = None,
         rollback: bool = False,
         accept_permissions: bool = False,
+        enabled: bool = True,
     ) -> SelectionOperation:
         """Select a verified generation after the caller stops its private owner.
 
         Expanded permissions and lower release sequences require explicit owner
         choices. State compatibility is publisher-declared; configuration schema
-        changes require migration tooling. This does not approve paid proposals.
+        changes require migration tooling. Set enabled=False to retain the verified
+        generation for offline setup without permitting owner startup. Interrupted
+        selection still revalidates trust. This does not approve paid proposals.
         """
         async with self.installer.locked_generation(runtime_digest) as (runtime, host):
             owner = RuntimeLock(self.root, "supervisor.lock")
@@ -325,8 +343,11 @@ class RuntimeSelector:
                     operation_id=operation_id or uuid4().hex,
                     rollback=rollback,
                     accept_permissions=accept_permissions,
+                    enabled=enabled,
                 )
-                return self._start(selection, expected_revision)
+                # Stopped selection still introduces a verified runtime. Its
+                # recovery must not use disable's invalid-trust escape path.
+                return self._start(selection, expected_revision, verify_runtime=not enabled)
             finally:
                 owner.close()
 
@@ -366,7 +387,7 @@ class RuntimeSelector:
     async def recover(self) -> SelectionOperation:
         """Finish one journaled local selection after interruption and revalidation."""
         operation = SelectionOperation.model_validate_json(read_private(self.pending))
-        if operation.selection.enabled:
+        if operation.selection.enabled or operation.verify_runtime:
             async with self.installer.locked_generation(
                 operation.selection.runtime_digest
             ) as (_, host):

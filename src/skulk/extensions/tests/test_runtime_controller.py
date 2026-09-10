@@ -204,3 +204,122 @@ async def test_accepted_journal_failure_is_explicitly_recoverable_without_restar
         assert await controller.recover(request.operation_id) == complete
     finally:
         await controller.close()
+
+
+async def staged_controller(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[RuntimeController, str]:
+    """Prepare an empty verified installation whose owner visibly marks any start."""
+    from skulk.extensions.tests.test_runtime_install import artifacts
+    from skulk.extensions.tests.test_runtime_service import OWNER_SOURCE
+
+    source = OWNER_SOURCE.replace(
+        "print('sensitive fixture output',flush=True)",
+        "open(a.root+'/owner-started','w').write('started')\n"
+        "print('sensitive fixture output',flush=True)",
+    )
+    metadata, trust, host = artifacts(root / "source", owner_source=source)
+    monkeypatch.setattr("skulk.extensions.runtime_install.measure_host", lambda: host)
+    controller = RuntimeController(root / "installed")
+    write_private(controller.root / "publisher-trust.json", trust.model_dump_json().encode())
+    staged = await controller.selector.installer.stage(metadata, root / "source")
+    return controller, staged.runtime_digest
+
+
+async def test_select_stopped_generation_requires_later_explicit_activation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A first selection and manager restart must not initialize private owner state."""
+    controller, digest = await staged_controller(tmp_path, monkeypatch)
+    request = LifecycleRequest(
+        operation_id="1" * 32, action="select", expected_revision=0, runtime_digest=digest
+    )
+    await controller.start()
+    try:
+        await controller.submit(request)
+        assert controller.work is not None
+        await controller.work
+        selected = controller.operation(request.operation_id)
+        assert selected.state == "complete" and not selected.selection.enabled
+        assert not (controller.root / "owner-started").exists()
+        assert await controller.submit(request) == selected
+        with pytest.raises(ValueError, match="identity"):
+            await controller.submit(request.model_copy(update={"action": "activate"}))
+    finally:
+        await controller.close()
+    resumed = RuntimeController(controller.root)
+    try:
+        await resumed.start()
+        assert resumed.service_task is not None
+        await resumed.service_task
+        assert not (resumed.root / "owner-started").exists()
+        await resumed.submit(LifecycleRequest(
+            operation_id="2" * 32, action="activate", expected_revision=1, runtime_digest=digest
+        ))
+        assert resumed.work is not None
+        await resumed.work
+        assert resumed.service is not None
+        await running(resumed.service)
+        assert (resumed.root / "owner-started").read_text() == "started"
+    finally:
+        await resumed.close()
+
+
+@pytest.mark.parametrize("fault", ["before_selection", "after_selection"])
+@pytest.mark.parametrize("damage", ["none", "artifact", "revocation", "journal"])
+async def test_stopped_selection_recovery_revalidates_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str, damage: str
+) -> None:
+    """Interrupted stopped selection cannot use disable's invalid-trust recovery."""
+    from skulk.extensions.runtime_artifacts import RuntimeTrust
+    from skulk.extensions.runtime_files import read_private
+
+    controller, digest = await staged_controller(tmp_path, monkeypatch)
+    request = LifecycleRequest(
+        operation_id="3" * 32, action="select", expected_revision=0, runtime_digest=digest
+    )
+    await controller.start()
+    selection_path = controller.root / "runtime-selection.json"
+
+    def fail_selection(path: Path, content: bytes) -> None:
+        if path == selection_path:
+            if fault == "after_selection":
+                write_private(path, content)
+            raise OSError("synthetic selection interruption")
+        write_private(path, content)
+
+    try:
+        with monkeypatch.context() as failure:
+            failure.setattr("skulk.extensions.runtime_selection.write_private", fail_selection)
+            await controller.submit(request)
+            assert controller.work is not None
+            await controller.work
+        assert controller.operation(request.operation_id).state == "recovery_required"
+    finally:
+        await controller.close()
+    if damage == "journal":
+        from skulk.extensions.runtime_selection import SelectionOperation
+
+        pending = controller.selector.pending
+        payload = SelectionOperation.model_validate_json(read_private(pending))
+        write_private(
+            pending, payload.model_copy(update={"verify_runtime": False}).model_dump_json().encode()
+        )
+    elif damage == "artifact":
+        artifact = controller.root / "generations" / digest / "artifacts/bundle.pyz"
+        artifact.write_bytes(artifact.read_bytes() + b"tampered")
+    elif damage == "revocation":
+        path = controller.root / "publisher-trust.json"
+        trust = RuntimeTrust.model_validate_json(read_private(path))
+        write_private(path, trust.model_copy(update={"revision": 2, "revoked_artifacts": (digest,)}).model_dump_json().encode())
+    resumed = RuntimeController(controller.root)
+    try:
+        await resumed.start()
+        observed = resumed.operation(request.operation_id)
+        assert (observed.state == "complete") == (damage == "none")
+        assert not (resumed.root / "owner-started").exists()
+        if resumed.service_task is not None:
+            await resumed.service_task
+        assert resumed.service is None or resumed.service.process is None
+    finally:
+        await resumed.close()

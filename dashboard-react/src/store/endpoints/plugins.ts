@@ -115,7 +115,7 @@ export interface ManagedRuntime {
 
 /** Durable local operation reference; provider submissions and approvals are separate. */
 export interface ManagedOperation {
-  request: { operation_id: string; action: 'activate' | 'disable' };
+  request: { operation_id: string; action: 'activate' | 'select' | 'disable' };
   state: 'accepted' | 'applying' | 'complete' | 'failed' | 'recovery_required';
   error_code: string | null;
 }
@@ -233,10 +233,10 @@ const pluginsApi = apiSlice.injectEndpoints({
       query: ({ pluginId, request }) => ({ url: `/v1/plugins/managed/installations/${encodeURIComponent(pluginId)}/install`, method: 'POST', headers, body: request }),
       invalidatesTags: ['Plugins'],
     }),
-    activateRuntimeRelease: build.mutation<ManagedOperation, { pluginId: string; operationId: string; expectedRevision: number; runtimeDigest: string; rollback: boolean }>({
-      query: ({ pluginId, operationId, expectedRevision, runtimeDigest, rollback }) => ({
+    activateRuntimeRelease: build.mutation<ManagedOperation, { pluginId: string; operationId: string; expectedRevision: number; runtimeDigest: string; rollback: boolean; action?: 'activate' | 'select' }>({
+      query: ({ pluginId, operationId, expectedRevision, runtimeDigest, rollback, action = 'activate' }) => ({
         url: `/v1/plugins/managed/installations/${encodeURIComponent(pluginId)}/operations`, method: 'POST', headers,
-        body: { operation_id: operationId, action: 'activate', expected_revision: expectedRevision, runtime_digest: runtimeDigest, rollback, accept_permissions: true },
+        body: { operation_id: operationId, action, expected_revision: expectedRevision, runtime_digest: runtimeDigest, rollback, accept_permissions: true },
       }),
       invalidatesTags: ['Plugins'],
     }),

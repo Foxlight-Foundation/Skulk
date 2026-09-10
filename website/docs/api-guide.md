@@ -3749,13 +3749,18 @@ The local socket accepts these typed requests:
 | `list` | None | Lists registered installation IDs, selected runtime digests, selection revisions, retained operation references, observed process status and stale/unavailable observations. Process existence does not imply capability readiness. |
 | `register` | `plugin_id` | Registers an empty `managed.*` installation, up to sixteen per manager. Provisions its existing host identity automatically; an existing mismatched identity is refused without replacement. No provider request is made. |
 | `get` | `plugin_id` | Returns desired selection and process observation without paths, credentials or raw output. |
-| `submit` | `plugin_id`, `request` | Accepts a local lifecycle request after validating its revision and target. The nested request contains `operation_id` (32 lowercase hexadecimal characters), `action` (`activate` or `disable`), `expected_revision`, and for activation `runtime_digest`, optional `rollback` and `accept_permissions`. No spending authority is conveyed. |
+| `submit` | `plugin_id`, `request` | Accepts a local lifecycle request after validating its revision and target. The nested request contains `operation_id` (32 lowercase hexadecimal characters), `action` (`activate`, `select` or `disable`), `expected_revision`, and for activation or stopped selection `runtime_digest`, optional `rollback` and `accept_permissions`. No spending authority is conveyed. |
 | `operation` | `plugin_id`, `operation_id` | Reads retained progress. Reconnect reads this result; reusing an ID with different intent is refused. |
 | `recover` | `plugin_id`, `operation_id` | Explicitly resumes only that retained local intent after its fault is corrected. A completed operation remains unchanged. No new request or provider operation is created. |
 
 Activation validates signed artifacts, permission expansion and migration
 compatibility before stopping the owner; it repeats admission checks before
-switching. Disable retains runtime generations, identities and cleanup material.
+switching. `select` performs the same checks and publishes `enabled: false`,
+allowing verified host-local setup or migration before any owner startup. A later
+`activate` request must use the new selection revision; selection itself performs
+no migration or identity initialization. Interrupted stopped selections revalidate
+trust and artifacts before completion. Disable retains runtime generations,
+identities and cleanup material, even when release trust is invalid.
 Operations move through `accepted`, `applying`, `complete`, `failed` or
 `recovery_required`; completion confirms the local desired-state change, with
 service and capability readiness observed separately. Pending local selection
@@ -3872,7 +3877,7 @@ without restart. Missing setup returns an actionable unavailable response.
 | GET | `/v1/plugins/managed` | Requires `plugins:read`. Returns `installations`, at most sixteen entries, with `plugin_id`, `selected_digest`, `selection_revision`, `enabled`, `service`, `stale`, `error_code`, `operation_id` and `operation_state`. Pending or selected operation references allow reconnect to resume observation without repeating a mutation. |
 | POST | `/v1/plugins/managed/installations` | Requires `plugins:manage`. Body: `plugin_id` in the `managed.*` namespace. Registers an empty installation and returns its observation. Does not download, stage or enable a release. |
 | GET | `/v1/plugins/managed/installations/{plugin_id}` | Requires `plugins:read`. Returns `installation` observation and `selection`, nullable before a release is selected. |
-| POST | `/v1/plugins/managed/installations/{plugin_id}/operations` | Requires `plugins:manage`. Body: `operation_id` (32 lowercase hexadecimal characters), `action` (`activate` or `disable`), `expected_revision` (nonnegative integer), and activation-only `runtime_digest`, optional `rollback` and `accept_permissions` booleans. Returns the retained `LifecycleOperation`. Activation accepts only an already staged, verified generation. |
+| POST | `/v1/plugins/managed/installations/{plugin_id}/operations` | Requires `plugins:manage`. Body: `operation_id` (32 lowercase hexadecimal characters), `action` (`activate`, `select` or `disable`), `expected_revision` (nonnegative integer), and activation/selection-only `runtime_digest`, optional `rollback` and `accept_permissions` booleans. Returns the retained `LifecycleOperation`. Activation and stopped selection accept only an already staged, verified generation. `select` keeps its owner stopped until a later explicit `activate` request. |
 | GET | `/v1/plugins/managed/installations/{plugin_id}/operations/{operation_id}` | Requires `plugins:read`. Reads the original local operation's exact `request`, previewed `selection`, `state` and sanitized `error_code`. Never repeats its effect. |
 | POST | `/v1/plugins/managed/installations/{plugin_id}/operations/{operation_id}/recover` | Requires `plugins:manage`. No body. Explicitly resumes the existing journaled local operation; a completed operation is unchanged. |
 
