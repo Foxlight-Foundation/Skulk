@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { TopologyData, NodeInfo, NodeHealth, TopologyEdge } from '../types/topology';
+import { CAPABILITY_SATELLITES_ENABLED } from '../featureFlags';
 import {
   useGetLocalNodeIdQuery,
   useGetLocalNodeIdentityQuery,
@@ -539,12 +540,14 @@ export function useClusterState(): ClusterState {
     // Capability hosts first: a management-only host that publishes
     // capability nodes is placed from telemetry with its real identity and
     // health, whether it is this dashboard's own host or a remote one.
-    const withCapabilityHosts = ensureCapabilityHostsPresent(
-      transformed,
-      Object.keys(data.capabilityNodes ?? {}),
-      data.nodeIdentities ?? {},
-      data.nodeHealth ?? {},
-    );
+    const withCapabilityHosts = CAPABILITY_SATELLITES_ENABLED
+      ? ensureCapabilityHostsPresent(
+          transformed,
+          Object.keys(data.capabilityNodes ?? {}),
+          data.nodeIdentities ?? {},
+          data.nodeHealth ?? {},
+        )
+      : transformed;
     return ensureLocalNodePresent(
       withCapabilityHosts,
       resolvedLocalNodeId,
