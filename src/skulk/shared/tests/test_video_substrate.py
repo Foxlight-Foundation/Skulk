@@ -873,13 +873,70 @@ def test_video_store_evicts_oldest_completed_jobs_to_fit(tmp_path: Path) -> None
     assert store.get(CommandId("oldest")) is None and store.get(CommandId("newer")) is not None
     assert not (tmp_path / "oldest").exists()
     # An assembly in flight is never a victim, and an artifact that cannot
-    # fit even with every finished job gone is refused outright.
+    # fit even with every finished job gone is refused before anything is
+    # deleted, so the finished job survives the refusal.
     with pytest.raises(ValueError, match="no room"):
         store.open_assembly(
             CommandId("huge"), "video", content_type="video/mp4", total_bytes=20, total_chunks=1
         )
     assert store.has_open_assembly(CommandId("incoming"), "video")
-    assert store.get(CommandId("newer")) is None or store.reserved_bytes() <= 10
+    assert store.get(CommandId("newer")) is not None
+
+
+def test_video_store_never_evicts_a_kept_job(tmp_path: Path) -> None:
+    store = VideoStore(tmp_path, max_total_bytes=10)
+    _commit(store, "between-halves", b"123456")
+    _commit(store, "finished", b"abc")
+    evicted = store.open_assembly(
+        CommandId("incoming"),
+        "video",
+        content_type="video/mp4",
+        total_bytes=4,
+        total_chunks=1,
+        keep={CommandId("between-halves")},
+    )
+    assert evicted == (CommandId("finished"),)
+    assert store.get(CommandId("between-halves")) is not None
+    with pytest.raises(ValueError, match="no room"):
+        store.open_assembly(
+            CommandId("more"),
+            "video",
+            content_type="video/mp4",
+            total_bytes=4,
+            total_chunks=1,
+            keep={CommandId("between-halves")},
+        )
+    assert store.get(CommandId("between-halves")) is not None
+
+
+def test_video_store_counts_open_assemblies_against_free_disk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = VideoStore(tmp_path, max_total_bytes=10**9)
+    reserve = 1024 * 1024 * 1024
+    monkeypatch.setattr(store, "_free_disk_bytes", lambda: reserve + 100)
+    store.open_assembly(
+        CommandId("first"), "video", content_type="video/mp4", total_bytes=60, total_chunks=1
+    )
+    # The first assembly's unwritten 60 bytes are promised; only 40 remain
+    # above the reserve, so a second 60-byte artifact does not fit.
+    with pytest.raises(ValueError, match="no room"):
+        store.open_assembly(
+            CommandId("second"), "video", content_type="video/mp4", total_bytes=60, total_chunks=1
+        )
+    store.append(CommandId("first"), "video", 1, b"x" * 60)
+    monkeypatch.setattr(store, "_free_disk_bytes", lambda: reserve + 100)
+    assert store.open_assembly(
+        CommandId("second"), "video", content_type="video/mp4", total_bytes=60, total_chunks=1
+    ) == ()
+
+
+def test_job_registry_lists_active_ids() -> None:
+    registry = VideoJobRegistry(None)
+    live = registry.create(_job("live"))
+    done = registry.create(_job("done", created_at=1))
+    registry.fail(done.id, "x")
+    assert registry.active_ids() == frozenset({live.id})
 
 
 def test_job_registry_marks_completed_jobs_expired() -> None:

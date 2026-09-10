@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import shutil
 import time
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, Literal, Protocol
@@ -126,41 +127,77 @@ class VideoStore:
             assembly.total_bytes for assembly in self._assemblies.values()
         )
 
-    def _fits(self, total_bytes: int) -> bool:
-        if self.reserved_bytes() + total_bytes > self._max_total_bytes:
-            return False
+    def _free_disk_bytes(self) -> int | None:
         try:
-            free = shutil.disk_usage(self._storage_dir).free
+            return shutil.disk_usage(self._storage_dir).free
         except OSError:
             # An unmeasurable filesystem is not a reason to refuse; the write
             # itself fails loudly if the disk is really full.
-            return True
-        return free - total_bytes >= _DISK_RESERVE_BYTES
+            return None
 
-    def _oldest_evictable(self, exclude: CommandId) -> CommandId | None:
+    def _unwritten_assembly_bytes(self) -> int:
+        """Bytes open assemblies have declared but not yet written to disk."""
+
+        return sum(
+            max(0, assembly.total_bytes - assembly.received_bytes)
+            for assembly in self._assemblies.values()
+        )
+
+    def _fits(self, total_bytes: int, *, released: int = 0) -> bool:
+        """Whether an artifact fits once ``released`` bytes have been evicted."""
+
+        if self.reserved_bytes() - released + total_bytes > self._max_total_bytes:
+            return False
+        free = self._free_disk_bytes()
+        if free is None:
+            return True
+        # Free space still counts the unwritten remainder of every open
+        # assembly, which is already promised to those transfers.
+        promised = self._unwritten_assembly_bytes() + total_bytes
+        return free + released - promised >= _DISK_RESERVE_BYTES
+
+    def _evictable(self, exclude: CommandId, keep: Collection[CommandId]) -> dict[CommandId, float]:
+        """Jobs eviction may take, each with its earliest expiry."""
+
         assembling = {command_id for command_id, _purpose in self._assemblies}
         expiry: dict[CommandId, float] = {}
         for (command_id, _purpose), stored in self._artifacts.items():
-            if command_id == exclude or command_id in assembling:
+            if command_id == exclude or command_id in assembling or command_id in keep:
                 continue
             expiry[command_id] = min(expiry.get(command_id, stored.expires_at), stored.expires_at)
-        if not expiry:
-            return None
-        return min(expiry, key=expiry.__getitem__)
+        return expiry
 
-    def _make_room(self, command_id: CommandId, total_bytes: int) -> tuple[CommandId, ...]:
+    def _job_bytes(self, command_id: CommandId) -> int:
+        return sum(
+            stored.size_bytes
+            for (owner, _purpose), stored in self._artifacts.items()
+            if owner == command_id
+        )
+
+    def _make_room(
+        self, command_id: CommandId, total_bytes: int, keep: Collection[CommandId]
+    ) -> tuple[CommandId, ...]:
         """Evict whole jobs, oldest expiry first, until the artifact fits.
 
-        Eviction never touches a job that is still receiving an artifact and
-        never the job the artifact belongs to. Raises ``ValueError`` when the
-        artifact cannot fit even with every evictable job gone.
+        Eviction never touches the job the artifact belongs to, a job still
+        receiving an artifact, or a job in ``keep`` (the caller's live jobs
+        whose other half is still in flight). The decision is made before
+        anything is deleted: if the artifact cannot fit even with every
+        evictable job gone, ``ValueError`` is raised and nothing is evicted.
         """
 
+        if self._fits(total_bytes):
+            return ()
+        candidates = self._evictable(command_id, keep)
+        evictable_bytes = sum(self._job_bytes(victim) for victim in candidates)
+        if not self._fits(total_bytes, released=evictable_bytes):
+            raise ValueError("the video store has no room for this artifact")
         evicted: list[CommandId] = []
-        while not self._fits(total_bytes):
-            victim = self._oldest_evictable(command_id)
-            if victim is None:
-                raise ValueError("the video store has no room for this artifact")
+        released = 0
+        for victim in sorted(candidates, key=candidates.__getitem__):
+            if self._fits(total_bytes, released=released):
+                break
+            released += self._job_bytes(victim)
             self.delete(victim)
             evicted.append(victim)
         return tuple(evicted)
@@ -173,9 +210,11 @@ class VideoStore:
         content_type: str,
         total_bytes: int,
         total_chunks: int,
+        keep: Collection[CommandId] = (),
     ) -> tuple[CommandId, ...]:
         """Begin receiving one artifact; replaces any half-received attempt.
 
+        ``keep`` names jobs eviction must not touch (the caller's live jobs).
         Returns the ids of jobs whose artifacts were evicted to make room, so
         the caller can mark those jobs expired.
         """
@@ -183,7 +222,7 @@ class VideoStore:
         if total_bytes <= 0 or total_bytes > _MAX_ARTIFACT_BYTES:
             raise ValueError("artifact size is outside the accepted range")
         self.abort_assembly(command_id, purpose)
-        evicted = self._make_room(command_id, total_bytes)
+        evicted = self._make_room(command_id, total_bytes, keep)
         directory = self._storage_dir / str(command_id)
         directory.mkdir(parents=True, exist_ok=True)
         staging_path = directory / f"{_ARTIFACT_FILENAMES[purpose]}.part"
