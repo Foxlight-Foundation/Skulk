@@ -550,6 +550,10 @@ bytecode writes. A changed or missing seal requires explicit recovery.
 `runtime_selection.py` owns journaled stopped-owner activation, explicit rollback
 and retained-state disable. Selection must hold installer and supervisor locks,
 preserve the highest selected sequence and never migrate configuration implicitly.
+An explicit disable can withdraw stalled activation/selection without trusting its
+release. Preserve both journals and the withdrawal link across restart; unpublished
+old transitions become superseded and published ones remain complete. Never
+supersede live work or a pending disable, and never replay provider requests.
 The atomic selection is desired state; service launch must revalidate current
 core compatibility and runtime integrity before executing private code.
 `runtime_service.py` provides that separate nonroot launcher. Keep its entrypoint

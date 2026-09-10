@@ -323,3 +323,126 @@ async def test_stopped_selection_recovery_revalidates_runtime(
         assert resumed.service is None or resumed.service.process is None
     finally:
         await resumed.close()
+
+
+async def test_disable_retains_initial_withdrawal_before_selection_journal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two early I/O failures retain withdrawal without ever launching the release."""
+    from skulk.extensions.runtime_artifacts import RuntimeTrust
+    from skulk.extensions.runtime_files import read_private
+
+    controller, digest = await staged_controller(tmp_path, monkeypatch)
+    await controller.start()
+    request = LifecycleRequest(
+        operation_id="6" * 32, action="activate", expected_revision=0,
+        runtime_digest=digest,
+    )
+    record = controller.records / (request.operation_id + ".json")
+
+    def fail_acknowledgement(path: Path, content: bytes) -> None:
+        if path == record:
+            raise OSError("interrupted acknowledgement")
+        write_private(path, content)
+
+    def fail_selection_journal(path: Path, content: bytes) -> None:
+        if path == controller.selector.pending:
+            raise OSError("interrupted selection journal")
+        write_private(path, content)
+
+    disable = LifecycleRequest(
+        operation_id="7" * 32, action="disable", expected_revision=0,
+    )
+    try:
+        with monkeypatch.context() as failure:
+            failure.setattr("skulk.extensions.runtime_controller.write_private", fail_acknowledgement)
+            with pytest.raises(OSError):
+                await controller.submit(request)
+        assert controller.selector.current() is None
+        assert not controller.selector.pending.exists()
+        trust_path = controller.root / "publisher-trust.json"
+        trust = RuntimeTrust.model_validate_json(read_private(trust_path))
+        write_private(trust_path, trust.model_copy(update={
+            "revision": 2, "revoked_artifacts": (digest,),
+        }).model_dump_json().encode())
+        with monkeypatch.context() as failure:
+            failure.setattr("skulk.extensions.runtime_selection.write_private", fail_selection_journal)
+            accepted = await controller.submit(disable)
+            assert accepted.withdraws_operation_id == request.operation_id
+            assert controller.work is not None
+            await controller.work
+        assert controller.operation(disable.operation_id).state == "recovery_required"
+        assert controller.pending.exists()
+        assert not controller.selector.pending.exists()
+    finally:
+        await controller.close()
+    resumed = RuntimeController(controller.root)
+    try:
+        await resumed.start()
+        assert resumed.operation(disable.operation_id).state == "complete"
+        assert resumed.operation(request.operation_id).state == "superseded"
+        selection = resumed.selector.current()
+        assert selection is not None and not selection.enabled and selection.revision == 1
+        assert not (resumed.root / "owner-started").exists()
+    finally:
+        await resumed.close()
+
+
+@pytest.mark.parametrize("published", [False, True])
+async def test_explicit_disable_withdraws_stalled_revoked_activation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, published: bool
+) -> None:
+    """Controller withdrawal is durable and terminal across both publication outcomes."""
+    from skulk.extensions.runtime_artifacts import RuntimeTrust
+    from skulk.extensions.runtime_files import read_private
+
+    selector = await installed(tmp_path, monkeypatch)
+    initial = selector.current()
+    assert initial is not None
+    write_private(selector.root / "receipts", b"synthetic outstanding cleanup")
+    controller = RuntimeController(selector.root)
+    await controller.start()
+    request = LifecycleRequest(operation_id="8" * 32, action="activate", expected_revision=1, runtime_digest=initial.runtime_digest)
+
+    def fail_selection(path: Path, content: bytes) -> None:
+        if path == selector.root / "runtime-selection.json":
+            if published:
+                write_private(path, content)
+            raise OSError("interrupted publication")
+        write_private(path, content)
+
+    try:
+        with monkeypatch.context() as failure:
+            failure.setattr("skulk.extensions.runtime_selection.write_private", fail_selection)
+            await controller.submit(request)
+            assert controller.work is not None
+            await controller.work
+        assert controller.operation(request.operation_id).state == "recovery_required"
+        trust = RuntimeTrust.model_validate_json(read_private(selector.root / "publisher-trust.json"))
+        revoked = trust.model_copy(update={"revision": 2, "revoked_artifacts": (initial.runtime_digest,)})
+        write_private(selector.root / "publisher-trust.json", revoked.model_dump_json().encode())
+        current = selector.current()
+        assert current is not None
+        disable = LifecycleRequest(operation_id="9" * 32, action="disable", expected_revision=current.revision)
+        with monkeypatch.context() as failure:
+            failure.setattr("skulk.extensions.runtime_selection.write_private", fail_selection)
+            accepted = await controller.submit(disable)
+            assert accepted.withdraws_operation_id == request.operation_id
+            assert controller.work is not None
+            await controller.work
+        assert controller.operation(disable.operation_id).state == "recovery_required"
+    finally:
+        await controller.close()
+    resumed = RuntimeController(selector.root)
+    try:
+        await resumed.start()
+        complete = resumed.operation(disable.operation_id)
+        assert complete.state == "complete" and not complete.selection.enabled
+        assert resumed.operation(request.operation_id).state == ("complete" if published else "superseded")
+        assert await resumed.submit(disable) == complete
+        assert (await resumed.recover(request.operation_id)).state == ("complete" if published else "superseded")
+        assert not resumed.pending.exists() and not selector.pending.exists()
+        assert read_private(selector.root / "receipts") == b"synthetic outstanding cleanup"
+        assert resumed.service is not None and resumed.service.process is None
+    finally:
+        await resumed.close()

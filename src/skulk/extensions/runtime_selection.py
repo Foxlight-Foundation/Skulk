@@ -84,13 +84,17 @@ def _omit_false(value: bool) -> bool:
     return not value
 
 
+def _omit_absent(value: str | None) -> bool:
+    return value is None
+
+
 class SelectionOperation(_Contract):
     """Durable local selection intent and safe reconnect/recovery status."""
 
     operation_id: str = Field(
         pattern=r"^[a-f0-9]{32}$", description="Immutable local operation ID."
     )
-    state: Literal["pending", "complete", "recovery_required"] = Field(
+    state: Literal["pending", "complete", "recovery_required", "superseded"] = Field(
         description="Selection progress, never a provider create operation."
     )
     expected_revision: int = Field(
@@ -104,6 +108,12 @@ class SelectionOperation(_Contract):
         exclude_if=_omit_false,
         description="Reverify a newly selected stopped runtime during recovery; legacy disable journals omit this field.",
     )
+    withdraws_operation_id: str | None = Field(
+        default=None,
+        pattern=r"^[a-f0-9]{32}$",
+        exclude_if=_omit_absent,
+        description="Prior local selection withdrawn by this explicit disable; its history is retained.",
+    )
 
     @model_validator(mode="after")
     def bounded(self) -> Self:
@@ -112,6 +122,12 @@ class SelectionOperation(_Contract):
             raise ValueError("selection intent exceeds bound")
         if self.operation_id != self.selection.operation_id:
             raise ValueError("selection operation identity differs")
+        if self.withdraws_operation_id is not None and (
+            self.withdraws_operation_id == self.operation_id
+            or self.selection.enabled
+            or self.verify_runtime
+        ):
+            raise ValueError("only disable can withdraw another selection")
         return self
 
 
@@ -178,6 +194,19 @@ class RuntimeSelector:
             canonical_json(operation.model_dump(mode="json")),
         )
 
+    def _settle_withdrawal(self, operation: SelectionOperation) -> None:
+        if operation.withdraws_operation_id is None:
+            return
+        previous = self.operation(operation.withdraws_operation_id)
+        # The revision fence tells whether the old atomic selection was already
+        # published. Never call a published transition cancelled retroactively.
+        state = (
+            "complete"
+            if previous.selection.revision <= operation.expected_revision
+            else "superseded"
+        )
+        self._save(previous.model_copy(update={"state": state}))
+
     def _apply(self, operation: SelectionOperation) -> SelectionOperation:
         current = self.current()
         if current != operation.selection and (
@@ -195,6 +224,7 @@ class RuntimeSelector:
                 self.root / "runtime-selection.json",
                 canonical_json(operation.selection.model_dump(mode="json")),
             )
+            self._settle_withdrawal(operation)
             complete = operation.model_copy(update={"state": "complete"})
             self._save(complete)
             _remove_private(self.pending)
@@ -351,33 +381,120 @@ class RuntimeSelector:
             finally:
                 owner.close()
 
+    def preview_disable(
+        self,
+        *,
+        expected_revision: int,
+        operation_id: str,
+        initial_selection: RuntimeSelection | None = None,
+    ) -> RuntimeSelection:
+        """Preview withdrawal of current or interrupted initial selection without executing it.
+
+        The caller must repeat this read under the installer and owner fences
+        before publication. A pending initial activation supplies identity only;
+        disable never treats its release as trusted executable code.
+        """
+        current = self.current()
+        pending = (
+            SelectionOperation.model_validate_json(read_private(self.pending))
+            if self.pending.exists()
+            else None
+        )
+        revision = current.revision if current is not None else 0
+        if revision != expected_revision:
+            raise ValueError("selection revision conflict")
+        if pending is not None and current != pending.selection and (
+            revision != pending.expected_revision
+        ):
+            raise ValueError("pending selection revision differs")
+        if (
+            current is None
+            and pending is None
+            and initial_selection is not None
+            and (expected_revision != 0 or initial_selection.revision != 1)
+        ):
+            raise ValueError("initial withdrawal revision differs")
+        base = current or (
+            pending.selection if pending is not None else initial_selection
+        )
+        if base is None:
+            raise ValueError("no selected runtime")
+        return RuntimeSelection.model_validate_json(
+            base.model_copy(
+                update={
+                    "revision": revision + 1,
+                    "operation_id": operation_id,
+                    "enabled": False,
+                }
+            ).model_dump_json()
+        )
+
     def disable(
-        self, *, expected_revision: int, operation_id: str | None = None
+        self,
+        *,
+        expected_revision: int,
+        operation_id: str | None = None,
+        initial_selection: RuntimeSelection | None = None,
     ) -> SelectionOperation:
         """Withdraw a stopped installation even if release trust is now invalid.
 
+        Withdraw interrupted local selection even when its release was revoked.
         Retain its selected version, runtime, logical state and cleanup material.
         An uninstall uses this same retained-state withdrawal in v1.
         """
+        identifier = operation_id or uuid4().hex
+        if len(identifier) != 32 or any(c not in "0123456789abcdef" for c in identifier):
+            raise ValueError("invalid selection operation ID")
         installer = RuntimeLock(self.installer.installer)
         try:
             owner = RuntimeLock(self.root, "supervisor.lock")
             try:
-                current = self.current()
-                if current is None:
-                    raise ValueError("no selected runtime")
-                selection = current.model_copy(
-                    update={
-                        "revision": expected_revision + 1,
-                        "operation_id": operation_id or uuid4().hex,
-                        "enabled": False,
-                    }
+                if (self.records / (identifier + ".json")).exists():
+                    prior = self.operation(identifier)
+                    if (
+                        prior.selection.enabled
+                        or prior.verify_runtime
+                        or prior.expected_revision != expected_revision
+                    ):
+                        raise ValueError("selection operation identity conflict")
+                    if prior.state != "complete":
+                        raise ValueError("selection operation requires recovery")
+                    return prior
+                selection = self.preview_disable(
+                    expected_revision=expected_revision,
+                    operation_id=identifier,
+                    initial_selection=initial_selection,
                 )
-                # model_copy is only for internal immutable updates; validate
-                # the externally supplied revision and operation ID at the edge.
-                selection = RuntimeSelection.model_validate_json(
-                    selection.model_dump_json()
-                )
+                if self.pending.exists():
+                    pending = SelectionOperation.model_validate_json(
+                        read_private(self.pending)
+                    )
+                    if pending.operation_id == selection.operation_id:
+                        raise ValueError("selection operation requires recovery")
+                    if not pending.selection.enabled and not pending.verify_runtime:
+                        raise ValueError("pending disable requires recovery")
+                    if (self.records / (selection.operation_id + ".json")).exists():
+                        raise ValueError("selection operation identity conflict")
+                    # Materialize the old history before replacing its sole
+                    # pending record. The new pending disable carries the link
+                    # so restart can finish withdrawal without trusting old code.
+                    previous = self.operation(pending.operation_id)
+                    if (
+                        previous.selection != pending.selection
+                        or previous.expected_revision != pending.expected_revision
+                        or previous.verify_runtime != pending.verify_runtime
+                    ):
+                        raise ValueError("pending selection history differs")
+                    self._save(previous)
+                    return self._apply(
+                        SelectionOperation(
+                            operation_id=selection.operation_id,
+                            selection=selection,
+                            expected_revision=expected_revision,
+                            state="pending",
+                            withdraws_operation_id=pending.operation_id,
+                        )
+                    )
                 return self._start(selection, expected_revision)
             finally:
                 owner.close()

@@ -39,8 +39,11 @@ function RuntimeControls({ runtime, unavailable }: { runtime: ManagedRuntime; un
     complete: t('plugins.operationComplete', 'Complete'),
     failed: t('plugins.operationFailed', 'Failed'),
     recovery_required: t('plugins.operationRecovery', 'Recovery needed'),
+    superseded: t('plugins.operationSuperseded', 'Withdrawn by a later disable'),
   }[state] : t('plugins.runtimeStatusUnknown', 'Status unavailable');
-  const pending = state === 'accepted' || state === 'applying' || state === 'recovery_required';
+  const pending = state === 'accepted' || state === 'applying';
+  const withdrawable = state === 'recovery_required' && !!operation.currentData && operation.currentData.request.action !== 'disable';
+  const confirmed = state === 'complete' || state === 'failed' || state === 'superseded' || withdrawable;
   const busy = disabling.isLoading || recovering.isLoading;
   const disableRuntime = async () => {
     const id = crypto.randomUUID().replaceAll('-', '');
@@ -71,10 +74,11 @@ function RuntimeControls({ runtime, unavailable }: { runtime: ManagedRuntime; un
     {operationId ? <p role="status">{t('plugins.runtimeOperation', 'Local operation')}: {stateLabel}</p> : null}
     {operation.error ? <p role="status">{t('plugins.runtimeReadFailed', 'Operation status could not be read. The original request has not been resubmitted.')}</p> : null}
     <Actions>
-      <Button type="button" disabled={!runtime.enabled || unavailable || busy || pending || (!!submitted && state !== 'complete' && state !== 'failed')} onClick={() => void disableRuntime()}>{t('plugins.disableRuntime', 'Disable runtime')}</Button>
+      <Button type="button" disabled={(!runtime.enabled && !withdrawable) || unavailable || busy || pending || (state === 'recovery_required' && !withdrawable) || (!!submitted && !confirmed)} onClick={() => void disableRuntime()}>{t('plugins.disableRuntime', 'Disable runtime')}</Button>
       {state === 'recovery_required' ? <Button type="button" disabled={unavailable || busy} onClick={() => void recoverOperation()}>{t('plugins.recoverRuntime', 'Recover local operation')}</Button> : null}
       {operationId ? <Button type="button" disabled={operation.isFetching || busy} onClick={() => void operation.refetch()}>{t('plugins.refreshOperation', 'Refresh operation status')}</Button> : null}
     </Actions>
+    {withdrawable ? <p>{t('plugins.withdrawInterruptedRuntime', 'Disable withdraws this pending local change without running its release. Installation history and cleanup records are retained.')}</p> : null}
     <p>{t('plugins.runtimeCleanup', 'Disabling stops future capability work. Existing cleanup records and independent cleanup supervision are retained.')}</p>
     {notice && state !== 'complete' ? <p role="status">{notice}</p> : null}
     <Button type="button" onClick={() => setReleaseOpen(!releaseOpen)}>{releaseOpen ? t('plugins.closeReleaseInstallation', 'Close release installation') : t('plugins.openReleaseInstallation', 'Install a release')}</Button>

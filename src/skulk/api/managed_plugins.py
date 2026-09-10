@@ -218,7 +218,7 @@ def create_managed_plugins_router(
         "/installations/{plugin_id}/operations",
         response_model=LifecycleOperation,
         summary="Submit a local plugin lifecycle operation",
-        description="Submit revision-fenced activate, select or disable with a retained operation_id. Activation and stopped selection require an already staged verified runtime. Select keeps the owner stopped for offline setup or migration until a later explicit activation; explicit rollback and permission acceptance are separate flags. Requires plugins:manage or direct owner authority. Client disconnect does not abandon accepted work. This never approves spending or replays provider requests.",
+        description="Submit revision-fenced activate, select or disable with a retained operation_id. Activation and stopped selection require an already staged verified runtime. Select keeps the owner stopped for offline setup or migration until a later explicit activation; explicit rollback and permission acceptance are separate flags. Requires plugins:manage or direct owner authority. Client disconnect does not abandon accepted work. Explicit disable may withdraw a stalled activation or selection without executing its release; it preserves the prior operation through withdraws_operation_id and terminal superseded history when publication never happened. Live work and pending disable cannot be superseded. This never approves spending or replays provider requests.",
     )
     async def submit(
         plugin_id: InstallationIdentifier,
@@ -264,7 +264,7 @@ def create_managed_plugins_router(
         "/installations/{plugin_id}/operations/{operation_id}/recover",
         response_model=LifecycleOperation,
         summary="Recover an interrupted local plugin operation",
-        description="Explicitly finish only an existing journaled local selection using the original operation ID. Completed operations are not reapplied. Requires plugins:manage or direct owner authority. Recovery never recreates a provider resource or grants spending approval.",
+        description="Explicitly finish only an existing journaled local selection using the original operation ID. Completed or superseded operations are not reapplied. Requires plugins:manage or direct owner authority. Recovery never recreates a provider resource or grants spending approval.",
     )
     async def recover(
         plugin_id: InstallationIdentifier,

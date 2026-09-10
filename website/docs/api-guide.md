@@ -3751,7 +3751,7 @@ The local socket accepts these typed requests:
 | `get` | `plugin_id` | Returns desired selection and process observation without paths, credentials or raw output. |
 | `submit` | `plugin_id`, `request` | Accepts a local lifecycle request after validating its revision and target. The nested request contains `operation_id` (32 lowercase hexadecimal characters), `action` (`activate`, `select` or `disable`), `expected_revision`, and for activation or stopped selection `runtime_digest`, optional `rollback` and `accept_permissions`. No spending authority is conveyed. |
 | `operation` | `plugin_id`, `operation_id` | Reads retained progress. Reconnect reads this result; reusing an ID with different intent is refused. |
-| `recover` | `plugin_id`, `operation_id` | Explicitly resumes only that retained local intent after its fault is corrected. A completed operation remains unchanged. No new request or provider operation is created. |
+| `recover` | `plugin_id`, `operation_id` | Explicitly resumes only that retained local intent after its fault is corrected. Completed or superseded operations remain unchanged. No new request or provider operation is created. |
 
 Activation validates signed artifacts, permission expansion and migration
 compatibility before stopping the owner; it repeats admission checks before
@@ -3760,9 +3760,16 @@ allowing verified host-local setup or migration before any owner startup. A late
 `activate` request must use the new selection revision; selection itself performs
 no migration or identity initialization. Interrupted stopped selections revalidate
 trust and artifacts before completion. Disable retains runtime generations,
-identities and cleanup material, even when release trust is invalid.
-Operations move through `accepted`, `applying`, `complete`, `failed` or
-`recovery_required`; completion confirms the local desired-state change, with
+identities and cleanup material, even when release trust is invalid. An explicit
+`disable` may withdraw a stalled `activate` or `select` using the actual current
+selection revision (zero when initial publication never happened). Live work still
+must finish; a pending disable uses recovery rather than another disable. The new
+operation retains `withdraws_operation_id` for its prior local intent. An unpublished
+prior transition becomes `superseded`; one already atomically published is recorded
+as `complete`. Its runtime is never executed to finish withdrawal. Both journals
+retain their history, including when withdrawal itself is interrupted.
+Operations move through `accepted`, `applying`, `complete`, `failed`,
+`recovery_required` or terminal `superseded`; completion confirms the local desired-state change, with
 service and capability readiness observed separately. Pending local selection
 recovery never replays provider requests. A retained accepted record without live
 owned work is reported as `recovery_required`. An accepted operation outlives its
@@ -3877,9 +3884,9 @@ without restart. Missing setup returns an actionable unavailable response.
 | GET | `/v1/plugins/managed` | Requires `plugins:read`. Returns `installations`, at most sixteen entries, with `plugin_id`, `selected_digest`, `selection_revision`, `enabled`, `service`, `stale`, `error_code`, `operation_id` and `operation_state`. Pending or selected operation references allow reconnect to resume observation without repeating a mutation. |
 | POST | `/v1/plugins/managed/installations` | Requires `plugins:manage`. Body: `plugin_id` in the `managed.*` namespace. Registers an empty installation and returns its observation. Does not download, stage or enable a release. |
 | GET | `/v1/plugins/managed/installations/{plugin_id}` | Requires `plugins:read`. Returns `installation` observation and `selection`, nullable before a release is selected. |
-| POST | `/v1/plugins/managed/installations/{plugin_id}/operations` | Requires `plugins:manage`. Body: `operation_id` (32 lowercase hexadecimal characters), `action` (`activate`, `select` or `disable`), `expected_revision` (nonnegative integer), and activation/selection-only `runtime_digest`, optional `rollback` and `accept_permissions` booleans. Returns the retained `LifecycleOperation`. Activation and stopped selection accept only an already staged, verified generation. `select` keeps its owner stopped until a later explicit `activate` request. |
-| GET | `/v1/plugins/managed/installations/{plugin_id}/operations/{operation_id}` | Requires `plugins:read`. Reads the original local operation's exact `request`, previewed `selection`, `state` and sanitized `error_code`. Never repeats its effect. |
-| POST | `/v1/plugins/managed/installations/{plugin_id}/operations/{operation_id}/recover` | Requires `plugins:manage`. No body. Explicitly resumes the existing journaled local operation; a completed operation is unchanged. |
+| POST | `/v1/plugins/managed/installations/{plugin_id}/operations` | Requires `plugins:manage`. Body: `operation_id` (32 lowercase hexadecimal characters), `action` (`activate`, `select` or `disable`), `expected_revision` (nonnegative integer), and activation/selection-only `runtime_digest`, optional `rollback` and `accept_permissions` booleans. Returns the retained `LifecycleOperation`. Activation and stopped selection accept only an already staged, verified generation. `select` keeps its owner stopped until a later explicit `activate` request. An explicit `disable` can withdraw a stalled activation/selection, including a revoked release, using the current selection revision. Live work and a pending disable cannot be superseded. |
+| GET | `/v1/plugins/managed/installations/{plugin_id}/operations/{operation_id}` | Requires `plugins:read`. Reads the original local operation's exact `request`, previewed `selection`, `state`, sanitized `error_code` and optional `withdraws_operation_id`. Superseded unpublished transitions remain terminal history. Never repeats its effect. |
+| POST | `/v1/plugins/managed/installations/{plugin_id}/operations/{operation_id}/recover` | Requires `plugins:manage`. No body. Explicitly resumes the existing journaled local operation; completed or superseded operations are unchanged. |
 
 Direct localhost/Tailscale owner administration remains available under the
 existing origin checks. Remote grants are explicit: a broad operation token does
@@ -3893,7 +3900,10 @@ mutation to discover whether the first succeeded. No raw provider response,
 credential value or host-local path is returned.
 
 The dashboard polls inventory and retained operation status, distinguishes stale
-observations, and supports disabling and explicit local recovery. Runtime
+observations, and supports disabling and explicit local recovery. A confirmed
+recovery-needed activation/selection offers Disable even before its first runtime
+was published; the UI explains that this withdraws local intent without running
+the release. An unconfirmed mutation still requires status readback first. Runtime
 completion does not prove capability readiness. Disabling preserves cleanup
 records and independent supervision. These routes convey neither paid approval
 nor permission to replay an uncertain provider create. Release download/staging uses the routes below; provider credential provisioning

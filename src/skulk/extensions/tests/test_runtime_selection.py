@@ -135,3 +135,64 @@ async def test_interrupted_selection_recovers_exact_local_intent(
     assert recovered.selection.revision == 1
     assert selector.current() == recovered.selection
     assert not selector.pending.exists()
+
+
+@pytest.mark.parametrize("published", [False, True])
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_disable_withdraws_revoked_interrupted_initial_selection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, published: bool, enabled: bool
+) -> None:
+    """An explicit stopped-state withdrawal never has to execute revoked code."""
+    source = tmp_path / "source"
+    metadata, trust, host = artifacts(source)
+    monkeypatch.setattr("skulk.extensions.runtime_install.measure_host", lambda: host)
+    selector = RuntimeSelector(tmp_path / "installed")
+    write_private(selector.root / "publisher-trust.json", trust.model_dump_json().encode())
+    write_private(selector.root / "receipts", b"synthetic outstanding cleanup")
+    staged = await selector.installer.stage(metadata, source)
+    original_id, disable_id = "d" * 32, "e" * 32
+
+    def fail_selection(path: Path, content: bytes) -> None:
+        if path == selector.root / "runtime-selection.json":
+            if published:
+                write_private(path, content)
+            raise OSError("interrupted publication")
+        write_private(path, content)
+
+    with monkeypatch.context() as failure:
+        failure.setattr("skulk.extensions.runtime_selection.write_private", fail_selection)
+        with pytest.raises(OSError):
+            await selector.activate(staged.runtime_digest, expected_revision=0, operation_id=original_id, enabled=enabled)
+    revoked = trust.model_copy(update={"revision": 2, "revoked_artifacts": (staged.runtime_digest,)})
+    write_private(selector.root / "publisher-trust.json", revoked.model_dump_json().encode())
+    with pytest.raises(ValueError, match="revocation"):
+        await selector.recover()
+    expected_revision = 1 if published else 0
+    with pytest.raises(ValueError, match="identity"):
+        selector.disable(expected_revision=expected_revision, operation_id=original_id)
+    with pytest.raises(ValueError, match="revision"):
+        selector.disable(expected_revision=expected_revision + 1, operation_id=disable_id)
+    owner = RuntimeLock(selector.root, "supervisor.lock")
+    try:
+        with pytest.raises(BlockingIOError):
+            selector.disable(expected_revision=expected_revision, operation_id=disable_id)
+    finally:
+        owner.close()
+    # A second filesystem interruption must retain the new disable intent, not
+    # resurrect the revoked activation when the process restarts.
+    with monkeypatch.context() as failure:
+        failure.setattr("skulk.extensions.runtime_selection.write_private", fail_selection)
+        with pytest.raises(OSError):
+            selector.disable(expected_revision=expected_revision, operation_id=disable_id)
+    pending = SelectionOperation.model_validate_json(read_private(selector.pending))
+    assert pending.operation_id == disable_id
+    assert pending.withdraws_operation_id == original_id
+    assert not pending.selection.enabled
+    recovered = await selector.recover()
+    assert recovered.state == "complete"
+    assert not recovered.selection.enabled
+    assert selector.operation(original_id).state == ("complete" if published else "superseded")
+    assert selector.disable(expected_revision=expected_revision, operation_id=disable_id) == recovered
+    assert read_private(selector.root / "receipts") == b"synthetic outstanding cleanup"
+    assert (selector.root / "generations" / staged.runtime_digest).is_dir()
+    assert not selector.pending.exists()

@@ -726,7 +726,13 @@ the same verification and permission checks as `activate`. The dashboard exposes
 initializes its identity until a later explicit activation using the new revision.
 This operation does not migrate state; plugin-owned local tooling handles that.
 Interrupted stopped selection revalidates trust and artifacts, while disable
-remains available for withdrawing an invalid release.
+remains available for withdrawing an invalid release. Explicit disable can replace
+a stalled activation or stopped selection after the owner fences are acquired,
+without executing or trusting that release. Its durable `withdraws_operation_id`
+links the old operation; unpublished transitions become terminal `superseded`
+history, while already published selections are recorded complete. Both journals
+retain enough intent to finish an interrupted withdrawal. Live work and a pending
+disable cannot be replaced; the latter uses explicit recovery.
 
 Operation records and pending intent let reconnect read the result and explicit
 recovery finish the same local switch after an interruption. Recovery performs

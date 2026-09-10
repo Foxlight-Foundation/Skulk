@@ -1603,6 +1603,11 @@ It revalidates the staged runtime under installer ownership, acquires the existi
 supervisor lock, journals intent and atomically publishes one desired selection.
 Explicit recovery completes only that local transition. Disable retains all
 logical state and cleanup material, including when release trust is invalid.
+A fenced explicit disable can supersede a stalled local activation/selection;
+its journal links the retained old intent and can recover withdrawal without
+executing the old release. Unpublished old transitions become `superseded`,
+while already published transitions retain completion. Live operations are not
+interrupted by a competing request.
 The highest selected sequence survives rollback; incompatible state/configuration
 changes require migration. Selection is separate from observed service health.
 `runtime_service.py` is the separate nonroot launcher for that selected generation.

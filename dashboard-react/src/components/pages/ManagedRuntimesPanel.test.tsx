@@ -103,7 +103,24 @@ it('requires a separate recovery action for the original local operation', async
   await act(async () => { store.dispatch(apiSlice.util.invalidateTags(['Plugins'])); });
   await contains('Recover local operation');
   expect(posts).toHaveLength(0);
+  await click('Disable runtime');
+  expect(posts).toHaveLength(0);
   await click('Recover local operation');
   await contains('Complete');
   expect(posts).toEqual([{ path: '/v1/plugins/managed/installations/managed.fixture/operations/' + 'b'.repeat(32) + '/recover', body: null }]);
+});
+
+it('offers explicit withdrawal of a failed initial activation without replaying it', async () => {
+  operation = { request: { operation_id: 'c'.repeat(32), action: 'activate' }, state: 'recovery_required', error_code: 'validation_failed' };
+  runtime = { ...runtime, enabled: false, selected_digest: null, selection_revision: 0, operation_id: operation.request.operation_id, operation_state: operation.state };
+  await act(async () => { store.dispatch(apiSlice.util.invalidateTags(['Plugins'])); });
+  await contains('Disable withdraws this pending local change');
+  expect(posts).toHaveLength(0);
+  await click('Disable runtime');
+  await contains('Applying');
+  expect(posts).toHaveLength(1);
+  expect(posts[0].body).toMatchObject({ action: 'disable', expected_revision: 0 });
+  expect(posts[0].body?.operation_id).not.toBe('c'.repeat(32));
+  await click('Disable runtime');
+  expect(posts).toHaveLength(1);
 });

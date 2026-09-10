@@ -75,7 +75,7 @@ class LifecycleOperation(BaseModel):
         description="Exact previewed selection; activation revalidates it."
     )
     state: Literal[
-        "accepted", "applying", "complete", "failed", "recovery_required"
+        "accepted", "applying", "complete", "failed", "recovery_required", "superseded"
     ] = Field(
         description="Local operation progress, independent of service and capability health."
     )
@@ -84,6 +84,11 @@ class LifecycleOperation(BaseModel):
     ) = Field(
         default=None,
         description="Sanitized corrective failure class; no exception payload.",
+    )
+    withdraws_operation_id: str | None = Field(
+        default=None,
+        pattern=r"^[a-f0-9]{32}$",
+        description="Prior stalled local intent withdrawn by this explicit disable; never a provider request.",
     )
 
     @model_validator(mode="after")
@@ -96,6 +101,11 @@ class LifecycleOperation(BaseModel):
             raise ValueError("lifecycle selection identity differs")
         if self.selection.enabled != (self.request.action == "activate"):
             raise ValueError("lifecycle selection action differs")
+        if self.withdraws_operation_id is not None and (
+            self.request.action != "disable"
+            or self.withdraws_operation_id == self.request.operation_id
+        ):
+            raise ValueError("only disable can withdraw another lifecycle operation")
         if (
             self.request.action in ("activate", "select")
             and self.selection.runtime_digest != self.request.runtime_digest
@@ -201,15 +211,15 @@ class RuntimeController:
                 accept_permissions=request.accept_permissions,
                 enabled=request.action == "activate",
             )
-        current = self.selector.current()
-        if current is None or current.revision != request.expected_revision:
-            raise ValueError("selection revision conflict")
-        return current.model_copy(
-            update={
-                "enabled": False,
-                "revision": request.expected_revision + 1,
-                "operation_id": request.operation_id,
-            }
+        pending = (
+            LifecycleOperation.model_validate_json(read_private(self.pending))
+            if self.pending.exists()
+            else None
+        )
+        return self.selector.preview_disable(
+            expected_revision=request.expected_revision,
+            operation_id=request.operation_id,
+            initial_selection=pending.selection if pending is not None else None,
         )
 
     async def submit(self, request: LifecycleRequest) -> LifecycleOperation:
@@ -229,14 +239,31 @@ class RuntimeController:
                 if prior.request != request:
                     raise ValueError("lifecycle operation identity conflict")
                 return prior
-            if self.pending.exists() or (
-                self.work is not None and not self.work.done()
+            if self.work is not None and not self.work.done():
+                raise ValueError("another lifecycle operation needs completion")
+            pending = (
+                LifecycleOperation.model_validate_json(read_private(self.pending))
+                if self.pending.exists()
+                else None
+            )
+            if pending is not None and (
+                request.action != "disable" or pending.request.action == "disable"
             ):
                 raise ValueError("another lifecycle operation needs completion")
             selection = await self._preview(request)
             operation = LifecycleOperation(
-                request=request, selection=selection, state="accepted"
+                request=request,
+                selection=selection,
+                state="accepted",
+                withdraws_operation_id=(
+                    pending.request.operation_id if pending is not None else None
+                ),
             )
+            if pending is not None:
+                # Preserve the original request before replacing its last
+                # recovery pointer. The new durable intent completes withdrawal
+                # on restart, even if the old release can never run again.
+                self._save(self.operation(pending.request.operation_id))
             # The full intent is durable before acknowledging or creating a task.
             # Pending-first permits recovery if the per-operation write fails.
             write_private(self.pending, operation.model_dump_json().encode())
@@ -301,7 +328,35 @@ class RuntimeController:
         result = operation
         try:
             current = self.selector.current()
-            if self.selector.pending.exists():
+            if operation.request.action == "disable":
+                if (
+                    current != operation.selection
+                    and await self._preview(operation.request) != operation.selection
+                ):
+                    raise ValueError("reviewed withdrawal changed")
+                await self._stop_service()
+                pending = (
+                    SelectionOperation.model_validate_json(
+                        read_private(self.selector.pending)
+                    )
+                    if self.selector.pending.exists()
+                    else None
+                )
+                if pending is not None and pending.operation_id == operation.request.operation_id:
+                    selected = await self.selector.recover()
+                elif pending is not None and current == operation.selection:
+                    raise ValueError("different selection needs recovery")
+                elif current != operation.selection:
+                    selected = self.selector.disable(
+                        expected_revision=operation.request.expected_revision,
+                        operation_id=operation.request.operation_id,
+                        initial_selection=operation.selection,
+                    )
+                else:
+                    selected = None
+                if selected is not None and selected.selection != operation.selection:
+                    raise ValueError("committed withdrawal differs")
+            elif self.selector.pending.exists():
                 pending = SelectionOperation.model_validate_json(
                     read_private(self.selector.pending)
                 )
@@ -336,6 +391,24 @@ class RuntimeController:
                     )
                 if selected.selection != operation.selection:
                     raise ValueError("committed selection differs")
+            if operation.withdraws_operation_id is not None:
+                previous = LifecycleOperation.model_validate_json(
+                    read_private(
+                        self.records / (operation.withdraws_operation_id + ".json")
+                    )
+                )
+                self._save(
+                    previous.model_copy(
+                        update={
+                            "state": "complete"
+                            if previous.selection.revision <= operation.request.expected_revision
+                            else "superseded",
+                            "error_code": None
+                            if previous.selection.revision <= operation.request.expected_revision
+                            else previous.error_code,
+                        }
+                    )
+                )
             result = operation.model_copy(
                 update={"state": "complete", "error_code": None}
             )
@@ -354,7 +427,8 @@ class RuntimeController:
             # recovery. Otherwise retain a failed record while allowing a new
             # corrected request, including disable of an invalid installation.
             interrupted = (
-                self.selector.pending.exists()
+                operation.withdraws_operation_id is not None
+                or self.selector.pending.exists()
                 or self.selector.current() == operation.selection
             )
             result = operation.model_copy(

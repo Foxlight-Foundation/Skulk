@@ -116,8 +116,9 @@ export interface ManagedRuntime {
 /** Durable local operation reference; provider submissions and approvals are separate. */
 export interface ManagedOperation {
   request: { operation_id: string; action: 'activate' | 'select' | 'disable' };
-  state: 'accepted' | 'applying' | 'complete' | 'failed' | 'recovery_required';
+  state: 'accepted' | 'applying' | 'complete' | 'failed' | 'recovery_required' | 'superseded';
   error_code: string | null;
+  withdraws_operation_id?: string | null;
 }
 
 /** Signed review returned before artifact download; no credentials or executable paths. */
