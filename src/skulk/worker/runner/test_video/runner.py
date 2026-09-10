@@ -56,6 +56,7 @@ from skulk.shared.types.worker.runners import (
     RunnerWarmingUp,
 )
 from skulk.utils.channels import MpReceiver, MpSender
+from skulk.worker.runner.test_video.provision import TEST_VIDEO_MODEL_ID
 from skulk.worker.runner.test_video.render import plan_render, render_clip
 
 STEP_SECONDS_ENV = "SKULK_TEST_VIDEO_STEP_SECONDS"
@@ -163,6 +164,14 @@ class Runner:
             case LoadModel() if isinstance(self.current_status, (RunnerIdle, RunnerConnected)):
                 self.update_status(RunnerLoading())
                 self.acknowledge_task(task)
+                if self.model_id != TEST_VIDEO_MODEL_ID:
+                    # Any card may declare the test backend, but synthetic
+                    # output standing in for a real model would be a silent
+                    # lie; the engine serves exactly the card it ships.
+                    raise RuntimeError(
+                        f"the test video engine serves only {TEST_VIDEO_MODEL_ID}, "
+                        f"not {self.model_id}"
+                    )
                 video = self.shard_metadata.model_card.video
                 if video is None:
                     raise RuntimeError(f"{self.model_id} has no [video] section")

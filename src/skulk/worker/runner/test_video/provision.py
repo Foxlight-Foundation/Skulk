@@ -1,26 +1,57 @@
-"""Stand-in weights for the test video engine.
+"""Stand-in weights and card registration for the test video engine.
 
 The engine needs no weights, but the worker's placement path expects a
 complete model directory before it loads a runner. This writes the smallest
 directory the download resolver accepts (a safetensors index, an empty
 safetensors file, and a config) under the node's models directory and adds
-that directory to the model search path, so the bundled card places without
-a download.
+that directory to the model search path, so the card places without a
+download. It also registers the bundled card as a custom card so a node
+whose catalog comes from the signed registry still lists it.
 """
 
 from __future__ import annotations
 
 import json
+import shutil
 import struct
 from pathlib import Path
 
-from skulk.shared.constants import SKULK_MODELS_DIR, add_model_search_path
+from skulk.shared.constants import (
+    RESOURCES_DIR,
+    SKULK_CUSTOM_MODEL_CARDS_DIR,
+    SKULK_MODELS_DIR,
+    add_model_search_path,
+)
 from skulk.shared.models.model_cards import ModelId
 
 TEST_VIDEO_MODEL_ID = ModelId("foxlight/test-video")
 """The one card the test engine serves; bundled under ``resources/video_model_cards``."""
 
 _WEIGHTS_FILENAME = "model.safetensors"
+_CARD_FILENAME = TEST_VIDEO_MODEL_ID.normalize() + ".toml"
+
+
+def bundled_card_path() -> Path:
+    """The bundled TOML for the test engine's card."""
+
+    return Path(RESOURCES_DIR) / "video_model_cards" / _CARD_FILENAME
+
+
+def register_test_video_card(custom_cards_dir: Path = SKULK_CUSTOM_MODEL_CARDS_DIR) -> Path:
+    """Make the card visible on a node whose catalog comes from the registry.
+
+    Bundled cards load only when the signed registry is unavailable, so on a
+    connected node the test card would never enter the catalog. The custom
+    card directory is the operator's override path and always loads; placing
+    the bundled TOML there is exactly what an operator adding the card by
+    hand would do. Idempotent; an existing file is left alone.
+    """
+
+    custom_cards_dir.mkdir(parents=True, exist_ok=True)
+    target = custom_cards_dir / _CARD_FILENAME
+    if not target.is_file():
+        shutil.copyfile(bundled_card_path(), target)
+    return target
 
 
 def provision_test_video_model(models_dir: Path = SKULK_MODELS_DIR) -> Path:

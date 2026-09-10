@@ -710,10 +710,16 @@ def _provision_test_video_engine() -> None:
 
     if "test_video" not in probe_node_backends():
         return
-    from skulk.worker.runner.test_video.provision import provision_test_video_model
+    from skulk.worker.runner.test_video.provision import (
+        provision_test_video_model,
+        register_test_video_card,
+    )
 
     directory = provision_test_video_model()
-    logger.info(f"test video engine advertised; stand-in model at {directory}")
+    card = register_test_video_card()
+    logger.info(
+        f"test video engine advertised; stand-in model at {directory}, card at {card}"
+    )
 
 
 def _purge_stale_video_directories() -> None:

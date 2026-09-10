@@ -8,8 +8,10 @@ import dataclasses
 import hashlib
 import struct
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
+from anyio import Path as AsyncPath
 
 from skulk.download.download_utils import (
     is_model_directory_complete,
@@ -17,7 +19,7 @@ from skulk.download.download_utils import (
 )
 from skulk.shared import constants
 from skulk.shared.backends import engine_of, resolve_node_backend
-from skulk.shared.models.model_cards import ModelCard, get_bundled_card
+from skulk.shared.models.model_cards import ModelCard, ModelId, get_bundled_card
 from skulk.shared.types.video import (
     VIDEO_OUTPUT_FILENAME,
     VIDEO_THUMBNAIL_FILENAME,
@@ -26,7 +28,9 @@ from skulk.shared.types.video import (
 )
 from skulk.worker.runner.test_video.provision import (
     TEST_VIDEO_MODEL_ID,
+    bundled_card_path,
     provision_test_video_model,
+    register_test_video_card,
 )
 from skulk.worker.runner.test_video.render import (
     RenderPlan,
@@ -205,6 +209,60 @@ def test_provision_writes_a_directory_the_resolver_accepts(tmp_path: Path) -> No
     assert provision_test_video_model(tmp_path) == directory
     assert constants.SKULK_MODELS_PATH is not None and tmp_path in constants.SKULK_MODELS_PATH
     assert resolve_model_in_path(TEST_VIDEO_MODEL_ID, None, expected_card=_card()) == directory
+
+
+def test_registering_the_card_copies_the_bundled_toml_once(tmp_path: Path) -> None:
+    target = register_test_video_card(tmp_path / "custom")
+    assert target == tmp_path / "custom" / (TEST_VIDEO_MODEL_ID.normalize() + ".toml")
+    assert target.read_bytes() == bundled_card_path().read_bytes()
+    target.write_text(target.read_text() + "\n# operator edit\n")
+    assert register_test_video_card(tmp_path / "custom") == target
+    assert target.read_text().endswith("# operator edit\n")
+    loaded = asyncio.run(ModelCard.load_from_path(AsyncPath(target)))
+    assert loaded.model_id == TEST_VIDEO_MODEL_ID and loaded.video is not None
+
+
+def test_runner_refuses_any_card_but_its_own() -> None:
+    from skulk.shared.types.common import NodeId
+    from skulk.shared.types.tasks import LoadModel
+    from skulk.shared.types.worker.instances import (
+        BoundInstance,
+        InstanceId,
+        MlxRingInstance,
+    )
+    from skulk.shared.types.worker.runners import RunnerId, ShardAssignments
+    from skulk.shared.types.worker.shards import PipelineShardMetadata
+    from skulk.worker.runner.test_video.runner import Runner
+
+    impostor = _card().model_copy(update={"model_id": ModelId("org/other-video")})
+    runner_id = RunnerId("r")
+    shard = PipelineShardMetadata(
+        model_card=impostor, device_rank=0, world_size=1, start_layer=0, end_layer=1, n_layers=1
+    )
+    instance = MlxRingInstance(
+        instance_id=InstanceId("i"),
+        shard_assignments=ShardAssignments(
+            model_id=impostor.model_id,
+            node_to_runner={NodeId("n"): runner_id},
+            runner_to_shard={runner_id: shard},
+        ),
+        hosts_by_node={},
+        ephemeral_port=50000,
+    )
+    sent: list[object] = []
+
+    class _Sender:
+        def send(self, event: object) -> None:
+            sent.append(event)
+
+    runner = Runner(
+        BoundInstance(instance=instance, bound_runner_id=runner_id, bound_node_id=NodeId("n")),
+        cast("Any", _Sender()),
+        cast("Any", None),
+        cast("Any", None),
+    )
+    with pytest.raises(RuntimeError, match="serves only foxlight/test-video"):
+        runner.handle_task(LoadModel(instance_id=instance.instance_id))
 
 
 def test_bundled_card_places_on_a_test_video_node() -> None:
