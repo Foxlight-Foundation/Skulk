@@ -113,7 +113,6 @@ def test_comfy_build_is_the_checkout_head(monkeypatch: pytest.MonkeyPatch) -> No
         return "a" * 40 if checkout == "/opt/ComfyUI" else None
 
     monkeypatch.setattr(inventory_module, "_git_head", fake_head)
-    monkeypatch.setattr("skulk.facts.derive.COMFY_RUNNER_AVAILABLE", True)
     facts = make_facts(gpus=(NVIDIA_A40,)).model_copy(
         update={"comfy_binary": ok_bin("SKULK_COMFY_BIN"), "comfy_root": "/opt/ComfyUI", "comfy_root_state": "ok"}
     )

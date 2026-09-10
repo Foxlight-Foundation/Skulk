@@ -367,17 +367,27 @@ A model card's `placement.compatible_backends` selects which engine serves it
   `AcceleratorMetrics.compute_capability` (+ `native_fp4`/`native_fp8`, via NVML)
   is the capability signal for keying placement on GPU generation, not vendor.
 
-- **`comfy`** (`provisioning/comfy.py`, runner to follow): served audio-video
-  engine over a pinned ComfyUI checkout (`COMFY_PIN`, release v0.35.0) in
-  its own managed virtual environment with a hash-pinned torch wheel set
-  (`COMFY_TORCH_WHEELS`, cu130 for aarch64 GB10 and x86_64). Provisioned
-  under `SKULK_ENGINES_DIR/comfy/<pin>/<variant>` at node startup only when
-  `SKULK_ENABLE_VIDEO_MODELS=true` (the wheel set is gigabytes), or by
-  `skulk doctor --fix`; `SKULK_COMFY_BIN` (the environment's python) plus
-  `SKULK_COMFY_ROOT` (the checkout) point at a hand-built install instead.
-  Tags `comfy-cuda` today, `comfy-rocm` once the Strix lane is qualified;
-  GPU-only, single-host. ADVANCING `COMFY_PIN` OR THE WHEEL SET IS A
-  CHECKLIST (architecture-reference.md "Engine pin advancement").
+- **`comfy`** (`worker/runner/comfy/`, `provisioning/comfy.py`): served
+  audio-video engine over a pinned ComfyUI checkout (`COMFY_PIN`, release
+  v0.35.0) in its own managed virtual environment with a hash-pinned torch
+  wheel set (`COMFY_TORCH_WHEELS`, cu130 for aarch64 GB10 and x86_64).
+  Provisioned under `SKULK_ENGINES_DIR/comfy/<pin>/<variant>` at node
+  startup only when `SKULK_ENABLE_VIDEO_MODELS=true` (the wheel set is
+  gigabytes), or by `skulk doctor --fix`; `SKULK_COMFY_BIN` (the
+  environment's python) plus `SKULK_COMFY_ROOT` (the checkout) point at a
+  hand-built install instead. The runner spawns ComfyUI headless (loopback
+  port, custom and API nodes disabled, Skulk-owned input/output/temp/user
+  directories, an `extra_model_paths.yaml` exposing the staged artifact),
+  binds the card and request onto ComfyUI's own MiniMax H3 node graph
+  (`graph.py`, the official workflow templates node for node), submits it
+  with a caller-minted `prompt_id`, follows `progress_state` on the
+  WebSocket, cancels through the jobs API, and hands the container plus a
+  first-frame thumbnail to the worker like the test engine does. Teardown
+  signals the process group; worker startup sweeps init-parented servers
+  launched with Skulk's `--user-directory`. Tags `comfy-cuda` today,
+  `comfy-rocm` once the Strix lane is qualified; GPU-only, single-host.
+  ADVANCING `COMFY_PIN` OR THE WHEEL SET IS A CHECKLIST
+  (architecture-reference.md "Engine pin advancement").
 - **`test_video`** (`worker/runner/test_video/`): deterministic test video
   engine for the audio-video substrate. Advertised as `test_video` /
   `test_video-cpu` only when `SKULK_TEST_VIDEO_ENGINE` is set; serves only the

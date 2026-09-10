@@ -569,13 +569,19 @@ def entrypoint(
                 )
                 runner.main()
                 return
-            # The served video engines are later deliverables of the video
-            # arc. Fail loudly with the reason instead of letting a text runner
+            if video_engine == "comfy":
+                from skulk.worker.runner.comfy.runner import Runner as ComfyRunner
+
+                runner = ComfyRunner(
+                    bound_instance, event_sender, task_receiver, cancel_receiver
+                )
+                runner.main()
+                return
+            # Fail loudly with the reason instead of letting a text runner
             # try to load a diffusion stack and report something unrelated.
             raise RuntimeError(
                 "no video engine serves this placement on this node "
-                f"(resolved backend {resolved!r}); the served video engines are "
-                "later deliverables of the video arc"
+                f"(resolved backend {resolved!r})"
             )
         if bound_instance.is_image_model:
             from skulk.worker.runner.image_models.runner import Runner as ImageRunner

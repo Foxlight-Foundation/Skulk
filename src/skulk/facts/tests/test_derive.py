@@ -7,8 +7,6 @@ binary override (#462), a Strix Halo with a Vulkan llama-server, a Mac, and
 the declared-override-vs-observed-hardware disagreements in between.
 """
 
-import pytest
-
 from skulk.facts.derive import derive_node_backends
 from skulk.facts.testing import (
     AMD_STRIX,
@@ -468,19 +466,10 @@ def test_test_video_engine_is_advertised_only_when_asked() -> None:
     assert any("test video" in note for note in asked.notes)
 
 
-def test_comfy_derives_cuda_from_nvidia_when_both_paths_are_valid(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from skulk.facts import derive as derive_module
-
+def test_comfy_derives_cuda_from_nvidia_when_both_paths_are_valid() -> None:
     facts = make_facts(gpus=(NVIDIA_A40,)).model_copy(
         update={"comfy_binary": ok_bin("SKULK_COMFY_BIN"), "comfy_root": "/opt/ComfyUI", "comfy_root_state": "ok"}
     )
-    # Until the runner ships, a valid install is withheld with a note.
-    withheld = derive_node_backends(facts)
-    assert "comfy" not in withheld.backends
-    assert any("withheld" in note for note in withheld.notes)
-    monkeypatch.setattr(derive_module, "COMFY_RUNNER_AVAILABLE", True)
     derivation = derive_node_backends(facts)
     assert {"comfy", "comfy-cuda"} <= derivation.backends
     assert not [c for c in derivation.conflicts if "comfy" in c.message]
@@ -502,10 +491,7 @@ def test_comfy_stays_off_without_a_valid_checkout() -> None:
     assert any(c.code == "invalid_engine_binary" and "SKULK_COMFY_ROOT" in c.message for c in derivation.conflicts)
 
 
-def test_comfy_is_gpu_only_and_honors_declarations(monkeypatch: pytest.MonkeyPatch) -> None:
-    from skulk.facts import derive as derive_module
-
-    monkeypatch.setattr(derive_module, "COMFY_RUNNER_AVAILABLE", True)
+def test_comfy_is_gpu_only_and_honors_declarations() -> None:
     valid = {"comfy_binary": ok_bin("SKULK_COMFY_BIN"), "comfy_root": "/opt/ComfyUI", "comfy_root_state": "ok"}
     no_gpu = derive_node_backends(make_facts().model_copy(update=valid))
     assert "comfy" not in no_gpu.backends
@@ -518,10 +504,7 @@ def test_comfy_is_gpu_only_and_honors_declarations(monkeypatch: pytest.MonkeyPat
     assert derive_node_backends(make_facts(gpus=(NVIDIA_A40,))).backends & {"comfy", "comfy-cuda"} == set()
 
 
-def test_comfy_skips_inherited_declarations_it_cannot_use(monkeypatch: pytest.MonkeyPatch) -> None:
-    from skulk.facts import derive as derive_module
-
-    monkeypatch.setattr(derive_module, "COMFY_RUNNER_AVAILABLE", True)
+def test_comfy_skips_inherited_declarations_it_cannot_use() -> None:
     valid = {"comfy_binary": ok_bin("SKULK_COMFY_BIN"), "comfy_root": "/opt/ComfyUI", "comfy_root_state": "ok"}
     # The documented AMD launch path declares vulkan for llama.cpp; ComfyUI
     # cannot use it, so the ROCm backend still derives from the observed GPU.

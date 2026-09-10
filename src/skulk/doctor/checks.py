@@ -311,17 +311,6 @@ def _check_comfy_engine(facts: NodeFacts) -> Sequence[CheckResult]:
                 f"{sorted(tag for tag in derived if tag.startswith('comfy-'))}",
             )
         ]
-    if facts.comfy_binary.state == "ok" and any(
-        "withheld" in note for note in derivation.notes
-    ):
-        return [
-            _ok(
-                check_id,
-                title,
-                f"comfy ({facts.comfy_root}) is configured; the backend advertises "
-                "once this build carries the ComfyUI runner",
-            )
-        ]
     if facts.comfy_binary.state != "not_configured" or facts.comfy_root is not None:
         return [
             CheckResult(
@@ -356,7 +345,7 @@ def _check_comfy_engine(facts: NodeFacts) -> Sequence[CheckResult]:
                 check_id,
                 title,
                 f"managed ComfyUI at {dormant} is installed; node startup wires it "
-                "once this build carries the ComfyUI runner",
+                "into this node's facts",
             )
         ]
     fix_available = _comfy_fix_applicable(facts)
@@ -396,7 +385,7 @@ def _fix_comfy_engine(facts: NodeFacts) -> str | None:
         return None
     from skulk.provisioning import ensure_comfy
 
-    root = ensure_comfy(facts, explicit=True)
+    root = ensure_comfy(facts)
     if root is None:
         raise RuntimeError(
             "ComfyUI provisioning did not produce an install (override present, "

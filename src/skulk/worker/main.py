@@ -171,6 +171,7 @@ from skulk.utils.keyed_backoff import KeyedBackoff
 from skulk.utils.task_group import TaskGroup
 from skulk.worker.plan import plan
 from skulk.worker.runner.bootstrap import WEDGE_FAILURE_MARKER
+from skulk.worker.runner.comfy.orphan_sweep import sweep_orphaned_comfy_servers
 from skulk.worker.runner.runner_supervisor import RunnerSupervisor
 from skulk.worker.runner.vllm.orphan_sweep import sweep_orphaned_vllm_engines
 
@@ -1225,6 +1226,9 @@ class Worker:
         # someone kills it (#653); reap exactly that shape before this
         # incarnation starts advertising capacity. No-op off Linux.
         sweep_orphaned_vllm_engines()
+        # Same shape for the video engine: a ComfyUI server whose runner died
+        # keeps the diffusion weights resident on the GPU.
+        sweep_orphaned_comfy_servers()
 
         info_send, info_recv = channel[GatheredInfo]()
         info_gatherer: InfoGatherer = InfoGatherer(

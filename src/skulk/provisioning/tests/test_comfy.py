@@ -33,7 +33,6 @@ def isolated_comfy(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.delenv(COMFY_ROOT_ENV, raising=False)
     monkeypatch.delenv("SKULK_NO_ENGINE_AUTOPROVISION", raising=False)
     monkeypatch.setattr(comfy, "_require_tool", _fake_tool)
-    monkeypatch.setattr(comfy, "provision_unasked_allowed", lambda: True)
 
 
 def _fake_tool(name: str) -> str:
@@ -210,8 +209,7 @@ def test_pinned_wheel_requirement_shape() -> None:
     assert wheel.requirement() == "torch @ https://x/torch-1.0.whl --hash=sha256:" + "a" * 64
 
 
-def test_startup_never_provisions_before_the_runner_exists(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(comfy, "provision_unasked_allowed", lambda: False)
+def test_startup_provisions_when_the_gates_pass(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
 
     def fake_provision(variant: str, *, run: object = None) -> Path:
@@ -220,6 +218,7 @@ def test_startup_never_provisions_before_the_runner_exists(monkeypatch: pytest.M
 
     monkeypatch.setattr(comfy, "provision_comfy", fake_provision)
     facts = make_facts(gpus=(NVIDIA_A40,))
-    assert ensure_comfy(facts) is None and calls == []
-    # An operator's doctor --fix is explicit and may provision.
-    assert ensure_comfy(facts, explicit=True) is not None and calls == ["cuda"]
+    # Offline startup never downloads; an online one provisions unasked
+    # because video models are enabled on this node.
+    assert ensure_comfy(facts, allow_download=False) is None and calls == []
+    assert ensure_comfy(facts) is not None and calls == ["cuda"]
