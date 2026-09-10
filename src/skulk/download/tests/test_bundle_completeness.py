@@ -134,3 +134,16 @@ def test_resolver_finds_a_rooted_bundle_by_its_manifest(tmp_path: Path, monkeypa
     monkeypatch.setattr(constants, "SKULK_MODELS_DIR", tmp_path / "unused")
     assert resolve_model_in_path(ModelId(card.model_id), REVISION, artifact_root="comfy") == artifact
     assert build_model_path(ModelId(card.model_id), REVISION, "comfy") == artifact / "comfy"
+
+
+def test_manifest_outranks_a_safetensors_index_inside_the_bundle(tmp_path: Path) -> None:
+    card = _card()
+    artifact = _install(tmp_path, card)
+    # An index that covers only the transformer shard would declare the
+    # directory complete on its own; the manifest still sees the short VAE.
+    (artifact / "diffusion_models" / "model.safetensors.index.json").write_text(
+        json.dumps({"metadata": {}, "weight_map": {"w": "transformer.safetensors"}})
+    )
+    assert is_model_directory_complete(artifact)
+    (artifact / "vae/audio_vae.safetensors").write_bytes(b"short")
+    assert not is_model_directory_complete(artifact)

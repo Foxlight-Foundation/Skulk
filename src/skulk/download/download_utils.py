@@ -1057,25 +1057,34 @@ def _gguf_shard_info(name: str) -> "tuple[str, int] | None":
 
 def is_model_directory_complete(model_dir: Path) -> bool:
     """Check if a model directory contains all required weight files."""
+    # A bundle's installed manifest is the store-verified file list and
+    # outranks the layout heuristics below: a truncated companion file the
+    # safetensors index never mentions still makes the artifact incomplete.
+    manifest_verdict = _installed_bundle_verdict(model_dir)
+    if manifest_verdict is not None:
+        return manifest_verdict
     file_list = _scan_model_directory(model_dir, recursive=True)
     if file_list is not None:
         # A safetensors index is present: completeness is governed entirely by it
         # (do NOT let a stray .gguf mask a partially-downloaded safetensors set).
         return all(f.size is not None for f in file_list)
-    if _installed_bundle_is_complete(model_dir):
-        return True
     # No safetensors index -> this may be a GGUF repo; complete once its weights
     # (the full shard group) are present.
     return directory_has_gguf_weights(model_dir)
 
 
 def _installed_bundle_is_complete(model_dir: Path) -> bool:
-    """Whether a bundle artifact's installed manifest is fully on disk.
+    """Whether a bundle artifact's installed manifest is present and fully on disk."""
+    return _installed_bundle_verdict(model_dir) is True
+
+
+def _installed_bundle_verdict(model_dir: Path) -> bool | None:
+    """Completeness by the installed bundle manifest, or ``None`` without one.
 
     A bundle-scoped artifact (a diffusion stack laid out by model folder, for
-    example) carries neither a safetensors index nor GGUF weights, so the two
-    layout probes above cannot see it. Its installed-card sidecar holds the
-    file manifest the store verified when it registered the bytes, and that
+    example) carries neither a safetensors index nor GGUF weights, so the
+    layout probes cannot see it. Its installed-card sidecar holds the file
+    manifest the store verified when it registered the bytes, and that
     manifest is the completeness truth: every listed file present at its
     recorded size. A legacy sidecar without a manifest proves nothing here.
     """
@@ -1084,9 +1093,9 @@ def _installed_bundle_is_complete(model_dir: Path) -> bool:
     try:
         record = read_installed_card(model_dir)
     except (OSError, ValueError):
-        return False
+        return None
     if record is None or record.schema_version != 2 or not record.files:
-        return False
+        return None
     # Same containment rule as verify_installed_file: a manifest entry must
     # resolve to a regular file beneath the artifact root, so an equal-sized
     # symlink pointing outside the artifact never reads as its bytes.
