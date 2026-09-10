@@ -126,6 +126,11 @@ def test_summary_rejects_duplicate_or_dangling_ids() -> None:
 
 
 def test_summary_bounds_surfaces_actions_and_host_count() -> None:
+    with pytest.raises(ValidationError):
+        _summary(operations_active=10**30)
+    with pytest.raises(ValidationError):
+        _summary(operations_active=-1)
+    assert _summary(operations_active=3).operations_active == 3
     surfaces = tuple(
         CapabilityNodeSurface(surface_id=f"s{i}", title="S", url="http://h/")
         for i in range(5)

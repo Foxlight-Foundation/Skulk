@@ -14,6 +14,12 @@ export type CapabilityActionItem =
       url: string;
       /** False when the surface reports it is not answering yet. */
       ready: boolean;
+      /**
+       * False when the URL is loopback on a host other than the one serving
+       * this dashboard: following it would hit the browser's machine, not the
+       * capability host, so the entry renders as unreachable with a hint.
+       */
+      reachable: boolean;
     }
   | {
       kind: 'call';
@@ -31,10 +37,57 @@ export type CapabilityActionItem =
 export interface CapabilityActionContext {
   /** True when the dashboard is served by the node's host. */
   isLocalHost: boolean;
+  /**
+   * Hostname the browser used to reach this dashboard (`location.hostname`).
+   * Loopback surface URLs on the local host are rewritten onto it so a
+   * dashboard opened from another machine still reaches the host.
+   */
+  dashboardHostname?: string;
   /** Friendly name of the host, for the "manage on host" hint. */
   hostName: string;
   /** Translates a key with an English fallback. */
   t: (key: string, fallback: string, params?: Record<string, string | number>) => string;
+}
+
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]', '0.0.0.0']);
+
+/** A resolved surface or link URL plus whether this browser can reach it. */
+export interface ResolvedSurfaceUrl {
+  url: string;
+  reachable: boolean;
+}
+
+/**
+ * Makes a surface URL usable from wherever the dashboard is open. A loopback
+ * URL means "on the capability host": when this dashboard is served by that
+ * host, the loopback part is replaced with the hostname the browser already
+ * reached the dashboard through; when the dashboard is served by a different
+ * host, the URL is left as is but marked unreachable, because following it
+ * would target the browser's own machine. Non-loopback URLs pass through.
+ */
+export function resolveSurfaceUrl(
+  url: string,
+  context: Pick<CapabilityActionContext, 'isLocalHost' | 'dashboardHostname'>,
+): ResolvedSurfaceUrl {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return { url, reachable: true };
+  }
+  if (!LOOPBACK_HOSTS.has(parsed.hostname) && !LOOPBACK_HOSTS.has(`[${parsed.hostname}]`)) {
+    return { url, reachable: true };
+  }
+  const dashboardHostname = context.dashboardHostname?.trim();
+  if (!context.isLocalHost || !dashboardHostname) {
+    return { url, reachable: false };
+  }
+  if (LOOPBACK_HOSTS.has(dashboardHostname) || LOOPBACK_HOSTS.has(`[${dashboardHostname}]`)) {
+    // Browser and host are the same machine; the loopback URL is fine.
+    return { url, reachable: true };
+  }
+  parsed.hostname = dashboardHostname;
+  return { url: parsed.toString(), reachable: true };
 }
 
 function resolveAction(
@@ -45,17 +98,27 @@ function resolveAction(
   if (action.kind === 'surface') {
     const surface = summary.surfaces.find((candidate) => candidate.surfaceId === action.surfaceId);
     if (!surface) return null;
+    const resolved = resolveSurfaceUrl(surface.url, context);
     return {
       kind: 'open-link',
       id: `action:${action.actionId}`,
       title: action.title,
-      url: surface.url,
+      url: resolved.url,
       ready: surface.ready,
+      reachable: resolved.reachable,
     };
   }
   if (action.kind === 'link') {
     if (!action.url) return null;
-    return { kind: 'open-link', id: `action:${action.actionId}`, title: action.title, url: action.url, ready: true };
+    const resolved = resolveSurfaceUrl(action.url, context);
+    return {
+      kind: 'open-link',
+      id: `action:${action.actionId}`,
+      title: action.title,
+      url: resolved.url,
+      ready: true,
+      reachable: resolved.reachable,
+    };
   }
   if (!action.capabilityId) return null;
   return {
@@ -81,13 +144,15 @@ export function buildCapabilityActions(
   const items: CapabilityActionItem[] = [];
   const seenUrls = new Set<string>();
   for (const surface of summary.surfaces) {
-    seenUrls.add(surface.url);
+    const resolved = resolveSurfaceUrl(surface.url, context);
+    seenUrls.add(resolved.url);
     items.push({
       kind: 'open-link',
       id: `surface:${surface.surfaceId}`,
       title: surface.title,
-      url: surface.url,
+      url: resolved.url,
       ready: surface.ready,
+      reachable: resolved.reachable,
     });
   }
   for (const action of summary.actions) {

@@ -32,6 +32,10 @@ MAX_CAPABILITY_NODE_ACTIONS = 8
 """Upper bound on actions one capability node advertises."""
 
 MAX_ACTION_PAYLOAD_BYTES = 4096
+
+MAX_OPERATIONS_ACTIVE = 10_000
+"""Upper bound on the reported active-operation count; the value is a hint
+for the flyout, not an inventory, and a larger integer is a malformed owner."""
 """Upper bound on a descriptor action's serialized fixed payload."""
 
 MAX_SURFACE_URL_LENGTH = 2048
@@ -279,7 +283,7 @@ class CapabilityNodeSummary(FrozenModel):
         default=(), max_length=MAX_CAPABILITY_NODE_ACTIONS
     )
     """Additional top-level actions the flyout offers."""
-    operations_active: int = Field(default=0, ge=0)
+    operations_active: int = Field(default=0, ge=0, le=MAX_OPERATIONS_ACTIVE)
     """Durable operations currently running on the node."""
 
     @field_validator("plugin_id", "node_id")

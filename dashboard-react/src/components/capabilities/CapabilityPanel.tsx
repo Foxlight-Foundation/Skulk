@@ -21,6 +21,7 @@ import { RightDrawer } from '../common/RightDrawer';
 import { DrawerBody, DrawerTabBar, DrawerTabButton } from '../common/drawerParts';
 import {
   buildCapabilityActions,
+  resolveSurfaceUrl,
   runDescriptorAction,
   type CapabilityActionItem,
 } from '../topology/capabilityActions';
@@ -197,7 +198,15 @@ export function CapabilityPanel() {
     : '';
   const isLocalHost = target !== null && localNodeId !== null && localNodeId === target.hostNodeId;
   const actions = useMemo(
-    () => (summary ? buildCapabilityActions(summary, { isLocalHost, hostName, t }) : []),
+    () =>
+      summary
+        ? buildCapabilityActions(summary, {
+            isLocalHost,
+            hostName,
+            dashboardHostname: window.location.hostname,
+            t,
+          })
+        : [],
     [summary, isLocalHost, hostName, t],
   );
 
@@ -312,25 +321,46 @@ export function CapabilityPanel() {
               <Empty>{t('capabilityPanel.noSurfaces', 'This node exposes no surfaces.')}</Empty>
             ) : (
               <List>
-                {summary.surfaces.map((surface) => (
-                  <LinkRow
-                    $muted={!surface.ready}
-                    href={surface.url}
-                    key={surface.surfaceId}
-                    rel="noopener noreferrer"
-                    target="_blank"
-                  >
-                    <FiExternalLink aria-hidden size={16} />
-                    <RowText>
-                      <span>{surface.title}</span>
-                      <small>
-                        {surface.ready
-                          ? surface.url
-                          : t('topology.capability.surfaceNotReady', 'Not answering yet')}
-                      </small>
-                    </RowText>
-                  </LinkRow>
-                ))}
+                {summary.surfaces.map((surface) => {
+                  const resolved = resolveSurfaceUrl(surface.url, {
+                    isLocalHost,
+                    dashboardHostname: window.location.hostname,
+                  });
+                  if (!resolved.reachable) {
+                    return (
+                      <ButtonRow disabled key={surface.surfaceId} type="button">
+                        <FiExternalLink aria-hidden size={16} />
+                        <RowText>
+                          <span>{surface.title}</span>
+                          <small>
+                            {t('topology.capability.surfaceOnHostOnly', 'Reachable only from a browser on {host}', {
+                              host: hostName,
+                            })}
+                          </small>
+                        </RowText>
+                      </ButtonRow>
+                    );
+                  }
+                  return (
+                    <LinkRow
+                      $muted={!surface.ready}
+                      href={resolved.url}
+                      key={surface.surfaceId}
+                      rel="noopener noreferrer"
+                      target="_blank"
+                    >
+                      <FiExternalLink aria-hidden size={16} />
+                      <RowText>
+                        <span>{surface.title}</span>
+                        <small>
+                          {surface.ready
+                            ? resolved.url
+                            : t('topology.capability.surfaceNotReady', 'Not answering yet')}
+                        </small>
+                      </RowText>
+                    </LinkRow>
+                  );
+                })}
               </List>
             )
           ) : (
@@ -341,6 +371,21 @@ export function CapabilityPanel() {
                 <List>
                   {actions.map((item) => {
                     if (item.kind === 'open-link') {
+                      if (!item.reachable) {
+                        return (
+                          <ButtonRow disabled key={item.id} type="button">
+                            <FiExternalLink aria-hidden size={16} />
+                            <RowText>
+                              <span>{item.title}</span>
+                              <small>
+                                {t('topology.capability.surfaceOnHostOnly', 'Reachable only from a browser on {host}', {
+                                  host: hostName,
+                                })}
+                              </small>
+                            </RowText>
+                          </ButtonRow>
+                        );
+                      }
                       return (
                         <LinkRow
                           $muted={!item.ready}

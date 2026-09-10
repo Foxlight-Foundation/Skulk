@@ -153,6 +153,10 @@ Notes:
 - The summary is gossiped to every node and rendered by every dashboard, so
   it must never carry credentials, tokens, or private paths. URLs with
   embedded credentials are rejected at construction.
+- A loopback surface URL (`127.0.0.1` or `localhost`) means "on this host":
+  the dashboard rewrites it onto the hostname the browser reached the
+  dashboard through when that dashboard is served by the host, and marks it
+  unreachable when the dashboard is served by another node.
 - `withdraw_capability_node(plugin_id, node_id)` removes the summary. When the
   last one goes, one empty reading clears the host's entry everywhere.
 - Unlike capability tags, management-only (`--no-worker`) hosts gossip these

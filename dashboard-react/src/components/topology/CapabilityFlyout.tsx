@@ -276,7 +276,12 @@ export function CapabilityFlyout({
   const summary = summaries.find((candidate) => capabilityNodeKey(candidate) === selectedKey) ?? summaries[0];
   if (!summary) return null;
   const isLocalHost = localNodeId !== null && localNodeId === hostNodeId;
-  const actions = buildCapabilityActions(summary, { isLocalHost, hostName, t });
+  const actions = buildCapabilityActions(summary, {
+    isLocalHost,
+    hostName,
+    dashboardHostname: window.location.hostname,
+    t,
+  });
   const level = capabilityNodeHealth(summary);
   const left = Math.max(
     CANVAS_MARGIN,
@@ -360,6 +365,23 @@ export function CapabilityFlyout({
       <ActionList>
         {actions.map((item) => {
           if (item.kind === 'open-link') {
+            if (!item.reachable) {
+              return (
+                <ActionButton
+                  disabled
+                  key={item.id}
+                  title={t(
+                    'topology.capability.surfaceOnHostOnly',
+                    'Reachable only from a browser on {host}',
+                    { host: hostName },
+                  )}
+                  type="button"
+                >
+                  <FiExternalLink aria-hidden size={14} />
+                  <ActionText>{item.title}</ActionText>
+                </ActionButton>
+              );
+            }
             return (
               <ActionLink
                 $muted={!item.ready}

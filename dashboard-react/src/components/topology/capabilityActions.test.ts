@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { CapabilityNodeSummary } from '../../types/capabilityNodes';
-import { buildCapabilityActions, generateCallId, runDescriptorAction } from './capabilityActions';
+import { buildCapabilityActions, generateCallId, resolveSurfaceUrl, runDescriptorAction } from './capabilityActions';
 
 const t = (_key: string, fallback: string, params?: Record<string, string | number>) =>
   fallback.replace(/\{(\w+)\}/g, (_match, name: string) => String(params?.[name] ?? ''));
@@ -115,5 +115,38 @@ describe('generateCallId', () => {
     const second = generateCallId(null);
     expect(first).toMatch(/^call-/);
     expect(first).not.toBe(second);
+  });
+});
+
+describe('resolveSurfaceUrl', () => {
+  it('rewrites loopback onto the dashboard hostname when served by the host', () => {
+    expect(
+      resolveSurfaceUrl('http://127.0.0.1:8188/ui?x=1', { isLocalHost: true, dashboardHostname: 'kite6.local' }),
+    ).toEqual({ url: 'http://kite6.local:8188/ui?x=1', reachable: true });
+    expect(resolveSurfaceUrl('http://localhost:8188/', { isLocalHost: true, dashboardHostname: '10.0.0.5' })).toEqual({
+      url: 'http://10.0.0.5:8188/',
+      reachable: true,
+    });
+  });
+
+  it('keeps loopback when the browser is on the host itself', () => {
+    expect(resolveSurfaceUrl('http://127.0.0.1:8188/', { isLocalHost: true, dashboardHostname: 'localhost' })).toEqual({
+      url: 'http://127.0.0.1:8188/',
+      reachable: true,
+    });
+  });
+
+  it('marks loopback unreachable when the dashboard is served elsewhere', () => {
+    expect(resolveSurfaceUrl('http://127.0.0.1:8188/', { isLocalHost: false, dashboardHostname: 'kite3.local' })).toEqual({
+      url: 'http://127.0.0.1:8188/',
+      reachable: false,
+    });
+  });
+
+  it('passes routable URLs through untouched', () => {
+    expect(resolveSurfaceUrl('https://host.example/ui', { isLocalHost: false, dashboardHostname: 'x' })).toEqual({
+      url: 'https://host.example/ui',
+      reachable: true,
+    });
   });
 });

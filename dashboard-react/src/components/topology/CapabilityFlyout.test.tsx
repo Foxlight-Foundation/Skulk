@@ -112,6 +112,15 @@ describe('CapabilityFlyout', () => {
     }
   });
 
+  it('disables a loopback surface when the dashboard is served by another host', async () => {
+    await render({ localNodeId: 'node-elsewhere' });
+    expect(container?.querySelector('a[href="http://127.0.0.1:8188/"]')).toBeNull();
+    const disabled = [...(container?.querySelectorAll('button:disabled') ?? [])].find((button) =>
+      button.textContent?.includes('Open Studio'),
+    );
+    expect(disabled?.title).toContain('Reachable only from a browser on kite6');
+  });
+
   it('explains remote management when the dashboard is on another host', async () => {
     await render({ localNodeId: 'node-elsewhere' });
     expect(container?.textContent).toContain('managed from the dashboard on kite6');
