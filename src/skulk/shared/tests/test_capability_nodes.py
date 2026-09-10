@@ -64,6 +64,10 @@ def test_surface_url_is_bounded_and_refuses_credential_query_names() -> None:
     for query in ("token=abc", "Access_Token=abc", "api_key=abc", "sig=abc", "auth="):
         with pytest.raises(ValidationError):
             CapabilityNodeSurface(surface_id="s", title="S", url=f"https://host/ui?{query}")
+    for fragment in ("access_token=abc", "id_token=abc&state=x"):
+        with pytest.raises(ValidationError):
+            CapabilityNodeSurface(surface_id="s", title="S", url=f"https://host/cb#{fragment}")
+    CapabilityNodeSurface(surface_id="s", title="S", url="https://host/ui#workflows")
 
 
 def test_key_segments_refuse_slashes_so_the_host_key_is_injective() -> None:

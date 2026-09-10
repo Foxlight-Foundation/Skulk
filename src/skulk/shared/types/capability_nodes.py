@@ -86,8 +86,8 @@ def _validate_public_url(url: str) -> str:
     The URL is opened by an operator's browser from the dashboard, so it must
     be something a browser can follow on its own. Userinfo is refused because
     a summary is gossiped to every node and must never carry a credential; the
-    same goes for query parameters whose names announce a credential (token,
-    key, signature, and the like). That screen is a guard against the obvious
+    same goes for query or fragment parameters whose names announce a
+    credential (token, key, signature, and the like). That screen is a guard against the obvious
     mistake, not proof of absence: a surface that needs an authenticated URL
     must authenticate in its own page instead. Length is capped so a signed or
     padded URL cannot inflate the reading.
@@ -101,12 +101,15 @@ def _validate_public_url(url: str) -> str:
         raise ValueError("surface and link URLs must be absolute http or https URLs")
     if "@" in parts.netloc:
         raise ValueError("surface and link URLs must not embed credentials")
-    for name, _value in parse_qsl(parts.query, keep_blank_values=True):
-        if name.lower() in _CREDENTIAL_QUERY_NAMES:
-            raise ValueError(
-                f"surface and link URLs must not carry credential-like query "
-                f"parameters ({name!r})"
-            )
+    # OAuth-style implicit flows put tokens in the fragment rather than the
+    # query, so both halves get the same name screen.
+    for part_name, raw in (("query", parts.query), ("fragment", parts.fragment)):
+        for name, _value in parse_qsl(raw, keep_blank_values=True):
+            if name.lower() in _CREDENTIAL_QUERY_NAMES:
+                raise ValueError(
+                    f"surface and link URLs must not carry credential-like {part_name} "
+                    f"parameters ({name!r})"
+                )
     return url
 
 
