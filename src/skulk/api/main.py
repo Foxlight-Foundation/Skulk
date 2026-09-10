@@ -6484,7 +6484,10 @@ class API:
                 f"{MAX_CAPABILITY_NODES_PER_HOST} summaries"
             )
             return
-        nodes[summary.key] = summary
+        # A frozen model does not freeze the nested payload dicts, so a deep
+        # copy detaches the published record from any object the extension
+        # still holds; what was validated is exactly what gets gossiped.
+        nodes[summary.key] = summary.model_copy(deep=True)
 
     def _withdraw_capability_node(self, plugin_id: str, node_id: str) -> None:
         """Withdraw a published capability-node summary.

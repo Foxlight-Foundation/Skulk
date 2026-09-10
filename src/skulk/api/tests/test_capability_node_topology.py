@@ -19,6 +19,7 @@ from skulk.api.main import (
 from skulk.shared.election import ElectionMessage
 from skulk.shared.types.capability_nodes import (
     MAX_CAPABILITY_NODES_PER_HOST,
+    CapabilityNodeAction,
     CapabilityNodeSummary,
     CapabilityNodeSurface,
 )
@@ -134,3 +135,26 @@ def test_env_fake_node_ignores_invalid_urls(monkeypatch: pytest.MonkeyPatch) -> 
         monkeypatch.setenv(TEST_CAPABILITY_NODE_ENV_VAR, value)
         api._publish_test_capability_node_from_env()  # pyright: ignore[reportPrivateUsage]
     assert view.local_capability_nodes == {}
+
+
+def test_publish_detaches_the_summary_from_extension_owned_payloads() -> None:
+    view = TelemetryView()
+    api = _build_api(view)
+    payload: dict[str, object] = {"mode": "t2va"}
+    summary = _summary().model_copy(
+        update={
+            "actions": (
+                CapabilityNodeAction(
+                    action_id="plan",
+                    title="Plan",
+                    kind="descriptor",
+                    capability_id="video.plan",
+                    payload=payload,  # pyright: ignore[reportArgumentType]
+                ),
+            )
+        }
+    )
+    api._extension_context.publish_capability_node(summary)  # pyright: ignore[reportPrivateUsage]
+    payload["api_key"] = "leaked-after-validation"
+    published = view.local_capability_nodes[summary.key]
+    assert published.actions[0].payload == {"mode": "t2va"}
