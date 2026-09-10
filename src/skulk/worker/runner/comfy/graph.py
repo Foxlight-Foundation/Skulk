@@ -102,7 +102,7 @@ def stage_for_node(node_id: str) -> VideoStage | None:
     """Map an executing graph node onto Skulk's coarse render stage."""
     if node_id in _STAGE_BY_NODE:
         return _STAGE_BY_NODE[node_id]
-    if node_id.startswith(("ref_", "load_")):
+    if node_id.startswith(("ref_", "load_", "guide_")):
         return "encoding"
     return None
 
@@ -384,16 +384,16 @@ def build_prompt(
         prompt[NODE_AUDIO_VAE] = _node("VAELoader", "Load audio VAE", vae_name=files.audio_vae)
 
     if render.mode is VideoMode.ReferenceToAudioVideo:
-        _add_reference_condition(prompt, render, params, references)
+        conditioning = _add_reference_condition(prompt, render, params, references)
     else:
-        _add_keyframe_condition(prompt, render, params, references)
+        conditioning = _add_keyframe_condition(prompt, render, params, references)
 
     prompt[NODE_NOISE] = _node("RandomNoise", "Seed", noise_seed=plan.seed)
     prompt[NODE_SAMPLER_SELECT] = _node("KSamplerSelect", "Sampler", sampler_name=SAMPLER_NAME)
     prompt[NODE_SCHEDULER] = _node(
         "BasicScheduler", "Schedule", model=model_ref, scheduler=SCHEDULER_NAME, steps=plan.steps, denoise=1.0
     )
-    prompt[NODE_GUIDER] = _node("BasicGuider", "Guider", model=model_ref, conditioning=_link(NODE_CONDITION, 0))
+    prompt[NODE_GUIDER] = _node("BasicGuider", "Guider", model=model_ref, conditioning=_link(conditioning, 0))
     prompt[NODE_SAMPLER] = _node(
         "SamplerCustomAdvanced",
         "Sample",
@@ -438,7 +438,8 @@ def _add_keyframe_condition(
     render: ComfyRenderPlan,
     params: VideoGenerationTaskParams,
     references: tuple[ReferenceBinding, ...],
-) -> None:
+) -> str:
+    """Add the text-and-keyframe condition node; return the conditioning node id."""
     plan = render.plan
     inputs: dict[str, object] = {
         "clip": _link(NODE_CLIP),
@@ -459,6 +460,7 @@ def _add_keyframe_condition(
         prompt[node_id] = _node("LoadImage", f"Load {role.replace('_', ' ')}", image=binding.input_name)
         inputs[role] = _link(node_id, 0)
     prompt[NODE_CONDITION] = _node("MiniMaxH3ImageToVideo", "Condition", **inputs)
+    return NODE_CONDITION
 
 
 def _add_reference_condition(
@@ -466,7 +468,14 @@ def _add_reference_condition(
     render: ComfyRenderPlan,
     params: VideoGenerationTaskParams,
     references: tuple[ReferenceBinding, ...],
-) -> None:
+) -> str:
+    """Add the reference condition node plus keyframe guides; return the conditioning node id.
+
+    ``MiniMaxH3ReferenceToVideo`` has no keyframe inputs, so a first or last
+    frame sent alongside numbered references (the documented Ref2VA request
+    shape) is anchored afterwards with ``MiniMaxH3AddGuide`` at frame 0 or
+    the last frame, chained onto the conditioning.
+    """
     plan = render.plan
     inputs: dict[str, object] = {
         "clip": _link(NODE_CLIP),
@@ -480,13 +489,12 @@ def _add_reference_condition(
     if plan.audio:
         inputs["audio_vae"] = _link(NODE_AUDIO_VAE)
     counts = {"image": 0, "video": 0, "audio": 0}
+    keyframes: list[ReferenceBinding] = []
     for binding in references:
         spec = binding.spec
         if spec.role != "reference":
-            raise ValueError(
-                f"mode {render.mode.value} accepts numbered references only; slot "
-                f"{spec.slot} has role {spec.role}"
-            )
+            keyframes.append(binding)
+            continue
         index = counts[spec.kind]
         counts[spec.kind] = index + 1
         if spec.kind == "image":
@@ -505,6 +513,23 @@ def _add_reference_condition(
             prompt[node_id] = _node("LoadAudio", f"Reference audio {index + 1}", audio=binding.input_name)
             inputs[f"ref_audios.ref_audio_{index}"] = _link(node_id, 0)
     prompt[NODE_CONDITION] = _node("MiniMaxH3ReferenceToVideo", "Condition", **inputs)
+    conditioning = NODE_CONDITION
+    for binding in keyframes:
+        role = binding.spec.role
+        load_id = f"load_{role}"
+        guide_id = f"guide_{role}"
+        prompt[load_id] = _node("LoadImage", f"Load {role.replace('_', ' ')}", image=binding.input_name)
+        prompt[guide_id] = _node(
+            "MiniMaxH3AddGuide",
+            f"Anchor {role.replace('_', ' ')}",
+            positive=_link(conditioning, 0),
+            vae=_link(NODE_VIDEO_VAE),
+            latent=_link(NODE_CONDITION, 1),
+            image=_link(load_id, 0),
+            frame_idx=0 if role == "first_frame" else -1,
+        )
+        conditioning = guide_id
+    return conditioning
 
 
 def extra_model_paths_yaml(model_dir: Path) -> str:

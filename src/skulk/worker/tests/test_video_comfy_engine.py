@@ -208,10 +208,26 @@ def test_reference_graph_numbers_attachments_per_kind(tmp_path: Path) -> None:
     assert prompt["ref_video_components_0"]["class_type"] == "GetVideoComponents"
     assert prompt["ref_image_1"]["inputs"]["image"] == "cmd/2.jpg"
     assert prompt["ref_audio_0"]["inputs"]["audio"] == "cmd/3.wav"
-    keyframe = (_reference(0, "image", "first_frame", "image/png", input_dir / "cmd" / names[0]),)
-    bad = _params(REF2VA_ID, mode=VideoMode.ReferenceToAudioVideo, references=keyframe, reference_bytes=1, total_input_chunks=1)
-    with pytest.raises(ValueError, match="numbered references only"):
-        build_prompt(plan_comfy_render(bad, card), bad, bind_references(bad.references, input_dir), "cmd")
+    # The documented Ref2VA request pairs a first frame with references: the
+    # keyframe is anchored through MiniMaxH3AddGuide after the reference node.
+    mixed_refs = (
+        _reference(0, "image", "first_frame", "image/png", input_dir / "cmd" / names[0]),
+        _reference(1, "image", "reference", "image/jpeg", input_dir / "cmd" / names[2]),
+        _reference(2, "image", "last_frame", "image/png", input_dir / "cmd" / names[0]),
+    )
+    mixed = _params(REF2VA_ID, references=mixed_refs, reference_bytes=3, total_input_chunks=3)
+    assert mixed.implied_mode() is VideoMode.ReferenceToAudioVideo
+    graph = build_prompt(plan_comfy_render(mixed, card), mixed, bind_references(mixed.references, input_dir), "cmd")
+    assert graph[NODE_CONDITION]["inputs"]["ref_images.ref_image_0"] == ["ref_image_0", 0]
+    assert "ref_images.ref_image_1" not in graph[NODE_CONDITION]["inputs"]
+    first = graph["guide_first_frame"]
+    assert first["class_type"] == "MiniMaxH3AddGuide" and first["inputs"]["frame_idx"] == 0
+    assert first["inputs"]["positive"] == [NODE_CONDITION, 0] and first["inputs"]["latent"] == [NODE_CONDITION, 1]
+    assert first["inputs"]["image"] == ["load_first_frame", 0] and first["inputs"]["vae"] == ["video_vae", 0]
+    last = graph["guide_last_frame"]
+    assert last["inputs"]["positive"] == ["guide_first_frame", 0] and last["inputs"]["frame_idx"] == -1
+    assert graph["guider"]["inputs"]["conditioning"] == ["guide_last_frame", 0]
+    assert graph["sampler"]["inputs"]["latent_image"] == [NODE_CONDITION, 1]
 
 
 def test_extra_model_paths_lists_the_folders_the_artifact_has(tmp_path: Path) -> None:
@@ -239,7 +255,7 @@ def test_server_args_are_headless_and_skulk_owned(tmp_path: Path) -> None:
 
 def test_stage_mapping_covers_every_graph_node() -> None:
     assert stage_for_node("sampler") == "sampling" and stage_for_node("decode_audio") == "decoding"
-    assert stage_for_node("ref_video_components_1") == "encoding" and stage_for_node("load_last_frame") == "encoding"
+    assert stage_for_node("ref_video_components_1") == "encoding" and stage_for_node("guide_last_frame") == "encoding"
     assert stage_for_node("save_thumbnail") == "muxing" and stage_for_node("unknown") is None
 
 
