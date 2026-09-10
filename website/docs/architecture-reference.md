@@ -1357,6 +1357,11 @@ support, so controllers must check live node support before and after submission
 
 - **Local system setup:** `service_setup.py` exposes `skulk-plugin-service setup|status` and journals source identity, generated profile, staged runtime and installation progress. Repeated setup reuses completed staging; source core/Python/dependency changes create a new operation after completion. `service_registration.py` is a standalone standard-library-only sudo helper with prepare/stop/install actions for the current account's fixed nonroot service. It walks root-owned parent directories without following links, refuses foreign unit definitions, and installs system LaunchDaemons or systemd multi-user services. No HTTP request can supply commands, paths or unit bytes. State lives in fixed service-owned system directories, and API connection metadata is generated under the existing Skulk configuration. One profile per account is supported. Dynamic API registration, dashboard setup and physical reboot gates remain outstanding.
 
+Skulk wheels and source distributions include declarative resources under
+`skulk/resources`. Discovery prefers the imported package and retains legacy
+service-copy and frozen bundle layouts. The source-tree `resources` symlink points
+to `src/skulk/resources`, preserving existing tools without duplicate payloads.
+
 Managed capability nodes may expose the optional `NodePreflightProvider` facet.
 The generic `/v1/plugins/{plugin_id}/nodes/{node_id}/preflight` read returns
 bounded prerequisite results and observed revision metadata independently of

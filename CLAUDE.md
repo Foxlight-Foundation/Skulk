@@ -566,7 +566,10 @@ trust during interrupted selection; never confuse it with invalid-trust disable.
 host identity provisioned locally and no remote path/command selection. Unavailable
 plugin runtimes must not remove manager inventory or operation-status access.
 `service_snapshot.py` prepares an exact local service copy without mutating Skulk's
-environment. Include declarative resources, remove editable path indirection, and
+environment. Ship declarative resources in `src/skulk/resources` for wheels and
+source distributions; retain the root `resources` symlink for source tooling.
+Installed discovery must use the imported package without a checkout dependency.
+Include declarative resources, remove editable path indirection, and
 refuse unhandled startup hooks or links. The standard-library-only copied
 `service_bootstrap.py` must run with site initialization disabled and verify the
 complete runtime before exec; it accepts no executable override. Service-runtime

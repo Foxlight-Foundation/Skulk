@@ -23,6 +23,13 @@ setup recovery tests belong alongside `service_setup.py` and the standalone
 Validate real LaunchDaemon/systemd behavior and reboot recovery on the explicitly
 assigned qualification host before claiming unattended installation support.
 
+Declarative model resources live in `src/skulk/resources/` so the normal uv build
+includes them in both wheels and source distributions. The root `resources`
+symlink preserves existing source tooling and desktop bundle paths; edit the
+package files rather than creating a second copy. Verify packaging changes with
+`uv build` and an installation outside the checkout, without resource environment
+overrides. A successful editable install does not establish wheel completeness.
+
 To run Skulk from source:
 
 **Prerequisites:**

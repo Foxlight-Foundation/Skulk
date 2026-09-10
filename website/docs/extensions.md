@@ -742,6 +742,10 @@ executing the fixed private owner entry point.
 
 ### Installing the local manager service
 
+The installed Skulk package includes its declarative model resources. Setup does
+not require a Git checkout or a `SKULK_RESOURCES_DIR` override. If resources are
+missing, reinstall the complete qualified package before retrying setup.
+
 The candidate `skulk-plugin-service setup` command prepares a verified independent
 manager runtime and registers a fixed nonroot system service on Apple Silicon
 macOS or Ubuntu 24.04 x86_64. Run it as the existing Skulk owner in the qualified

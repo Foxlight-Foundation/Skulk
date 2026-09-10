@@ -1632,6 +1632,10 @@ source and native bindings, and declarative resources without resolving versions
 or changing the source environment. Editable checkout redirection and old venv
 startup shims are omitted; unknown path hooks or external links are refused.
 Source identity and dependency inventory must remain unchanged throughout copying.
+Declarative resources are packaged under `skulk/resources` in both wheels and
+source distributions. Resource discovery first uses the imported package, then
+retains the older source/service-copy and frozen desktop layouts. The repository's
+root `resources` path is a compatibility symlink to the package directory.
 `service_bootstrap.py` uses only the standard library with Python site initialization
 disabled to verify the selected complete file seal before starting the fixed manager.
 Core-runtime activation requires a stopped manager and leaves plugin state intact.
