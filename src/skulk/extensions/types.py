@@ -30,6 +30,7 @@ from skulk.extensions.calls import CapabilityCall, CapabilityError, CapabilityRe
 from skulk.extensions.capabilities import CapabilityDescriptor
 from skulk.extensions.streams import CapabilityStreamFrame, CapabilityStreamSession
 from skulk.extensions.telemetry import ClusterNodeView
+from skulk.shared.types.capability_nodes import CapabilityNodeSummary
 from skulk.shared.types.common import ModelId, NodeId
 from skulk.shared.types.text_generation import TextGenerationTaskParams
 
@@ -91,6 +92,35 @@ class WithdrawCapability(Protocol):
     """
 
     def __call__(self, capability: str) -> None: ...
+
+
+class PublishCapabilityNode(Protocol):
+    """Synchronous callable that publishes a capability-node summary.
+
+    The topology half of advertising: where :class:`AdvertiseCapability`
+    announces a tag, this describes the managed node behind it (status,
+    surfaces, actions) so the dashboard can draw it as a satellite of this
+    host and open its surfaces. Publishing is keyed by plugin and node
+    identifier: republishing the same key replaces the previous summary, so
+    an owner reports status changes by publishing again. The summary is
+    gossiped on the host's normal telemetry cadence and must stay bounded and
+    credential free; validation happens at construction of the summary
+    itself. Hosts publish at most sixteen summaries; a seventeenth is
+    refused with a warning.
+    """
+
+    def __call__(self, summary: CapabilityNodeSummary) -> None: ...
+
+
+class WithdrawCapabilityNode(Protocol):
+    """Synchronous callable that withdraws a published capability-node summary.
+
+    Withdrawing a key that was never published is a no-op. Peers see the
+    withdrawal on the host's next telemetry poll; when the last summary goes,
+    one empty reading clears the host's entry everywhere.
+    """
+
+    def __call__(self, plugin_id: str, node_id: str) -> None: ...
 
 
 class DescribeNode(Protocol):
@@ -330,6 +360,11 @@ class ExtensionContext:
             their own ``read_cluster`` snapshots.
         withdraw_capability: The advertise surface's liveness counterpart:
             stops advertising a tag so callers stop selecting this node for it.
+        publish_capability_node: The topology surface: publishes a bounded
+            summary of a managed capability node this host runs so dashboards
+            draw it as a satellite and open its surfaces.
+        withdraw_capability_node: Removes a published summary by plugin and
+            node identifier.
         describe_node: The heavy half of discovery: fetches a node's full
             capability descriptors (schemas, I/O modes, versions) on demand.
         call_capability: The generic call verb: invokes a capability on a
@@ -351,6 +386,10 @@ class ExtensionContext:
     call_capability: CallCapability
     stream_capability: StreamCapability
     steward_actions_allowed: Callable[[], bool] = lambda: False
+    # Defaults keep hosts that predate capability-node summaries constructible;
+    # such a host simply publishes nothing for the topology layer.
+    publish_capability_node: PublishCapabilityNode = lambda summary: None
+    withdraw_capability_node: WithdrawCapabilityNode = lambda plugin_id, node_id: None
 
 
 @final
