@@ -172,3 +172,16 @@ def test_bundle_on_a_read_only_root_is_complete_by_its_detached_record(
         assert not is_model_directory_complete(artifact)
     finally:
         artifact.chmod(0o755)
+
+
+def test_rooted_bundle_manifest_outranks_a_config_under_the_loader_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    card = _card(root="comfy")
+    artifact = _install(tmp_path, card)
+    (artifact / "comfy" / "config.json").write_text("{}")
+    monkeypatch.setattr(constants, "SKULK_MODELS_PATH", (tmp_path,))
+    monkeypatch.setattr(constants, "SKULK_MODELS_DIR", tmp_path / "unused")
+    assert resolve_model_in_path(ModelId(card.model_id), REVISION, artifact_root="comfy") == artifact
+    (artifact / "comfy/vae/audio_vae.safetensors").write_bytes(b"short")
+    assert resolve_model_in_path(ModelId(card.model_id), REVISION, artifact_root="comfy") is None

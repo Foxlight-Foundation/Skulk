@@ -389,13 +389,7 @@ def resolve_model_in_path(
             load_candidate_is_complete = (
                 is_model_directory_complete(load_candidate)
                 if artifact_root is None
-                else (
-                    (load_candidate / "config.json").is_file()
-                    or directory_has_gguf_weights(load_candidate)
-                    # The bundle manifest lives at the installation root,
-                    # not beneath the loader root.
-                    or _installed_bundle_is_complete(candidate)
-                )
+                else _rooted_bundle_is_complete(candidate, load_candidate)
             )
             if (
                 candidate.is_dir()
@@ -866,11 +860,7 @@ def build_model_path(
     if (
         default.is_dir()
         and default_load_root.is_dir()
-        and (
-            (default_load_root / "config.json").exists()
-            or directory_has_gguf_weights(default_load_root)
-            or _installed_bundle_is_complete(default)
-        )
+        and _rooted_bundle_is_complete(default, default_load_root)
         and _source_revision_matches(default, source_revision)
     ):
         return _apply_artifact_root(default, artifact_root)
@@ -886,11 +876,7 @@ def build_model_path(
     if (
         staging_fallback.is_dir()
         and staging_load_root.is_dir()
-        and (
-            (staging_load_root / "config.json").exists()
-            or directory_has_gguf_weights(staging_load_root)
-            or _installed_bundle_is_complete(staging_fallback)
-        )
+        and _rooted_bundle_is_complete(staging_fallback, staging_load_root)
         and _source_revision_matches(staging_fallback, source_revision)
     ):
         return _apply_artifact_root(staging_fallback, artifact_root)
@@ -1073,9 +1059,17 @@ def is_model_directory_complete(model_dir: Path) -> bool:
     return directory_has_gguf_weights(model_dir)
 
 
-def _installed_bundle_is_complete(model_dir: Path) -> bool:
-    """Whether a bundle artifact's installed manifest is present and fully on disk."""
-    return _installed_bundle_verdict(model_dir) is True
+def _rooted_bundle_is_complete(install_dir: Path, load_dir: Path) -> bool:
+    """Completeness for an artifact whose loader root sits beneath its install root.
+
+    The installed manifest at the install root is final when present (it
+    covers files outside the loader root too); without one, the loader root
+    is complete when it carries a config or GGUF weights.
+    """
+    verdict = _installed_bundle_verdict(install_dir)
+    if verdict is not None:
+        return verdict
+    return (load_dir / "config.json").is_file() or directory_has_gguf_weights(load_dir)
 
 
 def _installed_bundle_verdict(model_dir: Path) -> bool | None:
