@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterable
 from typing import Literal, cast
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 
 from pydantic import Field, JsonValue, field_validator, model_validator
 
@@ -34,7 +34,36 @@ MAX_CAPABILITY_NODE_ACTIONS = 8
 MAX_ACTION_PAYLOAD_BYTES = 4096
 """Upper bound on a descriptor action's serialized fixed payload."""
 
+MAX_SURFACE_URL_LENGTH = 2048
+"""Upper bound on a surface or link URL; longer values are refused."""
+
 _MAX_TEXT_LENGTH = 200
+
+_CREDENTIAL_QUERY_NAMES = frozenset(
+    {
+        "token",
+        "access_token",
+        "id_token",
+        "refresh_token",
+        "auth",
+        "authorization",
+        "bearer",
+        "key",
+        "apikey",
+        "api_key",
+        "secret",
+        "password",
+        "passwd",
+        "pwd",
+        "credential",
+        "credentials",
+        "signature",
+        "sig",
+        "session",
+        "sessionid",
+        "session_id",
+    }
+)
 
 CapabilityNodeStatus = Literal[
     "installed",
@@ -52,18 +81,46 @@ CapabilityNodeActionKind = Literal["surface", "descriptor", "link"]
 
 
 def _validate_public_url(url: str) -> str:
-    """Accept only absolute http(s) URLs without embedded credentials.
+    """Accept only bounded, absolute http(s) URLs without embedded credentials.
 
     The URL is opened by an operator's browser from the dashboard, so it must
     be something a browser can follow on its own. Userinfo is refused because
-    a summary is gossiped to every node and must never carry a credential.
+    a summary is gossiped to every node and must never carry a credential; the
+    same goes for query parameters whose names announce a credential (token,
+    key, signature, and the like). That screen is a guard against the obvious
+    mistake, not proof of absence: a surface that needs an authenticated URL
+    must authenticate in its own page instead. Length is capped so a signed or
+    padded URL cannot inflate the reading.
     """
+    if len(url) > MAX_SURFACE_URL_LENGTH:
+        raise ValueError(
+            f"surface and link URLs are limited to {MAX_SURFACE_URL_LENGTH} characters"
+        )
     parts = urlsplit(url)
     if parts.scheme not in ("http", "https") or not parts.netloc:
         raise ValueError("surface and link URLs must be absolute http or https URLs")
     if "@" in parts.netloc:
         raise ValueError("surface and link URLs must not embed credentials")
+    for name, _value in parse_qsl(parts.query, keep_blank_values=True):
+        if name.lower() in _CREDENTIAL_QUERY_NAMES:
+            raise ValueError(
+                f"surface and link URLs must not carry credential-like query "
+                f"parameters ({name!r})"
+            )
     return url
+
+
+def _validate_key_segment(value: str) -> str:
+    """Identifiers that form the host-local ``plugin_id/node_id`` key.
+
+    A slash is refused so the joined key stays injective: otherwise
+    ``("a/b", "c")`` and ``("a", "b/c")`` would publish and withdraw each
+    other's summary.
+    """
+    _validate_identifier(value)
+    if "/" in value:
+        raise ValueError("plugin_id and node_id must not contain '/'")
+    return value
 
 
 def _validate_identifier(value: str) -> str:
@@ -192,7 +249,12 @@ class CapabilityNodeSummary(FrozenModel):
     operations_active: int = Field(default=0, ge=0)
     """Durable operations currently running on the node."""
 
-    @field_validator("plugin_id", "node_id", "bundle_id", "version")
+    @field_validator("plugin_id", "node_id")
+    @classmethod
+    def _check_key_segments(cls, value: str) -> str:
+        return _validate_key_segment(value)
+
+    @field_validator("bundle_id", "version")
     @classmethod
     def _check_identifiers(cls, value: str) -> str:
         return _validate_identifier(value)

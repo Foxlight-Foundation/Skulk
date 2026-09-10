@@ -14,6 +14,7 @@ from pydantic import JsonValue, ValidationError
 from skulk.shared.types.capability_nodes import (
     MAX_ACTION_PAYLOAD_BYTES,
     MAX_CAPABILITY_NODES_PER_HOST,
+    MAX_SURFACE_URL_LENGTH,
     CapabilityNodeAction,
     CapabilityNodeSummary,
     CapabilityNodeSurface,
@@ -52,6 +53,25 @@ def test_surface_url_must_be_absolute_http_without_credentials() -> None:
         with pytest.raises(ValidationError):
             CapabilityNodeSurface(surface_id="s", title="S", url=bad)
     CapabilityNodeSurface(surface_id="s", title="S", url="https://host:8443/ui")
+    CapabilityNodeSurface(surface_id="s", title="S", url="https://host/ui?workflow=h3&tab=2")
+
+
+def test_surface_url_is_bounded_and_refuses_credential_query_names() -> None:
+    with pytest.raises(ValidationError):
+        CapabilityNodeSurface(
+            surface_id="s", title="S", url="https://host/ui?" + "x" * MAX_SURFACE_URL_LENGTH
+        )
+    for query in ("token=abc", "Access_Token=abc", "api_key=abc", "sig=abc", "auth="):
+        with pytest.raises(ValidationError):
+            CapabilityNodeSurface(surface_id="s", title="S", url=f"https://host/ui?{query}")
+
+
+def test_key_segments_refuse_slashes_so_the_host_key_is_injective() -> None:
+    with pytest.raises(ValidationError):
+        _summary(plugin_id="a/b", node_id="c")
+    with pytest.raises(ValidationError):
+        _summary(node_id="b/c")
+    assert _summary(plugin_id="a.b", node_id="c").key == "a.b/c"
 
 
 def test_action_shapes_require_their_target() -> None:

@@ -91,6 +91,27 @@ describe('CapabilityFlyout', () => {
     expect(onClose).toHaveBeenCalled();
   });
 
+  it('closes on an outside press but leaves satellite presses to the graph toggle', async () => {
+    const { onClose } = await render();
+    const satellite = document.createElement('div');
+    satellite.className = 'topology-capability-satellite';
+    const inner = document.createElement('button');
+    satellite.append(inner);
+    document.body.append(satellite);
+    try {
+      await act(async () => {
+        inner.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+      });
+      expect(onClose).not.toHaveBeenCalled();
+      await act(async () => {
+        document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+      });
+      expect(onClose).toHaveBeenCalledTimes(1);
+    } finally {
+      satellite.remove();
+    }
+  });
+
   it('explains remote management when the dashboard is on another host', async () => {
     await render({ localNodeId: 'node-elsewhere' });
     expect(container?.textContent).toContain('managed from the dashboard on kite6');

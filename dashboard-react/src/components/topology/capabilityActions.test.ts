@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { CapabilityNodeSummary } from '../../types/capabilityNodes';
-import { buildCapabilityActions, runDescriptorAction } from './capabilityActions';
+import { buildCapabilityActions, generateCallId, runDescriptorAction } from './capabilityActions';
 
 const t = (_key: string, fallback: string, params?: Record<string, string | number>) =>
   fallback.replace(/\{(\w+)\}/g, (_match, name: string) => String(params?.[name] ?? ''));
@@ -93,5 +93,27 @@ describe('runDescriptorAction', () => {
     await expect(runDescriptorAction('node-a', 'video.plan', {}, fetchImpl)).rejects.toThrow(
       'not served',
     );
+  });
+});
+
+describe('generateCallId', () => {
+  const uuidShape = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+  it('works without randomUUID, as on a plain-HTTP LAN dashboard', () => {
+    const withoutRandomUuid: Partial<Crypto> = {
+      getRandomValues: <T extends ArrayBufferView | null>(array: T): T => {
+        if (array instanceof Uint8Array) array.fill(0xab);
+        return array;
+      },
+    };
+    expect(generateCallId(withoutRandomUuid)).toMatch(uuidShape);
+    expect(generateCallId(withoutRandomUuid)).not.toContain('crypto');
+  });
+
+  it('still produces a distinct id without Web Crypto at all', () => {
+    const first = generateCallId(null);
+    const second = generateCallId(null);
+    expect(first).toMatch(/^call-/);
+    expect(first).not.toBe(second);
   });
 });

@@ -14,6 +14,8 @@ import { satelliteColor, satelliteStatusLabel } from './capabilityPresentation';
 
 /** Width of the flyout card, used to keep it inside the canvas. */
 export const FLYOUT_WIDTH = 252;
+/** Graph controls whose presses toggle flyouts themselves. */
+const SATELLITE_CONTROL_SELECTOR = '.topology-capability-satellite, .topology-capability-overflow';
 const CANVAS_MARGIN = 8;
 
 /** Props for the flyout that opens from a capability satellite. */
@@ -250,7 +252,14 @@ export function CapabilityFlyout({
       if (event.key === 'Escape') onClose();
     };
     const onPointerDown = (event: PointerEvent) => {
-      if (cardRef.current && !cardRef.current.contains(event.target as Node)) onClose();
+      const target = event.target as Node | null;
+      if (!cardRef.current || !target || cardRef.current.contains(target)) return;
+      // A press on a satellite or the overflow glyph is the graph's own
+      // toggle, not an outside click; closing here would let the following
+      // click reopen the flyout it just closed.
+      const element = target instanceof Element ? target : target.parentElement;
+      if (element?.closest(SATELLITE_CONTROL_SELECTOR)) return;
+      onClose();
     };
     window.addEventListener('keydown', onKey);
     window.addEventListener('pointerdown', onPointerDown);

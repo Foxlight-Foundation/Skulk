@@ -117,6 +117,27 @@ export function buildCapabilityActions(
   return items;
 }
 
+/**
+ * Random call id that also works on plain-HTTP LAN dashboards, where the
+ * page is not a secure context and `crypto.randomUUID` does not exist. Falls
+ * back to `getRandomValues`, then to a clock-and-counter id so a call can
+ * always be made. Exposed with an injectable crypto for tests.
+ */
+export function generateCallId(cryptoLike: Partial<Crypto> | null = globalThis.crypto ?? null): string {
+  if (cryptoLike && typeof cryptoLike.randomUUID === 'function') return cryptoLike.randomUUID();
+  if (cryptoLike && typeof cryptoLike.getRandomValues === 'function') {
+    const bytes = cryptoLike.getRandomValues(new Uint8Array(16));
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  }
+  callIdFallbackCounter += 1;
+  return `call-${Date.now().toString(16)}-${callIdFallbackCounter.toString(16)}`;
+}
+
+let callIdFallbackCounter = 0;
+
 interface DescriptorListing {
   capabilities?: Array<{ id?: string; version?: string }>;
   revisions?: Record<string, string>;
@@ -161,7 +182,7 @@ export async function runDescriptorAction(
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      call_id: crypto.randomUUID(),
+      call_id: generateCallId(),
       capability_id: descriptor.id,
       version: descriptor.version,
       descriptor_revision: revision,
