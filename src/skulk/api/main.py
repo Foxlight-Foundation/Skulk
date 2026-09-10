@@ -1795,6 +1795,7 @@ class API:
                 "/chat",
                 "/steward",
                 "/integrations",
+                "/plugins",
                 "/operator",
             ):
                 self.app.get(_spa_route, include_in_schema=False)(_spa_index)

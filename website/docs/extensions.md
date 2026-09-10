@@ -564,7 +564,8 @@ installation registration appear without restarting the API. The individual
 connection records above remain compatible. Manager health independently fences
 capability admission; a healthy child cannot override missing manager observations.
 The [managed lifecycle HTTP routes](api-guide.md#managed-plugin-http-lifecycle) and
-Plugins dashboard remain available while children are disabled or broken.
+Plugins dashboard remain available while children are disabled or broken. The `/plugins`
+and `/plugins/` dashboard routes also support direct links and browser refreshes.
 
 The local protocol reads installed node IDs, ordinary settings and cached unary
 descriptors; mutations fence node identity, settings revision and schema digest.
