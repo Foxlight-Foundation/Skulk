@@ -8,8 +8,9 @@ import { Button } from '../common/Button';
 const Field = styled.fieldset`
   min-width: 0; margin: 12px 0; padding: 14px; border: 1px solid ${({ theme }) => theme.colors.border};
   label { display: grid; gap: 8px; }
-  input { width: 100%; min-width: 0; box-sizing: border-box; padding: 9px; border-radius: ${({ theme }) => theme.radii.sm};
+  input, textarea { width: 100%; min-width: 0; box-sizing: border-box; padding: 9px; border-radius: ${({ theme }) => theme.radii.sm};
     border: 1px solid ${({ theme }) => theme.colors.border}; background: ${({ theme }) => theme.colors.surface}; color: ${({ theme }) => theme.colors.text}; }
+  textarea { resize: vertical; }
 `;
 const Actions = styled.div`display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px;`;
 
@@ -17,12 +18,25 @@ const Actions = styled.div`display: flex; flex-wrap: wrap; gap: 8px; margin-top:
 function CredentialEditor({ address, current, reload, unavailable }: { address: NodeAddress; current: NodeCredentials; reload: () => Promise<NodeCredentials>; unavailable: boolean }) {
   const { t } = useSkulkTranslation();
   const [baseline, setBaseline] = useState(current);
-  const inputs = useRef<Record<string, HTMLInputElement | null>>({});
+  const inputs = useRef<Record<string, HTMLInputElement | HTMLTextAreaElement | null>>({});
+  const [multiline, setMultiline] = useState<ReadonlySet<string>>(() => new Set());
   const [busy, setBusy] = useState(false);
   const [uncertain, setUncertain] = useState(false);
   const [notice, setNotice] = useState('');
   const changed = baseline.revision !== current.revision || baseline.schemaDigest !== current.schemaDigest;
   const clearInputs = () => { for (const input of Object.values(inputs.current)) if (input) input.value = ''; };
+  const switchInput = (credentialId: string) => {
+    // Password inputs sanitize away newlines. Keep multiline bytes in an
+    // uncontrolled textarea, clearing the old draft instead of copying secrets
+    // through React state when the owner changes the input mode.
+    const input = inputs.current[credentialId];
+    if (input) input.value = '';
+    setMultiline((previous) => {
+      const next = new Set(previous);
+      if (next.has(credentialId)) next.delete(credentialId); else next.add(credentialId);
+      return next;
+    });
+  };
   const refresh = async () => {
     setBusy(true);
     try {
@@ -71,7 +85,11 @@ function CredentialEditor({ address, current, reload, unavailable }: { address: 
       <legend>{credential.title}</legend>
       <p>{credential.description}</p>
       <p>{credential.required ? t('plugins.credentialRequired', 'Required') : t('plugins.credentialOptional', 'Optional')} · {current.credentials.find((item) => item.credentialId === credential.credentialId)?.ready ? t('plugins.credentialReady', 'Ready') : t('plugins.credentialNotReady', 'Not ready')}</p>
-      <label>{t('plugins.replacementCredential', 'Replacement value')}<input ref={(element) => { inputs.current[credential.credentialId] = element; }} type="password" autoComplete="new-password" maxLength={4096} /></label>
+      <Button type="button" onClick={() => switchInput(credential.credentialId)}>{multiline.has(credential.credentialId) ? t('plugins.singleLineCredential', 'Use single-line input') : t('plugins.multilineCredential', 'Use multiline input')}</Button>
+      {multiline.has(credential.credentialId) ? <p>{t('plugins.multilineCredentialVisible', 'Multiline credentials are visible while editing. Switching input mode clears the draft.')}</p> : null}
+      <label>{t('plugins.replacementCredential', 'Replacement value')}{multiline.has(credential.credentialId)
+        ? <textarea ref={(element) => { inputs.current[credential.credentialId] = element; }} rows={4} autoComplete="off" autoCapitalize="off" spellCheck={false} maxLength={4096} />
+        : <input ref={(element) => { inputs.current[credential.credentialId] = element; }} type="password" autoComplete="new-password" maxLength={4096} />}</label>
       <Actions>
         <Button type="button" onClick={() => void change(credential.credentialId, 'replace')}>{t('plugins.replaceCredential', 'Replace credential')}</Button>
         <Button type="button" onClick={() => void change(credential.credentialId, 'retire')}>{t('plugins.retireCredential', 'Retire future use')}</Button>

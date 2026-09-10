@@ -21,7 +21,7 @@ function makeStore() { return configureStore({ reducer: { [apiSlice.reducerPath]
 function response(body: unknown, status = 200) { return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } }); }
 async function contains(text: string) { await act(async () => { await vi.waitFor(() => expect(host.textContent).toContain(text)); }); }
 async function click(label: string) { await act(async () => { [...host.querySelectorAll('button')].find((item) => item.textContent === label)?.click(); }); }
-function fill(value: string) { const input = host.querySelector('input'); if (!input) throw new Error('Missing credential input'); input.value = value; }
+function fill(value: string) { const input = host.querySelector('input, textarea') as HTMLInputElement | HTMLTextAreaElement | null; if (!input) throw new Error('Missing credential input'); input.value = value; }
 beforeEach(async () => {
   posts = [];
   loseResponse = false;
@@ -29,7 +29,7 @@ beforeEach(async () => {
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
     const request = input instanceof Request ? input : new Request(new URL(String(input), location.href), init);
     if (request.method === 'POST') {
-      expect(host.querySelector('input')?.value).toBe('');
+      expect((host.querySelector('input, textarea') as HTMLInputElement | HTMLTextAreaElement | null)?.value).toBe('');
       const body = await request.json() as Record<string, unknown>;
       posts.push(body);
       current = { ...current, revision: current.revision + 1, credentials: current.credentials.map((item) => ({ ...item, ready: body.operation === 'replace' })) };
@@ -88,5 +88,32 @@ it('preserves the revision fence when credentials change while entering a value'
   expect(posts).toHaveLength(0);
   await click('Refresh credential status');
   await contains('Credential status refreshed');
+  expect(host.querySelector('input')?.value).toBe('');
+});
+
+it('preserves multiline credential bytes and clears drafts before an unconfirmed submission', async () => {
+  const value = '-----BEGIN TEST KEY-----\nsynthetic-multiline-credential\n-----END TEST KEY-----\n';
+  fill('single-line-draft');
+  await click('Use multiline input');
+  expect(host.querySelector('textarea')?.value).toBe('');
+  await contains('Multiline credentials are visible while editing');
+  fill(value);
+  expect(host.querySelector('textarea')?.value).toBe(value);
+  expect(JSON.stringify(store.getState())).not.toContain('synthetic-multiline-credential');
+  loseResponse = true;
+  await click('Replace credential');
+  await contains('The credential update was not confirmed');
+  expect(posts).toHaveLength(1);
+  expect(posts[0].value).toBe(value);
+  expect(host.querySelector('textarea')?.value).toBe('');
+  expect(JSON.stringify(store.getState())).not.toContain('synthetic-multiline-credential');
+  await click('Replace credential');
+  expect(posts).toHaveLength(1);
+  await click('Refresh credential status');
+  await contains('Credential status refreshed');
+  fill(value);
+  await click('Use single-line input');
+  expect(host.querySelector('textarea')).toBeNull();
+  expect(host.querySelector('input')?.type).toBe('password');
   expect(host.querySelector('input')?.value).toBe('');
 });

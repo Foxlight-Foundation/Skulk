@@ -547,6 +547,12 @@ enumerated and nested-object fields with local schema references. Unsupported
 forms are identified explicitly; server-side schema validation remains
 authoritative. See the [HTTP contract](api-guide.md#plugin-node-configuration).
 
+Credential entry is separate from ordinary settings. The Plugins dashboard uses
+masked single-line input by default; choose **Use multiline input** for keys or
+other credentials containing line breaks. Multiline drafts are visible while
+editing. Switching input mode clears the draft, and submission clears it before
+the request is sent. Stored credential values are never returned to either form.
+
 ## Separately supervised plugin owners
 
 `ManagedOwner` connects to a locally installed owner process through an owner-only
