@@ -155,6 +155,8 @@ def _check_engine_available(facts: NodeFacts) -> Sequence[CheckResult]:
         engines.append(f"llama_server ({facts.llama_server_binary.configured_path})")
     if "vllm" in derived:
         engines.append(f"vllm ({facts.vllm_binary.configured_path})")
+    if "comfy" in derived:
+        engines.append(f"comfy ({facts.comfy_root})")
     if engines:
         return [_ok(check_id, title, "available: " + ", ".join(engines))]
     # A wheel-provisioned or previously provisioned managed engine derives no
@@ -270,6 +272,125 @@ def _fix_engine_available(facts: NodeFacts) -> str | None:
             "opted out, or download failed; see the log)"
         )
     return f"provisioned pinned llama-server at {binary}"
+
+
+# --- comfy video engine ------------------------------------------------------
+
+
+def _comfy_fix_applicable(facts: NodeFacts) -> bool:
+    """Whether --fix can provision the managed ComfyUI install on this node.
+
+    Mirrors ensure_comfy's gates: full participation, no explicit override,
+    auto-provisioning not opted out, video models enabled, and a recorded
+    wheel set for this machine and GPU vendor.
+    """
+    from skulk.provisioning.comfy import (
+        _gates_pass,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    return _declared_participation() == "full" and _gates_pass(facts)
+
+
+def _check_comfy_engine(facts: NodeFacts) -> Sequence[CheckResult]:
+    """The served video engine is present when video models are enabled."""
+    from skulk.provisioning.comfy import dormant_comfy
+    from skulk.shared.constants import SKULK_ENABLE_VIDEO_MODELS
+
+    check_id = "comfy-engine"
+    title = "ComfyUI video engine"
+    if _declared_participation() != "full":
+        return [_ok(check_id, title, "management node; no video engine expected")]
+    derived = derive_node_backends(facts).backends
+    if "comfy" in derived:
+        return [
+            _ok(
+                check_id,
+                title,
+                f"comfy ({facts.comfy_root}) advertises "
+                f"{sorted(tag for tag in derived if tag.startswith('comfy-'))}",
+            )
+        ]
+    if facts.comfy_binary.state != "not_configured":
+        return [
+            CheckResult(
+                check_id=check_id,
+                title=title,
+                verdict="fail",
+                detail=(
+                    f"{facts.comfy_binary.env_var} is set but the comfy engine derives "
+                    "no backend; see the capability-conflicts check for the reason"
+                ),
+                consequence="video cards never place on this node",
+                remediation=(
+                    "Fix SKULK_COMFY_BIN and SKULK_COMFY_ROOT so they name the "
+                    "environment's interpreter and the ComfyUI checkout, or unset "
+                    "both and let the node provision the managed install"
+                ),
+            )
+        ]
+    if not SKULK_ENABLE_VIDEO_MODELS:
+        return [
+            _ok(
+                check_id,
+                title,
+                "video models are disabled on this node (SKULK_ENABLE_VIDEO_MODELS); "
+                "no video engine is expected",
+            )
+        ]
+    dormant = dormant_comfy(facts)
+    if dormant is not None:
+        return [
+            _ok(
+                check_id,
+                title,
+                f"managed ComfyUI at {dormant} is installed and wires automatically "
+                "at node startup",
+            )
+        ]
+    fix_available = _comfy_fix_applicable(facts)
+    return [
+        CheckResult(
+            check_id=check_id,
+            title=title,
+            verdict="degraded",
+            detail=(
+                "video models are enabled but no ComfyUI install is configured or "
+                "provisioned on this node"
+            ),
+            consequence=(
+                "video cards never place here; only the deterministic test engine "
+                "can render (SKULK_TEST_VIDEO_ENGINE)"
+            ),
+            remediation=(
+                "`skulk doctor --fix` provisions the pinned ComfyUI checkout and "
+                "torch wheel set on a Linux NVIDIA node (several gigabytes); "
+                "alternatively set SKULK_COMFY_BIN and SKULK_COMFY_ROOT to a "
+                "hand-built install"
+                if fix_available
+                else "this machine has no recorded ComfyUI wheel set (Linux NVIDIA "
+                "aarch64 or x86_64 today); set SKULK_COMFY_BIN and "
+                "SKULK_COMFY_ROOT to a hand-built install"
+            ),
+            fix_available=fix_available,
+        )
+    ]
+
+
+def _fix_comfy_engine(facts: NodeFacts) -> str | None:
+    """Provision the managed ComfyUI install when video models are enabled."""
+    if not _comfy_fix_applicable(facts):
+        return None
+    if "comfy" in derive_node_backends(facts).backends:
+        return None
+    from skulk.provisioning import ensure_comfy
+
+    root = ensure_comfy(facts)
+    if root is None:
+        raise RuntimeError(
+            "ComfyUI provisioning did not produce an install (override present, "
+            "opted out, video models disabled, or the install failed; see the log)"
+        )
+    return f"provisioned pinned ComfyUI at {root}"
 
 
 # --- capability conflicts --------------------------------------------------
@@ -798,6 +919,20 @@ REGISTRY: tuple[DoctorCheck, ...] = (
         ),
         run=_check_engine_available,
         fix=_fix_engine_available,
+    ),
+    DoctorCheck(
+        check_id="comfy-engine",
+        title="ComfyUI video engine",
+        docs=(
+            "When video models are enabled (SKULK_ENABLE_VIDEO_MODELS), verifies "
+            "the served ComfyUI video engine is configured (SKULK_COMFY_BIN plus "
+            "SKULK_COMFY_ROOT) or provisioned as the managed install under the "
+            "engines directory. A Linux NVIDIA node without one is degraded: "
+            "video cards never place there. Management nodes and nodes with "
+            "video models disabled pass."
+        ),
+        run=_check_comfy_engine,
+        fix=_fix_comfy_engine,
     ),
     DoctorCheck(
         check_id="capability-conflicts",

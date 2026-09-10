@@ -38,7 +38,9 @@ def _is_executable_file(path: str) -> bool:
     """Whether ``path`` names an existing executable file."""
     return os.path.isfile(path) and os.access(path, os.X_OK)
 
-EngineType = Literal["mlx", "mlx_audio", "llama_cpp", "llama_server", "vllm", "test_video"]
+EngineType = Literal[
+    "mlx", "mlx_audio", "llama_cpp", "llama_server", "vllm", "test_video", "comfy"
+]
 """Inference runtime that loads and runs a model; selects the worker runner.
 
 ``llama_server`` is a *served-backend* engine: instead of loading the model
@@ -70,6 +72,14 @@ the text/vision MLX runner.
 audio-video clips in-process so the video substrate can be exercised end to
 end without a GPU. A node advertises it only when ``SKULK_TEST_VIDEO_ENGINE``
 is set, and it serves only the bundled ``foxlight/test-video`` card.
+
+``comfy`` is the served audio-video engine: the worker launches a pinned
+ComfyUI checkout headless from its own managed virtual environment and
+drives it over its HTTP API with the graph templates a video card declares.
+GPU-only (``cuda`` today, ``rocm`` once the Strix lane is qualified). The
+node provisions the pinned checkout and torch wheel set on demand when
+video models are enabled, or an operator points ``SKULK_COMFY_BIN`` and
+``SKULK_COMFY_ROOT`` at an existing install.
 """
 
 ComputeBackend = Literal["metal", "vulkan", "rocm", "cuda", "cpu"]
@@ -84,6 +94,7 @@ _ENGINES: Final[tuple[EngineType, ...]] = (
     "llama_server",
     "vllm",
     "test_video",
+    "comfy",
 )
 _COMPUTE_BACKENDS: Final[tuple[ComputeBackend, ...]] = (
     "metal",
@@ -139,6 +150,21 @@ _VLLM_COMPUTE_BACKENDS: Final[tuple[ComputeBackend, ...]] = ("cuda", "rocm")
 # and no weights; it exists to drive the video substrate in tests and on nodes
 # that cannot run a real video engine. Never set on a production node.
 TEST_VIDEO_ENGINE_ENV: Final = "SKULK_TEST_VIDEO_ENGINE"
+
+# Interpreter of the ComfyUI environment the ``comfy`` video engine launches
+# (``<venv>/bin/python``), and the checkout that holds ``main.py``. Set both to
+# use a hand-built ComfyUI; absent, a node with video models enabled provisions
+# the pinned checkout and torch wheel set itself (Linux, NVIDIA today).
+COMFY_BIN_ENV: Final = "SKULK_COMFY_BIN"
+COMFY_ROOT_ENV: Final = "SKULK_COMFY_ROOT"
+
+# Compute backends the ComfyUI install targets (comma-separated). GPU-only, so
+# only ``cuda`` / ``rocm`` are honored; unset falls back to the same
+# declaration chain vLLM uses, then to the observed GPU vendor.
+COMFY_BACKENDS_ENV: Final = "SKULK_COMFY_BACKENDS"
+
+# ComfyUI compute backends Skulk advertises: NVIDIA CUDA and AMD ROCm.
+_COMFY_COMPUTE_BACKENDS: Final[tuple[ComputeBackend, ...]] = ("cuda", "rocm")
 
 # Path to the ``ggml-rpc-server`` binary an RPC memory-donor runner launches
 # (#328, multi-node GGUF pooling). Optional: when unset, the donor looks for

@@ -41,6 +41,10 @@ degraded node is loud even if nobody runs the doctor.
 
 Verifies at least one inference engine is usable: in-process MLX on macOS, an importable llama-cpp-python build, a llama-server binary (SKULK_LLAMA_SERVER_BIN), or a vllm CLI (SKULK_VLLM_BIN). A node with none advertises no backends and can only participate as management. Supports `--fix`.
 
+### ComfyUI video engine (`comfy-engine`)
+
+When video models are enabled (SKULK_ENABLE_VIDEO_MODELS), verifies the served ComfyUI video engine is configured (SKULK_COMFY_BIN plus SKULK_COMFY_ROOT) or provisioned as the managed install under the engines directory. A Linux NVIDIA node without one is degraded: video cards never place there. Management nodes and nodes with video models disabled pass. Supports `--fix`.
+
 ### Capability conflicts (`capability-conflicts`)
 
 Runs backend derivation over the node facts snapshot and surfaces every observation-vs-declaration conflict: a GPU that no engine would use (silent CPU serving), degraded NVIDIA detection (missing nvidia-ml-py or a driver mismatch), an engine binary override pointing at an unusable path, or a declared backend the observed hardware cannot support. Supports `--fix`.

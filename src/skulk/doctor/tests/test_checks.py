@@ -751,3 +751,37 @@ def test_vllm_prerequisites_requires_a_cxx_compiler(
 
 def test_vllm_prerequisites_check_is_registered() -> None:
     assert any(check.check_id == "vllm-prerequisites" for check in REGISTRY)
+
+
+def test_comfy_engine_check_verdicts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import skulk.doctor.checks as checks_module
+    import skulk.provisioning.comfy as comfy_module
+    from skulk.facts.testing import NVIDIA_A40, make_facts, ok_bin
+
+    monkeypatch.setattr(comfy_module, "SKULK_ENGINES_DIR", tmp_path / "engines")
+    monkeypatch.setattr(comfy_module.platform_module, "machine", lambda: "aarch64")
+    monkeypatch.delenv("SKULK_NO_ENGINE_AUTOPROVISION", raising=False)
+    gpu = make_facts(gpus=(NVIDIA_A40,))
+
+    monkeypatch.setattr(checks_module, "SKULK_ENABLE_VIDEO_MODELS", False, raising=False)
+    monkeypatch.setattr("skulk.shared.constants.SKULK_ENABLE_VIDEO_MODELS", False)
+    monkeypatch.setattr(comfy_module, "_video_models_enabled", lambda: False)
+    disabled = checks_module._check_comfy_engine(gpu)
+    assert disabled[0].verdict == "ok" and "disabled" in disabled[0].detail
+
+    monkeypatch.setattr("skulk.shared.constants.SKULK_ENABLE_VIDEO_MODELS", True)
+    monkeypatch.setattr(comfy_module, "_video_models_enabled", lambda: True)
+    absent = checks_module._check_comfy_engine(gpu)
+    assert absent[0].verdict == "degraded" and absent[0].fix_available is True
+
+    configured = gpu.model_copy(
+        update={"comfy_binary": ok_bin("SKULK_COMFY_BIN"), "comfy_root": "/opt/ComfyUI", "comfy_root_state": "ok"}
+    )
+    live = checks_module._check_comfy_engine(configured)
+    assert live[0].verdict == "ok" and "comfy-cuda" in live[0].detail
+
+    broken = gpu.model_copy(update={"comfy_binary": ok_bin("SKULK_COMFY_BIN"), "comfy_root": "/nowhere", "comfy_root_state": "missing"})
+    assert checks_module._check_comfy_engine(broken)[0].verdict == "fail"
+
+    no_wheels = make_facts().model_copy(update={"platform": "linux"})
+    assert checks_module._check_comfy_engine(no_wheels)[0].fix_available is False

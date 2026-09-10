@@ -464,3 +464,34 @@ def test_test_video_engine_is_advertised_only_when_asked() -> None:
     assert {"test_video", "test_video-cpu"} <= asked.backends
     assert not asked.conflicts
     assert any("test video" in note for note in asked.notes)
+
+
+def test_comfy_derives_cuda_from_nvidia_when_both_paths_are_valid() -> None:
+    facts = make_facts(gpus=(NVIDIA_A40,)).model_copy(
+        update={"comfy_binary": ok_bin("SKULK_COMFY_BIN"), "comfy_root": "/opt/ComfyUI", "comfy_root_state": "ok"}
+    )
+    derivation = derive_node_backends(facts)
+    assert {"comfy", "comfy-cuda"} <= derivation.backends
+    assert not [c for c in derivation.conflicts if "comfy" in c.message]
+
+
+def test_comfy_stays_off_without_a_valid_checkout() -> None:
+    facts = make_facts(gpus=(NVIDIA_A40,)).model_copy(
+        update={"comfy_binary": ok_bin("SKULK_COMFY_BIN"), "comfy_root": "/nowhere", "comfy_root_state": "missing"}
+    )
+    derivation = derive_node_backends(facts)
+    assert "comfy" not in derivation.backends
+    assert any(c.code == "invalid_engine_binary" and "SKULK_COMFY_ROOT" in c.message for c in derivation.conflicts)
+
+
+def test_comfy_is_gpu_only_and_honors_declarations() -> None:
+    valid = {"comfy_binary": ok_bin("SKULK_COMFY_BIN"), "comfy_root": "/opt/ComfyUI", "comfy_root_state": "ok"}
+    no_gpu = derive_node_backends(make_facts().model_copy(update=valid))
+    assert "comfy" not in no_gpu.backends
+    assert any(c.code == "backend_override_conflict" and "comfy" in c.message for c in no_gpu.conflicts)
+    declared = derive_node_backends(
+        make_facts(gpus=(NVIDIA_A40,)).model_copy(update={**valid, "declared_comfy_backends": "rocm"})
+    )
+    assert "comfy-rocm" in declared.backends
+    assert any(c.code == "backend_override_conflict" and "SKULK_COMFY_BACKENDS" in c.message for c in declared.conflicts)
+    assert derive_node_backends(make_facts(gpus=(NVIDIA_A40,))).backends & {"comfy", "comfy-cuda"} == set()

@@ -27,8 +27,12 @@ This project records release notes here and mirrors public-facing notes in
   and the verified container both arrive. A deterministic test video engine
   (`SKULK_TEST_VIDEO_ENGINE`, bundled card `foxlight/test-video`) renders
   seeded synthetic clips through every stage of the pipeline so the
-  substrate works end to end on nodes without a GPU; the served video
-  engines follow.
+  substrate works end to end on nodes without a GPU. The `comfy` engine's
+  provisioning lands first: a pinned ComfyUI checkout (v0.35.0) in a
+  managed environment with a hash-pinned cu130 torch wheel set, provisioned
+  on Linux NVIDIA nodes that enable video models or by `skulk doctor --fix`,
+  advertised as `comfy-cuda`, with `SKULK_COMFY_BIN` and `SKULK_COMFY_ROOT`
+  for hand-built installs. The ComfyUI runner follows.
 - Muse Glimmer (Meta, August 2026) is a first-class model family on every
   serving lane. The capability resolver now derives the family's wire
   contract from the card family or model id, the same way it does for
