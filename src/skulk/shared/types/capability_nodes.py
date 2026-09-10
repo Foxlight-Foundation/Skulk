@@ -113,6 +113,25 @@ def _validate_public_url(url: str) -> str:
     return url
 
 
+def _check_payload_keys(value: object, path: str = "payload") -> None:
+    """Refuse credential-like names anywhere in a fixed action payload.
+
+    The payload is gossiped and rendered cluster-wide like the rest of the
+    summary, so it gets the same name screen as URL parameters, applied to
+    every nested object key.
+    """
+    if isinstance(value, dict):
+        for key, nested in cast("dict[str, object]", value).items():
+            if key.lower() in _CREDENTIAL_QUERY_NAMES:
+                raise ValueError(
+                    f"action payloads must not carry credential-like keys ({path}.{key})"
+                )
+            _check_payload_keys(nested, f"{path}.{key}")
+    elif isinstance(value, list):
+        for index, nested in enumerate(cast("list[object]", value)):
+            _check_payload_keys(nested, f"{path}[{index}]")
+
+
 def _validate_key_segment(value: str) -> str:
     """Identifiers that form the host-local ``plugin_id/node_id`` key.
 
@@ -220,6 +239,7 @@ class CapabilityNodeAction(FrozenModel):
         if self.payload is not None and self.kind != "descriptor":
             raise ValueError("only descriptor actions may carry a payload")
         if self.payload is not None:
+            _check_payload_keys(self.payload)
             encoded = json.dumps(self.payload, separators=(",", ":"))
             if len(encoded.encode("utf-8")) > MAX_ACTION_PAYLOAD_BYTES:
                 raise ValueError(

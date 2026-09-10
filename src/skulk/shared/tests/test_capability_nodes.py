@@ -93,6 +93,11 @@ def test_action_shapes_require_their_target() -> None:
         CapabilityNodeAction(action_id="a", title="A", kind="surface", surface_id="s" * 201)
     with pytest.raises(ValidationError):
         CapabilityNodeAction(action_id="a", title="A", kind="descriptor", capability_id=" video.plan")
+    leaking: dict[str, JsonValue] = {"mode": "t2va", "hosted": {"API_KEY": "abc"}}
+    with pytest.raises(ValidationError):
+        CapabilityNodeAction(
+            action_id="a", title="A", kind="descriptor", capability_id="video.plan", payload=leaking
+        )
     oversized: dict[str, JsonValue] = {"blob": "x" * MAX_ACTION_PAYLOAD_BYTES}
     with pytest.raises(ValidationError):
         CapabilityNodeAction(

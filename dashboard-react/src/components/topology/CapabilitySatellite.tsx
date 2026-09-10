@@ -31,6 +31,8 @@ export interface CapabilityOverflowProps {
   onSelect?: () => void;
 }
 
+// The native focus outline is kept on purpose: the disc has no other
+// keyboard focus indicator (the dashed ring only marks an open flyout).
 const buttonStyle = {
   appearance: 'none',
   background: 'transparent',
@@ -39,7 +41,6 @@ const buttonStyle = {
   cursor: 'pointer',
   height: '100%',
   margin: 0,
-  outline: 'none',
   padding: 0,
   width: '100%',
 } as const;
