@@ -6484,10 +6484,20 @@ class API:
                 f"{MAX_CAPABILITY_NODES_PER_HOST} summaries"
             )
             return
-        # A frozen model does not freeze the nested payload dicts, so a deep
-        # copy detaches the published record from any object the extension
-        # still holds; what was validated is exactly what gets gossiped.
-        nodes[summary.key] = summary.model_copy(deep=True)
+        # A frozen model does not freeze the nested payload dicts, so the
+        # extension could have mutated one between construction and this
+        # call. Rebuilding through the validators both re-checks the bounds
+        # and detaches the published record from any object the extension
+        # still holds; what gets gossiped is exactly what passed validation.
+        try:
+            validated = CapabilityNodeSummary.model_validate(summary.model_dump())
+        except ValidationError as error:
+            logger.warning(
+                f"Refusing capability-node summary {summary.key}: "
+                f"{error.errors()[0]['msg']}"
+            )
+            return
+        nodes[validated.key] = validated
 
     def _withdraw_capability_node(self, plugin_id: str, node_id: str) -> None:
         """Withdraw a published capability-node summary.

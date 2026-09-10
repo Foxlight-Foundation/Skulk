@@ -69,3 +69,57 @@ async def test_management_node_publishes_capability_changes_and_empty_withdrawal
                     assert reading.info.capabilities == frozenset()
                     break
             tasks.cancel_scope.cancel()
+
+
+async def test_management_node_publishes_capability_nodes_and_empty_withdrawal() -> (
+    None
+):
+    """Capability-node summaries follow the same publish-and-clear discipline as tags."""
+    from skulk.shared.types.capability_nodes import CapabilityNodeSummary
+    from skulk.utils.info_gatherer.info_gatherer import NodeCapabilityNodes
+
+    summary = CapabilityNodeSummary.model_validate(
+        {
+            "plugin_id": "foxlight.video-studio",
+            "node_id": "studio",
+            "bundle_id": "foxlight.video-studio",
+            "version": "1.0.0",
+            "status": "ready",
+            "owner_available": True,
+        }
+    )
+    published: list[CapabilityNodeSummary] = [summary]
+    sender, receiver = channel[NodeTelemetry]()
+    with anyio.fail_after(5):
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(
+                _publish_management_node_resources,
+                NodeId("management"),
+                True,
+                "zenoh",
+                sender,
+                None,
+                0.01,
+                None,
+                lambda: tuple(published),
+            )
+            while True:
+                reading = await receiver.receive()
+                if isinstance(reading.info, NodeCapabilityNodes):
+                    assert reading.info.nodes == (summary,)
+                    break
+            published.clear()
+            while True:
+                reading = await receiver.receive()
+                if isinstance(reading.info, NodeCapabilityNodes):
+                    assert reading.info.nodes == ()
+                    break
+            # After the clearing reading, no further empty readings follow.
+            seen_empty_again = False
+            with anyio.move_on_after(0.1):
+                while True:
+                    reading = await receiver.receive()
+                    if isinstance(reading.info, NodeCapabilityNodes):
+                        seen_empty_again = True
+            assert not seen_empty_again
+            tasks.cancel_scope.cancel()

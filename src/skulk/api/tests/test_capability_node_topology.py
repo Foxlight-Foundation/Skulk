@@ -158,3 +158,8 @@ def test_publish_detaches_the_summary_from_extension_owned_payloads() -> None:
     payload["api_key"] = "leaked-after-validation"
     published = view.local_capability_nodes[summary.key]
     assert published.actions[0].payload == {"mode": "t2va"}
+
+    # Mutated before publish: the validators run again and refuse it, and a
+    # previously published record for the same key is left as it was.
+    api._extension_context.publish_capability_node(summary)  # pyright: ignore[reportPrivateUsage]
+    assert view.local_capability_nodes[summary.key].actions[0].payload == {"mode": "t2va"}
