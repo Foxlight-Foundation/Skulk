@@ -2972,6 +2972,23 @@ all nodes converge. Operational visibility remains available, but events,
 commands, state, and inference are not cross-version-compatible; finish the
 deployment before starting new inference work.
 
+The response also carries a `capabilityNodes` map (keyed by host node id)
+describing the managed capability nodes each live host runs: extension-owned
+children such as an installed plugin bundle with its own user interface. Each
+entry is a bounded, credential-free summary: `pluginId`, `nodeId`, `bundleId`,
+`version`, optional `title`, owner-reported `status` (`installed`, `starting`,
+`ready`, `degraded`, `disabled`, `configuration_invalid`, or `failed`),
+`ownerAvailable`, `operationsActive`, `surfaces` (at most four; today every
+surface is `kind: "link"` with an absolute `url` and a `ready` flag), `actions`
+(at most eight `surface`, `link`, or `descriptor` entries; a descriptor action
+carries the `capabilityId` and a fixed `payload` for `POST /v1/capabilities/call`
+on that host), and `observedAt`, the local receipt time of the host's last
+reading. The summaries ride the telemetry plane; a host that stops publishing
+ages out with its other readings, and a reading older than about ninety
+seconds is treated as stale by the dashboard. The dashboard draws each summary
+as a satellite of its host in the topology and opens its surfaces from a
+flyout. Hosts with no capability nodes are absent from the map.
+
 The response carries a live `nodeResources` map as well. Each node entry includes
 its placement `backends`, declared `participation`, `apiAvailable` (whether the
 node process exposes the HTTP API), resolved `dataTransport` (`gossipsub` or

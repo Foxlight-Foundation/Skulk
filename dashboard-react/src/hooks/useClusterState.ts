@@ -17,7 +17,15 @@ import {
   type RawNodeHealth,
   type RawNodeResources,
   type RawConnectionEdge,
+  type RawCapabilityNodeSummary,
 } from '../store/endpoints/cluster';
+import type {
+  CapabilityNodeAction,
+  CapabilityNodeActionKind,
+  CapabilityNodeStatus,
+  CapabilityNodeSummary,
+  CapabilityNodeSurface,
+} from '../types/capabilityNodes';
 
 /* ── Transforms ──────────────────────────────────────────── */
 
@@ -337,8 +345,91 @@ export interface ClusterState {
   nodeThunderboltBridge: Record<string, RawThunderboltBridge>;
   nodeRdmaCtl: Record<string, RawRdmaCtl>;
   nodeCapabilities: Record<string, string[]>;
+  /** Capability-node summaries per host, already validated and typed. */
+  capabilityNodes: Record<string, CapabilityNodeSummary[]>;
   nodeResources: Record<string, RawNodeResources>;
   thunderboltBridgeCycles: string[][];
+}
+
+const CAPABILITY_NODE_STATUSES: ReadonlySet<string> = new Set([
+  'installed',
+  'starting',
+  'ready',
+  'degraded',
+  'disabled',
+  'configuration_invalid',
+  'failed',
+]);
+const CAPABILITY_ACTION_KINDS: ReadonlySet<string> = new Set(['surface', 'descriptor', 'link']);
+
+/**
+ * Validates the raw `capabilityNodes` projection into typed summaries.
+ * Entries missing identity, status, or freshness are dropped rather than
+ * rendered half-formed: a satellite the dashboard cannot name or place is
+ * worse than none. Surfaces of unknown kinds and malformed actions are
+ * skipped individually so one bad entry does not hide a whole node.
+ */
+export function normalizeCapabilityNodes(
+  raw: Record<string, RawCapabilityNodeSummary[]> | undefined,
+): Record<string, CapabilityNodeSummary[]> {
+  const result: Record<string, CapabilityNodeSummary[]> = {};
+  if (!raw) return result;
+  for (const [hostNodeId, entries] of Object.entries(raw)) {
+    if (!Array.isArray(entries)) continue;
+    const summaries: CapabilityNodeSummary[] = [];
+    for (const entry of entries) {
+      if (
+        !entry.pluginId ||
+        !entry.nodeId ||
+        !entry.bundleId ||
+        !entry.version ||
+        !entry.status ||
+        !CAPABILITY_NODE_STATUSES.has(entry.status) ||
+        typeof entry.observedAt !== 'string'
+      ) {
+        continue;
+      }
+      const surfaces: CapabilityNodeSurface[] = [];
+      for (const surface of entry.surfaces ?? []) {
+        if (surface.kind !== 'link' || !surface.surfaceId || !surface.url) continue;
+        surfaces.push({
+          surfaceId: surface.surfaceId,
+          title: surface.title ?? surface.surfaceId,
+          kind: 'link',
+          url: surface.url,
+          ready: surface.ready ?? true,
+        });
+      }
+      const actions: CapabilityNodeAction[] = [];
+      for (const action of entry.actions ?? []) {
+        if (!action.actionId || !action.kind || !CAPABILITY_ACTION_KINDS.has(action.kind)) continue;
+        actions.push({
+          actionId: action.actionId,
+          title: action.title ?? action.actionId,
+          kind: action.kind as CapabilityNodeActionKind,
+          surfaceId: action.surfaceId ?? null,
+          capabilityId: action.capabilityId ?? null,
+          payload: action.payload ?? null,
+          url: action.url ?? null,
+        });
+      }
+      summaries.push({
+        pluginId: entry.pluginId,
+        nodeId: entry.nodeId,
+        bundleId: entry.bundleId,
+        version: entry.version,
+        title: entry.title ?? null,
+        status: entry.status as CapabilityNodeStatus,
+        ownerAvailable: entry.ownerAvailable ?? false,
+        surfaces,
+        actions,
+        operationsActive: entry.operationsActive ?? 0,
+        observedAt: entry.observedAt,
+      });
+    }
+    if (summaries.length > 0) result[hostNodeId] = summaries;
+  }
+  return result;
 }
 
 const CONNECTION_LOST_THRESHOLD = 3;
@@ -411,6 +502,11 @@ export function useClusterState(): ClusterState {
     );
   }, [data, resolvedLocalNodeId, nodeIdentityQuery.data]);
 
+  const capabilityNodes = useMemo(
+    () => normalizeCapabilityNodes(data?.capabilityNodes),
+    [data?.capabilityNodes],
+  );
+
   return {
     topology,
     localNodeId: resolvedLocalNodeId,
@@ -425,6 +521,7 @@ export function useClusterState(): ClusterState {
     nodeRdmaCtl: data?.nodeRdmaCtl ?? {},
     nodeResources: data?.nodeResources ?? {},
     nodeCapabilities: data?.nodeCapabilities ?? {},
+    capabilityNodes,
     thunderboltBridgeCycles: data?.thunderboltBridgeCycles ?? [],
   };
 }

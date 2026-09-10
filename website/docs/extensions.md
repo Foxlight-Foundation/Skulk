@@ -109,6 +109,58 @@ Notes:
   this is automatic; a rare API-only (`--no-worker`) node records the tag but
   does not gossip it.
 
+### Publishing a capability node (`publish_capability_node`)
+
+A plugin that runs a managed child with its own user interface can make it
+visible in the dashboard topology. `context.publish_capability_node(summary)`
+publishes a `CapabilityNodeSummary` (from `skulk.shared.types.capability_nodes`)
+describing the node: `plugin_id` and `node_id` (its key on this host),
+`bundle_id` and `version`, an optional `title`, the owner-reported `status`
+(`installed`, `starting`, `ready`, `degraded`, `disabled`,
+`configuration_invalid`, or `failed`), `owner_available`, up to four
+`surfaces` (each a `link` with an absolute `http(s)` URL and a `ready` flag),
+up to eight `actions` (`surface`, `link`, or `descriptor` with a
+`capability_id` and a fixed payload of at most 4 KiB), and
+`operations_active`. The dashboard draws the node as a satellite of its host,
+colors it from `status` and `owner_available`, and opens the surfaces from a
+flyout in a new tab; descriptor actions run through
+`POST /v1/capabilities/call` on the host.
+
+```python
+from skulk.shared.types.capability_nodes import CapabilityNodeSummary, CapabilityNodeSurface
+
+context.publish_capability_node(
+    CapabilityNodeSummary(
+        plugin_id="foxlight.video-studio",
+        node_id="studio",
+        bundle_id="foxlight.video-studio",
+        version="1.0.0",
+        title="Video Studio",
+        status="ready",
+        owner_available=True,
+        surfaces=(
+            CapabilityNodeSurface(surface_id="studio", title="Open Studio", url="http://127.0.0.1:8188/"),
+        ),
+    )
+)
+```
+
+Notes:
+
+- Publish again with the same `plugin_id` and `node_id` to report a status
+  change; the previous summary is replaced in place. A host publishes at most
+  sixteen summaries; a seventeenth is refused with a warning.
+- The summary is gossiped to every node and rendered by every dashboard, so
+  it must never carry credentials, tokens, or private paths. URLs with
+  embedded credentials are rejected at construction.
+- `withdraw_capability_node(plugin_id, node_id)` removes the summary. When the
+  last one goes, one empty reading clears the host's entry everywhere.
+- Unlike capability tags, management-only (`--no-worker`) hosts gossip these
+  summaries too, so a capability node on a host without a model worker still
+  appears in the topology.
+- Set `SKULK_TEST_CAPABILITY_NODE=<url>` on a host to publish one stand-in
+  node with a single link surface and see the satellite without a plugin.
+
 ## Serving a capability (providers)
 
 Beyond observing chat traffic, an extension can be a **provider**: a plugin

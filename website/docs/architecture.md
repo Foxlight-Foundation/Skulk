@@ -1763,6 +1763,19 @@ the next gossip round. Together these are first-class citizenship expressed as
 plane access: a plugin both reads and writes the telemetry plane, and nothing
 about a tag is event-sourced.
 
+A plugin that runs a managed child with its own user interface (a capability
+node) can also publish a bounded summary of it with
+`publish_capability_node(summary)`: identity, owner-reported status, link
+surfaces, and manifest-declared actions, never credentials or private paths.
+The summary rides the same plane as a `NodeCapabilityNodes` reading, appears
+as `capabilityNodes` in `GET /state`, and the dashboard draws it as a satellite
+of its host in the topology with a flyout that opens the surfaces in a new tab
+and runs descriptor actions through `POST /v1/capabilities/call`.
+`withdraw_capability_node(plugin_id, node_id)` removes it. Satellite health is
+mapped from the summary alone and never folds into the host's own health.
+`SKULK_TEST_CAPABILITY_NODE=<url>` makes a host publish one stand-in node with
+a single link surface so the topology layer can be exercised without a plugin.
+
 ### Providers and capability calls
 
 An extension can also be a **provider**: a plugin that serves a capability of
