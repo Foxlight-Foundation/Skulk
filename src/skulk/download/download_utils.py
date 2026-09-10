@@ -1057,9 +1057,38 @@ def is_model_directory_complete(model_dir: Path) -> bool:
         # A safetensors index is present: completeness is governed entirely by it
         # (do NOT let a stray .gguf mask a partially-downloaded safetensors set).
         return all(f.size is not None for f in file_list)
+    if _installed_bundle_is_complete(model_dir):
+        return True
     # No safetensors index -> this may be a GGUF repo; complete once its weights
     # (the full shard group) are present.
     return directory_has_gguf_weights(model_dir)
+
+
+def _installed_bundle_is_complete(model_dir: Path) -> bool:
+    """Whether a bundle artifact's installed manifest is fully on disk.
+
+    A bundle-scoped artifact (a diffusion stack laid out by model folder, for
+    example) carries neither a safetensors index nor GGUF weights, so the two
+    layout probes above cannot see it. Its installed-card sidecar holds the
+    file manifest the store verified when it registered the bytes, and that
+    manifest is the completeness truth: every listed file present at its
+    recorded size. A legacy sidecar without a manifest proves nothing here.
+    """
+    from skulk.store.installed_cards import read_installed_card
+
+    try:
+        record = read_installed_card(model_dir)
+    except (OSError, ValueError):
+        return False
+    if record is None or record.schema_version != 2 or not record.files:
+        return False
+    for entry in record.files:
+        try:
+            if (model_dir / entry.path).stat().st_size != entry.size_bytes:
+                return False
+        except OSError:
+            return False
+    return True
 
 
 async def _build_file_list_from_local_directory(
