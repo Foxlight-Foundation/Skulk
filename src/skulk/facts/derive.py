@@ -499,12 +499,21 @@ def _derive_comfy(
 
     conflicts: list[CapabilityConflict] = []
     notes: list[str] = []
-    declared = (
-        _declared_tokens(facts.declared_comfy_backends)
-        or _declared_tokens(facts.declared_vllm_backends)
-        or _declared_tokens(facts.declared_llama_server_backends)
-        or _declared_tokens(facts.declared_llama_cpp_backends)
-    )
+    declared = _declared_tokens(facts.declared_comfy_backends)
+    if not declared:
+        # An inherited declaration is only borrowed when it names a compute
+        # this engine can use. The documented AMD launch path declares
+        # ``SKULK_LLAMA_CPP_BACKENDS=vulkan``, which is meaningless to ComfyUI
+        # and must not suppress the ROCm inference from the observed GPU.
+        for inherited in (
+            facts.declared_vllm_backends,
+            facts.declared_llama_server_backends,
+            facts.declared_llama_cpp_backends,
+        ):
+            tokens = _declared_tokens(inherited)
+            if any(cb in tokens for cb in _COMFY_COMPUTES):
+                declared = tokens
+                break
     computes = [cb for cb in _COMFY_COMPUTES if cb in declared]
     if computes:
         conflicts.extend(

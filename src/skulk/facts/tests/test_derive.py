@@ -516,3 +516,30 @@ def test_comfy_is_gpu_only_and_honors_declarations(monkeypatch: pytest.MonkeyPat
     assert "comfy-rocm" in declared.backends
     assert any(c.code == "backend_override_conflict" and "SKULK_COMFY_BACKENDS" in c.message for c in declared.conflicts)
     assert derive_node_backends(make_facts(gpus=(NVIDIA_A40,))).backends & {"comfy", "comfy-cuda"} == set()
+
+
+def test_comfy_skips_inherited_declarations_it_cannot_use(monkeypatch: pytest.MonkeyPatch) -> None:
+    from skulk.facts import derive as derive_module
+
+    monkeypatch.setattr(derive_module, "COMFY_RUNNER_AVAILABLE", True)
+    valid = {"comfy_binary": ok_bin("SKULK_COMFY_BIN"), "comfy_root": "/opt/ComfyUI", "comfy_root_state": "ok"}
+    # The documented AMD launch path declares vulkan for llama.cpp; ComfyUI
+    # cannot use it, so the ROCm backend still derives from the observed GPU.
+    amd = derive_node_backends(make_facts(gpus=(AMD_STRIX,), declared_llama_cpp="vulkan").model_copy(update=valid))
+    assert {"comfy", "comfy-rocm"} <= amd.backends
+    assert not [c for c in amd.conflicts if "comfy" in c.message]
+    assert any("derived comfy backend" in note for note in amd.notes)
+    # A usable inherited declaration is still honored ahead of hardware inference.
+    borrowed = derive_node_backends(
+        make_facts(gpus=(AMD_STRIX,), declared_llama_cpp="vulkan").model_copy(
+            update={**valid, "declared_vllm_backends": "cuda"}
+        )
+    )
+    assert "comfy-cuda" in borrowed.backends
+    assert "comfy-rocm" not in borrowed.backends
+    # An explicit comfy declaration with no usable compute stays a loud conflict.
+    explicit = derive_node_backends(
+        make_facts(gpus=(AMD_STRIX,)).model_copy(update={**valid, "declared_comfy_backends": "vulkan"})
+    )
+    assert "comfy" not in explicit.backends
+    assert any(c.code == "backend_override_conflict" and "comfy" in c.message for c in explicit.conflicts)
