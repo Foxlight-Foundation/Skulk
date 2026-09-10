@@ -2,6 +2,7 @@
 
 import asyncio
 import getpass
+import io
 import json
 import warnings
 from collections.abc import AsyncIterator, Iterator
@@ -15,7 +16,7 @@ import pytest
 from pydantic import JsonValue
 
 from skulk.extensions.runtime_artifacts import RuntimeTrust
-from skulk.extensions.runtime_attachment import HostSettings
+from skulk.extensions.runtime_attachment import HostSettings, ServiceConnection
 from skulk.extensions.runtime_download import RuntimeDownloads
 from skulk.extensions.runtime_files import (
     private_directory,
@@ -260,3 +261,38 @@ def test_credential_prompt_refuses_echo_fallback(
     with pytest.raises(getpass.GetPassWarning):
         read_hidden_credential("Credential: ")
     assert not read
+
+
+def test_cli_lost_response_directs_owner_to_generated_resume_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The entrypoint must not recommend a new installation after an uncertain reply."""
+    from skulk.extensions import service_setup
+
+    class Terminal(io.StringIO):
+        def isatty(self) -> bool:
+            return True
+
+    connection = ServiceConnection(manager_root=str(tmp_path), profile_id="a" * 32)
+    monkeypatch.setattr(
+        service_setup.sys, "argv", ["skulk-plugin-service", "install-plugin"]
+    )
+    monkeypatch.setattr(service_setup.sys, "stdin", Terminal())
+
+    def read_connection(_path: Path, _limit: int) -> bytes:
+        return connection.model_dump_json().encode()
+
+    monkeypatch.setattr(service_setup, "read_private", read_connection)
+
+    async def lost(_root: Path, _request: ManagerRequest) -> dict[str, JsonValue]:
+        raise OSError("sensitive connection details")
+
+    monkeypatch.setattr(service_setup, "manager_request", lost)
+    with pytest.raises(SystemExit) as stopped:
+        service_setup.main()
+    assert stopped.value.code == 1
+    captured = capsys.readouterr()
+    assert "Resume: skulk-plugin-service install-plugin managed." in captured.out
+    assert "printed resume command with its installation ID" in captured.err
+    assert "Rerun the same local command" not in captured.err
+    assert "sensitive connection details" not in captured.err

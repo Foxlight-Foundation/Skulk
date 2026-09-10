@@ -454,13 +454,15 @@ def main() -> None:
             print(json.dumps(asyncio.run(service_status())))
     except (EOFError, KeyboardInterrupt):
         print(
-            "Terminal closed. Accepted operations remain with the manager; use the printed resume command.",
+            "Terminal closed. Accepted local operations remain recorded; inspect retained status before retrying. For guided installation, use the printed resume command.",
             file=sys.stderr,
         )
         raise SystemExit(1) from None
     except (OSError, ValueError, TimeoutError, sqlite3.Error, getpass.GetPassWarning):
         print(
-            "Plugin service command incomplete. Rerun the same local command with the qualified Skulk environment; inspect protected setup and OS service status.",
+            "Guided installation incomplete. Use the printed resume command with its installation ID; inspect retained status before recovery."
+            if arguments.action == "install-plugin"
+            else "Plugin service command incomplete. Rerun the same local command with the qualified Skulk environment; inspect protected setup and OS service status.",
             file=sys.stderr,
         )
         raise SystemExit(1) from None
