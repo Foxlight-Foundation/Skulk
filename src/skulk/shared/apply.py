@@ -67,6 +67,7 @@ from skulk.utils.info_gatherer.info_gatherer import (
     MemoryUsage,
     MiscData,
     NodeCapabilities,
+    NodeCapabilityNodes,
     NodeConfig,
     NodeDiskUsage,
     NodeHeartbeat,
@@ -536,6 +537,10 @@ def apply_node_gathered_info(event: NodeGatheredInfo, state: State) -> State:
             # capability tags ride the TELEMETRY topic into the TelemetryView,
             # never the event log. No-op here so the GatheredInfo match stays
             # exhaustive; a stray log-path delivery is harmless.
+            pass
+        case NodeCapabilityNodes():
+            # Same plane, same reasoning: capability-node summaries feed the
+            # topology from the TelemetryView and never enter State.
             pass
         case NodeHeartbeat():
             # Dedicated liveness belongs only in TelemetryView. This legacy

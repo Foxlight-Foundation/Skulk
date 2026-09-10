@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { transformTopology } from './useClusterState';
+import { ensureCapabilityHostsPresent, normalizeCapabilityNodes, transformTopology } from './useClusterState';
 
 const GIB = 1024 ** 3;
 
@@ -118,5 +118,69 @@ describe('transformTopology memory pool selection', () => {
       ram_total: 16 * GIB,
       is_vram: undefined,
     });
+  });
+});
+
+describe('normalizeCapabilityNodes', () => {
+  it('types well-formed summaries and drops malformed entries', () => {
+    const result = normalizeCapabilityNodes({
+      'node-a': [
+        {
+          pluginId: 'foxlight.video-studio',
+          nodeId: 'studio',
+          bundleId: 'foxlight.video-studio',
+          version: '1.0.0',
+          status: 'ready',
+          ownerAvailable: true,
+          surfaces: [
+            { surfaceId: 'studio', title: 'Studio', kind: 'link', url: 'http://127.0.0.1:8188/', ready: true },
+            { surfaceId: 'weird', title: 'Weird', kind: 'proxied', url: 'http://127.0.0.1:1/' },
+          ],
+          actions: [
+            { actionId: 'open', title: 'Open', kind: 'surface', surfaceId: 'studio' },
+            { actionId: 'bad', title: 'Bad', kind: 'teleport' },
+          ],
+          observedAt: '2026-09-10T12:00:00+00:00',
+        },
+        { pluginId: 'no-status', nodeId: 'x', bundleId: 'b', version: '1', observedAt: 'now' },
+        { pluginId: 'bad-status', nodeId: 'x', bundleId: 'b', version: '1', status: 'exploded', observedAt: 'now' },
+      ],
+      'node-b': [],
+    });
+    expect(Object.keys(result)).toEqual(['node-a']);
+    const studio = result['node-a']?.[0];
+    expect(studio?.surfaces.map((surface) => surface.surfaceId)).toEqual(['studio']);
+    expect(studio?.actions.map((action) => action.actionId)).toEqual(['open']);
+    expect(studio?.operationsActive).toBe(0);
+    expect(studio?.title).toBeNull();
+  });
+
+  it('returns an empty map without the projection', () => {
+    expect(normalizeCapabilityNodes(undefined)).toEqual({});
+  });
+});
+
+describe('ensureCapabilityHostsPresent', () => {
+  it('adds a management-only capability host missing from the replicated topology', () => {
+    const topology = transformTopology({ nodes: ['worker-a'] }, {}, {}, {}, {}, {}, {}, {});
+    const result = ensureCapabilityHostsPresent(
+      topology,
+      ['mgmt-host', 'worker-a'],
+      { 'mgmt-host': { friendlyName: 'r720', modelId: 'PowerEdge R720', skulkVersion: '1.5.2' } },
+      { 'mgmt-host': { level: 'ok', reasons: [] } },
+    );
+    expect(Object.keys(result.nodes).sort()).toEqual(['mgmt-host', 'worker-a']);
+    const host = result.nodes['mgmt-host'];
+    expect(host?.friendly_name).toBe('r720');
+    expect(host?.system_info?.model_id).toBe('PowerEdge R720');
+    expect(host?.node_health?.level).toBe('ok');
+    expect(host?.syncing).toBeUndefined();
+    expect(host?.mactop_info?.memory?.ram_total).toBe(0);
+  });
+
+  it('leaves the topology untouched when every capability host is already present', () => {
+    const topology = transformTopology({ nodes: ['worker-a'] }, {}, {}, {}, {}, {}, {}, {});
+    expect(ensureCapabilityHostsPresent(topology, ['worker-a'], {}, {})).toBe(topology);
+    expect(ensureCapabilityHostsPresent(topology, [], {}, {})).toBe(topology);
   });
 });

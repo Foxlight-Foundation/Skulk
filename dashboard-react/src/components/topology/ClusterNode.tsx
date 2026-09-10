@@ -7,7 +7,13 @@ import type { Theme } from '../../theme';
 import { useSkulkTranslation, type SkulkTranslate } from '../../i18n/tolgee';
 import { HardwareBadge } from './HardwareBadge';
 import { TopologyNodeActions } from './TopologyNodeActions';
-import { clampTelemetryRatio, type HardwareBadgeSide } from './topologyLayout';
+import { CapabilityOverflow, CapabilitySatellite } from './CapabilitySatellite';
+import {
+  clampTelemetryRatio,
+  computeSatellitePositions,
+  type HardwareBadgeSide,
+} from './topologyLayout';
+import { capabilityNodeKey, type CapabilityNodeSummary } from '../../types/capabilityNodes';
 
 /** Props for one scalable SVG topology node. */
 export interface ClusterNodeProps {
@@ -35,6 +41,15 @@ export interface ClusterNodeProps {
   onRestart?: () => void;
   /** Called when the user opens live diagnostics for this node. */
   onInspect?: () => void;
+  /** Visible capability nodes this host runs, drawn as satellites. */
+  satellites?: CapabilityNodeSummary[];
+  /** Key of the satellite whose flyout is open on this host, if any. */
+  activeSatelliteKey?: string | null;
+  /**
+   * Called when a satellite (or the overflow glyph) is activated. The anchor
+   * is the satellite's center in canvas coordinates, ready for the flyout.
+   */
+  onSatelliteSelect?: (key: string, anchor: { x: number; y: number }) => void;
 }
 
 const NODE_RADIUS = 31;
@@ -232,6 +247,9 @@ export function ClusterNode({
   onSelect,
   onRestart,
   onInspect,
+  satellites = [],
+  activeSatelliteKey = null,
+  onSatelliteSelect,
 }: ClusterNodeProps) {
   const { t } = useSkulkTranslation();
   const theme = useTheme() as Theme;
@@ -267,6 +285,11 @@ export function ClusterNode({
     },
   );
   const infoContent = buildInfoContent(nodeId, nodeInfo, edges, allNodes, theme, t);
+  const satelliteLayout = computeSatellitePositions(satellites.length, hardwareBadgeSide);
+  const toCanvas = (localX: number, localY: number) => ({
+    x: x + localX * scale,
+    y: y + localY * scale,
+  });
 
   return (
     <g
@@ -385,6 +408,39 @@ export function ClusterNode({
         stroke={theme.colors.topologyNodeDotBorder}
         strokeWidth={2}
       />
+
+      {satelliteLayout.positions.map((position) => {
+        const summary = satellites[position.index];
+        if (!summary) return null;
+        const key = capabilityNodeKey(summary);
+        return (
+          <CapabilitySatellite
+            active={activeSatelliteKey === key}
+            key={key}
+            onSelect={() => onSatelliteSelect?.(key, toCanvas(position.x, position.y))}
+            summary={summary}
+            x={position.x}
+            y={position.y}
+          />
+        );
+      })}
+      {satelliteLayout.overflowPosition ? (
+        <CapabilityOverflow
+          count={satelliteLayout.overflow}
+          onSelect={() => {
+            const first = satellites[satelliteLayout.positions.length];
+            const overflowPosition = satelliteLayout.overflowPosition;
+            if (first && overflowPosition) {
+              onSatelliteSelect?.(
+                capabilityNodeKey(first),
+                toCanvas(overflowPosition.x, overflowPosition.y),
+              );
+            }
+          }}
+          x={satelliteLayout.overflowPosition.x}
+          y={satelliteLayout.overflowPosition.y}
+        />
+      ) : null}
 
       <g
         aria-label={deviceLabel}

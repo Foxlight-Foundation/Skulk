@@ -21,6 +21,10 @@ from pydantic import UUID4, Field, ValidationError, field_serializer, field_vali
 from skulk.operator.identity import OperatorIdentityRepository
 from skulk.routing.zenoh_status import ZenohPeerSampler
 from skulk.shared.constants import SKULK_CONFIG_FILE, SKULK_MODELS_DIR
+from skulk.shared.types.capability_nodes import (
+    MAX_CAPABILITY_NODES_PER_HOST,
+    CapabilityNodeSummary,
+)
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.profiling import (
     DiskUsage,
@@ -509,6 +513,34 @@ class NodeCapabilities(TaggedModel):
         return sorted(value)
 
 
+class NodeCapabilityNodes(TaggedModel):
+    """Summaries of the capability nodes a host runs, on the telemetry plane.
+
+    The topology-facing sibling of :class:`NodeCapabilities`: where that reading
+    says which capability tags a host offers, this one describes the managed
+    capability nodes behind them (status, surfaces, actions) so the dashboard
+    can draw each as a satellite of its host and open its surfaces. Like the
+    tag reading it is supplied by the extension surface rather than probed:
+    the API publishes summaries onto the shared ``TelemetryView`` and the
+    gatherer's ``capability_nodes_provider`` snapshots them. Last-write-wins,
+    never indexed, gone with its host.
+    """
+
+    nodes: tuple[CapabilityNodeSummary, ...] = Field(
+        default=(), max_length=MAX_CAPABILITY_NODES_PER_HOST
+    )
+    """Summaries in publication order, at most sixteen per host."""
+
+    @field_validator("nodes", mode="before")
+    @classmethod
+    def _coerce_nodes(cls, v: object) -> object:
+        # JSON arrays decode to lists, which strict mode rejects for a tuple
+        # field; coerce first so the reading populates over gossip.
+        if isinstance(v, list):
+            return tuple(cast("Iterable[object]", v))
+        return v
+
+
 class NodeHeartbeat(TaggedModel):
     """Small, explicit liveness reading published on the telemetry plane.
 
@@ -571,6 +603,7 @@ GatheredInfo = (
     | NodeResources
     | NodeDiskUsage
     | NodeCapabilities
+    | NodeCapabilityNodes
     | NodeHeartbeat
 )
 
@@ -597,6 +630,14 @@ class InfoGatherer:
     # the monitor is inert and never publishes.
     capabilities_provider: Callable[[], frozenset[str]] | None = None
     capabilities_poll_interval: float | None = 30
+    # Capability-node summaries (topology satellites). Polled faster than the
+    # tag set because a node's status moves while it starts; published only on
+    # change plus a periodic republish for late joiners.
+    capability_nodes_provider: (
+        Callable[[], tuple[CapabilityNodeSummary, ...]] | None
+    ) = None
+    capability_nodes_poll_interval: float | None = 5
+    capability_nodes_republish_interval: float = 30
     # Data-plane Zenoh connectivity, sampled from the router that owns the
     # session at each NodeResources advertisement. Optional so callers without
     # a router (tests, tools) stay unchanged; absent means "unknown", never 0.
@@ -630,6 +671,7 @@ class InfoGatherer:
                 tg.start_soon(self._monitor_node_resources)
                 tg.start_soon(self._monitor_disk_usage)
                 tg.start_soon(self._monitor_capabilities)
+                tg.start_soon(self._monitor_capability_nodes)
                 tg.start_soon(self._monitor_heartbeat)
                 # NodeConfig is deliberately NOT sent: it is neither a
                 # telemetry-plane reading nor a durable control event, so the
@@ -765,6 +807,46 @@ class InfoGatherer:
             except Exception as e:
                 logger.warning(f"Error gathering node capabilities: {e}")
             await anyio.sleep(self.capabilities_poll_interval)
+
+    async def _monitor_capability_nodes(self):
+        """Publish capability-node summaries onto the telemetry plane.
+
+        Same publication discipline as :meth:`_monitor_capabilities`: nothing
+        while the host runs no capability node, one empty reading when the
+        last node goes so peers clear their entry, and otherwise a reading
+        whenever the snapshot changes. A non-empty snapshot is also republished
+        every ``capability_nodes_republish_interval`` seconds so a node that
+        joins later still learns it on a plane that has no replay.
+        """
+        if (
+            self.capability_nodes_poll_interval is None
+            or self.capability_nodes_provider is None
+        ):
+            return
+        last_published: tuple[CapabilityNodeSummary, ...] | None = None
+        last_published_at = anyio.current_time()
+        while True:
+            try:
+                nodes = self.capability_nodes_provider()
+                changed = nodes != last_published
+                stale = (
+                    anyio.current_time() - last_published_at
+                    >= self.capability_nodes_republish_interval
+                )
+                should_publish = (
+                    changed if last_published is not None else bool(nodes)
+                ) or (bool(nodes) and stale)
+                if should_publish:
+                    with fail_after(30):
+                        await self.info_sender.send(NodeCapabilityNodes(nodes=nodes))
+                    last_published = nodes
+                    last_published_at = anyio.current_time()
+            except (ClosedResourceError, BrokenResourceError):
+                # Consumer gone: a stop signal, not a fault (#266).
+                raise
+            except Exception as e:
+                logger.warning(f"Error gathering capability nodes: {e}")
+            await anyio.sleep(self.capability_nodes_poll_interval)
 
     async def _monitor_misc(self):
         if self.misc_poll_interval is None:

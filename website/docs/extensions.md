@@ -104,10 +104,71 @@ Notes:
   so callers stop selecting this node for it. When the last tag is withdrawn,
   one final empty reading is published so peers clear their entry; a node's
   tags also disappear when the node leaves the cluster.
-- A node must run a worker to gossip its advertisement (the worker owns the
-  telemetry emit path). The mainstream node runs both an API and a worker, so
-  this is automatic; a rare API-only (`--no-worker`) node records the tag but
-  does not gossip it.
+- On the mainstream node (API plus worker) the worker's info gatherer gossips
+  the tag on its poll. A management-only (`--no-worker`) node has no gatherer;
+  its node lifecycle publishes the tag set alongside its resource reading
+  every two seconds instead, so installed services stay discoverable without
+  a model worker.
+
+### Publishing a capability node (`publish_capability_node`)
+
+A plugin that runs a managed child with its own user interface can make it
+visible in the dashboard topology. `context.publish_capability_node(summary)`
+publishes a `CapabilityNodeSummary` (from `skulk.shared.types.capability_nodes`)
+describing the node: `plugin_id` and `node_id` (its key on this host),
+`bundle_id` and `version`, an optional `title`, the owner-reported `status`
+(`installed`, `starting`, `ready`, `degraded`, `disabled`,
+`configuration_invalid`, or `failed`), `owner_available`, up to four
+`surfaces` (each a `link` with an absolute `http(s)` URL and a `ready` flag),
+up to eight `actions` (`surface`, `link`, or `descriptor` with a
+`capability_id` and a fixed payload of at most 4 KiB), and
+`operations_active`. The dashboard draws the node as a satellite of its host,
+colors it from `status` and `owner_available`, and opens the surfaces from a
+flyout in a new tab; descriptor actions run through
+`POST /v1/capabilities/call` on the host.
+
+```python
+from skulk.shared.types.capability_nodes import CapabilityNodeSummary, CapabilityNodeSurface
+
+context.publish_capability_node(
+    CapabilityNodeSummary(
+        plugin_id="foxlight.video-studio",
+        node_id="studio",
+        bundle_id="foxlight.video-studio",
+        version="1.0.0",
+        title="Video Studio",
+        status="ready",
+        owner_available=True,
+        surfaces=(
+            CapabilityNodeSurface(surface_id="studio", title="Open Studio", url="http://127.0.0.1:8188/"),
+        ),
+    )
+)
+```
+
+Notes:
+
+- Publish again with the same `plugin_id` and `node_id` to report a status
+  change; the previous summary is replaced in place. A host publishes at most
+  sixteen summaries; a seventeenth is refused with a warning.
+- The summary is gossiped to every node and rendered by every dashboard, so
+  it must never carry credentials, tokens, or private paths. URLs with
+  embedded credentials are rejected at construction.
+- A loopback surface URL (`127.0.0.1` or `localhost`) is reachable only
+  from a browser running on the host itself; every other dashboard shows the
+  entry as unreachable with a hint, and the URL is never rewritten onto a
+  LAN address (a loopback-bound service would refuse it). A surface meant
+  for remote operators must listen on a routable address and publish that
+  URL; embedding surfaces in the dashboard is a later contract.
+- `withdraw_capability_node(plugin_id, node_id)` removes the summary. When the
+  last one goes, one empty reading clears the host's entry everywhere.
+- Management-only (`--no-worker`) hosts gossip these summaries from the node
+  lifecycle with the same discipline as the worker gatherer (on change,
+  republished every thirty seconds while non-empty, one empty reading after
+  the last withdrawal), so a capability node on a host without a model
+  worker still appears in the topology.
+- Set `SKULK_TEST_CAPABILITY_NODE=<url>` on a host to publish one stand-in
+  node with a single link surface and see the satellite without a plugin.
 
 ## Serving a capability (providers)
 

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { TopologyData, NodeInfo, NodeHealth, TopologyEdge } from '../types/topology';
+import { CAPABILITY_SATELLITES_ENABLED } from '../featureFlags';
 import {
   useGetLocalNodeIdQuery,
   useGetLocalNodeIdentityQuery,
@@ -17,7 +18,15 @@ import {
   type RawNodeHealth,
   type RawNodeResources,
   type RawConnectionEdge,
+  type RawCapabilityNodeSummary,
 } from '../store/endpoints/cluster';
+import type {
+  CapabilityNodeAction,
+  CapabilityNodeActionKind,
+  CapabilityNodeStatus,
+  CapabilityNodeSummary,
+  CapabilityNodeSurface,
+} from '../types/capabilityNodes';
 
 /* ── Transforms ──────────────────────────────────────────── */
 
@@ -288,6 +297,48 @@ function ensureLocalNodePresent(
   };
 }
 
+/**
+ * Adds hosts that publish capability nodes but are absent from the
+ * replicated topology. A management-only (`--no-worker`) host emits no
+ * `NodeGatheredInfo`, so it never enters `/state.topology.nodes`, yet it is
+ * exactly the shape a capability node lives on. Its identity and derived
+ * health come from telemetry; it carries no memory or compute readings, so
+ * the node renders with an empty gauge rather than a fabricated one. Only
+ * hosts that appear in the projection are added, so the graph is unchanged
+ * for fleets without capability nodes.
+ */
+export function ensureCapabilityHostsPresent(
+  topology: TopologyData,
+  capabilityHosts: readonly string[],
+  identities: Record<string, RawNodeIdentity>,
+  health: Record<string, RawNodeHealth>,
+): TopologyData {
+  const missing = capabilityHosts.filter((hostNodeId) => !topology.nodes[hostNodeId]);
+  if (missing.length === 0) return topology;
+  const nodes: Record<string, NodeInfo> = { ...topology.nodes };
+  for (const hostNodeId of missing) {
+    const identity = identities[hostNodeId];
+    nodes[hostNodeId] = {
+      system_info: {
+        model_id: identity?.modelId,
+        chip: identity?.chipId,
+        memory: 0,
+      },
+      network_interfaces: [],
+      ip_to_interface: {},
+      mactop_info: { memory: { ram_usage: 0, ram_total: 0 } },
+      last_mactop_update: Date.now() / 1000,
+      friendly_name: identity?.friendlyName,
+      os_version: identity?.osVersion,
+      os_build_version: identity?.osBuildVersion,
+      skulk_version: identity?.skulkVersion,
+      skulk_commit: identity?.skulkCommit,
+      node_health: normalizeNodeHealth(health[hostNodeId]),
+    };
+  }
+  return { nodes, edges: topology.edges };
+}
+
 /* ── Public types ────────────────────────────────────────── */
 
 export type RawDownloads = Record<string, unknown[]>;
@@ -337,8 +388,91 @@ export interface ClusterState {
   nodeThunderboltBridge: Record<string, RawThunderboltBridge>;
   nodeRdmaCtl: Record<string, RawRdmaCtl>;
   nodeCapabilities: Record<string, string[]>;
+  /** Capability-node summaries per host, already validated and typed. */
+  capabilityNodes: Record<string, CapabilityNodeSummary[]>;
   nodeResources: Record<string, RawNodeResources>;
   thunderboltBridgeCycles: string[][];
+}
+
+const CAPABILITY_NODE_STATUSES: ReadonlySet<string> = new Set([
+  'installed',
+  'starting',
+  'ready',
+  'degraded',
+  'disabled',
+  'configuration_invalid',
+  'failed',
+]);
+const CAPABILITY_ACTION_KINDS: ReadonlySet<string> = new Set(['surface', 'descriptor', 'link']);
+
+/**
+ * Validates the raw `capabilityNodes` projection into typed summaries.
+ * Entries missing identity, status, or freshness are dropped rather than
+ * rendered half-formed: a satellite the dashboard cannot name or place is
+ * worse than none. Surfaces of unknown kinds and malformed actions are
+ * skipped individually so one bad entry does not hide a whole node.
+ */
+export function normalizeCapabilityNodes(
+  raw: Record<string, RawCapabilityNodeSummary[]> | undefined,
+): Record<string, CapabilityNodeSummary[]> {
+  const result: Record<string, CapabilityNodeSummary[]> = {};
+  if (!raw) return result;
+  for (const [hostNodeId, entries] of Object.entries(raw)) {
+    if (!Array.isArray(entries)) continue;
+    const summaries: CapabilityNodeSummary[] = [];
+    for (const entry of entries) {
+      if (
+        !entry.pluginId ||
+        !entry.nodeId ||
+        !entry.bundleId ||
+        !entry.version ||
+        !entry.status ||
+        !CAPABILITY_NODE_STATUSES.has(entry.status) ||
+        typeof entry.observedAt !== 'string'
+      ) {
+        continue;
+      }
+      const surfaces: CapabilityNodeSurface[] = [];
+      for (const surface of entry.surfaces ?? []) {
+        if (surface.kind !== 'link' || !surface.surfaceId || !surface.url) continue;
+        surfaces.push({
+          surfaceId: surface.surfaceId,
+          title: surface.title ?? surface.surfaceId,
+          kind: 'link',
+          url: surface.url,
+          ready: surface.ready ?? true,
+        });
+      }
+      const actions: CapabilityNodeAction[] = [];
+      for (const action of entry.actions ?? []) {
+        if (!action.actionId || !action.kind || !CAPABILITY_ACTION_KINDS.has(action.kind)) continue;
+        actions.push({
+          actionId: action.actionId,
+          title: action.title ?? action.actionId,
+          kind: action.kind as CapabilityNodeActionKind,
+          surfaceId: action.surfaceId ?? null,
+          capabilityId: action.capabilityId ?? null,
+          payload: action.payload ?? null,
+          url: action.url ?? null,
+        });
+      }
+      summaries.push({
+        pluginId: entry.pluginId,
+        nodeId: entry.nodeId,
+        bundleId: entry.bundleId,
+        version: entry.version,
+        title: entry.title ?? null,
+        status: entry.status as CapabilityNodeStatus,
+        ownerAvailable: entry.ownerAvailable ?? false,
+        surfaces,
+        actions,
+        operationsActive: entry.operationsActive ?? 0,
+        observedAt: entry.observedAt,
+      });
+    }
+    if (summaries.length > 0) result[hostNodeId] = summaries;
+  }
+  return result;
 }
 
 const CONNECTION_LOST_THRESHOLD = 3;
@@ -403,13 +537,29 @@ export function useClusterState(): ClusterState {
       data.nodeRdmaCtl ?? {},
       data.nodeHealth ?? {},
     );
+    // Capability hosts first: a management-only host that publishes
+    // capability nodes is placed from telemetry with its real identity and
+    // health, whether it is this dashboard's own host or a remote one.
+    const withCapabilityHosts = CAPABILITY_SATELLITES_ENABLED
+      ? ensureCapabilityHostsPresent(
+          transformed,
+          Object.keys(data.capabilityNodes ?? {}),
+          data.nodeIdentities ?? {},
+          data.nodeHealth ?? {},
+        )
+      : transformed;
     return ensureLocalNodePresent(
-      transformed,
+      withCapabilityHosts,
       resolvedLocalNodeId,
       nodeIdentityQuery.data ?? null,
       data.nodeIdentities ?? {},
     );
   }, [data, resolvedLocalNodeId, nodeIdentityQuery.data]);
+
+  const capabilityNodes = useMemo(
+    () => normalizeCapabilityNodes(data?.capabilityNodes),
+    [data?.capabilityNodes],
+  );
 
   return {
     topology,
@@ -425,6 +575,7 @@ export function useClusterState(): ClusterState {
     nodeRdmaCtl: data?.nodeRdmaCtl ?? {},
     nodeResources: data?.nodeResources ?? {},
     nodeCapabilities: data?.nodeCapabilities ?? {},
+    capabilityNodes,
     thunderboltBridgeCycles: data?.thunderboltBridgeCycles ?? [],
   };
 }

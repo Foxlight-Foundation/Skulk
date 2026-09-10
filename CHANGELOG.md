@@ -9,6 +9,18 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- Capability nodes in the dashboard topology. A plugin that runs a managed
+  child with its own user interface publishes a bounded, credential-free
+  `CapabilityNodeSummary` (status, link surfaces, manifest actions) through
+  `ExtensionContext.publish_capability_node`; hosts gossip it on the
+  telemetry plane as `NodeCapabilityNodes`, `GET /state` projects it as
+  `capabilityNodes`, and the dashboard draws each node as a satellite of its
+  host with a flyout that opens surfaces in a new tab, runs descriptor
+  actions on the local host, and opens a capability panel built on the
+  shared `RightDrawer` chrome now also used by the observability panel.
+  `SKULK_TEST_CAPABILITY_NODE=<url>` publishes a stand-in node for trying
+  the layer without a plugin; `VITE_CAPABILITY_SATELLITES=0` builds the
+  dashboard without it.
 - Audio-video generation substrate and the `/v1/videos` job API. Model
   cards gain a `[video]` section (modes `t2va` / `fl2va` / `ref2va`,
   duration and frame grid, canvas rules, audio output, reference limits,

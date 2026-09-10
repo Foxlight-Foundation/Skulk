@@ -1,0 +1,188 @@
+import { describe, expect, it, vi } from 'vitest';
+import type { CapabilityNodeSummary } from '../../types/capabilityNodes';
+import {
+  buildCapabilityActions,
+  generateCallId,
+  isLoopbackHostname,
+  resolveSurfaceUrl,
+  runDescriptorAction,
+} from './capabilityActions';
+
+const t = (_key: string, fallback: string, params?: Record<string, string | number>) =>
+  fallback.replace(/\{(\w+)\}/g, (_match, name: string) => String(params?.[name] ?? ''));
+
+function summary(overrides: Partial<CapabilityNodeSummary> = {}): CapabilityNodeSummary {
+  return {
+    pluginId: 'foxlight.video-studio',
+    nodeId: 'studio',
+    bundleId: 'foxlight.video-studio',
+    version: '1.0.0',
+    title: 'Video Studio',
+    status: 'ready',
+    ownerAvailable: true,
+    surfaces: [
+      { surfaceId: 'studio', title: 'Studio', kind: 'link', url: 'http://127.0.0.1:8188/', ready: true },
+      { surfaceId: 'comfy', title: 'ComfyUI', kind: 'link', url: 'http://127.0.0.1:8189/', ready: false },
+    ],
+    actions: [
+      { actionId: 'open-studio', title: 'Open Studio', kind: 'surface', surfaceId: 'studio' },
+      { actionId: 'docs', title: 'Docs', kind: 'link', url: 'https://example.invalid/docs' },
+      { actionId: 'plan', title: 'Plan', kind: 'descriptor', capabilityId: 'video.plan', payload: { mode: 't2va' } },
+      { actionId: 'dangling', title: 'Dangling', kind: 'surface', surfaceId: 'missing' },
+    ],
+    operationsActive: 0,
+    observedAt: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
+describe('buildCapabilityActions', () => {
+  it('lists surfaces, then manifest actions, then details, on the local host', () => {
+    const items = buildCapabilityActions(summary(), { isLocalHost: true, hostName: 'kite6', t });
+    expect(items.map((item) => item.id)).toEqual([
+      'surface:studio',
+      'surface:comfy',
+      'action:docs',
+      'action:plan',
+      'details',
+    ]);
+    const comfy = items[1];
+    expect(comfy?.kind === 'open-link' && comfy.ready).toBe(false);
+    const plan = items[3];
+    expect(plan?.kind === 'call' && plan.enabled && plan.payload).toEqual({ mode: 't2va' });
+  });
+
+  it('disables descriptor calls and adds the host hint when connected elsewhere', () => {
+    const items = buildCapabilityActions(summary(), { isLocalHost: false, hostName: 'kite6', t });
+    const plan = items.find((item) => item.id === 'action:plan');
+    expect(plan?.kind === 'call' && plan.enabled).toBe(false);
+    const last = items[items.length - 1];
+    expect(last?.kind).toBe('manage-on-host');
+    expect(last?.title).toBe('Manage on kite6');
+  });
+});
+
+describe('runDescriptorAction', () => {
+  it('resolves the exact descriptor before posting the call envelope', async () => {
+    const calls: Array<{ url: string; body?: unknown }> = [];
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      calls.push({ url, body: init?.body ? JSON.parse(String(init.body)) : undefined });
+      if (url === '/v1/capabilities') {
+        return new Response(
+          JSON.stringify({
+            capabilities: [{ id: 'video.plan', version: '1.0.0' }],
+            revisions: { 'video.plan@1.0.0': 'rev-1' },
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response(JSON.stringify({ call_id: 'x', ok: true, result: { plan: 'ok' } }), {
+        status: 200,
+      });
+    }) as unknown as typeof fetch;
+    const result = await runDescriptorAction('node-a', 'video.plan', { mode: 't2va' }, fetchImpl);
+    expect(result.ok).toBe(true);
+    const envelope = calls[1]?.body as Record<string, unknown>;
+    expect(envelope.capability_id).toBe('video.plan');
+    expect(envelope.version).toBe('1.0.0');
+    expect(envelope.descriptor_revision).toBe('rev-1');
+    expect(envelope.caller_node).toBe('node-a');
+    expect(envelope.target_node).toBe('node-a');
+    expect(envelope.payload).toEqual({ mode: 't2va' });
+  });
+
+  it('refuses a capability the host does not serve', async () => {
+    const fetchImpl = vi.fn(async () =>
+      new Response(JSON.stringify({ capabilities: [], revisions: {} }), { status: 200 }),
+    ) as unknown as typeof fetch;
+    await expect(runDescriptorAction('node-a', 'video.plan', {}, fetchImpl)).rejects.toThrow(
+      'not served',
+    );
+  });
+});
+
+describe('generateCallId', () => {
+  const uuidShape = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+  it('works without randomUUID, as on a plain-HTTP LAN dashboard', () => {
+    const withoutRandomUuid: Partial<Crypto> = {
+      getRandomValues: <T extends ArrayBufferView | null>(array: T): T => {
+        if (array instanceof Uint8Array) array.fill(0xab);
+        return array;
+      },
+    };
+    expect(generateCallId(withoutRandomUuid)).toMatch(uuidShape);
+    expect(generateCallId(withoutRandomUuid)).not.toContain('crypto');
+  });
+
+  it('still produces a distinct id without Web Crypto at all', () => {
+    const first = generateCallId(null);
+    const second = generateCallId(null);
+    expect(first).toMatch(/^call-/);
+    expect(first).not.toBe(second);
+  });
+});
+
+describe('resolveSurfaceUrl', () => {
+  it('keeps a loopback surface reachable only when the browser is on the host', () => {
+    expect(resolveSurfaceUrl('http://127.0.0.1:8188/', { isLocalHost: true, dashboardHostname: 'localhost' })).toEqual({
+      url: 'http://127.0.0.1:8188/',
+      reachable: true,
+    });
+    expect(resolveSurfaceUrl('http://localhost:8188/', { isLocalHost: true, dashboardHostname: '127.0.0.1' })).toEqual({
+      url: 'http://localhost:8188/',
+      reachable: true,
+    });
+  });
+
+  it('never rewrites loopback onto a LAN address and marks it unreachable from remote browsers', () => {
+    expect(resolveSurfaceUrl('http://127.0.0.1:8188/ui', { isLocalHost: true, dashboardHostname: 'kite6.local' })).toEqual({
+      url: 'http://127.0.0.1:8188/ui',
+      reachable: false,
+    });
+    expect(resolveSurfaceUrl('http://127.0.0.1:8188/', { isLocalHost: false, dashboardHostname: 'localhost' })).toEqual({
+      url: 'http://127.0.0.1:8188/',
+      reachable: false,
+    });
+  });
+
+  it('passes routable URLs through untouched', () => {
+    expect(resolveSurfaceUrl('https://host.example/ui', { isLocalHost: false, dashboardHostname: 'x' })).toEqual({
+      url: 'https://host.example/ui',
+      reachable: true,
+    });
+  });
+});
+
+describe('isLoopbackHostname', () => {
+  it('covers the whole loopback range and localhost spellings', () => {
+    for (const host of [
+      '127.0.0.1',
+      '127.0.0.2',
+      '127.255.255.255',
+      'localhost',
+      'localhost.',
+      'LOCALHOST',
+      'studio.localhost',
+      '[::1]',
+      '::1',
+      '0.0.0.0',
+      '[::]',
+      '[::ffff:7f00:1]',
+      '[::ffff:127.0.0.1]',
+      '::ffff:7f01:2',
+    ]) {
+      expect(isLoopbackHostname(host)).toBe(true);
+    }
+    for (const host of ['128.0.0.1', '10.0.0.5', 'kite6.local', 'host.example', '1270.0.0.1', '[::ffff:a00:5]', '[fe80::1]']) {
+      expect(isLoopbackHostname(host)).toBe(false);
+    }
+    expect(resolveSurfaceUrl('http://127.0.0.2:8188/', { isLocalHost: false, dashboardHostname: 'kite3.local' })).toEqual({
+      url: 'http://127.0.0.2:8188/',
+      reachable: false,
+    });
+    // The browser canonicalizes the mapped form; the parsed hostname must still classify as loopback.
+    expect(resolveSurfaceUrl('http://[::ffff:127.0.0.1]:8188/', { isLocalHost: false, dashboardHostname: 'kite3.local' }).reachable).toBe(false);
+  });
+});

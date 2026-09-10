@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { NodeInfo } from '../../types/topology';
 import {
+  MAX_VISIBLE_SATELLITES,
+  SATELLITE_ORBIT_RADIUS,
   buildCompleteEdgePairs,
   clampTelemetryRatio,
+  computeSatellitePositions,
   computeTopologyPositions,
   hardwareBadgeSideForPosition,
   orderTopologyPositionsForPainting,
@@ -163,5 +166,42 @@ describe('topology layout', () => {
     expect(clampTelemetryRatio(0.42)).toBe(0.42);
     expect(clampTelemetryRatio(1.4)).toBe(1);
     expect(clampTelemetryRatio(Number.NaN)).toBe(0);
+  });
+});
+
+describe('capability satellite layout', () => {
+  it('places nothing for a host without capability nodes', () => {
+    expect(computeSatellitePositions(0, 'left')).toEqual({
+      positions: [],
+      overflow: 0,
+      overflowPosition: null,
+    });
+  });
+
+  it('keeps every satellite above the node on the orbit radius', () => {
+    const layout = computeSatellitePositions(4, 'left');
+    expect(layout.positions).toHaveLength(4);
+    expect(layout.overflow).toBe(0);
+    for (const position of layout.positions) {
+      expect(Math.hypot(position.x, position.y)).toBeCloseTo(SATELLITE_ORBIT_RADIUS);
+      expect(position.y).toBeLessThan(0);
+    }
+  });
+
+  it('leans the arc away from the hardware badge', () => {
+    const leftBadge = computeSatellitePositions(1, 'left');
+    const rightBadge = computeSatellitePositions(1, 'right');
+    expect(leftBadge.positions[0]?.x).toBeGreaterThan(0);
+    expect(rightBadge.positions[0]?.x).toBeLessThan(0);
+  });
+
+  it('collapses satellites past the cap into one overflow slot', () => {
+    const layout = computeSatellitePositions(MAX_VISIBLE_SATELLITES + 3, 'left');
+    expect(layout.positions).toHaveLength(MAX_VISIBLE_SATELLITES);
+    expect(layout.overflow).toBe(3);
+    expect(layout.overflowPosition?.index).toBe(MAX_VISIBLE_SATELLITES);
+    expect(Math.hypot(layout.overflowPosition?.x ?? 0, layout.overflowPosition?.y ?? 0)).toBeCloseTo(
+      SATELLITE_ORBIT_RADIUS,
+    );
   });
 });

@@ -64,6 +64,7 @@ from skulk.shared.models.remote_code_approval import (
     require_remote_code_approval,
 )
 from skulk.shared.types.audio import RealtimeAudioInputFrame
+from skulk.shared.types.capability_nodes import CapabilityNodeSummary
 from skulk.shared.types.chunks import DataChunk, InputImageChunk, VideoChunk
 from skulk.shared.types.commands import (
     FailInstance,
@@ -1218,6 +1219,21 @@ class Worker:
             return frozenset()
         return frozenset(self._telemetry_view.local_advertised_capabilities)
 
+    def _local_capability_nodes_provider(self) -> tuple[CapabilityNodeSummary, ...]:
+        """Snapshot the capability-node summaries published on this node.
+
+        Same shape as :meth:`_local_capabilities_provider`: the API-side
+        extension surface writes summaries onto the shared view, and the
+        gatherer gossips this immutable snapshot. Order is publication order,
+        which keeps consecutive snapshots comparable for change detection.
+
+        Returns:
+            The summaries this node currently publishes, oldest first.
+        """
+        if self._telemetry_view is None:
+            return ()
+        return tuple(self._telemetry_view.local_capability_nodes.values())
+
     async def run(self):
         logger.info("Starting Worker")
         self._reconcile_staging_on_startup()
@@ -1241,6 +1257,7 @@ class Worker:
             # published), so a plugin advertising a capability rides the same
             # telemetry emit path as native node readings.
             capabilities_provider=self._local_capabilities_provider,
+            capability_nodes_provider=self._local_capability_nodes_provider,
             zenoh_peer_sampler=self._zenoh_peer_sampler,
         )
 

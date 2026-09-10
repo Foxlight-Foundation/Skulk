@@ -25,7 +25,7 @@ from collections.abc import (
     Sequence,
 )
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from pathlib import Path
 from typing import (
@@ -418,6 +418,13 @@ from skulk.shared.types.audio import (
     RealtimeAudioTranscriptionTaskParams,
     SpeechSynthesisTaskParams,
 )
+from skulk.shared.types.capability_nodes import (
+    CAPABILITY_NODES_STALE_AFTER_SECONDS,
+    MAX_CAPABILITY_NODES_PER_HOST,
+    CapabilityNodeAction,
+    CapabilityNodeSummary,
+    CapabilityNodeSurface,
+)
 from skulk.shared.types.chunks import (
     AudioChunk,
     DataChunk,
@@ -683,6 +690,14 @@ _MAX_CHUNK_REORDER_BUFFER = 512
 # unbounded in-flight calls on the API node. Calls beyond the bound are
 # rejected with the typed `overloaded` error rather than queued.
 _MAX_CONCURRENT_CAPABILITY_CALLS = 8
+
+TEST_CAPABILITY_NODE_ENV_VAR = "SKULK_TEST_CAPABILITY_NODE"
+"""Env var naming a URL; when set, this host publishes one stand-in capability
+node with a link surface at that URL so the topology layer can be exercised
+without a managed plugin installed."""
+
+TEST_CAPABILITY_NODE_PLUGIN_ID = "foxlight.test-capability"
+"""Plugin identifier of the stand-in capability node."""
 # Provider streams hold their admission slot until a terminal frame, unlike a
 # unary call whose slot is released with its result. Keep the same initial cap
 # so an extension cannot create unbounded handler tasks or DATA queues.
@@ -1665,6 +1680,10 @@ class API:
             # gossips it on its next poll. Reads self._telemetry_view lazily too.
             advertise_capability=self._advertise_capability,
             withdraw_capability=self._withdraw_capability,
+            # Topology satellites: bounded capability-node summaries ride the
+            # same outbound view and the same gatherer poll.
+            publish_capability_node=self._publish_capability_node,
+            withdraw_capability_node=self._withdraw_capability_node,
             # Capability discovery, heavy half (fabric-citizenship Phase 2a):
             # full descriptors on demand, local or via a reachable peer API.
             describe_node=self._describe_node_capabilities,
@@ -4965,6 +4984,30 @@ class API:
             for node_id, tags in self._telemetry_view.node_capabilities.items()
             if node_id in live and tags
         }
+        # Capability-node summaries per host: what the topology draws as
+        # satellites. Each carries the local receipt time of its host's last
+        # reading so the dashboard can mute a satellite whose host went quiet.
+        # A reading older than the stale threshold is dropped here: a live
+        # host republishes every thirty seconds, so a peer that missed the
+        # single empty withdrawal reading must not keep projecting summaries
+        # the host no longer publishes.
+        now = datetime.now(tz=timezone.utc)
+        stale_after = timedelta(seconds=CAPABILITY_NODES_STALE_AFTER_SECONDS)
+        received_at = self._telemetry_view.node_capability_nodes_received_at
+        payload["capabilityNodes"] = {
+            str(node_id): [
+                {
+                    **summary.model_dump(mode="json", by_alias=True),
+                    "observedAt": received_at[node_id].isoformat(),
+                }
+                for summary in summaries
+            ]
+            for node_id, summaries in self._telemetry_view.node_capability_nodes.items()
+            if node_id in live
+            and summaries
+            and node_id in received_at
+            and now - received_at[node_id] <= stale_after
+        }
         # Derived per-node health (#388): explain a node's problems (and the fix)
         # in the topology so the master's silent recovery of a wedged/failed node
         # is legible. Read-only derivation from the same state/telemetry above; no
@@ -6397,8 +6440,8 @@ class API:
 
         Empty or whitespace-only tags are ignored (a defensive guard: a tag is a
         discovery key, and a blank one would be meaningless gossip). A node that
-        runs no worker never emits (it has no gatherer), so the tag is recorded
-        but not gossiped there; the mainstream node runs both.
+        runs no worker has no gatherer; its node lifecycle publishes the set
+        alongside its management resource reading instead.
 
         Args:
             capability: The opaque capability tag to advertise (for example
@@ -6425,6 +6468,99 @@ class API:
             capability: The tag to withdraw (matched after whitespace trim).
         """
         self._telemetry_view.local_advertised_capabilities.discard(capability.strip())
+
+    def _publish_capability_node(self, summary: CapabilityNodeSummary) -> None:
+        """Publish or replace a capability-node summary for the topology layer.
+
+        Records the summary on the shared ``TelemetryView`` keyed by plugin and
+        node identifier; the gatherer (or the management-node publisher on a
+        worker-less host) gossips the snapshot on its next poll. Republishing a
+        key replaces the previous summary in place so publication order, and
+        therefore satellite order in the dashboard, stays stable. The per-host
+        bound is enforced here because it is a property of the host, not of one
+        summary.
+
+        Args:
+            summary: The validated, credential-free summary to publish.
+        """
+        nodes = self._telemetry_view.local_capability_nodes
+        if summary.key not in nodes and len(nodes) >= MAX_CAPABILITY_NODES_PER_HOST:
+            logger.warning(
+                "Refusing capability-node summary "
+                f"{summary.key}: this host already publishes "
+                f"{MAX_CAPABILITY_NODES_PER_HOST} summaries"
+            )
+            return
+        # A frozen model does not freeze the nested payload dicts, so the
+        # extension could have mutated one between construction and this
+        # call. Rebuilding through the validators both re-checks the bounds
+        # and detaches the published record from any object the extension
+        # still holds; what gets gossiped is exactly what passed validation.
+        try:
+            validated = CapabilityNodeSummary.model_validate(summary.model_dump())
+        except ValidationError as error:
+            logger.warning(
+                f"Refusing capability-node summary {summary.key}: "
+                f"{error.errors()[0]['msg']}"
+            )
+            return
+        nodes[validated.key] = validated
+
+    def _withdraw_capability_node(self, plugin_id: str, node_id: str) -> None:
+        """Withdraw a published capability-node summary.
+
+        The liveness counterpart of :meth:`_publish_capability_node`: an owner
+        that uninstalls or loses a node removes its summary so the satellite
+        disappears on the next poll. Withdrawing an unknown key is a no-op.
+
+        Args:
+            plugin_id: Plugin the node belongs to.
+            node_id: Identifier of the node within its plugin.
+        """
+        self._telemetry_view.local_capability_nodes.pop(f"{plugin_id}/{node_id}", None)
+
+    def _publish_test_capability_node_from_env(self) -> None:
+        """Publish a stand-in capability node when the operator asks for one.
+
+        ``SKULK_TEST_CAPABILITY_NODE=<url>`` makes this host advertise one
+        ready capability node with a single link surface at the given URL. It
+        exists so the topology layer can be exercised end to end (satellite,
+        flyout, link opens) on a fleet that has no managed plugin installed
+        yet. An invalid value is logged and ignored rather than failing the
+        node.
+        """
+        url = os.getenv(TEST_CAPABILITY_NODE_ENV_VAR, "").strip()
+        if not url:
+            return
+        try:
+            summary = CapabilityNodeSummary(
+                plugin_id=TEST_CAPABILITY_NODE_PLUGIN_ID,
+                node_id="studio",
+                bundle_id="foxlight.test-capability",
+                version="0.0.0",
+                title="Test capability",
+                status="ready",
+                owner_available=True,
+                surfaces=(
+                    CapabilityNodeSurface(
+                        surface_id="studio", title="Open surface", url=url
+                    ),
+                ),
+                actions=(
+                    CapabilityNodeAction(
+                        action_id="open-studio",
+                        title="Open surface",
+                        kind="surface",
+                        surface_id="studio",
+                    ),
+                ),
+            )
+        except ValidationError as error:
+            logger.warning(
+                f"Ignoring {TEST_CAPABILITY_NODE_ENV_VAR}: {error.errors()[0]['msg']}"
+            )
+            return
+        self._publish_capability_node(summary)
 
     async def list_node_capabilities(
         self, node_id: str | None = None
@@ -10000,6 +10136,7 @@ class API:
         try:
             if self._extensions is not None:
                 self._extensions.run_startup_hooks(self._extension_context)
+            self._publish_test_capability_node_from_env()
             async with self._tg as tg:
                 logger.info("Starting API")
                 tg.start_soon(self._apply_state)
