@@ -789,7 +789,9 @@ the terminal frame carries the manifest the worker streams from. The same
 seed always produces the same bytes, cancellation between sampling steps
 leaves nothing behind, and `SKULK_TEST_VIDEO_STEP_SECONDS` stretches a
 render so cancel and progress paths can be exercised at human speed. It is
-a test instrument, not a product engine.
+a test instrument, not a product engine. The card is registered as a
+custom card on the node advertising the engine; a multi-node fleet needs it
+on any node that may be elected master too.
 
 ### Text to speech
 

@@ -1431,7 +1431,9 @@ instance of the model on a node with a video engine; without one the job
 fails at placement with `video_mode_unavailable`. To exercise the routes
 without a GPU, start a node with `SKULK_TEST_VIDEO_ENGINE=1` and place the
 bundled `foxlight/test-video` card: it renders small seeded synthetic clips
-through the whole pipeline.
+through the whole pipeline. The card is registered on the node that
+advertises the engine, so on a multi-node fleet set the variable on every
+node that may be elected master as well, or add the card there by hand.
 
 ### The video object
 
@@ -1558,8 +1560,11 @@ curl -o clip.mp4 http://localhost:52415/v1/videos/<video_id>/content
 curl -o clip.jpg 'http://localhost:52415/v1/videos/<video_id>/content?variant=thumbnail'
 ```
 
-Returns the MP4 (H.264 video, AAC audio when present) or the JPEG
-thumbnail with its content type. Responds **409** while the job is not
+Returns the MP4 or the JPEG thumbnail with its content type. The codecs
+inside the container are the engine's: MiniMax H3 engines deliver H.264
+video with AAC audio, while the test video engine delivers MJPEG frames
+with uncompressed 16-bit PCM audio, so a client validating the stream
+should read the codecs from the file rather than assume them. Responds **409** while the job is not
 `completed` and **404** once the content has expired or when the job has no
 thumbnail. Content is node-local: fetch it from the API node that created
 the job. Stored content expires 24 hours after completion, and the node's

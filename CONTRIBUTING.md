@@ -51,6 +51,7 @@ Skulk is built with a mix of Rust, Python, TypeScript (React for the dashboard),
 - `resources/image_model_cards/` — Image model metadata TOML files
 - `resources/embedding_model_cards/` — Embedding model metadata TOML files
 - `resources/speech_model_cards/` — Speech model metadata TOML files
+- `resources/video_model_cards/` — Audio-video generation model metadata TOML files, including the test engine's `foxlight/test-video` card
 - `resources/speech_reference_voices/` — Checksummed bundled TTS conditioning audio and exact transcripts
 - `deployment/logging/` — VictoriaLogs + Grafana stack and Vector config
 - `docs/` — Technical documentation
@@ -79,6 +80,7 @@ This starts a Vite dev server on port 3000 with hot reload. The dev server proxi
 - `src/skulk/api/main.py` — FastAPI server (OpenAI, Claude, Ollama API compatibility)
 - `src/skulk/master/` — Master node (placement, election, event sourcing)
 - `src/skulk/worker/` — Worker node (inference, runner management, download coordination)
+- `src/skulk/worker/runner/` — One package per engine runner (MLX text, image, embeddings, speech, llama.cpp, llama-server, vLLM, RPC donor); `test_video/` is the deterministic test video engine that renders synthetic clips so the video substrate runs without a GPU
 - `src/skulk/store/` — Model store (registry, downloads, config, model optimizer)
 - `src/skulk/operator/` — Stable operator identity, quorum certification,
   crash-fault consensus, bounded dormant proposal lifecycle, and
@@ -146,6 +148,7 @@ operator overrides. Model-card locations are:
 - `resources/image_model_cards/` for image generation models
 - `resources/embedding_model_cards/` for embedding models
 - `resources/speech_model_cards/` for TTS/STT speech models
+- `resources/video_model_cards/` for audio-video generation models
 - `~/.skulk/custom_model_cards/` for user-added custom models
 
 ### Adding a Model Card
