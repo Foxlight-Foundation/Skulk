@@ -282,7 +282,7 @@ class _RenderSession:
         self.on_progress = on_progress
         self.total_steps = total_steps
         self.stage: VideoStage = "queued"
-        self.first_step_at: float | None = None
+        self.sampling_started_at: float | None = None
         self.last_step_at: float | None = None
         self.steps_seen = 0
         self.terminal: Literal["success", "error", "interrupted"] | None = None
@@ -303,6 +303,11 @@ class _RenderSession:
             node = data.get("node")
             if node is None:
                 return
+            if node == NODE_SAMPLER and self.sampling_started_at is None:
+                # The sampler node starting is the sampling clock's zero;
+                # progress events mark completed steps, so timing from the
+                # first of them would drop one step's worth of work.
+                self.sampling_started_at = time.monotonic()
             stage = stage_for_node(_as_str(node) or "")
             if stage is not None and stage != self.stage and stage != "sampling":
                 fraction = {"encoding": 0.05, "decoding": _SAMPLING_SHARE[1], "muxing": 0.95}.get(stage, 0.0)
@@ -322,8 +327,8 @@ class _RenderSession:
             step = int(value)
             now = time.monotonic()
             if step >= 1:
-                if self.first_step_at is None:
-                    self.first_step_at = now
+                if self.sampling_started_at is None:
+                    self.sampling_started_at = now
                 self.last_step_at = now
                 self.steps_seen = max(self.steps_seen, step)
             low, high = _SAMPLING_SHARE
@@ -342,10 +347,10 @@ class _RenderSession:
 
     @property
     def sampling_seconds(self) -> float:
-        """Observed sampling wall time."""
-        if self.first_step_at is None or self.last_step_at is None:
+        """Wall time from the sampler starting to its last reported step."""
+        if self.sampling_started_at is None or self.last_step_at is None:
             return 0.0
-        return self.last_step_at - self.first_step_at
+        return self.last_step_at - self.sampling_started_at
 
 
 def _as_str(value: object) -> str | None:

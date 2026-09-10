@@ -104,6 +104,11 @@ def test_plan_takes_steps_and_shifts_from_the_named_adapter() -> None:
     full = plan_comfy_render(_params(FL2VA_ID), card)
     assert full.adapter is None and full.steps == 20 and (full.video_shift, full.audio_shift) == (12.0, 3.0)
     assert (full.plan.width, full.plan.height, full.plan.frame_count, full.plan.fps) == (768, 768, 124, 24)
+    # Wide ratios keep their shape inside the trained pixel budget.
+    wide = plan_comfy_render(_params(FL2VA_ID, aspect_ratio="21:9"), card).plan
+    assert (wide.width, wide.height) == (1536, 672) and wide.width * wide.height <= 1032192
+    tall = plan_comfy_render(_params(FL2VA_ID, aspect_ratio="9:16"), card).plan
+    assert (tall.width, tall.height) == (768, 1344)
     turbo = plan_comfy_render(_params(FL2VA_ID, lora="turbo_fl2v_4step_768p"), card)
     assert turbo.adapter is not None and turbo.adapter.file == "minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors"
     assert turbo.steps == 4 and turbo.video_shift == 6.0 and turbo.adapter.strength == 1.0
@@ -357,6 +362,8 @@ def test_runner_renders_through_a_comfy_server(fake_comfy: Path) -> None:
         assert (terminal.output.width, terminal.output.height, terminal.output.frame_count, terminal.output.fps) == (1344, 768, 107, 24)
         assert (terminal.output.audio_sample_rate, terminal.output.audio_channels) == (32000, 2)
         assert terminal.stats.steps == 3 and terminal.stats.total_generation_time > 0
+        # Three fake steps of 10 ms each: the mean covers every step, not two.
+        assert terminal.stats.seconds_per_step >= 0.01
         assert not list(out_dir.glob("*_00001_.*"))
         # The graph ComfyUI received is the one the builder produced.
         submitted = next(fake_comfy.glob("video_output/*.prompt.json"))

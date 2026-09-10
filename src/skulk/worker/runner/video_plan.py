@@ -13,6 +13,7 @@ these facts differently from one another.
 from __future__ import annotations
 
 import hashlib
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -90,13 +91,19 @@ def plan_render(params: VideoGenerationTaskParams, video: VideoCardConfig) -> Re
         else:
             width, height = short, round(short * height_ratio / width_ratio)
         multiple = max(1, video.canvas_multiple)
+        if video.max_pixels is not None and width * height > video.max_pixels:
+            # The trained short edge at a wide ratio exceeds the trained pixel
+            # budget; scale both edges so the ratio survives (21:9 at 768p
+            # becomes 1536x672, not a 16:9 canvas with the height kept).
+            scale = math.sqrt(video.max_pixels / (width * height))
+            width, height = width * scale, height * scale
         canvas = (
             max(multiple, round(width / multiple) * multiple),
             max(multiple, round(height / multiple) * multiple),
         )
-        # Rounding the long edge up can overshoot the trained pixel budget
-        # by one grid step (768p at 16:9 rounds to 1376 wide; the model was
-        # trained at 1344). Step the long edge down until the canvas fits.
+        # Snapping can still overshoot by one grid step (768p at 16:9 rounds
+        # to 1376 wide; the model was trained at 1344). Step the long edge
+        # down until the canvas fits.
         if video.max_pixels is not None:
             canvas = _fit_pixel_budget(canvas, video.max_pixels, multiple)
     if max(canvas) > MAX_CONTAINER_EDGE:
