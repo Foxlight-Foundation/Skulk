@@ -55,6 +55,9 @@ const Card = styled.div`
   font-family: ${({ theme }) => theme.fonts.body};
   font-size: ${({ theme }) => theme.fontSizes.sm};
   z-index: 5;
+  /* A host at the summary cap with a node at the surface and action caps
+   * can outgrow a short canvas; the card scrolls inside the canvas instead. */
+  overflow-y: auto;
 `;
 
 const HeaderRow = styled.div`
@@ -291,6 +294,7 @@ export function CapabilityFlyout({
   const below = anchor.y + 18;
   const top = canvasHeight > 0 && below > canvasHeight * 0.6 ? undefined : below;
   const bottom = top === undefined ? Math.max(CANVAS_MARGIN, canvasHeight - anchor.y + 18) : undefined;
+  const maxHeight = canvasHeight > 0 ? Math.max(120, canvasHeight - 2 * CANVAS_MARGIN) : undefined;
 
   const runCall = async (item: Extract<CapabilityActionItem, { kind: 'call' }>) => {
     if (!localNodeId) return;
@@ -323,7 +327,7 @@ export function CapabilityFlyout({
       data-capability-flyout={selectedKey}
       ref={cardRef}
       role="dialog"
-      style={{ left, top, bottom }}
+      style={{ left, top, bottom, maxHeight }}
     >
       <HeaderRow>
         <TitleBlock>

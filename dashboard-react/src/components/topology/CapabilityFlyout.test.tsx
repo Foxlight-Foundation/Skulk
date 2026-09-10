@@ -121,6 +121,13 @@ describe('CapabilityFlyout', () => {
     expect(disabled?.title).toContain('Reachable only from a browser on kite6');
   });
 
+  it('caps its height to the canvas so a maximal card scrolls instead of overflowing', async () => {
+    await render({ canvasHeight: 300 });
+    const card = container?.querySelector<HTMLElement>('[role="dialog"]');
+    expect(card?.style.maxHeight).toBe('284px');
+    expect(getComputedStyle(card as Element).overflowY).toBe('auto');
+  });
+
   it('explains remote management when the dashboard is on another host', async () => {
     await render({ localNodeId: 'node-elsewhere' });
     expect(container?.textContent).toContain('managed from the dashboard on kite6');
