@@ -51,6 +51,19 @@ MAX_SURFACE_URL_LENGTH = 2048
 
 _MAX_TEXT_LENGTH = 200
 
+_CREDENTIAL_NAME_SUFFIXES = (
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "apikey",
+    "signature",
+    "credential",
+    "credentials",
+)
+"""Name stems that mark a credential whatever the prefix or spelling
+(``accessToken``, ``client_secret``, ``x-api-key``)."""
+
 _CREDENTIAL_QUERY_NAMES = frozenset(
     {
         "token",
@@ -92,6 +105,22 @@ CapabilityNodeActionKind = Literal["surface", "descriptor", "link"]
 """What a flyout action does: open a surface, call a capability, or open a link."""
 
 
+def _is_credential_name(name: str) -> bool:
+    """Whether a parameter or key name announces a credential.
+
+    Spelling is normalized (case folded, separators dropped) so camelCase,
+    snake_case, and kebab-case variants match the same stems: an exact hit
+    on the short names (``auth``, ``sig``, ``key``, ``session``) or any name
+    ending in a credential stem (``accessToken``, ``client_secret``).
+    """
+    normalized = "".join(character for character in name.lower() if character.isalnum())
+    if not normalized:
+        return False
+    if normalized in _CREDENTIAL_QUERY_NAMES:
+        return True
+    return normalized.endswith(_CREDENTIAL_NAME_SUFFIXES)
+
+
 def _validate_public_url(url: str) -> str:
     """Accept only bounded, absolute http(s) URLs without embedded credentials.
 
@@ -117,7 +146,7 @@ def _validate_public_url(url: str) -> str:
     # query, so both halves get the same name screen.
     for part_name, raw in (("query", parts.query), ("fragment", parts.fragment)):
         for name, _value in parse_qsl(raw, keep_blank_values=True):
-            if name.lower() in _CREDENTIAL_QUERY_NAMES:
+            if _is_credential_name(name):
                 raise ValueError(
                     f"surface and link URLs must not carry credential-like {part_name} "
                     f"parameters ({name!r})"
@@ -134,7 +163,7 @@ def _check_payload_keys(value: object, path: str = "payload") -> None:
     """
     if isinstance(value, dict):
         for key, nested in cast("dict[str, object]", value).items():
-            if key.lower() in _CREDENTIAL_QUERY_NAMES:
+            if _is_credential_name(key):
                 raise ValueError(
                     f"action payloads must not carry credential-like keys ({path}.{key})"
                 )

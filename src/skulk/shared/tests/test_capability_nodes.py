@@ -64,6 +64,10 @@ def test_surface_url_is_bounded_and_refuses_credential_query_names() -> None:
     for query in ("token=abc", "Access_Token=abc", "api_key=abc", "sig=abc", "auth="):
         with pytest.raises(ValidationError):
             CapabilityNodeSurface(surface_id="s", title="S", url=f"https://host/ui?{query}")
+    for query in ("accessToken=abc", "clientSecret=abc", "x-api-key=abc", "RefreshToken=abc"):
+        with pytest.raises(ValidationError):
+            CapabilityNodeSurface(surface_id="s", title="S", url=f"https://host/ui?{query}")
+    CapabilityNodeSurface(surface_id="s", title="S", url="https://host/ui?author=x&keyframe=3")
     for fragment in ("access_token=abc", "id_token=abc&state=x"):
         with pytest.raises(ValidationError):
             CapabilityNodeSurface(surface_id="s", title="S", url=f"https://host/cb#{fragment}")
@@ -94,6 +98,11 @@ def test_action_shapes_require_their_target() -> None:
     with pytest.raises(ValidationError):
         CapabilityNodeAction(action_id="a", title="A", kind="descriptor", capability_id=" video.plan")
     leaking: dict[str, JsonValue] = {"mode": "t2va", "hosted": {"API_KEY": "abc"}}
+    camel: dict[str, JsonValue] = {"mode": "t2va", "hosted": {"accessToken": "abc"}}
+    with pytest.raises(ValidationError):
+        CapabilityNodeAction(
+            action_id="a", title="A", kind="descriptor", capability_id="video.plan", payload=camel
+        )
     with pytest.raises(ValidationError):
         CapabilityNodeAction(
             action_id="a", title="A", kind="descriptor", capability_id="video.plan", payload=leaking
