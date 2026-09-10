@@ -777,9 +777,6 @@ def test_comfy_engine_check_verdicts(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     configured = gpu.model_copy(
         update={"comfy_binary": ok_bin("SKULK_COMFY_BIN"), "comfy_root": "/opt/ComfyUI", "comfy_root_state": "ok"}
     )
-    withheld = checks_module._check_comfy_engine(configured)
-    assert withheld[0].verdict == "ok" and "once this build carries" in withheld[0].detail
-    monkeypatch.setattr("skulk.facts.derive.COMFY_RUNNER_AVAILABLE", True)
     live = checks_module._check_comfy_engine(configured)
     assert live[0].verdict == "ok" and "comfy-cuda" in live[0].detail
     root_only = gpu.model_copy(update={"comfy_root": "/opt/ComfyUI", "comfy_root_state": "ok"})

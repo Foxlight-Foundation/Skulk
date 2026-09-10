@@ -32,7 +32,14 @@ This project records release notes here and mirrors public-facing notes in
   managed environment with a hash-pinned cu130 torch wheel set, provisioned
   on Linux NVIDIA nodes that enable video models or by `skulk doctor --fix`,
   advertised as `comfy-cuda`, with `SKULK_COMFY_BIN` and `SKULK_COMFY_ROOT`
-  for hand-built installs. The ComfyUI runner follows.
+  for hand-built installs. The ComfyUI runner drives that install headless:
+  it exposes the staged H3 artifact through an `extra_model_paths.yaml`,
+  binds each request onto ComfyUI's own MiniMax H3 node graph (text, first
+  and last frame, and numbered image, video, and audio references; named
+  turbo adapters with their trained step counts and sigma shifts), follows
+  step progress on the WebSocket, cancels mid-render, and delivers the
+  H.264/AAC container with a first-frame thumbnail. H3 cards place on
+  `comfy-cuda` nodes.
 - Muse Glimmer (Meta, August 2026) is a first-class model family on every
   serving lane. The capability resolver now derives the family's wire
   contract from the card family or model id, the same way it does for

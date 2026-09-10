@@ -793,6 +793,42 @@ interpreter and `SKULK_COMFY_ROOT` at the checkout; both must be valid or
 the engine stays off with a loud conflict. The checkout's commit is the
 engine's build identity in node telemetry.
 
+### ComfyUI runner
+
+The runner keeps ComfyUI at arm's length: it is a subprocess on a loopback
+port, started with custom and API nodes disabled so an operator's node
+packs can never change what a card renders, with Skulk's own input,
+output, temp, and user directories, and with the staged artifact exposed
+through an `extra_model_paths.yaml` rather than copied into the checkout.
+Model loading resolves the card's components and artifact bundle to the
+file names ComfyUI lists (the two VAEs share a directory and are told apart
+by component name), verifies they exist, and starts the server; ComfyUI
+loads weights on the first prompt and keeps them resident, so warm-up is
+the health check.
+
+A render is one graph. The request is resolved against the card exactly as
+the test engine resolves it (canvas from the trained short edge and aspect
+ratio, stepped down to the card's pixel budget; frame count on the trained
+grid; steps from the request, the named adapter, or the card default), then
+bound onto the node graph ComfyUI's own MiniMax H3 workflow templates use:
+the loaders, `MiniMaxH3ImageToVideo` for text and keyframe modes or
+`MiniMaxH3ReferenceToVideo` for numbered image, video, and audio references,
+an optional turbo adapter with its sigma shifts, the `res_multistep` sampler
+on a `simple` schedule, both decoders, and the muxer. References are the
+files the worker already verified, named by their path below the input
+directory. The prompt carries a Skulk-minted id and client id so the
+WebSocket delivers only this render's `executing`, `progress_state`, and
+terminal events; a queue entry from someone using the ComfyUI frontend on
+the same server just shows as `queued` until Skulk's prompt runs. Cancel
+goes through the jobs API and is checked on every event, not only when the
+socket is quiet. A rejected graph or a failed execution fails that task and
+leaves the server up; a server that dies fails the runner so the supervisor
+restarts it. Output is the container ComfyUI saved under the command's
+directory, renamed onto the worker's expected name, plus a first frame
+converted to a JPEG thumbnail. Teardown signals the whole process group,
+and worker startup reaps any init-parented server that was launched with
+Skulk's user directory.
+
 ### Test video engine
 
 Before any served video engine exists, and on nodes that will never run

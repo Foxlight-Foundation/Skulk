@@ -279,18 +279,6 @@ def _video_models_enabled() -> bool:
     return SKULK_ENABLE_VIDEO_MODELS
 
 
-def provision_unasked_allowed() -> bool:
-    """Whether node startup may provision without an operator asking.
-
-    Tied to the runner's availability: provisioning gigabytes for an engine
-    the build cannot yet drive is never something startup should do on its
-    own. ``skulk doctor --fix`` bypasses this by passing ``explicit=True``.
-    """
-    from skulk.facts.derive import COMFY_RUNNER_AVAILABLE
-
-    return COMFY_RUNNER_AVAILABLE
-
-
 def _gates_pass(facts: NodeFacts) -> bool:
     if os.environ.get(AUTOPROVISION_OPT_OUT_ENV, "").strip() == "1":
         return False
@@ -317,18 +305,15 @@ def _export(root: Path) -> Path:
     return root
 
 
-def ensure_comfy(
-    facts: NodeFacts, *, allow_download: bool = True, explicit: bool = False
-) -> Path | None:
+def ensure_comfy(facts: NodeFacts, *, allow_download: bool = True) -> Path | None:
     """Ensure a managed ComfyUI install for this node, honoring the gates.
 
     Exports ``SKULK_COMFY_BIN`` and ``SKULK_COMFY_ROOT`` for this process
     when a managed install is used. Returns the install root, or ``None``
     when nothing applies (override present, opted out, video models
     disabled, non-Linux or no wheel set for this hardware, nothing on disk
-    while offline, or provisioning failed). ``explicit`` marks an operator
-    request (``skulk doctor --fix``), which may provision even before the
-    runner exists; startup never does.
+    while offline, or provisioning failed). Node startup and ``skulk doctor
+    --fix`` both call this; the gates decide, not the caller.
     """
     if not _gates_pass(facts):
         return None
@@ -336,10 +321,6 @@ def ensure_comfy(
     if existing is not None:
         return _export(existing)
     if not allow_download:
-        return None
-    if not explicit and not provision_unasked_allowed():
-        # Node startup passes allow_download; until the runner exists, a
-        # multi-gigabyte install must be an explicit doctor --fix request.
         return None
     last_error: Exception | None = None
     for variant in select_comfy_variant_chain(facts):

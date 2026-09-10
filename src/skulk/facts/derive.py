@@ -47,17 +47,6 @@ _SERVED_COMPUTES = ("vulkan", "rocm", "cuda", "cpu")
 _VLLM_COMPUTES = ("cuda", "rocm")
 _COMFY_COMPUTES = ("cuda", "rocm")
 
-COMFY_RUNNER_AVAILABLE = False
-"""Whether this build carries the ComfyUI runner.
-
-Provisioning, facts, and doctor for the ``comfy`` engine land ahead of the
-runner that drives it. Until the runner exists, advertising the backend
-would let video cards place onto a node whose runner cannot start, so the
-tags stay withheld (a configured install is reported as a note, not a
-capability) and the node startup hook does not provision unasked. The
-runner deliverable flips this to ``True``.
-"""
-
 _INSTALL_DOCS_HINT = (
     "see website/docs (GPU node setup) or run `skulk doctor` for a full audit"
 )
@@ -545,12 +534,6 @@ def _derive_comfy(
                     f"unset {binary.env_var}, then restart skulk."
                 ),
             )
-        )
-        return set(), conflicts, notes
-    if not COMFY_RUNNER_AVAILABLE:
-        notes.append(
-            f"a ComfyUI install is configured ({facts.comfy_root}) but this build "
-            "carries no ComfyUI runner yet; the comfy backend is withheld"
         )
         return set(), conflicts, notes
     tags = {"comfy"} | {f"comfy-{compute}" for compute in computes}
