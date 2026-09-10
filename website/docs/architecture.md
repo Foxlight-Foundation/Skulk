@@ -749,7 +749,9 @@ image gate, so a fleet without a video engine does not advertise models it
 cannot serve. The bundled MiniMax H3 cards under
 `resources/video_model_cards/` are the transition fallback for the signed
 registry cards and pin every file of the ComfyUI repack by size and content
-identity.
+identity. The test engine's card lives in `resources/test_engine_cards/`
+instead: it names no artifact, and the registry imports only the artifact
+directories.
 
 ### Video jobs
 

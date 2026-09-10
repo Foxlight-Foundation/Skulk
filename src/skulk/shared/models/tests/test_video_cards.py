@@ -35,7 +35,9 @@ from skulk.shared.models.model_cards import (
 )
 from skulk.shared.types.memory import Memory
 
-CARD_DIRECTORY = Path(__file__).resolve().parents[5] / "resources" / "video_model_cards"
+RESOURCES = Path(__file__).resolve().parents[5] / "resources"
+CARD_DIRECTORY = RESOURCES / "video_model_cards"
+TEST_ENGINE_DIRECTORY = RESOURCES / "test_engine_cards"
 REVISION = "a" * 40
 
 
@@ -218,10 +220,8 @@ def test_profile_projects_video_output() -> None:
 
 
 def _load_bundled() -> list[tuple[Path, dict[str, object]]]:
-    return [
-        (path, tomllib.loads(path.read_text()))
-        for path in sorted(CARD_DIRECTORY.glob("*.toml"))
-    ]
+    paths = sorted(CARD_DIRECTORY.glob("*.toml")) + sorted(TEST_ENGINE_DIRECTORY.glob("*.toml"))
+    return [(path, tomllib.loads(path.read_text())) for path in paths]
 
 
 def _derived_bundle_id(files: object) -> str:
@@ -252,12 +252,15 @@ def test_bundled_video_cards_validate_and_pin_every_byte() -> None:
         assert path.name == card.model_id.normalize() + ".toml"
         if card.model_id == ModelId("foxlight/test-video"):
             # The test engine's card has no weights to pin: it is served by
-            # the deterministic renderer and provisioned in place.
+            # the deterministic renderer and provisioned in place, and it
+            # lives apart from the artifact corpus the registry imports.
+            assert path.parent == TEST_ENGINE_DIRECTORY
             seen_test_engine = True
             assert card.artifact_bundle is None and card.source_revision is None
             assert card.video is not None and card.license is None
             assert {"test_video", "test_video-cpu"} <= card.placement.compatible_backends
             continue
+        assert path.parent == CARD_DIRECTORY
         assert card.source_revision is not None
         assert card.artifact_bundle is not None
         assert card.video is not None

@@ -27,7 +27,7 @@ from skulk.shared.constants import (
 from skulk.shared.models.model_cards import ModelCard, ModelId, add_to_card_cache
 
 TEST_VIDEO_MODEL_ID = ModelId("foxlight/test-video")
-"""The one card the test engine serves; bundled under ``resources/video_model_cards``."""
+"""The one card the test engine serves; bundled under ``resources/test_engine_cards``."""
 
 _WEIGHTS_FILENAME = "model.safetensors"
 _CARD_FILENAME = TEST_VIDEO_MODEL_ID.normalize() + ".toml"
@@ -36,7 +36,7 @@ _CARD_FILENAME = TEST_VIDEO_MODEL_ID.normalize() + ".toml"
 def bundled_card_path() -> Path:
     """The bundled TOML for the test engine's card."""
 
-    return Path(RESOURCES_DIR) / "video_model_cards" / _CARD_FILENAME
+    return Path(RESOURCES_DIR) / "test_engine_cards" / _CARD_FILENAME
 
 
 def register_test_video_card(custom_cards_dir: Path = SKULK_CUSTOM_MODEL_CARDS_DIR) -> Path:
