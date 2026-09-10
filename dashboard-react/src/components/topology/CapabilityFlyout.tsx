@@ -272,12 +272,16 @@ export function CapabilityFlyout({
     };
   }, [onClose]);
 
+  // Call state is scoped to host plus node key: the same bundle installed on
+  // two hosts publishes the same key, so the key alone would carry a pending
+  // call from one host's flyout into the other's.
+  const callScope = `${hostNodeId}/${selectedKey}`;
   const callKeyRef = useRef<string | null>(null);
   useEffect(() => {
     setCallOutcome(null);
     setCallInFlight(null);
     callKeyRef.current = null;
-  }, [selectedKey]);
+  }, [callScope]);
 
   const summary = summaries.find((candidate) => capabilityNodeKey(candidate) === selectedKey) ?? summaries[0];
   if (!summary) return null;
@@ -305,7 +309,7 @@ export function CapabilityFlyout({
 
   const runCall = async (item: Extract<CapabilityActionItem, { kind: 'call' }>) => {
     if (!localNodeId) return;
-    const startedFor = selectedKey;
+    const startedFor = callScope;
     callKeyRef.current = startedFor;
     setCallInFlight(item.id);
     setCallOutcome(null);
