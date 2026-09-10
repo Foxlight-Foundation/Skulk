@@ -157,15 +157,32 @@ describe('resolveSurfaceUrl', () => {
 
 describe('isLoopbackHostname', () => {
   it('covers the whole loopback range and localhost spellings', () => {
-    for (const host of ['127.0.0.1', '127.0.0.2', '127.255.255.255', 'localhost', 'localhost.', 'LOCALHOST', 'studio.localhost', '[::1]', '::1', '0.0.0.0']) {
+    for (const host of [
+      '127.0.0.1',
+      '127.0.0.2',
+      '127.255.255.255',
+      'localhost',
+      'localhost.',
+      'LOCALHOST',
+      'studio.localhost',
+      '[::1]',
+      '::1',
+      '0.0.0.0',
+      '[::]',
+      '[::ffff:7f00:1]',
+      '[::ffff:127.0.0.1]',
+      '::ffff:7f01:2',
+    ]) {
       expect(isLoopbackHostname(host)).toBe(true);
     }
-    for (const host of ['128.0.0.1', '10.0.0.5', 'kite6.local', 'host.example', '1270.0.0.1']) {
+    for (const host of ['128.0.0.1', '10.0.0.5', 'kite6.local', 'host.example', '1270.0.0.1', '[::ffff:a00:5]', '[fe80::1]']) {
       expect(isLoopbackHostname(host)).toBe(false);
     }
     expect(resolveSurfaceUrl('http://127.0.0.2:8188/', { isLocalHost: false, dashboardHostname: 'kite3.local' })).toEqual({
       url: 'http://127.0.0.2:8188/',
       reachable: false,
     });
+    // The browser canonicalizes the mapped form; the parsed hostname must still classify as loopback.
+    expect(resolveSurfaceUrl('http://[::ffff:127.0.0.1]:8188/', { isLocalHost: false, dashboardHostname: 'kite3.local' }).reachable).toBe(false);
   });
 });

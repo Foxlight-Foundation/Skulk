@@ -92,7 +92,21 @@ export function isLoopbackHostname(hostname: string): boolean {
   const normalized = hostname.trim().toLowerCase().replace(/\.$/, '');
   if (LOOPBACK_HOSTS.has(normalized) || LOOPBACK_HOSTS.has(`[${normalized}]`)) return true;
   if (normalized === 'localhost' || normalized.endsWith('.localhost')) return true;
-  const ipv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(normalized);
+  if (isLoopbackIpv4(normalized)) return true;
+  // IPv6 forms: the unspecified address, and IPv4-mapped loopback, which the
+  // URL parser canonicalizes from ::ffff:127.0.0.1 to ::ffff:7f00:1.
+  const unbracketed = normalized.replace(/^\[|\]$/g, '');
+  if (unbracketed === '::' || unbracketed === '::1') return true;
+  const mapped = /^::ffff:(.+)$/.exec(unbracketed);
+  if (!mapped) return false;
+  const tail = mapped[1] ?? '';
+  if (isLoopbackIpv4(tail)) return true;
+  const hexGroups = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(tail);
+  return hexGroups !== null && parseInt(hexGroups[1] ?? '', 16) >> 8 === 0x7f;
+}
+
+function isLoopbackIpv4(host: string): boolean {
+  const ipv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
   return ipv4 !== null && ipv4[1] === '127';
 }
 
