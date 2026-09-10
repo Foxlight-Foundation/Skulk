@@ -193,11 +193,11 @@ class VideoStore:
         if not self._fits(total_bytes, released=evictable_bytes):
             raise ValueError("the video store has no room for this artifact")
         evicted: list[CommandId] = []
-        released = 0
         for victim in sorted(candidates, key=candidates.__getitem__):
-            if self._fits(total_bytes, released=released):
+            # Each deletion is already reflected in the reserved total and
+            # in the filesystem's free space, so the check is plain again.
+            if self._fits(total_bytes):
                 break
-            released += self._job_bytes(victim)
             self.delete(victim)
             evicted.append(victim)
         return tuple(evicted)

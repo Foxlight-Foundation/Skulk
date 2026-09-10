@@ -289,7 +289,26 @@ def mux_mp4(
     sample_rate: int,
     channels: int,
 ) -> bytes:
-    """Mux JPEG frames and optional PCM audio into a minimal MP4."""
+    """Mux JPEG frames and optional PCM audio into a minimal MP4.
+
+    Args:
+        frames: One complete JPEG file per video frame, in display order;
+            every frame is shown for exactly one tick of ``fps``.
+        width: Frame width in pixels, declared in the sample entry.
+        height: Frame height in pixels, declared in the sample entry.
+        fps: Frames per second; also the video track's timescale.
+        audio: Interleaved little-endian 16-bit PCM, or ``None`` for a
+            silent file with a single video track.
+        sample_rate: Audio sample rate in hertz.
+        channels: Audio channel count; each PCM sample is ``channels * 2``
+            bytes.
+
+    Returns:
+        The complete container bytes: ``ftyp``, one ``mdat`` holding the
+        frames followed by the audio, then ``moov`` with an MJPEG track and,
+        when audio is given, an uncompressed PCM (``sowt``) track. Pure
+        function with no side effects; the caller writes the bytes.
+    """
 
     ftyp = _box(b"ftyp", b"isom" + struct.pack(">I", 0x200) + b"isom" + b"iso2" + b"mp41")
     video_data = b"".join(frames)

@@ -51,6 +51,21 @@ DIGEST = "a" * 64
 MODEL = ModelId("org/video")
 
 
+def _ample_free_bytes(_store: VideoStore) -> int:
+    return 1 << 40
+
+
+@pytest.fixture(autouse=True)
+def ample_disk(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the store's free-space check off the host's real disk.
+
+    The store leaves a reserve on its filesystem; a test must not depend on
+    how full the machine running it happens to be.
+    """
+
+    monkeypatch.setattr(VideoStore, "_free_disk_bytes", _ample_free_bytes)
+
+
 def _reference_payload(
     slot: int, kind: str = "image", role: str = "reference"
 ) -> dict[str, object]:
@@ -881,6 +896,21 @@ def test_video_store_evicts_oldest_completed_jobs_to_fit(tmp_path: Path) -> None
         )
     assert store.has_open_assembly(CommandId("incoming"), "video")
     assert store.get(CommandId("newer")) is not None
+
+
+def test_video_store_evicts_as_many_jobs_as_the_artifact_needs(tmp_path: Path) -> None:
+    store = VideoStore(tmp_path, max_total_bytes=12)
+    _commit(store, "oldest", b"12")
+    _commit(store, "middle", b"345")
+    _commit(store, "newest", b"6789")
+    # Nine bytes held under a twelve-byte ceiling; eight more need both older
+    # jobs gone, and each deletion counts exactly once against the ceiling.
+    evicted = store.open_assembly(
+        CommandId("incoming"), "video", content_type="video/mp4", total_bytes=8, total_chunks=1
+    )
+    assert evicted == (CommandId("oldest"), CommandId("middle"))
+    assert store.get(CommandId("newest")) is not None
+    assert store.reserved_bytes() == 4 + 8
 
 
 def test_video_store_never_evicts_a_kept_job(tmp_path: Path) -> None:
