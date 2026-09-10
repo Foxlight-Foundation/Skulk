@@ -16,13 +16,15 @@ import shutil
 import struct
 from pathlib import Path
 
+from anyio import Path as AsyncPath
+
 from skulk.shared.constants import (
     RESOURCES_DIR,
     SKULK_CUSTOM_MODEL_CARDS_DIR,
     SKULK_MODELS_DIR,
     add_model_search_path,
 )
-from skulk.shared.models.model_cards import ModelId
+from skulk.shared.models.model_cards import ModelCard, ModelId, add_to_card_cache
 
 TEST_VIDEO_MODEL_ID = ModelId("foxlight/test-video")
 """The one card the test engine serves; bundled under ``resources/video_model_cards``."""
@@ -52,6 +54,24 @@ def register_test_video_card(custom_cards_dir: Path = SKULK_CUSTOM_MODEL_CARDS_D
     if not target.is_file():
         shutil.copyfile(bundled_card_path(), target)
     return target
+
+
+async def install_test_video_card(
+    custom_cards_dir: Path = SKULK_CUSTOM_MODEL_CARDS_DIR,
+) -> ModelCard:
+    """Register the card and make it visible in this process's catalog now.
+
+    The catalog may already have been preloaded from the registry before the
+    worker provisions the engine, and the custom directory is only re-read
+    on the next refresh. Adding the loaded card to the cache directly means
+    the documented start-and-place flow works on the first start.
+    """
+
+    path = register_test_video_card(custom_cards_dir)
+    card = await ModelCard.load_from_path(AsyncPath(path))
+    card = card.model_copy(update={"is_custom": True})
+    add_to_card_cache(card)
+    return card
 
 
 def provision_test_video_model(models_dir: Path = SKULK_MODELS_DIR) -> Path:

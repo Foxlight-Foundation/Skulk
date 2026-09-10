@@ -703,22 +703,23 @@ def _write_reference_media(
         staging.replace(target)
 
 
-def _provision_test_video_engine() -> None:
-    """Give the test video engine its stand-in weights when the node advertises it."""
+async def _provision_test_video_engine() -> None:
+    """Give the test video engine its stand-in weights and card when advertised."""
 
     from skulk.shared.backends import probe_node_backends
 
     if "test_video" not in probe_node_backends():
         return
     from skulk.worker.runner.test_video.provision import (
+        install_test_video_card,
         provision_test_video_model,
-        register_test_video_card,
     )
 
     directory = provision_test_video_model()
-    card = register_test_video_card()
+    card = await install_test_video_card()
     logger.info(
-        f"test video engine advertised; stand-in model at {directory}, card at {card}"
+        f"test video engine advertised; stand-in model at {directory}, "
+        f"card {card.model_id} registered"
     )
 
 
@@ -1243,7 +1244,7 @@ class Worker:
             # Reference files and unacknowledged containers from a previous
             # process have no tracking record; nothing can ever release them.
             _purge_stale_video_directories()
-            _provision_test_video_engine()
+            await _provision_test_video_engine()
             async with self._tg as tg:
                 tg.start_soon(info_gatherer.run)
                 tg.start_soon(self._forward_info, info_recv)

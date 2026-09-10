@@ -29,6 +29,7 @@ from skulk.shared.types.video import (
 from skulk.worker.runner.test_video.provision import (
     TEST_VIDEO_MODEL_ID,
     bundled_card_path,
+    install_test_video_card,
     provision_test_video_model,
     register_test_video_card,
 )
@@ -263,6 +264,18 @@ def test_runner_refuses_any_card_but_its_own() -> None:
     )
     with pytest.raises(RuntimeError, match="serves only foxlight/test-video"):
         runner.handle_task(LoadModel(instance_id=instance.instance_id))
+
+
+def test_installing_the_card_makes_it_visible_immediately(tmp_path: Path) -> None:
+    from skulk.shared.models import model_cards
+
+    model_cards._card_cache.pop(TEST_VIDEO_MODEL_ID, None)
+    try:
+        card = asyncio.run(install_test_video_card(tmp_path / "custom"))
+        assert card.is_custom and card.model_id == TEST_VIDEO_MODEL_ID
+        assert model_cards._card_cache[TEST_VIDEO_MODEL_ID] is card
+    finally:
+        model_cards._card_cache.pop(TEST_VIDEO_MODEL_ID, None)
 
 
 def test_bundled_card_places_on_a_test_video_node() -> None:
