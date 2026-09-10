@@ -45,6 +45,18 @@ from skulk.utils.pydantic_ext import CamelCaseModel
 _GPU_COMPUTES = ("vulkan", "rocm", "cuda")
 _SERVED_COMPUTES = ("vulkan", "rocm", "cuda", "cpu")
 _VLLM_COMPUTES = ("cuda", "rocm")
+_COMFY_COMPUTES = ("cuda", "rocm")
+
+COMFY_RUNNER_AVAILABLE = False
+"""Whether this build carries the ComfyUI runner.
+
+Provisioning, facts, and doctor for the ``comfy`` engine land ahead of the
+runner that drives it. Until the runner exists, advertising the backend
+would let video cards place onto a node whose runner cannot start, so the
+tags stay withheld (a configured install is reported as a note, not a
+capability) and the node startup hook does not provision unasked. The
+runner deliverable flips this to ``True``.
+"""
 
 _INSTALL_DOCS_HINT = (
     "see website/docs (GPU node setup) or run `skulk doctor` for a full audit"
@@ -413,6 +425,138 @@ def _derive_vllm(
     return tags, conflicts, notes
 
 
+def _derive_comfy(
+    facts: NodeFacts,
+) -> tuple[set[str], list[CapabilityConflict], list[str]]:
+    """Derive ``comfy`` tags: declaration chain > vendor inference; GPU-only.
+
+    The engine is an interpreter plus a checkout, so both ``SKULK_COMFY_BIN``
+    and ``SKULK_COMFY_ROOT`` must be valid before the engine advertises; a
+    broken half is its own loud conflict rather than a silent absence.
+    """
+    binary = facts.comfy_binary
+    if binary.state == "not_configured":
+        if facts.comfy_root is not None:
+            return (
+                set(),
+                [
+                    CapabilityConflict(
+                        code="invalid_engine_binary",
+                        message=(
+                            f"SKULK_COMFY_ROOT is set to {facts.comfy_root!r} but "
+                            f"{binary.env_var} is not; the comfy video engine needs "
+                            "both and is disabled on this node."
+                        ),
+                        remediation=(
+                            f"Set {binary.env_var} to the ComfyUI environment's "
+                            "python interpreter (or unset SKULK_COMFY_ROOT) and "
+                            "restart skulk."
+                        ),
+                    )
+                ],
+                [],
+            )
+        return set(), [], []
+    if binary.state in ("missing", "not_executable"):
+        return (
+            set(),
+            [
+                CapabilityConflict(
+                    code="invalid_engine_binary",
+                    message=(
+                        f"{binary.env_var} is set to {binary.configured_path!r} "
+                        f"but that path is {binary.state.replace('_', ' ')}; the "
+                        "comfy video engine is disabled on this node."
+                    ),
+                    remediation=(
+                        f"Point {binary.env_var} at the ComfyUI environment's "
+                        "python interpreter (or unset it) and restart skulk."
+                    ),
+                )
+            ],
+            [],
+        )
+    if facts.comfy_root_state != "ok":
+        return (
+            set(),
+            [
+                CapabilityConflict(
+                    code="invalid_engine_binary",
+                    message=(
+                        f"{binary.env_var} is set but SKULK_COMFY_ROOT "
+                        f"({facts.comfy_root!r}) does not name a ComfyUI checkout "
+                        "holding main.py; the comfy video engine is disabled on "
+                        "this node."
+                    ),
+                    remediation=(
+                        "Point SKULK_COMFY_ROOT at the ComfyUI checkout that goes "
+                        f"with {binary.env_var} and restart skulk."
+                    ),
+                )
+            ],
+            [],
+        )
+
+    conflicts: list[CapabilityConflict] = []
+    notes: list[str] = []
+    declared = _declared_tokens(facts.declared_comfy_backends)
+    if not declared:
+        # An inherited declaration is only borrowed when it names a compute
+        # this engine can use. The documented AMD launch path declares
+        # ``SKULK_LLAMA_CPP_BACKENDS=vulkan``, which is meaningless to ComfyUI
+        # and must not suppress the ROCm inference from the observed GPU.
+        for inherited in (
+            facts.declared_vllm_backends,
+            facts.declared_llama_server_backends,
+            facts.declared_llama_cpp_backends,
+        ):
+            tokens = _declared_tokens(inherited)
+            if any(cb in tokens for cb in _COMFY_COMPUTES):
+                declared = tokens
+                break
+    computes = [cb for cb in _COMFY_COMPUTES if cb in declared]
+    if computes:
+        conflicts.extend(
+            _override_conflicts(
+                computes, facts, env_var="SKULK_COMFY_BACKENDS", engine="comfy"
+            )
+        )
+    elif not declared:
+        if facts.gpus_of("nvidia"):
+            computes.append("cuda")
+        if facts.gpus_of("amd"):
+            computes.append("rocm")
+        if computes:
+            notes.append(
+                f"derived comfy backend(s) {sorted(computes)} from observed "
+                "GPU hardware (no backends declared)"
+            )
+    if not computes:
+        conflicts.append(
+            CapabilityConflict(
+                code="backend_override_conflict",
+                message=(
+                    f"{binary.env_var} configures the GPU-only comfy video engine "
+                    "but no usable GPU backend was declared or observed; comfy "
+                    "is disabled on this node."
+                ),
+                remediation=(
+                    "Set SKULK_COMFY_BACKENDS to cuda or rocm on a GPU node, or "
+                    f"unset {binary.env_var}, then restart skulk."
+                ),
+            )
+        )
+        return set(), conflicts, notes
+    if not COMFY_RUNNER_AVAILABLE:
+        notes.append(
+            f"a ComfyUI install is configured ({facts.comfy_root}) but this build "
+            "carries no ComfyUI runner yet; the comfy backend is withheld"
+        )
+        return set(), conflicts, notes
+    tags = {"comfy"} | {f"comfy-{compute}" for compute in computes}
+    return tags, conflicts, notes
+
+
 def _derive_test_video(facts: NodeFacts) -> tuple[set[str], list[CapabilityConflict], list[str]]:
     """Advertise the test video engine when the operator asked for it."""
 
@@ -452,7 +596,13 @@ def derive_node_backends(facts: NodeFacts) -> BackendDerivation:
         if facts.mlx_audio_importable:
             tags |= {"mlx_audio", "mlx_audio-metal"}
 
-    for derive in (_derive_llama_cpp, _derive_llama_server, _derive_vllm, _derive_test_video):
+    for derive in (
+        _derive_llama_cpp,
+        _derive_llama_server,
+        _derive_vllm,
+        _derive_comfy,
+        _derive_test_video,
+    ):
         engine_tags, engine_conflicts, engine_notes = derive(facts)
         tags |= engine_tags
         conflicts.extend(engine_conflicts)

@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from typing import Final, Literal, final
 
-from pydantic import ConfigDict
+from pydantic import ConfigDict, Field
 
 from skulk.utils.pydantic_ext import CamelCaseModel
 
@@ -245,6 +245,21 @@ class NodeFacts(CamelCaseModel):
     test_video_engine: bool = False
     """Whether ``SKULK_TEST_VIDEO_ENGINE`` asks this node to advertise the
     deterministic test video engine."""
+
+    comfy_binary: EngineBinaryFact = Field(
+        default_factory=lambda: EngineBinaryFact(env_var="SKULK_COMFY_BIN")
+    )
+    """State of the ``SKULK_COMFY_BIN`` declaration (the ComfyUI environment's
+    interpreter)."""
+
+    comfy_root: str | None = None
+    """Raw ``SKULK_COMFY_ROOT`` value (the ComfyUI checkout), or ``None``."""
+
+    comfy_root_state: Literal["not_configured", "missing", "ok"] = "not_configured"
+    """Whether ``comfy_root`` names a directory holding ComfyUI's ``main.py``."""
+
+    declared_comfy_backends: str | None = None
+    """Raw ``SKULK_COMFY_BACKENDS`` value, verbatim, or ``None`` when unset."""
 
     def gpus_of(self, vendor: GpuVendor) -> tuple[GpuDeviceFact, ...]:
         """Return the observed GPUs of one vendor, preserving device order."""

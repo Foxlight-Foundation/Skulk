@@ -774,6 +774,25 @@ filesystem's reserve. Job records are mirrored to a JSON index so a
 restarted API still lists recent jobs, with anything in flight marked
 failed and completed artifacts re-verified before they are served.
 
+### ComfyUI engine provisioning
+
+The served video engine runs a pinned ComfyUI checkout headless from its own
+managed environment, because ComfyUI ships as a repository rather than a
+wheel and needs a torch build matched to the node's GPU stack. Provisioning
+follows the store pattern the llama-server engine established: a pinned
+commit and a hash-pinned torch wheel set recorded in the manifest, fetched
+on demand, verified before use, and installed under the engines directory
+keyed by pin and variant, built in a staging directory and renamed into
+place so a half-finished install is never adopted. Two gates beyond the
+llama-server ones apply: the node must have video models enabled, since the
+wheel set is several gigabytes and most nodes never render video, and a
+variant is offered only where a wheel set is recorded for the machine, so
+an AMD node provisions nothing until the ROCm lane is qualified. An
+operator with a hand-built ComfyUI points `SKULK_COMFY_BIN` at its
+interpreter and `SKULK_COMFY_ROOT` at the checkout; both must be valid or
+the engine stays off with a loud conflict. The checkout's commit is the
+engine's build identity in node telemetry.
+
 ### Test video engine
 
 Before any served video engine exists, and on nodes that will never run

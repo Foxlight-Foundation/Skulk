@@ -108,3 +108,88 @@ LLAMA_SERVER_ARTIFACTS: Final[dict[tuple[str, EngineVariant], EngineArtifact]] =
         sha256="cba2f4a533c77a0bc5e0bcc13d4ac1129f941ba784be915196acbb403c1b2ffa",
     ),
 }
+
+
+# --- ComfyUI (served video engine) --------------------------------------------
+
+COMFY_PIN: Final = "40c4fcdf513a4523e39d54a9d391908af8df8171"
+"""The pinned ComfyUI commit for managed installs: release v0.35.0 (2026-09-09).
+
+Native MiniMax H3 support landed in v0.30.0; this release follows the H3
+denoise-mask fix (421a1c2, 2026-09-08) and carries the model patch loader
+the ControlNet union companion needs. Advance deliberately: bump the pin,
+re-record the torch wheel set if it moves, and rerun the engine battery.
+"""
+
+COMFY_REPOSITORY: Final = "https://github.com/comfyanonymous/ComfyUI.git"
+"""Upstream repository the managed checkout clones at the pin."""
+
+COMFY_PYTHON: Final = "3.13"
+"""Interpreter the managed environment is created with; the wheel set below
+is recorded for its ``cp313`` tags."""
+
+
+@final
+class PinnedWheel(CamelCaseModel):
+    """One exact wheel from a package index with its integrity checksum."""
+
+    model_config = ConfigDict(frozen=True)
+
+    name: str
+    """Distribution name."""
+
+    version: str
+    """Exact version including any local tag (``2.14.0+cu130``)."""
+
+    filename: str
+    """Wheel filename as published."""
+
+    sha256: str
+    """Hex SHA-256 of the wheel; passed to the installer as a required hash."""
+
+    index: str
+    """Directory URL the filename resolves against."""
+
+    def url(self) -> str:
+        """The download URL for this wheel."""
+        return f"{self.index.rstrip('/')}/{self.filename}"
+
+    def requirement(self) -> str:
+        """A hashed direct-URL requirement line."""
+        return f"{self.name} @ {self.url()} --hash=sha256:{self.sha256}"
+
+    def constraint(self) -> str:
+        """An exact version constraint for later resolver passes."""
+        return f"{self.name}=={self.version}"
+
+
+_PYTORCH_CU130_INDEX: Final = "https://download.pytorch.org/whl/cu130"
+
+
+def _cu130(name: str, version: str, machine: str, sha256: str) -> PinnedWheel:
+    return PinnedWheel(
+        name=name,
+        version=f"{version}+cu130",
+        filename=f"{name}-{version}%2Bcu130-cp313-cp313-manylinux_2_28_{machine}.whl",
+        sha256=sha256,
+        index=_PYTORCH_CU130_INDEX,
+    )
+
+
+# (machine, variant) -> the torch wheel set installed into the managed
+# ComfyUI environment, for sys.platform == "linux" and cp313. Checksums are
+# the index's own link digests, recorded 2026-09-10 from
+# download.pytorch.org/whl/cu130. CUDA 13.0 wheels need a 580-series or newer
+# driver. ROCm is absent until the Strix lane is qualified on real hardware.
+COMFY_TORCH_WHEELS: Final[dict[tuple[str, EngineVariant], tuple[PinnedWheel, ...]]] = {
+    ("aarch64", "cuda"): (
+        _cu130("torch", "2.14.0", "aarch64", "20ec4bb8944a847dee60e6d5536b415670dd5403342f36dbe08a6be5bf582e08"),
+        _cu130("torchvision", "0.29.0", "aarch64", "bfecf363f1c2f99e273405d9f15b647d6d51afaa20174803452f9a1071af666c"),
+        _cu130("torchaudio", "2.11.0", "aarch64", "23498b01097648e304e78d6495a9f5bdce8441a802afc3025e2561973d74c025"),
+    ),
+    ("x86_64", "cuda"): (
+        _cu130("torch", "2.14.0", "x86_64", "745010695e0458d6f28accb697b5371b6fd245aa8696530165f972cd126bbd8d"),
+        _cu130("torchvision", "0.29.0", "x86_64", "360f048dd21a2c23f12af210962d4bd23321da32410a67fac98ef1e22fd2bc21"),
+        _cu130("torchaudio", "2.11.0", "x86_64", "e9c07cfdab691454092ff12d21dd1407a4bb8ad081d38f222cf6fcf6abcc18c8"),
+    ),
+}

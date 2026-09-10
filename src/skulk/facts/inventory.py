@@ -94,6 +94,37 @@ def _vllm_build(binary: EngineBinaryFact) -> str | None:
     return f"vllm@{version}" if version is not None else None
 
 
+@lru_cache(maxsize=8)
+def _git_head(checkout: str) -> str | None:
+    """Read one checkout's HEAD commit once per process."""
+    try:
+        completed = subprocess.run(  # noqa: S603 - operator-configured checkout
+            ["git", "-C", checkout, "rev-parse", "HEAD"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    head = completed.stdout.strip()
+    return head if len(head) == 40 else None
+
+
+def _comfy_build(facts: NodeFacts) -> str | None:
+    """Return the ComfyUI checkout's commit as the engine's build identity.
+
+    The checkout is the build truth: a managed install is the pinned commit
+    by construction, and a hand-built install is whatever its HEAD says.
+    """
+    if facts.comfy_root_state != "ok" or facts.comfy_root is None:
+        return None
+    head = _git_head(facts.comfy_root)
+    return f"comfy@{head}" if head is not None else None
+
+
 def _declared_engine_builds(environ: Mapping[str, str]) -> dict[str, str]:
     """Parse optional open engine/tag build overrides from JSON configuration."""
     raw = environ.get("SKULK_ENGINE_BUILDS", "{}").strip() or "{}"
@@ -138,6 +169,8 @@ def engine_build_inventory(
             # vLLM normally lives in its own managed virtual environment, so
             # the Skulk environment's package metadata is not its build truth.
             build = _vllm_build(facts.vllm_binary)
+        elif engine == "comfy":
+            build = _comfy_build(facts)
         if build is not None:
             discovered[engine] = build
 

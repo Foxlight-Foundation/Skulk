@@ -15,7 +15,7 @@ import subprocess
 import sys
 from collections.abc import Mapping
 from pathlib import Path
-from typing import cast, final
+from typing import Literal, cast, final
 
 from loguru import logger
 
@@ -278,6 +278,9 @@ def gather_node_facts(
     # back into this package (function-level import on both sides keeps the
     # module graph acyclic).
     from skulk.shared.backends import (
+        COMFY_BACKENDS_ENV,
+        COMFY_BIN_ENV,
+        COMFY_ROOT_ENV,
         LLAMA_CPP_BACKENDS_ENV,
         LLAMA_SERVER_BACKENDS_ENV,
         LLAMA_SERVER_BIN_ENV,
@@ -354,6 +357,14 @@ def gather_node_facts(
     declared_llama_cpp = env.get(LLAMA_CPP_BACKENDS_ENV)
     declared_llama_server = env.get(LLAMA_SERVER_BACKENDS_ENV)
     declared_vllm = env.get(VLLM_BACKENDS_ENV)
+    comfy_binary = _binary_fact(COMFY_BIN_ENV, env)
+    comfy_root = env.get(COMFY_ROOT_ENV, "").strip() or None
+    comfy_root_state: Literal["not_configured", "missing", "ok"] = "not_configured"
+    if comfy_root is not None:
+        comfy_root_state = (
+            "ok" if os.path.isfile(os.path.join(comfy_root, "main.py")) else "missing"
+        )
+    declared_comfy = env.get(COMFY_BACKENDS_ENV)
     test_video_engine = (env.get(TEST_VIDEO_ENGINE_ENV, "").strip().lower() in ("1", "true", "yes", "on"))
 
     # Probe the binary's own device list only when there is a usable binary
@@ -383,4 +394,8 @@ def gather_node_facts(
         declared_llama_server_backends=declared_llama_server,
         declared_vllm_backends=declared_vllm,
         test_video_engine=test_video_engine,
+        comfy_binary=comfy_binary,
+        comfy_root=comfy_root,
+        comfy_root_state=comfy_root_state,
+        declared_comfy_backends=declared_comfy,
     )

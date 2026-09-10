@@ -1834,12 +1834,14 @@ def main():
     )
     if not args.no_worker and declared_participation != "management":
         from skulk.facts import current_node_facts, refresh_node_facts
-        from skulk.provisioning import ensure_llama_server
+        from skulk.provisioning import ensure_comfy, ensure_llama_server
 
-        if (
-            ensure_llama_server(current_node_facts(), allow_download=not args.offline)
-            is not None
-        ):
+        facts = current_node_facts()
+        wired = ensure_llama_server(facts, allow_download=not args.offline) is not None
+        # The managed ComfyUI install only provisions when video models are
+        # enabled on this node; the torch wheel set is several gigabytes.
+        wired = ensure_comfy(facts, allow_download=not args.offline) is not None or wired
+        if wired:
             refresh_node_facts()
 
     if args.spawn_api:
