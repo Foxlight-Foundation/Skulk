@@ -569,6 +569,10 @@ plugin runtimes must not remove manager inventory or operation-status access.
 environment. Ship declarative resources in `src/skulk/resources` for wheels and
 source distributions; retain the root `resources` symlink for source tooling.
 Installed discovery must use the imported package without a checkout dependency.
+Changed-source local setup may supersede a failed operation, retaining its journal
+and profile and staging before service stop. Linux `WorkingDirectory` is a literal
+path, unlike the quoted `ExecStart` argument list; accept only the exact old fixed
+quoted unit for repair, never arbitrary owner-supplied unit changes.
 Include declarative resources, remove editable path indirection, and
 refuse unhandled startup hooks or links. The standard-library-only copied
 `service_bootstrap.py` must run with site initialization disabled and verify the

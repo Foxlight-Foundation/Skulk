@@ -1639,6 +1639,10 @@ root `resources` path is a compatibility symlink to the package directory.
 `service_bootstrap.py` uses only the standard library with Python site initialization
 disabled to verify the selected complete file seal before starting the fixed manager.
 Core-runtime activation requires a stopped manager and leaves plugin state intact.
+Explicit local setup with a changed source can supersede an interrupted operation;
+its journal and logical profile remain retained while a new copy is staged before
+stopping any existing manager. Linux registration emits a literal working directory
+and recognizes the exact earlier quoted form only to repair that generated unit.
 `managed_attachment.py` shares one local profile fence across an API's adapters
 and reports the live process's measured core build. `runtime_attachment.py` journals
 transport renewal after stopping affected owners; recovery finishes only exact

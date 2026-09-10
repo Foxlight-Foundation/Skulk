@@ -195,10 +195,9 @@ async def setup_service() -> SetupOperation:
                     operation.skulk_build_sha256 != host.skulk_build_sha256
                     or operation.source_sha256 != source_identity
                 ):
-                    if operation.phase != "ready":
-                        raise ValueError(
-                            "finish interrupted setup using its original Skulk build"
-                        )
+                    # A corrected local build must be able to replace failed
+                    # setup. Preserve its journal/profile and stage a complete
+                    # new copy before touching any selected or running manager.
                     operation = None
             profile_id = profile_id or uuid4().hex
             connection = ServiceConnection(

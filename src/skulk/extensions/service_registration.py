@@ -120,7 +120,9 @@ class ServiceLayout:
             "[Unit]\nDescription=Skulk managed plugin service\nAfter=local-fs.target\n"
             "StartLimitIntervalSec=0\n\n[Service]\nType=exec\n"
             f"User={self.user_id}\nGroup={self.group_id}\n"
-            f"WorkingDirectory={_systemd_argument(str(self.root))}\nExecStart={command}\n"
+            # WorkingDirectory takes a path, not ExecStart's quoted argument list.
+            # This root is fixed ASCII with only a numeric owner suffix.
+            f"WorkingDirectory={self.root}\nExecStart={command}\n"
             "Restart=always\nRestartSec=10\nTimeoutStopSec=180\nKillMode=mixed\n"
             "UMask=0077\nNoNewPrivileges=true\nLimitCORE=0\n"
             "StandardOutput=null\nStandardError=journal\n\n[Install]\nWantedBy=multi-user.target\n"
@@ -154,7 +156,18 @@ class ServiceLayout:
             if not isinstance(value, str):
                 raise ValueError("invalid existing interpreter identity")
             python = value
-        if content != self.definition(Path(python)):
+        expected = self.definition(Path(python))
+        if self.platform == "ubuntu-24.04-x86_64":
+            # Permit repair of only the exact prior generated unit. systemd
+            # rejects its quoted WorkingDirectory before starting any process.
+            previous = expected.replace(
+                f"WorkingDirectory={self.root}\n".encode(),
+                f'WorkingDirectory="{self.root}"\n'.encode(),
+                1,
+            )
+            if content == previous:
+                return
+        if content != expected:
             raise ValueError("existing service definition differs from fixed contract")
 
 
@@ -252,6 +265,31 @@ def _execute(arguments: tuple[str, ...], allowed: tuple[int, ...] = (0,)) -> Non
         raise ValueError("OS service operation failed; inspect system service status")
 
 
+def _stop_systemd(unit: str) -> None:
+    # A rejected generated unit reports "not loaded" (5), even though it has no
+    # process to stop. Independently confirm quiescence before any replacement.
+    _execute(("/usr/bin/systemctl", "stop", unit), (0, 5))
+    result = subprocess.run(
+        (
+            "/usr/bin/systemctl",
+            "show",
+            unit,
+            "--property=ActiveState",
+            "--property=MainPID",
+        ),
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        timeout=30,
+        check=False,
+        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
+    )
+    if result.returncode != 0 or set(result.stdout.splitlines()) not in (
+        {b"ActiveState=inactive", b"MainPID=0"},
+        {b"ActiveState=failed", b"MainPID=0"},
+    ):
+        raise ValueError("system service has not stopped")
+
+
 def register(
     layout: ServiceLayout, action: Literal["prepare", "stop", "install"]
 ) -> None:
@@ -294,7 +332,7 @@ def register(
                 ("/bin/launchctl", "bootout", "system/" + layout.label), (0, 3, 113)
             )
         else:
-            _execute(("/usr/bin/systemctl", "stop", layout.unit.name))
+            _stop_systemd(layout.unit.name)
         return
     definition = layout.definition(Path(sys.executable).resolve(strict=True))
     parent = _directory(layout.unit.parent)

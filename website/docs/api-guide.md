@@ -4059,11 +4059,14 @@ configuration must live outside Git checkouts and remain available after boot.
 Setup records a generated `operation_id` and phases `preparing`, `staged`,
 `selected`, `registered`, `ready`. Rerunning after interruption reuses the exact
 completed staged copy and generated profile. A changed source core, Python or
-dependency inventory requires a new setup operation after the prior one completes;
-prior operations and runtime generations remain retained. Preparation does not stop
+dependency inventory starts a new setup operation, including when a corrected build
+replaces failed setup. Prior operations, runtime generations and the generated
+profile remain retained. Preparation does not stop
 the existing manager. Activation stops only its fixed service, verifies the copied
 runtime again, preserves the latest transport attachment, and starts the registered
 service. An unrelated definition occupying the reserved service name is refused.
+The exact earlier Linux unit with a quoted working directory is recognized for
+repair; setup replaces it with systemd's literal absolute-path form.
 No provider request, credential provisioning, approval or implicit enable occurs.
 
 `skulk-plugin-service status` reports the last setup phase separately from current

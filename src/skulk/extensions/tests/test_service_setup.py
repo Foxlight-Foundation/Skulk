@@ -27,6 +27,57 @@ from skulk.extensions.service_snapshot import ServiceSnapshot
 from skulk.extensions.tests.test_service_snapshot import staged
 
 
+@pytest.mark.parametrize(
+    ("state", "process_id", "stop_code", "accepted"),
+    [
+        ("inactive", 0, 5, True),
+        ("failed", 0, 0, True),
+        ("active", 12, 0, False),
+        ("deactivating", 0, 5, False),
+        ("inactive", 12, 0, False),
+        ("inactive", 0, 1, False),
+    ],
+)
+def test_systemd_stop_requires_confirmed_quiescence(
+    monkeypatch: pytest.MonkeyPatch,
+    state: str,
+    process_id: int,
+    stop_code: int,
+    accepted: bool,
+) -> None:
+    """An unloaded unit can be repaired only after confirming no active process."""
+    layout = service_registration.ServiceLayout(
+        "ubuntu-24.04-x86_64", 1001, 1001, "owner", "owners"
+    )
+    monkeypatch.setattr("skulk.extensions.service_registration.os.geteuid", lambda: 0)
+
+    def existing(_layout: service_registration.ServiceLayout) -> bytes:
+        return b"verified fixed unit"
+
+    monkeypatch.setattr(
+        "skulk.extensions.service_registration._existing",
+        existing,
+    )
+
+    def run(
+        arguments: tuple[str, ...], **_options: object
+    ) -> subprocess.CompletedProcess[bytes]:
+        assert arguments[0] == "/usr/bin/systemctl"
+        if arguments[1] == "stop":
+            return subprocess.CompletedProcess(arguments, stop_code)
+        assert arguments[1] == "show"
+        return subprocess.CompletedProcess(
+            arguments, 0, f"ActiveState={state}\nMainPID={process_id}\n".encode()
+        )
+
+    monkeypatch.setattr(service_registration.subprocess, "run", run)
+    if accepted:
+        service_registration.register(layout, "stop")
+    else:
+        with pytest.raises(ValueError):
+            service_registration.register(layout, "stop")
+
+
 @pytest.mark.parametrize("target", ["macos-arm64", "ubuntu-24.04-x86_64"])
 def test_fixed_system_definitions_and_foreign_unit_refusal(
     tmp_path: Path,
@@ -67,6 +118,14 @@ def test_fixed_system_definitions_and_foreign_unit_refusal(
         )
         assert b"$$cash%%percent" in definition
         assert b"KillMode=mixed\n" in definition
+        assert b"WorkingDirectory=/var/lib/skulk-plugin-services/1001\n" in definition
+        previous = definition.replace(
+            b"WorkingDirectory=/var/lib/skulk-plugin-services/1001\n",
+            b'WorkingDirectory="/var/lib/skulk-plugin-services/1001"\n',
+        )
+        layout.verify_existing(previous)
+        with pytest.raises(ValueError):
+            layout.verify_existing(previous.replace(b"User=1001", b"User=0"))
         assert (
             b"PrivateTmp=true" not in definition
         )  # API and manager share their local sockets.
@@ -233,3 +292,25 @@ async def test_setup_resumes_same_snapshot_and_preserves_latest_transport(
         read_private(root / "setup-operations" / (completed.operation_id + ".json"))
     )
     assert retained == completed
+
+    # A broken preparation must not require the owner to reinstall the broken
+    # build merely to finish it before applying a correction.
+    monkeypatch.setattr(
+        "skulk.extensions.service_setup.service_source_identity", lambda: "e" * 64
+    )
+    actions_before = list(actions)
+    with pytest.raises(ValueError, match="fresh staging"):
+        await setup_service()
+    repaired = SetupOperation.model_validate_json(read_private(root / "setup.json"))
+    assert repaired.operation_id != next_operation.operation_id
+    assert repaired.profile_id == completed.profile_id
+    assert repaired.phase == "preparing"
+    assert actions == [*actions_before, "prepare"]
+    assert (
+        SetupOperation.model_validate_json(
+            read_private(
+                root / "setup-operations" / (next_operation.operation_id + ".json")
+            )
+        )
+        == next_operation
+    )
