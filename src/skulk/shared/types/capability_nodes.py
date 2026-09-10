@@ -202,16 +202,19 @@ class CapabilityNodeAction(FrozenModel):
             raise ValueError("surface actions need a surface_id")
         if self.kind == "link" and self.url is None:
             raise ValueError("link actions need a url")
-        if self.kind == "descriptor":
-            if self.capability_id is None:
-                raise ValueError("descriptor actions need a capability_id")
-            if self.payload is not None:
-                encoded = json.dumps(self.payload, separators=(",", ":"))
-                if len(encoded.encode("utf-8")) > MAX_ACTION_PAYLOAD_BYTES:
-                    raise ValueError(
-                        "descriptor action payloads are limited to "
-                        f"{MAX_ACTION_PAYLOAD_BYTES} bytes"
-                    )
+        if self.kind == "descriptor" and self.capability_id is None:
+            raise ValueError("descriptor actions need a capability_id")
+        # Only descriptor actions have a use for a payload; refusing it on the
+        # other kinds keeps every accepted action within the byte bound rather
+        # than leaving a side door into the gossiped reading.
+        if self.payload is not None and self.kind != "descriptor":
+            raise ValueError("only descriptor actions may carry a payload")
+        if self.payload is not None:
+            encoded = json.dumps(self.payload, separators=(",", ":"))
+            if len(encoded.encode("utf-8")) > MAX_ACTION_PAYLOAD_BYTES:
+                raise ValueError(
+                    f"descriptor action payloads are limited to {MAX_ACTION_PAYLOAD_BYTES} bytes"
+                )
         return self
 
 
