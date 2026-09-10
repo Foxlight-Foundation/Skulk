@@ -43,9 +43,11 @@ start on a busy node can take minutes, and a dead process is detected long
 before the deadline."""
 _PORT_COLLISION_ATTEMPTS: Final = 3
 _ADDRESS_IN_USE_MARKER: Final = "address already in use"
-_CANCEL_ACK_SECONDS: Final = 120.0
-"""How long a cancelled render may take to stop; sampling steps on H3 run
-minutes each and the interrupt lands between them."""
+_CANCEL_GRACE_SECONDS: Final = 3600.0
+"""How long an accepted cancel may take to stop the render. ComfyUI applies
+the interrupt between sampling steps, and one H3 step on the supported GPUs
+runs minutes, so the grace is a safety net for a server that ignores the
+interrupt, not a bound on step length."""
 _JOB_POLL_SECONDS: Final = 5.0
 _SOCKET_WAIT_SECONDS: Final = 0.5
 _SAMPLING_SHARE: Final = (0.1, 0.9)
@@ -413,13 +415,17 @@ async def _history_outputs(session: aiohttp.ClientSession, prompt_id: str) -> di
     return cast("dict[str, Any]", entry.get("outputs") or {})
 
 
-async def _cancel(session: aiohttp.ClientSession, prompt_id: str) -> None:
+async def _cancel(session: aiohttp.ClientSession, prompt_id: str) -> bool:
+    """Ask the server to stop the prompt; True when it was running or queued."""
     async with session.post(f"/api/jobs/{prompt_id}/cancel") as response:
         if response.status == 404:
             # Older servers without the jobs API: a global interrupt is the
             # only lever, and this runner submits one prompt at a time.
             async with session.post("/interrupt", json={"prompt_id": prompt_id}):
                 pass
+            return True
+        body = cast("dict[str, Any]", await response.json(content_type=None))
+        return bool(body.get("cancelled"))
 
 
 async def run_prompt(
@@ -469,9 +475,12 @@ async def run_prompt(
                 raise RuntimeError("ComfyUI exited mid-render")
             now = time.monotonic()
             if cancel_sent_at is None and is_cancelled():
-                await _cancel(session, prompt_id)
                 cancel_sent_at = now
-            elif cancel_sent_at is not None and now - cancel_sent_at > _CANCEL_ACK_SECONDS:
+                if not await _cancel(session, prompt_id):
+                    # Nothing to interrupt: the prompt already reached a
+                    # terminal state the socket has not told us about yet.
+                    last_poll = 0.0
+            elif cancel_sent_at is not None and now - cancel_sent_at > _CANCEL_GRACE_SECONDS:
                 raise RuntimeError("ComfyUI did not stop the render after cancellation")
             if now - last_poll >= _JOB_POLL_SECONDS:
                 last_poll = now

@@ -379,8 +379,11 @@ def build_prompt(
         "CLIPLoader", "Load text encoder", clip_name=files.text_encoder, type="minimax", device="default"
     )
     prompt[NODE_VIDEO_VAE] = _node("VAELoader", "Load video VAE", vae_name=files.video_vae)
-    if plan.audio:
-        assert files.audio_vae is not None
+    # The audio VAE encodes reference soundtracks as well as decoding the
+    # output track, so a request that attaches audio (or a clip, which
+    # carries its own) needs it even when it asks for a silent output.
+    references_carry_audio = any(binding.spec.kind in ("audio", "video") for binding in references)
+    if (plan.audio or references_carry_audio) and files.audio_vae is not None:
         prompt[NODE_AUDIO_VAE] = _node("VAELoader", "Load audio VAE", vae_name=files.audio_vae)
 
     if render.mode is VideoMode.ReferenceToAudioVideo:
@@ -486,7 +489,7 @@ def _add_reference_condition(
         "length": plan.frame_count,
         "ref_image_size": "match",
     }
-    if plan.audio:
+    if NODE_AUDIO_VAE in prompt:
         inputs["audio_vae"] = _link(NODE_AUDIO_VAE)
     counts = {"image": 0, "video": 0, "audio": 0}
     keyframes: list[ReferenceBinding] = []

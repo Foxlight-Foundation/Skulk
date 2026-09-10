@@ -208,6 +208,15 @@ def test_reference_graph_numbers_attachments_per_kind(tmp_path: Path) -> None:
     assert prompt["ref_video_components_0"]["class_type"] == "GetVideoComponents"
     assert prompt["ref_image_1"]["inputs"]["image"] == "cmd/2.jpg"
     assert prompt["ref_audio_0"]["inputs"]["audio"] == "cmd/3.wav"
+    # A silent output still needs the audio VAE to encode audio references.
+    silent = _params(REF2VA_ID, audio=False, references=refs, reference_bytes=4, total_input_chunks=4)
+    silent_graph = build_prompt(plan_comfy_render(silent, card), silent, bind_references(silent.references, input_dir), "cmd")
+    assert NODE_AUDIO_VAE in silent_graph and silent_graph[NODE_CONDITION]["inputs"]["audio_vae"] == [NODE_AUDIO_VAE, 0]
+    assert NODE_DECODE_AUDIO not in silent_graph and "audio" not in silent_graph[NODE_CREATE_VIDEO]["inputs"]
+    images_only = (refs[0], refs[2].model_copy(update={"slot": 1}))
+    quiet = _params(REF2VA_ID, audio=False, references=images_only, reference_bytes=2, total_input_chunks=2)
+    quiet_graph = build_prompt(plan_comfy_render(quiet, card), quiet, bind_references(quiet.references, input_dir), "cmd")
+    assert NODE_AUDIO_VAE not in quiet_graph and "audio_vae" not in quiet_graph[NODE_CONDITION]["inputs"]
     # The documented Ref2VA request pairs a first frame with references: the
     # keyframe is anchored through MiniMaxH3AddGuide after the reference node.
     mixed_refs = (
