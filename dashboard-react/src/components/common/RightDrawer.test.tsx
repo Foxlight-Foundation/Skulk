@@ -23,7 +23,7 @@ afterEach(async () => {
   container = null;
 });
 
-async function render(open: boolean) {
+async function render(open: boolean, title: string = 'Drawer') {
   container = document.createElement('div');
   document.body.append(container);
   root = createRoot(container);
@@ -41,7 +41,7 @@ async function render(open: boolean) {
           onWidthChange={() => undefined}
           open={open}
           resizeLabel="Resize test drawer"
-          title="Drawer"
+          title={title}
           width={480}
         >
           <p>drawer body</p>
@@ -71,5 +71,19 @@ describe('RightDrawer', () => {
       window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
     });
     expect(onClose).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe('RightDrawer header', () => {
+  it('keeps the close button inside the drawer under a long unbroken title', async () => {
+    await render(true, 'x'.repeat(200));
+    const aside = container?.querySelector<HTMLElement>('#test-drawer');
+    const close = container?.querySelector<HTMLButtonElement>('button[aria-label="Close test drawer"]');
+    expect(aside).not.toBeNull();
+    expect(close).not.toBeNull();
+    const asideRect = (aside as HTMLElement).getBoundingClientRect();
+    const closeRect = (close as HTMLElement).getBoundingClientRect();
+    expect(closeRect.right).toBeLessThanOrEqual(asideRect.right + 1);
+    expect(closeRect.width).toBeGreaterThan(0);
   });
 });

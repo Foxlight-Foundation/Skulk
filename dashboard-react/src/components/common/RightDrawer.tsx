@@ -119,6 +119,13 @@ const Header = styled.div`
 
 const Title = styled.h2`
   margin: 0;
+  /* A long unbroken title (capability titles may be 200 characters) must
+   * shrink and truncate rather than push the close button off the drawer. */
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-family: ${({ theme }) => theme.fonts.body};
   font-size: ${({ theme }) => theme.fontSizes.lg};
   color: ${({ theme }) => theme.colors.text};
