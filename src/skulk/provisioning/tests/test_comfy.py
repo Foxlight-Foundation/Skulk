@@ -33,6 +33,7 @@ def isolated_comfy(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.delenv(COMFY_ROOT_ENV, raising=False)
     monkeypatch.delenv("SKULK_NO_ENGINE_AUTOPROVISION", raising=False)
     monkeypatch.setattr(comfy, "_require_tool", _fake_tool)
+    monkeypatch.setattr(comfy, "provision_unasked_allowed", lambda: True)
 
 
 def _fake_tool(name: str) -> str:
@@ -162,6 +163,8 @@ def test_ensure_provisions_and_exports_both_paths(monkeypatch: pytest.MonkeyPatc
 def test_ensure_honors_override_opt_out_and_the_video_gate(monkeypatch: pytest.MonkeyPatch) -> None:
     facts = make_facts(gpus=(NVIDIA_A40,))
     assert ensure_comfy(facts.model_copy(update={"comfy_binary": ok_bin(COMFY_BIN_ENV)})) is None
+    # A half-set override is an operator decision too; never overwrite it.
+    assert ensure_comfy(facts.model_copy(update={"comfy_root": "/opt/ComfyUI", "comfy_root_state": "ok"})) is None
     monkeypatch.setenv("SKULK_NO_ENGINE_AUTOPROVISION", "1")
     assert ensure_comfy(facts) is None
     monkeypatch.delenv("SKULK_NO_ENGINE_AUTOPROVISION")
@@ -202,3 +205,18 @@ def test_pinned_wheel_requirement_shape() -> None:
     wheel = PinnedWheel(name="torch", version="1.0+cu130", filename="torch-1.0.whl", sha256="a" * 64, index="https://x/")
     assert wheel.url() == "https://x/torch-1.0.whl"
     assert wheel.requirement() == "torch @ https://x/torch-1.0.whl --hash=sha256:" + "a" * 64
+
+
+def test_startup_never_provisions_before_the_runner_exists(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(comfy, "provision_unasked_allowed", lambda: False)
+    calls: list[str] = []
+
+    def fake_provision(variant: str, *, run: object = None) -> Path:
+        calls.append(variant)
+        return provision_comfy(variant, run=_FakeRun())  # pyright: ignore[reportArgumentType]
+
+    monkeypatch.setattr(comfy, "provision_comfy", fake_provision)
+    facts = make_facts(gpus=(NVIDIA_A40,))
+    assert ensure_comfy(facts) is None and calls == []
+    # An operator's doctor --fix is explicit and may provision.
+    assert ensure_comfy(facts, explicit=True) is not None and calls == ["cuda"]

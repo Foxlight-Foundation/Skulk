@@ -300,7 +300,8 @@ def _check_comfy_engine(facts: NodeFacts) -> Sequence[CheckResult]:
     title = "ComfyUI video engine"
     if _declared_participation() != "full":
         return [_ok(check_id, title, "management node; no video engine expected")]
-    derived = derive_node_backends(facts).backends
+    derivation = derive_node_backends(facts)
+    derived = derivation.backends
     if "comfy" in derived:
         return [
             _ok(
@@ -310,7 +311,18 @@ def _check_comfy_engine(facts: NodeFacts) -> Sequence[CheckResult]:
                 f"{sorted(tag for tag in derived if tag.startswith('comfy-'))}",
             )
         ]
-    if facts.comfy_binary.state != "not_configured":
+    if facts.comfy_binary.state == "ok" and any(
+        "withheld" in note for note in derivation.notes
+    ):
+        return [
+            _ok(
+                check_id,
+                title,
+                f"comfy ({facts.comfy_root}) is configured; the backend advertises "
+                "once this build carries the ComfyUI runner",
+            )
+        ]
+    if facts.comfy_binary.state != "not_configured" or facts.comfy_root is not None:
         return [
             CheckResult(
                 check_id=check_id,
@@ -343,8 +355,8 @@ def _check_comfy_engine(facts: NodeFacts) -> Sequence[CheckResult]:
             _ok(
                 check_id,
                 title,
-                f"managed ComfyUI at {dormant} is installed and wires automatically "
-                "at node startup",
+                f"managed ComfyUI at {dormant} is installed; node startup wires it "
+                "once this build carries the ComfyUI runner",
             )
         ]
     fix_available = _comfy_fix_applicable(facts)
@@ -384,7 +396,7 @@ def _fix_comfy_engine(facts: NodeFacts) -> str | None:
         return None
     from skulk.provisioning import ensure_comfy
 
-    root = ensure_comfy(facts)
+    root = ensure_comfy(facts, explicit=True)
     if root is None:
         raise RuntimeError(
             "ComfyUI provisioning did not produce an install (override present, "
