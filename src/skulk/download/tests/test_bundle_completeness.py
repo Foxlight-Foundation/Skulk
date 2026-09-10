@@ -167,7 +167,19 @@ def test_bundle_on_a_read_only_root_is_complete_by_its_detached_record(
         written = write_installed_card_with_fallback(artifact, record, fallback_root=records)
         assert written.parent == records
         monkeypatch.setattr(installed_cards, "SKULK_INSTALLED_CARD_RECORDS_DIR", records)
+        hashes = 0
+        real_verify = installed_cards.verify_installed_card
+
+        def counting_verify(*args: object, **kwargs: object) -> bool:
+            nonlocal hashes
+            hashes += 1
+            return real_verify(*args, **kwargs)  # pyright: ignore[reportArgumentType]
+
+        monkeypatch.setattr(installed_cards, "verify_installed_card", counting_verify)
         assert is_model_directory_complete(artifact)
+        assert is_model_directory_complete(artifact)
+        # The detached record is hash-verified once per unchanged artifact.
+        assert hashes == 1
         monkeypatch.setattr(installed_cards, "SKULK_INSTALLED_CARD_RECORDS_DIR", tmp_path / "elsewhere")
         assert not is_model_directory_complete(artifact)
     finally:

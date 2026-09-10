@@ -10,7 +10,7 @@ from collections.abc import Awaitable
 from contextlib import suppress
 from datetime import timedelta
 from pathlib import Path, PurePosixPath
-from typing import Callable, Literal
+from typing import TYPE_CHECKING, Callable, Literal
 from urllib.parse import urljoin
 
 import aiofiles
@@ -47,6 +47,9 @@ from skulk.shared.types.worker.downloads import (
     RepoFileDownloadProgress,
 )
 from skulk.shared.types.worker.shards import PipelineShardMetadata, ShardMetadata
+
+if TYPE_CHECKING:
+    from skulk.store.installed_cards import VerifiedDetachedInstalledCardCache
 
 _SOURCE_REVISION_MARKER = ".skulk-source-revision"
 _SOURCE_REVISION_STAGING_MARKER = ".skulk-source-revision-staging"
@@ -1072,6 +1075,19 @@ def _rooted_bundle_is_complete(install_dir: Path, load_dir: Path) -> bool:
     return (load_dir / "config.json").is_file() or directory_has_gguf_weights(load_dir)
 
 
+_verified_detached_records: "VerifiedDetachedInstalledCardCache | None" = None
+
+
+def _detached_record_cache() -> "VerifiedDetachedInstalledCardCache":
+    """The process-lifetime cache of hash-verified detached installed records."""
+    global _verified_detached_records  # noqa: PLW0603 - one cache per process
+    if _verified_detached_records is None:
+        from skulk.store.installed_cards import VerifiedDetachedInstalledCardCache
+
+        _verified_detached_records = VerifiedDetachedInstalledCardCache()
+    return _verified_detached_records
+
+
 def _installed_bundle_verdict(model_dir: Path) -> bool | None:
     """Completeness by the installed bundle manifest, or ``None`` without one.
 
@@ -1086,10 +1102,14 @@ def _installed_bundle_verdict(model_dir: Path) -> bool | None:
 
     try:
         # The adjacent sidecar, or the path-bound detached record a read-only
-        # model root keeps under the Skulk data directory (that path re-hashes
-        # the bytes before trusting the record, as the inventory does).
+        # model root keeps under the Skulk data directory. A detached record
+        # is trusted only after a full hash pass; the process-lifetime cache
+        # keeps that pass to once per unchanged artifact (file-stat changes
+        # invalidate it), since completeness is probed on every resolution.
         record = installed_cards.read_installed_card_with_fallback(
-            model_dir, fallback_root=installed_cards.SKULK_INSTALLED_CARD_RECORDS_DIR
+            model_dir,
+            fallback_root=installed_cards.SKULK_INSTALLED_CARD_RECORDS_DIR,
+            verified_detached_cache=_detached_record_cache(),
         )
     except (OSError, ValueError):
         return None
