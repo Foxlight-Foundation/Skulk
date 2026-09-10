@@ -1088,10 +1088,15 @@ def _installed_bundle_verdict(model_dir: Path) -> bool | None:
     manifest is the completeness truth: every listed file present at its
     recorded size. A legacy sidecar without a manifest proves nothing here.
     """
-    from skulk.store.installed_cards import read_installed_card
+    from skulk.store import installed_cards
 
     try:
-        record = read_installed_card(model_dir)
+        # The adjacent sidecar, or the path-bound detached record a read-only
+        # model root keeps under the Skulk data directory (that path re-hashes
+        # the bytes before trusting the record, as the inventory does).
+        record = installed_cards.read_installed_card_with_fallback(
+            model_dir, fallback_root=installed_cards.SKULK_INSTALLED_CARD_RECORDS_DIR
+        )
     except (OSError, ValueError):
         return None
     if record is None or record.schema_version != 2 or not record.files:

@@ -18,9 +18,11 @@ from skulk.download.download_utils import (
 )
 from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
 from skulk.shared.types.memory import Memory
+from skulk.store import installed_cards
 from skulk.store.installed_cards import (
     build_installed_card_record,
     write_installed_card,
+    write_installed_card_with_fallback,
 )
 
 REVISION = "a" * 40
@@ -147,3 +149,26 @@ def test_manifest_outranks_a_safetensors_index_inside_the_bundle(tmp_path: Path)
     assert is_model_directory_complete(artifact)
     (artifact / "vae/audio_vae.safetensors").write_bytes(b"short")
     assert not is_model_directory_complete(artifact)
+
+
+def test_bundle_on_a_read_only_root_is_complete_by_its_detached_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    card = _card()
+    artifact = tmp_path / "models" / card.model_id.normalize()
+    for path, payload in FILES.items():
+        (artifact / path).parent.mkdir(parents=True, exist_ok=True)
+        (artifact / path).write_bytes(payload)
+    (artifact / ".skulk-source-revision").write_text(f"{REVISION}\n")
+    record = build_installed_card_record(artifact, card)
+    records = tmp_path / "records"
+    artifact.chmod(0o555)
+    try:
+        written = write_installed_card_with_fallback(artifact, record, fallback_root=records)
+        assert written.parent == records
+        monkeypatch.setattr(installed_cards, "SKULK_INSTALLED_CARD_RECORDS_DIR", records)
+        assert is_model_directory_complete(artifact)
+        monkeypatch.setattr(installed_cards, "SKULK_INSTALLED_CARD_RECORDS_DIR", tmp_path / "elsewhere")
+        assert not is_model_directory_complete(artifact)
+    finally:
+        artifact.chmod(0o755)
