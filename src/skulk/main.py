@@ -133,6 +133,9 @@ def _derive_zenoh_namespace(raw: str) -> str:
 _LIBP2P_NETWORK_VERSION = "v0.0.2"
 _LIBP2P_NAMESPACE_ENV_VAR = "SKULK_LIBP2P_NAMESPACE"
 _NODE_RESOURCES_POLL_INTERVAL_SECONDS = 2.0
+_CAPABILITY_NODES_REPUBLISH_SECONDS = 30.0
+"""Republish cadence for an unchanged non-empty capability-node snapshot on a
+management-only host; matches the worker gatherer so late joiners learn it."""
 _CLUSTER_CONFIG_SYNC_ATTEMPTS = 30
 _CLUSTER_CONFIG_SYNC_RESPONSE_TIMEOUT_SECONDS = 1.0
 _CLUSTER_CONFIG_SYNC_RETRY_INTERVAL_SECONDS = 0.2
@@ -155,6 +158,7 @@ async def _publish_management_node_resources(
     capability_nodes_provider: (
         Callable[[], tuple[CapabilityNodeSummary, ...]] | None
     ) = None,
+    capability_nodes_republish_interval: float = _CAPABILITY_NODES_REPUBLISH_SECONDS,
 ) -> None:
     """Advertise resource truth for a node started without a worker.
 
@@ -179,16 +183,21 @@ async def _publish_management_node_resources(
             this host inference placement.
         capability_nodes_provider: Cached capability-node summaries. A
             management-only host is exactly where a capability node lives
-            without inference, so the summaries are published from here
-            whenever they change, plus every tick while non-empty for late
-            joiners, and once more as an empty reading after the last one
-            is withdrawn.
+            without inference, so the summaries are published from here with
+            the worker gatherer's discipline: on change, republished while
+            non-empty every ``capability_nodes_republish_interval`` seconds
+            for late joiners, and once more as an empty reading after the
+            last one is withdrawn. A full snapshot every tick would be
+            sustained gossip for a host at the summary bounds.
+        capability_nodes_republish_interval: Seconds between republishes of
+            an unchanged non-empty snapshot.
 
     Side effects:
         Publishes one immediate and then periodic ``NodeResources`` reading until
         the owning task is cancelled or telemetry admission closes.
     """
-    published_capability_nodes = False
+    last_capability_nodes: tuple[CapabilityNodeSummary, ...] | None = None
+    last_capability_nodes_at = anyio.current_time()
     while True:
         try:
             resources = NodeResources(
@@ -220,14 +229,24 @@ async def _publish_management_node_resources(
                 if capability_nodes_provider is not None
                 else ()
             )
-            if capability_nodes or published_capability_nodes:
+            changed = (
+                capability_nodes != last_capability_nodes
+                if last_capability_nodes is not None
+                else bool(capability_nodes)
+            )
+            stale = (
+                anyio.current_time() - last_capability_nodes_at
+                >= capability_nodes_republish_interval
+            )
+            if changed or (capability_nodes and stale):
                 await telemetry_sender.send(
                     NodeTelemetry(
                         node_id=node_id,
                         info=NodeCapabilityNodes(nodes=capability_nodes),
                     )
                 )
-                published_capability_nodes = bool(capability_nodes)
+                last_capability_nodes = capability_nodes
+                last_capability_nodes_at = anyio.current_time()
         except (ClosedResourceError, BrokenResourceError):
             return
         except Exception as error:

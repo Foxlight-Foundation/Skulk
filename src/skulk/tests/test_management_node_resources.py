@@ -108,6 +108,16 @@ async def test_management_node_publishes_capability_nodes_and_empty_withdrawal()
                 if isinstance(reading.info, NodeCapabilityNodes):
                     assert reading.info.nodes == (summary,)
                     break
+            # Unchanged snapshots are not resent every tick: with the
+            # republish interval far above the poll, the next ticks carry
+            # resources only.
+            repeats = 0
+            with anyio.move_on_after(0.1):
+                while True:
+                    reading = await receiver.receive()
+                    if isinstance(reading.info, NodeCapabilityNodes):
+                        repeats += 1
+            assert repeats == 0
             published.clear()
             while True:
                 reading = await receiver.receive()
@@ -123,3 +133,43 @@ async def test_management_node_publishes_capability_nodes_and_empty_withdrawal()
                         seen_empty_again = True
             assert not seen_empty_again
             tasks.cancel_scope.cancel()
+
+
+async def test_management_node_republishes_unchanged_snapshot_for_late_joiners() -> None:
+    """A non-empty snapshot is resent on the republish cadence even when unchanged."""
+    from skulk.shared.types.capability_nodes import CapabilityNodeSummary
+    from skulk.utils.info_gatherer.info_gatherer import NodeCapabilityNodes
+
+    summary = CapabilityNodeSummary.model_validate(
+        {
+            "plugin_id": "foxlight.video-studio",
+            "node_id": "studio",
+            "bundle_id": "foxlight.video-studio",
+            "version": "1.0.0",
+            "status": "ready",
+            "owner_available": True,
+        }
+    )
+    sender, receiver = channel[NodeTelemetry]()
+    readings = 0
+    with anyio.fail_after(5):
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(
+                _publish_management_node_resources,
+                NodeId("management"),
+                True,
+                "zenoh",
+                sender,
+                None,
+                0.01,
+                None,
+                lambda: (summary,),
+                0.05,
+            )
+            with anyio.move_on_after(0.3):
+                while True:
+                    reading = await receiver.receive()
+                    if isinstance(reading.info, NodeCapabilityNodes):
+                        readings += 1
+            tasks.cancel_scope.cancel()
+    assert readings >= 3

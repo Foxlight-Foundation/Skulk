@@ -162,10 +162,11 @@ Notes:
   URL; embedding surfaces in the dashboard is a later contract.
 - `withdraw_capability_node(plugin_id, node_id)` removes the summary. When the
   last one goes, one empty reading clears the host's entry everywhere.
-- Management-only (`--no-worker`) hosts gossip these summaries the same way
-  they gossip capability tags (from the node lifecycle, every two seconds), so
-  a capability node on a host without a model worker still appears in the
-  topology.
+- Management-only (`--no-worker`) hosts gossip these summaries from the node
+  lifecycle with the same discipline as the worker gatherer (on change,
+  republished every thirty seconds while non-empty, one empty reading after
+  the last withdrawal), so a capability node on a host without a model
+  worker still appears in the topology.
 - Set `SKULK_TEST_CAPABILITY_NODE=<url>` on a host to publish one stand-in
   node with a single link surface and see the satellite without a plugin.
 
