@@ -86,6 +86,10 @@ _BUILTIN_CARD_DIRS = [
     Path(RESOURCES_DIR) / "embedding_model_cards",
     Path(RESOURCES_DIR) / "speech_model_cards",
     Path(RESOURCES_DIR) / "video_model_cards",
+    # Cards the synthetic test engines serve. They name no downloadable
+    # artifact, so they live apart from the corpus the signed registry
+    # imports; the registry reads only the artifact directories above.
+    Path(RESOURCES_DIR) / "test_engine_cards",
 ]
 
 _card_cache: dict[ModelId, "ModelCard"] = {}

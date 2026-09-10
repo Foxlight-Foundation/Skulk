@@ -51,7 +51,8 @@ Skulk is built with a mix of Rust, Python, TypeScript (React for the dashboard),
 - `resources/image_model_cards/` — Image model metadata TOML files
 - `resources/embedding_model_cards/` — Embedding model metadata TOML files
 - `resources/speech_model_cards/` — Speech model metadata TOML files
-- `resources/video_model_cards/`: audio-video generation model metadata TOML files, including the test engine's `foxlight/test-video` card
+- `resources/video_model_cards/`: audio-video generation model metadata TOML files (downloadable artifacts only; the signed registry imports this directory)
+- `resources/test_engine_cards/`: cards served by the synthetic test engines, such as `foxlight/test-video`; they name no artifact and stay out of the registry corpus
 - `resources/speech_reference_voices/` — Checksummed bundled TTS conditioning audio and exact transcripts
 - `deployment/logging/` — VictoriaLogs + Grafana stack and Vector config
 - `docs/` — Technical documentation
@@ -149,6 +150,7 @@ operator overrides. Model-card locations are:
 - `resources/embedding_model_cards/` for embedding models
 - `resources/speech_model_cards/` for TTS/STT speech models
 - `resources/video_model_cards/` for audio-video generation models
+- `resources/test_engine_cards/` for the synthetic test engines' cards
 - `~/.skulk/custom_model_cards/` for user-added custom models
 
 ### Adding a Model Card

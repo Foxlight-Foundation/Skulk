@@ -59,7 +59,7 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 
 ### Test video engine
 
-`src/skulk/worker/runner/test_video/`: `render.py` (seeded frame and tone synthesis, minimal ISO BMFF muxer with MJPEG and `sowt` PCM tracks), `runner.py` (duck-typed `Runner` with the image runner's state machine; emits progress `VideoChunk` frames and the terminal manifest), `provision.py` (stand-in model directory so `foxlight/test-video` places without a download). Selected in `bootstrap.entrypoint` when the shard's stamped backend resolves to the `test_video` engine; advertised by `facts.derive._derive_test_video` when `SKULK_TEST_VIDEO_ENGINE` is set.
+`src/skulk/worker/runner/test_video/`: `render.py` (seeded frame and tone synthesis, minimal ISO BMFF muxer with MJPEG and `sowt` PCM tracks), `runner.py` (duck-typed `Runner` with the image runner's state machine; emits progress `VideoChunk` frames and the terminal manifest), `provision.py` (stand-in model directory so `foxlight/test-video` places without a download; the card itself is bundled under `resources/test_engine_cards/`, apart from the artifact card directories the signed registry imports). Selected in `bootstrap.entrypoint` when the shard's stamped backend resolves to the `test_video` engine; advertised by `facts.derive._derive_test_video` when `SKULK_TEST_VIDEO_ENGINE` is set.
 
 ### Runner subprocess
 
@@ -1269,7 +1269,8 @@ deployment/             # observability stack docker-compose
 bench/                  # benchmark + repro harnesses
 docs/                   # operator guides (this file in website/docs/)
 website/                # Docusaurus site
-resources/inference_model_cards/  # built-in TOML cards
+resources/*_model_cards/  # built-in TOML cards per family (the registry imports these)
+resources/test_engine_cards/  # cards the synthetic test engines serve; never imported
 rust/                   # libp2p (networking), PyO3 bindings, system_custodian
 ```
 
