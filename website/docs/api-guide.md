@@ -3991,10 +3991,38 @@ acceptance, and paid-capacity approval remains a separate plugin operation.
 The dashboard's **Install a release** controls inspect the configured release,
 show its version/permissions and size, stage exact bytes, and require a separate
 permission acceptance and activation action. Installation progress is restored
-from the server after reconnect. Source/trust entry is available through terminal
-and direct-owner HTTP; its dashboard form and guided interrupted-install recovery
-are not yet available. Provider credential setup, nonbillable preflight and paid
+from the server after reconnect. Source/trust entry is available through terminal,
+the dashboard and direct-owner HTTP. Provider credential setup, nonbillable preflight and paid
 proposal approval remain separate from these release-feed operations.
+
+### Guided terminal installation
+
+After local system-service setup, run `skulk-plugin-service install-plugin` in
+the nonroot owner's interactive terminal. It generates an installation identity
+and prints a resume command before registration. Supply the trusted HTTPS
+directory, metadata filename (default `release.json`), publisher ID, Ed25519 public
+key and timezone-aware trust expiry. Confirm publisher trust separately, then enter
+the optional feed bearer through hidden terminal input. Credentials are never
+accepted as arguments, printed or included in retained operation identifiers.
+
+The command displays verified release compatibility, exact digest, size, expiry
+and permissions. Download requires explicit confirmation; starting the plugin owner
+requires separate permission acceptance. Both use the existing revision-fenced
+manager operations. Plugin configuration, nonbillable preflight, capability-node
+enablement and paid approval remain separate plugin operations, available through
+the plugin's documented terminal commands or the Plugins dashboard.
+
+After disconnect or an uncertain response, run the printed
+`skulk-plugin-service install-plugin MANAGED_ID` command. It retains configured
+trust and credentials, reads accepted installation/activation status, and never
+automatically resubmits an effect. Interrupted downloads require explicit recovery
+consent under their original operation ID. An unrelated or failed lifecycle
+transition requires explicit lifecycle inspection/recovery; it is not replaced.
+Existing selections of a different release require the explicit upgrade interface.
+Polling is bounded; exiting the terminal leaves manager-owned work running.
+The command accepts at most one installation ID and no executable, path or
+provider command. The existing typed-JSON `manage` interface remains available
+for automation, source rotation and advanced lifecycle operations.
 
 
 ### Stable local manager runtime

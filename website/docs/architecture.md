@@ -1662,6 +1662,13 @@ existing nonroot account from durable system storage. Retained setup phase is
 separate from current runtime integrity and manager availability. HTTP lifecycle,
 dynamic registration and physical service/reboot qualification remain open.
 
+`terminal_install.py` composes the manager's existing operations for the interactive
+`skulk-plugin-service install-plugin` command. It generates installation/operation
+identities, reads external source/trust settings and a hidden feed credential, and
+separates trust, download and owner-execution consent. Resume observes existing
+operations; interrupted downloads require explicit recovery. It never changes node
+configuration or approves spending, and introduces no HTTP or privileged operation.
+
 Extension startup and serving share one event loop. The API starts hooks only
 once its runtime begins and invokes optional asynchronous shutdown hooks before
 closing its lifetime, with discovery withdrawn and a shared thirty-second cleanup

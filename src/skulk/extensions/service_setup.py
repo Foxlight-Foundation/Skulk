@@ -2,17 +2,26 @@
 
 import argparse
 import asyncio
+import getpass
 import json
 import os
 import sqlite3
 import stat
 import sys
 import time
+import warnings
 from pathlib import Path
 from typing import Literal, Self
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    TypeAdapter,
+    model_validator,
+)
 
 from skulk.extensions import service_bootstrap, service_registration
 from skulk.extensions.local_setup import manage_installed_plugin, setup_installed_plugin
@@ -27,6 +36,7 @@ from skulk.extensions.runtime_install import finish_runtime_work
 from skulk.extensions.runtime_manager import (
     MANAGER_REQUEST,
     InventoryRequest,
+    ManagerRequest,
     manager_request,
 )
 from skulk.extensions.service_registration import ServiceLayout, local_layout
@@ -36,6 +46,7 @@ from skulk.extensions.service_snapshot import (
     service_source_identity,
     stage_service_runtime,
 )
+from skulk.extensions.terminal_install import TerminalInstaller
 from skulk.shared.constants import SKULK_CONFIG_HOME
 
 
@@ -342,11 +353,26 @@ class _ServiceArguments(argparse.Namespace):
         self.setup_arguments: list[str] = []
 
 
+def read_hidden_credential(prompt: str) -> str:
+    """Refuse a terminal that cannot disable echo before reading a credential."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", getpass.GetPassWarning)
+        return getpass.getpass(prompt)
+
+
 def main() -> None:
     """Run one explicit local setup command; remote management never invokes sudo."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "action", choices=("setup", "status", "manage", "setup-plugin", "manage-plugin")
+        "action",
+        choices=(
+            "setup",
+            "status",
+            "manage",
+            "setup-plugin",
+            "manage-plugin",
+            "install-plugin",
+        ),
     )
     parser.add_argument("setup_arguments", nargs=argparse.REMAINDER)
     arguments = _ServiceArguments()
@@ -356,6 +382,35 @@ def main() -> None:
             arguments.setup_arguments
         )
         action = TypeAdapter[str](str).validate_python(arguments.action)
+        if action == "install-plugin":
+            if (
+                os.geteuid() == 0
+                or os.geteuid() != os.getuid()
+                or not sys.stdin.isatty()
+                or len(remaining) > 1
+            ):
+                raise ValueError(
+                    "guided installation requires the nonroot owner terminal"
+                )
+            connection = ServiceConnection.model_validate_json(
+                read_private(
+                    SKULK_CONFIG_HOME / "managed-service/connection.json", 8192
+                )
+            )
+
+            async def install() -> None:
+                async def request(value: ManagerRequest) -> dict[str, JsonValue]:
+                    return await manager_request(Path(connection.manager_root), value)
+
+                def output(message: str) -> None:
+                    print(message, flush=True)
+
+                _ = await TerminalInstaller(
+                    request, input, read_hidden_credential, output
+                ).run(remaining[0] if remaining else None)
+
+            asyncio.run(install())
+            return
         if action in {"setup-plugin", "manage-plugin"}:
             if not remaining:
                 raise ValueError("plugin command requires an installed plugin ID")
@@ -397,7 +452,13 @@ def main() -> None:
             )
         else:
             print(json.dumps(asyncio.run(service_status())))
-    except (OSError, ValueError, TimeoutError, sqlite3.Error):
+    except (EOFError, KeyboardInterrupt):
+        print(
+            "Terminal closed. Accepted operations remain with the manager; use the printed resume command.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1) from None
+    except (OSError, ValueError, TimeoutError, sqlite3.Error, getpass.GetPassWarning):
         print(
             "Plugin service command incomplete. Rerun the same local command with the qualified Skulk environment; inspect protected setup and OS service status.",
             file=sys.stderr,

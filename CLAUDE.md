@@ -1146,6 +1146,14 @@ System daemons run as the nonroot account; API, management, plugin and independe
 cleanup lifetimes remain distinct. Test registration effects with isolated fixtures;
 real system-service and reboot claims require explicit physical qualification.
 
+`extensions/terminal_install.py` implements guided `skulk-plugin-service install-plugin`
+over existing manager requests. Keep external trust/source prompts and hidden feed
+credentials separate from generated IDs. Print resume identity before effects,
+observe accepted operations after disconnect, and require explicit trust, staging
+and activation consent. Provider configuration/preflight and paid approval stay
+outside this generic installer. Test through real manager IPC and signed fixture
+artifacts, including lost responses and explicit same-operation recovery.
+
 Managed node setup checks use the optional provider-neutral `NodePreflightProvider`
 facet and `/v1/plugins/{plugin_id}/nodes/{node_id}/preflight`. The plugin retains
 nonbillable checks and enable/restart enforcement; core enforces explicit plugin

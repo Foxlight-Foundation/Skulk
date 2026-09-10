@@ -22,6 +22,10 @@ setup recovery tests belong alongside `service_setup.py` and the standalone
 `service_registration.py` helper, with OS effects injected into isolated fixtures.
 Validate real LaunchDaemon/systemd behavior and reboot recovery on the explicitly
 assigned qualification host before claiming unattended installation support.
+Guided terminal installation lives in `extensions/terminal_install.py`. Its terminal
+effects are injectable; test the complete workflow against real manager IPC and
+synthetic signed artifacts, including disconnects, hidden credentials and distinct
+owner decisions. Keep plugin-specific setup and approval policy out of this module.
 
 Declarative model resources live in `src/skulk/resources/` so the normal uv build
 includes them in both wheels and source distributions. The root `resources`

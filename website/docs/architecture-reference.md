@@ -1404,6 +1404,14 @@ forms cannot contain credential fields, and setup completion does not imply
 preflight, enablement or paid approval. Public setup-file reads remain separate.
 
 
+Guided release installation uses `terminal_install.TerminalInstaller` through
+`skulk-plugin-service install-plugin [MANAGED_ID]`. It generates identities before
+effects and composes existing typed manager requests with separate publisher trust,
+download and activation consent. Feed credentials use hidden terminal input.
+Resume reads retained operations; download recovery requires explicit consent,
+and failed or unrelated lifecycle transitions are never replaced automatically.
+No provider policy, node enablement or paid approval is added to core.
+
 Installed plugin terminal management uses `skulk-plugin-service manage-plugin`
 and the selected archive's fixed optional `__manage__.py`. `extensions/local_setup.py`
 shares verification and inherited generation ownership with `setup-plugin`, while

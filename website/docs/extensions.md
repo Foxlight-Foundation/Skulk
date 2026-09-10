@@ -795,6 +795,15 @@ disconnect does not abandon accepted staging. The dashboard separates review,
 installation and explicit activation. Interrupted installation and protected partial
 evidence remain available for local recovery rather than automatic replay.
 
+`skulk-plugin-service install-plugin` provides the same guided release workflow in
+an owner terminal, generating internal IDs and collecting the feed credential through
+hidden input. Publisher trust, artifact installation and owner activation each
+require distinct consent. The printed `install-plugin MANAGED_ID` command resumes
+by reading retained operations; only explicitly confirmed download recovery retries
+the original local installation. Continue with the plugin's own configuration and
+preflight commands before enabling capability work. This command adds no provider
+policy or spending authority to core.
+
 
 ## Public node setup exports
 
