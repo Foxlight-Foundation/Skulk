@@ -6433,8 +6433,8 @@ class API:
 
         Empty or whitespace-only tags are ignored (a defensive guard: a tag is a
         discovery key, and a blank one would be meaningless gossip). A node that
-        runs no worker never emits (it has no gatherer), so the tag is recorded
-        but not gossiped there; the mainstream node runs both.
+        runs no worker has no gatherer; its node lifecycle publishes the set
+        alongside its management resource reading instead.
 
         Args:
             capability: The opaque capability tag to advertise (for example
