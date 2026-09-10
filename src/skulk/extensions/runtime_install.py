@@ -47,6 +47,7 @@ _OPERATION_ROW: TypeAdapter[tuple[str, str] | None] = TypeAdapter(
 _TRUST_ROW: TypeAdapter[tuple[int, str] | None] = TypeAdapter(tuple[int, str] | None)
 _DIGEST_ROW: TypeAdapter[tuple[str] | None] = TypeAdapter(tuple[str] | None)
 _RUNTIME_DIGEST: TypeAdapter[str] = TypeAdapter(Digest)
+_STAGING_OWNERSHIP_TIMEOUT = 30.0
 
 
 class RuntimeOperation(BaseModel):
@@ -303,6 +304,19 @@ class RuntimeInstaller:
         finally:
             lock.close()
 
+    async def _staging_lock(self, wait_for_ownership: bool) -> RuntimeLock:
+        # Supervisor verification briefly shares this lock. Wait only before
+        # staging has any effects; retrying the installer itself could replay
+        # partially completed work. Direct terminal calls remain nonblocking.
+        async with asyncio.timeout(_STAGING_OWNERSHIP_TIMEOUT):
+            while True:
+                try:
+                    return RuntimeLock(self.installer)
+                except BlockingIOError:
+                    if not wait_for_ownership:
+                        raise
+                    await asyncio.sleep(0.1)
+
     async def stage(
         self,
         metadata: bytes,
@@ -310,6 +324,7 @@ class RuntimeInstaller:
         *,
         operation_id: str | None = None,
         recover: bool = False,
+        wait_for_ownership: bool = False,
     ) -> RuntimeOperation:
         """Stage one verified artifact set offline with a reconnectable operation ID.
 
@@ -320,10 +335,13 @@ class RuntimeInstaller:
         Explicit recovery preserves incomplete generations as evidence before
         rebuilding the same signed bytes. Selected or completed generations are
         never moved or resealed by recovery.
+        Managed downloads may set wait_for_ownership to wait up to 30 seconds
+        for a competing local lock before any staging effects. Verification
+        runs after ownership is acquired; cancellation while waiting is safe.
         """
         if recover and operation_id is None:
             raise ValueError("recovery requires the original operation ID")
-        lock = RuntimeLock(self.installer)
+        lock = await self._staging_lock(wait_for_ownership)
         operation: RuntimeOperation | None = None
         record_started = False
         try:

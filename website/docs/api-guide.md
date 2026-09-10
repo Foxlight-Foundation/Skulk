@@ -3932,7 +3932,13 @@ staging. It resolves no dependency versions and does not modify Skulk's environm
 Installation states are `accepted`, `downloading`, `staging`, `staged` and
 `recovery_required`. Failure codes distinguish `download_failed`,
 `installation_failed` and `installation_interrupted`. Accepted work outlives an
-HTTP/browser disconnect. Manager shutdown cancels network transfer and waits for
+HTTP/browser disconnect. During `staging`, accepted downloads wait up to 30 seconds
+for the local installer lock before verification and installation begin. Short
+service-verification contention resumes the same operation without downloading
+again. If ownership remains busy, the operation becomes `recovery_required` with
+`installation_failed`; finish the competing management command before explicitly
+recovering the original operation. Shutdown cancels this wait without starting
+an installer. Manager shutdown cancels network transfer and waits for
 owned offline staging; an interrupted operation is retained and never automatically
 replayed after restart. Partial artifacts and incomplete runtime evidence remain
 protected for explicit recovery. Recovery retains prior operations, downloaded

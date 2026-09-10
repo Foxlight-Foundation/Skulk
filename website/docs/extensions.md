@@ -694,7 +694,12 @@ an explicitly supported host prerequisite.
 
 The installer journals operation IDs, release-sequence identities and monotonic
 trust revisions. `operation(id)` reads progress without replaying work. A disconnected
-waiter does not release the installer lock or prevent successful work from recording
+browser leaves accepted downloads running. Before offline staging starts, those
+downloads wait up to 30 seconds for competing local installer ownership and then
+revalidate trust and compatibility. Brief supervisor checks therefore delay the
+same operation without another download. Timeout or shutdown while waiting leaves
+the operation recoverable without starting an installer. A disconnected waiter
+does not release the installer lock or prevent successful work from recording
 `staged`. A failed or interrupted generation remains `recovery_required`, retaining
 its evidence; another call with that ID does not implicitly run installation again.
 Completed stages can be reverified from their cached artifacts. Completion requires

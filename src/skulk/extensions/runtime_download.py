@@ -665,6 +665,7 @@ class RuntimeDownloads:
                 directory,
                 operation_id=operation.request.operation_id,
                 recover=operation.attempt > 0,
+                wait_for_ownership=True,
             )
             if staged.state != "staged":
                 raise ValueError("offline installation requires recovery")

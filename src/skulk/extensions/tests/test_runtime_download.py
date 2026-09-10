@@ -98,6 +98,97 @@ async def test_review_and_owned_staging_survive_request_lifetime(
     await restarted.close()
 
 
+async def test_staging_waits_for_short_lived_installer_ownership(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A service verification lock delays accepted staging without requiring replay."""
+    downloads, _, _, calls = prepared(tmp_path, monkeypatch)
+    review = await downloads.inspect()
+    request = InstallRequest(
+        operation_id="b" * 32,
+        runtime_digest=review.runtime_digest,
+        expected_source_revision=1,
+    )
+    await downloads.submit(request)
+    lock = RuntimeLock(downloads.installer.installer)
+    try:
+        async with asyncio.timeout(5):
+            while downloads.operation(request.operation_id).state == "accepted":
+                await asyncio.sleep(0.01)
+        await asyncio.sleep(0.1)
+        waiting = downloads.operation(request.operation_id)
+        assert waiting.state == "staging"
+        assert waiting.downloaded_bytes == review.artifact_bytes
+        assert downloads.work is not None and not downloads.work.done()
+        with pytest.raises(LookupError):
+            downloads.installer.operation(request.operation_id)
+        assert await downloads.submit(request) == waiting
+    finally:
+        lock.close()
+        assert downloads.work is not None
+        await downloads.work
+        await downloads.close()
+    staged = downloads.operation(request.operation_id)
+    assert staged.state == "staged" and staged.attempt == 0
+    assert len(calls) == 3
+    assert not (downloads.root / "selected-runtime.json").exists()
+
+
+@pytest.mark.parametrize("failure", ["timeout", "shutdown", "expired"])
+async def test_staging_ownership_wait_refuses_without_effects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    """Waiting is bounded and cancellable, and trust is checked after acquiring ownership."""
+    downloads, _, _, calls = prepared(tmp_path, monkeypatch)
+    review = await downloads.inspect()
+    request = InstallRequest(
+        operation_id="b" * 32,
+        runtime_digest=review.runtime_digest,
+        expected_source_revision=1,
+    )
+    if failure == "timeout":
+        monkeypatch.setattr(
+            "skulk.extensions.runtime_install._STAGING_OWNERSHIP_TIMEOUT", 0.1
+        )
+    await downloads.submit(request)
+    lock = RuntimeLock(downloads.installer.installer)
+    try:
+        async with asyncio.timeout(5):
+            while downloads.operation(request.operation_id).state == "accepted":
+                await asyncio.sleep(0.01)
+        assert downloads.operation(request.operation_id).state == "staging"
+        assert downloads.work is not None
+        if failure == "shutdown":
+            await downloads.close()
+        elif failure == "expired":
+            path = downloads.root / "publisher-trust.json"
+            trust = RuntimeTrust.model_validate_json(read_private(path))
+            write_private(
+                path,
+                trust.model_copy(update={"expires_at": 1}).model_dump_json().encode(),
+            )
+            lock.close()
+        async with asyncio.timeout(5):
+            await downloads.work
+        failed = downloads.operation(request.operation_id)
+        assert failed.state == "recovery_required"
+        assert failed.error_code == "installation_failed"
+        assert failed.downloaded_bytes == review.artifact_bytes
+        with pytest.raises(LookupError):
+            downloads.installer.operation(request.operation_id)
+        assert not (downloads.root / "generations").exists()
+        assert not (downloads.root / "selected-runtime.json").exists()
+    finally:
+        lock.close()
+        await downloads.close()
+    restarted = RuntimeDownloads(downloads.root)
+    try:
+        assert await restarted.submit(request) == failed
+        assert restarted.work is None and len(calls) == 3
+    finally:
+        await restarted.close()
+
+
 @pytest.mark.parametrize("failure", ["redirect", "truncated", "tampered", "oversized"])
 async def test_bad_artifacts_never_stage_or_replay(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
