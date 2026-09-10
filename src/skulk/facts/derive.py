@@ -413,6 +413,22 @@ def _derive_vllm(
     return tags, conflicts, notes
 
 
+def _derive_test_video(facts: NodeFacts) -> tuple[set[str], list[CapabilityConflict], list[str]]:
+    """Advertise the test video engine when the operator asked for it."""
+
+    if not facts.test_video_engine:
+        return set(), [], []
+    return (
+        {"test_video", "test_video-cpu"},
+        [],
+        [
+            "SKULK_TEST_VIDEO_ENGINE advertises the deterministic test video "
+            "engine; it renders synthetic clips and serves only the bundled "
+            "foxlight/test-video card"
+        ],
+    )
+
+
 def derive_node_backends(facts: NodeFacts) -> BackendDerivation:
     """Derive the backend tags a node advertises, plus every loud conflict.
 
@@ -436,7 +452,7 @@ def derive_node_backends(facts: NodeFacts) -> BackendDerivation:
         if facts.mlx_audio_importable:
             tags |= {"mlx_audio", "mlx_audio-metal"}
 
-    for derive in (_derive_llama_cpp, _derive_llama_server, _derive_vllm):
+    for derive in (_derive_llama_cpp, _derive_llama_server, _derive_vllm, _derive_test_video):
         engine_tags, engine_conflicts, engine_notes = derive(facts)
         tags |= engine_tags
         conflicts.extend(engine_conflicts)

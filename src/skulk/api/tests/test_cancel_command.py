@@ -17,6 +17,21 @@ from skulk.shared.types.common import CommandId
 from skulk.utils.channels import Sender
 
 
+def _ample_free_bytes(_store: VideoStore) -> int:
+    return 1 << 40
+
+
+@pytest.fixture(autouse=True)
+def ample_disk(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the store's free-space check off the host's real disk.
+
+    The store leaves a reserve on its filesystem; a test must not depend on
+    how full the machine running it happens to be.
+    """
+
+    monkeypatch.setattr(VideoStore, "_free_disk_bytes", _ample_free_bytes)
+
+
 def _make_api() -> Any:
     """Create a minimal API instance with cancel route and error handler."""
 

@@ -42,6 +42,21 @@ from skulk.utils.channels import channel
 MODEL = ModelId("org/video")
 
 
+def _ample_free_bytes(_store: VideoStore) -> int:
+    return 1 << 40
+
+
+@pytest.fixture(autouse=True)
+def ample_disk(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the store's free-space check off the host's real disk.
+
+    The store leaves a reserve on its filesystem; a test must not depend on
+    how full the machine running it happens to be.
+    """
+
+    monkeypatch.setattr(VideoStore, "_free_disk_bytes", _ample_free_bytes)
+
+
 def _card() -> ModelCard:
     return ModelCard(
         model_id=MODEL,
@@ -569,6 +584,75 @@ def test_create_multipart_releases_earlier_parts_when_a_later_one_fails(
     assert response.status_code == 400
     assert api._video_upload_inflight_bytes == 0
     api._send.assert_not_called()
+
+
+def test_create_rejects_a_mode_that_contradicts_the_attachments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _make_api(monkeypatch)
+    client = TestClient(api.app)
+    response = client.post(
+        "/v1/videos", json={"model": str(MODEL), "prompt": "x", "mode": "fl2va"}
+    )
+    assert response.status_code == 400 and "imply t2va" in response.json()["error"]["message"]
+    response = client.post(
+        "/v1/videos",
+        data={"model": str(MODEL), "prompt": "x", "mode": "t2va"},
+        files=[("first_frame", ("a.png", b"0123456789", "image/png"))],
+    )
+    assert response.status_code == 400 and "imply fl2va" in response.json()["error"]["message"]
+    assert api._video_upload_inflight_bytes == 0
+    api._send.assert_not_called()
+
+
+def test_create_multipart_prechecks_the_declared_length(monkeypatch: pytest.MonkeyPatch) -> None:
+    api = _make_api(monkeypatch)
+    client = TestClient(api.app)
+    too_big = api_main._REFERENCE_MEDIA_PENDING_COMMAND_BYTES + api_main._VIDEO_MULTIPART_OVERHEAD_BYTES + 1
+    response = client.post(
+        "/v1/videos",
+        headers={"content-type": "multipart/form-data; boundary=x", "content-length": str(too_big)},
+        content=b"",
+    )
+    assert response.status_code == 413
+    api._pending_vision_media_bytes = api_main._VISION_MEDIA_PENDING_TOTAL_BYTES
+    response = client.post(
+        "/v1/videos",
+        headers={
+            "content-type": "multipart/form-data; boundary=x",
+            "content-length": str(api_main._VIDEO_MULTIPART_OVERHEAD_BYTES + 1),
+        },
+        content=b"",
+    )
+    assert response.status_code == 503
+
+
+def test_cancel_notifies_the_worker_when_the_render_finishes_during_the_send(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _make_api(monkeypatch)
+    terminals: list[OutputMediaPacket] = []
+
+    async def capture(packet: OutputMediaPacket) -> None:
+        terminals.append(packet)
+
+    monkeypatch.setattr(api, "_send_output_media_terminal", capture)
+    job = api._video_jobs.create(_job("racing", created_at=1))
+    sender, _receiver = channel[object]()
+    api._video_generation_queues[job.id] = sender
+    api._video_output_sources[job.id] = NodeId("worker-1")
+
+    async def send_and_finish(command: object) -> None:
+        # The terminal frame lands while TaskCancelled is in flight: the
+        # drain pops the queue and the job enters its upload phase.
+        api._video_generation_queues.pop(job.id, None)
+        api._video_jobs.update(job.id, render_finished=True, stage="uploading")
+
+    api._send = send_and_finish
+    client = TestClient(api.app)
+    assert client.post("/v1/videos/racing/cancel").json()["status"] == "cancelled"
+    assert [packet.kind for packet in terminals] == ["cancelled"]
+    assert terminals[0].target_node == NodeId("worker-1")
 
 
 def test_create_multipart_rejects_unknown_file_fields(monkeypatch: pytest.MonkeyPatch) -> None:

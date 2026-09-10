@@ -24,8 +24,11 @@ This project records release notes here and mirrors public-facing notes in
   `input_reference`, `first_frame`, `last_frame`, and repeated `reference`
   parts), list, retrieve, download (`content` with a `variant`), cancel,
   and delete jobs; a job completes only when the render's terminal report
-  and the verified container both arrive. No video engine ships yet, so a
-  create request fails at placement until one does.
+  and the verified container both arrive. A deterministic test video engine
+  (`SKULK_TEST_VIDEO_ENGINE`, bundled card `foxlight/test-video`) renders
+  seeded synthetic clips through every stage of the pipeline so the
+  substrate works end to end on nodes without a GPU; the served video
+  engines follow.
 - Muse Glimmer (Meta, August 2026) is a first-class model family on every
   serving lane. The capability resolver now derives the family's wire
   contract from the card family or model id, the same way it does for

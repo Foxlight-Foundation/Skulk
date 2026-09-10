@@ -547,12 +547,35 @@ def entrypoint(
         # RunnerFailed state rather than an unreported process-exit retry loop.
         require_remote_code_approval(shard.model_card)
         if bound_instance.is_video_model:
-            # The video substrate ships ahead of its engines. Fail loudly with
-            # the reason instead of letting a text runner try to load a
-            # diffusion stack and report something unrelated.
+            # Video placements are single-host. The master normally stamps
+            # the resolved backend; an unstamped shard (telemetry still
+            # warming, or a manual launch) resolves locally exactly like the
+            # text engines do.
+            from skulk.shared.backends import engine_of
+
+            resolved = shard.resolved_backend
+            video_engine = (
+                engine_of(resolved)
+                if resolved is not None
+                else _resolve_text_engine(bound_instance)
+            )
+            if video_engine == "test_video":
+                from skulk.worker.runner.test_video.runner import (
+                    Runner as TestVideoRunner,
+                )
+
+                runner = TestVideoRunner(
+                    bound_instance, event_sender, task_receiver, cancel_receiver
+                )
+                runner.main()
+                return
+            # The served video engines are later deliverables of the video
+            # arc. Fail loudly with the reason instead of letting a text runner
+            # try to load a diffusion stack and report something unrelated.
             raise RuntimeError(
-                "no video engine is installed on this node; the served video "
-                "engines are the next deliverable of the video arc"
+                "no video engine serves this placement on this node "
+                f"(resolved backend {resolved!r}); the served video engines are "
+                "later deliverables of the video arc"
             )
         if bound_instance.is_image_model:
             from skulk.worker.runner.image_models.runner import Runner as ImageRunner

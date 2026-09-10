@@ -242,6 +242,10 @@ class NodeFacts(CamelCaseModel):
     declared_vllm_backends: str | None = None
     """Raw ``SKULK_VLLM_BACKENDS`` value, verbatim, or ``None`` when unset."""
 
+    test_video_engine: bool = False
+    """Whether ``SKULK_TEST_VIDEO_ENGINE`` asks this node to advertise the
+    deterministic test video engine."""
+
     def gpus_of(self, vendor: GpuVendor) -> tuple[GpuDeviceFact, ...]:
         """Return the observed GPUs of one vendor, preserving device order."""
         return tuple(gpu for gpu in self.gpus if gpu.vendor == vendor)

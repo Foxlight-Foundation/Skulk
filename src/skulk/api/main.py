@@ -1094,6 +1094,8 @@ _OUTPUT_MEDIA_EARLY_BYTES_TOTAL = 128 * 1024 * 1024
 _VIDEO_ARTIFACT_PURPOSES: tuple[VideoArtifactPurpose, ...] = ("video", "thumbnail")
 _VIDEO_UPLOAD_READ_BYTES = 1024 * 1024
 """Read size while draining one multipart attachment under its byte bound."""
+_VIDEO_MULTIPART_OVERHEAD_BYTES = 1024 * 1024
+"""Allowance for multipart framing and text fields above the attachment bound."""
 
 
 def _validation_detail(error: ValidationError) -> str:
@@ -10565,6 +10567,27 @@ class API:
             raise HTTPException(status_code=404, detail="Video not found")
         return job
 
+    def _precheck_video_upload_length(self, request: Request) -> None:
+        """Refuse a body the limits would reject before the parser spools it."""
+
+        declared = request.headers.get("content-length", "")
+        if not declared.isdigit():
+            return
+        length = int(declared)
+        if length > _REFERENCE_MEDIA_PENDING_COMMAND_BYTES + _VIDEO_MULTIPART_OVERHEAD_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail="Reference media exceeds the per-request media limit",
+            )
+        if length > self._video_upload_budget() + _VIDEO_MULTIPART_OVERHEAD_BYTES:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "This node cannot admit more reference media until pending "
+                    "uploads finish"
+                ),
+            )
+
     def _video_upload_budget(self) -> int:
         """Bytes this node can still admit across uploads pending or arriving."""
 
@@ -10726,6 +10749,7 @@ class API:
                 ) from error
             raw: object = body
         elif content_type.startswith("multipart/form-data"):
+            self._precheck_video_upload_length(request)
             form = await request.form()
             raw = {
                 key: value for key, value in form.multi_items() if isinstance(value, str)
@@ -10786,6 +10810,15 @@ class API:
             raise HTTPException(
                 status_code=400, detail=_validation_detail(error)
             ) from error
+        implied = params.model_copy(update={"mode": None}).implied_mode()
+        if params.mode is not None and params.mode != implied:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"mode {params.mode.value} does not match the attachments, "
+                    f"which imply {implied.value}"
+                ),
+            )
         job = await self.submit_video_generation(params, attachments)
         return self._video_resource(job)
 
@@ -10873,16 +10906,20 @@ class API:
         """
 
         queue = self._video_generation_queues.get(command_id)
-        job = self._video_jobs.get(command_id)
-        source = self._video_output_sources.get(command_id)
         if queue is not None:
             await self._send(TaskCancelled(cancelled_command_id=command_id))
             # Suppress the TaskFinished that stream cleanup would send so the
             # worker observes the Cancelled task first (same as cancel_command).
             self._cancelled_command_ids.add(command_id)
             queue.close()
+        # Re-read after the await: the terminal frame may have landed while
+        # the cancellation was being sent, moving the job into its upload
+        # phase, and then the producing worker must be told to stop.
+        job = self._video_jobs.get(command_id)
+        source = self._video_output_sources.get(command_id)
+        upload_started = job is not None and job.render_finished
         self._finish_video_job(command_id, "the job was cancelled", cancelled=True)
-        if queue is None and job is not None and source is not None:
+        if upload_started and job is not None and source is not None:
             await self._send_output_media_terminal(
                 OutputMediaPacket(
                     source_node=self.node_id,
@@ -11270,6 +11307,9 @@ class API:
                     content_type=packet.content_type,
                     total_bytes=packet.total_bytes,
                     total_chunks=packet.total_chunks,
+                    # A live job between its halves has committed content
+                    # that eviction must not take out from under it.
+                    keep=self._video_jobs.active_ids(),
                 )
                 for stale in evicted:
                     # The store made room by dropping the oldest finished

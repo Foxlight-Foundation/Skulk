@@ -282,6 +282,7 @@ def gather_node_facts(
         LLAMA_SERVER_BACKENDS_ENV,
         LLAMA_SERVER_BIN_ENV,
         RPC_SERVER_BIN_ENV,
+        TEST_VIDEO_ENGINE_ENV,
         VLLM_BACKENDS_ENV,
         VLLM_BIN_ENV,
     )
@@ -353,6 +354,7 @@ def gather_node_facts(
     declared_llama_cpp = env.get(LLAMA_CPP_BACKENDS_ENV)
     declared_llama_server = env.get(LLAMA_SERVER_BACKENDS_ENV)
     declared_vllm = env.get(VLLM_BACKENDS_ENV)
+    test_video_engine = (env.get(TEST_VIDEO_ENGINE_ENV, "").strip().lower() in ("1", "true", "yes", "on"))
 
     # Probe the binary's own device list only when there is a usable binary
     # and no SERVER-specific declaration answers the question. A llama.cpp
@@ -380,4 +382,5 @@ def gather_node_facts(
         declared_llama_cpp_backends=declared_llama_cpp,
         declared_llama_server_backends=declared_llama_server,
         declared_vllm_backends=declared_vllm,
+        test_video_engine=test_video_engine,
     )

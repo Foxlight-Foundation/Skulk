@@ -186,6 +186,10 @@ class VideoJobRegistry:
         """Number of jobs that have not reached a terminal state."""
         return sum(1 for job in self._jobs.values() if not job.is_terminal)
 
+    def active_ids(self) -> frozenset[CommandId]:
+        """Ids of jobs that have not reached a terminal state."""
+        return frozenset(job.id for job in self._jobs.values() if not job.is_terminal)
+
     def list(self, *, limit: int = 20, after: CommandId | None = None, descending: bool = True) -> list[VideoJob]:
         """Return jobs ordered by creation, newest first by default."""
 

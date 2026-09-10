@@ -245,10 +245,19 @@ def _derived_bundle_id(files: object) -> str:
 
 def test_bundled_video_cards_validate_and_pin_every_byte() -> None:
     cards = _load_bundled()
-    assert len(cards) == 2
+    assert len(cards) == 3
+    seen_test_engine = False
     for path, raw in cards:
         card = ModelCard.model_validate(raw)
         assert path.name == card.model_id.normalize() + ".toml"
+        if card.model_id == ModelId("foxlight/test-video"):
+            # The test engine's card has no weights to pin: it is served by
+            # the deterministic renderer and provisioned in place.
+            seen_test_engine = True
+            assert card.artifact_bundle is None and card.source_revision is None
+            assert card.video is not None and card.license is None
+            assert {"test_video", "test_video-cpu"} <= card.placement.compatible_backends
+            continue
         assert card.source_revision is not None
         assert card.artifact_bundle is not None
         assert card.video is not None
@@ -265,6 +274,7 @@ def test_bundled_video_cards_validate_and_pin_every_byte() -> None:
         assert card.artifact_bundle.download_size == sum(item.size_bytes for item in card.artifact_bundle.files)
         assert all(item.object_id is not None for item in card.artifact_bundle.files)
         card.require_immutable_external_companions(context="bundled video cards")
+    assert seen_test_engine
 
 
 def test_video_cards_hidden_until_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
