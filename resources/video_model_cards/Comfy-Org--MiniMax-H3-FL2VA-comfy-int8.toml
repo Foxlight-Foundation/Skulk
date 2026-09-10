@@ -25,7 +25,7 @@ notice = "Open-weight use is territorially scoped by the license (the European U
 display_name = "MiniMax H3"
 
 [placement]
-compatible_backends = ["comfy"]
+compatible_backends = ["comfy", "comfy-cuda", "comfy-rocm"]
 backend_preference = ["comfy-cuda", "comfy-rocm"]
 min_vram_gib = 64
 

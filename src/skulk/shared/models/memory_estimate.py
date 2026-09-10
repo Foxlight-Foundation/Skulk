@@ -290,6 +290,10 @@ def backend_offloads_to_vram(resolved_backend: str | None) -> bool:
     """
     if resolved_backend is None:
         return False
+    if resolved_backend == "comfy":
+        # The video engine has no CPU mode: a card that names only the bare
+        # engine tag still lands its model on the GPU.
+        return True
     return resolved_backend.startswith(
         ("llama_cpp-", "llama_server-", "vllm-", "comfy-")
     ) and not resolved_backend.endswith("-cpu")

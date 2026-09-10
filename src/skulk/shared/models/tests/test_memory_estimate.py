@@ -555,4 +555,5 @@ def test_comfy_backend_offloads_to_vram() -> None:
     from skulk.shared.models.memory_estimate import backend_offloads_to_vram
 
     assert backend_offloads_to_vram("comfy-cuda") and backend_offloads_to_vram("comfy-rocm")
-    assert not backend_offloads_to_vram("comfy")
+    # The engine has no CPU mode, so even the bare tag lands on the GPU.
+    assert backend_offloads_to_vram("comfy")

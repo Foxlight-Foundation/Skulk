@@ -262,7 +262,7 @@ def test_bundled_video_cards_validate_and_pin_every_byte() -> None:
         assert card.artifact_bundle is not None
         assert card.video is not None
         assert card.license is not None and card.license.display_name == "MiniMax H3"
-        assert card.placement.compatible_backends == frozenset({"comfy"})
+        assert card.placement.compatible_backends == frozenset({"comfy", "comfy-cuda", "comfy-rocm"})
         bundle_paths = {item.path for item in card.artifact_bundle.files}
         for companion in card.video.companions:
             assert companion.repo is None
