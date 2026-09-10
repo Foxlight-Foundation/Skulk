@@ -10,7 +10,7 @@ from collections.abc import Awaitable
 from contextlib import suppress
 from datetime import timedelta
 from pathlib import Path, PurePosixPath
-from typing import Callable, Literal
+from typing import TYPE_CHECKING, Callable, Literal
 from urllib.parse import urljoin
 
 import aiofiles
@@ -47,6 +47,9 @@ from skulk.shared.types.worker.downloads import (
     RepoFileDownloadProgress,
 )
 from skulk.shared.types.worker.shards import PipelineShardMetadata, ShardMetadata
+
+if TYPE_CHECKING:
+    from skulk.store.installed_cards import VerifiedDetachedInstalledCardCache
 
 _SOURCE_REVISION_MARKER = ".skulk-source-revision"
 _SOURCE_REVISION_STAGING_MARKER = ".skulk-source-revision-staging"
@@ -389,10 +392,7 @@ def resolve_model_in_path(
             load_candidate_is_complete = (
                 is_model_directory_complete(load_candidate)
                 if artifact_root is None
-                else (
-                    (load_candidate / "config.json").is_file()
-                    or directory_has_gguf_weights(load_candidate)
-                )
+                else _rooted_bundle_is_complete(candidate, load_candidate)
             )
             if (
                 candidate.is_dir()
@@ -863,10 +863,7 @@ def build_model_path(
     if (
         default.is_dir()
         and default_load_root.is_dir()
-        and (
-            (default_load_root / "config.json").exists()
-            or directory_has_gguf_weights(default_load_root)
-        )
+        and _rooted_bundle_is_complete(default, default_load_root)
         and _source_revision_matches(default, source_revision)
     ):
         return _apply_artifact_root(default, artifact_root)
@@ -882,10 +879,7 @@ def build_model_path(
     if (
         staging_fallback.is_dir()
         and staging_load_root.is_dir()
-        and (
-            (staging_load_root / "config.json").exists()
-            or directory_has_gguf_weights(staging_load_root)
-        )
+        and _rooted_bundle_is_complete(staging_fallback, staging_load_root)
         and _source_revision_matches(staging_fallback, source_revision)
     ):
         return _apply_artifact_root(staging_fallback, artifact_root)
@@ -1052,6 +1046,12 @@ def _gguf_shard_info(name: str) -> "tuple[str, int] | None":
 
 def is_model_directory_complete(model_dir: Path) -> bool:
     """Check if a model directory contains all required weight files."""
+    # A bundle's installed manifest is the store-verified file list and
+    # outranks the layout heuristics below: a truncated companion file the
+    # safetensors index never mentions still makes the artifact incomplete.
+    manifest_verdict = _installed_bundle_verdict(model_dir)
+    if manifest_verdict is not None:
+        return manifest_verdict
     file_list = _scan_model_directory(model_dir, recursive=True)
     if file_list is not None:
         # A safetensors index is present: completeness is governed entirely by it
@@ -1060,6 +1060,77 @@ def is_model_directory_complete(model_dir: Path) -> bool:
     # No safetensors index -> this may be a GGUF repo; complete once its weights
     # (the full shard group) are present.
     return directory_has_gguf_weights(model_dir)
+
+
+def _rooted_bundle_is_complete(install_dir: Path, load_dir: Path) -> bool:
+    """Completeness for an artifact whose loader root sits beneath its install root.
+
+    The installed manifest at the install root is final when present (it
+    covers files outside the loader root too); without one, the loader root
+    is complete when it carries a config or GGUF weights.
+    """
+    verdict = _installed_bundle_verdict(install_dir)
+    if verdict is not None:
+        return verdict
+    return (load_dir / "config.json").is_file() or directory_has_gguf_weights(load_dir)
+
+
+_verified_detached_records: "VerifiedDetachedInstalledCardCache | None" = None
+
+
+def _detached_record_cache() -> "VerifiedDetachedInstalledCardCache":
+    """The process-lifetime cache of hash-verified detached installed records."""
+    global _verified_detached_records  # noqa: PLW0603 - one cache per process
+    if _verified_detached_records is None:
+        from skulk.store.installed_cards import VerifiedDetachedInstalledCardCache
+
+        _verified_detached_records = VerifiedDetachedInstalledCardCache()
+    return _verified_detached_records
+
+
+def _installed_bundle_verdict(model_dir: Path) -> bool | None:
+    """Completeness by the installed bundle manifest, or ``None`` without one.
+
+    A bundle-scoped artifact (a diffusion stack laid out by model folder, for
+    example) carries neither a safetensors index nor GGUF weights, so the
+    layout probes cannot see it. Its installed-card sidecar holds the file
+    manifest the store verified when it registered the bytes, and that
+    manifest is the completeness truth: every listed file present at its
+    recorded size. A legacy sidecar without a manifest proves nothing here.
+    """
+    from skulk.store import installed_cards
+
+    try:
+        # The adjacent sidecar, or the path-bound detached record a read-only
+        # model root keeps under the Skulk data directory. A detached record
+        # is trusted only after a full hash pass; the process-lifetime cache
+        # keeps that pass to once per unchanged artifact (file-stat changes
+        # invalidate it), since completeness is probed on every resolution.
+        record = installed_cards.read_installed_card_with_fallback(
+            model_dir,
+            fallback_root=installed_cards.SKULK_INSTALLED_CARD_RECORDS_DIR,
+            verified_detached_cache=_detached_record_cache(),
+        )
+    except (OSError, ValueError):
+        return None
+    if record is None or record.schema_version != 2 or not record.files:
+        return None
+    # Same containment rule as verify_installed_file: a manifest entry must
+    # resolve to a regular file beneath the artifact root, so an equal-sized
+    # symlink pointing outside the artifact never reads as its bytes.
+    resolved_root = model_dir.resolve()
+    for entry in record.files:
+        try:
+            candidate = (resolved_root / entry.path).resolve()
+            if (
+                not candidate.is_relative_to(resolved_root)
+                or not candidate.is_file()
+                or candidate.stat().st_size != entry.size_bytes
+            ):
+                return False
+        except OSError:
+            return False
+    return True
 
 
 async def _build_file_list_from_local_directory(
