@@ -25,6 +25,7 @@ from skulk.extensions.runtime_manager import (
     SubmitRequest,
     manager_request,
 )
+from skulk.extensions.tests.test_managed import Dynamic
 from skulk.extensions.tests.test_runtime_install import artifacts
 from skulk.extensions.tests.test_runtime_service import OWNER_SOURCE, running
 from skulk.extensions.tests.test_steward_tools import context
@@ -116,6 +117,7 @@ async def test_late_setup_activation_outage_and_shutdown_preserve_independent_ma
         owner = services.owners["managed.fixture"]
         assert registry.configuration_providers["managed.fixture"] is owner
         await owner.refresh()
+        assert owner.manager_enabled is False
         assert (
             not registry.capability_descriptors
         )  # Empty registration is not admission.
@@ -146,9 +148,16 @@ async def test_late_setup_activation_outage_and_shutdown_preserve_independent_ma
         await owner.refresh()
         assert registry.capability_descriptors == (descriptor,)
         assert registry.call_handler(descriptor.qualified_id) is not None
+        assert owner.manager_enabled is True
+        replacement = Dynamic("replacement")
+        replacement.snapshot = (descriptor,)
+        competing = LoadedExtensions([replacement], managed_services=services)
+        assert not competing.capability_descriptors
         await manager.close()
         with pytest.raises((OSError, ValueError)):
             await services.refresh()
+        assert owner.manager_enabled is None
+        assert not competing.capability_descriptors
         owner.available = (
             True  # Even a late successful child observation cannot restore admission.
         )
@@ -163,7 +172,42 @@ async def test_late_setup_activation_outage_and_shutdown_preserve_independent_ma
         await services.refresh()
         await owner.refresh()
         assert services.owners["managed.fixture"] is owner
+        assert owner.manager_enabled is True
         assert registry.capability_descriptors == (descriptor,)
+        cached_nodes = owner.nodes
+        await services.request(
+            SubmitRequest(
+                plugin_id="managed.fixture",
+                request=LifecycleRequest(
+                    operation_id="3" * 32,
+                    action="disable",
+                    expected_revision=1,
+                ),
+            )
+        )
+        assert controller.work is not None
+        await controller.work
+        await services.refresh()
+        assert owner.manager_enabled is False
+        assert owner.nodes == cached_nodes
+        assert registry.configuration_providers["managed.fixture"] is owner
+        assert not registry.capability_descriptors
+        assert competing.capability_descriptors == (descriptor,)
+        entry = competing.call_handler(descriptor.qualified_id)
+        assert entry is not None and entry[1] is replacement
+        # A lost manager observation cannot authorize transferring ownership.
+        await manager.close()
+        with pytest.raises((OSError, ValueError)):
+            await services.refresh()
+        assert owner.manager_enabled is None
+        assert not competing.capability_descriptors
+        manager = RuntimeManager(root)
+        await manager.start()
+        assert manager.boot is not None
+        await manager.boot
+        await services.refresh()
+        assert owner.manager_enabled is False
+        assert competing.capability_descriptors == (descriptor,)
         await registry.run_shutdown_hooks()
         assert not registry.capability_descriptors
         assert "result" in await manager_request(root, InventoryRequest())

@@ -231,6 +231,7 @@ class ManagedServices:
                             )
                         self.owners[identifier] = owner
                         owner.on_start(self.context)
+                    self.owners[identifier].manager_enabled = item.enabled
                     self.owners[identifier].manager_available = (
                         item.enabled
                         and not item.stale
@@ -246,6 +247,7 @@ class ManagedServices:
                 for owner in self.owners.values():
                     owner.available = False
                     owner.manager_available = False
+                    owner.manager_enabled = None
                 raise
 
     async def _poll(self) -> None:

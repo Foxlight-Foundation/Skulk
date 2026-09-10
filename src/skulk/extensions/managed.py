@@ -203,6 +203,7 @@ class ManagedOwner:
         self.observed = 0.0
         self.available = False
         self.manager_available = True
+        self.manager_enabled: bool | None = None
         self.poll_task: asyncio.Task[None] | None = None
         self.host_task: asyncio.Task[None] | None = None
         self.host_callbacks_available = False
@@ -213,7 +214,12 @@ class ManagedOwner:
         return None
 
     def dynamic_capabilities(self) -> tuple[CapabilityDescriptor, ...]:
-        """Return bounded cached contracts, preserving ownership during failure."""
+        """Reserve cached contracts unless an explicit disable withdraws ownership."""
+        # Unknown health must not transfer a capability to another owner. A
+        # confirmed disable is different: the operator withdrew that runtime,
+        # while its cached nodes remain available for management and diagnostics.
+        if self.disabled or self.manager_enabled is False:
+            return ()
         return tuple(
             descriptor for node in self.nodes for descriptor in node.descriptors
         )
@@ -222,6 +228,7 @@ class ManagedOwner:
         """Admit only recently observed ready capacity while the adapter is active."""
         return (
             not self.disabled
+            and self.manager_enabled is not False
             and self.available
             and self.manager_available
             and time.monotonic() - self.observed < 3

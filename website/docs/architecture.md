@@ -1686,7 +1686,10 @@ local service setup. It discovers newly registered installations without an API
 restart, shares the API attachment fence, and merges their ordinary configuration
 and cached capability facets with existing extensions. Static extension names
 retain priority. Missing or stale manager observations withdraw capability
-admission even if a child later reports healthy. API shutdown releases observers;
+admission even if a child later reports healthy. An explicitly disabled owner
+withdraws its cached capability reservations so a replacement can become visible
+without an API restart; unknown manager state retains conflict protection. Cached
+nodes remain available for management. API shutdown releases observers;
 the OS retains ownership of runtime and independent cleanup supervision.
 `api/managed_plugins.py` exposes explicit plugin-scoped inventory, registration,
 selection and durable lifecycle operations under `/v1/plugins/managed`. The
