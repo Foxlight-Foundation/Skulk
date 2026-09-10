@@ -33,6 +33,14 @@ MAX_CAPABILITY_NODE_ACTIONS = 8
 
 MAX_ACTION_PAYLOAD_BYTES = 4096
 
+CAPABILITY_NODES_STALE_AFTER_SECONDS = 90.0
+"""Age after which a host's last capability-node reading no longer counts.
+
+A live host republishes a non-empty snapshot every thirty seconds, so three
+missed intervals mean the summaries are gone or the host is silent; either
+way a peer that missed the single empty withdrawal reading must not keep
+projecting the old summaries. The dashboard mutes at the same age."""
+
 MAX_OPERATIONS_ACTIVE = 10_000
 """Upper bound on the reported active-operation count; the value is a hint
 for the flyout, not an inventory, and a larger integer is a malformed owner."""

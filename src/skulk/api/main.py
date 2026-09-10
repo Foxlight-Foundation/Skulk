@@ -25,7 +25,7 @@ from collections.abc import (
     Sequence,
 )
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from pathlib import Path
 from typing import (
@@ -419,6 +419,7 @@ from skulk.shared.types.audio import (
     SpeechSynthesisTaskParams,
 )
 from skulk.shared.types.capability_nodes import (
+    CAPABILITY_NODES_STALE_AFTER_SECONDS,
     MAX_CAPABILITY_NODES_PER_HOST,
     CapabilityNodeAction,
     CapabilityNodeSummary,
@@ -4986,20 +4987,26 @@ class API:
         # Capability-node summaries per host: what the topology draws as
         # satellites. Each carries the local receipt time of its host's last
         # reading so the dashboard can mute a satellite whose host went quiet.
+        # A reading older than the stale threshold is dropped here: a live
+        # host republishes every thirty seconds, so a peer that missed the
+        # single empty withdrawal reading must not keep projecting summaries
+        # the host no longer publishes.
+        now = datetime.now(tz=timezone.utc)
+        stale_after = timedelta(seconds=CAPABILITY_NODES_STALE_AFTER_SECONDS)
+        received_at = self._telemetry_view.node_capability_nodes_received_at
         payload["capabilityNodes"] = {
             str(node_id): [
                 {
                     **summary.model_dump(mode="json", by_alias=True),
-                    "observedAt": self._telemetry_view.node_capability_nodes_received_at[
-                        node_id
-                    ].isoformat(),
+                    "observedAt": received_at[node_id].isoformat(),
                 }
                 for summary in summaries
             ]
             for node_id, summaries in self._telemetry_view.node_capability_nodes.items()
             if node_id in live
             and summaries
-            and node_id in self._telemetry_view.node_capability_nodes_received_at
+            and node_id in received_at
+            and now - received_at[node_id] <= stale_after
         }
         # Derived per-node health (#388): explain a node's problems (and the fix)
         # in the topology so the master's silent recovery of a wedged/failed node

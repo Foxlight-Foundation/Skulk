@@ -2984,8 +2984,10 @@ surface is `kind: "link"` with an absolute `url` and a `ready` flag), `actions`
 carries the `capabilityId` and a fixed `payload` for `POST /v1/capabilities/call`
 on that host), and `observedAt`, the local receipt time of the host's last
 reading. The summaries ride the telemetry plane; a host that stops publishing
-ages out with its other readings, and a reading older than about ninety
-seconds is treated as stale by the dashboard. The dashboard draws each summary
+ages out with its other readings, and a host whose last reading is older
+than ninety seconds (three republish intervals) is dropped from the map,
+which also covers a peer that missed the host's withdrawal reading. The
+dashboard mutes a satellite at the same age. The dashboard draws each summary
 as a satellite of its host in the topology and opens its surfaces from a
 flyout. Hosts with no capability nodes are absent from the map.
 

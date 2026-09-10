@@ -6,7 +6,7 @@ shared TelemetryView outbound map, `withdraw_capability_node` removes it, and
 `capabilityNodes` with the host's last receipt time.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import cast
 
 import pytest
@@ -18,6 +18,7 @@ from skulk.api.main import (
 )
 from skulk.shared.election import ElectionMessage
 from skulk.shared.types.capability_nodes import (
+    CAPABILITY_NODES_STALE_AFTER_SECONDS,
     MAX_CAPABILITY_NODES_PER_HOST,
     CapabilityNodeAction,
     CapabilityNodeSummary,
@@ -98,13 +99,20 @@ async def test_state_projects_capability_nodes_of_live_hosts() -> None:
     api = _build_api(view)
     host = NodeId("n-host")
     dead = NodeId("n-dead")
-    observed = datetime(2026, 9, 10, 12, 0, tzinfo=timezone.utc)
+    observed = datetime.now(tz=timezone.utc)
     view.node_capability_nodes[host] = (_summary(),)
     view.node_capability_nodes_received_at[host] = observed
     view.node_capability_nodes[dead] = (_summary("ghost"),)
     view.node_capability_nodes_received_at[dead] = observed
+    # A live host whose last reading is older than the stale threshold is
+    # dropped too: it missed the withdrawal or stopped publishing summaries.
+    quiet = NodeId("n-quiet")
+    view.node_capability_nodes[quiet] = (_summary("old"),)
+    view.node_capability_nodes_received_at[quiet] = observed - timedelta(
+        seconds=CAPABILITY_NODES_STALE_AFTER_SECONDS + 1
+    )
     api.state = api.state.model_copy(
-        update={"last_seen": {host: datetime.now(tz=timezone.utc)}}
+        update={"last_seen": {host: observed, quiet: observed}}
     )
     payload = await api.get_cluster_state()
     nodes = cast("dict[str, list[dict[str, object]]]", payload["capabilityNodes"])
