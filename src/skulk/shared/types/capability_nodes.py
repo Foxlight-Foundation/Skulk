@@ -244,7 +244,14 @@ class CapabilityNodeAction(FrozenModel):
             raise ValueError("only descriptor actions may carry a payload")
         if self.payload is not None:
             _check_payload_keys(self.payload)
-            encoded = json.dumps(self.payload, separators=(",", ":"))
+            try:
+                # allow_nan=False refuses NaN and Infinity, which are not JSON
+                # and would fail the strict encoder behind GET /state later.
+                encoded = json.dumps(self.payload, separators=(",", ":"), allow_nan=False)
+            except ValueError as error:
+                raise ValueError(
+                    "descriptor action payloads must be plain JSON without NaN or Infinity"
+                ) from error
             if len(encoded.encode("utf-8")) > MAX_ACTION_PAYLOAD_BYTES:
                 raise ValueError(
                     f"descriptor action payloads are limited to {MAX_ACTION_PAYLOAD_BYTES} bytes"

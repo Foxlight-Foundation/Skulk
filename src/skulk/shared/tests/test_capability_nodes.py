@@ -98,6 +98,15 @@ def test_action_shapes_require_their_target() -> None:
         CapabilityNodeAction(
             action_id="a", title="A", kind="descriptor", capability_id="video.plan", payload=leaking
         )
+    for bad_number in (float("nan"), float("inf")):
+        with pytest.raises(ValidationError):
+            CapabilityNodeAction(
+                action_id="a",
+                title="A",
+                kind="descriptor",
+                capability_id="video.plan",
+                payload={"steps": bad_number},
+            )
     oversized: dict[str, JsonValue] = {"blob": "x" * MAX_ACTION_PAYLOAD_BYTES}
     with pytest.raises(ValidationError):
         CapabilityNodeAction(
