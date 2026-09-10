@@ -547,12 +547,18 @@ def entrypoint(
         # RunnerFailed state rather than an unreported process-exit retry loop.
         require_remote_code_approval(shard.model_card)
         if bound_instance.is_video_model:
-            # Video placements are single-host and the master stamps the
-            # resolved backend, so the engine is read straight off the shard.
+            # Video placements are single-host. The master normally stamps
+            # the resolved backend; an unstamped shard (telemetry still
+            # warming, or a manual launch) resolves locally exactly like the
+            # text engines do.
             from skulk.shared.backends import engine_of
 
             resolved = shard.resolved_backend
-            video_engine = engine_of(resolved) if resolved is not None else None
+            video_engine = (
+                engine_of(resolved)
+                if resolved is not None
+                else _resolve_text_engine(bound_instance)
+            )
             if video_engine == "test_video":
                 from skulk.worker.runner.test_video.runner import (
                     Runner as TestVideoRunner,
