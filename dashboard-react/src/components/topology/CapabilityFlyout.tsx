@@ -272,8 +272,11 @@ export function CapabilityFlyout({
     };
   }, [onClose]);
 
+  const callKeyRef = useRef<string | null>(null);
   useEffect(() => {
     setCallOutcome(null);
+    setCallInFlight(null);
+    callKeyRef.current = null;
   }, [selectedKey]);
 
   const summary = summaries.find((candidate) => capabilityNodeKey(candidate) === selectedKey) ?? summaries[0];
@@ -298,25 +301,29 @@ export function CapabilityFlyout({
 
   const runCall = async (item: Extract<CapabilityActionItem, { kind: 'call' }>) => {
     if (!localNodeId) return;
+    const startedFor = selectedKey;
+    callKeyRef.current = startedFor;
     setCallInFlight(item.id);
     setCallOutcome(null);
+    let next: { id: string; text: string; error: boolean };
     try {
       const result = await runDescriptorAction(localNodeId, item.capabilityId, item.payload);
-      if (result.ok === false) {
-        const message = result.error?.message ?? result.error?.code ?? 'error';
-        setCallOutcome({ id: item.id, text: message, error: true });
-      } else {
-        setCallOutcome({
-          id: item.id,
-          text: t('topology.capability.callSucceeded', '{title} completed', { title: item.title }),
-          error: false,
-        });
-      }
+      next =
+        result.ok === false
+          ? { id: item.id, text: result.error?.message ?? result.error?.code ?? 'error', error: true }
+          : {
+              id: item.id,
+              text: t('topology.capability.callSucceeded', '{title} completed', { title: item.title }),
+              error: false,
+            };
     } catch (error: unknown) {
-      setCallOutcome({ id: item.id, text: error instanceof Error ? error.message : String(error), error: true });
-    } finally {
-      setCallInFlight(null);
+      next = { id: item.id, text: error instanceof Error ? error.message : String(error), error: true };
     }
+    // A completion for a node the operator has since switched away from is
+    // dropped rather than shown under the new node's header.
+    if (callKeyRef.current !== startedFor) return;
+    setCallOutcome(next);
+    setCallInFlight(null);
   };
 
   return (
@@ -376,7 +383,7 @@ export function CapabilityFlyout({
                   key={item.id}
                   title={t(
                     'topology.capability.surfaceOnHostOnly',
-                    'Reachable only from a browser on {host}',
+                    'Reachable only from a browser running on {host}',
                     { host: hostName },
                   )}
                   type="button"

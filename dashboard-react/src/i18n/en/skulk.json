@@ -967,7 +967,7 @@
   "topology.capability.status.stale": "no recent report",
   "topology.capability.status.starting": "starting",
   "topology.capability.surfaceNotReady": "Not answering yet",
-  "topology.capability.surfaceOnHostOnly": "Reachable only from a browser on {host}",
+  "topology.capability.surfaceOnHostOnly": "Reachable only from a browser running on {host}",
   "topology.capability.switcherAria": "Capability nodes on this host",
   "topology.clusterNode.connections": "Connections",
   "topology.clusterNode.disabled": "Disabled",

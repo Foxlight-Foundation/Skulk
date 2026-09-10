@@ -39,8 +39,8 @@ export interface CapabilityActionContext {
   isLocalHost: boolean;
   /**
    * Hostname the browser used to reach this dashboard (`location.hostname`).
-   * Loopback surface URLs on the local host are rewritten onto it so a
-   * dashboard opened from another machine still reaches the host.
+   * A loopback surface URL is reachable only when this is loopback too and
+   * the dashboard is served by the capability host.
    */
   dashboardHostname?: string;
   /** Friendly name of the host, for the "manage on host" hint. */
@@ -58,12 +58,14 @@ export interface ResolvedSurfaceUrl {
 }
 
 /**
- * Makes a surface URL usable from wherever the dashboard is open. A loopback
- * URL means "on the capability host": when this dashboard is served by that
- * host, the loopback part is replaced with the hostname the browser already
- * reached the dashboard through; when the dashboard is served by a different
- * host, the URL is left as is but marked unreachable, because following it
- * would target the browser's own machine. Non-loopback URLs pass through.
+ * Decides whether this browser can follow a surface URL. A loopback URL
+ * means "on the capability host" and a service published that way is
+ * usually bound to loopback only (the ComfyUI engine listens on 127.0.0.1),
+ * so it is reachable only when the browser itself runs on that host: the
+ * dashboard was reached through a loopback hostname and it is served by the
+ * capability host. The URL is never rewritten onto a LAN address, which
+ * would advertise a link the service refuses. Any other browser sees the
+ * entry as unreachable with a hint; routable URLs pass through untouched.
  */
 export function resolveSurfaceUrl(
   url: string,
@@ -75,19 +77,14 @@ export function resolveSurfaceUrl(
   } catch {
     return { url, reachable: true };
   }
-  if (!LOOPBACK_HOSTS.has(parsed.hostname) && !LOOPBACK_HOSTS.has(`[${parsed.hostname}]`)) {
-    return { url, reachable: true };
-  }
-  const dashboardHostname = context.dashboardHostname?.trim();
-  if (!context.isLocalHost || !dashboardHostname) {
-    return { url, reachable: false };
-  }
-  if (LOOPBACK_HOSTS.has(dashboardHostname) || LOOPBACK_HOSTS.has(`[${dashboardHostname}]`)) {
-    // Browser and host are the same machine; the loopback URL is fine.
-    return { url, reachable: true };
-  }
-  parsed.hostname = dashboardHostname;
-  return { url: parsed.toString(), reachable: true };
+  if (!isLoopbackHostname(parsed.hostname)) return { url, reachable: true };
+  const dashboardHostname = context.dashboardHostname?.trim() ?? '';
+  const browserOnHost = context.isLocalHost && isLoopbackHostname(dashboardHostname);
+  return { url, reachable: browserOnHost };
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+  return LOOPBACK_HOSTS.has(hostname) || LOOPBACK_HOSTS.has(`[${hostname}]`);
 }
 
 function resolveAction(

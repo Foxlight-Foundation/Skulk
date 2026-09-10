@@ -119,25 +119,23 @@ describe('generateCallId', () => {
 });
 
 describe('resolveSurfaceUrl', () => {
-  it('rewrites loopback onto the dashboard hostname when served by the host', () => {
-    expect(
-      resolveSurfaceUrl('http://127.0.0.1:8188/ui?x=1', { isLocalHost: true, dashboardHostname: 'kite6.local' }),
-    ).toEqual({ url: 'http://kite6.local:8188/ui?x=1', reachable: true });
-    expect(resolveSurfaceUrl('http://localhost:8188/', { isLocalHost: true, dashboardHostname: '10.0.0.5' })).toEqual({
-      url: 'http://10.0.0.5:8188/',
-      reachable: true,
-    });
-  });
-
-  it('keeps loopback when the browser is on the host itself', () => {
+  it('keeps a loopback surface reachable only when the browser is on the host', () => {
     expect(resolveSurfaceUrl('http://127.0.0.1:8188/', { isLocalHost: true, dashboardHostname: 'localhost' })).toEqual({
       url: 'http://127.0.0.1:8188/',
       reachable: true,
     });
+    expect(resolveSurfaceUrl('http://localhost:8188/', { isLocalHost: true, dashboardHostname: '127.0.0.1' })).toEqual({
+      url: 'http://localhost:8188/',
+      reachable: true,
+    });
   });
 
-  it('marks loopback unreachable when the dashboard is served elsewhere', () => {
-    expect(resolveSurfaceUrl('http://127.0.0.1:8188/', { isLocalHost: false, dashboardHostname: 'kite3.local' })).toEqual({
+  it('never rewrites loopback onto a LAN address and marks it unreachable from remote browsers', () => {
+    expect(resolveSurfaceUrl('http://127.0.0.1:8188/ui', { isLocalHost: true, dashboardHostname: 'kite6.local' })).toEqual({
+      url: 'http://127.0.0.1:8188/ui',
+      reachable: false,
+    });
+    expect(resolveSurfaceUrl('http://127.0.0.1:8188/', { isLocalHost: false, dashboardHostname: 'localhost' })).toEqual({
       url: 'http://127.0.0.1:8188/',
       reachable: false,
     });

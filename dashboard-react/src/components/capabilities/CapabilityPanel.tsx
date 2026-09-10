@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import styled, { useTheme } from 'styled-components';
 import { FiExternalLink, FiPlay } from 'react-icons/fi';
 import type { Theme } from '../../theme';
@@ -178,6 +178,16 @@ export function CapabilityPanel() {
   const { capabilityNodes, topology, localNodeId } = useClusterState();
   const [outcome, setOutcome] = useState<{ text: string; error: boolean } | null>(null);
   const [inFlight, setInFlight] = useState(false);
+  const targetKey = target ? `${target.hostNodeId}/${target.key}` : null;
+  // The panel stays mounted across targets, so call state is scoped to the
+  // target it was produced for: a target change clears it, and a completion
+  // for a previous target is dropped instead of landing under the new one.
+  const callTargetRef = useRef<string | null>(null);
+  useEffect(() => {
+    setOutcome(null);
+    setInFlight(false);
+    callTargetRef.current = null;
+  }, [targetKey]);
 
   const close = useCallback(() => dispatch(uiActions.closeCapabilityPanel()), [dispatch]);
   const setWidth = useCallback(
@@ -211,21 +221,24 @@ export function CapabilityPanel() {
   );
 
   const runCall = async (item: Extract<CapabilityActionItem, { kind: 'call' }>) => {
-    if (!localNodeId) return;
+    if (!localNodeId || !targetKey) return;
+    const startedFor = targetKey;
+    callTargetRef.current = startedFor;
     setInFlight(true);
     setOutcome(null);
+    let next: { text: string; error: boolean };
     try {
       const result = await runDescriptorAction(localNodeId, item.capabilityId, item.payload);
-      if (result.ok === false) {
-        setOutcome({ text: result.error?.message ?? result.error?.code ?? 'error', error: true });
-      } else {
-        setOutcome({ text: JSON.stringify(result.result ?? null, null, 2), error: false });
-      }
+      next =
+        result.ok === false
+          ? { text: result.error?.message ?? result.error?.code ?? 'error', error: true }
+          : { text: JSON.stringify(result.result ?? null, null, 2), error: false };
     } catch (error: unknown) {
-      setOutcome({ text: error instanceof Error ? error.message : String(error), error: true });
-    } finally {
-      setInFlight(false);
+      next = { text: error instanceof Error ? error.message : String(error), error: true };
     }
+    if (callTargetRef.current !== startedFor) return;
+    setOutcome(next);
+    setInFlight(false);
   };
 
   const title = summary ? capabilityNodeTitle(summary) : t('capabilityPanel.title', 'Capability node');
@@ -333,7 +346,7 @@ export function CapabilityPanel() {
                         <RowText>
                           <span>{surface.title}</span>
                           <small>
-                            {t('topology.capability.surfaceOnHostOnly', 'Reachable only from a browser on {host}', {
+                            {t('topology.capability.surfaceOnHostOnly', 'Reachable only from a browser running on {host}', {
                               host: hostName,
                             })}
                           </small>
@@ -378,7 +391,7 @@ export function CapabilityPanel() {
                             <RowText>
                               <span>{item.title}</span>
                               <small>
-                                {t('topology.capability.surfaceOnHostOnly', 'Reachable only from a browser on {host}', {
+                                {t('topology.capability.surfaceOnHostOnly', 'Reachable only from a browser running on {host}', {
                                   host: hostName,
                                 })}
                               </small>

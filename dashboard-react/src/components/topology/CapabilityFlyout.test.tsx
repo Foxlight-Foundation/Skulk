@@ -118,7 +118,7 @@ describe('CapabilityFlyout', () => {
     const disabled = [...(container?.querySelectorAll('button:disabled') ?? [])].find((button) =>
       button.textContent?.includes('Open Studio'),
     );
-    expect(disabled?.title).toContain('Reachable only from a browser on kite6');
+    expect(disabled?.title).toContain('Reachable only from a browser running on kite6');
   });
 
   it('caps its height to the canvas so a maximal card scrolls instead of overflowing', async () => {
