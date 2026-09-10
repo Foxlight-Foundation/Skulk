@@ -296,6 +296,48 @@ function ensureLocalNodePresent(
   };
 }
 
+/**
+ * Adds hosts that publish capability nodes but are absent from the
+ * replicated topology. A management-only (`--no-worker`) host emits no
+ * `NodeGatheredInfo`, so it never enters `/state.topology.nodes`, yet it is
+ * exactly the shape a capability node lives on. Its identity and derived
+ * health come from telemetry; it carries no memory or compute readings, so
+ * the node renders with an empty gauge rather than a fabricated one. Only
+ * hosts that appear in the projection are added, so the graph is unchanged
+ * for fleets without capability nodes.
+ */
+export function ensureCapabilityHostsPresent(
+  topology: TopologyData,
+  capabilityHosts: readonly string[],
+  identities: Record<string, RawNodeIdentity>,
+  health: Record<string, RawNodeHealth>,
+): TopologyData {
+  const missing = capabilityHosts.filter((hostNodeId) => !topology.nodes[hostNodeId]);
+  if (missing.length === 0) return topology;
+  const nodes: Record<string, NodeInfo> = { ...topology.nodes };
+  for (const hostNodeId of missing) {
+    const identity = identities[hostNodeId];
+    nodes[hostNodeId] = {
+      system_info: {
+        model_id: identity?.modelId,
+        chip: identity?.chipId,
+        memory: 0,
+      },
+      network_interfaces: [],
+      ip_to_interface: {},
+      mactop_info: { memory: { ram_usage: 0, ram_total: 0 } },
+      last_mactop_update: Date.now() / 1000,
+      friendly_name: identity?.friendlyName,
+      os_version: identity?.osVersion,
+      os_build_version: identity?.osBuildVersion,
+      skulk_version: identity?.skulkVersion,
+      skulk_commit: identity?.skulkCommit,
+      node_health: normalizeNodeHealth(health[hostNodeId]),
+    };
+  }
+  return { nodes, edges: topology.edges };
+}
+
 /* ── Public types ────────────────────────────────────────── */
 
 export type RawDownloads = Record<string, unknown[]>;
@@ -494,8 +536,17 @@ export function useClusterState(): ClusterState {
       data.nodeRdmaCtl ?? {},
       data.nodeHealth ?? {},
     );
-    return ensureLocalNodePresent(
+    // Capability hosts first: a management-only host that publishes
+    // capability nodes is placed from telemetry with its real identity and
+    // health, whether it is this dashboard's own host or a remote one.
+    const withCapabilityHosts = ensureCapabilityHostsPresent(
       transformed,
+      Object.keys(data.capabilityNodes ?? {}),
+      data.nodeIdentities ?? {},
+      data.nodeHealth ?? {},
+    );
+    return ensureLocalNodePresent(
+      withCapabilityHosts,
       resolvedLocalNodeId,
       nodeIdentityQuery.data ?? null,
       data.nodeIdentities ?? {},

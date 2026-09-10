@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { normalizeCapabilityNodes, transformTopology } from './useClusterState';
+import { ensureCapabilityHostsPresent, normalizeCapabilityNodes, transformTopology } from './useClusterState';
 
 const GIB = 1024 ** 3;
 
@@ -157,5 +157,30 @@ describe('normalizeCapabilityNodes', () => {
 
   it('returns an empty map without the projection', () => {
     expect(normalizeCapabilityNodes(undefined)).toEqual({});
+  });
+});
+
+describe('ensureCapabilityHostsPresent', () => {
+  it('adds a management-only capability host missing from the replicated topology', () => {
+    const topology = transformTopology({ nodes: ['worker-a'] }, {}, {}, {}, {}, {}, {}, {});
+    const result = ensureCapabilityHostsPresent(
+      topology,
+      ['mgmt-host', 'worker-a'],
+      { 'mgmt-host': { friendlyName: 'r720', modelId: 'PowerEdge R720', skulkVersion: '1.5.2' } },
+      { 'mgmt-host': { level: 'ok', reasons: [] } },
+    );
+    expect(Object.keys(result.nodes).sort()).toEqual(['mgmt-host', 'worker-a']);
+    const host = result.nodes['mgmt-host'];
+    expect(host?.friendly_name).toBe('r720');
+    expect(host?.system_info?.model_id).toBe('PowerEdge R720');
+    expect(host?.node_health?.level).toBe('ok');
+    expect(host?.syncing).toBeUndefined();
+    expect(host?.mactop_info?.memory?.ram_total).toBe(0);
+  });
+
+  it('leaves the topology untouched when every capability host is already present', () => {
+    const topology = transformTopology({ nodes: ['worker-a'] }, {}, {}, {}, {}, {}, {}, {});
+    expect(ensureCapabilityHostsPresent(topology, ['worker-a'], {}, {})).toBe(topology);
+    expect(ensureCapabilityHostsPresent(topology, [], {}, {})).toBe(topology);
   });
 });
