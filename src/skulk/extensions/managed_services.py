@@ -231,7 +231,13 @@ class ManagedServices:
                             )
                         self.owners[identifier] = owner
                         owner.on_start(self.context)
-                    self.owners[identifier].manager_enabled = item.enabled
+                    # Error summaries omit selection fields and default enabled
+                    # to false. Only an observed selection proves owner withdrawal.
+                    self.owners[identifier].manager_enabled = (
+                        item.enabled
+                        if item.selected_digest is not None and item.error_code is None
+                        else None
+                    )
                     self.owners[identifier].manager_available = (
                         item.enabled
                         and not item.stale

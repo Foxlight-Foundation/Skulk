@@ -571,7 +571,8 @@ connection records above remain compatible. Manager health independently fences
 capability admission; a healthy child cannot override missing manager observations.
 An explicit runtime disable also releases cached capability IDs, allowing an
 enabled replacement to advertise without an API restart. An unavailable owner
-whose enabled state is unknown still reserves its IDs to prevent silent takeover.
+whose enabled state is unknown, including missing or unreadable selection state,
+still reserves its IDs to prevent silent takeover.
 Neither case removes cached nodes from management.
 The [managed lifecycle HTTP routes](api-guide.md#managed-plugin-http-lifecycle) and
 Plugins dashboard remain available while children are disabled or broken. The `/plugins`

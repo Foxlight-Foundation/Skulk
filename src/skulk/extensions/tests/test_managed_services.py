@@ -117,7 +117,7 @@ async def test_late_setup_activation_outage_and_shutdown_preserve_independent_ma
         owner = services.owners["managed.fixture"]
         assert registry.configuration_providers["managed.fixture"] is owner
         await owner.refresh()
-        assert owner.manager_enabled is False
+        assert owner.manager_enabled is None
         assert (
             not registry.capability_descriptors
         )  # Empty registration is not admission.
@@ -195,6 +195,24 @@ async def test_late_setup_activation_outage_and_shutdown_preserve_independent_ma
         assert competing.capability_descriptors == (descriptor,)
         entry = competing.call_handler(descriptor.qualified_id)
         assert entry is not None and entry[1] is replacement
+        selection_path = controller.root / "runtime-selection.json"
+        original_selection = read_private(selection_path)
+        for missing in (False, True):
+            if missing:
+                selection_path.unlink()
+            else:
+                write_private(selection_path, b"invalid selection")
+            try:
+                await services.refresh()
+                assert owner.manager_enabled is None
+                assert owner.nodes == cached_nodes
+                assert not competing.capability_descriptors
+                assert competing.call_handler(descriptor.qualified_id) is None
+            finally:
+                write_private(selection_path, original_selection)
+            await services.refresh()
+            assert owner.manager_enabled is False
+            assert competing.capability_descriptors == (descriptor,)
         # A lost manager observation cannot authorize transferring ownership.
         await manager.close()
         with pytest.raises((OSError, ValueError)):

@@ -1688,7 +1688,8 @@ and cached capability facets with existing extensions. Static extension names
 retain priority. Missing or stale manager observations withdraw capability
 admission even if a child later reports healthy. An explicitly disabled owner
 withdraws its cached capability reservations so a replacement can become visible
-without an API restart; unknown manager state retains conflict protection. Cached
+without an API restart; unknown manager or selection state retains conflict
+protection. Cached
 nodes remain available for management. API shutdown releases observers;
 the OS retains ownership of runtime and independent cleanup supervision.
 `api/managed_plugins.py` exposes explicit plugin-scoped inventory, registration,
