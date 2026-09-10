@@ -297,7 +297,11 @@ export function CapabilityFlyout({
   const below = anchor.y + 18;
   const top = canvasHeight > 0 && below > canvasHeight * 0.6 ? undefined : below;
   const bottom = top === undefined ? Math.max(CANVAS_MARGIN, canvasHeight - anchor.y + 18) : undefined;
-  const maxHeight = canvasHeight > 0 ? Math.max(120, canvasHeight - 2 * CANVAS_MARGIN) : undefined;
+  // Cap to the space on the chosen side so the card, and its scroll range,
+  // end inside the canvas wherever it is anchored.
+  const availableHeight =
+    top !== undefined ? canvasHeight - top - CANVAS_MARGIN : canvasHeight - (bottom ?? 0) - CANVAS_MARGIN;
+  const maxHeight = canvasHeight > 0 ? Math.max(120, availableHeight) : undefined;
 
   const runCall = async (item: Extract<CapabilityActionItem, { kind: 'call' }>) => {
     if (!localNodeId) return;

@@ -1,6 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { CapabilityNodeSummary } from '../../types/capabilityNodes';
-import { buildCapabilityActions, generateCallId, resolveSurfaceUrl, runDescriptorAction } from './capabilityActions';
+import {
+  buildCapabilityActions,
+  generateCallId,
+  isLoopbackHostname,
+  resolveSurfaceUrl,
+  runDescriptorAction,
+} from './capabilityActions';
 
 const t = (_key: string, fallback: string, params?: Record<string, string | number>) =>
   fallback.replace(/\{(\w+)\}/g, (_match, name: string) => String(params?.[name] ?? ''));
@@ -145,6 +151,21 @@ describe('resolveSurfaceUrl', () => {
     expect(resolveSurfaceUrl('https://host.example/ui', { isLocalHost: false, dashboardHostname: 'x' })).toEqual({
       url: 'https://host.example/ui',
       reachable: true,
+    });
+  });
+});
+
+describe('isLoopbackHostname', () => {
+  it('covers the whole loopback range and localhost spellings', () => {
+    for (const host of ['127.0.0.1', '127.0.0.2', '127.255.255.255', 'localhost', 'localhost.', 'LOCALHOST', 'studio.localhost', '[::1]', '::1', '0.0.0.0']) {
+      expect(isLoopbackHostname(host)).toBe(true);
+    }
+    for (const host of ['128.0.0.1', '10.0.0.5', 'kite6.local', 'host.example', '1270.0.0.1']) {
+      expect(isLoopbackHostname(host)).toBe(false);
+    }
+    expect(resolveSurfaceUrl('http://127.0.0.2:8188/', { isLocalHost: false, dashboardHostname: 'kite3.local' })).toEqual({
+      url: 'http://127.0.0.2:8188/',
+      reachable: false,
     });
   });
 });

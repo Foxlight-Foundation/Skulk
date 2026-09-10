@@ -122,9 +122,12 @@ describe('CapabilityFlyout', () => {
   });
 
   it('caps its height to the canvas so a maximal card scrolls instead of overflowing', async () => {
+    // Anchor y = 120 on a 300 px canvas: the card hangs below at top 138 and
+    // may use only the 154 px that remain above the bottom margin.
     await render({ canvasHeight: 300 });
     const card = container?.querySelector<HTMLElement>('[role="dialog"]');
-    expect(card?.style.maxHeight).toBe('284px');
+    expect(card?.style.top).toBe('138px');
+    expect(card?.style.maxHeight).toBe('154px');
     expect(getComputedStyle(card as Element).overflowY).toBe('auto');
   });
 

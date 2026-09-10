@@ -83,8 +83,17 @@ export function resolveSurfaceUrl(
   return { url, reachable: browserOnHost };
 }
 
-function isLoopbackHostname(hostname: string): boolean {
-  return LOOPBACK_HOSTS.has(hostname) || LOOPBACK_HOSTS.has(`[${hostname}]`);
+/**
+ * Whether a URL hostname addresses the browser's own machine: any address in
+ * 127.0.0.0/8, the IPv6 loopback in either bracket form, the unspecified
+ * address, and `localhost` with or without a trailing dot or subdomain.
+ */
+export function isLoopbackHostname(hostname: string): boolean {
+  const normalized = hostname.trim().toLowerCase().replace(/\.$/, '');
+  if (LOOPBACK_HOSTS.has(normalized) || LOOPBACK_HOSTS.has(`[${normalized}]`)) return true;
+  if (normalized === 'localhost' || normalized.endsWith('.localhost')) return true;
+  const ipv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(normalized);
+  return ipv4 !== null && ipv4[1] === '127';
 }
 
 function resolveAction(
