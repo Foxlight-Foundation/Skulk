@@ -37,6 +37,8 @@ DEFAULT_SHORT_EDGE = 64
 """Canvas short edge when neither the request nor the card names one."""
 DEFAULT_SAMPLE_RATE = 32000
 DEFAULT_CHANNELS = 2
+MAX_CONTAINER_EDGE = 65535
+"""MP4 sample entries carry 16-bit width and height fields."""
 
 ProgressCallback = Callable[[VideoStage, int | None, int | None, float], None]
 """Called with ``(stage, step, total_steps, fraction)`` as the render advances."""
@@ -91,6 +93,11 @@ def plan_render(params: VideoGenerationTaskParams, video: VideoCardConfig) -> Re
         canvas = (
             max(multiple, round(width / multiple) * multiple),
             max(multiple, round(height / multiple) * multiple),
+        )
+    if max(canvas) > MAX_CONTAINER_EDGE:
+        raise ValueError(
+            f"canvas {canvas[0]}x{canvas[1]} exceeds the container's "
+            f"{MAX_CONTAINER_EDGE} pixel edge limit"
         )
     seed = params.seed
     if seed is None:

@@ -200,7 +200,11 @@ class Runner:
                             ),
                         )
                     )
-                    raise
+                    if not isinstance(error, ValueError):
+                        raise
+                    # A request the engine cannot honor fails that task only;
+                    # the runner stays up for the next one.
+                    logger.warning(f"test video engine rejected {command_id}: {error}")
                 self.current_status = RunnerReady()
             case Shutdown():
                 self.update_status(RunnerShuttingDown())

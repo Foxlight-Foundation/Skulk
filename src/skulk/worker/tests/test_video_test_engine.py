@@ -97,6 +97,16 @@ def test_plan_resolves_canvas_grid_and_defaults_from_the_card() -> None:
     assert explicit.audio is False
 
 
+def test_plan_rejects_a_canvas_the_container_cannot_describe() -> None:
+    video = _card().video
+    assert video is not None
+    params = VideoGenerationTaskParams(
+        prompt="x", model=str(TEST_VIDEO_MODEL_ID), seconds=1, size="99992x16"
+    )
+    with pytest.raises(ValueError, match="edge limit"):
+        plan_render(params, video)
+
+
 def test_render_is_deterministic_and_the_manifest_describes_the_file(tmp_path: Path) -> None:
     plan = RenderPlan(
         width=32, height=24, fps=8, frame_count=5, steps=2, seed=11, audio=True,
