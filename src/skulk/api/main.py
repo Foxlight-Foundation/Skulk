@@ -210,6 +210,7 @@ from skulk.api.types import (
     ImageListItem,
     ImageListResponse,
     ImageSize,
+    LicenseSection,
     ModalitiesCapabilitySection,
     ModelList,
     ModelListModel,
@@ -245,6 +246,7 @@ from skulk.api.types import (
     TraceTaskKind,
     TracingStateResponse,
     UpdateTracingStateRequest,
+    VideoCapabilitySection,
     VideoCreateRequest,
     VideoDeletedResponse,
     VideoError,
@@ -9180,6 +9182,8 @@ class API:
             audio=AudioCapabilitySection.from_model_card(card),
             tooling=ToolingCapabilitySection.from_model_card(card),
             runtime=RuntimeCapabilitySection.from_model_card(card),
+            video=VideoCapabilitySection.from_model_card(card),
+            license=LicenseSection.from_model_card(card),
             resolved_capabilities=ResolvedModelCapabilities.from_profile(
                 resolved_profile
             ),

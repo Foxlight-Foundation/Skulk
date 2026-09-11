@@ -6,7 +6,12 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from skulk.shared.models.capabilities import ResolvedCapabilityProfile
-from skulk.shared.models.model_cards import AudioResponseFormat, ModelCard, ModelId
+from skulk.shared.models.model_cards import (
+    AudioResponseFormat,
+    ModelCard,
+    ModelId,
+    VideoCompanionKind,
+)
 from skulk.shared.models.registry import (
     RegistryAdvisory,
     RegistryCapabilityClaim,
@@ -348,6 +353,21 @@ class ModelListModel(BaseModel):
         default=None,
         description="Optional declarative runtime integration hints from the model card.",
     )
+    video: "VideoCapabilitySection | None" = Field(
+        default=None,
+        description=(
+            "Declared video generation contract from the model card: modes, "
+            "clip length range, canvas rules, audio output, and named adapters. "
+            "Present only on video model cards."
+        ),
+    )
+    license: "LicenseSection | None" = Field(
+        default=None,
+        description=(
+            "Operator-facing license facts from the model card, including the "
+            "product display name the license may require. Informational only."
+        ),
+    )
     resolved_capabilities: "ResolvedModelCapabilities | None" = Field(
         default=None,
         description=(
@@ -630,6 +650,135 @@ class AudioCapabilitySection(BaseModel):
             supports_reference_audio=config.supports_reference_audio,
             supports_translation=config.supports_translation,
             sample_rates=list(config.sample_rates),
+        )
+
+
+class VideoAdapterSection(BaseModel):
+    """One named adapter (LoRA) a video card ships, selectable per request."""
+
+    name: str = Field(description="Adapter name accepted by the video job `lora` field.")
+    modes: list[str] = Field(
+        default_factory=list,
+        description="Generation modes the adapter is trained for; empty means every mode.",
+    )
+    steps: int | None = Field(default=None, description="Sampling steps the adapter was trained for.")
+    strength: float | None = Field(default=None, description="Default adapter strength.")
+
+
+class VideoReferenceLimitsSection(BaseModel):
+    """Per-kind reference attachment limits for reference-to-video cards."""
+
+    max_images: int = Field(default=0, description="Reference images accepted per request.")
+    max_videos: int = Field(default=0, description="Reference clips accepted per request.")
+    max_audio_clips: int = Field(default=0, description="Reference audio clips accepted per request.")
+    max_files: int | None = Field(default=None, description="Total attachments accepted, when bounded.")
+    clip_min_seconds: int | None = Field(default=None, description="Shortest reference clip accepted.")
+    clip_max_seconds: int | None = Field(default=None, description="Longest reference clip accepted.")
+    total_clip_seconds: int | None = Field(default=None, description="Combined reference clip length accepted.")
+
+
+class VideoCapabilitySection(BaseModel):
+    """Declared video generation contract from the model card.
+
+    Mirrors the card's ``video`` section so a client can build a valid
+    ``POST /v1/videos`` request without a copy of the card: which modes it
+    serves, the clip length range, the canvas rules, whether it renders a
+    synchronized audio track, and the named adapters with their trained
+    step counts.
+    """
+
+    modes: list[str] = Field(description="Generation modes the card serves: t2va, fl2va, ref2va.")
+    min_seconds: int = Field(description="Shortest clip length accepted.")
+    max_seconds: int = Field(description="Longest clip length accepted.")
+    fps: int = Field(description="Output frame rate.")
+    frame_grid_multiple: int = Field(description="Frame counts snap to this multiple plus the offset.")
+    frame_grid_offset: int = Field(description="Frame grid offset.")
+    canvas_multiple: int = Field(description="Canvas dimensions must be multiples of this.")
+    default_short_edge: int | None = Field(default=None, description="Trained short edge when `size` is omitted.")
+    max_pixels: int | None = Field(default=None, description="Pixel budget per frame.")
+    aspect_ratios: list[str] = Field(default_factory=list, description="Advisory aspect ratios the card lists.")
+    audio_output: bool = Field(description="Whether renders carry a synchronized audio track.")
+    audio_sample_rate: int | None = Field(default=None, description="Audio sample rate of rendered clips.")
+    audio_channels: int | None = Field(default=None, description="Audio channels of rendered clips.")
+    default_steps: int = Field(description="Sampling steps when no adapter is selected.")
+    reference_limits: VideoReferenceLimitsSection | None = Field(
+        default=None, description="Reference attachment limits for reference-to-video cards."
+    )
+    adapters: list[VideoAdapterSection] = Field(
+        default_factory=list, description="Named adapters (LoRAs) selectable through the job `lora` field."
+    )
+
+    @classmethod
+    def from_model_card(cls, model_card: ModelCard) -> "VideoCapabilitySection | None":
+        """Project the card's declared video contract, or ``None`` for non-video cards."""
+        config = model_card.video
+        if config is None:
+            return None
+        limits = config.reference_limits
+        return cls(
+            modes=[mode.value for mode in config.modes],
+            min_seconds=config.min_seconds,
+            max_seconds=config.max_seconds,
+            fps=config.fps,
+            frame_grid_multiple=config.frame_grid_multiple,
+            frame_grid_offset=config.frame_grid_offset,
+            canvas_multiple=config.canvas_multiple,
+            default_short_edge=config.default_short_edge,
+            max_pixels=config.max_pixels,
+            aspect_ratios=list(config.aspect_ratios),
+            audio_output=config.audio_output,
+            audio_sample_rate=config.audio_sample_rate,
+            audio_channels=config.audio_channels,
+            default_steps=config.default_steps,
+            reference_limits=(
+                VideoReferenceLimitsSection(
+                    max_images=limits.max_images,
+                    max_videos=limits.max_videos,
+                    max_audio_clips=limits.max_audio_clips,
+                    max_files=limits.max_files,
+                    clip_min_seconds=limits.clip_min_seconds,
+                    clip_max_seconds=limits.clip_max_seconds,
+                    total_clip_seconds=limits.total_clip_seconds,
+                )
+                if limits is not None
+                else None
+            ),
+            adapters=[
+                VideoAdapterSection(
+                    name=companion.name,
+                    modes=[mode.value for mode in companion.modes],
+                    steps=companion.steps,
+                    strength=companion.strength,
+                )
+                for companion in config.companions
+                if companion.kind == VideoCompanionKind.Lora
+            ],
+        )
+
+
+class LicenseSection(BaseModel):
+    """Operator-facing license facts from the model card; nothing is enforced."""
+
+    name: str = Field(description="Human-readable license name.")
+    url: str | None = Field(default=None, description="Where the license text lives.")
+    spdx_id: str | None = Field(default=None, description="SPDX identifier when one exists.")
+    notice: str | None = Field(default=None, description="Terms the operator should see before fetching.")
+    display_name: str | None = Field(
+        default=None, description="Product display name the license requires, for example a model brand."
+    )
+
+    @classmethod
+    def from_model_card(cls, model_card: ModelCard) -> "LicenseSection | None":
+        """Project the card's license section, or ``None`` when the card declares none."""
+        config = model_card.license
+        if config is None:
+            return None
+        return cls(
+            name=config.name,
+            url=config.url,
+            spdx_id=config.spdx_id,
+            notice=config.notice,
+            display_name=config.display_name,
         )
 
 

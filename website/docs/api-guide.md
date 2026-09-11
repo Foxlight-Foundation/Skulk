@@ -2767,6 +2767,8 @@ Important fields:
 | `remote_code_approved_on_this_node` | boolean | Deprecated compatibility alias for `remote_code_approved_for_cluster` |
 | `remote_code_automatically_trusted` | boolean | Whether repository code is authorized by signed publication, explicit addition, or bundled distribution for this exact card |
 | `audio` | object | Declared speech metadata from the model card, including `kind`, audio response formats, streaming/realtime flags, built-in `voices`, `default_voice`, voice/reference-audio flags, translation support, and sample rates |
+| `video` | object or null | Declared video generation contract from a video model card: `modes` (`t2va`, `fl2va`, `ref2va`), `min_seconds`/`max_seconds`, `fps`, frame grid (`frame_grid_multiple`, `frame_grid_offset`), `canvas_multiple`, `default_short_edge`, `max_pixels`, `aspect_ratios`, `audio_output` with `audio_sample_rate`/`audio_channels`, `default_steps`, `reference_limits`, and `adapters` (named LoRAs with `modes`, `steps`, `strength`, selectable through the video job `lora` field). Null for non-video cards |
+| `license` | object or null | Operator-facing license facts from the card: `name`, `url`, `spdx_id`, `notice`, and `display_name` (a product name the license requires in a UI). Informational; nothing is enforced |
 | `resolved_capabilities.supports_speech_synthesis` | boolean | Whether clients should treat the model as a text-to-speech model |
 | `resolved_capabilities.supports_transcription` | boolean | Whether clients should treat the model as a speech-to-text model |
 | `resolved_capabilities.supports_speech_translation` | boolean | Whether clients should treat the model as supporting speech translation |
