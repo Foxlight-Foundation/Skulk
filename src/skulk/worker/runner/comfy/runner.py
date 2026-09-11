@@ -122,11 +122,12 @@ def launch_flags(resolved_backend: str | None) -> tuple[str, ...]:
 
     CUDA needs nothing beyond the headless defaults; the ROCm lane adds
     ``ROCM_LAUNCH_FLAGS``. The backend is the stamped ``comfy-<compute>`` tag;
-    an unstamped shard (telemetry still warming, or a manual launch) uses
-    the tag this node advertises itself, so a managed ROCm install never
-    launches without the flags it was qualified with.
+    an unstamped shard (telemetry still warming, or a manual launch), or one
+    stamped with the bare engine tag by a card that declares no compute,
+    uses the tag this node advertises itself, so a managed ROCm install
+    never launches without the flags it was qualified with.
     """
-    backend = resolved_backend if resolved_backend is not None else _local_comfy_backend()
+    backend = resolved_backend if resolved_backend is not None and "-" in resolved_backend else _local_comfy_backend()
     if backend is not None and backend.endswith("-rocm"):
         return ROCM_LAUNCH_FLAGS
     return ()

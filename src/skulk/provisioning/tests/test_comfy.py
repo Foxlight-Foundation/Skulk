@@ -275,3 +275,25 @@ def test_startup_provisions_when_the_gates_pass(monkeypatch: pytest.MonkeyPatch)
     # because video models are enabled on this node.
     assert ensure_comfy(facts, allow_download=False) is None and calls == []
     assert ensure_comfy(facts) is not None and calls == ["cuda"]
+
+
+def test_legacy_layout_install_is_reused_when_its_record_matches(tmp_path: Path) -> None:
+    """An install made before roots carried the digest keeps serving after an upgrade."""
+    legacy = tmp_path / "engines" / "comfy" / COMFY_PIN / "cuda"
+    (legacy / "ComfyUI").mkdir(parents=True)
+    (legacy / "ComfyUI" / "main.py").write_text("# comfy\n")
+    binary = legacy / "venv" / "bin" / "python"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("#!/bin/sh\n")
+    binary.chmod(0o755)
+    wheels = COMFY_TORCH_WHEELS[("aarch64", "cuda")]
+    (legacy / RECORD_FILENAME).write_text(
+        json.dumps({"pin": COMFY_PIN, "variant": "cuda", "wheels": [{"filename": w.filename, "sha256": w.sha256} for w in wheels]})
+    )
+    assert managed_comfy_install(make_facts(gpus=(NVIDIA_A40,))) == legacy
+    run = _FakeRun()
+    assert provision_comfy("cuda", run=run) == legacy and run.commands == []
+    # A legacy install built on other wheels is not this wheel set and is ignored.
+    (legacy / RECORD_FILENAME).write_text(json.dumps({"pin": COMFY_PIN, "variant": "cuda", "wheels": [{"filename": "torch-old.whl", "sha256": "0" * 64}]}))
+    assert managed_comfy_install(make_facts(gpus=(NVIDIA_A40,))) is None
+    assert provision_comfy("cuda", run=_FakeRun()) == _root(tmp_path, "aarch64", "cuda")

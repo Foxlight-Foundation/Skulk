@@ -26,3 +26,11 @@ def test_unstamped_shards_use_the_tag_this_node_advertises(monkeypatch: pytest.M
     assert launch_flags(None) == ROCM_LAUNCH_FLAGS
     monkeypatch.setattr(backends, "probe_node_backends", lambda: {"llama_server-vulkan"})
     assert launch_flags(None) == ()
+
+
+def test_a_bare_engine_stamp_also_uses_the_tag_this_node_advertises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A card declaring only ``comfy`` still gets the ROCm flags on a ROCm node."""
+    monkeypatch.setattr(backends, "probe_node_backends", lambda: {"comfy", "comfy-rocm"})
+    assert launch_flags("comfy") == ROCM_LAUNCH_FLAGS
+    monkeypatch.setattr(backends, "probe_node_backends", lambda: {"comfy", "comfy-cuda"})
+    assert launch_flags("comfy") == ()

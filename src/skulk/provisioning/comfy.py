@@ -25,7 +25,7 @@ import subprocess
 import tempfile
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Final
+from typing import Final, cast
 
 from loguru import logger
 
@@ -139,12 +139,52 @@ def _install_complete(root: Path) -> bool:
     )
 
 
+def _legacy_comfy_root(variant: EngineVariant) -> Path:
+    """The pre-digest layout, ``<pin>/<variant>``, that earlier installs used."""
+    return SKULK_ENGINES_DIR / "comfy" / COMFY_PIN / variant
+
+
+def _record_matches(root: Path, wheels: Sequence[PinnedWheel]) -> bool:
+    """Whether an install's record names exactly this wheel set by hash."""
+    try:
+        loaded = cast(object, json.loads((root / RECORD_FILENAME).read_text()))  # pyright: ignore[reportAny]
+    except (OSError, ValueError):
+        return False
+    if not isinstance(loaded, dict):
+        return False
+    record = cast(dict[str, object], loaded)
+    recorded = record.get("wheels")
+    if not isinstance(recorded, list):
+        return False
+    hashes: set[object] = set()
+    for entry in cast(list[object], recorded):
+        if isinstance(entry, dict):
+            hashes.add(cast(dict[str, object], entry).get("sha256"))
+    return hashes == {wheel.sha256 for wheel in wheels}
+
+
+def _existing_install(variant: EngineVariant, machine: str) -> Path | None:
+    """A complete install for this wheel set: the digest-keyed root, or a legacy
+    root whose record proves it was built on exactly these wheels. An install
+    made before roots carried the digest is reused rather than rebuilt, so an
+    upgraded node (offline or not) keeps the engine it already has."""
+    root = managed_comfy_root(variant, machine)
+    if _install_complete(root):
+        return root
+    wheels = COMFY_TORCH_WHEELS.get((machine, variant))
+    legacy = _legacy_comfy_root(variant)
+    if wheels is not None and legacy != root and _install_complete(legacy) and _record_matches(legacy, wheels):
+        return legacy
+    return None
+
+
 def managed_comfy_install(facts: NodeFacts) -> Path | None:
     """The complete managed install this node would use, if one is on disk."""
+    machine = platform_module.machine()
     for variant in select_comfy_variant_chain(facts):
-        root = managed_comfy_root(variant)
-        if _install_complete(root):
-            return root
+        existing = _existing_install(variant, machine)
+        if existing is not None:
+            return existing
     return None
 
 
@@ -196,9 +236,10 @@ def provision_comfy(variant: EngineVariant, *, run: Runner = subprocess.run) -> 
     if wheels is None:
         raise RuntimeError(f"no ComfyUI torch wheel set is recorded for {machine}/{variant}")
     torch_index = wheels[0].index
+    existing = _existing_install(variant, machine)
+    if existing is not None:
+        return existing
     target = managed_comfy_root(variant, machine)
-    if _install_complete(target):
-        return target
     git = _require_tool("git")
     uv = _require_tool("uv")
     target.parent.mkdir(parents=True, exist_ok=True)
