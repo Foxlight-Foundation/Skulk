@@ -791,25 +791,24 @@ a half-finished install is never adopted. Two gates beyond the llama-server
 ones apply: the node must have video models enabled, since the wheel set is
 several gigabytes and most nodes never render video, and a variant is
 offered only where a wheel set is recorded for the machine. Two lanes are
-recorded on one torch release: cu130 wheels for NVIDIA nodes (aarch64 and
-x86_64) and rocm7.2 wheels for x86_64 AMD nodes, which bundle their own HIP
-runtime so the host needs only the amdgpu kernel driver; the ROCm lane
+recorded: cu130 wheels from the PyTorch index for NVIDIA nodes (aarch64
+and x86_64), and for x86_64 AMD nodes AMD's own stable ROCm 10.0.0 channel,
+where torch is a host wheel plus a gfx1151 device package on top of the
+`rocm` runtime packages, all bundling the HIP runtime so the host needs
+only the amdgpu kernel driver; the ROCm lane
 launches ComfyUI with `--bf16-vae --disable-mmap --cache-none`, the flags
 validated for MiniMax H3 on Strix Halo (memory-mapping a checkpoint above 64
 GB through unified memory is pathologically slow, the fp32 VAE decode does
 not fit beside the transformer, and node outputs are not worth retaining on
-a host whose GPU memory is the system's), and with
-`TORCH_BLAS_PREFER_HIPBLASLT=1` in the server's environment: the rocm7.2
-wheel's gfx1151 rocBLAS library lacks a single-precision batched GEMM
-solution that the Qwen3-VL text encoder's vision tower issues for
-image-conditioned prompts, and without the hipBLASLt route the server
-segfaults on every keyframe or reference render. hipBLASLt's own gfx1151
-library has gaps too, reached by a second image-conditioned prompt in one
-process, so on this lane the runner replaces the server after every
-render: the first prompt a fresh process executes has passed every time
-on the hardware, and the price is the model reload on the next render.
-Complete coverage needs a torch build made for gfx1151, which today exists
-only as a nightly, or a system ROCm 7.2 for AMD's lightweight wheels. An
+a host whose GPU memory is the system's). The AMD channel is the one whose
+gfx1151 BLAS libraries are complete for H3: the rocm7.2 torch wheel from the
+PyTorch index, the lane's first wheel set, shipped a gfx1151 rocBLAS without
+the single-precision batched GEMM the Qwen3-VL text encoder's vision tower
+issues for image-conditioned prompts and a hipBLASLt without the bf16
+bias-fused GEMM a second prompt in one process reaches, and each missing
+kernel is a segfault in the HIP runtime. The ROCm 10 set renders every
+prompt shape in one warm server, so the hipBLASLt routing and the
+server-per-render policy that bridged the gap are gone. An
 operator with a hand-built ComfyUI points `SKULK_COMFY_BIN` at its
 interpreter and `SKULK_COMFY_ROOT` at the checkout; both must be valid or
 the engine stays off with a loud conflict. The checkout's commit is the

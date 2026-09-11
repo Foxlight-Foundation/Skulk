@@ -7,7 +7,9 @@ Speaks the subset of ComfyUI's HTTP and WebSocket protocol the runner uses
 fixed order, emitting the same events a real server would, and writing the
 files the save nodes name. Behaviour is steered by environment variables:
 ``FAKE_COMFY_STEP_SECONDS`` (sampling pace), ``FAKE_COMFY_FAIL_NODE`` (fail
-when that node executes). Copied into a temporary checkout as ``main.py``
+when that node executes), ``FAKE_COMFY_HISTORY_DELAY_SECONDS`` (how long the
+history entry lags the terminal socket event, as it does on a real server).
+Copied into a temporary checkout as ``main.py``
 and started by the runner exactly like the real thing; it imports nothing
 from Skulk.
 """
@@ -54,6 +56,7 @@ class FakeComfy:
         self.queue: asyncio.Queue[tuple[str, dict[str, Any], str]] = asyncio.Queue()
         self.step_seconds = float(os.environ.get("FAKE_COMFY_STEP_SECONDS", "0.01"))
         self.fail_node = os.environ.get("FAKE_COMFY_FAIL_NODE") or None
+        self.history_delay_seconds = float(os.environ.get("FAKE_COMFY_HISTORY_DELAY_SECONDS", "0"))
 
     async def send(self, event: str, data: dict[str, Any], client_id: str) -> None:
         socket = self.sockets.get(client_id)
@@ -154,19 +157,21 @@ class FakeComfy:
             data = {"prompt_id": prompt_id, "node_id": "sampler", "node_type": "SamplerCustomAdvanced", "executed": []}
             messages.append(["execution_interrupted", data])
             status = {"status_str": "error", "completed": False, "messages": messages}
-            self.history[prompt_id] = {"prompt": [0, prompt_id, graph, {}, []], "outputs": outputs, "status": status}
             await self.send("execution_interrupted", data, client_id)
         except Exception as error:  # noqa: BLE001 - mirrors ComfyUI's handler
             data = {"prompt_id": prompt_id, "node_id": node_id, "node_type": graph[node_id]["class_type"], "exception_message": str(error), "exception_type": type(error).__name__, "traceback": [], "current_inputs": {}, "current_outputs": {}}
             messages.append(["execution_error", data])
             status = {"status_str": "error", "completed": False, "messages": messages}
-            self.history[prompt_id] = {"prompt": [0, prompt_id, graph, {}, []], "outputs": outputs, "status": status}
             await self.send("execution_error", data, client_id)
         else:
             messages.append(["execution_success", {"prompt_id": prompt_id, "timestamp": int(time.time() * 1000)}])
             status = {"status_str": "success", "completed": True, "messages": messages}
-            self.history[prompt_id] = {"prompt": [0, prompt_id, graph, {}, []], "outputs": outputs, "status": status}
             await self.send("execution_success", {"prompt_id": prompt_id}, client_id)
+        # ComfyUI records the history entry only after the executor returns,
+        # so the terminal socket event always precedes it; the delay widens
+        # that window the way a slow executor teardown does.
+        await asyncio.sleep(self.history_delay_seconds)
+        self.history[prompt_id] = {"prompt": [0, prompt_id, graph, {}, []], "outputs": outputs, "status": status}
         await self.send("executing", {"node": None, "prompt_id": prompt_id}, client_id)
 
     async def history_entry(self, request: web.Request) -> web.Response:

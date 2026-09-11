@@ -370,8 +370,13 @@ A model card's `placement.compatible_backends` selects which engine serves it
 - **`comfy`** (`worker/runner/comfy/`, `provisioning/comfy.py`): served
   audio-video engine over a pinned ComfyUI checkout (`COMFY_PIN`, release
   v0.35.0) in its own managed virtual environment with a hash-pinned torch
-  wheel set (`COMFY_TORCH_WHEELS`: cu130 for aarch64 GB10 and x86_64,
-  rocm7.2 for x86_64 Strix Halo; the ROCm wheels bundle their HIP runtime).
+  wheel set (`COMFY_TORCH_WHEELS`: cu130 for aarch64 GB10 and x86_64 from
+  the PyTorch index; for x86_64 Strix Halo, AMD's stable ROCm 10.0.0
+  channel, `stable.repo.amd.com/rocm/whl-next`, twelve pinned artifacts:
+  the `rocm` runtime packages with the gfx1151 device libraries, torch
+  with its gfx1151 device packages, torchvision, torchaudio, triton; that
+  channel publishes no digests, so they are recorded by downloading each
+  artifact once).
   Provisioned under `SKULK_ENGINES_DIR/comfy/<pin>/<variant>-<wheel-set
   digest>` (a wheel-set change reprovisions, never reuses) at node
   startup only when `SKULK_ENABLE_VIDEO_MODELS=true` (the wheel set is
@@ -388,14 +393,16 @@ A model card's `placement.compatible_backends` selects which engine serves it
   signals the process group; worker startup sweeps init-parented servers
   launched with Skulk's `--user-directory`. Tags `comfy-cuda` and
   `comfy-rocm` (the ROCm lane launches with `ROCM_LAUNCH_FLAGS`:
-  `--bf16-vae --disable-mmap --cache-none`, and `ROCM_LAUNCH_ENVIRONMENT`:
-  `TORCH_BLAS_PREFER_HIPBLASLT=1`, because the rocm7.2 wheel's gfx1151
-  rocBLAS library lacks an fp32 batched GEMM the Qwen3-VL text encoder's
-  vision tower needs and the server segfaults on image-conditioned prompts
-  without it; and the lane serves one render per server process,
-  `ROCM_FRESH_SERVER_PER_RENDER`, because hipBLASLt has gfx1151 gaps of
-  its own that a second image-conditioned prompt in one process reaches);
-  GPU-only, single-host.
+  `--bf16-vae --disable-mmap --cache-none`); GPU-only, single-host. The
+  runner treats ComfyUI's `execution_success` socket event as success but
+  reads the outputs from `/history` only once the entry exists: ComfyUI
+  sends the event from inside its executor and records history after the
+  executor returns, a gap that on the ROCm lane spans seconds. The ROCm
+  wheel set is AMD's stable ROCm 10.0.0 channel, whose gfx1151 BLAS
+  libraries are complete for H3; the earlier rocm7.2 set from the PyTorch
+  index lacked GEMM kernels the text encoder reaches on image-conditioned
+  prompts and needed hipBLASLt routing plus a fresh server per render,
+  both retired with that set.
   ADVANCING `COMFY_PIN` OR THE WHEEL SET IS A CHECKLIST
   (architecture-reference.md "Engine pin advancement").
 - **`test_video`** (`worker/runner/test_video/`): deterministic test video

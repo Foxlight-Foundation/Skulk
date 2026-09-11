@@ -45,22 +45,31 @@ def _fake_tool(name: str) -> str:
     return f"/fake/bin/{name}"
 
 
-def test_manifest_records_hashed_cu130_and_rocm72_wheel_sets() -> None:
+def test_manifest_records_hashed_cu130_and_rocm10_wheel_sets() -> None:
     assert set(COMFY_TORCH_WHEELS) == {("aarch64", "cuda"), ("x86_64", "cuda"), ("x86_64", "rocm")}
     assert len(COMFY_PIN) == 40
     for (_machine, variant), wheels in COMFY_TORCH_WHEELS.items():
-        local, index = ("cu130", "cu130") if variant == "cuda" else ("rocm7.2", "rocm7.2")
-        assert [wheel.name for wheel in wheels] == ["torch", "torchvision", "torchaudio"]
         for wheel in wheels:
             assert len(wheel.sha256) == 64
-            assert wheel.version.endswith(f"+{local}")
-            assert wheel.filename.startswith(f"{wheel.name}-") and "cp313" in wheel.filename
-            assert wheel.url().startswith(f"https://download.pytorch.org/whl/{index}/")
             assert wheel.requirement().endswith(f"--hash=sha256:{wheel.sha256}")
             assert wheel.constraint() == f"{wheel.name}=={wheel.version}"
-    # Both lanes sit on one torch release so a card's behavior never forks by vendor.
-    releases = {tuple(wheel.version.split("+")[0] for wheel in wheels) for wheels in COMFY_TORCH_WHEELS.values()}
-    assert len(releases) == 1
+        if variant == "cuda":
+            assert [wheel.name for wheel in wheels] == ["torch", "torchvision", "torchaudio"]
+            for wheel in wheels:
+                assert wheel.version.endswith("+cu130") and wheel.channel is None
+                assert wheel.filename.startswith(f"{wheel.name}-") and "cp313" in wheel.filename
+                assert wheel.url().startswith("https://download.pytorch.org/whl/cu130/")
+        else:
+            # AMD's channel: the rocm runtime packages first, then torch with its
+            # gfx1151 device packages, one directory per package, one channel root.
+            names = [wheel.name for wheel in wheels]
+            assert names[:5] == ["rocm", "rocm-bootstrap", "rocm-sdk-core", "rocm-sdk-libraries", "rocm-sdk-device-gfx1151"]
+            assert {"torch", "amd-torch-device-gfx1151", "amd-torch-device-gfx115x", "torchvision", "torchaudio", "triton"} <= set(names)
+            for wheel in wheels:
+                assert wheel.url() == f"https://stable.repo.amd.com/rocm/whl-next/{wheel.name}/{wheel.filename}"
+                assert wheel.channel == "https://stable.repo.amd.com/rocm/whl-next"
+            torch = next(wheel for wheel in wheels if wheel.name == "torch")
+            assert torch.version == "2.13.0+rocm10.0.0" and "cp313" in torch.filename
     digests = {key: wheel_set_digest(wheels) for key, wheels in COMFY_TORCH_WHEELS.items()}
     assert len(set(digests.values())) == 3 and all(len(digest) == 64 for digest in digests.values())
 
@@ -173,7 +182,7 @@ def test_provision_needs_a_recorded_wheel_set() -> None:
         provision_comfy("rocm", run=_FakeRun())
 
 
-def test_provision_rocm_uses_the_rocm_index_and_its_own_root(
+def test_provision_rocm_uses_the_amd_channel_and_its_own_root(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr(comfy.platform_module, "machine", lambda: "x86_64")
@@ -182,10 +191,11 @@ def test_provision_rocm_uses_the_rocm_index_and_its_own_root(
     assert root == _root(tmp_path, "x86_64", "rocm")
     assert root != _root(tmp_path, "x86_64", "cuda")
     comfy_install = run.commands[5]
-    assert comfy_install[comfy_install.index("--extra-index-url") + 1] == "https://download.pytorch.org/whl/rocm7.2"
+    assert comfy_install[comfy_install.index("--extra-index-url") + 1] == "https://stable.repo.amd.com/rocm/whl-next"
     requirements = (root / "torch-requirements.txt").read_text()
-    assert "rocm7.2" in requirements and "cu130" not in requirements
-    assert "torch==2.14.0+rocm7.2" in (root / "torch-constraints.txt").read_text()
+    assert "rocm10.0.0" in requirements and "cu130" not in requirements
+    assert "rocm @ https://stable.repo.amd.com/rocm/whl-next/rocm/rocm-10.0.0.tar.gz --hash=sha256:" in requirements
+    assert "torch==2.13.0+rocm10.0.0" in (root / "torch-constraints.txt").read_text()
     record = json.loads((root / RECORD_FILENAME).read_text())
     assert record["variant"] == "rocm" and record["machine"] == "x86_64"
 
