@@ -213,12 +213,12 @@ def wheel_set_digest(wheels: Sequence[PinnedWheel]) -> str:
 
 
 # (machine, variant) -> the torch wheel set installed into the managed
-# ComfyUI environment, for sys.platform == "linux" and cp313. Checksums are
-# the index's own link digests, recorded 2026-09-10 from
-# download.pytorch.org/whl/cu130 and download.pytorch.org/whl/rocm7.2. CUDA
-# 13.0 wheels need a 580-series or newer driver. The ROCm lane uses AMD's
-# stable ROCm 10.0.0 channel (digests recorded 2026-09-11 by downloading each
-# artifact; the index publishes no digests): torch plus its gfx1151 device
+# ComfyUI environment, for sys.platform == "linux" and cp313. The CUDA
+# lane's checksums are the PyTorch index's own link digests, recorded
+# 2026-09-10 from download.pytorch.org/whl/cu130; CUDA 13.0 wheels need a
+# 580-series or newer driver. The ROCm lane uses AMD's stable ROCm 10.0.0
+# channel (digests recorded 2026-09-11 by downloading each artifact and
+# hashing it; that index publishes no digests): torch plus its gfx1151 device
 # packages, torchvision and torchaudio, triton, and the ``rocm`` runtime
 # packages (core, libraries, and the gfx1151 device libraries), which bundle
 # the HIP runtime so the host needs only the amdgpu kernel driver. The
