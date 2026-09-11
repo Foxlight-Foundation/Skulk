@@ -106,6 +106,8 @@ export interface ManagedRuntime {
   selected_digest: string | null;
   selection_revision: number;
   enabled: boolean;
+  /** Uninstalled runtimes retain cleanup state and can be explicitly reinstalled. */
+  uninstalled?: boolean;
   stale: boolean;
   error_code: string | null;
   operation_id: string | null;
@@ -115,7 +117,7 @@ export interface ManagedRuntime {
 
 /** Durable local operation reference; provider submissions and approvals are separate. */
 export interface ManagedOperation {
-  request: { operation_id: string; action: 'activate' | 'select' | 'disable' };
+  request: { operation_id: string; action: 'activate' | 'select' | 'disable' | 'uninstall' };
   state: 'accepted' | 'applying' | 'complete' | 'failed' | 'recovery_required' | 'superseded';
   error_code: string | null;
   withdraws_operation_id?: string | null;
@@ -249,10 +251,10 @@ const pluginsApi = apiSlice.injectEndpoints({
       query: ({ pluginId, operationId }) => ({ url: `/v1/plugins/managed/installations/${encodeURIComponent(pluginId)}/operations/${encodeURIComponent(operationId)}`, headers, cache: 'no-store' }),
       providesTags: ['Plugins'],
     }),
-    disableManagedRuntime: build.mutation<ManagedOperation, { pluginId: string; operationId: string; expectedRevision: number }>({
-      query: ({ pluginId, operationId, expectedRevision }) => ({
+    withdrawManagedRuntime: build.mutation<ManagedOperation, { pluginId: string; operationId: string; expectedRevision: number; action: 'disable' | 'uninstall' }>({
+      query: ({ pluginId, operationId, expectedRevision, action }) => ({
         url: `/v1/plugins/managed/installations/${encodeURIComponent(pluginId)}/operations`, method: 'POST', headers,
-        body: { operation_id: operationId, action: 'disable', expected_revision: expectedRevision },
+        body: { operation_id: operationId, action, expected_revision: expectedRevision },
       }),
       // Even an uncertain response needs a fresh server operation reference;
       // invalidation reads state and never replays the mutation.
@@ -281,4 +283,4 @@ const pluginsApi = apiSlice.injectEndpoints({
   }),
 });
 
-export const { useGetNodeProposalsQuery, useGetNodeProposalReviewQuery, useApproveNodeProposalMutation, useGetNodeProposalOperationQuery, useResumeNodeProposalMutation, useGetNodeSetupActionsQuery, useStartNodeSetupMutation, useResumeNodeSetupMutation, useLazyGetNodeSetupQuery, useLazyGetNodePreflightQuery, useGetNodeCredentialsQuery, useRegisterManagedRuntimeMutation, useGetRuntimeSourceStatusQuery, useRecoverRuntimeInstallationMutation, useLazyGetRuntimeReleaseQuery, useGetRuntimeInstallationQuery, useInstallRuntimeReleaseMutation, useActivateRuntimeReleaseMutation, useGetManagedRuntimesQuery, useGetManagedOperationQuery, useDisableManagedRuntimeMutation, useRecoverManagedOperationMutation, useGetPluginNodesQuery, useGetNodeConfigurationQuery, useConfigurePluginNodeMutation } = pluginsApi;
+export const { useGetNodeProposalsQuery, useGetNodeProposalReviewQuery, useApproveNodeProposalMutation, useGetNodeProposalOperationQuery, useResumeNodeProposalMutation, useGetNodeSetupActionsQuery, useStartNodeSetupMutation, useResumeNodeSetupMutation, useLazyGetNodeSetupQuery, useLazyGetNodePreflightQuery, useGetNodeCredentialsQuery, useRegisterManagedRuntimeMutation, useGetRuntimeSourceStatusQuery, useRecoverRuntimeInstallationMutation, useLazyGetRuntimeReleaseQuery, useGetRuntimeInstallationQuery, useInstallRuntimeReleaseMutation, useActivateRuntimeReleaseMutation, useGetManagedRuntimesQuery, useGetManagedOperationQuery, useWithdrawManagedRuntimeMutation, useRecoverManagedOperationMutation, useGetPluginNodesQuery, useGetNodeConfigurationQuery, useConfigurePluginNodeMutation } = pluginsApi;

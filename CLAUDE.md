@@ -553,7 +553,7 @@ preserve the highest selected sequence and never migrate configuration implicitl
 An explicit disable can withdraw stalled activation/selection without trusting its
 release. Preserve both journals and the withdrawal link across restart; unpublished
 old transitions become superseded and published ones remain complete. Never
-supersede live work or a pending disable, and never replay provider requests.
+supersede live work or a pending withdrawal, and never replay provider requests.
 The atomic selection is desired state; service launch must revalidate current
 core compatibility and runtime integrity before executing private code.
 `runtime_service.py` provides that separate nonroot launcher. Keep its entrypoint
@@ -1222,3 +1222,11 @@ acceptance, before any claim of provider completion. The private owner validates
 request correlation, preserves acknowledgement across restart and reconciles later
 receipt state without replay. Core and dashboard transport/display this bounded
 phase alongside independent cleanup observations.
+
+
+Managed-plugin `uninstall` is a retained-state withdrawal through the existing
+`RuntimeController`, using the same owner stop and selection journal as disable.
+The selected lifecycle operation determines inventory's `uninstalled` flag, separately
+from pending-operation progress. No extra supervisor, provider call or purge is added.
+Configuration, credentials, receipts and runtime generations remain available;
+independent cleanup continues. A verified `select` or `activate` reinstalls explicitly.

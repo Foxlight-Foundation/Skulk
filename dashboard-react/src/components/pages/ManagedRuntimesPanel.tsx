@@ -3,7 +3,7 @@ import styled from 'styled-components';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 import {
   useGetManagedRuntimesQuery, useGetManagedOperationQuery,
-  useDisableManagedRuntimeMutation, useRecoverManagedOperationMutation,
+  useWithdrawManagedRuntimeMutation, useRecoverManagedOperationMutation,
   useRegisterManagedRuntimeMutation,
   type ManagedRuntime,
 } from '../../store/endpoints/plugins';
@@ -24,7 +24,7 @@ function RuntimeControls({ runtime, unavailable }: { runtime: ManagedRuntime; un
   const [notice, setNotice] = useState('');
   const [submitted, setSubmitted] = useState<string | null>(null);
   const [releaseOpen, setReleaseOpen] = useState(false);
-  const [disable, disabling] = useDisableManagedRuntimeMutation();
+  const [withdraw, withdrawing] = useWithdrawManagedRuntimeMutation();
   const [recover, recovering] = useRecoverManagedOperationMutation();
   const operationId = submitted ?? runtime.operation_id;
   const operation = useGetManagedOperationQuery({ pluginId: runtime.plugin_id, operationId: operationId ?? '' }, {
@@ -39,18 +39,18 @@ function RuntimeControls({ runtime, unavailable }: { runtime: ManagedRuntime; un
     complete: t('plugins.operationComplete', 'Complete'),
     failed: t('plugins.operationFailed', 'Failed'),
     recovery_required: t('plugins.operationRecovery', 'Recovery needed'),
-    superseded: t('plugins.operationSuperseded', 'Withdrawn by a later disable'),
+    superseded: t('plugins.operationSuperseded', 'Withdrawn by a later operation'),
   }[state] : t('plugins.runtimeStatusUnknown', 'Status unavailable');
   const pending = state === 'accepted' || state === 'applying';
-  const withdrawable = state === 'recovery_required' && !!operation.currentData && operation.currentData.request.action !== 'disable';
+  const withdrawable = state === 'recovery_required' && !!operation.currentData && !['disable', 'uninstall'].includes(operation.currentData.request.action);
   const confirmed = state === 'complete' || state === 'failed' || state === 'superseded' || withdrawable;
-  const busy = disabling.isLoading || recovering.isLoading;
-  const disableRuntime = async () => {
+  const busy = withdrawing.isLoading || recovering.isLoading;
+  const withdrawRuntime = async (action: 'disable' | 'uninstall') => {
     const id = crypto.randomUUID().replaceAll('-', '');
     setSubmitted(id);
     setNotice('');
     try {
-      await disable({ pluginId: runtime.plugin_id, operationId: id, expectedRevision: runtime.selection_revision }).unwrap();
+      await withdraw({ action, pluginId: runtime.plugin_id, operationId: id, expectedRevision: runtime.selection_revision }).unwrap();
     } catch {
       setNotice(t('plugins.runtimeUncertain', 'The request did not return a confirmed result. Refresh operation status before taking another action.'));
     }
@@ -66,7 +66,7 @@ function RuntimeControls({ runtime, unavailable }: { runtime: ManagedRuntime; un
   };
   return <RuntimeCard aria-label={runtime.plugin_id}>
     <h3>{runtime.plugin_id}</h3>
-    <p>{runtime.enabled ? t('plugins.runtimeEnabled', 'Runtime enabled') : t('plugins.runtimeDisabled', 'Runtime disabled')}</p>
+    <p>{runtime.uninstalled ? t('plugins.runtimeUninstalled', 'Plugin uninstalled; cleanup state retained') : runtime.enabled ? t('plugins.runtimeEnabled', 'Runtime enabled') : t('plugins.runtimeDisabled', 'Runtime disabled')}</p>
     <p>{t('plugins.selectedRelease', 'Selected release')}: {runtime.selected_digest?.slice(0, 12) ?? t('plugins.noRelease', 'None selected')}</p>
     <p>{t('plugins.activeRelease', 'Active release')}: {runtime.service?.active_digest?.slice(0, 12) ?? t('plugins.noActiveRelease', 'None active')}</p>
     {runtime.stale || unavailable ? <p role="status">{t('plugins.runtimeStale', 'Service health is stale or unavailable.')}</p> : null}
@@ -74,12 +74,13 @@ function RuntimeControls({ runtime, unavailable }: { runtime: ManagedRuntime; un
     {operationId ? <p role="status">{t('plugins.runtimeOperation', 'Local operation')}: {stateLabel}</p> : null}
     {operation.error ? <p role="status">{t('plugins.runtimeReadFailed', 'Operation status could not be read. The original request has not been resubmitted.')}</p> : null}
     <Actions>
-      <Button type="button" disabled={(!runtime.enabled && !withdrawable) || unavailable || busy || pending || (state === 'recovery_required' && !withdrawable) || (!!submitted && !confirmed)} onClick={() => void disableRuntime()}>{t('plugins.disableRuntime', 'Disable runtime')}</Button>
+      <Button type="button" disabled={runtime.uninstalled || (!runtime.enabled && !withdrawable) || unavailable || busy || pending || (state === 'recovery_required' && !withdrawable) || (!!submitted && !confirmed)} onClick={() => void withdrawRuntime('disable')}>{t('plugins.disableRuntime', 'Disable runtime')}</Button>
+      <Button type="button" disabled={(runtime.uninstalled && !withdrawable) || (!runtime.selected_digest && !withdrawable) || unavailable || busy || pending || (state === 'recovery_required' && !withdrawable) || (!!submitted && !confirmed)} onClick={() => void withdrawRuntime('uninstall')}>{t('plugins.uninstallRuntime', 'Uninstall plugin')}</Button>
       {state === 'recovery_required' ? <Button type="button" disabled={unavailable || busy} onClick={() => void recoverOperation()}>{t('plugins.recoverRuntime', 'Recover local operation')}</Button> : null}
       {operationId ? <Button type="button" disabled={operation.isFetching || busy} onClick={() => void operation.refetch()}>{t('plugins.refreshOperation', 'Refresh operation status')}</Button> : null}
     </Actions>
-    {withdrawable ? <p>{t('plugins.withdrawInterruptedRuntime', 'Disable withdraws this pending local change without running its release. Installation history and cleanup records are retained.')}</p> : null}
-    <p>{t('plugins.runtimeCleanup', 'Disabling stops future capability work. Existing cleanup records and independent cleanup supervision are retained.')}</p>
+    {withdrawable ? <p>{t('plugins.withdrawInterruptedRuntime', 'Disable or uninstall withdraws this pending local change without running its release. Installation history and cleanup records are retained.')}</p> : null}
+    <p>{t('plugins.runtimeCleanup', 'Disable and uninstall stop future capability work. Cleanup supervision, credentials, records and recovery artifacts are retained. Uninstall is not a data purge. Select or activate a verified release to reinstall.')}</p>
     {notice && state !== 'complete' ? <p role="status">{notice}</p> : null}
     <Button type="button" onClick={() => setReleaseOpen(!releaseOpen)}>{releaseOpen ? t('plugins.closeReleaseInstallation', 'Close release installation') : t('plugins.openReleaseInstallation', 'Install a release')}</Button>
     {releaseOpen ? <RuntimeReleasePanel runtime={runtime} /> : null}

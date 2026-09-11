@@ -61,7 +61,7 @@ beforeEach(async () => {
         return response(operation);
       }
       const id = String(body?.operation_id);
-      operation = { request: { operation_id: id, action: 'disable' }, state: 'applying', error_code: null };
+      operation = { request: { operation_id: id, action: body?.action === 'uninstall' ? 'uninstall' : 'disable' }, state: 'applying', error_code: null };
       runtime = { ...runtime, operation_id: id, operation_state: 'applying' };
       // The manager accepted the original request but the browser lost its response.
       return response({}, 503);
@@ -114,7 +114,7 @@ it('offers explicit withdrawal of a failed initial activation without replaying 
   operation = { request: { operation_id: 'c'.repeat(32), action: 'activate' }, state: 'recovery_required', error_code: 'validation_failed' };
   runtime = { ...runtime, enabled: false, selected_digest: null, selection_revision: 0, operation_id: operation.request.operation_id, operation_state: operation.state };
   await act(async () => { store.dispatch(apiSlice.util.invalidateTags(['Plugins'])); });
-  await contains('Disable withdraws this pending local change');
+  await contains('Disable or uninstall withdraws this pending local change');
   expect(posts).toHaveLength(0);
   await click('Disable runtime');
   await contains('Applying');
@@ -123,4 +123,44 @@ it('offers explicit withdrawal of a failed initial activation without replaying 
   expect(posts[0].body?.operation_id).not.toBe('c'.repeat(32));
   await click('Disable runtime');
   expect(posts).toHaveLength(1);
+});
+
+
+it('retains an uncertain uninstall across reconnect without another submission', async () => {
+  await contains('managed.fixture');
+  await click('Uninstall plugin');
+  await contains('Applying');
+  expect(posts).toHaveLength(1);
+  expect(posts[0].body).toMatchObject({ action: 'uninstall', expected_revision: 7 });
+  await click('Uninstall plugin');
+  expect(posts).toHaveLength(1);
+  await act(async () => { root.unmount(); store.dispatch(apiSlice.util.resetApiState()); });
+  await mount();
+  await contains('Applying');
+  await click('Refresh operation status');
+  expect(posts).toHaveLength(1);
+});
+
+it('shows retained uninstall status and offers explicit release reinstallation', async () => {
+  runtime = { ...runtime, uninstalled: true, enabled: false, service: null };
+  await act(async () => { store.dispatch(apiSlice.util.invalidateTags(['Plugins'])); });
+  await contains('Plugin uninstalled; cleanup state retained');
+  await click('Uninstall plugin');
+  await click('Disable runtime');
+  expect(posts).toHaveLength(0);
+  expect([...host.querySelectorAll('button')].find((item) => item.textContent === 'Install a release')?.disabled).toBe(false);
+});
+
+
+it('allows uninstall to withdraw a stalled reinstallation while retaining uninstalled status', async () => {
+  operation = { request: { operation_id: 'd'.repeat(32), action: 'select' }, state: 'recovery_required', error_code: 'validation_failed' };
+  runtime = { ...runtime, uninstalled: true, enabled: false, operation_id: operation.request.operation_id, operation_state: operation.state };
+  await act(async () => { store.dispatch(apiSlice.util.invalidateTags(['Plugins'])); });
+  await contains('Disable or uninstall withdraws this pending local change');
+  await click('Disable runtime');
+  expect(posts).toHaveLength(0);
+  await click('Uninstall plugin');
+  await contains('Applying');
+  expect(posts).toHaveLength(1);
+  expect(posts[0].body).toMatchObject({ action: 'uninstall', expected_revision: 7 });
 });

@@ -2176,3 +2176,11 @@ acceptance, before any claim of provider completion. The private owner validates
 request correlation, preserves acknowledgement across restart and reconciles later
 receipt state without replay. Core and dashboard transport/display this bounded
 phase alongside independent cleanup observations.
+
+
+Managed-plugin `uninstall` is a retained-state withdrawal through the existing
+`RuntimeController`, using the same owner stop and selection journal as disable.
+The selected lifecycle operation determines inventory's `uninstalled` flag, separately
+from pending-operation progress. No extra supervisor, provider call or purge is added.
+Configuration, credentials, receipts and runtime generations remain available;
+independent cleanup continues. A verified `select` or `activate` reinstalls explicitly.

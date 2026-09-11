@@ -2,6 +2,7 @@
 
 import asyncio
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
@@ -10,8 +11,9 @@ from skulk.extensions.runtime_files import RuntimeLock, write_private
 from skulk.extensions.tests.test_runtime_service import installed, running
 
 
+@pytest.mark.parametrize("action", ["disable", "uninstall"])
 async def test_revision_refusal_preserves_owner_and_disable_reconnect_never_replays(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, action: Literal["disable", "uninstall"]
 ) -> None:
     """Validate before stopping; duplicate accepted requests retain one transition."""
     selector = await installed(tmp_path, monkeypatch)
@@ -23,7 +25,7 @@ async def test_revision_refusal_preserves_owner_and_disable_reconnect_never_repl
         process = controller.service.process
         assert process is not None
         stale = LifecycleRequest(
-            operation_id="a" * 32, action="disable", expected_revision=0
+            operation_id="a" * 32, action=action, expected_revision=0
         )
         with pytest.raises(ValueError, match="revision"):
             await controller.submit(stale)
@@ -40,7 +42,7 @@ async def test_revision_refusal_preserves_owner_and_disable_reconnect_never_repl
             await controller.submit(invalid)
         assert process.returncode is None
         request = LifecycleRequest(
-            operation_id="c" * 32, action="disable", expected_revision=1
+            operation_id="c" * 32, action=action, expected_revision=1
         )
         accepted = await controller.submit(request)
         assert accepted.state == "accepted"
@@ -58,6 +60,64 @@ async def test_revision_refusal_preserves_owner_and_disable_reconnect_never_repl
     finally:
         await controller.close()
     RuntimeLock(selector.root, "manager.lock").close()
+
+
+async def test_uninstall_retains_state_across_restart_until_explicit_reinstallation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Uninstall stops the owner without erasing obligations or revival on restart."""
+    selector = await installed(tmp_path, monkeypatch)
+    selection = selector.current()
+    assert selection is not None
+    retained = {
+        "receipts": b"synthetic outstanding cleanup",
+        "credential-history": b"synthetic protected cleanup credential",
+        "configuration": b"synthetic revisioned configuration",
+    }
+    for name, value in retained.items():
+        write_private(selector.root / name, value)
+    controller = RuntimeController(selector.root)
+    await controller.start()
+    request = LifecycleRequest(operation_id="a" * 32, action="uninstall", expected_revision=1)
+    try:
+        assert controller.service is not None
+        await running(controller.service)
+        process = controller.service.process
+        await controller.submit(request)
+        assert controller.work is not None
+        await controller.work
+        assert process is not None and process.returncode == 0
+        assert controller.is_uninstalled(selector.current())
+    finally:
+        await controller.close()
+    resumed = RuntimeController(selector.root)
+    try:
+        await resumed.start()
+        assert resumed.service_task is not None
+        await resumed.service_task
+        assert resumed.service is not None and resumed.service.process is None
+        assert resumed.is_uninstalled(selector.current())
+        assert (await resumed.submit(request)).state == "complete"
+        with pytest.raises(ValueError, match="uninstalled"):
+            await resumed.submit(LifecycleRequest(operation_id="b" * 32, action="disable", expected_revision=2))
+        reinstall = LifecycleRequest(
+            operation_id="c" * 32, action="select", expected_revision=2,
+            runtime_digest=selection.runtime_digest,
+        )
+        accepted = await resumed.submit(reinstall)
+        # An accepted replacement is not yet a published reinstallation.
+        assert resumed.is_uninstalled(selector.current())
+        assert resumed.work is not None
+        await resumed.work
+        assert resumed.operation(reinstall.operation_id).state == "complete"
+        assert selector.current() == accepted.selection
+        assert not resumed.is_uninstalled(selector.current())
+        assert not accepted.selection.enabled
+        for name, value in retained.items():
+            assert (selector.root / name).read_bytes() == value
+        assert (selector.root / "generations" / selection.runtime_digest).is_dir()
+    finally:
+        await resumed.close()
 
 
 async def test_owner_switch_is_completed_after_requester_disappears(
@@ -99,15 +159,16 @@ async def test_owner_switch_is_completed_after_requester_disappears(
 
 
 @pytest.mark.parametrize("fault", ["before_selection", "after_selection"])
+@pytest.mark.parametrize("action", ["disable", "uninstall"])
 async def test_restart_completes_only_recorded_local_selection(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, action: Literal["disable", "uninstall"], fault: str
 ) -> None:
     """Interrupted writes recover exact local intent once, with no provider operations."""
     selector = await installed(tmp_path, monkeypatch)
     controller = RuntimeController(selector.root)
     await controller.start()
     request = LifecycleRequest(
-        operation_id="e" * 32, action="disable", expected_revision=1
+        operation_id="e" * 32, action=action, expected_revision=1
     )
     original = selector.root / "runtime-selection.json"
 
@@ -389,8 +450,9 @@ async def test_disable_retains_initial_withdrawal_before_selection_journal(
 
 
 @pytest.mark.parametrize("published", [False, True])
+@pytest.mark.parametrize("action", ["disable", "uninstall"])
 async def test_explicit_disable_withdraws_stalled_revoked_activation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, published: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, action: Literal["disable", "uninstall"], published: bool
 ) -> None:
     """Controller withdrawal is durable and terminal across both publication outcomes."""
     from skulk.extensions.runtime_artifacts import RuntimeTrust
@@ -423,7 +485,7 @@ async def test_explicit_disable_withdraws_stalled_revoked_activation(
         write_private(selector.root / "publisher-trust.json", revoked.model_dump_json().encode())
         current = selector.current()
         assert current is not None
-        disable = LifecycleRequest(operation_id="9" * 32, action="disable", expected_revision=current.revision)
+        disable = LifecycleRequest(operation_id="9" * 32, action=action, expected_revision=current.revision)
         with monkeypatch.context() as failure:
             failure.setattr("skulk.extensions.runtime_selection.write_private", fail_selection)
             accepted = await controller.submit(disable)
