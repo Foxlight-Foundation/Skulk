@@ -1286,13 +1286,16 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 The ComfyUI engine has its own pin: `COMFY_PIN` (a release commit) and
 `COMFY_TORCH_WHEELS` (exact torch, torchvision, and torchaudio wheels per
 machine and variant with their index digests) in `provisioning/manifest.py`.
-Advancing either means re-recording the wheel digests from the index, bumping
-the pin, provisioning a fresh install on the target lane, and rerunning the
-video engine battery before merge. The managed install directory is keyed by
-pin alone, so an advanced pin provisions beside the old one rather than over
-it, and a wheel-set change ships with the next pin advance (ComfyUI releases
-weekly) rather than on its own: an install that already exists for the pin is
-reused as is.
+Advancing either means re-recording the wheel digests from the index (for
+every lane: cu130 and rocm7.2 stay on one torch release), bumping the pin
+when ComfyUI moves, provisioning a fresh install on each target lane, and
+rerunning the video engine battery before merge. The managed install
+directory is keyed by pin, variant, and the wheel set's digest, so an
+advanced pin or a changed wheel set provisions beside the old install rather
+than over it and an existing install is reused only when both match; the
+superseded install stays on disk until an operator removes it, so a node that
+follows several advances should prune old entries under
+`SKULK_ENGINES_DIR/comfy/`.
 
 The managed llama-server engine is pinned (`LLAMA_SERVER_PIN` in
 `src/skulk/provisioning/manifest.py`, currently `b10753`) so upstream churn is

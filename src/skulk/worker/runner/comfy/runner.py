@@ -109,13 +109,25 @@ attention on this stack; ComfyUI's default SDPA path is the one that works.
 """
 
 
+def _local_comfy_backend() -> str | None:
+    """The node's own advertised ``comfy-<compute>`` tag, for an unstamped shard."""
+    from skulk.shared.backends import probe_node_backends
+
+    tags = sorted(tag for tag in probe_node_backends() if tag.startswith("comfy-"))
+    return tags[0] if tags else None
+
+
 def launch_flags(resolved_backend: str | None) -> tuple[str, ...]:
     """Extra ComfyUI flags for the node's compute backend.
 
     CUDA needs nothing beyond the headless defaults; the ROCm lane adds
-    ``ROCM_LAUNCH_FLAGS``. The backend is the stamped ``comfy-<compute>`` tag.
+    ``ROCM_LAUNCH_FLAGS``. The backend is the stamped ``comfy-<compute>`` tag;
+    an unstamped shard (telemetry still warming, or a manual launch) uses
+    the tag this node advertises itself, so a managed ROCm install never
+    launches without the flags it was qualified with.
     """
-    if resolved_backend is not None and resolved_backend.endswith("-rocm"):
+    backend = resolved_backend if resolved_backend is not None else _local_comfy_backend()
+    if backend is not None and backend.endswith("-rocm"):
         return ROCM_LAUNCH_FLAGS
     return ()
 
