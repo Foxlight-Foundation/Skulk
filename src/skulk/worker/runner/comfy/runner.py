@@ -97,14 +97,26 @@ _HASH_CHUNK: Final = 1 << 20
 _THUMBNAIL_QUALITY: Final = 85
 
 
+ROCM_LAUNCH_FLAGS: Final[tuple[str, ...]] = ("--bf16-vae", "--disable-mmap", "--cache-none")
+"""ComfyUI flags for the ROCm lane, validated for H3 on Strix Halo (gfx1151).
+
+``--disable-mmap`` because safetensors memory-mapping of a checkpoint above
+64 GB is pathologically slow through the unified-memory path; ``--bf16-vae``
+because the fp32 VAE decode of a 768p clip does not fit beside the
+transformer; ``--cache-none`` so node outputs are not retained between
+renders on a host whose GPU memory is the system's. There is no flash
+attention on this stack; ComfyUI's default SDPA path is the one that works.
+"""
+
+
 def launch_flags(resolved_backend: str | None) -> tuple[str, ...]:
     """Extra ComfyUI flags for the node's compute backend.
 
-    CUDA needs nothing beyond the headless defaults. The ROCm lane records its
-    validated flags with the ROCm provisioning variant; until then a ROCm
-    node launches with the same defaults.
+    CUDA needs nothing beyond the headless defaults; the ROCm lane adds
+    ``ROCM_LAUNCH_FLAGS``. The backend is the stamped ``comfy-<compute>`` tag.
     """
-    del resolved_backend
+    if resolved_backend is not None and resolved_backend.endswith("-rocm"):
+        return ROCM_LAUNCH_FLAGS
     return ()
 
 

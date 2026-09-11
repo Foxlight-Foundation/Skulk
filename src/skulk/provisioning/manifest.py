@@ -22,6 +22,8 @@ is deliberately advanced and re-validated.
 
 from __future__ import annotations
 
+import hashlib
+from collections.abc import Sequence
 from typing import Final, Literal, final
 
 from pydantic import ConfigDict
@@ -164,23 +166,46 @@ class PinnedWheel(CamelCaseModel):
 
 
 _PYTORCH_CU130_INDEX: Final = "https://download.pytorch.org/whl/cu130"
+_PYTORCH_ROCM72_INDEX: Final = "https://download.pytorch.org/whl/rocm7.2"
+
+
+def _pytorch_wheel(name: str, version: str, local: str, index: str, machine: str, sha256: str) -> PinnedWheel:
+    return PinnedWheel(
+        name=name,
+        version=f"{version}+{local}",
+        filename=f"{name}-{version}%2B{local}-cp313-cp313-manylinux_2_28_{machine}.whl",
+        sha256=sha256,
+        index=index,
+    )
 
 
 def _cu130(name: str, version: str, machine: str, sha256: str) -> PinnedWheel:
-    return PinnedWheel(
-        name=name,
-        version=f"{version}+cu130",
-        filename=f"{name}-{version}%2Bcu130-cp313-cp313-manylinux_2_28_{machine}.whl",
-        sha256=sha256,
-        index=_PYTORCH_CU130_INDEX,
-    )
+    return _pytorch_wheel(name, version, "cu130", _PYTORCH_CU130_INDEX, machine, sha256)
+
+
+def _rocm72(name: str, version: str, machine: str, sha256: str) -> PinnedWheel:
+    return _pytorch_wheel(name, version, "rocm7.2", _PYTORCH_ROCM72_INDEX, machine, sha256)
+
+
+def wheel_set_digest(wheels: Sequence[PinnedWheel]) -> str:
+    """Content identity of one wheel set: the SHA-256 over its wheel digests.
+
+    A managed install is keyed by the ComfyUI pin and this digest together,
+    so a wheel-set change without a pin change reprovisions instead of
+    silently reusing an environment built on different torch builds.
+    """
+    return hashlib.sha256("".join(sorted(wheel.sha256 for wheel in wheels)).encode()).hexdigest()
 
 
 # (machine, variant) -> the torch wheel set installed into the managed
 # ComfyUI environment, for sys.platform == "linux" and cp313. Checksums are
 # the index's own link digests, recorded 2026-09-10 from
-# download.pytorch.org/whl/cu130. CUDA 13.0 wheels need a 580-series or newer
-# driver. ROCm is absent until the Strix lane is qualified on real hardware.
+# download.pytorch.org/whl/cu130 and download.pytorch.org/whl/rocm7.2. CUDA
+# 13.0 wheels need a 580-series or newer driver. The ROCm 7.2 wheels bundle
+# their own HIP runtime, so the host needs only the amdgpu kernel driver (a
+# Strix Halo gfx1151 node runs them on an in-tree kernel 7 driver); they are
+# published for x86_64 only. Both lanes sit on the same torch release so a
+# card's behavior does not fork by vendor.
 COMFY_TORCH_WHEELS: Final[dict[tuple[str, EngineVariant], tuple[PinnedWheel, ...]]] = {
     ("aarch64", "cuda"): (
         _cu130("torch", "2.14.0", "aarch64", "20ec4bb8944a847dee60e6d5536b415670dd5403342f36dbe08a6be5bf582e08"),
@@ -191,5 +216,10 @@ COMFY_TORCH_WHEELS: Final[dict[tuple[str, EngineVariant], tuple[PinnedWheel, ...
         _cu130("torch", "2.14.0", "x86_64", "745010695e0458d6f28accb697b5371b6fd245aa8696530165f972cd126bbd8d"),
         _cu130("torchvision", "0.29.0", "x86_64", "360f048dd21a2c23f12af210962d4bd23321da32410a67fac98ef1e22fd2bc21"),
         _cu130("torchaudio", "2.11.0", "x86_64", "e9c07cfdab691454092ff12d21dd1407a4bb8ad081d38f222cf6fcf6abcc18c8"),
+    ),
+    ("x86_64", "rocm"): (
+        _rocm72("torch", "2.14.0", "x86_64", "fa22a1a85f4f92c4fb49dc9b117b3eb32b8c684968508f585df042e7016eb97f"),
+        _rocm72("torchvision", "0.29.0", "x86_64", "a400ed6494ec9d1f007754492e7de714c7e0bfeedfe295b401435403bf2630fb"),
+        _rocm72("torchaudio", "2.11.0", "x86_64", "9228e1c534d04d80fa7b46205f448da947fd06f5573ba8602f041b504edb3596"),
     ),
 }

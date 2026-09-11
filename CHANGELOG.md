@@ -41,17 +41,20 @@ This project records release notes here and mirrors public-facing notes in
   seeded synthetic clips through every stage of the pipeline so the
   substrate works end to end on nodes without a GPU. The `comfy` engine's
   provisioning lands first: a pinned ComfyUI checkout (v0.35.0) in a
-  managed environment with a hash-pinned cu130 torch wheel set, provisioned
-  on Linux NVIDIA nodes that enable video models or by `skulk doctor --fix`,
-  advertised as `comfy-cuda`, with `SKULK_COMFY_BIN` and `SKULK_COMFY_ROOT`
-  for hand-built installs. The ComfyUI runner drives that install headless:
+  managed environment with a hash-pinned torch wheel set (cu130 on NVIDIA,
+  rocm7.2 on AMD Strix Halo; installs are keyed by pin and wheel-set digest
+  so a wheel change reprovisions), provisioned on Linux NVIDIA and AMD nodes
+  that enable video models or by `skulk doctor --fix`, advertised as
+  `comfy-cuda` or `comfy-rocm` (the ROCm lane launches ComfyUI with
+  `--bf16-vae --disable-mmap --cache-none`), with `SKULK_COMFY_BIN` and
+  `SKULK_COMFY_ROOT` for hand-built installs. The ComfyUI runner drives that install headless:
   it exposes the staged H3 artifact through an `extra_model_paths.yaml`,
   binds each request onto ComfyUI's own MiniMax H3 node graph (text, first
   and last frame, and numbered image, video, and audio references; named
   turbo adapters with their trained step counts and sigma shifts), follows
   step progress on the WebSocket, cancels mid-render, and delivers the
   H.264/AAC container with a first-frame thumbnail. H3 cards place on
-  `comfy-cuda` nodes.
+  `comfy-cuda` and `comfy-rocm` nodes.
 - Muse Glimmer (Meta, August 2026) is a first-class model family on every
   serving lane. The capability resolver now derives the family's wire
   contract from the card family or model id, the same way it does for
