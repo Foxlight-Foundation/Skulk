@@ -339,9 +339,11 @@ What to expect, from measurements on a Strix Halo pair:
 ## Video (MiniMax H3) on the AMD node
 
 The served `comfy` video engine has a ROCm lane for this hardware. With
-`SKULK_ENABLE_VIDEO_MODELS=true` (or `skulk doctor --fix`), a Linux AMD node
-provisions the pinned ComfyUI checkout into its own managed environment with
-the hash-pinned `rocm7.2` torch wheel set. Those wheels bundle their own HIP
+`SKULK_ENABLE_VIDEO_MODELS=true` set, a Linux AMD node provisions the pinned
+ComfyUI checkout into its own managed environment with the hash-pinned
+`rocm7.2` torch wheel set, at node startup or through `skulk doctor --fix`
+(the doctor honors the same gate: without video models enabled it reports
+that no engine is expected and provisions nothing). Those wheels bundle their own HIP
 runtime, so unlike the Vulkan path above nothing from a system ROCm install is
 used; the amdgpu kernel driver and membership in the `render` and `video`
 groups are enough. The node then advertises `comfy-rocm` and H3 cards place
