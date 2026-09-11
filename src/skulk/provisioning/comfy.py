@@ -147,7 +147,7 @@ def _legacy_comfy_root(variant: EngineVariant) -> Path:
 def _record_matches(root: Path, wheels: Sequence[PinnedWheel]) -> bool:
     """Whether an install's record names exactly this wheel set by hash."""
     try:
-        loaded = cast(object, json.loads((root / RECORD_FILENAME).read_text()))  # pyright: ignore[reportAny]
+        loaded = cast(object, json.loads((root / RECORD_FILENAME).read_text()))
     except (OSError, ValueError):
         return False
     if not isinstance(loaded, dict):
