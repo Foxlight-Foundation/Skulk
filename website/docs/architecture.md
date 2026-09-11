@@ -803,7 +803,13 @@ a host whose GPU memory is the system's), and with
 wheel's gfx1151 rocBLAS library lacks a single-precision batched GEMM
 solution that the Qwen3-VL text encoder's vision tower issues for
 image-conditioned prompts, and without the hipBLASLt route the server
-segfaults on every keyframe or reference render. An
+segfaults on every keyframe or reference render. hipBLASLt's own gfx1151
+library has gaps too, reached by a second image-conditioned prompt in one
+process, so on this lane the runner replaces the server after every
+render: the first prompt a fresh process executes has passed every time
+on the hardware, and the price is the model reload on the next render.
+Complete coverage needs a torch build made for gfx1151, which today exists
+only as a nightly, or a system ROCm 7.2 for AMD's lightweight wheels. An
 operator with a hand-built ComfyUI points `SKULK_COMFY_BIN` at its
 interpreter and `SKULK_COMFY_ROOT` at the checkout; both must be valid or
 the engine stays off with a loud conflict. The checkout's commit is the

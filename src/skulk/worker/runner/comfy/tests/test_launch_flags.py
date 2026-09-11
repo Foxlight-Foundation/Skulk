@@ -10,6 +10,7 @@ import skulk.shared.backends as backends
 from skulk.worker.runner.comfy.runner import (
     ROCM_LAUNCH_ENVIRONMENT,
     ROCM_LAUNCH_FLAGS,
+    fresh_server_per_render,
     launch_environment,
     launch_flags,
 )
@@ -64,3 +65,13 @@ def test_server_environment_layers_lane_variables_over_the_process(monkeypatch: 
     assert "PYTHONPATH" not in env
     assert env["PATH"].startswith(str(interpreter.parent))
     assert env["TORCH_BLAS_PREFER_HIPBLASLT"] == "1"
+
+
+def test_rocm_lane_serves_one_render_per_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The ROCm lane replaces its server after each render; other lanes keep theirs."""
+    assert fresh_server_per_render("comfy-rocm") is True
+    assert fresh_server_per_render("comfy-cuda") is False
+    monkeypatch.setattr(backends, "probe_node_backends", lambda: {"comfy", "comfy-rocm"})
+    assert fresh_server_per_render(None) is True
+    monkeypatch.setattr(backends, "probe_node_backends", lambda: {"comfy", "comfy-cuda"})
+    assert fresh_server_per_render(None) is False

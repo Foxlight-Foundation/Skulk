@@ -392,7 +392,10 @@ A model card's `placement.compatible_backends` selects which engine serves it
   `TORCH_BLAS_PREFER_HIPBLASLT=1`, because the rocm7.2 wheel's gfx1151
   rocBLAS library lacks an fp32 batched GEMM the Qwen3-VL text encoder's
   vision tower needs and the server segfaults on image-conditioned prompts
-  without it); GPU-only, single-host.
+  without it; and the lane serves one render per server process,
+  `ROCM_FRESH_SERVER_PER_RENDER`, because hipBLASLt has gfx1151 gaps of
+  its own that a second image-conditioned prompt in one process reaches);
+  GPU-only, single-host.
   ADVANCING `COMFY_PIN` OR THE WHEEL SET IS A CHECKLIST
   (architecture-reference.md "Engine pin advancement").
 - **`test_video`** (`worker/runner/test_video/`): deterministic test video

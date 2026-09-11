@@ -150,6 +150,25 @@ def launch_flags(resolved_backend: str | None) -> tuple[str, ...]:
     return ROCM_LAUNCH_FLAGS if _is_rocm_lane(resolved_backend) else ()
 
 
+ROCM_FRESH_SERVER_PER_RENDER: Final = True
+"""Whether the ROCm lane recycles its ComfyUI server after every render.
+
+The rocm7.2 torch wheel's gfx1151 BLAS libraries are incomplete: rocBLAS and
+hipBLASLt each lack GEMM solutions that H3 prompts reach, and the runtime
+segfaults launching a missing one. With hipBLASLt preferred, the first
+prompt a fresh server executes has passed every time on real hardware,
+while a second image-conditioned prompt in the same process reaches a
+bf16 bias-fused GEMM the library lacks. Until a wheel with complete
+gfx1151 coverage exists, a server serves one render and is replaced; the
+cost is the model reload on the next render's first step.
+"""
+
+
+def fresh_server_per_render(resolved_backend: str | None) -> bool:
+    """Whether this launch replaces the ComfyUI server after each render."""
+    return ROCM_FRESH_SERVER_PER_RENDER and _is_rocm_lane(resolved_backend)
+
+
 def launch_environment(resolved_backend: str | None) -> dict[str, str]:
     """Extra environment for the ComfyUI server on the node's compute backend.
 
@@ -294,6 +313,24 @@ class Runner:
             self.server.teardown()
             self.server = None
 
+    def _recycle_server_if_needed(self) -> None:
+        """Replace the server after a render on lanes that need a fresh process.
+
+        Runs whether the render succeeded, failed, or was cancelled: the
+        next render must start from a process that has executed no prompt.
+        A respawn failure surfaces on the next render through the liveness
+        check rather than here, so a finished render is never reported as
+        failed by its successor's startup.
+        """
+        if not fresh_server_per_render(self.shard_metadata.resolved_backend):
+            return
+        logger.info("recycling the ComfyUI server after the render (fresh server per render on this lane)")
+        self._teardown_server()
+        try:
+            self._load_model()
+        except Exception as error:  # noqa: BLE001 - reported by the next render's liveness check
+            logger.warning(f"ComfyUI respawn after the render failed: {error}")
+
     def _ensure_server_alive(self) -> None:
         if self.server is None or not self.server.alive():
             tail = self.server.log_tail() if self.server is not None else "(no server)"
@@ -338,6 +375,8 @@ class Runner:
                     if not isinstance(error, ValueError):
                         raise
                     logger.warning(f"comfy engine rejected {command_id}: {error}")
+                finally:
+                    self._recycle_server_if_needed()
                 self.current_status = RunnerReady()
             case Shutdown():
                 self.update_status(RunnerShuttingDown())
