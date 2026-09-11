@@ -43,7 +43,7 @@ Verifies at least one inference engine is usable: in-process MLX on macOS, an im
 
 ### ComfyUI video engine (`comfy-engine`)
 
-When video models are enabled (SKULK_ENABLE_VIDEO_MODELS), verifies the served ComfyUI video engine is configured (SKULK_COMFY_BIN plus SKULK_COMFY_ROOT) or provisioned as the managed install under the engines directory. A Linux NVIDIA node without one is degraded: video cards never place there. Management nodes and nodes with video models disabled pass. Supports `--fix`.
+When video models are enabled (SKULK_ENABLE_VIDEO_MODELS), verifies the served ComfyUI video engine is configured (SKULK_COMFY_BIN plus SKULK_COMFY_ROOT) or provisioned as the managed install under the engines directory. A Linux NVIDIA or AMD node without one is degraded: video cards never place there. Management nodes and nodes with video models disabled pass. Supports `--fix`.
 
 ### Capability conflicts (`capability-conflicts`)
 

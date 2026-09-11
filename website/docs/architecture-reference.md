@@ -51,7 +51,7 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 
 ### ComfyUI engine provisioning
 
-`src/skulk/provisioning/comfy.py`: `select_comfy_variant_chain` (Linux, GPU vendor, and a recorded wheel set for the machine), `provision_comfy` (git clone at `COMFY_PIN` with a HEAD check, `uv venv` on `COMFY_PYTHON`, the `COMFY_TORCH_WHEELS` set installed by exact URL and hash with no resolution, then ComfyUI's requirements resolved against constraints that keep that wheel set, a frozen environment listing, and a record file written last; staging directory renamed into place), `managed_comfy_install`, `dormant_comfy` (read-only twin for doctor), `ensure_comfy` (gates: opt-out, explicit override wins, `SKULK_ENABLE_VIDEO_MODELS`, variant chain; exports `SKULK_COMFY_BIN` and `SKULK_COMFY_ROOT`). Pins live in `provisioning/manifest.py` (`COMFY_PIN`, `COMFY_REPOSITORY`, `COMFY_PYTHON`, `PinnedWheel`, `COMFY_TORCH_WHEELS`). Facts: `NodeFacts.comfy_binary`, `comfy_root`, `comfy_root_state`, `declared_comfy_backends`; derivation `_derive_comfy` (GPU-only, vLLM's declaration chain); inventory reports `comfy@<checkout HEAD>`. Startup hook in `src/skulk/main.py` beside `ensure_llama_server`. Doctor check `comfy-engine` with `--fix`.
+`src/skulk/provisioning/comfy.py`: `select_comfy_variant_chain` (Linux, GPU vendor, and a recorded wheel set for the machine), `provision_comfy` (git clone at `COMFY_PIN` with a HEAD check, `uv venv` on `COMFY_PYTHON`, the `COMFY_TORCH_WHEELS` set installed by exact URL and hash with no resolution, then ComfyUI's requirements resolved against constraints that keep that wheel set, a frozen environment listing, and a record file written last; staging directory renamed into place), `managed_comfy_install`, `dormant_comfy` (read-only twin for doctor), `ensure_comfy` (gates: opt-out, explicit override wins, `SKULK_ENABLE_VIDEO_MODELS`, variant chain; exports `SKULK_COMFY_BIN` and `SKULK_COMFY_ROOT`). Pins live in `provisioning/manifest.py` (`COMFY_PIN`, `COMFY_REPOSITORY`, `COMFY_PYTHON`, `PinnedWheel`, `COMFY_TORCH_WHEELS` for cu130 and rocm7.2, `wheel_set_digest` keying the install root). The ROCm lane's launch flags are `ROCM_LAUNCH_FLAGS` in `worker/runner/comfy/runner.py`. Facts: `NodeFacts.comfy_binary`, `comfy_root`, `comfy_root_state`, `declared_comfy_backends`; derivation `_derive_comfy` (GPU-only, vLLM's declaration chain); inventory reports `comfy@<checkout HEAD>`. Startup hook in `src/skulk/main.py` beside `ensure_llama_server`. Doctor check `comfy-engine` with `--fix`.
 
 ### ComfyUI runner
 
@@ -1150,7 +1150,7 @@ Only `SKULK_*` names are read. The legacy `EXO_*` deprecation runway was removed
 | `SKULK_TEST_DISTRIBUTED_MODEL` | Tests only: force the distributed/prefix-cache slow-test model (`gpt-oss-20b` or `llama-3.2-1b`); default auto-selects by Metal working-set size |
 | `MLX_METAL_FAST_SYNCH` | Set by Skulk based on resolved card preference; not for direct operator use |
 | `MLX_HOSTFILE`, `MLX_RANK`, `MLX_RING_VERBOSE`, `MLX_IBV_DEVICES`, `MLX_JACCL_COORDINATOR` | MLX upstream env vars; auto-set by Skulk during distributed init. Ring hostfile addresses are chosen per neighbor pair from OBSERVED libp2p connections, ranked thunderbolt > maybe_ethernet > ethernet > wifi > unknown > VPN/overlay. Tailscale CGNAT (100.64/10, fd7a:115c:a1e0::/48) addresses are detected by ADDRESS (utun types don't gossip) and rank strictly last: the overlay exists for external reachability and may be DERP-relayed, so it is only used when a pair has no local candidate (#265). Selection lives in `_find_ip_prioritised` / `get_mlx_ring_hosts_by_node` (`src/skulk/master/placement_utils.py`) |
-| `SKULK_COMFY_BIN` / `SKULK_COMFY_ROOT` | Interpreter (`<venv>/bin/python`) and checkout of a hand-built ComfyUI for the `comfy` video engine; both required. Absent, a Linux NVIDIA node with `SKULK_ENABLE_VIDEO_MODELS=true` provisions the pinned managed install under `SKULK_ENGINES_DIR/comfy/<pin>/<variant>` |
+| `SKULK_COMFY_BIN` / `SKULK_COMFY_ROOT` | Interpreter (`<venv>/bin/python`) and checkout of a hand-built ComfyUI for the `comfy` video engine; both required. Absent, a Linux NVIDIA or AMD node with `SKULK_ENABLE_VIDEO_MODELS=true` provisions the pinned managed install under `SKULK_ENGINES_DIR/comfy/<pin>/<variant>-<wheel-set digest>` (cu130 or rocm7.2 torch wheels; the ROCm lane launches ComfyUI with `--bf16-vae --disable-mmap --cache-none`) |
 | `SKULK_COMFY_BACKENDS` | Compute backends the ComfyUI install targets (`cuda`, `rocm`); unset falls back to the vLLM and llama declaration chain, then to the observed GPU vendor |
 | `SKULK_TEST_VIDEO_ENGINE` | Truthy value advertises the deterministic test video engine (`test_video` / `test_video-cpu`) on this node; serves only the bundled `foxlight/test-video` card. Test instrument only |
 | `SKULK_TEST_VIDEO_STEP_SECONDS` | Simulated wall time per sampling step in the test video engine (default 0.02) |
@@ -1286,13 +1286,16 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 The ComfyUI engine has its own pin: `COMFY_PIN` (a release commit) and
 `COMFY_TORCH_WHEELS` (exact torch, torchvision, and torchaudio wheels per
 machine and variant with their index digests) in `provisioning/manifest.py`.
-Advancing either means re-recording the wheel digests from the index, bumping
-the pin, provisioning a fresh install on the target lane, and rerunning the
-video engine battery before merge. The managed install directory is keyed by
-pin alone, so an advanced pin provisions beside the old one rather than over
-it, and a wheel-set change ships with the next pin advance (ComfyUI releases
-weekly) rather than on its own: an install that already exists for the pin is
-reused as is.
+Advancing either means re-recording the wheel digests from the index (for
+every lane: cu130 and rocm7.2 stay on one torch release), bumping the pin
+when ComfyUI moves, provisioning a fresh install on each target lane, and
+rerunning the video engine battery before merge. The managed install
+directory is keyed by pin, variant, and the wheel set's digest, so an
+advanced pin or a changed wheel set provisions beside the old install rather
+than over it and an existing install is reused only when both match; the
+superseded install stays on disk until an operator removes it, so a node that
+follows several advances should prune old entries under
+`SKULK_ENGINES_DIR/comfy/`.
 
 The managed llama-server engine is pinned (`LLAMA_SERVER_PIN` in
 `src/skulk/provisioning/manifest.py`, currently `b10753`) so upstream churn is

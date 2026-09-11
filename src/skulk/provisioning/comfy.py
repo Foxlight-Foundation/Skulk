@@ -25,7 +25,7 @@ import subprocess
 import tempfile
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Final
+from typing import Final, cast
 
 from loguru import logger
 
@@ -37,6 +37,7 @@ from skulk.provisioning.manifest import (
     COMFY_TORCH_WHEELS,
     EngineVariant,
     PinnedWheel,
+    wheel_set_digest,
 )
 from skulk.shared.backends import COMFY_BIN_ENV, COMFY_ROOT_ENV
 from skulk.shared.constants import SKULK_ENABLE_VIDEO_MODELS, SKULK_ENGINES_DIR
@@ -48,7 +49,7 @@ _VENV_TIMEOUT_SECONDS: Final = 300.0
 # large transitive set; give the one-time install a generous budget.
 _INSTALL_TIMEOUT_SECONDS: Final = 3600.0
 _PYPI_INDEX: Final = "https://pypi.org/simple/"
-_PYTORCH_CU130_INDEX: Final = "https://download.pytorch.org/whl/cu130"
+_DIGEST_KEY_LENGTH: Final = 12
 
 CHECKOUT_DIRNAME: Final = "ComfyUI"
 VENV_DIRNAME: Final = "venv"
@@ -104,9 +105,18 @@ def select_comfy_variant_chain(facts: NodeFacts) -> tuple[EngineVariant, ...]:
     return tuple(variant for variant in wanted if (machine, variant) in COMFY_TORCH_WHEELS)
 
 
-def managed_comfy_root(variant: EngineVariant) -> Path:
-    """Directory holding one managed install (checkout plus environment)."""
-    return SKULK_ENGINES_DIR / "comfy" / COMFY_PIN / variant
+def managed_comfy_root(variant: EngineVariant, machine: str | None = None) -> Path:
+    """Directory holding one managed install (checkout plus environment).
+
+    Keyed by the ComfyUI pin, the variant, and the wheel set's digest, so an
+    install built on other torch wheels is never reused for this set.
+    Returns ``None``-free paths only for recorded wheel sets; an unrecorded
+    machine and variant pair keys under the variant alone, where nothing is
+    ever provisioned.
+    """
+    wheels = COMFY_TORCH_WHEELS.get((machine or platform_module.machine(), variant))
+    key = variant if wheels is None else f"{variant}-{wheel_set_digest(wheels)[:_DIGEST_KEY_LENGTH]}"
+    return SKULK_ENGINES_DIR / "comfy" / COMFY_PIN / key
 
 
 def comfy_interpreter(root: Path) -> Path:
@@ -129,12 +139,52 @@ def _install_complete(root: Path) -> bool:
     )
 
 
+def _legacy_comfy_root(variant: EngineVariant) -> Path:
+    """The pre-digest layout, ``<pin>/<variant>``, that earlier installs used."""
+    return SKULK_ENGINES_DIR / "comfy" / COMFY_PIN / variant
+
+
+def _record_matches(root: Path, wheels: Sequence[PinnedWheel]) -> bool:
+    """Whether an install's record names exactly this wheel set by hash."""
+    try:
+        loaded = cast(object, json.loads((root / RECORD_FILENAME).read_text()))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(loaded, dict):
+        return False
+    record = cast(dict[str, object], loaded)
+    recorded = record.get("wheels")
+    if not isinstance(recorded, list):
+        return False
+    hashes: set[object] = set()
+    for entry in cast(list[object], recorded):
+        if isinstance(entry, dict):
+            hashes.add(cast(dict[str, object], entry).get("sha256"))
+    return hashes == {wheel.sha256 for wheel in wheels}
+
+
+def _existing_install(variant: EngineVariant, machine: str) -> Path | None:
+    """A complete install for this wheel set: the digest-keyed root, or a legacy
+    root whose record proves it was built on exactly these wheels. An install
+    made before roots carried the digest is reused rather than rebuilt, so an
+    upgraded node (offline or not) keeps the engine it already has."""
+    root = managed_comfy_root(variant, machine)
+    if _install_complete(root):
+        return root
+    wheels = COMFY_TORCH_WHEELS.get((machine, variant))
+    legacy = _legacy_comfy_root(variant)
+    if wheels is not None and legacy != root and _install_complete(legacy) and _record_matches(legacy, wheels):
+        return legacy
+    return None
+
+
 def managed_comfy_install(facts: NodeFacts) -> Path | None:
     """The complete managed install this node would use, if one is on disk."""
+    machine = platform_module.machine()
     for variant in select_comfy_variant_chain(facts):
-        root = managed_comfy_root(variant)
-        if _install_complete(root):
-            return root
+        existing = _existing_install(variant, machine)
+        if existing is not None:
+            return existing
     return None
 
 
@@ -185,15 +235,17 @@ def provision_comfy(variant: EngineVariant, *, run: Runner = subprocess.run) -> 
     wheels = COMFY_TORCH_WHEELS.get((machine, variant))
     if wheels is None:
         raise RuntimeError(f"no ComfyUI torch wheel set is recorded for {machine}/{variant}")
-    target = managed_comfy_root(variant)
-    if _install_complete(target):
-        return target
+    torch_index = wheels[0].index
+    existing = _existing_install(variant, machine)
+    if existing is not None:
+        return existing
+    target = managed_comfy_root(variant, machine)
     git = _require_tool("git")
     uv = _require_tool("uv")
     target.parent.mkdir(parents=True, exist_ok=True)
     env = sanitized_index_environment()
-    with tempfile.TemporaryDirectory(dir=target.parent, prefix=f".{variant}-") as staging:
-        root = Path(staging) / variant
+    with tempfile.TemporaryDirectory(dir=target.parent, prefix=f".{target.name}-") as staging:
+        root = Path(staging) / target.name
         root.mkdir()
         checkout = comfy_checkout(root)
         _run(
@@ -238,7 +290,7 @@ def provision_comfy(variant: EngineVariant, *, run: Runner = subprocess.run) -> 
             run,
             [
                 uv, "pip", "install", "--no-config", "--quiet", "--python", str(interpreter),
-                "--index-url", _PYPI_INDEX, "--extra-index-url", _PYTORCH_CU130_INDEX,
+                "--index-url", _PYPI_INDEX, "--extra-index-url", torch_index,
                 "-c", str(constraints), "-r", str(checkout / "requirements.txt"),
             ],
             timeout=_INSTALL_TIMEOUT_SECONDS,
@@ -260,6 +312,7 @@ def provision_comfy(variant: EngineVariant, *, run: Runner = subprocess.run) -> 
                     "variant": variant,
                     "machine": machine,
                     "python": COMFY_PYTHON,
+                    "wheelSetDigest": wheel_set_digest(wheels),
                     "wheels": [{"filename": wheel.filename, "sha256": wheel.sha256} for wheel in wheels],
                 },
                 indent=2,

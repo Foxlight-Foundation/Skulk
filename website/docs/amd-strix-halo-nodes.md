@@ -336,6 +336,24 @@ What to expect, from measurements on a Strix Halo pair:
   whole pooled instance tears down within seconds, and no orphan processes
   are left behind.
 
+## Video (MiniMax H3) on the AMD node
+
+The served `comfy` video engine has a ROCm lane for this hardware. With
+`SKULK_ENABLE_VIDEO_MODELS=true` set, a Linux AMD node provisions the pinned
+ComfyUI checkout into its own managed environment with the hash-pinned
+`rocm7.2` torch wheel set, at node startup or through `skulk doctor --fix`
+(the doctor honors the same gate: without video models enabled it reports
+that no engine is expected and provisions nothing). Those wheels bundle their own HIP
+runtime, so unlike the Vulkan path above nothing from a system ROCm install is
+used; the amdgpu kernel driver and membership in the `render` and `video`
+groups are enough. The node then advertises `comfy-rocm` and H3 cards place
+on it. The runner launches ComfyUI with `--bf16-vae --disable-mmap
+--cache-none`, the flags validated on gfx1151: memory-mapping a checkpoint
+above 64 GB through unified memory is pathologically slow, and the fp32 VAE
+decode does not fit beside the transformer. Expect several gigabytes of wheels
+on first provisioning and set the unified-memory kernel parameters above so the
+GPU can address the whole pool.
+
 ## What is not on the AMD path today
 
 - **MTP across the in-process `llama_cpp` engine.** The in-process binding does

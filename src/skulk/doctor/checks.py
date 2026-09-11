@@ -364,13 +364,13 @@ def _check_comfy_engine(facts: NodeFacts) -> Sequence[CheckResult]:
             ),
             remediation=(
                 "`skulk doctor --fix` provisions the pinned ComfyUI checkout and "
-                "torch wheel set on a Linux NVIDIA node (several gigabytes); "
+                "torch wheel set on a Linux NVIDIA or AMD node (several gigabytes); "
                 "alternatively set SKULK_COMFY_BIN and SKULK_COMFY_ROOT to a "
                 "hand-built install"
                 if fix_available
                 else "this machine has no recorded ComfyUI wheel set (Linux NVIDIA "
-                "aarch64 or x86_64 today); set SKULK_COMFY_BIN and "
-                "SKULK_COMFY_ROOT to a hand-built install"
+                "aarch64 or x86_64, or Linux AMD x86_64 today); set SKULK_COMFY_BIN "
+                "and SKULK_COMFY_ROOT to a hand-built install"
             ),
             fix_available=fix_available,
         )
@@ -928,7 +928,7 @@ REGISTRY: tuple[DoctorCheck, ...] = (
             "When video models are enabled (SKULK_ENABLE_VIDEO_MODELS), verifies "
             "the served ComfyUI video engine is configured (SKULK_COMFY_BIN plus "
             "SKULK_COMFY_ROOT) or provisioned as the managed install under the "
-            "engines directory. A Linux NVIDIA node without one is degraded: "
+            "engines directory. A Linux NVIDIA or AMD node without one is degraded: "
             "video cards never place there. Management nodes and nodes with "
             "video models disabled pass."
         ),

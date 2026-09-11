@@ -1,0 +1,36 @@
+"""The ComfyUI launch line varies only by the stamped compute backend."""
+
+from __future__ import annotations
+
+import pytest
+
+import skulk.shared.backends as backends
+from skulk.worker.runner.comfy.runner import ROCM_LAUNCH_FLAGS, launch_flags
+
+
+def test_rocm_backends_get_the_validated_strix_flags() -> None:
+    assert launch_flags("comfy-rocm") == ROCM_LAUNCH_FLAGS
+    assert ROCM_LAUNCH_FLAGS == ("--bf16-vae", "--disable-mmap", "--cache-none")
+
+
+def test_other_backends_launch_with_the_headless_defaults_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(backends, "probe_node_backends", lambda: {"comfy", "comfy-cuda"})
+    assert launch_flags("comfy-cuda") == ()
+    assert launch_flags("comfy") == ()
+    assert launch_flags(None) == ()
+
+
+def test_unstamped_shards_use_the_tag_this_node_advertises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unstamped shard on a ROCm node still launches with the qualified flags."""
+    monkeypatch.setattr(backends, "probe_node_backends", lambda: {"comfy", "comfy-rocm", "llama_server-vulkan"})
+    assert launch_flags(None) == ROCM_LAUNCH_FLAGS
+    monkeypatch.setattr(backends, "probe_node_backends", lambda: {"llama_server-vulkan"})
+    assert launch_flags(None) == ()
+
+
+def test_a_bare_engine_stamp_also_uses_the_tag_this_node_advertises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A card declaring only ``comfy`` still gets the ROCm flags on a ROCm node."""
+    monkeypatch.setattr(backends, "probe_node_backends", lambda: {"comfy", "comfy-rocm"})
+    assert launch_flags("comfy") == ROCM_LAUNCH_FLAGS
+    monkeypatch.setattr(backends, "probe_node_backends", lambda: {"comfy", "comfy-cuda"})
+    assert launch_flags("comfy") == ()

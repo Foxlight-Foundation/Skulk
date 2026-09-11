@@ -20,7 +20,13 @@ from skulk.provisioning.comfy import (
     provision_comfy,
     select_comfy_variant_chain,
 )
-from skulk.provisioning.manifest import COMFY_PIN, COMFY_TORCH_WHEELS, PinnedWheel
+from skulk.provisioning.manifest import (
+    COMFY_PIN,
+    COMFY_TORCH_WHEELS,
+    EngineVariant,
+    PinnedWheel,
+    wheel_set_digest,
+)
 from skulk.shared.backends import COMFY_BIN_ENV, COMFY_ROOT_ENV
 
 
@@ -39,26 +45,42 @@ def _fake_tool(name: str) -> str:
     return f"/fake/bin/{name}"
 
 
-def test_manifest_records_a_hashed_cu130_wheel_set() -> None:
-    assert set(COMFY_TORCH_WHEELS) == {("aarch64", "cuda"), ("x86_64", "cuda")}
+def test_manifest_records_hashed_cu130_and_rocm72_wheel_sets() -> None:
+    assert set(COMFY_TORCH_WHEELS) == {("aarch64", "cuda"), ("x86_64", "cuda"), ("x86_64", "rocm")}
     assert len(COMFY_PIN) == 40
-    for wheels in COMFY_TORCH_WHEELS.values():
+    for (_machine, variant), wheels in COMFY_TORCH_WHEELS.items():
+        local, index = ("cu130", "cu130") if variant == "cuda" else ("rocm7.2", "rocm7.2")
         assert [wheel.name for wheel in wheels] == ["torch", "torchvision", "torchaudio"]
         for wheel in wheels:
             assert len(wheel.sha256) == 64
-            assert wheel.version.endswith("+cu130")
+            assert wheel.version.endswith(f"+{local}")
             assert wheel.filename.startswith(f"{wheel.name}-") and "cp313" in wheel.filename
-            assert wheel.url().startswith("https://download.pytorch.org/whl/cu130/")
+            assert wheel.url().startswith(f"https://download.pytorch.org/whl/{index}/")
             assert wheel.requirement().endswith(f"--hash=sha256:{wheel.sha256}")
             assert wheel.constraint() == f"{wheel.name}=={wheel.version}"
+    # Both lanes sit on one torch release so a card's behavior never forks by vendor.
+    releases = {tuple(wheel.version.split("+")[0] for wheel in wheels) for wheels in COMFY_TORCH_WHEELS.values()}
+    assert len(releases) == 1
+    digests = {key: wheel_set_digest(wheels) for key, wheels in COMFY_TORCH_WHEELS.items()}
+    assert len(set(digests.values())) == 3 and all(len(digest) == 64 for digest in digests.values())
+
+
+def _root(tmp_path: Path, machine: str, variant: EngineVariant) -> Path:
+    digest = wheel_set_digest(COMFY_TORCH_WHEELS[(machine, variant)])[:12]
+    return tmp_path / "engines" / "comfy" / COMFY_PIN / f"{variant}-{digest}"
 
 
 def test_variant_chain_needs_linux_a_gpu_and_a_recorded_wheel_set(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     assert select_comfy_variant_chain(make_facts(gpus=(NVIDIA_A40,))) == ("cuda",)
-    # AMD has no recorded wheel set yet, so nothing is offered.
+    # The ROCm wheel set is published for x86_64 only, so an aarch64 AMD node
+    # is offered nothing rather than an environment that cannot drive its GPU.
     assert select_comfy_variant_chain(make_facts(gpus=(AMD_STRIX,))) == ()
+    monkeypatch.setattr(comfy.platform_module, "machine", lambda: "x86_64")
+    assert select_comfy_variant_chain(make_facts(gpus=(AMD_STRIX,))) == ("rocm",)
+    assert select_comfy_variant_chain(make_facts(gpus=(NVIDIA_A40,))) == ("cuda",)
+    monkeypatch.setattr(comfy.platform_module, "machine", lambda: "aarch64")
     assert select_comfy_variant_chain(make_facts()) == ()
     assert select_comfy_variant_chain(make_facts(platform="darwin", gpus=(NVIDIA_A40,))) == ()
     monkeypatch.setattr(comfy.platform_module, "machine", lambda: "riscv64")
@@ -99,11 +121,12 @@ class _FakeRun:
 def test_provision_builds_the_install_in_order_and_records_it(tmp_path: Path) -> None:
     run = _FakeRun()
     root = provision_comfy("cuda", run=run)
-    assert root == tmp_path / "engines" / "comfy" / COMFY_PIN / "cuda"
+    assert root == _root(tmp_path, "aarch64", "cuda")
     assert (root / "ComfyUI" / "main.py").is_file()
     assert os.access(root / "venv" / "bin" / "python", os.X_OK)
     record = json.loads((root / RECORD_FILENAME).read_text())
     assert record["pin"] == COMFY_PIN and record["variant"] == "cuda"
+    assert record["wheelSetDigest"] == wheel_set_digest(COMFY_TORCH_WHEELS[("aarch64", "cuda")])
     assert [entry["filename"] for entry in record["wheels"]] == [
         wheel.filename for wheel in COMFY_TORCH_WHEELS[("aarch64", "cuda")]
     ]
@@ -121,6 +144,7 @@ def test_provision_builds_the_install_in_order_and_records_it(tmp_path: Path) ->
     assert all(f"--hash=sha256:{wheel.sha256}" in requirements for wheel in COMFY_TORCH_WHEELS[("aarch64", "cuda")])
     comfy_install = run.commands[5]
     assert "--extra-index-url" in comfy_install and "-c" in comfy_install
+    assert comfy_install[comfy_install.index("--extra-index-url") + 1] == "https://download.pytorch.org/whl/cu130"
     assert "torch==2.14.0+cu130" in (root / "torch-constraints.txt").read_text()
     assert run.commands[6][1:3] == ["pip", "freeze"]
     # Idempotent: a complete install runs nothing.
@@ -132,7 +156,7 @@ def test_provision_refuses_a_checkout_off_the_pin(tmp_path: Path) -> None:
     run = _FakeRun(head="0" * 40)
     with pytest.raises(RuntimeError, match="not the pinned"):
         provision_comfy("cuda", run=run)
-    assert not (tmp_path / "engines" / "comfy" / COMFY_PIN / "cuda").exists()
+    assert not _root(tmp_path, "aarch64", "cuda").exists()
     assert list((tmp_path / "engines" / "comfy" / COMFY_PIN).iterdir()) == []
 
 
@@ -144,8 +168,37 @@ def test_provision_leaves_nothing_behind_when_an_install_step_fails(tmp_path: Pa
 
 
 def test_provision_needs_a_recorded_wheel_set() -> None:
+    # The fixture machine is aarch64, which has no ROCm wheel set.
     with pytest.raises(RuntimeError, match="no ComfyUI torch wheel set"):
         provision_comfy("rocm", run=_FakeRun())
+
+
+def test_provision_rocm_uses_the_rocm_index_and_its_own_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(comfy.platform_module, "machine", lambda: "x86_64")
+    run = _FakeRun()
+    root = provision_comfy("rocm", run=run)
+    assert root == _root(tmp_path, "x86_64", "rocm")
+    assert root != _root(tmp_path, "x86_64", "cuda")
+    comfy_install = run.commands[5]
+    assert comfy_install[comfy_install.index("--extra-index-url") + 1] == "https://download.pytorch.org/whl/rocm7.2"
+    requirements = (root / "torch-requirements.txt").read_text()
+    assert "rocm7.2" in requirements and "cu130" not in requirements
+    assert "torch==2.14.0+rocm7.2" in (root / "torch-constraints.txt").read_text()
+    record = json.loads((root / RECORD_FILENAME).read_text())
+    assert record["variant"] == "rocm" and record["machine"] == "x86_64"
+
+
+def test_install_root_changes_with_the_wheel_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A wheel-set change without a pin change keys a fresh install."""
+    before = comfy.managed_comfy_root("cuda", "aarch64")
+    wheels = COMFY_TORCH_WHEELS[("aarch64", "cuda")]
+    changed = (wheels[0].model_copy(update={"sha256": "f" * 64}), *wheels[1:])
+    monkeypatch.setitem(COMFY_TORCH_WHEELS, ("aarch64", "cuda"), changed)
+    after = comfy.managed_comfy_root("cuda", "aarch64")
+    assert before != after and before.parent == after.parent
+    assert after.name.startswith("cuda-") and len(after.name) == len("cuda-") + 12
 
 
 def test_ensure_provisions_and_exports_both_paths(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -222,3 +275,25 @@ def test_startup_provisions_when_the_gates_pass(monkeypatch: pytest.MonkeyPatch)
     # because video models are enabled on this node.
     assert ensure_comfy(facts, allow_download=False) is None and calls == []
     assert ensure_comfy(facts) is not None and calls == ["cuda"]
+
+
+def test_legacy_layout_install_is_reused_when_its_record_matches(tmp_path: Path) -> None:
+    """An install made before roots carried the digest keeps serving after an upgrade."""
+    legacy = tmp_path / "engines" / "comfy" / COMFY_PIN / "cuda"
+    (legacy / "ComfyUI").mkdir(parents=True)
+    (legacy / "ComfyUI" / "main.py").write_text("# comfy\n")
+    binary = legacy / "venv" / "bin" / "python"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("#!/bin/sh\n")
+    binary.chmod(0o755)
+    wheels = COMFY_TORCH_WHEELS[("aarch64", "cuda")]
+    (legacy / RECORD_FILENAME).write_text(
+        json.dumps({"pin": COMFY_PIN, "variant": "cuda", "wheels": [{"filename": w.filename, "sha256": w.sha256} for w in wheels]})
+    )
+    assert managed_comfy_install(make_facts(gpus=(NVIDIA_A40,))) == legacy
+    run = _FakeRun()
+    assert provision_comfy("cuda", run=run) == legacy and run.commands == []
+    # A legacy install built on other wheels is not this wheel set and is ignored.
+    (legacy / RECORD_FILENAME).write_text(json.dumps({"pin": COMFY_PIN, "variant": "cuda", "wheels": [{"filename": "torch-old.whl", "sha256": "0" * 64}]}))
+    assert managed_comfy_install(make_facts(gpus=(NVIDIA_A40,))) is None
+    assert provision_comfy("cuda", run=_FakeRun()) == _root(tmp_path, "aarch64", "cuda")

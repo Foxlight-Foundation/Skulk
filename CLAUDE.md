@@ -370,8 +370,10 @@ A model card's `placement.compatible_backends` selects which engine serves it
 - **`comfy`** (`worker/runner/comfy/`, `provisioning/comfy.py`): served
   audio-video engine over a pinned ComfyUI checkout (`COMFY_PIN`, release
   v0.35.0) in its own managed virtual environment with a hash-pinned torch
-  wheel set (`COMFY_TORCH_WHEELS`, cu130 for aarch64 GB10 and x86_64).
-  Provisioned under `SKULK_ENGINES_DIR/comfy/<pin>/<variant>` at node
+  wheel set (`COMFY_TORCH_WHEELS`: cu130 for aarch64 GB10 and x86_64,
+  rocm7.2 for x86_64 Strix Halo; the ROCm wheels bundle their HIP runtime).
+  Provisioned under `SKULK_ENGINES_DIR/comfy/<pin>/<variant>-<wheel-set
+  digest>` (a wheel-set change reprovisions, never reuses) at node
   startup only when `SKULK_ENABLE_VIDEO_MODELS=true` (the wheel set is
   gigabytes), or by `skulk doctor --fix`; `SKULK_COMFY_BIN` (the
   environment's python) plus `SKULK_COMFY_ROOT` (the checkout) point at a
@@ -384,8 +386,9 @@ A model card's `placement.compatible_backends` selects which engine serves it
   WebSocket, cancels through the jobs API, and hands the container plus a
   first-frame thumbnail to the worker like the test engine does. Teardown
   signals the process group; worker startup sweeps init-parented servers
-  launched with Skulk's `--user-directory`. Tags `comfy-cuda` today,
-  `comfy-rocm` once the Strix lane is qualified; GPU-only, single-host.
+  launched with Skulk's `--user-directory`. Tags `comfy-cuda` and
+  `comfy-rocm` (the ROCm lane launches with `ROCM_LAUNCH_FLAGS`:
+  `--bf16-vae --disable-mmap --cache-none`); GPU-only, single-host.
   ADVANCING `COMFY_PIN` OR THE WHEEL SET IS A CHECKLIST
   (architecture-reference.md "Engine pin advancement").
 - **`test_video`** (`worker/runner/test_video/`): deterministic test video

@@ -784,12 +784,21 @@ wheel and needs a torch build matched to the node's GPU stack. Provisioning
 follows the store pattern the llama-server engine established: a pinned
 commit and a hash-pinned torch wheel set recorded in the manifest, fetched
 on demand, verified before use, and installed under the engines directory
-keyed by pin and variant, built in a staging directory and renamed into
-place so a half-finished install is never adopted. Two gates beyond the
-llama-server ones apply: the node must have video models enabled, since the
-wheel set is several gigabytes and most nodes never render video, and a
-variant is offered only where a wheel set is recorded for the machine, so
-an AMD node provisions nothing until the ROCm lane is qualified. An
+keyed by pin, variant, and the wheel set's digest (a wheel change without
+a pin change reprovisions rather than reusing an environment built on
+other torch builds), built in a staging directory and renamed into place so
+a half-finished install is never adopted. Two gates beyond the llama-server
+ones apply: the node must have video models enabled, since the wheel set is
+several gigabytes and most nodes never render video, and a variant is
+offered only where a wheel set is recorded for the machine. Two lanes are
+recorded on one torch release: cu130 wheels for NVIDIA nodes (aarch64 and
+x86_64) and rocm7.2 wheels for x86_64 AMD nodes, which bundle their own HIP
+runtime so the host needs only the amdgpu kernel driver; the ROCm lane
+launches ComfyUI with `--bf16-vae --disable-mmap --cache-none`, the flags
+validated for MiniMax H3 on Strix Halo (memory-mapping a checkpoint above 64
+GB through unified memory is pathologically slow, the fp32 VAE decode does
+not fit beside the transformer, and node outputs are not worth retaining on
+a host whose GPU memory is the system's). An
 operator with a hand-built ComfyUI points `SKULK_COMFY_BIN` at its
 interpreter and `SKULK_COMFY_ROOT` at the checkout; both must be valid or
 the engine stays off with a loud conflict. The checkout's commit is the

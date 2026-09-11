@@ -97,14 +97,39 @@ _HASH_CHUNK: Final = 1 << 20
 _THUMBNAIL_QUALITY: Final = 85
 
 
+ROCM_LAUNCH_FLAGS: Final[tuple[str, ...]] = ("--bf16-vae", "--disable-mmap", "--cache-none")
+"""ComfyUI flags for the ROCm lane, validated for H3 on Strix Halo (gfx1151).
+
+``--disable-mmap`` because safetensors memory-mapping of a checkpoint above
+64 GB is pathologically slow through the unified-memory path; ``--bf16-vae``
+because the fp32 VAE decode of a 768p clip does not fit beside the
+transformer; ``--cache-none`` so node outputs are not retained between
+renders on a host whose GPU memory is the system's. There is no flash
+attention on this stack; ComfyUI's default SDPA path is the one that works.
+"""
+
+
+def _local_comfy_backend() -> str | None:
+    """The node's own advertised ``comfy-<compute>`` tag, for an unstamped shard."""
+    from skulk.shared.backends import probe_node_backends
+
+    tags = sorted(tag for tag in probe_node_backends() if tag.startswith("comfy-"))
+    return tags[0] if tags else None
+
+
 def launch_flags(resolved_backend: str | None) -> tuple[str, ...]:
     """Extra ComfyUI flags for the node's compute backend.
 
-    CUDA needs nothing beyond the headless defaults. The ROCm lane records its
-    validated flags with the ROCm provisioning variant; until then a ROCm
-    node launches with the same defaults.
+    CUDA needs nothing beyond the headless defaults; the ROCm lane adds
+    ``ROCM_LAUNCH_FLAGS``. The backend is the stamped ``comfy-<compute>`` tag;
+    an unstamped shard (telemetry still warming, or a manual launch), or one
+    stamped with the bare engine tag by a card that declares no compute,
+    uses the tag this node advertises itself, so a managed ROCm install
+    never launches without the flags it was qualified with.
     """
-    del resolved_backend
+    backend = resolved_backend if resolved_backend is not None and "-" in resolved_backend else _local_comfy_backend()
+    if backend is not None and backend.endswith("-rocm"):
+        return ROCM_LAUNCH_FLAGS
     return ()
 
 
