@@ -109,6 +109,17 @@ attention on this stack; ComfyUI's default SDPA path is the one that works.
 """
 
 
+ROCM_LAUNCH_ENVIRONMENT: Final[dict[str, str]] = {"TORCH_BLAS_PREFER_HIPBLASLT": "1"}
+"""Environment for the ComfyUI server on the ROCm lane.
+
+The gfx1151 code objects in the rocm7.2 torch wheel lack a rocBLAS Tensile
+single-precision batched GEMM solution the Qwen3-VL text encoder's vision
+tower needs; rocBLAS launches the missing kernel and the server segfaults
+on every image-conditioned prompt. Routing torch GEMMs through hipBLASLt,
+whose library carries the solution, was the fix found on real hardware.
+"""
+
+
 def _local_comfy_backend() -> str | None:
     """The node's own advertised ``comfy-<compute>`` tag, for an unstamped shard."""
     from skulk.shared.backends import probe_node_backends
@@ -117,20 +128,34 @@ def _local_comfy_backend() -> str | None:
     return tags[0] if tags else None
 
 
+def _is_rocm_lane(resolved_backend: str | None) -> bool:
+    """Whether this launch is the ROCm lane.
+
+    The backend is the stamped ``comfy-<compute>`` tag; an unstamped shard
+    (telemetry still warming, or a manual launch), or one stamped with the
+    bare engine tag by a card that declares no compute, uses the tag this
+    node advertises itself, so a managed ROCm install never launches without
+    the settings it was qualified with.
+    """
+    backend = resolved_backend if resolved_backend is not None and "-" in resolved_backend else _local_comfy_backend()
+    return backend is not None and backend.endswith("-rocm")
+
+
 def launch_flags(resolved_backend: str | None) -> tuple[str, ...]:
     """Extra ComfyUI flags for the node's compute backend.
 
     CUDA needs nothing beyond the headless defaults; the ROCm lane adds
-    ``ROCM_LAUNCH_FLAGS``. The backend is the stamped ``comfy-<compute>`` tag;
-    an unstamped shard (telemetry still warming, or a manual launch), or one
-    stamped with the bare engine tag by a card that declares no compute,
-    uses the tag this node advertises itself, so a managed ROCm install
-    never launches without the flags it was qualified with.
+    ``ROCM_LAUNCH_FLAGS``.
     """
-    backend = resolved_backend if resolved_backend is not None and "-" in resolved_backend else _local_comfy_backend()
-    if backend is not None and backend.endswith("-rocm"):
-        return ROCM_LAUNCH_FLAGS
-    return ()
+    return ROCM_LAUNCH_FLAGS if _is_rocm_lane(resolved_backend) else ()
+
+
+def launch_environment(resolved_backend: str | None) -> dict[str, str]:
+    """Extra environment for the ComfyUI server on the node's compute backend.
+
+    CUDA needs nothing; the ROCm lane adds ``ROCM_LAUNCH_ENVIRONMENT``.
+    """
+    return dict(ROCM_LAUNCH_ENVIRONMENT) if _is_rocm_lane(resolved_backend) else {}
 
 
 def _configured_install() -> tuple[Path, Path]:
@@ -351,6 +376,7 @@ class Runner:
             user_dir=self.work_dir / "user",
             log_path=self.work_dir / "server.log",
             extra_args=launch_flags(self.shard_metadata.resolved_backend),
+            extra_env=launch_environment(self.shard_metadata.resolved_backend),
         )
         server.start()
         self.server = server

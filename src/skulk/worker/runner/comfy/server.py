@@ -89,6 +89,22 @@ def pick_free_port() -> int:
     raise RuntimeError("could not find a free port for the ComfyUI server")
 
 
+def server_environment(interpreter: Path, extra: dict[str, str]) -> dict[str, str]:
+    """The environment one ComfyUI server is spawned with.
+
+    The interpreter's own bin directory comes first on ``PATH``: the
+    environment carries its tools (ffmpeg wheels, compilers for JIT kernels)
+    beside python. ``PYTHONPATH`` from the Skulk process must not leak into
+    ComfyUI's interpreter, since the two environments carry different torch
+    builds. Lane-specific variables (``extra``) are layered last so they win.
+    """
+    env = dict(os.environ)
+    env["PATH"] = f"{interpreter.parent}{os.pathsep}{env.get('PATH', '')}"
+    env.pop("PYTHONPATH", None)
+    env.update(extra)
+    return env
+
+
 def server_args(
     interpreter: Path,
     root: Path,
@@ -146,6 +162,8 @@ class ComfyServer:
     user_dir: Path
     log_path: Path
     extra_args: tuple[str, ...] = ()
+    extra_env: dict[str, str] = field(default_factory=dict)
+    """Lane-specific variables layered over the process environment."""
     base_url: str | None = None
     process: subprocess.Popen[bytes] | None = None
     _log: BinaryIO | None = field(default=None, repr=False)
@@ -186,13 +204,7 @@ class ComfyServer:
         )
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self._log = open(self.log_path, "wb")  # noqa: SIM115 - closed in teardown
-        env = dict(os.environ)
-        # The interpreter's own bin directory first: the environment carries
-        # its tools (ffmpeg wheels, compilers for JIT kernels) beside python.
-        env["PATH"] = f"{self.interpreter.parent}{os.pathsep}{env.get('PATH', '')}"
-        # PYTHONPATH from the Skulk process must not leak into ComfyUI's
-        # interpreter: the two environments carry different torch builds.
-        env.pop("PYTHONPATH", None)
+        env = server_environment(self.interpreter, self.extra_env)
         logger.info(f"spawning ComfyUI: {' '.join(args)} (log={self.log_path})")
         self.process = subprocess.Popen(
             args,

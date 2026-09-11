@@ -798,7 +798,12 @@ launches ComfyUI with `--bf16-vae --disable-mmap --cache-none`, the flags
 validated for MiniMax H3 on Strix Halo (memory-mapping a checkpoint above 64
 GB through unified memory is pathologically slow, the fp32 VAE decode does
 not fit beside the transformer, and node outputs are not worth retaining on
-a host whose GPU memory is the system's). An
+a host whose GPU memory is the system's), and with
+`TORCH_BLAS_PREFER_HIPBLASLT=1` in the server's environment: the rocm7.2
+wheel's gfx1151 rocBLAS library lacks a single-precision batched GEMM
+solution that the Qwen3-VL text encoder's vision tower issues for
+image-conditioned prompts, and without the hipBLASLt route the server
+segfaults on every keyframe or reference render. An
 operator with a hand-built ComfyUI points `SKULK_COMFY_BIN` at its
 interpreter and `SKULK_COMFY_ROOT` at the checkout; both must be valid or
 the engine stays off with a loud conflict. The checkout's commit is the
