@@ -69,6 +69,10 @@ class ManagedInstallation(BaseModel):
     enabled: bool = Field(
         default=False, description="Whether the selected runtime is enabled."
     )
+    uninstalled: bool = Field(
+        default=False,
+        description="Published uninstall intent; retained state remains available for cleanup and explicit reinstallation.",
+    )
     service: RuntimeServiceStatus | None = Field(
         default=None,
         description="Observed process health, independent of capability readiness.",

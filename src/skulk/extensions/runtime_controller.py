@@ -34,8 +34,8 @@ class LifecycleRequest(BaseModel):
         pattern=r"^[a-f0-9]{32}$",
         description="Caller-retained idempotent local operation ID.",
     )
-    action: Literal["activate", "select", "disable"] = Field(
-        description="Activate a retained generation, select it while keeping its owner stopped, or withdraw future work."
+    action: Literal["activate", "select", "disable", "uninstall"] = Field(
+        description="Activate or select a retained generation, disable it, or uninstall while retaining cleanup state and recovery artifacts."
     )
     expected_revision: int = Field(
         ge=0, description="Reviewed current installation selection revision."
@@ -57,10 +57,10 @@ class LifecycleRequest(BaseModel):
         """Reject ambiguous or irrelevant fields before any local operation starts."""
         if self.action in ("activate", "select") and self.runtime_digest is None:
             raise ValueError("runtime selection requires a runtime digest")
-        if self.action == "disable" and (
+        if self.action in ("disable", "uninstall") and (
             self.runtime_digest is not None or self.rollback or self.accept_permissions
         ):
-            raise ValueError("disable accepts no activation options")
+            raise ValueError("withdrawal accepts no activation options")
         return self
 
 
@@ -88,7 +88,7 @@ class LifecycleOperation(BaseModel):
     withdraws_operation_id: str | None = Field(
         default=None,
         pattern=r"^[a-f0-9]{32}$",
-        description="Prior stalled local intent withdrawn by this explicit disable; never a provider request.",
+        description="Prior stalled local intent withdrawn by explicit disable or uninstall; never a provider request.",
     )
 
     @model_validator(mode="after")
@@ -102,10 +102,10 @@ class LifecycleOperation(BaseModel):
         if self.selection.enabled != (self.request.action == "activate"):
             raise ValueError("lifecycle selection action differs")
         if self.withdraws_operation_id is not None and (
-            self.request.action != "disable"
+            self.request.action not in ("disable", "uninstall")
             or self.withdraws_operation_id == self.request.operation_id
         ):
-            raise ValueError("only disable can withdraw another lifecycle operation")
+            raise ValueError("only withdrawal can replace another lifecycle operation")
         if (
             self.request.action in ("activate", "select")
             and self.selection.runtime_digest != self.request.runtime_digest
@@ -192,6 +192,21 @@ class RuntimeController:
             operation.model_dump_json().encode(),
         )
 
+    def is_uninstalled(self, selection: RuntimeSelection | None) -> bool:
+        """Read uninstall status from published intent, independently of pending work.
+
+        Retained state remains manageable. Only a later committed selection or
+        activation reinstalls it; downloading or failing a new operation cannot.
+        Legacy direct-selector selections have no lifecycle record.
+        """
+        if selection is None:
+            return False
+        try:
+            operation = self.operation(selection.operation_id)
+        except FileNotFoundError:
+            return False
+        return operation.request.action == "uninstall"
+
     def _clear_pending(self) -> None:
         self.pending.unlink(missing_ok=True)
         descriptor = os.open(self.records, os.O_RDONLY | os.O_DIRECTORY)
@@ -201,6 +216,8 @@ class RuntimeController:
             os.close(descriptor)
 
     async def _preview(self, request: LifecycleRequest) -> RuntimeSelection:
+        if request.action == "disable" and self.is_uninstalled(self.selector.current()):
+            raise ValueError("installation is uninstalled; select or activate to reinstall")
         if request.action in ("activate", "select"):
             assert request.runtime_digest is not None
             return await self.selector.preview(
@@ -247,7 +264,8 @@ class RuntimeController:
                 else None
             )
             if pending is not None and (
-                request.action != "disable" or pending.request.action == "disable"
+                request.action not in ("disable", "uninstall")
+                or pending.request.action in ("disable", "uninstall")
             ):
                 raise ValueError("another lifecycle operation needs completion")
             selection = await self._preview(request)
@@ -328,7 +346,7 @@ class RuntimeController:
         result = operation
         try:
             current = self.selector.current()
-            if operation.request.action == "disable":
+            if operation.request.action in ("disable", "uninstall"):
                 if (
                     current != operation.selection
                     and await self._preview(operation.request) != operation.selection

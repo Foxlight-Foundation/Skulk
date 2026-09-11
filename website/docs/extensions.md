@@ -721,7 +721,7 @@ configuration HTTP routes do not accept artifact paths or expose raw installer l
 ## Stopped-owner runtime selection
 
 `extensions/runtime_selection.py:RuntimeSelector` provides local activation,
-selection with the owner stopped, explicit rollback, retained-state disable/uninstall and interrupted-selection
+selection with the owner stopped, explicit rollback, retained-state withdrawal and interrupted-selection
 recovery. It holds both the installer fence and the existing supervisor lock;
 the caller must stop the affected plugin owner first. Skulk inference and an
 independent cleanup service are outside this operation's process ownership.
@@ -901,3 +901,15 @@ after the capability controller durably accepts the exact approved request. The
 provider request may remain queued. Preserve this observation across restart and
 use receipt reconciliation for later active/absent state; neither reconnection nor
 status reads may repeat the effect. A lost or uncorrelated response remains uncertain.
+
+
+### Retained uninstall
+
+The generic manager exposes distinct `disable` and `uninstall` lifecycle actions.
+Both use stopped-owner withdrawal and preserve independently supervised cleanup.
+Uninstall remains visible in inventory as `uninstalled: true`; registration, runtime
+artifacts, configuration, identities, credentials and receipt history are retained
+for cleanup and explicit reinstallation. It never means remote resources are absent.
+The terminal and dashboard use the same operation, revision checks and recovery.
+Only a later committed, verified `select` or `activate` reinstalls the plugin;
+merely downloading a release or accepting a pending operation does not.

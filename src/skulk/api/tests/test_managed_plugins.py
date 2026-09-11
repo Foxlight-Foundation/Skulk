@@ -6,6 +6,7 @@ import os
 import sys
 from dataclasses import replace
 from pathlib import Path
+from typing import Literal
 
 import httpx
 import pytest
@@ -30,9 +31,11 @@ from skulk.extensions.tests.test_steward_tools import context
 from skulk.operator.pairing import PluginGrantUpdate
 
 
+@pytest.mark.parametrize("action", ["disable", "uninstall"])
 async def test_http_scopes_lifecycle_status_and_api_loss(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    action: Literal["disable", "uninstall"],
 ) -> None:
     """Only explicit grants reach durable local operations, which outlive the API."""
     manager = manager_fixture(tmp_path / "manager", monkeypatch)
@@ -327,7 +330,7 @@ async def test_http_scopes_lifecycle_status_and_api_loss(
             )
             assert recovery.status_code == 200 and recovery.content == record.content
             disable = LifecycleRequest(
-                operation_id="5" * 32, action="disable", expected_revision=1
+                operation_id="5" * 32, action=action, expected_revision=1
             )
             accepted = await client.post(
                 operations,

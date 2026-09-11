@@ -3,6 +3,7 @@
 import asyncio
 import json
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
@@ -27,8 +28,9 @@ from skulk.extensions.tests.test_runtime_install import artifacts
 from skulk.extensions.tests.test_runtime_service import OWNER_SOURCE, running
 
 
+@pytest.mark.parametrize("action", ["disable", "uninstall"])
 async def test_socket_registration_activation_disconnect_and_reconnect(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, action: Literal["disable", "uninstall"]
 ) -> None:
     """The shared terminal/API socket persists accepted work after the client closes."""
     private_directory(tmp_path)
@@ -85,7 +87,7 @@ async def test_socket_registration_activation_disconnect_and_reconnect(
         disable = SubmitRequest(
             plugin_id=identifier,
             request=LifecycleRequest(
-                operation_id="2" * 32, action="disable", expected_revision=1
+                operation_id="2" * 32, action=action, expected_revision=1
             ),
         )
         reader, writer = await asyncio.open_unix_connection(manager_socket(tmp_path))
@@ -106,6 +108,8 @@ async def test_socket_registration_activation_disconnect_and_reconnect(
         assert await manager_request(tmp_path, disable) == result
         current = controller.selector.current()
         assert current is not None and current.revision == 2
+        inventory = await manager_request(tmp_path, InventoryRequest())
+        assert json.loads(json.dumps(inventory))["result"]["installations"][0]["uninstalled"] == (action == "uninstall")
         assert await reader.read() == b""
         inspection = await manager_request(
             tmp_path, InstallationRequest(action="get", plugin_id=identifier)

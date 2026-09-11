@@ -3749,7 +3749,7 @@ The local socket accepts these typed requests:
 | `list` | None | Lists registered installation IDs, selected runtime digests, selection revisions, retained operation references, observed process status and stale/unavailable observations. Process existence does not imply capability readiness. |
 | `register` | `plugin_id` | Registers an empty `managed.*` installation, up to sixteen per manager. Provisions its existing host identity automatically; an existing mismatched identity is refused without replacement. No provider request is made. |
 | `get` | `plugin_id` | Returns desired selection and process observation without paths, credentials or raw output. |
-| `submit` | `plugin_id`, `request` | Accepts a local lifecycle request after validating its revision and target. The nested request contains `operation_id` (32 lowercase hexadecimal characters), `action` (`activate`, `select` or `disable`), `expected_revision`, and for activation or stopped selection `runtime_digest`, optional `rollback` and `accept_permissions`. No spending authority is conveyed. |
+| `submit` | `plugin_id`, `request` | Accepts a local lifecycle request after validating its revision and target. The nested request contains `operation_id` (32 lowercase hexadecimal characters), `action` (`activate`, `select`, `disable` or `uninstall`), `expected_revision`, and for activation or stopped selection `runtime_digest`, optional `rollback` and `accept_permissions`. No spending authority is conveyed. |
 | `operation` | `plugin_id`, `operation_id` | Reads retained progress. Reconnect reads this result; reusing an ID with different intent is refused. |
 | `recover` | `plugin_id`, `operation_id` | Explicitly resumes only that retained local intent after its fault is corrected. Completed or superseded operations remain unchanged. No new request or provider operation is created. |
 
@@ -3884,7 +3884,7 @@ without restart. Missing setup returns an actionable unavailable response.
 | GET | `/v1/plugins/managed` | Requires `plugins:read`. Returns `installations`, at most sixteen entries, with `plugin_id`, `selected_digest`, `selection_revision`, `enabled`, `service`, `stale`, `error_code`, `operation_id` and `operation_state`. Pending or selected operation references allow reconnect to resume observation without repeating a mutation. |
 | POST | `/v1/plugins/managed/installations` | Requires `plugins:manage`. Body: `plugin_id` in the `managed.*` namespace. Registers an empty installation and returns its observation. Does not download, stage or enable a release. |
 | GET | `/v1/plugins/managed/installations/{plugin_id}` | Requires `plugins:read`. Returns `installation` observation and `selection`, nullable before a release is selected. |
-| POST | `/v1/plugins/managed/installations/{plugin_id}/operations` | Requires `plugins:manage`. Body: `operation_id` (32 lowercase hexadecimal characters), `action` (`activate`, `select` or `disable`), `expected_revision` (nonnegative integer), and activation/selection-only `runtime_digest`, optional `rollback` and `accept_permissions` booleans. Returns the retained `LifecycleOperation`. Activation and stopped selection accept only an already staged, verified generation. `select` keeps its owner stopped until a later explicit `activate` request. An explicit `disable` can withdraw a stalled activation/selection, including a revoked release, using the current selection revision. Live work and a pending disable cannot be superseded. |
+| POST | `/v1/plugins/managed/installations/{plugin_id}/operations` | Requires `plugins:manage`. Body: `operation_id` (32 lowercase hexadecimal characters), `action` (`activate`, `select`, `disable` or `uninstall`), `expected_revision` (nonnegative integer), and activation/selection-only `runtime_digest`, optional `rollback` and `accept_permissions` booleans. Returns the retained `LifecycleOperation`. Activation and stopped selection accept only an already staged, verified generation. `select` keeps its owner stopped until a later explicit `activate` request. An explicit `disable` can withdraw a stalled activation/selection, including a revoked release, using the current selection revision. Live work and a pending withdrawal cannot be superseded. |
 | GET | `/v1/plugins/managed/installations/{plugin_id}/operations/{operation_id}` | Requires `plugins:read`. Reads the original local operation's exact `request`, previewed `selection`, `state`, sanitized `error_code` and optional `withdraws_operation_id`. Superseded unpublished transitions remain terminal history. Never repeats its effect. |
 | POST | `/v1/plugins/managed/installations/{plugin_id}/operations/{operation_id}/recover` | Requires `plugins:manage`. No body. Explicitly resumes the existing journaled local operation; completed or superseded operations are unchanged. |
 
@@ -4263,3 +4263,33 @@ The generation fence and terminal I/O survive process replacement; the plugin
 supplies fixed management verbs and derives its durable state coordinates.
 Neither this command nor generic management grants mint paid approval. The existing
 `skulk-plugin-service manage` installation-manager interface is unchanged.
+
+
+### Uninstall a managed plugin while retaining cleanup
+
+The terminal manager and `POST /v1/plugins/managed/installations/{plugin_id}/operations`
+accept `action: "uninstall"` with the reviewed `expected_revision` and a new
+32-character hexadecimal `operation_id`. It requires the same `plugins:manage`
+authority as disable. No runtime digest, rollback flag or permission acceptance is
+accepted for withdrawal. For example, send this JSON to `skulk-plugin-service manage`:
+
+```json
+{"action":"submit","plugin_id":"managed.example","request":{"operation_id":"d083ef35f295414188bd7cdb699454f84","action":"uninstall","expected_revision":2}}
+```
+
+Use `operation` with the same plugin and operation identifiers to read completion;
+retrying the original request returns its retained result. Browser reconnects also
+read that result without submitting another operation. In **Plugins → Managed
+runtimes**, **Uninstall plugin** invokes this same operation.
+
+Uninstall stops the plugin owner and withdraws future capabilities and acquisition.
+It retains the installation registration, verified runtime generations, configuration,
+identities, credentials and receipt history. Independently supervised cleanup remains
+outside its process ownership. This is not a data purge or proof of provider absence;
+inspect the plugin's cleanup status separately. Inventory (`GET /v1/plugins/managed`)
+reports `uninstalled: true` from the published uninstall operation, even after manager
+restart or while a replacement operation is pending. Failed downloads or activation
+attempts cannot silently reinstall it. A later successful verified `select` or
+`activate` explicitly reinstalls the retained installation. Disable is refused while
+uninstalled. Uninstall can withdraw a stalled activation or selection, including an
+invalid release, but cannot replace live work or another pending withdrawal.

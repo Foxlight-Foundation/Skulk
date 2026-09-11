@@ -392,6 +392,7 @@ class RuntimeManager:
                 "selected_digest": selection.runtime_digest if selection else None,
                 "selection_revision": selection.revision if selection else 0,
                 "enabled": selection.enabled if selection else False,
+                "uninstalled": controller.is_uninstalled(selection),
                 "service": status.model_dump(mode="json") if status else None,
                 "stale": stale,
             }
