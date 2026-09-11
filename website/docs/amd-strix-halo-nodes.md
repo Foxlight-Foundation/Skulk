@@ -355,7 +355,15 @@ decode does not fit beside the transformer. It also sets
 gfx1151 rocBLAS library is missing a single-precision batched GEMM kernel
 that the H3 text encoder's vision tower uses for keyframe and reference
 prompts, and rocBLAS segfaults launching it; hipBLASLt carries the
-solution. Text-only prompts never hit it, which is how the gap hid. Expect several gigabytes of wheels
+solution. Text-only prompts never hit it, which is how the gap hid.
+hipBLASLt has gfx1151 gaps of its own that a second image-conditioned prompt
+in the same server process reaches, so on this lane the runner replaces the
+ComfyUI server after every render; expect the model reload (a few minutes)
+at the start of each render. This is a property of the rocm7.2 torch wheel,
+not of the hardware, so it applies only to the managed install: a hand-built
+stack pointed at by `SKULK_COMFY_BIN` (a torch build made for gfx1151, which
+AMD publishes nightly, or a system ROCm 7.2 with AMD's lightweight wheels)
+keeps its server warm. Expect several gigabytes of wheels
 on first provisioning and set the unified-memory kernel parameters above so the
 GPU can address the whole pool.
 

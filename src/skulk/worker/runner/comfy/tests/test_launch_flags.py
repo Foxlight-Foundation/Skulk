@@ -10,6 +10,7 @@ import skulk.shared.backends as backends
 from skulk.worker.runner.comfy.runner import (
     ROCM_LAUNCH_ENVIRONMENT,
     ROCM_LAUNCH_FLAGS,
+    fresh_server_per_render,
     launch_environment,
     launch_flags,
 )
@@ -64,3 +65,27 @@ def test_server_environment_layers_lane_variables_over_the_process(monkeypatch: 
     assert "PYTHONPATH" not in env
     assert env["PATH"].startswith(str(interpreter.parent))
     assert env["TORCH_BLAS_PREFER_HIPBLASLT"] == "1"
+
+
+def test_rocm_lane_serves_one_render_per_server(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The managed ROCm install replaces its server after each render; other lanes and hand-built stacks keep theirs."""
+    import skulk.shared.constants as constants
+
+    monkeypatch.setattr(constants, "SKULK_ENGINES_DIR", tmp_path / "engines")
+    managed = tmp_path / "engines" / "comfy" / "pin" / "rocm-abc" / "venv" / "bin" / "python"
+    hand_built = tmp_path / "opt" / "comfy" / "venv" / "bin" / "python"
+    # uv makes the venv interpreter a symlink to the host interpreter, which
+    # lives outside the engines directory; the install is still managed.
+    host = tmp_path / "host" / "cpython" / "bin" / "python3.13"
+    host.parent.mkdir(parents=True)
+    host.write_text("")
+    managed.parent.mkdir(parents=True)
+    managed.symlink_to(host)
+    assert fresh_server_per_render("comfy-rocm", managed) is True
+    assert fresh_server_per_render("comfy-rocm", managed.parent / ".." / "bin" / "python") is True
+    assert fresh_server_per_render("comfy-rocm", hand_built) is False
+    assert fresh_server_per_render("comfy-cuda", managed) is False
+    monkeypatch.setattr(backends, "probe_node_backends", lambda: {"comfy", "comfy-rocm"})
+    assert fresh_server_per_render(None, managed) is True
+    monkeypatch.setattr(backends, "probe_node_backends", lambda: {"comfy", "comfy-cuda"})
+    assert fresh_server_per_render(None, managed) is False
