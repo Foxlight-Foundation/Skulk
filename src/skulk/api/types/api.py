@@ -1,6 +1,6 @@
 import time
 from collections.abc import Generator
-from typing import Annotated, Any, Literal, final, get_args
+from typing import Annotated, Any, Literal, cast, final, get_args
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -653,11 +653,18 @@ class AudioCapabilitySection(BaseModel):
         )
 
 
+VideoModeName = Literal["t2va", "fl2va", "ref2va"]
+"""Wire spelling of a video generation mode, shared by the models-route
+projection and the video job request so generated clients see one enum."""
+
+
 class VideoAdapterSection(BaseModel):
     """One named adapter (LoRA) a video card ships, selectable per request."""
 
+    model_config = ConfigDict(frozen=True, strict=True)
+
     name: str = Field(description="Adapter name accepted by the video job `lora` field.")
-    modes: list[str] = Field(
+    modes: list[VideoModeName] = Field(
         default_factory=list,
         description="Generation modes the adapter is trained for; empty means every mode.",
     )
@@ -667,6 +674,8 @@ class VideoAdapterSection(BaseModel):
 
 class VideoReferenceLimitsSection(BaseModel):
     """Per-kind reference attachment limits for reference-to-video cards."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
 
     max_images: int = Field(default=0, description="Reference images accepted per request.")
     max_videos: int = Field(default=0, description="Reference clips accepted per request.")
@@ -687,7 +696,9 @@ class VideoCapabilitySection(BaseModel):
     step counts.
     """
 
-    modes: list[str] = Field(description="Generation modes the card serves: t2va, fl2va, ref2va.")
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    modes: list[VideoModeName] = Field(description="Generation modes the card serves.")
     min_seconds: int = Field(description="Shortest clip length accepted.")
     max_seconds: int = Field(description="Longest clip length accepted.")
     fps: int = Field(description="Output frame rate.")
@@ -716,7 +727,7 @@ class VideoCapabilitySection(BaseModel):
             return None
         limits = config.reference_limits
         return cls(
-            modes=[mode.value for mode in config.modes],
+            modes=cast("list[VideoModeName]", [mode.value for mode in config.modes]),
             min_seconds=config.min_seconds,
             max_seconds=config.max_seconds,
             fps=config.fps,
@@ -746,7 +757,7 @@ class VideoCapabilitySection(BaseModel):
             adapters=[
                 VideoAdapterSection(
                     name=companion.name,
-                    modes=[mode.value for mode in companion.modes],
+                    modes=cast("list[VideoModeName]", [mode.value for mode in companion.modes]),
                     steps=companion.steps,
                     strength=companion.strength,
                 )
@@ -758,6 +769,8 @@ class VideoCapabilitySection(BaseModel):
 
 class LicenseSection(BaseModel):
     """Operator-facing license facts from the model card; nothing is enforced."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
 
     name: str = Field(description="Human-readable license name.")
     url: str | None = Field(default=None, description="Where the license text lives.")
@@ -2241,7 +2254,7 @@ class VideoCreateRequest(BaseModel):
     card's trained canvas."""
     aspect_ratio: str | None = None
     """Advisory ``W:H`` ratio used when ``size`` is omitted."""
-    mode: Literal["t2va", "fl2va", "ref2va"] | None = None
+    mode: VideoModeName | None = None
     """Generation mode; omitted derives it from the attachments."""
     steps: int | None = Field(default=None, ge=1, le=200)
     """Sampling steps; omitted defers to the adapter or the card."""

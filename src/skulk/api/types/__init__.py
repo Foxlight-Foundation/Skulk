@@ -114,6 +114,7 @@ from .api import VideoCreateRequest as VideoCreateRequest
 from .api import VideoDeletedResponse as VideoDeletedResponse
 from .api import VideoError as VideoError
 from .api import VideoListResponse as VideoListResponse
+from .api import VideoModeName as VideoModeName
 from .api import VideoOutputInfo as VideoOutputInfo
 from .api import VideoReferenceLimitsSection as VideoReferenceLimitsSection
 from .api import VideoResource as VideoResource
