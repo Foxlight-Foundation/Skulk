@@ -360,8 +360,10 @@ hipBLASLt has gfx1151 gaps of its own that a second image-conditioned prompt
 in the same server process reaches, so on this lane the runner replaces the
 ComfyUI server after every render; expect the model reload (a few minutes)
 at the start of each render. This is a property of the rocm7.2 torch wheel,
-not of the hardware: a torch build made for gfx1151 (AMD publishes nightly
-ones) or a system ROCm 7.2 with AMD's lightweight wheels would remove it. Expect several gigabytes of wheels
+not of the hardware, so it applies only to the managed install: a hand-built
+stack pointed at by `SKULK_COMFY_BIN` (a torch build made for gfx1151, which
+AMD publishes nightly, or a system ROCm 7.2 with AMD's lightweight wheels)
+keeps its server warm. Expect several gigabytes of wheels
 on first provisioning and set the unified-memory kernel parameters above so the
 GPU can address the whole pool.
 

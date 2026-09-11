@@ -164,9 +164,26 @@ cost is the model reload on the next render's first step.
 """
 
 
-def fresh_server_per_render(resolved_backend: str | None) -> bool:
-    """Whether this launch replaces the ComfyUI server after each render."""
-    return ROCM_FRESH_SERVER_PER_RENDER and _is_rocm_lane(resolved_backend)
+def _managed_install(interpreter: Path) -> bool:
+    """Whether ``interpreter`` belongs to a managed install under the engines directory."""
+    from skulk.shared.constants import SKULK_ENGINES_DIR
+
+    return interpreter.resolve().is_relative_to((SKULK_ENGINES_DIR / "comfy").resolve())
+
+
+def fresh_server_per_render(resolved_backend: str | None, interpreter: Path) -> bool:
+    """Whether this launch replaces the ComfyUI server after each render.
+
+    The workaround belongs to the pinned rocm7.2 wheel set the managed
+    install carries, not to the hardware: an operator's hand-built ROCm
+    stack (``SKULK_COMFY_BIN`` outside the engines directory) may carry a
+    complete gfx1151 build and keeps its server warm.
+    """
+    return (
+        ROCM_FRESH_SERVER_PER_RENDER
+        and _is_rocm_lane(resolved_backend)
+        and _managed_install(interpreter)
+    )
 
 
 def launch_environment(resolved_backend: str | None) -> dict[str, str]:
@@ -322,7 +339,8 @@ class Runner:
         check rather than here, so a finished render is never reported as
         failed by its successor's startup.
         """
-        if not fresh_server_per_render(self.shard_metadata.resolved_backend):
+        interpreter = self.server.interpreter if self.server is not None else _configured_install()[0]
+        if not fresh_server_per_render(self.shard_metadata.resolved_backend, interpreter):
             return
         logger.info("recycling the ComfyUI server after the render (fresh server per render on this lane)")
         self._teardown_server()

@@ -289,10 +289,10 @@ def test_orphan_sweep_matches_only_skulk_launched_servers(tmp_path: Path) -> Non
     assert orphan_sweep.find_orphaned_comfy_pids(proc, marker) == [100]
 
 
-def _bound_instance(card: ModelCard, runner_id: RunnerId, node: NodeId) -> BoundInstance:
+def _bound_instance(card: ModelCard, runner_id: RunnerId, node: NodeId, backend: str = "comfy-cuda") -> BoundInstance:
     shard = PipelineShardMetadata(
         model_card=card, device_rank=0, world_size=1, start_layer=0, end_layer=1, n_layers=1,
-        resolved_backend="comfy-cuda",
+        resolved_backend=backend,
     )
     instance = MlxRingInstance(
         instance_id=InstanceId("comfy-instance"),
@@ -349,9 +349,9 @@ def fake_comfy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path
 
 
-def _runner(sender: _Sender, cancels: _Cancels) -> Runner:
+def _runner(sender: _Sender, cancels: _Cancels, backend: str = "comfy-cuda") -> Runner:
     card = _card(FL2VA_ID)
-    bound = _bound_instance(card, RunnerId("comfy-runner"), NodeId("n"))
+    bound = _bound_instance(card, RunnerId("comfy-runner"), NodeId("n"), backend)
     return Runner(bound, cast("Any", sender), cast("Any", None), cast("Any", cancels))
 
 
@@ -441,6 +441,62 @@ def test_runner_execution_error_fails_the_task_only(fake_comfy: Path, monkeypatc
         errors = [e.chunk for e in sender.events if isinstance(e, ChunkGenerated) and isinstance(e.chunk, ErrorChunk)]
         assert len(errors) == 2 and "rejected the graph" in (errors[1].error_message or "")
         assert runner.server.alive()
+    finally:
+        runner.handle_task(Shutdown(instance_id=instance, runner_id=RunnerId("comfy-runner")))
+
+
+def test_rocm_lane_replaces_the_server_after_every_render(fake_comfy: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """On the managed ROCm install each render gets a fresh server: after success, cancel, and failure."""
+    monkeypatch.setattr(runner_module, "_managed_install", lambda interpreter: True)  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    monkeypatch.setenv("FAKE_COMFY_STEP_SECONDS", "0.3")
+    sender = _Sender()
+    cancels = _Cancels()
+    runner = _runner(sender, cancels, backend="comfy-rocm")
+    instance = runner.bound_instance.instance.instance_id
+    try:
+        runner.handle_task(LoadModel(instance_id=instance))
+        runner.handle_task(StartWarmup(instance_id=instance))
+        first = runner.server
+        assert first is not None and first.alive()
+        runner.handle_task(VideoGeneration(command_id=CommandId("cmd-one"), instance_id=instance, task_params=_params(FL2VA_ID, steps=1), owner_node=NodeId("n")))
+        assert _video_chunks(sender)[-1].finish_reason == "stop"
+        second = runner.server
+        assert second is not None and second is not first and second.alive() and not first.alive()
+        # A cancelled render is recycled the same way. The fake server reads its
+        # failure switch at spawn, so it is set now: the server spawned after the
+        # cancel carries it and the render after that fails at decode.
+        monkeypatch.setenv("FAKE_COMFY_FAIL_NODE", "decode_video")
+        task = VideoGeneration(command_id=CommandId("cmd-cancel"), instance_id=instance, task_params=_params(FL2VA_ID, steps=50), owner_node=NodeId("n"))
+        cancels.pending.append(task.task_id)
+        runner.handle_task(task)
+        third = runner.server
+        assert third is not None and third is not second and third.alive() and not second.alive()
+        sender.events.clear()
+        monkeypatch.delenv("FAKE_COMFY_FAIL_NODE")
+        runner.handle_task(VideoGeneration(command_id=CommandId("cmd-fail"), instance_id=instance, task_params=_params(FL2VA_ID, steps=1), owner_node=NodeId("n")))
+        errors = [e.chunk for e in sender.events if isinstance(e, ChunkGenerated) and isinstance(e.chunk, ErrorChunk)]
+        assert len(errors) == 1
+        fourth = runner.server
+        assert fourth is not None and fourth is not third and fourth.alive()
+        sender.events.clear()
+        runner.handle_task(VideoGeneration(command_id=CommandId("cmd-two"), instance_id=instance, task_params=_params(FL2VA_ID, steps=1), owner_node=NodeId("n")))
+        assert _video_chunks(sender)[-1].finish_reason == "stop"
+    finally:
+        runner.handle_task(Shutdown(instance_id=instance, runner_id=RunnerId("comfy-runner")))
+    assert runner.server is None
+
+
+def test_cuda_lane_keeps_its_server_across_renders(fake_comfy: Path) -> None:
+    """The CUDA lane never recycles: the same server serves consecutive renders."""
+    sender = _Sender()
+    runner = _runner(sender, _Cancels())
+    instance = runner.bound_instance.instance.instance_id
+    try:
+        runner.handle_task(LoadModel(instance_id=instance))
+        runner.handle_task(StartWarmup(instance_id=instance))
+        first = runner.server
+        runner.handle_task(VideoGeneration(command_id=CommandId("cmd-a"), instance_id=instance, task_params=_params(FL2VA_ID, steps=1), owner_node=NodeId("n")))
+        assert runner.server is first and first is not None and first.alive()
     finally:
         runner.handle_task(Shutdown(instance_id=instance, runner_id=RunnerId("comfy-runner")))
 

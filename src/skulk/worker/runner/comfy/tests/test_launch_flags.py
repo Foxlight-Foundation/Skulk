@@ -67,11 +67,17 @@ def test_server_environment_layers_lane_variables_over_the_process(monkeypatch: 
     assert env["TORCH_BLAS_PREFER_HIPBLASLT"] == "1"
 
 
-def test_rocm_lane_serves_one_render_per_server(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The ROCm lane replaces its server after each render; other lanes keep theirs."""
-    assert fresh_server_per_render("comfy-rocm") is True
-    assert fresh_server_per_render("comfy-cuda") is False
+def test_rocm_lane_serves_one_render_per_server(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The managed ROCm install replaces its server after each render; other lanes and hand-built stacks keep theirs."""
+    import skulk.shared.constants as constants
+
+    monkeypatch.setattr(constants, "SKULK_ENGINES_DIR", tmp_path / "engines")
+    managed = tmp_path / "engines" / "comfy" / "pin" / "rocm-abc" / "venv" / "bin" / "python"
+    hand_built = tmp_path / "opt" / "comfy" / "venv" / "bin" / "python"
+    assert fresh_server_per_render("comfy-rocm", managed) is True
+    assert fresh_server_per_render("comfy-rocm", hand_built) is False
+    assert fresh_server_per_render("comfy-cuda", managed) is False
     monkeypatch.setattr(backends, "probe_node_backends", lambda: {"comfy", "comfy-rocm"})
-    assert fresh_server_per_render(None) is True
+    assert fresh_server_per_render(None, managed) is True
     monkeypatch.setattr(backends, "probe_node_backends", lambda: {"comfy", "comfy-cuda"})
-    assert fresh_server_per_render(None) is False
+    assert fresh_server_per_render(None, managed) is False
