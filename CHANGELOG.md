@@ -58,6 +58,14 @@ This project records release notes here and mirrors public-facing notes in
   step progress on the WebSocket, cancels mid-render, and delivers the
   H.264/AAC container with a first-frame thumbnail. H3 cards place on
   `comfy-cuda` and `comfy-rocm` nodes.
+- `GET /v1/models` entries carry two additive sections from the card: `video`
+  (the declared video contract: modes, clip length range, frame grid and
+  canvas rules, audio output, default steps, reference limits, and the named
+  adapters selectable through a video job's `lora` field) and `license`
+  (name, URL, SPDX id, notice, and the product display name a license may
+  require), so a client such as the Video Studio capability can plan a valid
+  render and show the required attribution from the running node's catalog
+  instead of a copy of the card. Both are null where the card declares none.
 - Muse Glimmer (Meta, August 2026) is a first-class model family on every
   serving lane. The capability resolver now derives the family's wire
   contract from the card family or model id, the same way it does for

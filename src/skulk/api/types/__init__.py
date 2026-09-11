@@ -62,6 +62,7 @@ from .api import ImageGenerationTaskParams as ImageGenerationTaskParams
 from .api import ImageListItem as ImageListItem
 from .api import ImageListResponse as ImageListResponse
 from .api import ImageSize as ImageSize
+from .api import LicenseSection as LicenseSection
 from .api import Logprobs as Logprobs
 from .api import LogprobsContentItem as LogprobsContentItem
 from .api import ModalitiesCapabilitySection as ModalitiesCapabilitySection
@@ -107,11 +108,15 @@ from .api import TraceTaskKind as TraceTaskKind
 from .api import TracingStateResponse as TracingStateResponse
 from .api import UpdateTracingStateRequest as UpdateTracingStateRequest
 from .api import Usage as Usage
+from .api import VideoAdapterSection as VideoAdapterSection
+from .api import VideoCapabilitySection as VideoCapabilitySection
 from .api import VideoCreateRequest as VideoCreateRequest
 from .api import VideoDeletedResponse as VideoDeletedResponse
 from .api import VideoError as VideoError
 from .api import VideoListResponse as VideoListResponse
+from .api import VideoModeName as VideoModeName
 from .api import VideoOutputInfo as VideoOutputInfo
+from .api import VideoReferenceLimitsSection as VideoReferenceLimitsSection
 from .api import VideoResource as VideoResource
 from .api import VideoStatsInfo as VideoStatsInfo
 from .api import WebSearchResult as WebSearchResult
