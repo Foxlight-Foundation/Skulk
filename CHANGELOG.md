@@ -41,16 +41,15 @@ This project records release notes here and mirrors public-facing notes in
   seeded synthetic clips through every stage of the pipeline so the
   substrate works end to end on nodes without a GPU. The `comfy` engine's
   provisioning lands first: a pinned ComfyUI checkout (v0.35.0) in a
-  managed environment with a hash-pinned torch wheel set (cu130 on NVIDIA,
-  rocm7.2 on AMD Strix Halo; installs are keyed by pin and wheel-set digest
-  so a wheel change reprovisions), provisioned on Linux NVIDIA and AMD nodes
-  that enable video models or by `skulk doctor --fix`, advertised as
-  `comfy-cuda` or `comfy-rocm` (the ROCm lane launches ComfyUI with
-  `--bf16-vae --disable-mmap --cache-none` and routes torch GEMMs through
-  hipBLASLt, since the rocm7.2 wheel's gfx1151 rocBLAS library lacks a
-  kernel the H3 text encoder's vision tower needs, and replaces its ComfyUI
-  server after every render because hipBLASLt has gfx1151 gaps of its own),
-  with `SKULK_COMFY_BIN` and
+  managed environment with a hash-pinned torch wheel set (cu130 from the
+  PyTorch index on NVIDIA; on AMD Strix Halo, AMD's stable ROCm 10.0.0
+  channel with torch's gfx1151 device packages, whose BLAS libraries carry
+  every kernel H3 reaches, where the rocm7.2 wheel's did not; installs are
+  keyed by pin and wheel-set digest so a wheel change reprovisions),
+  provisioned on Linux NVIDIA and AMD nodes that enable video models or by
+  `skulk doctor --fix`, advertised as `comfy-cuda` or `comfy-rocm` (the
+  ROCm lane launches ComfyUI with `--bf16-vae --disable-mmap
+  --cache-none`), with `SKULK_COMFY_BIN` and
   `SKULK_COMFY_ROOT` for hand-built installs. The ComfyUI runner drives that install headless:
   it exposes the staged H3 artifact through an `extra_model_paths.yaml`,
   binds each request onto ComfyUI's own MiniMax H3 node graph (text, first

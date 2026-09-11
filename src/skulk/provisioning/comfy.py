@@ -235,7 +235,9 @@ def provision_comfy(variant: EngineVariant, *, run: Runner = subprocess.run) -> 
     wheels = COMFY_TORCH_WHEELS.get((machine, variant))
     if wheels is None:
         raise RuntimeError(f"no ComfyUI torch wheel set is recorded for {machine}/{variant}")
-    torch_index = wheels[0].index
+    # The resolver pass for ComfyUI's requirements sees the channel the wheel
+    # set came from, so its constraints resolve there.
+    torch_index = wheels[0].channel or wheels[0].index
     existing = _existing_install(variant, machine)
     if existing is not None:
         return existing

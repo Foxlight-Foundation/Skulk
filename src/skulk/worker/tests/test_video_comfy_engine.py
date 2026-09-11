@@ -359,7 +359,10 @@ def _video_chunks(sender: _Sender) -> list[VideoChunk]:
     return [e.chunk for e in sender.events if isinstance(e, ChunkGenerated) and isinstance(e.chunk, VideoChunk)]
 
 
-def test_runner_renders_through_a_comfy_server(fake_comfy: Path) -> None:
+def test_runner_renders_through_a_comfy_server(fake_comfy: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A step pace well above timer resolution keeps the per-step assertion
+    # below from flaking on a sleep that wakes a few microseconds early.
+    monkeypatch.setenv("FAKE_COMFY_STEP_SECONDS", "0.05")
     sender = _Sender()
     runner = _runner(sender, _Cancels())
     instance = runner.bound_instance.instance.instance_id
@@ -388,7 +391,7 @@ def test_runner_renders_through_a_comfy_server(fake_comfy: Path) -> None:
         assert (terminal.output.audio_sample_rate, terminal.output.audio_channels) == (32000, 2)
         assert terminal.stats.steps == 3 and terminal.stats.total_generation_time > 0
         # Three fake steps of 10 ms each: the mean covers every step, not two.
-        assert terminal.stats.seconds_per_step >= 0.01
+        assert terminal.stats.seconds_per_step >= 0.04
         assert not list(out_dir.glob("*_00001_.*"))
         # The graph ComfyUI received is the one the builder produced.
         submitted = next(fake_comfy.glob("video_output/*.prompt.json"))
@@ -422,6 +425,24 @@ def test_runner_cancel_interrupts_the_server_and_keeps_serving(fake_comfy: Path,
         runner.handle_task(Shutdown(instance_id=instance, runner_id=RunnerId("comfy-runner")))
 
 
+def test_runner_waits_for_the_history_entry_after_success(fake_comfy: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # ComfyUI signals success over the socket before it records the history
+    # entry; a runner that reads history on the event alone loses the race
+    # whenever the executor's teardown is slow (seen on the ROCm lane).
+    monkeypatch.setenv("FAKE_COMFY_HISTORY_DELAY_SECONDS", "1.5")
+    sender = _Sender()
+    runner = _runner(sender, _Cancels())
+    instance = runner.bound_instance.instance.instance_id
+    try:
+        runner.handle_task(LoadModel(instance_id=instance))
+        runner.handle_task(StartWarmup(instance_id=instance))
+        runner.handle_task(VideoGeneration(command_id=CommandId("cmd-late-history"), instance_id=instance, task_params=_params(FL2VA_ID, steps=1), owner_node=NodeId("n")))
+        assert _video_chunks(sender)[-1].finish_reason == "stop"
+        assert (fake_comfy / "video_output" / "cmd-late-history").exists()
+    finally:
+        runner.handle_task(Shutdown(instance_id=instance, runner_id=RunnerId("comfy-runner")))
+
+
 def test_runner_execution_error_fails_the_task_only(fake_comfy: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FAKE_COMFY_FAIL_NODE", "decode_video")
     sender = _Sender()
@@ -445,49 +466,8 @@ def test_runner_execution_error_fails_the_task_only(fake_comfy: Path, monkeypatc
         runner.handle_task(Shutdown(instance_id=instance, runner_id=RunnerId("comfy-runner")))
 
 
-def test_rocm_lane_replaces_the_server_after_every_render(fake_comfy: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """On the managed ROCm install each render gets a fresh server: after success, cancel, and failure."""
-    monkeypatch.setattr(runner_module, "_managed_install", lambda interpreter: True)  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
-    monkeypatch.setenv("FAKE_COMFY_STEP_SECONDS", "0.3")
-    sender = _Sender()
-    cancels = _Cancels()
-    runner = _runner(sender, cancels, backend="comfy-rocm")
-    instance = runner.bound_instance.instance.instance_id
-    try:
-        runner.handle_task(LoadModel(instance_id=instance))
-        runner.handle_task(StartWarmup(instance_id=instance))
-        first = runner.server
-        assert first is not None and first.alive()
-        runner.handle_task(VideoGeneration(command_id=CommandId("cmd-one"), instance_id=instance, task_params=_params(FL2VA_ID, steps=1), owner_node=NodeId("n")))
-        assert _video_chunks(sender)[-1].finish_reason == "stop"
-        second = runner.server
-        assert second is not None and second is not first and second.alive() and not first.alive()
-        # A cancelled render is recycled the same way. The fake server reads its
-        # failure switch at spawn, so it is set now: the server spawned after the
-        # cancel carries it and the render after that fails at decode.
-        monkeypatch.setenv("FAKE_COMFY_FAIL_NODE", "decode_video")
-        task = VideoGeneration(command_id=CommandId("cmd-cancel"), instance_id=instance, task_params=_params(FL2VA_ID, steps=50), owner_node=NodeId("n"))
-        cancels.pending.append(task.task_id)
-        runner.handle_task(task)
-        third = runner.server
-        assert third is not None and third is not second and third.alive() and not second.alive()
-        sender.events.clear()
-        monkeypatch.delenv("FAKE_COMFY_FAIL_NODE")
-        runner.handle_task(VideoGeneration(command_id=CommandId("cmd-fail"), instance_id=instance, task_params=_params(FL2VA_ID, steps=1), owner_node=NodeId("n")))
-        errors = [e.chunk for e in sender.events if isinstance(e, ChunkGenerated) and isinstance(e.chunk, ErrorChunk)]
-        assert len(errors) == 1
-        fourth = runner.server
-        assert fourth is not None and fourth is not third and fourth.alive()
-        sender.events.clear()
-        runner.handle_task(VideoGeneration(command_id=CommandId("cmd-two"), instance_id=instance, task_params=_params(FL2VA_ID, steps=1), owner_node=NodeId("n")))
-        assert _video_chunks(sender)[-1].finish_reason == "stop"
-    finally:
-        runner.handle_task(Shutdown(instance_id=instance, runner_id=RunnerId("comfy-runner")))
-    assert runner.server is None
-
-
-def test_cuda_lane_keeps_its_server_across_renders(fake_comfy: Path) -> None:
-    """The CUDA lane never recycles: the same server serves consecutive renders."""
+def test_the_server_serves_consecutive_renders(fake_comfy: Path) -> None:
+    """One server serves consecutive renders; nothing replaces it between them."""
     sender = _Sender()
     runner = _runner(sender, _Cancels())
     instance = runner.bound_instance.instance.instance_id

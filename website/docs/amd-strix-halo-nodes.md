@@ -340,8 +340,10 @@ What to expect, from measurements on a Strix Halo pair:
 
 The served `comfy` video engine has a ROCm lane for this hardware. With
 `SKULK_ENABLE_VIDEO_MODELS=true` set, a Linux AMD node provisions the pinned
-ComfyUI checkout into its own managed environment with the hash-pinned
-`rocm7.2` torch wheel set, at node startup or through `skulk doctor --fix`
+ComfyUI checkout into its own managed environment with the hash-pinned torch
+set from AMD's stable ROCm 10.0.0 channel (the `rocm` runtime with the
+gfx1151 device libraries, torch with its gfx1151 device packages,
+torchvision, torchaudio, triton), at node startup or through `skulk doctor --fix`
 (the doctor honors the same gate: without video models enabled it reports
 that no engine is expected and provisions nothing). Those wheels bundle their own HIP
 runtime, so unlike the Vulkan path above nothing from a system ROCm install is
@@ -350,22 +352,21 @@ groups are enough. The node then advertises `comfy-rocm` and H3 cards place
 on it. The runner launches ComfyUI with `--bf16-vae --disable-mmap
 --cache-none`, the flags validated on gfx1151: memory-mapping a checkpoint
 above 64 GB through unified memory is pathologically slow, and the fp32 VAE
-decode does not fit beside the transformer. It also sets
-`TORCH_BLAS_PREFER_HIPBLASLT=1` for the server: the rocm7.2 torch wheel's
-gfx1151 rocBLAS library is missing a single-precision batched GEMM kernel
-that the H3 text encoder's vision tower uses for keyframe and reference
-prompts, and rocBLAS segfaults launching it; hipBLASLt carries the
-solution. Text-only prompts never hit it, which is how the gap hid.
-hipBLASLt has gfx1151 gaps of its own that a second image-conditioned prompt
-in the same server process reaches, so on this lane the runner replaces the
-ComfyUI server after every render; expect the model reload (a few minutes)
-at the start of each render. This is a property of the rocm7.2 torch wheel,
-not of the hardware, so it applies only to the managed install: a hand-built
-stack pointed at by `SKULK_COMFY_BIN` (a torch build made for gfx1151, which
-AMD publishes nightly, or a system ROCm 7.2 with AMD's lightweight wheels)
-keeps its server warm. Expect several gigabytes of wheels
-on first provisioning and set the unified-memory kernel parameters above so the
-GPU can address the whole pool.
+decode does not fit beside the transformer. One server stays warm across
+renders, so only the first render after placement pays the model load. The
+wheel set matters here: the rocm7.2 torch wheel from the PyTorch index, the
+lane's first set, shipped gfx1151 BLAS libraries missing GEMM kernels that
+keyframe and reference prompts reach (a single-precision batched GEMM in
+rocBLAS, a bf16 bias-fused GEMM in hipBLASLt), and the HIP runtime
+segfaults launching a missing kernel; text-only prompts never hit them,
+which is how the gaps hid. AMD's ROCm 10.0.0 wheels carry every kernel H3
+needs, and a hand-built stack pointed at by `SKULK_COMFY_BIN` should be
+built the same way. Per-step sampling time on gfx1151 is the same on both
+sets (the hardware's GEMM throughput is the ceiling), so the gain from the
+advance is correctness and the retired reload, not faster steps. Expect
+several gigabytes of wheels on first provisioning and set the
+unified-memory kernel parameters above so the GPU can address the whole
+pool.
 
 ## What is not on the AMD path today
 

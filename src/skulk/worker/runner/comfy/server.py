@@ -50,6 +50,14 @@ runs minutes, so the grace is a safety net for a server that ignores the
 interrupt, not a bound on step length."""
 _JOB_POLL_SECONDS: Final = 5.0
 _SOCKET_WAIT_SECONDS: Final = 0.5
+_HISTORY_WAIT_SECONDS: Final = 120.0
+"""How long a finished prompt may take to appear in ``/history``. ComfyUI
+sends ``execution_success`` from inside the executor and records the history
+entry only after the executor returns, so the entry lags the event by the
+executor's teardown (model tracker, RAM-cache release, event-loop shutdown).
+On the ROCm lane that gap has been observed above a second; a server that
+never records the entry is broken, so the wait is bounded."""
+_HISTORY_POLL_SECONDS: Final = 0.25
 _SAMPLING_SHARE: Final = (0.1, 0.9)
 """Fraction of the progress bar the sampling stage spans."""
 
@@ -89,19 +97,18 @@ def pick_free_port() -> int:
     raise RuntimeError("could not find a free port for the ComfyUI server")
 
 
-def server_environment(interpreter: Path, extra: dict[str, str]) -> dict[str, str]:
+def server_environment(interpreter: Path) -> dict[str, str]:
     """The environment one ComfyUI server is spawned with.
 
     The interpreter's own bin directory comes first on ``PATH``: the
     environment carries its tools (ffmpeg wheels, compilers for JIT kernels)
     beside python. ``PYTHONPATH`` from the Skulk process must not leak into
     ComfyUI's interpreter, since the two environments carry different torch
-    builds. Lane-specific variables (``extra``) are layered last so they win.
+    builds.
     """
     env = dict(os.environ)
     env["PATH"] = f"{interpreter.parent}{os.pathsep}{env.get('PATH', '')}"
     env.pop("PYTHONPATH", None)
-    env.update(extra)
     return env
 
 
@@ -162,8 +169,6 @@ class ComfyServer:
     user_dir: Path
     log_path: Path
     extra_args: tuple[str, ...] = ()
-    extra_env: dict[str, str] = field(default_factory=dict)
-    """Lane-specific variables layered over the process environment."""
     base_url: str | None = None
     process: subprocess.Popen[bytes] | None = None
     _log: BinaryIO | None = field(default=None, repr=False)
@@ -204,7 +209,7 @@ class ComfyServer:
         )
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self._log = open(self.log_path, "wb")  # noqa: SIM115 - closed in teardown
-        env = server_environment(self.interpreter, self.extra_env)
+        env = server_environment(self.interpreter)
         logger.info(f"spawning ComfyUI: {' '.join(args)} (log={self.log_path})")
         self.process = subprocess.Popen(
             args,
@@ -417,14 +422,26 @@ async def _job_status(session: aiohttp.ClientSession, prompt_id: str) -> tuple[s
     return _as_str(job.get("status")), message
 
 
-async def _history_outputs(session: aiohttp.ClientSession, prompt_id: str) -> dict[str, Any]:
-    async with session.get(f"/history/{prompt_id}") as response:
-        response.raise_for_status()
-        history = cast("dict[str, Any]", await response.json(content_type=None))
-    entry = cast("dict[str, Any] | None", history.get(prompt_id))
-    if entry is None:
-        raise RuntimeError(f"ComfyUI reported success for {prompt_id} but has no history entry")
-    return cast("dict[str, Any]", entry.get("outputs") or {})
+async def _history_outputs(session: aiohttp.ClientSession, prompt_id: str, server_alive: Callable[[], bool]) -> dict[str, Any]:
+    """The prompt's recorded outputs, waiting for the history entry to land.
+
+    Success is signalled over the socket before the entry exists, so the
+    first read may legitimately miss; the wait ends early when the server
+    dies and fails after :data:`_HISTORY_WAIT_SECONDS`.
+    """
+    deadline = time.monotonic() + _HISTORY_WAIT_SECONDS
+    while True:
+        async with session.get(f"/history/{prompt_id}") as response:
+            response.raise_for_status()
+            history = cast("dict[str, Any]", await response.json(content_type=None))
+        entry = cast("dict[str, Any] | None", history.get(prompt_id))
+        if entry is not None:
+            return cast("dict[str, Any]", entry.get("outputs") or {})
+        if not server_alive():
+            raise RuntimeError(f"ComfyUI exited before recording the history entry for {prompt_id}")
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"ComfyUI reported success for {prompt_id} but has no history entry")
+        await asyncio.sleep(_HISTORY_POLL_SECONDS)
 
 
 async def _cancel(session: aiohttp.ClientSession, prompt_id: str) -> bool:
@@ -508,5 +525,5 @@ async def run_prompt(
             raise ComfyRenderError(f"ComfyUI failed the render ({state.error})")
         if state.terminal == "interrupted":
             return RenderResult("cancelled", {}, state.sampling_seconds, state.steps_seen)
-        outputs = await _history_outputs(session, prompt_id)
+        outputs = await _history_outputs(session, prompt_id, server_alive)
         return RenderResult("completed", outputs, state.sampling_seconds, state.steps_seen)

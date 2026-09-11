@@ -104,19 +104,9 @@ ROCM_LAUNCH_FLAGS: Final[tuple[str, ...]] = ("--bf16-vae", "--disable-mmap", "--
 64 GB is pathologically slow through the unified-memory path; ``--bf16-vae``
 because the fp32 VAE decode of a 768p clip does not fit beside the
 transformer; ``--cache-none`` so node outputs are not retained between
-renders on a host whose GPU memory is the system's. There is no flash
-attention on this stack; ComfyUI's default SDPA path is the one that works.
-"""
-
-
-ROCM_LAUNCH_ENVIRONMENT: Final[dict[str, str]] = {"TORCH_BLAS_PREFER_HIPBLASLT": "1"}
-"""Environment for the ComfyUI server on the ROCm lane.
-
-The gfx1151 code objects in the rocm7.2 torch wheel lack a rocBLAS Tensile
-single-precision batched GEMM solution the Qwen3-VL text encoder's vision
-tower needs; rocBLAS launches the missing kernel and the server segfaults
-on every image-conditioned prompt. Routing torch GEMMs through hipBLASLt,
-whose library carries the solution, was the fix found on real hardware.
+renders on a host whose GPU memory is the system's. No attention flag:
+ComfyUI's default SDPA path already selects the wheel set's flash-class
+kernel on gfx1151 (measured against the math path on the hardware).
 """
 
 
@@ -148,56 +138,6 @@ def launch_flags(resolved_backend: str | None) -> tuple[str, ...]:
     ``ROCM_LAUNCH_FLAGS``.
     """
     return ROCM_LAUNCH_FLAGS if _is_rocm_lane(resolved_backend) else ()
-
-
-ROCM_FRESH_SERVER_PER_RENDER: Final = True
-"""Whether the ROCm lane recycles its ComfyUI server after every render.
-
-The rocm7.2 torch wheel's gfx1151 BLAS libraries are incomplete: rocBLAS and
-hipBLASLt each lack GEMM solutions that H3 prompts reach, and the runtime
-segfaults launching a missing one. With hipBLASLt preferred, the first
-prompt a fresh server executes has passed every time on real hardware,
-while a second image-conditioned prompt in the same process reaches a
-bf16 bias-fused GEMM the library lacks. Until a wheel with complete
-gfx1151 coverage exists, a server serves one render and is replaced; the
-cost is the model reload on the next render's first step.
-"""
-
-
-def _managed_install(interpreter: Path) -> bool:
-    """Whether ``interpreter`` belongs to a managed install under the engines directory.
-
-    Compared without following symlinks: ``uv venv`` makes ``venv/bin/python``
-    a link to the host interpreter, and resolving it would escape the engines
-    directory for exactly the install this predicate exists to recognize.
-    """
-    from skulk.shared.constants import SKULK_ENGINES_DIR
-
-    managed_root = Path(os.path.abspath(SKULK_ENGINES_DIR / "comfy"))
-    return Path(os.path.abspath(interpreter)).is_relative_to(managed_root)
-
-
-def fresh_server_per_render(resolved_backend: str | None, interpreter: Path) -> bool:
-    """Whether this launch replaces the ComfyUI server after each render.
-
-    The workaround belongs to the pinned rocm7.2 wheel set the managed
-    install carries, not to the hardware: an operator's hand-built ROCm
-    stack (``SKULK_COMFY_BIN`` outside the engines directory) may carry a
-    complete gfx1151 build and keeps its server warm.
-    """
-    return (
-        ROCM_FRESH_SERVER_PER_RENDER
-        and _is_rocm_lane(resolved_backend)
-        and _managed_install(interpreter)
-    )
-
-
-def launch_environment(resolved_backend: str | None) -> dict[str, str]:
-    """Extra environment for the ComfyUI server on the node's compute backend.
-
-    CUDA needs nothing; the ROCm lane adds ``ROCM_LAUNCH_ENVIRONMENT``.
-    """
-    return dict(ROCM_LAUNCH_ENVIRONMENT) if _is_rocm_lane(resolved_backend) else {}
 
 
 def _configured_install() -> tuple[Path, Path]:
@@ -336,25 +276,6 @@ class Runner:
             self.server.teardown()
             self.server = None
 
-    def _recycle_server_if_needed(self) -> None:
-        """Replace the server after a render on lanes that need a fresh process.
-
-        Runs whether the render succeeded, failed, or was cancelled: the
-        next render must start from a process that has executed no prompt.
-        A respawn failure surfaces on the next render through the liveness
-        check rather than here, so a finished render is never reported as
-        failed by its successor's startup.
-        """
-        interpreter = self.server.interpreter if self.server is not None else _configured_install()[0]
-        if not fresh_server_per_render(self.shard_metadata.resolved_backend, interpreter):
-            return
-        logger.info("recycling the ComfyUI server after the render (fresh server per render on this lane)")
-        self._teardown_server()
-        try:
-            self._load_model()
-        except Exception as error:  # noqa: BLE001 - reported by the next render's liveness check
-            logger.warning(f"ComfyUI respawn after the render failed: {error}")
-
     def _ensure_server_alive(self) -> None:
         if self.server is None or not self.server.alive():
             tail = self.server.log_tail() if self.server is not None else "(no server)"
@@ -399,8 +320,6 @@ class Runner:
                     if not isinstance(error, ValueError):
                         raise
                     logger.warning(f"comfy engine rejected {command_id}: {error}")
-                finally:
-                    self._recycle_server_if_needed()
                 self.current_status = RunnerReady()
             case Shutdown():
                 self.update_status(RunnerShuttingDown())
@@ -439,7 +358,6 @@ class Runner:
             user_dir=self.work_dir / "user",
             log_path=self.work_dir / "server.log",
             extra_args=launch_flags(self.shard_metadata.resolved_backend),
-            extra_env=launch_environment(self.shard_metadata.resolved_backend),
         )
         server.start()
         self.server = server
