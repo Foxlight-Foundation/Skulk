@@ -388,7 +388,11 @@ A model card's `placement.compatible_backends` selects which engine serves it
   signals the process group; worker startup sweeps init-parented servers
   launched with Skulk's `--user-directory`. Tags `comfy-cuda` and
   `comfy-rocm` (the ROCm lane launches with `ROCM_LAUNCH_FLAGS`:
-  `--bf16-vae --disable-mmap --cache-none`); GPU-only, single-host.
+  `--bf16-vae --disable-mmap --cache-none`, and `ROCM_LAUNCH_ENVIRONMENT`:
+  `TORCH_BLAS_PREFER_HIPBLASLT=1`, because the rocm7.2 wheel's gfx1151
+  rocBLAS library lacks an fp32 batched GEMM the Qwen3-VL text encoder's
+  vision tower needs and the server segfaults on image-conditioned prompts
+  without it); GPU-only, single-host.
   ADVANCING `COMFY_PIN` OR THE WHEEL SET IS A CHECKLIST
   (architecture-reference.md "Engine pin advancement").
 - **`test_video`** (`worker/runner/test_video/`): deterministic test video

@@ -46,7 +46,9 @@ This project records release notes here and mirrors public-facing notes in
   so a wheel change reprovisions), provisioned on Linux NVIDIA and AMD nodes
   that enable video models or by `skulk doctor --fix`, advertised as
   `comfy-cuda` or `comfy-rocm` (the ROCm lane launches ComfyUI with
-  `--bf16-vae --disable-mmap --cache-none`), with `SKULK_COMFY_BIN` and
+  `--bf16-vae --disable-mmap --cache-none` and routes torch GEMMs through
+  hipBLASLt, since the rocm7.2 wheel's gfx1151 rocBLAS library lacks a
+  kernel the H3 text encoder's vision tower needs), with `SKULK_COMFY_BIN` and
   `SKULK_COMFY_ROOT` for hand-built installs. The ComfyUI runner drives that install headless:
   it exposes the staged H3 artifact through an `extra_model_paths.yaml`,
   binds each request onto ComfyUI's own MiniMax H3 node graph (text, first

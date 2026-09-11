@@ -350,7 +350,12 @@ groups are enough. The node then advertises `comfy-rocm` and H3 cards place
 on it. The runner launches ComfyUI with `--bf16-vae --disable-mmap
 --cache-none`, the flags validated on gfx1151: memory-mapping a checkpoint
 above 64 GB through unified memory is pathologically slow, and the fp32 VAE
-decode does not fit beside the transformer. Expect several gigabytes of wheels
+decode does not fit beside the transformer. It also sets
+`TORCH_BLAS_PREFER_HIPBLASLT=1` for the server: the rocm7.2 torch wheel's
+gfx1151 rocBLAS library is missing a single-precision batched GEMM kernel
+that the H3 text encoder's vision tower uses for keyframe and reference
+prompts, and rocBLAS segfaults launching it; hipBLASLt carries the
+solution. Text-only prompts never hit it, which is how the gap hid. Expect several gigabytes of wheels
 on first provisioning and set the unified-memory kernel parameters above so the
 GPU can address the whole pool.
 
