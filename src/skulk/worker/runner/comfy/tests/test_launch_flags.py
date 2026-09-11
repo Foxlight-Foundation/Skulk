@@ -74,7 +74,15 @@ def test_rocm_lane_serves_one_render_per_server(monkeypatch: pytest.MonkeyPatch,
     monkeypatch.setattr(constants, "SKULK_ENGINES_DIR", tmp_path / "engines")
     managed = tmp_path / "engines" / "comfy" / "pin" / "rocm-abc" / "venv" / "bin" / "python"
     hand_built = tmp_path / "opt" / "comfy" / "venv" / "bin" / "python"
+    # uv makes the venv interpreter a symlink to the host interpreter, which
+    # lives outside the engines directory; the install is still managed.
+    host = tmp_path / "host" / "cpython" / "bin" / "python3.13"
+    host.parent.mkdir(parents=True)
+    host.write_text("")
+    managed.parent.mkdir(parents=True)
+    managed.symlink_to(host)
     assert fresh_server_per_render("comfy-rocm", managed) is True
+    assert fresh_server_per_render("comfy-rocm", managed.parent / ".." / "bin" / "python") is True
     assert fresh_server_per_render("comfy-rocm", hand_built) is False
     assert fresh_server_per_render("comfy-cuda", managed) is False
     monkeypatch.setattr(backends, "probe_node_backends", lambda: {"comfy", "comfy-rocm"})

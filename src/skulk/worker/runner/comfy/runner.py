@@ -165,10 +165,16 @@ cost is the model reload on the next render's first step.
 
 
 def _managed_install(interpreter: Path) -> bool:
-    """Whether ``interpreter`` belongs to a managed install under the engines directory."""
+    """Whether ``interpreter`` belongs to a managed install under the engines directory.
+
+    Compared without following symlinks: ``uv venv`` makes ``venv/bin/python``
+    a link to the host interpreter, and resolving it would escape the engines
+    directory for exactly the install this predicate exists to recognize.
+    """
     from skulk.shared.constants import SKULK_ENGINES_DIR
 
-    return interpreter.resolve().is_relative_to((SKULK_ENGINES_DIR / "comfy").resolve())
+    managed_root = Path(os.path.abspath(SKULK_ENGINES_DIR / "comfy"))
+    return Path(os.path.abspath(interpreter)).is_relative_to(managed_root)
 
 
 def fresh_server_per_render(resolved_backend: str | None, interpreter: Path) -> bool:
