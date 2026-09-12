@@ -133,6 +133,7 @@ from skulk.api.performance_envelope import (
     PerformanceEnvelopeRegistry,
     PerformanceEnvelopeReport,
 )
+from skulk.api.plugins import create_plugins_router
 from skulk.api.provider_diagnostics import ProviderObserver
 from skulk.api.realtime import (
     REALTIME_WEBSOCKET_MAX_MESSAGE_BYTES,
@@ -1921,6 +1922,9 @@ class API:
         self._setup_exception_handlers()
         self._setup_cors()
         self._setup_routes()
+        self.app.include_router(
+            create_plugins_router(self._extensions or LoadedExtensions([]), operator_pairing_service)
+        )
         if operator_pairing_service is not None:
             self.app.include_router(
                 create_operator_auth_router(operator_pairing_service)
@@ -1953,6 +1957,7 @@ class API:
                 "/chat",
                 "/steward",
                 "/integrations",
+                "/plugins",
                 "/operator",
             ):
                 self.app.get(_spa_route, include_in_schema=False)(_spa_index)
