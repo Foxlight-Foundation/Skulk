@@ -688,7 +688,9 @@ def test_plan_takes_the_canvas_from_the_keyframe_when_nothing_else_says(
     tall = tmp_path / "tall.jpg"
     tall.write_bytes(_jpeg_bytes(900, 1600))
 
-    def spec(role: str, path: Path, slot: int = 0) -> VideoReferenceSpec:
+    def spec(
+        role: str, path: Path, slot: int = 0, at_seconds: float | None = None
+    ) -> VideoReferenceSpec:
         return VideoReferenceSpec(
             slot=slot,
             kind="image",
@@ -697,6 +699,7 @@ def test_plan_takes_the_canvas_from_the_keyframe_when_nothing_else_says(
             size_bytes=path.stat().st_size if path.exists() else 1,
             sha256="0" * 64,
             local_path=str(path),
+            at_seconds=at_seconds,
         )
 
     base = VideoGenerationTaskParams(
@@ -751,8 +754,8 @@ def test_plan_takes_the_canvas_from_the_keyframe_when_nothing_else_says(
     )
     # Timed keyframes alone: the earliest one shapes the canvas.
     timed = (
-        spec("keyframe", tall).model_copy(update={"at_seconds": 0.75}),
-        spec("keyframe", wide, 1).model_copy(update={"at_seconds": 0.25}),
+        spec("keyframe", tall, at_seconds=0.75),
+        spec("keyframe", wide, 1, at_seconds=0.25),
     )
     earliest = plan_render(base.model_copy(update={"references": timed}), video)
     assert (earliest.width, earliest.height) == (112, 64)
