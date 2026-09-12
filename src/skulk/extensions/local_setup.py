@@ -88,7 +88,7 @@ async def _run_installed_plugin(
     _retained_history(root, selection)
     selector = RuntimeSelector(root)
     async with selector.installer.locked_generation(
-        selection.runtime_digest, inherit_on_exec=True
+        selection.runtime_digest, inherit_on_exec=True, wait_for_ownership=True
     ):
         if selector.current() != selection or selector.pending.exists():
             raise ValueError("plugin selection changed or requires recovery")

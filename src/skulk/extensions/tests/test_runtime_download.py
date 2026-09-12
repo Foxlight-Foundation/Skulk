@@ -147,9 +147,7 @@ async def test_staging_ownership_wait_refuses_without_effects(
         expected_source_revision=1,
     )
     if failure == "timeout":
-        monkeypatch.setattr(
-            "skulk.extensions.runtime_install._STAGING_OWNERSHIP_TIMEOUT", 0.1
-        )
+        monkeypatch.setattr("skulk.extensions.runtime_install._OWNERSHIP_TIMEOUT", 0.1)
     await downloads.submit(request)
     lock = RuntimeLock(downloads.installer.installer)
     try:

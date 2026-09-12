@@ -4261,6 +4261,9 @@ selected signed runtime, qualified host and retained trust before executing the
 archive's fixed optional `__manage__.py`. Paths and module names cannot be supplied.
 The generation fence and terminal I/O survive process replacement; the plugin
 supplies fixed management verbs and derives its durable state coordinates.
+Local setup and management wait up to 30 seconds for installation ownership before
+executing anything. A timeout or selection change refuses the command; this wait
+does not retry plugin execution or any accepted operation.
 Neither this command nor generic management grants mint paid approval. The existing
 `skulk-plugin-service manage` installation-manager interface is unchanged.
 
