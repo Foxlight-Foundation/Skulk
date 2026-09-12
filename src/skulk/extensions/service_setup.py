@@ -11,7 +11,7 @@ import sys
 import time
 import warnings
 from pathlib import Path
-from typing import Literal, Self
+from typing import Literal, Self, final
 from uuid import uuid4
 
 from pydantic import (
@@ -48,6 +48,8 @@ from skulk.extensions.service_snapshot import (
 )
 from skulk.extensions.terminal_install import TerminalInstaller
 from skulk.shared.constants import SKULK_CONFIG_HOME
+
+_READINESS_WAIT_SECONDS = 60.0
 
 
 class SetupOperation(BaseModel):
@@ -88,6 +90,16 @@ class SetupOperation(BaseModel):
         ):
             raise ValueError("setup core identity differs")
         return self
+
+
+@final
+class ServiceReadinessPendingError(Exception):
+    """Report successful registration whose management readiness is not yet proven."""
+
+    def __init__(self, operation_id: str) -> None:
+        """Retain only the local operation identity for safe terminal diagnostics."""
+        super().__init__(operation_id)
+        self.operation_id = operation_id
 
 
 def _save(root: Path, operation: SetupOperation) -> None:
@@ -162,8 +174,8 @@ def _ready_installation(
 async def setup_service() -> SetupOperation:
     """Prepare, register and verify the owner's fixed system service without paid work.
 
-    Rerunning resumes a retained staged runtime. An already healthy completed
-    installation is inspected without stopping it. Preparation uses the existing
+    Rerunning resumes a retained staged runtime. A verified healthy registration
+    is completed without elevation or stopping it. Preparation uses the existing
     qualified core environment read-only; local sudo only provisions its parent
     directory and installs/stops/starts the fixed nonroot OS service definition.
     """
@@ -176,7 +188,23 @@ async def setup_service() -> SetupOperation:
     _outside_checkout(configuration)
     host = await asyncio.to_thread(measure_host)
     source_identity = await asyncio.to_thread(service_source_identity)
-    await finish_runtime_work(asyncio.create_task(_elevate(layout, "prepare")))
+    # First installation needs a root-owned parent before the owner can lock its
+    # state. Existing healthy registrations can be verified without another sudo
+    # prompt; all repair paths still validate that parent through the fixed helper.
+    try:
+        root_info = layout.root.lstat()
+    except FileNotFoundError:
+        prepared = True
+    else:
+        # Interrupted initial preparation may leave an empty root-owned leaf.
+        # The privileged helper must adopt or reject it before owner-side locking.
+        prepared = (
+            not stat.S_ISDIR(root_info.st_mode)
+            or root_info.st_uid != os.getuid()
+            or bool(root_info.st_mode & 0o077)
+        )
+    if prepared:
+        await finish_runtime_work(asyncio.create_task(_elevate(layout, "prepare")))
     lock = RuntimeLock(layout.root, "setup.lock")
     try:
 
@@ -248,7 +276,7 @@ async def setup_service() -> SetupOperation:
             # A live manager alone proves neither boot registration nor integrity
             # of its selected copy. Verify both before treating setup as complete.
             if (
-                operation.phase == "ready"
+                operation.phase in {"registered", "ready"}
                 and operation.snapshot is not None
                 and await asyncio.to_thread(
                     _ready_installation, layout, operation.snapshot, base
@@ -256,7 +284,12 @@ async def setup_service() -> SetupOperation:
                 and await _observe(layout.root)
             ):
                 write_private(connection_path, connection.model_dump_json().encode())
+                if operation.phase == "registered":
+                    operation = operation.model_copy(update={"phase": "ready"})
+                    _save(layout.root, operation)
                 return operation
+            if not prepared:
+                await _elevate(layout, "prepare")
             if operation.snapshot is None:
                 print("Preparing verified independent manager runtime...", flush=True)
                 snapshot = await stage_service_runtime(layout.root)
@@ -302,12 +335,10 @@ async def setup_service() -> SetupOperation:
             await _elevate(layout, "install")
             operation = operation.model_copy(update={"phase": "registered"})
             _save(layout.root, operation)
-            deadline = time.monotonic() + 60
+            deadline = time.monotonic() + _READINESS_WAIT_SECONDS
             while not await _observe(layout.root):
                 if time.monotonic() >= deadline:
-                    raise ValueError(
-                        "system service registered but management is unavailable; rerun setup after correcting service status"
-                    )
+                    raise ServiceReadinessPendingError(operation.operation_id)
                 await asyncio.sleep(0.5)
             operation = operation.model_copy(update={"phase": "ready"})
             _save(layout.root, operation)
@@ -452,6 +483,24 @@ def main() -> None:
             )
         else:
             print(json.dumps(asyncio.run(service_status())))
+    except ServiceReadinessPendingError as error:
+        print(
+            json.dumps(
+                {
+                    "operation_id": error.operation_id,
+                    "phase": "registered",
+                    "error_code": "service_readiness_pending",
+                }
+            )
+        )
+        print(
+            "System service registered; management readiness is still pending. "
+            "Inspect skulk-plugin-service status. Once runtime verification and "
+            "management availability pass, rerun the same setup command to finish "
+            "this operation without restarting the service or requesting sudo.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1) from None
     except (EOFError, KeyboardInterrupt):
         print(
             "Terminal closed. Accepted local operations remain recorded; inspect retained status before retrying. For guided installation, use the printed resume command.",
