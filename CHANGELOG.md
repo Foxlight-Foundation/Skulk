@@ -21,6 +21,9 @@ This project records release notes here and mirrors public-facing notes in
   `SKULK_TEST_CAPABILITY_NODE=<url>` publishes a stand-in node for trying
   the layer without a plugin; `VITE_CAPABILITY_SATELLITES=0` builds the
   dashboard without it.
+- Video jobs take their canvas from an attached keyframe: with no `size` and
+  no `aspect_ratio`, the `first_frame` (else `last_frame`) image sets the
+  shape, read from its header alone, so a keyframe keeps its framing.
 - Audio-video generation substrate and the `/v1/videos` job API. Model
   cards gain a `[video]` section (modes `t2va` / `fl2va` / `ref2va`,
   duration and frame grid, canvas rules, audio output, reference limits,

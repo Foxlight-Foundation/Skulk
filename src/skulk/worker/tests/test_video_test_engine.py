@@ -53,7 +53,9 @@ def _ignore_progress(
     del stage, step, total_steps, fraction
 
 
-def _boxes(data: bytes, start: int = 0, end: int | None = None) -> list[tuple[bytes, int, int]]:
+def _boxes(
+    data: bytes, start: int = 0, end: int | None = None
+) -> list[tuple[bytes, int, int]]:
     """Top-level (kind, payload_start, payload_end) triples of an ISO BMFF span."""
 
     end = len(data) if end is None else end
@@ -68,7 +70,9 @@ def _boxes(data: bytes, start: int = 0, end: int | None = None) -> list[tuple[by
     return boxes
 
 
-def _find(data: bytes, path: list[bytes], start: int = 0, end: int | None = None) -> tuple[int, int]:
+def _find(
+    data: bytes, path: list[bytes], start: int = 0, end: int | None = None
+) -> tuple[int, int]:
     span = (start, len(data) if end is None else end)
     for kind in path:
         matches = [(s, e) for k, s, e in _boxes(data, *span) if k == kind]
@@ -91,9 +95,17 @@ def test_plan_resolves_canvas_grid_and_defaults_from_the_card() -> None:
     assert plan.steps == video.default_steps and plan.audio is True
     assert plan.seed == plan_render(params, video).seed
     explicit = plan_render(
-        params.model_copy(update={"size": "96x48", "seed": 7, "steps": 3, "audio": False}), video
+        params.model_copy(
+            update={"size": "96x48", "seed": 7, "steps": 3, "audio": False}
+        ),
+        video,
     )
-    assert (explicit.width, explicit.height, explicit.seed, explicit.steps) == (96, 48, 7, 3)
+    assert (explicit.width, explicit.height, explicit.seed, explicit.steps) == (
+        96,
+        48,
+        7,
+        3,
+    )
     assert explicit.audio is False
 
 
@@ -107,16 +119,27 @@ def test_plan_rejects_a_canvas_the_container_cannot_describe() -> None:
         plan_render(params, video)
 
 
-def test_render_is_deterministic_and_the_manifest_describes_the_file(tmp_path: Path) -> None:
+def test_render_is_deterministic_and_the_manifest_describes_the_file(
+    tmp_path: Path,
+) -> None:
     plan = RenderPlan(
-        width=32, height=24, fps=8, frame_count=5, steps=2, seed=11, audio=True,
-        sample_rate=32000, channels=2,
+        width=32,
+        height=24,
+        fps=8,
+        frame_count=5,
+        steps=2,
+        seed=11,
+        audio=True,
+        sample_rate=32000,
+        channels=2,
     )
     stages: list[tuple[VideoStage, int | None, int | None, float]] = []
     result = render_clip(
         plan,
         tmp_path / "one",
-        progress=lambda stage, step, total, fraction: stages.append((stage, step, total, fraction)),
+        progress=lambda stage, step, total, fraction: stages.append(
+            (stage, step, total, fraction)
+        ),
         is_cancelled=lambda: False,
         step_seconds=0,
     )
@@ -129,14 +152,29 @@ def test_render_is_deterministic_and_the_manifest_describes_the_file(tmp_path: P
     assert manifest.thumbnail_sha256 == hashlib.sha256(thumbnail).hexdigest()
     assert manifest.thumbnail_size_bytes == len(thumbnail)
     assert thumbnail.startswith(b"\xff\xd8")
-    assert (manifest.width, manifest.height, manifest.frame_count, manifest.fps) == (32, 24, 5, 8)
+    assert (manifest.width, manifest.height, manifest.frame_count, manifest.fps) == (
+        32,
+        24,
+        5,
+        8,
+    )
     assert abs(manifest.seconds - 5 / 8) < 1e-9
     assert (manifest.audio_sample_rate, manifest.audio_channels) == (32000, 2)
     assert stats.steps == 2 and stats.total_generation_time >= 0
-    assert [stage for stage, *_ in stages] == ["encoding", "sampling", "sampling", "decoding", "muxing"]
+    assert [stage for stage, *_ in stages] == [
+        "encoding",
+        "sampling",
+        "sampling",
+        "decoding",
+        "muxing",
+    ]
     assert stages[2][1:] == (2, 2, 0.8)
     again = render_clip(
-        plan, tmp_path / "two", progress=_ignore_progress, is_cancelled=lambda: False, step_seconds=0
+        plan,
+        tmp_path / "two",
+        progress=_ignore_progress,
+        is_cancelled=lambda: False,
+        step_seconds=0,
     )
     assert again is not None and again[0].sha256 == manifest.sha256
     other = render_clip(
@@ -164,32 +202,53 @@ def test_container_is_a_well_formed_mp4_with_both_tracks(tmp_path: Path) -> None
     assert len(traks) == 2
     video_stbl = _find(container, [b"mdia", b"minf", b"stbl"], *traks[0])
     stsz = _find(container, [b"stsz"], *video_stbl)
-    _version_flags, sample_size, count = struct.unpack(">IIII", container[stsz[0] : stsz[0] + 16])[:3]
+    _version_flags, sample_size, count = struct.unpack(
+        ">IIII", container[stsz[0] : stsz[0] + 16]
+    )[:3]
     assert (sample_size, count) == (0, 3)
     sizes = struct.unpack(">3I", container[stsz[0] + 12 : stsz[0] + 24])
     assert list(sizes) == [len(frame) for frame in frames]
     stco = _find(container, [b"stco"], *video_stbl)
-    assert struct.unpack(">II", container[stco[0] + 4 : stco[0] + 12]) == (1, mdat_start)
+    assert struct.unpack(">II", container[stco[0] + 4 : stco[0] + 12]) == (
+        1,
+        mdat_start,
+    )
     audio_stbl = _find(container, [b"mdia", b"minf", b"stbl"], *traks[1])
     stsz_audio = _find(container, [b"stsz"], *audio_stbl)
-    assert struct.unpack(">II", container[stsz_audio[0] + 4 : stsz_audio[0] + 12]) == (4, 16)
+    assert struct.unpack(">II", container[stsz_audio[0] + 4 : stsz_audio[0] + 12]) == (
+        4,
+        16,
+    )
     stco_audio = _find(container, [b"stco"], *audio_stbl)
     assert struct.unpack(">II", container[stco_audio[0] + 4 : stco_audio[0] + 12]) == (
         1,
         mdat_start + sum(len(frame) for frame in frames),
     )
-    silent = mux_mp4(frames, width=16, height=8, fps=8, audio=None, sample_rate=16, channels=2)
+    silent = mux_mp4(
+        frames, width=16, height=8, fps=8, audio=None, sample_rate=16, channels=2
+    )
     moov = _find(silent, [b"moov"])
     assert sum(1 for k, _s, _e in _boxes(silent, *moov) if k == b"trak") == 1
 
 
 def test_render_without_audio_declares_no_track(tmp_path: Path) -> None:
     plan = RenderPlan(
-        width=16, height=16, fps=8, frame_count=1, steps=1, seed=1, audio=False,
-        sample_rate=32000, channels=2,
+        width=16,
+        height=16,
+        fps=8,
+        frame_count=1,
+        steps=1,
+        seed=1,
+        audio=False,
+        sample_rate=32000,
+        channels=2,
     )
     result = render_clip(
-        plan, tmp_path, progress=_ignore_progress, is_cancelled=lambda: False, step_seconds=0
+        plan,
+        tmp_path,
+        progress=_ignore_progress,
+        is_cancelled=lambda: False,
+        step_seconds=0,
     )
     assert result is not None
     assert result[0].audio_sample_rate is None and result[0].audio_channels is None
@@ -197,8 +256,15 @@ def test_render_without_audio_declares_no_track(tmp_path: Path) -> None:
 
 def test_render_stops_between_steps_when_cancelled(tmp_path: Path) -> None:
     plan = RenderPlan(
-        width=16, height=16, fps=8, frame_count=1, steps=4, seed=1, audio=False,
-        sample_rate=32000, channels=2,
+        width=16,
+        height=16,
+        fps=8,
+        frame_count=1,
+        steps=4,
+        seed=1,
+        audio=False,
+        sample_rate=32000,
+        channels=2,
     )
     calls = {"count": 0}
 
@@ -207,7 +273,11 @@ def test_render_stops_between_steps_when_cancelled(tmp_path: Path) -> None:
         return calls["count"] > 2
 
     result = render_clip(
-        plan, tmp_path / "out", progress=_ignore_progress, is_cancelled=cancelled, step_seconds=0
+        plan,
+        tmp_path / "out",
+        progress=_ignore_progress,
+        is_cancelled=cancelled,
+        step_seconds=0,
     )
     assert result is None
     assert not (tmp_path / "out").exists()
@@ -218,8 +288,14 @@ def test_provision_writes_a_directory_the_resolver_accepts(tmp_path: Path) -> No
     assert directory == tmp_path / TEST_VIDEO_MODEL_ID.normalize()
     assert is_model_directory_complete(directory)
     assert provision_test_video_model(tmp_path) == directory
-    assert constants.SKULK_MODELS_PATH is not None and tmp_path in constants.SKULK_MODELS_PATH
-    assert resolve_model_in_path(TEST_VIDEO_MODEL_ID, None, expected_card=_card()) == directory
+    assert (
+        constants.SKULK_MODELS_PATH is not None
+        and tmp_path in constants.SKULK_MODELS_PATH
+    )
+    assert (
+        resolve_model_in_path(TEST_VIDEO_MODEL_ID, None, expected_card=_card())
+        == directory
+    )
 
 
 def test_registering_the_card_copies_the_bundled_toml_once(tmp_path: Path) -> None:
@@ -248,7 +324,12 @@ def test_runner_refuses_any_card_but_its_own() -> None:
     impostor = _card().model_copy(update={"model_id": ModelId("org/other-video")})
     runner_id = RunnerId("r")
     shard = PipelineShardMetadata(
-        model_card=impostor, device_rank=0, world_size=1, start_layer=0, end_layer=1, n_layers=1
+        model_card=impostor,
+        device_rank=0,
+        world_size=1,
+        start_layer=0,
+        end_layer=1,
+        n_layers=1,
     )
     instance = MlxRingInstance(
         instance_id=InstanceId("i"),
@@ -267,7 +348,9 @@ def test_runner_refuses_any_card_but_its_own() -> None:
             sent.append(event)
 
     runner = Runner(
-        BoundInstance(instance=instance, bound_runner_id=runner_id, bound_node_id=NodeId("n")),
+        BoundInstance(
+            instance=instance, bound_runner_id=runner_id, bound_node_id=NodeId("n")
+        ),
         cast("Any", _Sender()),
         cast("Any", None),
         cast("Any", None),
@@ -295,9 +378,14 @@ def test_bundled_card_places_on_a_test_video_node() -> None:
         card.placement.compatible_backends, card.placement.backend_preference, node_tags
     )
     assert resolved == "test_video-cpu" and engine_of(resolved) == "test_video"
-    assert resolve_node_backend(
-        card.placement.compatible_backends, card.placement.backend_preference, frozenset({"mlx"})
-    ) is None
+    assert (
+        resolve_node_backend(
+            card.placement.compatible_backends,
+            card.placement.backend_preference,
+            frozenset({"mlx"}),
+        )
+        is None
+    )
     assert card.video is not None and card.video.audio_output
     assert card.video.frame_count_for_seconds(1) == 9
 
@@ -328,8 +416,12 @@ async def _drive_render(
     async with anyio.create_task_group() as group:
         group.start_soon(supervisor.run)
         with anyio.fail_after(180):
-            await supervisor.start_task(LoadModel(instance_id=instance), wait_for_terminal=True)
-            await supervisor.start_task(StartWarmup(instance_id=instance), wait_for_terminal=True)
+            await supervisor.start_task(
+                LoadModel(instance_id=instance), wait_for_terminal=True
+            )
+            await supervisor.start_task(
+                StartWarmup(instance_id=instance), wait_for_terminal=True
+            )
             await supervisor.start_task(
                 VideoGenerationTask(
                     command_id=CommandId(command_id),
@@ -415,7 +507,9 @@ async def test_runner_subprocess_renders_and_hands_the_manifest_to_the_worker(
         hosts_by_node={},
         ephemeral_port=50000,
     )
-    bound = BoundInstance(instance=instance, bound_runner_id=runner_id, bound_node_id=node)
+    bound = BoundInstance(
+        instance=instance, bound_runner_id=runner_id, bound_node_id=node
+    )
     event_sender, _event_receiver = channel[Event](512)
     data_sender, data_receiver = channel[DataChunk](512)
     outputs: list[tuple[CommandId, NodeId | None, VideoChunk]] = []
@@ -423,14 +517,18 @@ async def test_runner_subprocess_renders_and_hands_the_manifest_to_the_worker(
         bound_instance=bound,
         event_sender=event_sender,
         data_sender=data_sender,
-        on_video_output=lambda command_id, owner, chunk: outputs.append((command_id, owner, chunk)),
+        on_video_output=lambda command_id, owner, chunk: outputs.append(
+            (command_id, owner, chunk)
+        ),
     )
     command_id = CommandId("test-video-command")
     params = VideoGenerationTaskParams(
         prompt="a fox in the snow", model=str(card.model_id), seconds=1, seed=3
     )
     try:
-        await _drive_render(supervisor, instance.instance_id, runner_id, command_id, params, node)
+        await _drive_render(
+            supervisor, instance.instance_id, runner_id, command_id, params, node
+        )
     finally:
         logger.remove(sink_id)
         logger.add(sys.stderr)
@@ -448,14 +546,199 @@ async def test_runner_subprocess_renders_and_hands_the_manifest_to_the_worker(
     assert isinstance(terminal, VideoChunk) and terminal.output is not None
     assert terminal.finish_reason == "stop" and terminal.stats is not None
     progress = [frame.chunk for frame in frames[1:-1]]
-    assert all(isinstance(chunk, VideoChunk) and chunk.output is None for chunk in progress)
-    assert any(isinstance(chunk, VideoChunk) and chunk.stage == "sampling" for chunk in progress)
+    assert all(
+        isinstance(chunk, VideoChunk) and chunk.output is None for chunk in progress
+    )
+    assert any(
+        isinstance(chunk, VideoChunk) and chunk.stage == "sampling"
+        for chunk in progress
+    )
     assert outputs == [(command_id, node, terminal)]
     manifest = terminal.output
-    assert (manifest.width, manifest.height, manifest.frame_count, manifest.fps) == (64, 64, 9, 8)
+    assert (manifest.width, manifest.height, manifest.frame_count, manifest.fps) == (
+        64,
+        64,
+        9,
+        8,
+    )
     rendered = list(cache_home.rglob(VIDEO_OUTPUT_FILENAME))
     assert len(rendered) == 1 and rendered[0].parent.name == str(command_id)
     assert hashlib.sha256(rendered[0].read_bytes()).hexdigest() == manifest.sha256
     assert manifest.size_bytes == rendered[0].stat().st_size
     thumbnail = rendered[0].parent / VIDEO_THUMBNAIL_FILENAME
-    assert hashlib.sha256(thumbnail.read_bytes()).hexdigest() == manifest.thumbnail_sha256
+    assert (
+        hashlib.sha256(thumbnail.read_bytes()).hexdigest() == manifest.thumbnail_sha256
+    )
+
+
+def _png_bytes(width: int, height: int) -> bytes:
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + struct.pack(">I", 13)
+        + b"IHDR"
+        + struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    )
+
+
+def _jpeg_bytes(width: int, height: int) -> bytes:
+    # SOI, an APP0 segment, a DQT segment, then SOF0 with the frame size.
+    app0 = b"\xff\xe0" + struct.pack(">H", 16) + b"JFIF\x00" + bytes(9)
+    dqt = b"\xff\xdb" + struct.pack(">H", 67) + bytes(65)
+    sof0 = b"\xff\xc0" + struct.pack(">HBHHB", 17, 8, height, width, 3) + bytes(9)
+    return b"\xff\xd8" + app0 + dqt + sof0
+
+
+def _webp_vp8x_bytes(width: int, height: int) -> bytes:
+    body = (
+        b"WEBPVP8X"
+        + struct.pack("<I", 10)
+        + bytes(4)
+        + (width - 1).to_bytes(3, "little")
+        + (height - 1).to_bytes(3, "little")
+    )
+    return b"RIFF" + struct.pack("<I", len(body)) + body
+
+
+def _heic_bytes(width: int, height: int, *, phone: bool = False) -> bytes:
+    """A HEIC box tree; ``phone`` adds a thumbnail item listed first and a
+    quarter-turn rotation on the primary, the way a portrait photo is stored."""
+
+    def box(kind: bytes, payload: bytes) -> bytes:
+        return struct.pack(">I", 8 + len(payload)) + kind + payload
+
+    ispe = box(b"ispe", bytes(4) + struct.pack(">II", width, height))
+    if not phone:
+        ipco = box(b"ipco", box(b"hvcC", bytes(6)) + ispe)
+        meta = box(b"meta", bytes(4) + box(b"hdlr", bytes(24)) + box(b"iprp", ipco))
+        return box(b"ftyp", b"heic" + bytes(4) + b"mif1heic") + meta
+    thumb = box(b"ispe", bytes(4) + struct.pack(">II", 320, 240))
+    irot = box(b"irot", b"\x01")
+    # Properties 1..4: thumbnail ispe, hvcC, primary ispe, irot.
+    ipco = box(b"ipco", thumb + box(b"hvcC", bytes(6)) + ispe + irot)
+    # Item 2 (thumbnail) -> property 1; item 1 (primary) -> 2, 3, 4.
+    ipma = box(
+        b"ipma",
+        bytes(4)
+        + struct.pack(">I", 2)
+        + struct.pack(">HB", 2, 1)
+        + bytes([1])
+        + struct.pack(">HB", 1, 3)
+        + bytes([2, 3, 4]),
+    )
+    pitm = box(b"pitm", bytes(4) + struct.pack(">H", 1))
+    meta = box(
+        b"meta", bytes(4) + box(b"hdlr", bytes(24)) + pitm + box(b"iprp", ipco + ipma)
+    )
+    return box(b"ftyp", b"heic" + bytes(4) + b"mif1heic") + meta
+
+
+def test_image_dimensions_are_read_from_headers_alone() -> None:
+    from skulk.worker.runner.image_dimensions import dimensions_from_header
+
+    assert dimensions_from_header(_png_bytes(1920, 1080)) == (1920, 1080)
+    assert dimensions_from_header(_jpeg_bytes(640, 480)) == (640, 480)
+    assert dimensions_from_header(_webp_vp8x_bytes(1000, 500)) == (1000, 500)
+    # Truncated, foreign, or scan-before-frame bytes are no shape, not an error.
+    assert dimensions_from_header(_png_bytes(8, 8)[:20]) is None
+    assert dimensions_from_header(b"GIF89a" + bytes(20)) is None
+    assert dimensions_from_header(b"\xff\xd8\xff\xda\x00\x02") is None
+    assert dimensions_from_header(_png_bytes(0, 8)) is None
+    # A zero-length segment cannot advance the cursor: no shape, no loop.
+    assert dimensions_from_header(b"\xff\xd8\xff\xe0\x00\x00" + bytes(64)) is None
+    # A sideways phone photo: EXIF orientation 6 swaps the displayed axes.
+    tiff = (
+        b"MM\x00\x2a\x00\x00\x00\x08"
+        + struct.pack(">H", 1)
+        + struct.pack(">HHIHH", 0x0112, 3, 1, 6, 0)
+        + bytes(4)
+    )
+    app1 = b"\xff\xe1" + struct.pack(">H", 8 + len(tiff)) + b"Exif\x00\x00" + tiff
+    rotated = b"\xff\xd8" + app1 + _jpeg_bytes(4000, 3000)[2:]
+    assert dimensions_from_header(rotated) == (3000, 4000)
+    assert dimensions_from_header(
+        b"GIF89a" + struct.pack("<HH", 320, 200) + bytes(20)
+    ) == (320, 200)
+    assert dimensions_from_header(_heic_bytes(4032, 3024)) == (4032, 3024)
+    # A phone portrait: the thumbnail's ispe comes first, the primary is
+    # named by pitm and stored sideways with a quarter-turn irot.
+    assert dimensions_from_header(_heic_bytes(4032, 3024, phone=True)) == (3024, 4032)
+    assert dimensions_from_header(b"\x00\x00\x00\x18ftypisom" + bytes(32)) is None
+
+
+def test_plan_takes_the_canvas_from_the_keyframe_when_nothing_else_says(
+    tmp_path: Path,
+) -> None:
+    """A first frame keeps its framing: with no size and no aspect ratio the
+    canvas follows the image's shape, snapped to the card's grid. A last
+    frame stands in without a first; a plain reference never decides; an
+    explicit ratio or size still wins."""
+    from skulk.shared.types.video import VideoReferenceSpec
+
+    video = _card().video
+    assert video is not None
+    wide = tmp_path / "wide.png"
+    wide.write_bytes(_png_bytes(1600, 900))
+    tall = tmp_path / "tall.jpg"
+    tall.write_bytes(_jpeg_bytes(900, 1600))
+
+    def spec(role: str, path: Path, slot: int = 0) -> VideoReferenceSpec:
+        return VideoReferenceSpec(
+            slot=slot,
+            kind="image",
+            role=role,  # type: ignore[arg-type]
+            media_type="image/png",
+            size_bytes=path.stat().st_size if path.exists() else 1,
+            sha256="0" * 64,
+            local_path=str(path),
+        )
+
+    base = VideoGenerationTaskParams(
+        prompt="a fox", model=str(TEST_VIDEO_MODEL_ID), seconds=1
+    )
+    first = plan_render(
+        base.model_copy(update={"references": (spec("first_frame", wide),)}), video
+    )
+    assert (first.width, first.height) == (112, 64)
+    last_only = plan_render(
+        base.model_copy(update={"references": (spec("last_frame", tall),)}), video
+    )
+    assert (last_only.width, last_only.height) == (64, 112)
+    both = plan_render(
+        base.model_copy(
+            update={
+                "references": (spec("last_frame", tall), spec("first_frame", wide, 1))
+            }
+        ),
+        video,
+    )
+    assert (both.width, both.height) == (112, 64)
+    reference = plan_render(
+        base.model_copy(update={"references": (spec("reference", wide),)}), video
+    )
+    assert (reference.width, reference.height) == (64, 64)
+    explicit = plan_render(
+        base.model_copy(
+            update={"references": (spec("first_frame", wide),), "aspect_ratio": "1:1"}
+        ),
+        video,
+    )
+    assert (explicit.width, explicit.height) == (64, 64)
+    sized = plan_render(
+        base.model_copy(
+            update={"references": (spec("first_frame", wide),), "size": "96x48"}
+        ),
+        video,
+    )
+    assert (sized.width, sized.height) == (96, 48)
+    # Bytes the worker has not placed on disk, or an unreadable image, fall
+    # back to the card default rather than failing the render.
+    unplaced = spec("first_frame", wide).model_copy(update={"local_path": None})
+    assert (
+        plan_render(base.model_copy(update={"references": (unplaced,)}), video).width
+        == 64
+    )
+    missing = spec("first_frame", tmp_path / "gone.png")
+    assert (
+        plan_render(base.model_copy(update={"references": (missing,)}), video).width
+        == 64
+    )

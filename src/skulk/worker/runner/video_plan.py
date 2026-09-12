@@ -16,9 +16,11 @@ import hashlib
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 from skulk.shared.models.model_cards import VideoCardConfig
 from skulk.shared.types.video import VideoGenerationTaskParams, VideoStage
+from skulk.worker.runner.image_dimensions import image_dimensions
 
 DEFAULT_SHORT_EDGE = 64
 """Canvas short edge when neither the request nor the card names one."""
@@ -58,7 +60,27 @@ def _parse_ratio(value: str | None) -> tuple[int, int]:
     return (int(left), int(right))
 
 
-def _fit_pixel_budget(canvas: tuple[int, int], max_pixels: int, multiple: int) -> tuple[int, int]:
+def keyframe_shape(params: VideoGenerationTaskParams) -> tuple[int, int] | None:
+    """The pixel shape of the keyframe that anchors the clip, when one is attached.
+
+    The first frame decides; the last frame stands in when there is no
+    first. Only an image whose verified bytes the worker placed on disk
+    (``local_path``) can be read; a plain ``reference`` never sets the
+    canvas, since it conditions content, not framing.
+    """
+    for role in ("first_frame", "last_frame"):
+        for reference in params.references:
+            if reference.role != role or reference.kind != "image":
+                continue
+            if reference.local_path is None:
+                return None
+            return image_dimensions(Path(reference.local_path))
+    return None
+
+
+def _fit_pixel_budget(
+    canvas: tuple[int, int], max_pixels: int, multiple: int
+) -> tuple[int, int]:
     width, height = canvas
     while width * height > max_pixels:
         if width >= height:
@@ -72,11 +94,15 @@ def _fit_pixel_budget(canvas: tuple[int, int], max_pixels: int, multiple: int) -
     return (width, height)
 
 
-def plan_render(params: VideoGenerationTaskParams, video: VideoCardConfig) -> RenderPlan:
+def plan_render(
+    params: VideoGenerationTaskParams, video: VideoCardConfig
+) -> RenderPlan:
     """Resolve the request against the card the way a real engine would.
 
-    The canvas is the explicit ``size`` or the card's short edge scaled by
-    the advisory aspect ratio and snapped to the canvas grid; the frame count
+    The canvas is the explicit ``size``, or the card's short edge scaled by
+    the advisory aspect ratio (or, with neither, by the shape of the first
+    or last frame attached, so a keyframe keeps its framing) and snapped to
+    the canvas grid; the frame count
     is the card's aligned count for the requested duration; steps fall back
     to the card default; the seed is the request's or a digest of the prompt
     so an unseeded request is still reproducible.
@@ -85,7 +111,8 @@ def plan_render(params: VideoGenerationTaskParams, video: VideoCardConfig) -> Re
     canvas = params.width_height
     if canvas is None:
         short = video.default_short_edge or DEFAULT_SHORT_EDGE
-        width_ratio, height_ratio = _parse_ratio(params.aspect_ratio)
+        shape = keyframe_shape(params) if params.aspect_ratio is None else None
+        width_ratio, height_ratio = shape or _parse_ratio(params.aspect_ratio)
         if width_ratio >= height_ratio:
             width, height = round(short * width_ratio / height_ratio), short
         else:
@@ -113,7 +140,9 @@ def plan_render(params: VideoGenerationTaskParams, video: VideoCardConfig) -> Re
         )
     seed = params.seed
     if seed is None:
-        seed = int.from_bytes(hashlib.sha256(params.prompt.encode()).digest()[:4], "big")
+        seed = int.from_bytes(
+            hashlib.sha256(params.prompt.encode()).digest()[:4], "big"
+        )
     audio = params.audio and video.audio_output
     return RenderPlan(
         width=canvas[0],
