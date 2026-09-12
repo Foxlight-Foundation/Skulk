@@ -599,16 +599,37 @@ def _webp_vp8x_bytes(width: int, height: int) -> bytes:
     return b"RIFF" + struct.pack("<I", len(body)) + body
 
 
-def _heic_bytes(width: int, height: int) -> bytes:
+def _heic_bytes(width: int, height: int, *, phone: bool = False) -> bytes:
+    """A HEIC box tree; ``phone`` adds a thumbnail item listed first and a
+    quarter-turn rotation on the primary, the way a portrait photo is stored."""
+
     def box(kind: bytes, payload: bytes) -> bytes:
         return struct.pack(">I", 8 + len(payload)) + kind + payload
 
     ispe = box(b"ispe", bytes(4) + struct.pack(">II", width, height))
-    ipco = box(b"ipco", box(b"hvcC", bytes(6)) + ispe)
-    iprp = box(b"iprp", ipco)
-    meta = box(b"meta", bytes(4) + box(b"hdlr", bytes(24)) + iprp)
-    ftyp = box(b"ftyp", b"heic" + bytes(4) + b"mif1heic")
-    return ftyp + meta
+    if not phone:
+        ipco = box(b"ipco", box(b"hvcC", bytes(6)) + ispe)
+        meta = box(b"meta", bytes(4) + box(b"hdlr", bytes(24)) + box(b"iprp", ipco))
+        return box(b"ftyp", b"heic" + bytes(4) + b"mif1heic") + meta
+    thumb = box(b"ispe", bytes(4) + struct.pack(">II", 320, 240))
+    irot = box(b"irot", b"\x01")
+    # Properties 1..4: thumbnail ispe, hvcC, primary ispe, irot.
+    ipco = box(b"ipco", thumb + box(b"hvcC", bytes(6)) + ispe + irot)
+    # Item 2 (thumbnail) -> property 1; item 1 (primary) -> 2, 3, 4.
+    ipma = box(
+        b"ipma",
+        bytes(4)
+        + struct.pack(">I", 2)
+        + struct.pack(">HB", 2, 1)
+        + bytes([1])
+        + struct.pack(">HB", 1, 3)
+        + bytes([2, 3, 4]),
+    )
+    pitm = box(b"pitm", bytes(4) + struct.pack(">H", 1))
+    meta = box(
+        b"meta", bytes(4) + box(b"hdlr", bytes(24)) + pitm + box(b"iprp", ipco + ipma)
+    )
+    return box(b"ftyp", b"heic" + bytes(4) + b"mif1heic") + meta
 
 
 def test_image_dimensions_are_read_from_headers_alone() -> None:
@@ -638,6 +659,9 @@ def test_image_dimensions_are_read_from_headers_alone() -> None:
         b"GIF89a" + struct.pack("<HH", 320, 200) + bytes(20)
     ) == (320, 200)
     assert dimensions_from_header(_heic_bytes(4032, 3024)) == (4032, 3024)
+    # A phone portrait: the thumbnail's ispe comes first, the primary is
+    # named by pitm and stored sideways with a quarter-turn irot.
+    assert dimensions_from_header(_heic_bytes(4032, 3024, phone=True)) == (3024, 4032)
     assert dimensions_from_header(b"\x00\x00\x00\x18ftypisom" + bytes(32)) is None
 
 

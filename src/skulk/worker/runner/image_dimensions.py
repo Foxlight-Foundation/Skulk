@@ -27,12 +27,14 @@ the range and are skipped)."""
 
 
 def image_dimensions(path: Path) -> tuple[int, int] | None:
-    """Return ``(width, height)`` of a PNG, JPEG, or WebP file, else ``None``.
+    """Return the displayed ``(width, height)`` of an image file, else ``None``.
 
-    Reads at most ``HEADER_BYTES``; an unreadable file, an unknown format,
-    or a header the prefix does not reach yields ``None`` rather than an
-    error, since a missing shape only means the canvas falls back to the
-    card's default.
+    PNG, JPEG (with its EXIF orientation applied), WebP, GIF, and the ISO
+    base-media stills HEIC, HEIF, and AVIF (the primary item, with its
+    rotation applied) are read. Reads at most ``HEADER_BYTES``; an
+    unreadable file, an unknown format, or a header the prefix does not
+    reach yields ``None`` rather than an error, since a missing shape only
+    means the canvas falls back to the card's default.
     """
     try:
         with path.open("rb") as handle:
@@ -140,7 +142,13 @@ _STILL_BRANDS = frozenset(
 
 
 def _isobmff(data: bytes) -> tuple[int, int] | None:
-    """HEIC, HEIF, and AVIF: the ``ispe`` property inside ``meta/iprp/ipco``."""
+    """HEIC, HEIF, and AVIF: the primary item's ``ispe``, rotated by its ``irot``.
+
+    A phone still carries several items (the picture, a thumbnail, tiles),
+    so the geometry is the one ``pitm`` names, found through the item's
+    property associations in ``ipma`` rather than the first ``ispe`` in
+    the container. Without ``pitm`` or ``ipma`` the first ``ispe`` stands.
+    """
     size = _be32(data, 0)
     if (
         size < 16
@@ -161,10 +169,87 @@ def _isobmff(data: bytes) -> tuple[int, int] | None:
     ipco = _box(data, iprp[0], iprp[1], b"ipco")
     if ipco is None:
         return None
-    ispe = _box(data, ipco[0], ipco[1], b"ispe")
-    if ispe is None or ispe[0] + 12 > len(data):
+    properties = _children(data, ipco[0], ipco[1])
+    wanted = _primary_properties(data, meta, iprp)
+    chosen = (
+        [properties[index - 1] for index in wanted if 0 < index <= len(properties)]
+        if wanted
+        else properties
+    )
+    shape: tuple[int, int] | None = None
+    quarter_turns = 0
+    for kind, first, last in chosen:
+        if kind == b"ispe" and shape is None and first + 12 <= len(data):
+            shape = _positive(_be32(data, first + 4), _be32(data, first + 8))
+        elif kind == b"irot" and first < min(last, len(data)):
+            quarter_turns = data[first] & 0x03
+    if shape is None:
         return None
-    return _positive(_be32(data, ispe[0] + 4), _be32(data, ispe[0] + 8))
+    return (shape[1], shape[0]) if quarter_turns % 2 else shape
+
+
+def _primary_properties(
+    data: bytes, meta: tuple[int, int], iprp: tuple[int, int]
+) -> list[int]:
+    """Property indices (1-based, in ``ipco`` order) of the primary item."""
+    pitm = _box(data, meta[0] + 4, meta[1], b"pitm")
+    ipma = _box(data, iprp[0], iprp[1], b"ipma")
+    if pitm is None or ipma is None:
+        return []
+    version = data[pitm[0]] if pitm[0] < len(data) else 0
+    primary = _be16(data, pitm[0] + 4) if version == 0 else _be32(data, pitm[0] + 4)
+    ipma_version = data[ipma[0]] if ipma[0] < len(data) else 0
+    flags = _be32(data, ipma[0]) & 0xFFFFFF
+    offset = ipma[0] + 4
+    count = _be32(data, offset)
+    offset += 4
+    for _ in range(min(count, 1024)):
+        if ipma_version == 0:
+            item = _be16(data, offset)
+            offset += 2
+        else:
+            item = _be32(data, offset)
+            offset += 4
+        if offset >= len(data):
+            return []
+        associations = data[offset]
+        offset += 1
+        indices: list[int] = []
+        for _ in range(associations):
+            if flags & 1:
+                indices.append(_be16(data, offset) & 0x7FFF)
+                offset += 2
+            else:
+                if offset >= len(data):
+                    return []
+                indices.append(data[offset] & 0x7F)
+                offset += 1
+        if item == primary:
+            return indices
+    return []
+
+
+def _children(data: bytes, start: int, end: int) -> list[tuple[bytes, int, int]]:
+    """``(kind, payload start, payload end)`` of every box in a span, in order."""
+    found: list[tuple[bytes, int, int]] = []
+    offset = start
+    while offset + 8 <= min(end, len(data)) and len(found) < 256:
+        size = _be32(data, offset)
+        header = 8
+        if size == 1:
+            if offset + 16 > len(data):
+                break
+            size = int.from_bytes(data[offset + 8 : offset + 16], "big")
+            header = 16
+        elif size == 0:
+            size = end - offset
+        if size < header:
+            break
+        found.append(
+            (data[offset + 4 : offset + 8], offset + header, min(offset + size, end))
+        )
+        offset += size
+    return found
 
 
 def _box(data: bytes, start: int, end: int, kind: bytes) -> tuple[int, int] | None:
