@@ -1230,3 +1230,12 @@ The selected lifecycle operation determines inventory's `uninstalled` flag, sepa
 from pending-operation progress. No extra supervisor, provider call or purge is added.
 Configuration, credentials, receipts and runtime generations remain available;
 independent cleanup continues. A verified `select` or `activate` reinstalls explicitly.
+
+### Managed plugin attachment observations
+
+`GET /v1/plugins/host-network` is a read-only, plugin-read-authorized projection of
+actual native control/data TCP listeners, local identity, transport and a
+non-routing namespace fingerprint. `Router.host_network` reads live libp2p and
+Zenoh listeners, including OS-assigned ports. It does not expose namespace
+secrets, dial peers, select commands or restart inference. Provider-specific
+secure tunnels and bootstrap remain in the private plugin.

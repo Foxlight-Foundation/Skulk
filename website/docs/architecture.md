@@ -2184,3 +2184,15 @@ The selected lifecycle operation determines inventory's `uninstalled` flag, sepa
 from pending-operation progress. No extra supervisor, provider call or purge is added.
 Configuration, credentials, receipts and runtime generations remain available;
 independent cleanup continues. A verified `select` or `activate` reinstalls explicitly.
+
+### Plugin-owned fabric attachment
+
+An installed capacity plugin can read `GET /v1/plugins/host-network` through the
+existing owner or explicit plugin-read authorization. The router queries native
+listeners for actual control and data ports rather than guessing startup defaults.
+The response identifies this process and its data transport, with a separate
+namespace comparison fingerprint that cannot be used as the routing namespace.
+No namespace secret enters the response or replicated state. The plugin owns its
+secure transport and remote bootstrap; the core read never connects peers or
+restarts existing inference. Missing TCP listeners fail closed, and observations
+are bounded, uncached and refreshed after process restart.

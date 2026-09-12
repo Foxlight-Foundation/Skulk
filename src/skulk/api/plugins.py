@@ -27,6 +27,7 @@ from skulk.extensions.credentials import (
     NodeCredentialProvider,
     NodeCredentials,
 )
+from skulk.extensions.host_network import HostNetwork
 from skulk.extensions.loader import LoadedExtensions
 from skulk.extensions.preflight import NodePreflight, NodePreflightProvider
 from skulk.extensions.proposal_actions import (
@@ -96,6 +97,7 @@ def create_plugins_router(
     pairing_service: OperatorPairingService | None,
     *,
     tailnet_peer_verifier: TailnetPeerVerifier = is_tailscale_peer,
+    host_network: Callable[[], Awaitable[HostNetwork]] | None = None,
 ) -> APIRouter:
     """Expose ordinary configuration through optional plugin management facets.
 
@@ -113,6 +115,42 @@ def create_plugins_router(
         )
     )
     capacity = anyio.CapacityLimiter(8)
+
+    @router.get(
+        "/host-network",
+        response_model=HostNetwork,
+        summary="Read local plugin attachment endpoints",
+        description=(
+            "Return actual bound control/data TCP listeners and local peer identity "
+            "for plugin-owned secure attachment. Includes the required data transport "
+            "and a non-routing namespace comparison digest; never namespace secrets. "
+            "Requires plugins:read or direct owner authority. Does not connect, "
+            "reconfigure or restart the host. Unavailable listeners return 503."
+        ),
+    )
+    async def read_host_network(request: Request, response: Response) -> HostNetwork:
+        """Authorize before inspecting live listeners; return no cached observations."""
+        await authorize_plugin_request(
+            request, pairing_service, "plugins:read", tailnet_peer_verifier
+        )
+        response.headers["Cache-Control"] = "no-store"
+        if host_network is None:
+            raise HTTPException(status_code=503, detail="host network unavailable")
+        try:
+            capacity.acquire_nowait()
+        except anyio.WouldBlock:
+            raise HTTPException(status_code=429, detail="plugin management busy") from None
+        try:
+            async with asyncio.timeout(2):
+                return await host_network()
+        except Exception:
+            # Native networking errors can contain private routing addresses or
+            # namespace material. Only the typed successful projection is public.
+            raise HTTPException(
+                status_code=503, detail="host network unavailable"
+            ) from None
+        finally:
+            capacity.release()
 
     async def invoke(call: Callable[[], Awaitable[_Result]]) -> _Result:
         try:

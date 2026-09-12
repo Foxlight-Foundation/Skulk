@@ -305,6 +305,7 @@ from skulk.extensions import (
     snapshot_cluster,
     validate_against_schema,
 )
+from skulk.extensions.host_network import HostNetwork
 from skulk.extensions.steward import StewardToolBinding
 from skulk.master.image_store import ImageStore
 from skulk.master.placement import (
@@ -1523,6 +1524,7 @@ class API:
         enable_builtin_providers: bool = False,
         operator_pairing_service: OperatorPairingService | None = None,
         apply_custom_card_mutations_locally: bool = False,
+        host_network_provider: Callable[[], Awaitable[HostNetwork]] | None = None,
     ) -> None:
         self.state = State()
         self._apply_custom_card_mutations_locally = apply_custom_card_mutations_locally
@@ -1761,7 +1763,11 @@ class API:
         self._setup_cors()
         self._setup_routes()
         self.app.include_router(
-            create_plugins_router(self._extensions or LoadedExtensions([]), operator_pairing_service)
+            create_plugins_router(
+                self._extensions or LoadedExtensions([]),
+                operator_pairing_service,
+                host_network=host_network_provider,
+            )
         )
         if operator_pairing_service is not None:
             self.app.include_router(
@@ -3644,11 +3650,14 @@ class API:
 
         return PlacementPreviewResponse(
             previews=[
-                preview.model_copy(update={
-                    "trust_requirement": trust_requirement,
-                    "card_digest": authorized_model_card_digest(model_card)
-                    if preview.instance is not None else None,
-                })
+                preview.model_copy(
+                    update={
+                        "trust_requirement": trust_requirement,
+                        "card_digest": authorized_model_card_digest(model_card)
+                        if preview.instance is not None
+                        else None,
+                    }
+                )
                 for preview in previews
             ]
         )
