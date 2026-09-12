@@ -10931,6 +10931,9 @@ class API:
                     raise HTTPException(
                         status_code=400, detail=f"{field_name} is empty"
                     )
+                # From here the part's bytes are charged against admission;
+                # every refusal below releases them, since only parts that
+                # reach ``blobs`` are released by the callers' cleanup.
                 remaining -= attachment.size_bytes
                 filename = upload.filename[:255] if upload.filename else None
                 at_seconds: float | None = None
@@ -10950,6 +10953,7 @@ class API:
                         at_seconds=at_seconds,
                     )
                 except ValidationError as error:
+                    self._video_upload_inflight_bytes -= attachment.size_bytes
                     raise HTTPException(
                         status_code=400, detail=_validation_detail(error)
                     ) from error

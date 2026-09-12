@@ -811,3 +811,11 @@ def test_create_multipart_pairs_keyframes_with_their_times(
         files=[("keyframe", ("a.png", b"a", "image/png"))],
     )
     assert bad.status_code == 400 and "number" in bad.json()["error"]["message"]
+    # A clip under a keyframe role is refused by the spec after its bytes were
+    # read; the reservation is released with the refusal.
+    clip = client.post(
+        "/v1/videos",
+        data={"model": str(MODEL), "prompt": "x", "keyframe_at": "1"},
+        files=[("keyframe", ("a.mp4", b"\x00\x00clip", "video/mp4"))],
+    )
+    assert clip.status_code == 400 and api._video_upload_inflight_bytes == 0
