@@ -2663,7 +2663,9 @@ class API:
                 "its job object immediately. Send `application/json` for "
                 "text-to-video, or `multipart/form-data` whose file parts are the "
                 "conditioning attachments (`input_reference` or `first_frame`, "
-                "`last_frame`, repeated `reference`). Poll `GET /v1/videos/{video_id}` "
+                "`last_frame`, repeated timed `keyframe` parts each paired in order "
+                "with a `keyframe_at` value in seconds, repeated `reference`). Poll "
+                "`GET /v1/videos/{video_id}` "
                 "for progress and fetch the result from "
                 "`GET /v1/videos/{video_id}/content`."
             ),
@@ -10857,6 +10859,18 @@ class API:
         )
         recognized = {field_name for field_name, _role in fields}
         keyframe_times = _keyframe_times(form)
+        keyframe_parts = sum(
+            1
+            for value in form.getlist("keyframe")
+            if isinstance(value, StarletteUploadFile)
+        )
+        if keyframe_parts != len(keyframe_times):
+            # Decided before any part is read, so a mismatch charges nothing
+            # against the node's upload admission budget.
+            raise HTTPException(
+                status_code=400,
+                detail="keyframe_at values must match the keyframe parts one to one",
+            )
         for key, value in form.multi_items():
             if isinstance(value, StarletteUploadFile) and key not in recognized:
                 # A misspelled part would otherwise vanish and the request
@@ -10921,11 +10935,7 @@ class API:
                 filename = upload.filename[:255] if upload.filename else None
                 at_seconds: float | None = None
                 if role == "keyframe":
-                    if keyframes_seen >= len(keyframe_times):
-                        raise HTTPException(
-                            status_code=400,
-                            detail="each keyframe part needs a keyframe_at value",
-                        )
+                    # Counts were matched before any part was read.
                     at_seconds = keyframe_times[keyframes_seen]
                     keyframes_seen += 1
                 try:
@@ -10945,11 +10955,6 @@ class API:
                     ) from error
                 specs.append(spec)
                 blobs.append(attachment)
-        if keyframes_seen != len(keyframe_times):
-            raise HTTPException(
-                status_code=400,
-                detail="keyframe_at values must match the keyframe parts one to one",
-            )
 
     async def create_video(self, request: Request) -> VideoResource:
         """Create one audio-video generation job and return it immediately."""

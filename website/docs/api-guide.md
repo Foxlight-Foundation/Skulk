@@ -1496,7 +1496,7 @@ Request fields (JSON keys or form fields):
 | `prompt` | string | Required; up to 8000 characters, structured prompts pass through verbatim |
 | `seconds` | integer | Clip length; any integer inside the card's supported range (MiniMax H3: 4 to 15). Omitted means the card's shortest clip. A string such as `"8"` is accepted for OpenAI SDK compatibility |
 | `size` | string | `WIDTHxHEIGHT`; must be a multiple of the card's canvas grid and inside its pixel budget. Omitted lets the engine pick the trained canvas |
-| `aspect_ratio` | string | Advisory `W:H` used when `size` is omitted. With neither, a `first_frame` (else `last_frame`) image sets the shape: the canvas follows the keyframe, snapped to the card's grid and pixel budget, so the frame keeps its framing (`input_reference` is the OpenAI name for the first frame). The shape is the displayed one: a JPEG's EXIF orientation is honored, and PNG, JPEG, WebP, GIF, HEIC, HEIF, and AVIF are read. A plain `reference` never decides the canvas |
+| `aspect_ratio` | string | Advisory `W:H` used when `size` is omitted. With neither, a `first_frame` (else `last_frame`, else the earliest timed `keyframe`) image sets the shape: the canvas follows the keyframe, snapped to the card's grid and pixel budget, so the frame keeps its framing (`input_reference` is the OpenAI name for the first frame). The shape is the displayed one: a JPEG's EXIF orientation is honored, and PNG, JPEG, WebP, GIF, HEIC, HEIF, and AVIF are read. A plain `reference` never decides the canvas |
 | `mode` | string | `t2va`, `fl2va`, or `ref2va`; omitted derives it from the attachments |
 | `steps` | integer | Sampling steps; omitted defers to the selected adapter or the card |
 | `seed` | integer | Deterministic seed |

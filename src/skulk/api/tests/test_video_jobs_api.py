@@ -793,13 +793,18 @@ def test_create_multipart_pairs_keyframes_with_their_times(
             ("keyframe", ("b.png", b"b", "image/png")),
         ],
     )
-    assert short.status_code == 400 and "keyframe_at" in short.json()["error"]["message"]
+    assert (
+        short.status_code == 400 and "keyframe_at" in short.json()["error"]["message"]
+    )
+    # Refused before any part is read: nothing stays charged against admission.
+    assert api._video_upload_inflight_bytes == 0
     extra = client.post(
         "/v1/videos",
         data={"model": str(MODEL), "prompt": "x", "keyframe_at": ["1", "2"]},
         files=[("keyframe", ("a.png", b"a", "image/png"))],
     )
     assert extra.status_code == 400
+    assert api._video_upload_inflight_bytes == 0
     bad = client.post(
         "/v1/videos",
         data={"model": str(MODEL), "prompt": "x", "keyframe_at": "soon"},
