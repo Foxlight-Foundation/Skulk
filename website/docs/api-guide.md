@@ -4118,7 +4118,17 @@ No provider request, credential provisioning, approval or implicit enable occurs
 is historical completion, not current service health. Corrective error codes are
 `registration_or_integrity_unavailable` and `service_unavailable`; rerun the same
 local setup command using its qualified environment after correcting OS access or
-runtime integrity. Root-owned unit definitions have fixed arguments; service output
+runtime integrity. When setup's readiness wait expires after successful registration,
+the command exits with status 1 and prints JSON containing the retained
+`operation_id`, `phase: "registered"` and `error_code: "service_readiness_pending"`.
+Registration is preserved. Inspect `skulk-plugin-service status`; when both
+`registered_runtime_verified` and `management_available` are true, rerunning setup
+in the same qualified environment verifies the binding, selected runtime and fixed
+OS definition, then completes the original operation without elevation, restaging
+or restarting the healthy service. A healthy completed setup also needs no elevation.
+Status itself remains read-only. A different source environment still requests a
+new runtime generation; an invalid registration follows the privileged repair path.
+Root-owned unit definitions have fixed arguments; service output
 is not a channel for private plugin diagnostics. Protected plugin evidence remains
 host-local.
 

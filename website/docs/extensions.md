@@ -776,6 +776,11 @@ isolated environment; only its fixed registration helper requests local elevatio
 It generates service storage and a local profile connection without configuration
 file editing. `skulk-plugin-service status` separates retained setup progress from
 current management availability and registered-runtime integrity.
+If registration succeeds but readiness is still pending, setup reports
+`service_readiness_pending` with the retained operation ID. Once status verifies
+both runtime integrity and management availability, repeat setup in the same
+qualified environment to complete that operation without elevation or restarting
+the healthy service.
 
 See the [local setup contract](api-guide.md#local-system-service-setup) for supported
 paths, interruption recovery, privileges and current qualification boundaries.

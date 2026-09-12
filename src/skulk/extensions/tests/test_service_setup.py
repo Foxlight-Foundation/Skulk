@@ -1,5 +1,6 @@
 """Fixed system-service contracts and resumable owner-local setup without root."""
 
+import json
 import os
 import plistlib
 import subprocess
@@ -9,7 +10,7 @@ from typing import Literal, cast
 
 import pytest
 
-from skulk.extensions import service_registration
+from skulk.extensions import service_registration, service_setup
 from skulk.extensions.runtime_artifacts import QualifiedHost
 from skulk.extensions.runtime_attachment import HostSettings
 from skulk.extensions.runtime_files import (
@@ -20,6 +21,7 @@ from skulk.extensions.runtime_files import (
 from skulk.extensions.service_registration import ServiceLayout
 from skulk.extensions.service_setup import (
     ServiceConnection,
+    ServiceReadinessPendingError,
     SetupOperation,
     setup_service,
 )
@@ -163,11 +165,13 @@ def test_registration_helper_is_standalone_and_refuses_unprivileged_mutation(
     assert not marker.exists()
 
 
+@pytest.mark.parametrize("failure", ["registration", "readiness"])
 async def test_setup_resumes_same_snapshot_and_preserves_latest_transport(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    failure: Literal["registration", "readiness"],
 ) -> None:
-    """OS registration failure resumes the exact staged copy and generated identity."""
+    """Registration or readiness failure preserves staging and avoids healthy restarts."""
     root, config, unit = (
         tmp_path / "service",
         tmp_path / "config",
@@ -219,20 +223,30 @@ async def test_setup_resumes_same_snapshot_and_preserves_latest_transport(
         if action == "prepare":
             private_directory(root)
         if action == "install":
-            if fail:
+            if fail and failure == "registration":
                 raise ValueError("synthetic OS registration failure")
             unit.write_bytes(layout.definition(Path(sys.executable).resolve()))
 
     async def observe(path: Path) -> bool:
-        return unit.exists()
+        return unit.exists() and not fail
+
+    def registered_copy(
+        actual: ServiceLayout, snapshot: ServiceSnapshot, base: Path
+    ) -> bool:
+        # Only the root-owned unit check is substituted; stage/select still verify
+        # the real runtime copy. A registered service must match the fixed unit.
+        return unit.exists() and unit.read_bytes() == layout.definition(base)
 
     monkeypatch.setattr("skulk.extensions.service_setup.stage_service_runtime", stage)
     monkeypatch.setattr("skulk.extensions.service_setup._elevate", elevate)
     monkeypatch.setattr("skulk.extensions.service_setup._observe", observe)
-    with pytest.raises(ValueError, match="synthetic"):
+    monkeypatch.setattr(service_setup, "_READINESS_WAIT_SECONDS", 0.0)
+    monkeypatch.setattr(service_setup, "_ready_installation", registered_copy)
+    expected_error = ValueError if failure == "registration" else ServiceReadinessPendingError
+    with pytest.raises(expected_error):
         await setup_service()
     interrupted = SetupOperation.model_validate_json(read_private(root / "setup.json"))
-    assert interrupted.phase == "selected"
+    assert interrupted.phase == ("selected" if failure == "registration" else "registered")
     settings = HostSettings.model_validate_json(read_private(root / "host.json"))
     assert settings.transport_node_id == "latest-live-transport"
     connection = ServiceConnection.model_validate_json(
@@ -246,21 +260,23 @@ async def test_setup_resumes_same_snapshot_and_preserves_latest_transport(
     assert completed.phase == "ready"
     assert completed.operation_id == interrupted.operation_id
     assert completed.snapshot == interrupted.snapshot and stages == 1
-    assert actions == ["prepare", "stop", "install", "prepare", "stop", "install"]
+    expected_actions = ["prepare", "stop", "install"]
+    if failure == "registration":
+        expected_actions += ["prepare", "stop", "install"]
+    assert actions == expected_actions
     assert read_private(root / "host.json") == settings.model_dump_json().encode()
 
-    # The readiness test substitutes only the root-owned unit check; the real
-    # copy seal and selector were exercised during both setup attempts above.
-    def registered_copy(
-        actual: ServiceLayout, snapshot: ServiceSnapshot, base: Path
-    ) -> bool:
-        return True
-
-    monkeypatch.setattr(
-        "skulk.extensions.service_setup._ready_installation", registered_copy
-    )
     assert await setup_service() == completed
-    assert actions[-1] == "prepare" and actions.count("stop") == 2
+    assert actions == expected_actions
+    # Management availability alone cannot bless a tampered registration.
+    unit.write_bytes(b"foreign service")
+    fail = True
+    with pytest.raises(expected_error):
+        await setup_service()
+    assert actions == [*expected_actions, "prepare", "stop", "install"]
+    unit.write_bytes(layout.definition(Path(sys.executable).resolve()))
+    fail = False
+    assert await setup_service() == completed
     monkeypatch.setattr(
         "skulk.extensions.service_setup.SKULK_CONFIG_HOME", tmp_path / "other-profile"
     )
@@ -314,3 +330,27 @@ async def test_setup_resumes_same_snapshot_and_preserves_latest_transport(
         )
         == next_operation
     )
+
+
+def test_pending_readiness_cli_identifies_retained_operation(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Late readiness reports registration and a safe recovery action, not reinstall."""
+    identifier = "a" * 32
+
+    async def pending() -> SetupOperation:
+        raise ServiceReadinessPendingError(identifier)
+
+    monkeypatch.setattr(service_setup, "setup_service", pending)
+    monkeypatch.setattr(sys, "argv", ["skulk-plugin-service", "setup"])
+    with pytest.raises(SystemExit, match="1"):
+        service_setup.main()
+    output = capsys.readouterr()
+    assert json.loads(output.out) == {
+        "operation_id": identifier,
+        "phase": "registered",
+        "error_code": "service_readiness_pending",
+    }
+    assert "skulk-plugin-service status" in output.err
+    assert "without restarting" in output.err
+    assert "command incomplete" not in output.err
