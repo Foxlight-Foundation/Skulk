@@ -23,7 +23,7 @@ from skulk.utils.pydantic_ext import CamelCaseModel
 VideoReferenceKind = Literal["image", "video", "audio"]
 """Media families a request may attach as conditioning input."""
 
-VideoReferenceRole = Literal["first_frame", "last_frame", "reference"]
+VideoReferenceRole = Literal["first_frame", "last_frame", "keyframe", "reference"]
 """How one attachment conditions generation.
 
 ``first_frame`` and ``last_frame`` are the keyframe anchors of ``fl2va``;
@@ -43,6 +43,8 @@ VideoStage = Literal[
 _SIZE_PATTERN = re.compile(r"^([1-9][0-9]{1,4})x([1-9][0-9]{1,4})$")
 _SHA256_PATTERN = r"^[0-9a-f]{64}$"
 MAX_VIDEO_REFERENCES = 16
+MAX_VIDEO_KEYFRAMES = 8
+"""Timed keyframes per request; each anchors one frame of the clip."""
 """Upper bound on attachments per request before card limits apply."""
 MAX_VIDEO_PROMPT_CHARS = 8000
 """Prompt length ceiling; structured H3 prompts run to several thousand chars."""
@@ -72,6 +74,9 @@ class VideoReferenceSpec(CamelCaseModel):
     """Digest of the attachment bytes, verified by every consumer."""
     filename: str | None = Field(default=None, max_length=255)
     """Caller-supplied name, informational only."""
+    at_seconds: float | None = Field(default=None, ge=0)
+    """Time into the clip a ``keyframe`` anchors; required for that role and
+    absent for every other. The engine snaps it to the nearest frame."""
     local_path: str | None = None
     """Worker-local file holding the verified bytes; filled only on the copy a
     worker hands to its runner, never by the API or master."""
@@ -85,8 +90,13 @@ class VideoReferenceSpec(CamelCaseModel):
 
     @model_validator(mode="after")
     def _validate_role_kind(self) -> VideoReferenceSpec:
-        if self.role in ("first_frame", "last_frame") and self.kind != "image":
+        if (
+            self.role in ("first_frame", "last_frame", "keyframe")
+            and self.kind != "image"
+        ):
             raise ValueError("keyframe roles require an image attachment")
+        if (self.role == "keyframe") != (self.at_seconds is not None):
+            raise ValueError("a keyframe carries at_seconds and no other role does")
         family = self.media_type.split("/", 1)[0]
         if family != self.kind:
             raise ValueError(f"{self.kind} attachment cannot carry {self.media_type}")
@@ -155,7 +165,10 @@ class VideoGenerationTaskParams(BaseModel):
     @field_validator("aspect_ratio")
     @classmethod
     def _validate_aspect_ratio(cls, value: str | None) -> str | None:
-        if value is not None and re.fullmatch(r"[1-9][0-9]*:[1-9][0-9]*", value) is None:
+        if (
+            value is not None
+            and re.fullmatch(r"[1-9][0-9]*:[1-9][0-9]*", value) is None
+        ):
             raise ValueError("aspect_ratio must be W:H")
         return value
 
@@ -175,6 +188,14 @@ class VideoGenerationTaskParams(BaseModel):
         for role in ("first_frame", "last_frame"):
             if roles.count(role) > 1:
                 raise ValueError(f"at most one {role} attachment is allowed")
+        keyframes = [item for item in self.references if item.role == "keyframe"]
+        if len(keyframes) > MAX_VIDEO_KEYFRAMES:
+            raise ValueError(f"at most {MAX_VIDEO_KEYFRAMES} keyframes are allowed")
+        times = [item.at_seconds for item in keyframes]
+        if len(set(times)) != len(times):
+            raise ValueError("keyframes must anchor distinct times")
+        if any(time is not None and time > self.seconds for time in times):
+            raise ValueError("a keyframe cannot lie past the end of the clip")
         if self.references and self.reference_bytes != sum(
             item.size_bytes for item in self.references
         ):
@@ -204,7 +225,7 @@ class VideoGenerationTaskParams(BaseModel):
         roles = {item.role for item in self.references}
         if "reference" in roles:
             return VideoMode.ReferenceToAudioVideo
-        if roles & {"first_frame", "last_frame"}:
+        if roles & {"first_frame", "last_frame", "keyframe"}:
             return VideoMode.FramesToAudioVideo
         return VideoMode.TextToAudioVideo
 

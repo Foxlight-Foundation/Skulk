@@ -1510,6 +1510,7 @@ File parts (multipart only), in slot order:
 |------|------|-------|
 | `input_reference` | first frame | OpenAI's name for the keyframe image; `first_frame` is the same thing |
 | `last_frame` | last frame | Image |
+| `keyframe` | keyframe | Repeatable image anchored at a time into the clip; pair every part with one `keyframe_at` form value (seconds, zero or more, in the same order). At most 8, at distinct times, none past the clip's end. Alone they imply `fl2va`; beside `reference` parts they anchor a `ref2va` render. The engine snaps each to the nearest frame |
 | `reference` | reference | Repeatable; images, video clips, or audio in the order given |
 
 Each part must carry an `image/*`, `video/*`, or `audio/*` content type. At

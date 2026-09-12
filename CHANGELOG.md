@@ -21,6 +21,9 @@ This project records release notes here and mirrors public-facing notes in
   `SKULK_TEST_CAPABILITY_NODE=<url>` publishes a stand-in node for trying
   the layer without a plugin; `VITE_CAPABILITY_SATELLITES=0` builds the
   dashboard without it.
+- Video jobs accept timed keyframes: repeatable `keyframe` parts, each paired
+  with a `keyframe_at` time in seconds, anchor frames anywhere in the clip
+  (one H3 guide per frame), alongside or instead of the first and last frame.
 - Video jobs take their canvas from an attached keyframe: with no `size` and
   no `aspect_ratio`, the `first_frame` (else `last_frame`) image sets the
   shape, read from its header alone, so a keyframe keeps its framing.

@@ -1124,6 +1124,26 @@ def _validation_detail(error: ValidationError) -> str:
     )
 
 
+def _keyframe_times(form: FormData) -> list[float]:
+    """The ``keyframe_at`` values in part order, each a non-negative number."""
+    times: list[float] = []
+    for value in form.getlist("keyframe_at"):
+        if not isinstance(value, str):
+            raise HTTPException(status_code=400, detail="keyframe_at must be a number")
+        try:
+            seconds = float(value)
+        except ValueError as error:
+            raise HTTPException(
+                status_code=400, detail="keyframe_at must be a number of seconds"
+            ) from error
+        if not seconds >= 0 or seconds != seconds:
+            raise HTTPException(
+                status_code=400, detail="keyframe_at must be zero or more seconds"
+            )
+        times.append(seconds)
+    return times
+
+
 def _video_create_multipart_schema() -> dict[str, object]:
     """One flat object schema for the multipart create body.
 
@@ -1140,12 +1160,29 @@ def _video_create_multipart_schema() -> dict[str, object]:
     }
     properties["first_frame"] = {**binary, "description": "First-frame image."}
     properties["last_frame"] = {**binary, "description": "Last-frame image."}
+    properties["keyframe"] = {
+        "type": "array",
+        "items": binary,
+        "description": (
+            "Timed keyframe images, in order; each pairs with one keyframe_at."
+        ),
+    }
+    properties["keyframe_at"] = {
+        "type": "array",
+        "items": {"type": "number", "minimum": 0},
+        "description": (
+            "Seconds into the clip each keyframe anchors, in the same order as "
+            "the keyframe parts."
+        ),
+    }
     properties["reference"] = {
         "type": "array",
         "items": binary,
         "description": "Reference images, clips, or audio, in slot order.",
     }
     return {**schema, "title": "VideoCreateMultipart", "properties": properties}
+
+
 _VISION_MEDIA_PENDING_TTL_SECONDS = 5 * 60.0
 _VISION_MEDIA_ACK_TIMEOUT_SECONDS = 5 * 60.0
 _VISION_MEDIA_RAW_IMAGE_BYTES = (_VISION_MEDIA_PENDING_COMMAND_BYTES // 4) * 3
@@ -2023,7 +2060,11 @@ class API:
         # purge directories no job can ever serve again.
         adopted: set[CommandId] = set()
         for job in self._video_jobs.list(limit=MAX_RETAINED_JOBS):
-            if job.status != "completed" or job.output is None or job.expires_at is None:
+            if (
+                job.status != "completed"
+                or job.output is None
+                or job.expires_at is None
+            ):
                 continue
             complete = self._video_store.adopt(
                 job.id,
@@ -3900,11 +3941,14 @@ class API:
 
         return PlacementPreviewResponse(
             previews=[
-                preview.model_copy(update={
-                    "trust_requirement": trust_requirement,
-                    "card_digest": authorized_model_card_digest(model_card)
-                    if preview.instance is not None else None,
-                })
+                preview.model_copy(
+                    update={
+                        "trust_requirement": trust_requirement,
+                        "card_digest": authorized_model_card_digest(model_card)
+                        if preview.instance is not None
+                        else None,
+                    }
+                )
                 for preview in previews
             ]
         )
@@ -5363,7 +5407,11 @@ class API:
 
         if not isinstance(
             task,
-            (task_types.TextGeneration, task_types.ImageEdits, task_types.VideoGeneration),
+            (
+                task_types.TextGeneration,
+                task_types.ImageEdits,
+                task_types.VideoGeneration,
+            ),
         ):
             return
         pending = self._take_pending_vision_media(task.command_id)
@@ -10715,7 +10763,10 @@ class API:
         if not declared.isdigit():
             return
         length = int(declared)
-        if length > _REFERENCE_MEDIA_PENDING_COMMAND_BYTES + _VIDEO_MULTIPART_OVERHEAD_BYTES:
+        if (
+            length
+            > _REFERENCE_MEDIA_PENDING_COMMAND_BYTES + _VIDEO_MULTIPART_OVERHEAD_BYTES
+        ):
             raise HTTPException(
                 status_code=413,
                 detail="Reference media exceeds the per-request media limit",
@@ -10780,7 +10831,9 @@ class API:
         except BaseException:
             self._video_upload_inflight_bytes -= total
             raise
-        return VideoAttachment(chunks=tuple(chunks), size_bytes=total, sha256=digest.hexdigest())
+        return VideoAttachment(
+            chunks=tuple(chunks), size_bytes=total, sha256=digest.hexdigest()
+        )
 
     async def _read_video_attachments(
         self, form: FormData
@@ -10788,7 +10841,9 @@ class API:
         """Turn the form's file parts into reference specs plus their frames.
 
         Part order fixes the slot order: an OpenAI-style ``input_reference``
-        or a ``first_frame``, then ``last_frame``, then every ``reference``.
+        or a ``first_frame``, then ``last_frame``, then every timed
+        ``keyframe`` (each paired, in order, with a ``keyframe_at`` value in
+        seconds), then every ``reference``.
         """
 
         specs: list[VideoReferenceSpec] = []
@@ -10797,9 +10852,11 @@ class API:
             ("input_reference", "first_frame"),
             ("first_frame", "first_frame"),
             ("last_frame", "last_frame"),
+            ("keyframe", "keyframe"),
             ("reference", "reference"),
         )
         recognized = {field_name for field_name, _role in fields}
+        keyframe_times = _keyframe_times(form)
         for key, value in form.multi_items():
             if isinstance(value, StarletteUploadFile) and key not in recognized:
                 # A misspelled part would otherwise vanish and the request
@@ -10808,11 +10865,13 @@ class API:
                     status_code=400,
                     detail=(
                         f"{key} is not an attachment field; use input_reference, "
-                        "first_frame, last_frame, or reference"
+                        "first_frame, last_frame, keyframe, or reference"
                     ),
                 )
         try:
-            await self._read_video_attachment_parts(form, fields, specs, blobs)
+            await self._read_video_attachment_parts(
+                form, fields, specs, blobs, keyframe_times
+            )
         except BaseException:
             # Parts read before the failing one are reserved against the
             # node budget; the caller never sees them, so release them here.
@@ -10826,10 +10885,12 @@ class API:
         fields: tuple[tuple[str, VideoReferenceRole], ...],
         specs: list[VideoReferenceSpec],
         blobs: list[VideoAttachment],
+        keyframe_times: list[float],
     ) -> None:
         """Read every recognized file part into ``specs`` and ``blobs`` in slot order."""
 
         remaining = _REFERENCE_MEDIA_PENDING_COMMAND_BYTES
+        keyframes_seen = 0
         for field_name, role in fields:
             for upload in form.getlist(field_name):
                 if not isinstance(upload, StarletteUploadFile):
@@ -10858,6 +10919,15 @@ class API:
                     )
                 remaining -= attachment.size_bytes
                 filename = upload.filename[:255] if upload.filename else None
+                at_seconds: float | None = None
+                if role == "keyframe":
+                    if keyframes_seen >= len(keyframe_times):
+                        raise HTTPException(
+                            status_code=400,
+                            detail="each keyframe part needs a keyframe_at value",
+                        )
+                    at_seconds = keyframe_times[keyframes_seen]
+                    keyframes_seen += 1
                 try:
                     spec = VideoReferenceSpec(
                         slot=len(specs),
@@ -10867,6 +10937,7 @@ class API:
                         size_bytes=attachment.size_bytes,
                         sha256=attachment.sha256,
                         filename=filename,
+                        at_seconds=at_seconds,
                     )
                 except ValidationError as error:
                     raise HTTPException(
@@ -10874,6 +10945,11 @@ class API:
                     ) from error
                 specs.append(spec)
                 blobs.append(attachment)
+        if keyframes_seen != len(keyframe_times):
+            raise HTTPException(
+                status_code=400,
+                detail="keyframe_at values must match the keyframe parts one to one",
+            )
 
     async def create_video(self, request: Request) -> VideoResource:
         """Create one audio-video generation job and return it immediately."""
@@ -10893,7 +10969,9 @@ class API:
             self._precheck_video_upload_length(request)
             form = await request.form()
             raw = {
-                key: value for key, value in form.multi_items() if isinstance(value, str)
+                key: value
+                for key, value in form.multi_items()
+                if isinstance(value, str) and key != "keyframe_at"
             }
             references, attachments = await self._read_video_attachments(form)
         else:
@@ -10929,7 +11007,9 @@ class API:
             raise HTTPException(
                 status_code=400, detail=f"{create.model} is not a video model"
             )
-        seconds = create.seconds if create.seconds is not None else card.video.min_seconds
+        seconds = (
+            create.seconds if create.seconds is not None else card.video.min_seconds
+        )
         try:
             params = VideoGenerationTaskParams(
                 prompt=create.prompt,
@@ -11243,7 +11323,9 @@ class API:
             self._take_pending_vision_media(command_id)
             self._vision_media_commands.discard(command_id)
             self._vision_media_models.pop(command_id, None)
-            self._finish_video_job(command_id, "the generation command could not be sent")
+            self._finish_video_job(
+                command_id, "the generation command could not be sent"
+            )
             raise
         return job
 
@@ -11276,7 +11358,8 @@ class API:
                         if chunk.output is None or chunk.finish_reason == "error":
                             self._finish_video_job(
                                 command_id,
-                                chunk.error_message or "the render ended without output",
+                                chunk.error_message
+                                or "the render ended without output",
                             )
                             break
                         changes.update(
@@ -11351,7 +11434,8 @@ class API:
             return
         if job.audio and manifest.audio_sample_rate is None:
             self._finish_video_job(
-                command_id, "the request required an audio track and the render has none"
+                command_id,
+                "the request required an audio track and the render has none",
             )
             return
         if manifest.thumbnail_sha256 is not None:
@@ -11389,7 +11473,10 @@ class API:
                 if job is None or job.is_terminal or packet.model != ModelId(job.model):
                     continue
                 expected_source = self._video_output_source(command_id)
-                if expected_source is not None and packet.source_node != expected_source:
+                if (
+                    expected_source is not None
+                    and packet.source_node != expected_source
+                ):
                     # Only the node the master placed the render on may deliver
                     # its output; anything else is a stray or misrouted stream.
                     # Before placement has replicated here the fabric's trust
@@ -11415,7 +11502,8 @@ class API:
                         # cannot hold more than a few frames, and every held
                         # frame across all jobs shares one byte budget.
                         self._finish_video_job(
-                            command_id, "video output arrived too far ahead of its open frame"
+                            command_id,
+                            "video output arrived too far ahead of its open frame",
                         )
                         await self._send_output_media_terminal(
                             packet.transport_failure("output stream opened too late")
@@ -11481,7 +11569,9 @@ class API:
                 assert packet.total_chunks is not None
                 if self._video_store.has_open_assembly(
                     command_id, packet.purpose
-                ) and not self._video_store.assembly_complete(command_id, packet.purpose):
+                ) and not self._video_store.assembly_complete(
+                    command_id, packet.purpose
+                ):
                     # The gossipsub fallback can deliver the completion ahead
                     # of a chunk. Hold it until the assembly fills; the media
                     # deadline fails the job if the chunk never comes.
@@ -11493,9 +11583,7 @@ class API:
                     sha256=packet.sha256,
                     total_chunks=packet.total_chunks,
                 )
-                self._video_jobs.update(
-                    command_id, expires_at=int(stored.expires_at)
-                )
+                self._video_jobs.update(command_id, expires_at=int(stored.expires_at))
                 self._settle_video_job(command_id)
                 await self._send_output_media_terminal(packet.accepted())
             elif packet.kind == "transport_failed":

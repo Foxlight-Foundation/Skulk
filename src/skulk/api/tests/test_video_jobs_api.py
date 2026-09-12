@@ -64,13 +64,21 @@ def _card() -> ModelCard:
         n_layers=4,
         hidden_size=256,
         supports_tensor=False,
-        tasks=[ModelTask.TextToVideo, ModelTask.ImageToVideo, ModelTask.ReferenceToVideo],
+        tasks=[
+            ModelTask.TextToVideo,
+            ModelTask.ImageToVideo,
+            ModelTask.ReferenceToVideo,
+        ],
         video=VideoCardConfig.model_validate(
             {
                 "modes": ["t2va", "fl2va", "ref2va"],
                 "min_seconds": 4,
                 "max_seconds": 15,
-                "reference_limits": {"max_images": 4, "max_videos": 1, "max_audio_clips": 1},
+                "reference_limits": {
+                    "max_images": 4,
+                    "max_videos": 1,
+                    "max_audio_clips": 1,
+                },
             }
         ),
     )
@@ -82,7 +90,9 @@ class _StubTaskGroup:
     def __init__(self) -> None:
         self.spawned: list[tuple[object, tuple[object, ...]]] = []
 
-    def start_soon(self, function: Callable[..., Coroutine[Any, Any, object]], *args: object) -> None:
+    def start_soon(
+        self, function: Callable[..., Coroutine[Any, Any, object]], *args: object
+    ) -> None:
         self.spawned.append((function, args))
 
 
@@ -166,7 +176,9 @@ def test_create_json_text_to_video(monkeypatch: pytest.MonkeyPatch) -> None:
     assert body["id"] in {str(key) for key in api._video_generation_queues}
 
 
-def test_create_defaults_seconds_to_the_card_minimum(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_create_defaults_seconds_to_the_card_minimum(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     api = _make_api(monkeypatch)
     client = TestClient(api.app)
     response = client.post("/v1/videos", json={"model": str(MODEL), "prompt": "x"})
@@ -185,7 +197,10 @@ def test_create_defaults_seconds_to_the_card_minimum(monkeypatch: pytest.MonkeyP
     ],
 )
 def test_create_rejects_bad_requests(
-    monkeypatch: pytest.MonkeyPatch, payload: dict[str, object], status: int, fragment: str
+    monkeypatch: pytest.MonkeyPatch,
+    payload: dict[str, object],
+    status: int,
+    fragment: str,
 ) -> None:
     api = _make_api(monkeypatch)
     client = TestClient(api.app)
@@ -198,7 +213,9 @@ def test_create_rejects_bad_requests(
 def test_create_rejects_other_content_types(monkeypatch: pytest.MonkeyPatch) -> None:
     api = _make_api(monkeypatch)
     client = TestClient(api.app)
-    response = client.post("/v1/videos", content=b"prompt=x", headers={"content-type": "text/plain"})
+    response = client.post(
+        "/v1/videos", content=b"prompt=x", headers={"content-type": "text/plain"}
+    )
     assert response.status_code == 415
 
 
@@ -209,7 +226,12 @@ def test_create_multipart_stages_attachments(monkeypatch: pytest.MonkeyPatch) ->
     clip = b"\x00\x00clip"
     response = client.post(
         "/v1/videos",
-        data={"model": str(MODEL), "prompt": "keyframes", "seconds": "5", "audio": "false"},
+        data={
+            "model": str(MODEL),
+            "prompt": "keyframes",
+            "seconds": "5",
+            "audio": "false",
+        },
         files=[
             ("input_reference", ("first.png", first, "image/png")),
             ("reference", ("clip.mp4", clip, "video/mp4")),
@@ -241,7 +263,10 @@ def test_create_multipart_rejects_unlabelled_and_oversized_parts(
         data={"model": str(MODEL), "prompt": "x"},
         files=[("first_frame", ("blob", b"data", "application/octet-stream"))],
     )
-    assert response.status_code == 400 and "content type" in response.json()["error"]["message"]
+    assert (
+        response.status_code == 400
+        and "content type" in response.json()["error"]["message"]
+    )
     monkeypatch.setattr(api_main, "_REFERENCE_MEDIA_PENDING_COMMAND_BYTES", 8)
     response = client.post(
         "/v1/videos",
@@ -252,7 +277,9 @@ def test_create_multipart_rejects_unlabelled_and_oversized_parts(
     api._send.assert_not_called()
 
 
-def test_create_multipart_rejects_two_first_frames(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_create_multipart_rejects_two_first_frames(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     api = _make_api(monkeypatch)
     client = TestClient(api.app)
     response = client.post(
@@ -287,7 +314,9 @@ def test_list_pages_newest_first(monkeypatch: pytest.MonkeyPatch) -> None:
     first = client.get("/v1/videos", params={"limit": 2}).json()
     assert [item["id"] for item in first["data"]] == ["job-2", "job-1"]
     assert first["has_more"] is True and first["last_id"] == "job-1"
-    second = client.get("/v1/videos", params={"limit": 2, "after": first["last_id"]}).json()
+    second = client.get(
+        "/v1/videos", params={"limit": 2, "after": first["last_id"]}
+    ).json()
     assert [item["id"] for item in second["data"]] == ["job-0"]
     assert second["has_more"] is False
     ascending = client.get("/v1/videos", params={"order": "asc"}).json()
@@ -310,7 +339,11 @@ def _complete_job(api: Any, identifier: str, payload: bytes) -> None:
     digest = hashlib.sha256(payload).hexdigest()
     api._video_jobs.create(_job(identifier, created_at=1))
     api._video_store.open_assembly(
-        command_id, "video", content_type="video/mp4", total_bytes=len(payload), total_chunks=1
+        command_id,
+        "video",
+        content_type="video/mp4",
+        total_bytes=len(payload),
+        total_chunks=1,
     )
     api._video_store.append(command_id, "video", 1, payload)
     stored = api._video_store.commit(command_id, "video", sha256=digest, total_chunks=1)
@@ -325,7 +358,9 @@ def _complete_job(api: Any, identifier: str, payload: bytes) -> None:
         audio_sample_rate=32000,
         audio_channels=2,
     )
-    api._video_jobs.update(command_id, render_finished=True, output=manifest, media_delivered=True)
+    api._video_jobs.update(
+        command_id, render_finished=True, output=manifest, media_delivered=True
+    )
     api._video_jobs.settle(command_id)
     api._video_jobs.update(command_id, expires_at=int(stored.expires_at))
 
@@ -340,14 +375,23 @@ def test_content_serves_only_completed_jobs(monkeypatch: pytest.MonkeyPatch) -> 
     assert pending.status_code == 409 and "queued" in pending.json()["error"]["message"]
     response = client.get("/v1/videos/done/content")
     assert response.status_code == 200
-    assert response.content == payload and response.headers["content-type"] == "video/mp4"
-    assert client.get("/v1/videos/done/content", params={"variant": "thumbnail"}).status_code == 404
+    assert (
+        response.content == payload and response.headers["content-type"] == "video/mp4"
+    )
+    assert (
+        client.get(
+            "/v1/videos/done/content", params={"variant": "thumbnail"}
+        ).status_code
+        == 404
+    )
     body = client.get("/v1/videos/done").json()
     assert body["status"] == "completed" and body["output"]["has_thumbnail"] is False
     assert body["output"]["size_bytes"] == len(payload)
 
 
-def test_cancel_streaming_job_sends_task_cancelled(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cancel_streaming_job_sends_task_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     api = _make_api(monkeypatch)
     job = api._video_jobs.create(_job("live", created_at=1))
     sender, _receiver = channel[object]()
@@ -367,7 +411,9 @@ def test_cancel_streaming_job_sends_task_cancelled(monkeypatch: pytest.MonkeyPat
     api._send.assert_not_called()
 
 
-def test_cancel_uploading_job_notifies_the_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cancel_uploading_job_notifies_the_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     api = _make_api(monkeypatch)
     terminals: list[OutputMediaPacket] = []
 
@@ -420,7 +466,9 @@ def test_delete_cancels_then_forgets(monkeypatch: pytest.MonkeyPatch) -> None:
     assert client.delete("/v1/videos/live").status_code == 404
 
 
-def test_legacy_cancel_route_handles_uploading_jobs(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_legacy_cancel_route_handles_uploading_jobs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     api = _make_api(monkeypatch)
     monkeypatch.setattr(api, "_send_output_media_terminal", AsyncMock())
     job = api._video_jobs.create(_job("uploading", created_at=1, render_finished=True))
@@ -434,7 +482,9 @@ async def test_post_render_task_failure_ends_the_job_directly(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     api = _make_api(monkeypatch)
-    job = api._video_jobs.create(_job("post-render", created_at=1, render_finished=True))
+    job = api._video_jobs.create(
+        _job("post-render", created_at=1, render_finished=True)
+    )
     api._video_job_media_deadlines[job.id] = time.monotonic() + 60
     task = VideoGenerationTask(
         task_id=TaskId("t"),
@@ -447,7 +497,11 @@ async def test_post_render_task_failure_ends_the_job_directly(
     api.state = State(tasks={task.task_id: task})
     await api._terminate_command_stream(task.task_id, "instance lost")
     failed = api._video_jobs.get(job.id)
-    assert failed is not None and failed.status == "failed" and failed.error == "instance lost"
+    assert (
+        failed is not None
+        and failed.status == "failed"
+        and failed.error == "instance lost"
+    )
     assert api._pending_stream_failures == {}
     assert job.id not in api._video_job_media_deadlines
 
@@ -510,7 +564,9 @@ def test_task_command_id_covers_video_tasks() -> None:
     assert API._task_command_id(task) == "c"
 
 
-def test_reference_staging_hashes_without_a_joined_copy(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_reference_staging_hashes_without_a_joined_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from skulk.api import video_jobs
 
     api = _make_api(monkeypatch)
@@ -550,7 +606,10 @@ def test_create_multipart_refuses_uploads_the_node_cannot_hold(
         files=[("first_frame", ("big.png", b"0123456789", "image/png"))],
     )
     assert response.status_code == 503
-    assert api._video_upload_inflight_bytes == api_main._VISION_MEDIA_PENDING_TOTAL_BYTES - 4
+    assert (
+        api._video_upload_inflight_bytes
+        == api_main._VISION_MEDIA_PENDING_TOTAL_BYTES - 4
+    )
 
 
 def test_create_multipart_releases_its_reservation_after_staging(
@@ -594,24 +653,39 @@ def test_create_rejects_a_mode_that_contradicts_the_attachments(
     response = client.post(
         "/v1/videos", json={"model": str(MODEL), "prompt": "x", "mode": "fl2va"}
     )
-    assert response.status_code == 400 and "imply t2va" in response.json()["error"]["message"]
+    assert (
+        response.status_code == 400
+        and "imply t2va" in response.json()["error"]["message"]
+    )
     response = client.post(
         "/v1/videos",
         data={"model": str(MODEL), "prompt": "x", "mode": "t2va"},
         files=[("first_frame", ("a.png", b"0123456789", "image/png"))],
     )
-    assert response.status_code == 400 and "imply fl2va" in response.json()["error"]["message"]
+    assert (
+        response.status_code == 400
+        and "imply fl2va" in response.json()["error"]["message"]
+    )
     assert api._video_upload_inflight_bytes == 0
     api._send.assert_not_called()
 
 
-def test_create_multipart_prechecks_the_declared_length(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_create_multipart_prechecks_the_declared_length(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     api = _make_api(monkeypatch)
     client = TestClient(api.app)
-    too_big = api_main._REFERENCE_MEDIA_PENDING_COMMAND_BYTES + api_main._VIDEO_MULTIPART_OVERHEAD_BYTES + 1
+    too_big = (
+        api_main._REFERENCE_MEDIA_PENDING_COMMAND_BYTES
+        + api_main._VIDEO_MULTIPART_OVERHEAD_BYTES
+        + 1
+    )
     response = client.post(
         "/v1/videos",
-        headers={"content-type": "multipart/form-data; boundary=x", "content-length": str(too_big)},
+        headers={
+            "content-type": "multipart/form-data; boundary=x",
+            "content-length": str(too_big),
+        },
         content=b"",
     )
     assert response.status_code == 413
@@ -655,7 +729,9 @@ def test_cancel_notifies_the_worker_when_the_render_finishes_during_the_send(
     assert terminals[0].target_node == NodeId("worker-1")
 
 
-def test_create_multipart_rejects_unknown_file_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_create_multipart_rejects_unknown_file_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     api = _make_api(monkeypatch)
     client = TestClient(api.app)
     response = client.post(
@@ -672,8 +748,61 @@ def test_multipart_openapi_schema_is_one_flat_object() -> None:
     schema = api_main._video_create_multipart_schema()
     assert "allOf" not in schema
     properties = cast("dict[str, Any]", schema["properties"])
-    assert {"prompt", "model", "input_reference", "first_frame", "last_frame", "reference"} <= set(
-        properties
-    )
+    assert {
+        "prompt",
+        "model",
+        "input_reference",
+        "first_frame",
+        "last_frame",
+        "reference",
+    } <= set(properties)
     assert properties["reference"]["items"] == {"type": "string", "format": "binary"}
     assert schema.get("additionalProperties") is False
+
+
+def test_create_multipart_pairs_keyframes_with_their_times(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _make_api(monkeypatch)
+    client = TestClient(api.app)
+    response = client.post(
+        "/v1/videos",
+        data={
+            "model": str(MODEL),
+            "prompt": "anchors",
+            "seconds": "5",
+            "keyframe_at": ["1.5", "4"],
+        },
+        files=[
+            ("first_frame", ("first.png", b"\x89PNG first", "image/png")),
+            ("keyframe", ("mid.png", b"\x89PNG mid", "image/png")),
+            ("keyframe", ("late.png", b"\x89PNG late", "image/png")),
+        ],
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["mode"] == "fl2va"
+    references = _sent_command(api).task_params.references
+    assert [spec.role for spec in references] == ["first_frame", "keyframe", "keyframe"]
+    assert [spec.at_seconds for spec in references] == [None, 1.5, 4.0]
+    # Every keyframe part needs its time, and a time needs its part.
+    short = client.post(
+        "/v1/videos",
+        data={"model": str(MODEL), "prompt": "x", "keyframe_at": "1"},
+        files=[
+            ("keyframe", ("a.png", b"a", "image/png")),
+            ("keyframe", ("b.png", b"b", "image/png")),
+        ],
+    )
+    assert short.status_code == 400 and "keyframe_at" in short.json()["error"]["message"]
+    extra = client.post(
+        "/v1/videos",
+        data={"model": str(MODEL), "prompt": "x", "keyframe_at": ["1", "2"]},
+        files=[("keyframe", ("a.png", b"a", "image/png"))],
+    )
+    assert extra.status_code == 400
+    bad = client.post(
+        "/v1/videos",
+        data={"model": str(MODEL), "prompt": "x", "keyframe_at": "soon"},
+        files=[("keyframe", ("a.png", b"a", "image/png"))],
+    )
+    assert bad.status_code == 400 and "number" in bad.json()["error"]["message"]
