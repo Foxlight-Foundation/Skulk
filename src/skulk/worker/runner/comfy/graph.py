@@ -124,11 +124,15 @@ class ComfyModelFiles:
 
 def _bundle_paths(card: ModelCard) -> tuple[PurePosixPath, ...]:
     if card.artifact_bundle is None:
-        raise ValueError(f"{card.model_id} declares no artifact bundle; the comfy engine needs exact files")
+        raise ValueError(
+            f"{card.model_id} declares no artifact bundle; the comfy engine needs exact files"
+        )
     return tuple(PurePosixPath(file.path) for file in card.artifact_bundle.files)
 
 
-def _component_file(card: ModelCard, component_name: str, *, required: bool = True) -> str | None:
+def _component_file(
+    card: ModelCard, component_name: str, *, required: bool = True
+) -> str | None:
     """Pick the one bundle file a component loads.
 
     A component names its directory; the bundle lists the files. When the
@@ -137,17 +141,27 @@ def _component_file(card: ModelCard, component_name: str, *, required: bool = Tr
     name carries the component's own qualifier (``video`` or ``audio``) is
     chosen, and anything still ambiguous is refused rather than guessed.
     """
-    component = next((c for c in (card.components or ()) if c.component_name == component_name), None)
+    component = next(
+        (c for c in (card.components or ()) if c.component_name == component_name), None
+    )
     if component is None:
         if required:
-            raise ValueError(f"{card.model_id} declares no {component_name!r} component")
+            raise ValueError(
+                f"{card.model_id} declares no {component_name!r} component"
+            )
         return None
     directory = PurePosixPath(component.component_path.rstrip("/"))
     candidates = [path for path in _bundle_paths(card) if path.parent == directory]
     if len(candidates) > 1:
-        qualifiers = [token for token in component_name.split("_") if token not in ("vae", "model", "encoder")]
+        qualifiers = [
+            token
+            for token in component_name.split("_")
+            if token not in ("vae", "model", "encoder")
+        ]
         narrowed = [
-            path for path in candidates if any(token in path.name.lower() for token in qualifiers)
+            path
+            for path in candidates
+            if any(token in path.name.lower() for token in qualifiers)
         ]
         if len(narrowed) == 1:
             candidates = narrowed
@@ -228,9 +242,13 @@ def select_adapter(
         if companion.name != params.lora:
             continue
         if companion.kind is not VideoCompanionKind.Lora:
-            raise ValueError(f"companion {params.lora!r} is a {companion.kind.value}, not a lora")
+            raise ValueError(
+                f"companion {params.lora!r} is a {companion.kind.value}, not a lora"
+            )
         if companion.modes and mode not in companion.modes:
-            raise ValueError(f"lora {params.lora!r} does not apply to mode {mode.value}")
+            raise ValueError(
+                f"lora {params.lora!r} does not apply to mode {mode.value}"
+            )
         return companion
     raise ValueError(f"{card.model_id} has no lora companion named {params.lora!r}")
 
@@ -252,7 +270,9 @@ class ComfyRenderPlan:
         return self.plan.steps
 
 
-def plan_comfy_render(params: VideoGenerationTaskParams, card: ModelCard) -> ComfyRenderPlan:
+def plan_comfy_render(
+    params: VideoGenerationTaskParams, card: ModelCard
+) -> ComfyRenderPlan:
     """Resolve a request against the card for the ComfyUI engine.
 
     Steps come from the request, else the selected adapter's trained count,
@@ -273,11 +293,17 @@ def plan_comfy_render(params: VideoGenerationTaskParams, card: ModelCard) -> Com
     if companion is not None:
         adapter = AdapterChoice(
             file=companion_file(companion, card),
-            strength=params.lora_strength if params.lora_strength is not None else (companion.strength or 1.0),
+            strength=params.lora_strength
+            if params.lora_strength is not None
+            else (companion.strength or 1.0),
             steps=companion.steps,
         )
-        video_shift = companion.video_shift if companion.video_shift is not None else video_shift
-        audio_shift = companion.audio_shift if companion.audio_shift is not None else audio_shift
+        video_shift = (
+            companion.video_shift if companion.video_shift is not None else video_shift
+        )
+        audio_shift = (
+            companion.audio_shift if companion.audio_shift is not None else audio_shift
+        )
     base = plan_render(params, video)
     if params.steps is None and adapter is not None and adapter.steps is not None:
         base = RenderPlan(
@@ -331,13 +357,17 @@ def bind_references(
     root = input_dir.resolve()
     for spec in references:
         if spec.local_path is None:
-            raise ValueError(f"reference slot {spec.slot} has no local file on this node")
+            raise ValueError(
+                f"reference slot {spec.slot} has no local file on this node"
+            )
         local = Path(spec.local_path).resolve()
         if not local.is_relative_to(root):
             raise ValueError(
                 f"reference slot {spec.slot} at {local} is outside the video input directory {root}"
             )
-        bindings.append(ReferenceBinding(spec=spec, input_name=local.relative_to(root).as_posix()))
+        bindings.append(
+            ReferenceBinding(spec=spec, input_name=local.relative_to(root).as_posix())
+        )
     return tuple(bindings)
 
 
@@ -356,7 +386,9 @@ def build_prompt(
     plan = render.plan
     files = render.files
     prompt: ComfyPrompt = {}
-    prompt[NODE_UNET] = _node("UNETLoader", "Load H3", unet_name=files.diffusion_model, weight_dtype="default")
+    prompt[NODE_UNET] = _node(
+        "UNETLoader", "Load H3", unet_name=files.diffusion_model, weight_dtype="default"
+    )
     model_ref = _link(NODE_UNET)
     if render.adapter is not None:
         prompt[NODE_LORA] = _node(
@@ -376,15 +408,25 @@ def build_prompt(
         prompt[NODE_SHIFT] = _node("MiniMaxH3SigmaShift", "Sigma shift", **shift_inputs)
         model_ref = _link(NODE_SHIFT)
     prompt[NODE_CLIP] = _node(
-        "CLIPLoader", "Load text encoder", clip_name=files.text_encoder, type="minimax", device="default"
+        "CLIPLoader",
+        "Load text encoder",
+        clip_name=files.text_encoder,
+        type="minimax",
+        device="default",
     )
-    prompt[NODE_VIDEO_VAE] = _node("VAELoader", "Load video VAE", vae_name=files.video_vae)
+    prompt[NODE_VIDEO_VAE] = _node(
+        "VAELoader", "Load video VAE", vae_name=files.video_vae
+    )
     # The audio VAE encodes reference soundtracks as well as decoding the
     # output track, so a request that attaches audio (or a clip, which
     # carries its own) needs it even when it asks for a silent output.
-    references_carry_audio = any(binding.spec.kind in ("audio", "video") for binding in references)
+    references_carry_audio = any(
+        binding.spec.kind in ("audio", "video") for binding in references
+    )
     if (plan.audio or references_carry_audio) and files.audio_vae is not None:
-        prompt[NODE_AUDIO_VAE] = _node("VAELoader", "Load audio VAE", vae_name=files.audio_vae)
+        prompt[NODE_AUDIO_VAE] = _node(
+            "VAELoader", "Load audio VAE", vae_name=files.audio_vae
+        )
 
     if render.mode is VideoMode.ReferenceToAudioVideo:
         conditioning = _add_reference_condition(prompt, render, params, references)
@@ -392,11 +434,20 @@ def build_prompt(
         conditioning = _add_keyframe_condition(prompt, render, params, references)
 
     prompt[NODE_NOISE] = _node("RandomNoise", "Seed", noise_seed=plan.seed)
-    prompt[NODE_SAMPLER_SELECT] = _node("KSamplerSelect", "Sampler", sampler_name=SAMPLER_NAME)
-    prompt[NODE_SCHEDULER] = _node(
-        "BasicScheduler", "Schedule", model=model_ref, scheduler=SCHEDULER_NAME, steps=plan.steps, denoise=1.0
+    prompt[NODE_SAMPLER_SELECT] = _node(
+        "KSamplerSelect", "Sampler", sampler_name=SAMPLER_NAME
     )
-    prompt[NODE_GUIDER] = _node("BasicGuider", "Guider", model=model_ref, conditioning=_link(conditioning, 0))
+    prompt[NODE_SCHEDULER] = _node(
+        "BasicScheduler",
+        "Schedule",
+        model=model_ref,
+        scheduler=SCHEDULER_NAME,
+        steps=plan.steps,
+        denoise=1.0,
+    )
+    prompt[NODE_GUIDER] = _node(
+        "BasicGuider", "Guider", model=model_ref, conditioning=_link(conditioning, 0)
+    )
     prompt[NODE_SAMPLER] = _node(
         "SamplerCustomAdvanced",
         "Sample",
@@ -407,12 +458,21 @@ def build_prompt(
         latent_image=_link(NODE_CONDITION, 1),
     )
     prompt[NODE_DECODE_VIDEO] = _node(
-        "VAEDecode", "Decode video", samples=_link(NODE_SAMPLER, 0), vae=_link(NODE_VIDEO_VAE)
+        "VAEDecode",
+        "Decode video",
+        samples=_link(NODE_SAMPLER, 0),
+        vae=_link(NODE_VIDEO_VAE),
     )
-    create_inputs: dict[str, object] = {"images": _link(NODE_DECODE_VIDEO), "fps": float(plan.fps)}
+    create_inputs: dict[str, object] = {
+        "images": _link(NODE_DECODE_VIDEO),
+        "fps": float(plan.fps),
+    }
     if plan.audio:
         prompt[NODE_DECODE_AUDIO] = _node(
-            "VAEDecodeAudio", "Decode audio", samples=_link(NODE_SAMPLER, 0), vae=_link(NODE_AUDIO_VAE)
+            "VAEDecodeAudio",
+            "Decode audio",
+            samples=_link(NODE_SAMPLER, 0),
+            vae=_link(NODE_AUDIO_VAE),
         )
         create_inputs["audio"] = _link(NODE_DECODE_AUDIO)
     prompt[NODE_CREATE_VIDEO] = _node("CreateVideo", "Mux", **create_inputs)
@@ -425,7 +485,11 @@ def build_prompt(
         **{"format.codec": "h264"},
     )
     prompt[NODE_THUMBNAIL_FRAME] = _node(
-        "ImageFromBatch", "First frame", image=_link(NODE_DECODE_VIDEO), batch_index=0, length=1
+        "ImageFromBatch",
+        "First frame",
+        image=_link(NODE_DECODE_VIDEO),
+        batch_index=0,
+        length=1,
     )
     prompt[NODE_SAVE_THUMBNAIL] = _node(
         "SaveImage",
@@ -452,18 +516,61 @@ def _add_keyframe_condition(
         "height": plan.height,
         "length": plan.frame_count,
     }
+    timed: list[ReferenceBinding] = []
     for binding in references:
         role = binding.spec.role
+        if role == "keyframe":
+            timed.append(binding)
+            continue
         if role not in ("first_frame", "last_frame"):
             raise ValueError(
                 f"mode {render.mode.value} accepts keyframe attachments only; slot "
                 f"{binding.spec.slot} has role {role}"
             )
         node_id = f"load_{role}"
-        prompt[node_id] = _node("LoadImage", f"Load {role.replace('_', ' ')}", image=binding.input_name)
+        prompt[node_id] = _node(
+            "LoadImage", f"Load {role.replace('_', ' ')}", image=binding.input_name
+        )
         inputs[role] = _link(node_id, 0)
     prompt[NODE_CONDITION] = _node("MiniMaxH3ImageToVideo", "Condition", **inputs)
-    return NODE_CONDITION
+    # The condition node's latent (output 1) is what a timed keyframe anchors
+    # into, one guide per frame, chained onto the conditioning.
+    return _add_timed_guides(prompt, render, timed, NODE_CONDITION)
+
+
+def keyframe_index(at_seconds: float, fps: int, frame_count: int) -> int:
+    """The frame a timed keyframe anchors: its time on the clip's frame grid."""
+    return min(frame_count - 1, max(0, round(at_seconds * fps)))
+
+
+def _add_timed_guides(
+    prompt: ComfyPrompt,
+    render: ComfyRenderPlan,
+    timed: list[ReferenceBinding],
+    conditioning: str,
+) -> str:
+    """Chain one ``MiniMaxH3AddGuide`` per timed keyframe, earliest first."""
+    plan = render.plan
+    for binding in sorted(timed, key=lambda item: item.spec.at_seconds or 0.0):
+        at_seconds = binding.spec.at_seconds
+        assert at_seconds is not None
+        index = keyframe_index(at_seconds, plan.fps, plan.frame_count)
+        load_id = f"load_keyframe_{binding.spec.slot}"
+        guide_id = f"guide_keyframe_{binding.spec.slot}"
+        prompt[load_id] = _node(
+            "LoadImage", f"Load keyframe at {at_seconds:g} s", image=binding.input_name
+        )
+        prompt[guide_id] = _node(
+            "MiniMaxH3AddGuide",
+            f"Anchor keyframe at {at_seconds:g} s (frame {index})",
+            positive=_link(conditioning, 0),
+            vae=_link(NODE_VIDEO_VAE),
+            latent=_link(NODE_CONDITION, 1),
+            image=_link(load_id, 0),
+            frame_idx=index,
+        )
+        conditioning = guide_id
+    return conditioning
 
 
 def _add_reference_condition(
@@ -493,8 +600,12 @@ def _add_reference_condition(
         inputs["audio_vae"] = _link(NODE_AUDIO_VAE)
     counts = {"image": 0, "video": 0, "audio": 0}
     keyframes: list[ReferenceBinding] = []
+    timed: list[ReferenceBinding] = []
     for binding in references:
         spec = binding.spec
+        if spec.role == "keyframe":
+            timed.append(binding)
+            continue
         if spec.role != "reference":
             keyframes.append(binding)
             continue
@@ -502,18 +613,28 @@ def _add_reference_condition(
         counts[spec.kind] = index + 1
         if spec.kind == "image":
             node_id = f"ref_image_{index}"
-            prompt[node_id] = _node("LoadImage", f"Reference image {index + 1}", image=binding.input_name)
+            prompt[node_id] = _node(
+                "LoadImage", f"Reference image {index + 1}", image=binding.input_name
+            )
             inputs[f"ref_images.ref_image_{index}"] = _link(node_id, 0)
         elif spec.kind == "video":
             load_id = f"ref_video_{index}"
             split_id = f"ref_video_components_{index}"
-            prompt[load_id] = _node("LoadVideo", f"Reference video {index + 1}", file=binding.input_name)
-            prompt[split_id] = _node("GetVideoComponents", f"Reference video {index + 1} frames", video=_link(load_id))
+            prompt[load_id] = _node(
+                "LoadVideo", f"Reference video {index + 1}", file=binding.input_name
+            )
+            prompt[split_id] = _node(
+                "GetVideoComponents",
+                f"Reference video {index + 1} frames",
+                video=_link(load_id),
+            )
             inputs[f"ref_videos.ref_video_{index}"] = _link(split_id, 0)
             inputs[f"ref_video_audios.ref_video_audio_{index}"] = _link(split_id, 1)
         else:
             node_id = f"ref_audio_{index}"
-            prompt[node_id] = _node("LoadAudio", f"Reference audio {index + 1}", audio=binding.input_name)
+            prompt[node_id] = _node(
+                "LoadAudio", f"Reference audio {index + 1}", audio=binding.input_name
+            )
             inputs[f"ref_audios.ref_audio_{index}"] = _link(node_id, 0)
     prompt[NODE_CONDITION] = _node("MiniMaxH3ReferenceToVideo", "Condition", **inputs)
     conditioning = NODE_CONDITION
@@ -521,7 +642,9 @@ def _add_reference_condition(
         role = binding.spec.role
         load_id = f"load_{role}"
         guide_id = f"guide_{role}"
-        prompt[load_id] = _node("LoadImage", f"Load {role.replace('_', ' ')}", image=binding.input_name)
+        prompt[load_id] = _node(
+            "LoadImage", f"Load {role.replace('_', ' ')}", image=binding.input_name
+        )
         prompt[guide_id] = _node(
             "MiniMaxH3AddGuide",
             f"Anchor {role.replace('_', ' ')}",
@@ -532,7 +655,7 @@ def _add_reference_condition(
             frame_idx=0 if role == "first_frame" else -1,
         )
         conditioning = guide_id
-    return conditioning
+    return _add_timed_guides(prompt, render, timed, conditioning)
 
 
 def extra_model_paths_yaml(model_dir: Path) -> str:
@@ -547,4 +670,3 @@ def extra_model_paths_yaml(model_dir: Path) -> str:
         if (model_dir / folder).is_dir():
             lines.append(f"  {folder}: {folder}")
     return "\n".join(lines) + "\n"
-

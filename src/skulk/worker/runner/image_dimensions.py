@@ -171,6 +171,10 @@ def _isobmff(data: bytes) -> tuple[int, int] | None:
         return None
     properties = _children(data, ipco[0], ipco[1])
     wanted = _primary_properties(data, meta, iprp)
+    if wanted is None:
+        # Association metadata is present but cannot be resolved: fail
+        # closed rather than let a thumbnail's ispe decide the canvas.
+        return None
     chosen = (
         [properties[index - 1] for index in wanted if 0 < index <= len(properties)]
         if wanted
@@ -190,8 +194,13 @@ def _isobmff(data: bytes) -> tuple[int, int] | None:
 
 def _primary_properties(
     data: bytes, meta: tuple[int, int], iprp: tuple[int, int]
-) -> list[int]:
-    """Property indices (1-based, in ``ipco`` order) of the primary item."""
+) -> list[int] | None:
+    """Property indices (1-based, in ``ipco`` order) of the primary item.
+
+    An empty list means the file carries no association metadata (the first
+    ``ispe`` stands); ``None`` means it does but the primary item's entry is
+    missing, truncated, or beyond the scan bound.
+    """
     pitm = _box(data, meta[0] + 4, meta[1], b"pitm")
     ipma = _box(data, iprp[0], iprp[1], b"ipma")
     if pitm is None or ipma is None:
@@ -211,7 +220,7 @@ def _primary_properties(
             item = _be32(data, offset)
             offset += 4
         if offset >= len(data):
-            return []
+            return None
         associations = data[offset]
         offset += 1
         indices: list[int] = []
@@ -221,12 +230,12 @@ def _primary_properties(
                 offset += 2
             else:
                 if offset >= len(data):
-                    return []
+                    return None
                 indices.append(data[offset] & 0x7F)
                 offset += 1
         if item == primary:
             return indices
-    return []
+    return None
 
 
 def _children(data: bytes, start: int, end: int) -> list[tuple[bytes, int, int]]:

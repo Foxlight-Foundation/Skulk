@@ -64,17 +64,26 @@ def keyframe_shape(params: VideoGenerationTaskParams) -> tuple[int, int] | None:
     """The pixel shape of the keyframe that anchors the clip, when one is attached.
 
     The first frame decides; the last frame stands in when there is no
-    first. Only an image whose verified bytes the worker placed on disk
-    (``local_path``) can be read; a plain ``reference`` never sets the
-    canvas, since it conditions content, not framing.
+    first, and the earliest timed keyframe when there is neither. Only an
+    image whose verified bytes the worker placed on disk (``local_path``)
+    can be read; a plain ``reference`` never sets the canvas, since it
+    conditions content, not framing.
     """
-    for role in ("first_frame", "last_frame"):
-        for reference in params.references:
-            if reference.role != role or reference.kind != "image":
-                continue
-            if reference.local_path is None:
-                return None
-            return image_dimensions(Path(reference.local_path))
+    ordered = sorted(
+        params.references,
+        key=lambda item: (
+            {"first_frame": 0, "last_frame": 1, "keyframe": 2}.get(item.role, 3),
+            item.at_seconds or 0.0,
+        ),
+    )
+    for reference in ordered:
+        if reference.role not in ("first_frame", "last_frame", "keyframe"):
+            continue
+        if reference.kind != "image":
+            continue
+        if reference.local_path is None:
+            return None
+        return image_dimensions(Path(reference.local_path))
     return None
 
 
