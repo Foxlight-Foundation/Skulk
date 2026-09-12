@@ -47,7 +47,7 @@ _OPERATION_ROW: TypeAdapter[tuple[str, str] | None] = TypeAdapter(
 _TRUST_ROW: TypeAdapter[tuple[int, str] | None] = TypeAdapter(tuple[int, str] | None)
 _DIGEST_ROW: TypeAdapter[tuple[str] | None] = TypeAdapter(tuple[str] | None)
 _RUNTIME_DIGEST: TypeAdapter[str] = TypeAdapter(Digest)
-_STAGING_OWNERSHIP_TIMEOUT = 30.0
+_OWNERSHIP_TIMEOUT = 30.0
 
 
 class RuntimeOperation(BaseModel):
@@ -256,7 +256,11 @@ class RuntimeInstaller:
 
     @contextlib.asynccontextmanager
     async def locked_generation(
-        self, runtime_digest: str, *, inherit_on_exec: bool = False
+        self,
+        runtime_digest: str,
+        *,
+        inherit_on_exec: bool = False,
+        wait_for_ownership: bool = False,
     ) -> AsyncIterator[tuple[VerifiedRuntime, QualifiedHost]]:
         """Hold installation ownership around a fully verified staged generation.
 
@@ -265,9 +269,11 @@ class RuntimeInstaller:
         local state transition. Cancellation waits for file verification to finish.
         Explicit local setup may inherit the fence across exec until its terminal
         process exits; ordinary owners and verification callers do not inherit it.
+        Local entrypoints may wait up to 30 seconds for ownership before any
+        verification or execution; no command is retried after acquiring the lock.
         """
         digest = _RUNTIME_DIGEST.validate_python(runtime_digest, strict=True)
-        lock = RuntimeLock(self.installer)
+        lock = await self._ownership_lock(wait_for_ownership)
         try:
             generation = self.root / "generations" / digest
 
@@ -304,11 +310,11 @@ class RuntimeInstaller:
         finally:
             lock.close()
 
-    async def _staging_lock(self, wait_for_ownership: bool) -> RuntimeLock:
+    async def _ownership_lock(self, wait_for_ownership: bool) -> RuntimeLock:
         # Supervisor verification briefly shares this lock. Wait only before
-        # staging has any effects; retrying the installer itself could replay
-        # partially completed work. Direct terminal calls remain nonblocking.
-        async with asyncio.timeout(_STAGING_OWNERSHIP_TIMEOUT):
+        # staging or local entrypoint execution has any effects. Retrying either
+        # operation itself could replay partially completed work.
+        async with asyncio.timeout(_OWNERSHIP_TIMEOUT):
             while True:
                 try:
                     return RuntimeLock(self.installer)
@@ -341,7 +347,7 @@ class RuntimeInstaller:
         """
         if recover and operation_id is None:
             raise ValueError("recovery requires the original operation ID")
-        lock = await self._staging_lock(wait_for_ownership)
+        lock = await self._ownership_lock(wait_for_ownership)
         operation: RuntimeOperation | None = None
         record_started = False
         try:

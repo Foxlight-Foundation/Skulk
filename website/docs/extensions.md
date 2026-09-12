@@ -886,7 +886,11 @@ protected service connection and selected installation, verifies its full runtim
 compatibility, trust and retained release history, then executes only that entrypoint.
 The publisher supplies fixed management verbs; the caller cannot select an executable
 or module. The plugin derives its internal coordinates from its verified installed
-source. The generation lock survives exec to prevent upgrades during the command.
+source. Local setup and management wait up to 30 seconds for the generation lock
+before executing plugin code, so periodic runtime verification does not cause an
+immediate refusal. Selection and trust are checked again after ownership is acquired;
+a timeout or changed selection refuses execution. The command is never replayed.
+The generation lock survives exec to prevent upgrades during the command.
 
 This local nonroot command retains terminal I/O and does not itself invoke sudo,
 change release selection or authorize paid effects. Disabled node management remains

@@ -27,7 +27,19 @@ class ExecutedError(Exception):
 
 @pytest.mark.parametrize("action", ["setup", "manage"])
 @pytest.mark.parametrize(
-    "fault", ["none", "disabled", "missing_entry", "damaged", "history", "profile"]
+    "fault",
+    [
+        "none",
+        "disabled",
+        "missing_entry",
+        "damaged",
+        "history",
+        "profile",
+        "contention",
+        "busy",
+        "selection_changed",
+        "cancelled",
+    ],
 )
 async def test_local_setup_verifies_before_process_replacement(
     tmp_path: Path,
@@ -103,14 +115,50 @@ async def test_local_setup_verifies_before_process_replacement(
         raise ExecutedError
 
     monkeypatch.setattr(os, "execve", replace_process)
-    if fault in ("none", "disabled"):
+    held = None
+    if fault in ("contention", "busy", "selection_changed", "cancelled"):
+        held = RuntimeLock(selector.installer.installer)
+        monkeypatch.setattr("skulk.extensions.runtime_install._OWNERSHIP_TIMEOUT", 0.25)
+        if fault == "contention":
+            asyncio.get_running_loop().call_later(0.05, held.close)
+        elif fault == "selection_changed":
+            selected = selector.current()
+            assert selected is not None
+            # Publish a different selection after discovery, while ownership is busy.
+            replacement = (
+                selected.model_copy(update={"revision": selected.revision + 1})
+                .model_dump_json()
+                .encode()
+            )
+            asyncio.get_running_loop().call_later(
+                0.05, write_private, root / "runtime-selection.json", replacement
+            )
+            asyncio.get_running_loop().call_later(0.06, held.close)
+    if fault in ("none", "disabled", "contention"):
         with pytest.raises(ExecutedError):
             await command("managed.example", ("--example-input", "$(inert)"))
         assert executed
+    elif fault == "busy":
+        with pytest.raises(TimeoutError):
+            await command("managed.example", ())
+        assert not executed
+        with pytest.raises(BlockingIOError):
+            RuntimeLock(selector.installer.installer)
+    elif fault == "cancelled":
+        task = asyncio.create_task(command("managed.example", ()))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert not executed
+        with pytest.raises(BlockingIOError):
+            RuntimeLock(selector.installer.installer)
     else:
         with pytest.raises((OSError, ValueError)):
             await command("managed.example", ())
         assert not executed
+    if held is not None:
+        held.close()
     RuntimeLock(selector.installer.installer).close()
     if fault == "history":
         with sqlite3.connect(selector.installer.database) as database:
