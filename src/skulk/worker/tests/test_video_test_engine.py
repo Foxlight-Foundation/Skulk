@@ -662,6 +662,13 @@ def test_image_dimensions_are_read_from_headers_alone() -> None:
     # A phone portrait: the thumbnail's ispe comes first, the primary is
     # named by pitm and stored sideways with a quarter-turn irot.
     assert dimensions_from_header(_heic_bytes(4032, 3024, phone=True)) == (3024, 4032)
+    # pitm names an item ipma does not list: unresolved, so no shape rather
+    # than the first ispe (a thumbnail) deciding the canvas.
+    orphan = _heic_bytes(4032, 3024, phone=True).replace(
+        b"pitm" + bytes(4) + struct.pack(">H", 1),
+        b"pitm" + bytes(4) + struct.pack(">H", 9),
+    )
+    assert dimensions_from_header(orphan) is None
     assert dimensions_from_header(b"\x00\x00\x00\x18ftypisom" + bytes(32)) is None
 
 
@@ -681,7 +688,9 @@ def test_plan_takes_the_canvas_from_the_keyframe_when_nothing_else_says(
     tall = tmp_path / "tall.jpg"
     tall.write_bytes(_jpeg_bytes(900, 1600))
 
-    def spec(role: str, path: Path, slot: int = 0) -> VideoReferenceSpec:
+    def spec(
+        role: str, path: Path, slot: int = 0, at_seconds: float | None = None
+    ) -> VideoReferenceSpec:
         return VideoReferenceSpec(
             slot=slot,
             kind="image",
@@ -690,6 +699,7 @@ def test_plan_takes_the_canvas_from_the_keyframe_when_nothing_else_says(
             size_bytes=path.stat().st_size if path.exists() else 1,
             sha256="0" * 64,
             local_path=str(path),
+            at_seconds=at_seconds,
         )
 
     base = VideoGenerationTaskParams(
@@ -742,3 +752,10 @@ def test_plan_takes_the_canvas_from_the_keyframe_when_nothing_else_says(
         plan_render(base.model_copy(update={"references": (missing,)}), video).width
         == 64
     )
+    # Timed keyframes alone: the earliest one shapes the canvas.
+    timed = (
+        spec("keyframe", tall, at_seconds=0.75),
+        spec("keyframe", wide, 1, at_seconds=0.25),
+    )
+    earliest = plan_render(base.model_copy(update={"references": timed}), video)
+    assert (earliest.width, earliest.height) == (112, 64)
