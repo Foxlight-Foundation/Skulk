@@ -2,9 +2,12 @@
 
 A keyframe decides the canvas of the clip it anchors, so the planner needs
 the image's shape before any engine touches it. Only the container headers
-are read (PNG, JPEG, WebP: the families the video route accepts), from a
-bounded prefix of the file, so a large or hostile file costs nothing more
-than that prefix and no image codec runs in the worker.
+are read (PNG, JPEG with its EXIF orientation, WebP, GIF, and the ISO
+base-media stills HEIC, HEIF, and AVIF: the families the video route
+accepts), from a bounded prefix of the file, so a large or hostile file
+costs nothing more than that prefix and no image codec runs in the worker.
+The shape returned is the displayed shape: a phone photo stored sideways
+with an orientation tag counts as the engine will show it.
 """
 
 from __future__ import annotations
@@ -47,6 +50,10 @@ def dimensions_from_header(data: bytes) -> tuple[int, int] | None:
         return _jpeg(data)
     if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
         return _webp(data)
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return _gif(data)
+    if data[4:8] == b"ftyp":
+        return _isobmff(data)
     return None
 
 
@@ -59,6 +66,7 @@ def _png(data: bytes) -> tuple[int, int] | None:
 
 def _jpeg(data: bytes) -> tuple[int, int] | None:
     offset = 2
+    orientation = 1
     while offset + 4 <= len(data):
         if data[offset] != 0xFF:
             return None
@@ -75,11 +83,108 @@ def _jpeg(data: bytes) -> tuple[int, int] | None:
             # End of image, or scan data before any frame header.
             return None
         length = _be16(data, offset + 2)
+        if length < 2:
+            # A segment shorter than its own length field cannot advance the
+            # cursor; a malformed file is no shape, never a stuck runner.
+            return None
+        if marker == 0xE1 and data[offset + 4 : offset + 10] == b"Exif\x00\x00":
+            orientation = _exif_orientation(data[offset + 10 : offset + 2 + length])
         if marker in _JPEG_FRAME_MARKERS:
             if offset + 9 > len(data):
                 return None
-            return _positive(_be16(data, offset + 7), _be16(data, offset + 5))
+            width, height = _be16(data, offset + 7), _be16(data, offset + 5)
+            if orientation in (5, 6, 7, 8):
+                # The decoder transposes these on display; so does the engine.
+                width, height = height, width
+            return _positive(width, height)
         offset += 2 + length
+    return None
+
+
+def _exif_orientation(tiff: bytes) -> int:
+    """The EXIF orientation tag from a TIFF block, 1 when absent or unreadable."""
+    if len(tiff) < 8 or tiff[:2] not in (b"II", b"MM"):
+        return 1
+    order = "little" if tiff[:2] == b"II" else "big"
+
+    def read(offset: int, size: int) -> int:
+        return int.from_bytes(tiff[offset : offset + size], order)
+
+    if read(2, 2) != 42:
+        return 1
+    ifd = read(4, 4)
+    if ifd + 2 > len(tiff):
+        return 1
+    count = min(read(ifd, 2), 512)
+    for index in range(count):
+        entry = ifd + 2 + index * 12
+        if entry + 12 > len(tiff):
+            return 1
+        if read(entry, 2) == 0x0112 and read(entry + 2, 2) == 3:
+            value = read(entry + 8, 2)
+            return value if 1 <= value <= 8 else 1
+    return 1
+
+
+def _gif(data: bytes) -> tuple[int, int] | None:
+    if len(data) < 10:
+        return None
+    width = int.from_bytes(data[6:8], "little")
+    height = int.from_bytes(data[8:10], "little")
+    return _positive(width, height)
+
+
+_STILL_BRANDS = frozenset(
+    {b"heic", b"heix", b"heim", b"heis", b"hevc", b"mif1", b"msf1", b"avif", b"avis"}
+)
+
+
+def _isobmff(data: bytes) -> tuple[int, int] | None:
+    """HEIC, HEIF, and AVIF: the ``ispe`` property inside ``meta/iprp/ipco``."""
+    size = _be32(data, 0)
+    if (
+        size < 16
+        or data[8:12] not in _STILL_BRANDS
+        and not any(
+            data[16 + 4 * index : 20 + 4 * index] in _STILL_BRANDS
+            for index in range((min(size, 64) - 16) // 4)
+        )
+    ):
+        return None
+    meta = _box(data, 0, len(data), b"meta")
+    if meta is None:
+        return None
+    # meta is a full box: four bytes of version and flags precede its children.
+    iprp = _box(data, meta[0] + 4, meta[1], b"iprp")
+    if iprp is None:
+        return None
+    ipco = _box(data, iprp[0], iprp[1], b"ipco")
+    if ipco is None:
+        return None
+    ispe = _box(data, ipco[0], ipco[1], b"ispe")
+    if ispe is None or ispe[0] + 12 > len(data):
+        return None
+    return _positive(_be32(data, ispe[0] + 4), _be32(data, ispe[0] + 8))
+
+
+def _box(data: bytes, start: int, end: int, kind: bytes) -> tuple[int, int] | None:
+    """``(payload start, payload end)`` of the first box of ``kind`` in a span."""
+    offset = start
+    while offset + 8 <= min(end, len(data)):
+        size = _be32(data, offset)
+        header = 8
+        if size == 1:
+            if offset + 16 > len(data):
+                return None
+            size = int.from_bytes(data[offset + 8 : offset + 16], "big")
+            header = 16
+        elif size == 0:
+            size = end - offset
+        if size < header:
+            return None
+        if data[offset + 4 : offset + 8] == kind:
+            return (offset + header, min(offset + size, end))
+        offset += size
     return None
 
 

@@ -599,6 +599,18 @@ def _webp_vp8x_bytes(width: int, height: int) -> bytes:
     return b"RIFF" + struct.pack("<I", len(body)) + body
 
 
+def _heic_bytes(width: int, height: int) -> bytes:
+    def box(kind: bytes, payload: bytes) -> bytes:
+        return struct.pack(">I", 8 + len(payload)) + kind + payload
+
+    ispe = box(b"ispe", bytes(4) + struct.pack(">II", width, height))
+    ipco = box(b"ipco", box(b"hvcC", bytes(6)) + ispe)
+    iprp = box(b"iprp", ipco)
+    meta = box(b"meta", bytes(4) + box(b"hdlr", bytes(24)) + iprp)
+    ftyp = box(b"ftyp", b"heic" + bytes(4) + b"mif1heic")
+    return ftyp + meta
+
+
 def test_image_dimensions_are_read_from_headers_alone() -> None:
     from skulk.worker.runner.image_dimensions import dimensions_from_header
 
@@ -610,6 +622,23 @@ def test_image_dimensions_are_read_from_headers_alone() -> None:
     assert dimensions_from_header(b"GIF89a" + bytes(20)) is None
     assert dimensions_from_header(b"\xff\xd8\xff\xda\x00\x02") is None
     assert dimensions_from_header(_png_bytes(0, 8)) is None
+    # A zero-length segment cannot advance the cursor: no shape, no loop.
+    assert dimensions_from_header(b"\xff\xd8\xff\xe0\x00\x00" + bytes(64)) is None
+    # A sideways phone photo: EXIF orientation 6 swaps the displayed axes.
+    tiff = (
+        b"MM\x00\x2a\x00\x00\x00\x08"
+        + struct.pack(">H", 1)
+        + struct.pack(">HHIHH", 0x0112, 3, 1, 6, 0)
+        + bytes(4)
+    )
+    app1 = b"\xff\xe1" + struct.pack(">H", 8 + len(tiff)) + b"Exif\x00\x00" + tiff
+    rotated = b"\xff\xd8" + app1 + _jpeg_bytes(4000, 3000)[2:]
+    assert dimensions_from_header(rotated) == (3000, 4000)
+    assert dimensions_from_header(
+        b"GIF89a" + struct.pack("<HH", 320, 200) + bytes(20)
+    ) == (320, 200)
+    assert dimensions_from_header(_heic_bytes(4032, 3024)) == (4032, 3024)
+    assert dimensions_from_header(b"\x00\x00\x00\x18ftypisom" + bytes(32)) is None
 
 
 def test_plan_takes_the_canvas_from_the_keyframe_when_nothing_else_says(
