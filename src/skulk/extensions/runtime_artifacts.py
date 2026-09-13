@@ -29,6 +29,7 @@ Digest = Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
 Identifier = Annotated[
     str, Field(min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9._:@-]+$")
 ]
+# Preserve the signed/persisted Linux artifact identifier; it is not an OS-version gate.
 RuntimePlatform = Literal["macos-arm64", "ubuntu-24.04-x86_64"]
 
 
@@ -163,12 +164,7 @@ def measure_host() -> QualifiedHost:
     target: RuntimePlatform
     if sys.platform == "darwin" and platform.machine() == "arm64":
         target = "macos-arm64"
-    elif (
-        sys.platform == "linux"
-        and platform.machine() == "x86_64"
-        and platform.freedesktop_os_release().get("ID") == "ubuntu"
-        and platform.freedesktop_os_release().get("VERSION_ID") == "24.04"
-    ):
+    elif sys.platform == "linux" and platform.machine() == "x86_64":
         target = "ubuntu-24.04-x86_64"
     else:
         raise ValueError("unsupported managed runtime platform")
