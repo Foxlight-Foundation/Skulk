@@ -68,9 +68,7 @@ def _rust_fixture(
     for name, ready in (("cargo", cargo_ready), ("rustc", compiler_ready)):
         template = root / (name + ".template")
         template.write_text(
-            '#!/bin/sh\ntest -f "$SKULK_INSTALLER_TEST_ROOT/'
-            + name
-            + '.ready"\n'
+            '#!/bin/sh\ntest -f "$SKULK_INSTALLER_TEST_ROOT/' + name + '.ready"\n'
         )
         template.chmod(0o755)
         if ready is not None:
@@ -94,7 +92,9 @@ printf ready > "$SKULK_INSTALLER_TEST_ROOT/rustc.ready"
     return tools
 
 
-def _run_rust_prerequisites(root: Path, tools: Path) -> subprocess.CompletedProcess[str]:
+def _run_rust_prerequisites(
+    root: Path, tools: Path
+) -> subprocess.CompletedProcess[str]:
     installer = _installer()
     start = installer.index("# --- Rust toolchain")
     end = installer.index("# --- uv", start)
@@ -121,7 +121,12 @@ def _run_rust_prerequisites(root: Path, tools: Path) -> subprocess.CompletedProc
 
 @pytest.mark.parametrize(
     ("cargo_ready", "compiler_ready", "repair_expected"),
-    [(None, None, True), (False, False, True), (True, False, True), (True, True, False)],
+    [
+        (None, None, True),
+        (False, False, True),
+        (True, False, True),
+        (True, True, False),
+    ],
 )
 def test_rust_setup_checks_usability_before_advancing(
     tmp_path: Path,
@@ -156,7 +161,10 @@ def test_interrupted_rust_setup_recovers_on_the_same_installation(
     retried = _run_rust_prerequisites(tmp_path, tools)
     assert retried.returncode == 0, retried.stderr
     assert (tmp_path / "advanced").is_file()
-    assert (tmp_path / "installations").read_text().splitlines() == ["install", "install"]
+    assert (tmp_path / "installations").read_text().splitlines() == [
+        "install",
+        "install",
+    ]
 
 
 def test_successful_rustup_exit_requires_working_tools(tmp_path: Path) -> None:
