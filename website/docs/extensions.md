@@ -742,7 +742,8 @@ and wheel bytes, supported platform/Python version, qualified Skulk build, state
 schema and permission summary. Plugin-specific manifest policy stays opaque but
 is covered by the signature. Trust comes from owner-provisioned protected local
 storage, not the release. Revoked or expired artifacts and incompatible hosts
-are refused. Supported targets are Apple Silicon macOS and Ubuntu 24.04 x86_64.
+are refused. Linux distribution names and versions do not restrict installation;
+native wheel tags and dependency checks determine binary compatibility. Supported targets are Apple Silicon macOS and Linux x86_64 with systemd.
 
 `RuntimeInstaller` in `extensions/runtime_install.py` stages complete supplied
 artifacts under a stable service root. It verifies wheel tags, archive paths,
@@ -832,7 +833,7 @@ missing, reinstall the complete qualified package before retrying setup.
 
 The candidate `skulk-plugin-service setup` command prepares a verified independent
 manager runtime and registers a fixed nonroot system service on Apple Silicon
-macOS or Ubuntu 24.04 x86_64. Run it as the existing Skulk owner in the qualified
+macOS or Linux x86_64 with systemd. Run it as the existing Skulk owner in the qualified
 isolated environment; only its fixed registration helper requests local elevation.
 It generates service storage and a local profile connection without configuration
 file editing. `skulk-plugin-service status` separates retained setup progress from

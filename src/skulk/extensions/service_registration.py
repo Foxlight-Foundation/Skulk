@@ -21,23 +21,17 @@ from pathlib import Path
 from typing import Literal, cast, final
 from uuid import uuid4
 
+# Preserve the signed/persisted Linux artifact identifier; it is not an OS-version gate.
 ServicePlatform = Literal["macos-arm64", "ubuntu-24.04-x86_64"]
 
 
 def service_platform() -> ServicePlatform:
-    """Require a release-qualified local OS and processor architecture."""
+    """Select service layout by OS kernel and CPU architecture."""
     if sys.platform == "darwin" and platform.machine() == "arm64":
         return "macos-arm64"
-    if (
-        sys.platform == "linux"
-        and platform.machine() == "x86_64"
-        and platform.freedesktop_os_release().get("ID") == "ubuntu"
-        and platform.freedesktop_os_release().get("VERSION_ID") == "24.04"
-    ):
+    if sys.platform == "linux" and platform.machine() == "x86_64":
         return "ubuntu-24.04-x86_64"
-    raise ValueError(
-        "plugin services require Apple Silicon macOS or Ubuntu 24.04 x86_64"
-    )
+    raise ValueError("plugin services require Apple Silicon macOS or Linux x86_64")
 
 
 @final
