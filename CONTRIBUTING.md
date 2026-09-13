@@ -79,6 +79,8 @@ Skulk is built with a mix of Rust, Python, TypeScript (React for the dashboard),
 - `resources/image_model_cards/` — Image model metadata TOML files
 - `resources/embedding_model_cards/` — Embedding model metadata TOML files
 - `resources/speech_model_cards/` — Speech model metadata TOML files
+- `resources/video_model_cards/`: audio-video generation model metadata TOML files (downloadable artifacts only; the signed registry imports this directory)
+- `resources/test_engine_cards/`: cards served by the synthetic test engines, such as `foxlight/test-video`; they name no artifact and stay out of the registry corpus
 - `resources/speech_reference_voices/` — Checksummed bundled TTS conditioning audio and exact transcripts
 - `deployment/logging/` — VictoriaLogs + Grafana stack and Vector config
 - `docs/` — Technical documentation
@@ -92,6 +94,8 @@ The Skulk dashboard is a React + TypeScript + styled-components app in `dashboar
 - `src/components/cluster/` — ClusterCard, PlacementManager, RunningInstanceCard
 - `src/components/layout/` — HeaderNav, SettingsPanel, InstancePanel, ConversationPanel, StoreRegistryTable
 - `src/components/chat/` — ChatForm, ChatMessages, ChatModelSelector
+- `src/components/topology/` — TopologyGraph, ClusterNode, capability satellites and flyout (`CapabilitySatellite`, `CapabilityFlyout`, `capabilityActions.ts`)
+- `src/components/capabilities/` — CapabilityPanel, the drawer for one capability node (overview, surfaces, actions)
 - `src/stores/` — Zustand stores (chatStore, uiStore) with localStorage/sessionStorage persistence
 - `src/hooks/` — useClusterState, useConfig, useModelPicker
 - `src/auth/` — Browser operator pairing and in-memory credential transport; its public protocol fixtures are checked against Python pairing proofs. Credentials must bypass Redux and browser persistence.
@@ -108,6 +112,7 @@ This starts a Vite dev server on port 3000 with hot reload. The dev server proxi
 - `src/skulk/api/main.py` — FastAPI server (OpenAI, Claude, Ollama API compatibility)
 - `src/skulk/master/` — Master node (placement, election, event sourcing)
 - `src/skulk/worker/` — Worker node (inference, runner management, download coordination)
+- `src/skulk/worker/runner/`: one package per engine runner (MLX text, image, embeddings, speech, llama.cpp, llama-server, vLLM, RPC donor); `comfy/` drives a headless ComfyUI server for the audio-video engine, `test_video/` is the deterministic test video engine that renders synthetic clips so the video substrate runs without a GPU, and `video_plan.py` is the request-to-plan resolution both share
 - `src/skulk/store/` — Model store (registry, downloads, config, model optimizer)
 - `src/skulk/operator/` — Stable operator identity, quorum certification,
   crash-fault consensus, bounded dormant proposal lifecycle, and
@@ -175,6 +180,8 @@ operator overrides. Model-card locations are:
 - `resources/image_model_cards/` for image generation models
 - `resources/embedding_model_cards/` for embedding models
 - `resources/speech_model_cards/` for TTS/STT speech models
+- `resources/video_model_cards/` for audio-video generation models
+- `resources/test_engine_cards/` for the synthetic test engines' cards
 - `~/.skulk/custom_model_cards/` for user-added custom models
 
 ### Adding a Model Card

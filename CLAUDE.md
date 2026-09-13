@@ -367,6 +367,56 @@ A model card's `placement.compatible_backends` selects which engine serves it
   `AcceleratorMetrics.compute_capability` (+ `native_fp4`/`native_fp8`, via NVML)
   is the capability signal for keying placement on GPU generation, not vendor.
 
+- **`comfy`** (`worker/runner/comfy/`, `provisioning/comfy.py`): served
+  audio-video engine over a pinned ComfyUI checkout (`COMFY_PIN`, release
+  v0.35.0) in its own managed virtual environment with a hash-pinned torch
+  wheel set (`COMFY_TORCH_WHEELS`: cu130 for aarch64 GB10 and x86_64 from
+  the PyTorch index; for x86_64 Strix Halo, AMD's stable ROCm 10.0.0
+  channel, `stable.repo.amd.com/rocm/whl-next`, twelve pinned artifacts:
+  the `rocm` runtime packages with the gfx1151 device libraries, torch
+  with its gfx1151 device packages, torchvision, torchaudio, triton; that
+  channel publishes no digests, so they are recorded by downloading each
+  artifact once).
+  Provisioned under `SKULK_ENGINES_DIR/comfy/<pin>/<variant>-<wheel-set
+  digest>` (a wheel-set change reprovisions, never reuses) at node
+  startup only when `SKULK_ENABLE_VIDEO_MODELS=true` (the wheel set is
+  gigabytes), or by `skulk doctor --fix`; `SKULK_COMFY_BIN` (the
+  environment's python) plus `SKULK_COMFY_ROOT` (the checkout) point at a
+  hand-built install instead. The runner spawns ComfyUI headless (loopback
+  port, custom and API nodes disabled, Skulk-owned input/output/temp/user
+  directories, an `extra_model_paths.yaml` exposing the staged artifact),
+  binds the card and request onto ComfyUI's own MiniMax H3 node graph
+  (`graph.py`, the official workflow templates node for node), submits it
+  with a caller-minted `prompt_id`, follows `progress_state` on the
+  WebSocket, cancels through the jobs API, and hands the container plus a
+  first-frame thumbnail to the worker like the test engine does. Teardown
+  signals the process group; worker startup sweeps init-parented servers
+  launched with Skulk's `--user-directory`. Tags `comfy-cuda` and
+  `comfy-rocm` (the ROCm lane launches with `ROCM_LAUNCH_FLAGS`:
+  `--bf16-vae --disable-mmap --cache-none`); GPU-only, single-host. The
+  runner treats ComfyUI's `execution_success` socket event as success but
+  reads the outputs from `/history` only once the entry exists: ComfyUI
+  sends the event from inside its executor and records history after the
+  executor returns, a gap that on the ROCm lane spans seconds. The ROCm
+  wheel set is AMD's stable ROCm 10.0.0 channel, whose gfx1151 BLAS
+  libraries are complete for H3; the earlier rocm7.2 set from the PyTorch
+  index lacked GEMM kernels the text encoder reaches on image-conditioned
+  prompts and needed hipBLASLt routing plus a fresh server per render,
+  both retired with that set.
+  ADVANCING `COMFY_PIN` OR THE WHEEL SET IS A CHECKLIST
+  (architecture-reference.md "Engine pin advancement").
+- **`test_video`** (`worker/runner/test_video/`): deterministic test video
+  engine for the audio-video substrate. Advertised as `test_video` /
+  `test_video-cpu` only when `SKULK_TEST_VIDEO_ENGINE` is set; serves only the
+  bundled `foxlight/test-video` card (under `resources/test_engine_cards/`,
+  apart from the artifact card directories the registry imports), for which
+  the worker provisions a stand-in model directory at startup. Renders a seeded synthetic clip
+  (MJPEG video plus 16-bit PCM audio in a hand-muxed MP4, JPEG thumbnail)
+  through the real card rules, progress frames, terminal manifest,
+  `OUTPUT_MEDIA` transfer, and job settlement, so `/v1/videos` works end to
+  end on a node without a GPU. `SKULK_TEST_VIDEO_STEP_SECONDS` sets the
+  simulated per-step wall time. Never enable it on a production node.
+
 ### Intelligent fabric (steward)
 Optional resident operator assistant, config-gated (`intelligent_fabric` in
 skulk.yaml, default off). Identity = `BaseInstance.system_role` flagged
@@ -451,10 +501,11 @@ Components communicate via typed pub/sub topics (src/skulk/routing/topics.py):
 - `SPEECH_MEDIA`: Bounded speech input, off the event log/master/State. TTS reference audio requires node-addressed Zenoh. Batch STT audio is retained at the owning API until authoritative `TaskCreated` placement, then sent as raw frames to each selected speech worker; workers gate runner dispatch on exact sequence, task owner, count, and SHA-256 verification. Batch STT retains a target-filtered gossipsub fallback on the trusted fabric. Same-version fleet required.
 - `TRACE_DATA`: Best-effort diagnostic trace payloads, off the event log/master/State. Each runner supervisor sends one terminal packet per traced task rank to the owning API; that API assembles the expected rank set under fixed task-count and age bounds before writing the Chrome trace. Same-version fleet required.
 - `VISION_MEDIA`: VLM and image-edit input, off the event log/master/State. The API waits for authoritative `TaskCreated` placement, then sends an `opened -> chunk* -> completed` binary-framed stream directly to every selected MLX rank, or only to the `LlamaRpcInstance` driver because RPC donors never execute inference. Workers apply stream/frame/byte/age bounds and expose input to planning only after exact sequence, metadata, task-owner, and SHA-256 verification plus successful acknowledgement admission; timed-out acknowledgement sends retry while the task remains gated. Each target returns `accepted`, and a bounded missing-ack deadline fails the source request. Vision ingress has separate bounded network-receive lanes and a separate remote dispatcher; `NodeDiagnostics.visionMediaEgress` reports router pressure and `visionMediaIngress` reports worker retention and outcomes, so uploads cannot delay control receive, consume generated-output capacity, or fail invisibly. Same-version fleet required.
+- `OUTPUT_MEDIA`: Finished video containers (and optional thumbnails), off the event log/master/State. The producing worker streams `OutputMediaPacket` frames (`opened -> chunk* -> completed`, raw bytes, purpose `video` or `thumbnail`) to the owning API, which assembles them in its `VideoStore`, verifies size and SHA-256, and returns `accepted` or `transport_failed`; the worker keeps its local copy until acknowledged or a five-minute deadline passes. `VISION_MEDIA` doubles as the reference-attachment ingress for `VideoGeneration` (`payload="reference_media"`, raw slot-keyed bytes, larger bounds, per-slot digest verification before task-local files are written). A video job completes only when the terminal `VideoChunk` on DATA and the verified container have both arrived. Callers drive renders through the OpenAI-shaped `/v1/videos` job family (create as JSON or multipart, list, retrieve, `content`, cancel, delete); every job failure path funnels through `API._finish_video_job`, and the `VideoStore` evicts the oldest completed jobs to stay under `SKULK_VIDEO_STORE_MAX_BYTES`. Same-version fleet required.
 - `ELECTION_MESSAGES`: Election protocol messages
 - `AUTHORITY_MESSAGES`: Stable-installation-addressed, Ed25519-signed public authority consensus messages (prepare/promise/accept/vote/commit/catch-up). It has dedicated bounded Python egress, but currently uses the default libp2p gossipsub behavior; secret payloads never enter it.
 - `CONNECTION_MESSAGES`: libp2p connection updates
-- `TELEMETRY`: Workers, node-lifetime services, and API lifetime tasks offer `NodeTelemetry` without blocking into a bounded 256-key latest-value map, drained through a one-packet queue and dedicated gossipsub protocol/handler queues. The in-memory `TelemetryView` holds node resources/memory/system/identity/disk/rdma-ctl, extension capability tags, the payload-free `NodeHeartbeat`, non-terminal `DownloadPending`/`DownloadOngoing`, and bounded `NodeArtifactInventory` readings; none enters the event log. Artifact inventory contains compact installed identity, model ID, size, completeness, last use, in-use state, store-host role, and truncation only. Its node-owned publisher exists even under `--no-api`, publishes at startup, after relevant storage/runtime transitions, and every 60 seconds; local receipt time drives freshness and node pruning removes it. Detached read-only records receive one full hash verification per stable file-stat fingerprint, preventing periodic repair scans from continuously rehashing model weights while invalidating cached trust after filesystem changes. The canonical catalog and manifests never ride telemetry. `GET /store/registry` synthesizes `store_local` entries for the advertised store host, projects other `node_cache` locations, and reports `syncing`/`current`/`degraded`/`unavailable` coverage. This lossy view is operator truth only; reconciliation retains direct verified `/store/storage` reads before transfer. Only download completed/failed outcomes remain in `State`, with opaque attempt IDs preventing delayed telemetry from overriding terminal/reset decisions; `effective_downloads()` restores the existing planner/worker/`GET /state` view. `GET /v1/diagnostics/telemetry` exposes aggregate local pressure. Heartbeat publishes every two seconds; ordinary telemetry and the last indexed control event remain liveness fallbacks, and `NodeTimedOut.evidence` persists the deciding ages. Connectivity readings (`node_network`, thunderbolt maps/cycles) deliberately remain ordered control state because they define the topology graph. Topology edges come from HTTP identity probes of advertised addresses PLUS authenticated libp2p sessions recorded as first-class edges (#662, refcounted per peer; the session edge is what keeps a NAT'd remote member out of floating-node limbo), with failing advertised addresses probed at a backed-off cadence. Same-version fleets remain required.
+- `TELEMETRY`: Workers, node-lifetime services, and API lifetime tasks offer `NodeTelemetry` without blocking into a bounded 256-key latest-value map, drained through a one-packet queue and dedicated gossipsub protocol/handler queues. The in-memory `TelemetryView` holds node resources/memory/system/identity/disk/rdma-ctl, extension capability tags, bounded capability-node summaries (`NodeCapabilityNodes`, projected as `/state.capabilityNodes` and drawn as topology satellites), the payload-free `NodeHeartbeat`, non-terminal `DownloadPending`/`DownloadOngoing`, and bounded `NodeArtifactInventory` readings; none enters the event log. Artifact inventory contains compact installed identity, model ID, size, completeness, last use, in-use state, store-host role, and truncation only. Its node-owned publisher exists even under `--no-api`, publishes at startup, after relevant storage/runtime transitions, and every 60 seconds; local receipt time drives freshness and node pruning removes it. Detached read-only records receive one full hash verification per stable file-stat fingerprint, preventing periodic repair scans from continuously rehashing model weights while invalidating cached trust after filesystem changes. The canonical catalog and manifests never ride telemetry. `GET /store/registry` synthesizes `store_local` entries for the advertised store host, projects other `node_cache` locations, and reports `syncing`/`current`/`degraded`/`unavailable` coverage. This lossy view is operator truth only; reconciliation retains direct verified `/store/storage` reads before transfer. Only download completed/failed outcomes remain in `State`, with opaque attempt IDs preventing delayed telemetry from overriding terminal/reset decisions; `effective_downloads()` restores the existing planner/worker/`GET /state` view. `GET /v1/diagnostics/telemetry` exposes aggregate local pressure. Heartbeat publishes every two seconds; ordinary telemetry and the last indexed control event remain liveness fallbacks, and `NodeTimedOut.evidence` persists the deciding ages. Connectivity readings (`node_network`, thunderbolt maps/cycles) deliberately remain ordered control state because they define the topology graph. Topology edges come from HTTP identity probes of advertised addresses PLUS authenticated libp2p sessions recorded as first-class edges (#662, refcounted per peer; the session edge is what keeps a NAT'd remote member out of floating-node limbo), with failing advertised addresses probed at a backed-off cadence. Same-version fleets remain required.
 
 
 ### Event Sourcing
@@ -646,7 +697,10 @@ clusters). Contract in `src/skulk/extensions/types.py`: chat middleware gets
 `transform_chat_request` (pre-dispatch, on the API node) and
 `observe_chat_response` (immutable summary, background task), plus an
 `ExtensionContext` with `embed_texts` (in-process `/v1/embeddings`,
-`API.embed_texts`). Both hooks also run on the steward's bespoke turn
+`API.embed_texts`). `publish_capability_node` / `withdraw_capability_node`
+publish a bounded, credential-free summary of a managed capability node
+(status, link surfaces, actions) that the dashboard draws as a satellite of
+its host; `SKULK_TEST_CAPABILITY_NODE=<url>` publishes a stand-in one. Both hooks also run on the steward's bespoke turn
 (`API._steward_extension_transform`): the turn is presented as the steward's
 system prompt in `instructions` plus the operator history in `input`, and only
 those two are read back. Invariants: every extension call is guarded (a raising
@@ -682,7 +736,7 @@ card-content digest from the same effective catalog/installed precedence as
 place resources; controllers must repeat identity and live compatibility checks.
 
 Skulk now treats model capability handling as two layers:
-- **Model cards**: persisted declarative metadata, including optional `reasoning`, `modalities`, `audio`, `tooling`, and `runtime` sections for refined model support
+- **Model cards**: persisted declarative metadata, including optional `reasoning`, `modalities`, `audio`, `video`, `license`, `tooling`, and `runtime` sections for refined model support. The `video` section declares audio-video generation truth (modes `t2va`/`fl2va`/`ref2va`, each implying one of `TextToVideo`/`ImageToVideo`/`ReferenceToVideo`; duration, fps and frame grid; canvas; audio output; reference limits; pinned lora/model_patch/embedding/graph_template companions) and names no engine; video cards are hidden until `SKULK_ENABLE_VIDEO_MODELS=true`, like the image gate
 - **Resolved capability profiles**: normalized runtime behavior contracts derived from the card plus conservative family defaults
 
 This capability spine is the source of truth for model-aware reasoning defaults, prompt rendering, output parsing, tool-call handling, speech/TTS/STT metadata, and additive `/v1/models` metadata consumed by the dashboard.

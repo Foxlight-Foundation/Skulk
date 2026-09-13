@@ -12,6 +12,11 @@ from skulk.api.types import (
     Usage,
 )
 from skulk.shared.models.model_cards import AudioResponseFormat, ModelId
+from skulk.shared.types.video import (
+    VideoGenerationStats,
+    VideoOutputManifest,
+    VideoStage,
+)
 from skulk.utils.pydantic_ext import CamelCaseModel, TaggedModel
 
 from .common import CommandId, NodeId
@@ -159,6 +164,47 @@ class TranscriptionChunk(BaseChunk):
     """Error text when a speech runner fails after beginning output."""
 
 
+class VideoChunk(BaseChunk):
+    """Progress or terminal frame for one audio-video generation.
+
+    Progress frames carry the stage, step counters, and an optional bounded
+    JPEG preview. The terminal frame carries the output manifest; the bytes it
+    describes travel separately on the ``OUTPUT_MEDIA`` plane.
+    """
+
+    stage: VideoStage
+    """Coarse render phase."""
+    step: int | None = None
+    """Completed sampling steps so far."""
+    total_steps: int | None = None
+    """Planned sampling steps."""
+    progress: float | None = Field(default=None, ge=0.0, le=1.0)
+    """Overall completion estimate."""
+    preview: str | None = Field(default=None, max_length=262_144)
+    """Optional base64 JPEG preview of the latest decoded frame."""
+    output: VideoOutputManifest | None = None
+    """Finished container description; present only on the terminal frame."""
+    stats: VideoGenerationStats | None = None
+    """Runner timing, on the terminal frame."""
+    finish_reason: FinishReason | None = None
+    """Terminal reason when this is the last frame."""
+    error_message: str | None = None
+    """Error text when the render fails after progress began."""
+
+    @model_validator(mode="after")
+    def _validate_terminal(self) -> "VideoChunk":
+        if self.output is not None and self.finish_reason is None:
+            raise ValueError("a video output manifest requires a finish_reason")
+        return self
+
+    def __repr_args__(self) -> Generator[tuple[str, Any], None, None]:
+        for name, value in super().__repr_args__():  # pyright: ignore[reportAny]
+            if name == "preview" and hasattr(value, "__len__"):  # pyright: ignore[reportAny]
+                yield name, f"<{len(self.preview or '')} chars>"
+            elif name is not None:
+                yield name, value
+
+
 class PrefillProgressChunk(BaseChunk):
     """Data class for prefill progress events during streaming."""
 
@@ -175,6 +221,7 @@ GenerationChunk = (
     | AudioChunk
     | TranscriptionChunk
     | PrefillProgressChunk
+    | VideoChunk
 )
 
 

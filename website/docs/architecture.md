@@ -51,12 +51,12 @@ flowchart TB
 
 Each subsystem has its own concern:
 
-- **Router** wraps libp2p (via PyO3 Rust bindings) and exposes typed pub/sub topics: `GLOBAL_EVENTS`, `LOCAL_EVENTS`, `COMMANDS`, `DOWNLOAD_COMMANDS`, `STATE_SYNC_MESSAGES`, `ELECTION_MESSAGES`, `AUTHORITY_MESSAGES`, `CONNECTION_MESSAGES`, `TELEMETRY`, `DATA`, `PROVIDER_DATA`, `REALTIME_AUDIO`, `SPEECH_MEDIA`, `TRACE_DATA`, and `VISION_MEDIA`. Components subscribe by topic; every topic has a machine-checked control, authority, telemetry, or data plane assignment and payloads are validated Pydantic types.
+- **Router** wraps libp2p (via PyO3 Rust bindings) and exposes typed pub/sub topics: `GLOBAL_EVENTS`, `LOCAL_EVENTS`, `COMMANDS`, `DOWNLOAD_COMMANDS`, `STATE_SYNC_MESSAGES`, `ELECTION_MESSAGES`, `AUTHORITY_MESSAGES`, `CONNECTION_MESSAGES`, `TELEMETRY`, `DATA`, `PROVIDER_DATA`, `REALTIME_AUDIO`, `SPEECH_MEDIA`, `TRACE_DATA`, `VISION_MEDIA`, and `OUTPUT_MEDIA`. Components subscribe by topic; every topic has a machine-checked control, authority, telemetry, or data plane assignment and payloads are validated Pydantic types.
 - **Telemetry plane** (`TELEMETRY` topic) carries last-write-wins readings that are *not* decisions: each node's `participation` role and `backends`, memory and system profile, observational identity/disk/rdma-ctl status, heartbeat, non-terminal model-download progress, and compact node-local artifact availability. A node-owned inventory service runs independently of the HTTP API (including under `--no-api`), publishes at startup and after storage/runtime transitions, and repairs every 60 seconds; a fixed entry ceiling and truncation flag keep it bounded. Detached records for read-only model roots receive one full hash verification per stable file-stat fingerprint, so periodic repair scans reuse process-local trust while any path, device, inode, size, modification-time, or change-time transition forces re-verification. Canonical card bodies, manifests, and the store catalog never ride telemetry: the store host advertises only its role, and API nodes synthesize canonical `store_local` locations while projecting additional `node_cache` copies from `TelemetryView`. Local receipt time establishes freshness; readings become partial after two publication intervals and are pruned with node membership. Local producers never wait for network capacity: a fixed 256-key admission map replaces older values for the same node/reading (download progress additionally keys by model), evicts the oldest distinct key only at the bound, and drains through a one-packet network queue. Telemetry then uses a dedicated gossipsub behavior and protocol with independent per-peer handler queues: transport isolation is structural, so a saturated control or election path cannot delay telemetry and telemetry fan-out cannot consume control or election capacity. Aggregate pressure is available at `GET /v1/diagnostics/telemetry`. Readings land in an in-memory `TelemetryView`, not event-sourced `State`; only download completion and failure remain durable. Attempt identities stop delayed progress on the independent protocol from overriding terminal/reset decisions, while `GET /state` overlays the live view to preserve the dashboard's wire shape. `GET /store/registry` exposes inventory coverage as `syncing`, `current`, `degraded`, or `unavailable`; this is operator/read truth only. Store reconciliation continues to query each node's `/store/storage` directly and verify identities and manifests before transferring bytes. The system profile includes a collector-agnostic accelerator block (GPU utilization, VRAM used and total, power, temperature, clock) normalized at each platform collector. Because the context-admission ceiling must be identical across ranks but telemetry is unordered, the master computes it once at placement time and stamps it onto the instance (`context_token_limit`). **Connectivity readings stay on the control plane**: `node_network`, the thunderbolt maps, and derived `thunderbolt_bridge_cycles` define the topology graph and therefore require ordered event-sourced state.
   Canonical locality does not depend on card resolution:
   `cache_inventory.store_nodes` identifies the live store hosts even when a
   legacy entry has not yet established exact installed-generation provenance.
-- **Data plane** has six typed families. `DATA` carries generated token, image, embedding, transcription, and audio output; `PROVIDER_DATA` carries extension-provider stream frames without adding arbitrary provider payloads to `DataChunk`; `REALTIME_AUDIO` carries built-in realtime STT PCM from an owning API to the selected speech worker; `SPEECH_MEDIA` carries bounded request-scoped TTS reference audio and batch STT uploads; `TRACE_DATA` carries terminal per-rank diagnostic traces to the owning API; and `VISION_MEDIA` carries VLM and image-edit input from the owning API directly to every MLX worker rank selected by the master's authoritative `TaskCreated` decision, or only to the driver of a llama.cpp RPC instance. Streaming families use explicit per-stream lifecycles and every family uses node-addressed same-node short circuit/remote delivery on Zenoh. Vision uses `opened -> chunk* -> completed -> accepted`, with a source-side deadline requiring acceptance from every selected target. Batch STT waits for `TaskCreated`, then sends raw frames to the selected worker and gates runner dispatch on exact sequence, task owner, count, and SHA-256 verification. Trace assembly is best-effort and bounded by task count and age. Vision ingress has its own bounded network-receive lanes and remote dispatcher, stream/owner admission limits, five-minute lease, and `NodeDiagnostics.visionMediaEgress` counters so a large upload cannot delay control receive or consume generated-output capacity. Workers retain incomplete input only within fixed frame, per-command byte, process byte, stream-count, and age bounds; they expose it to planning only after the completion frame, sequence set, metadata, authoritative task owner, and SHA-256 digest verify and the acknowledgement is admitted to transport. `NodeDiagnostics.visionMediaIngress` reports API-staged commands/bytes, pending worker acknowledgements, retained worker streams/frames/bytes, verified streams, completions, rejections, and expirations. A generated-output command queue has a separate 30-minute no-frame resource lease, renewed by every producer frame observed by egress. The master never indexes, persists, or application-relays payloads from these families. OpenAI response models retain their required base64/JSON shapes, while provider, realtime audio, speech media, and vision media cluster framing uses bounded headers plus raw bytes. See [how the cluster communicates](cluster-communication) for transport and trust details.
+- **Data plane** has seven typed families. `DATA` carries generated token, image, video-progress, embedding, transcription, and audio output; `PROVIDER_DATA` carries extension-provider stream frames without adding arbitrary provider payloads to `DataChunk`; `REALTIME_AUDIO` carries built-in realtime STT PCM from an owning API to the selected speech worker; `SPEECH_MEDIA` carries bounded request-scoped TTS reference audio and batch STT uploads; `TRACE_DATA` carries terminal per-rank diagnostic traces to the owning API; and `VISION_MEDIA` carries VLM and image-edit input from the owning API directly to every MLX worker rank selected by the master's authoritative `TaskCreated` decision, or only to the driver of a llama.cpp RPC instance, and carries video reference attachments as raw slot-keyed bytes with their own larger bounds; and `OUTPUT_MEDIA` carries a finished video container from the producing worker back to the owning API, which assembles and verifies it in its video store and acknowledges before the worker releases its copy. A video job is complete only when both the terminal progress frame on `DATA` and the verified container on `OUTPUT_MEDIA` have arrived. Streaming families use explicit per-stream lifecycles and every family uses node-addressed same-node short circuit/remote delivery on Zenoh. Vision uses `opened -> chunk* -> completed -> accepted`, with a source-side deadline requiring acceptance from every selected target. Batch STT waits for `TaskCreated`, then sends raw frames to the selected worker and gates runner dispatch on exact sequence, task owner, count, and SHA-256 verification. Trace assembly is best-effort and bounded by task count and age. Vision ingress has its own bounded network-receive lanes and remote dispatcher, stream/owner admission limits, five-minute lease, and `NodeDiagnostics.visionMediaEgress` counters so a large upload cannot delay control receive or consume generated-output capacity. Workers retain incomplete input only within fixed frame, per-command byte, process byte, stream-count, and age bounds; they expose it to planning only after the completion frame, sequence set, metadata, authoritative task owner, and SHA-256 digest verify and the acknowledgement is admitted to transport. `NodeDiagnostics.visionMediaIngress` reports API-staged commands/bytes, pending worker acknowledgements, retained worker streams/frames/bytes, verified streams, completions, rejections, and expirations. A generated-output command queue has a separate 30-minute no-frame resource lease, renewed by every producer frame observed by egress. The master never indexes, persists, or application-relays payloads from these families. OpenAI response models retain their required base64/JSON shapes, while provider, realtime audio, speech media, and vision media cluster framing uses bounded headers plus raw bytes. See [how the cluster communicates](cluster-communication) for transport and trust details.
 
   Vision admission is hard-bounded: an API accepts at most 64 staged plus active commands, 32 MiB per command, and 512 MiB across staged plus active transfers. The isolated remote dispatcher admits 16 streams total and per destination owner, with a 66-frame queue holding one open frame, at most 64 half-megabyte payload frames, and one completion frame per stream (512 MiB maximum queued media), 64 bounded rejection tasks, and a five-minute idle lease. Network receive has a separate 66-frame payload lane and 1024-frame metadata-only terminal lane. A worker admits 64 streams, 64 media chunks and 32 MiB per command, 512 MiB process-wide, and retains at most 64 pre-task failure reports; both worker retention and source acknowledgement expire after five minutes. Same-process delivery uses rendezvous channels rather than hidden packet queues.
 - **Election** runs the bully algorithm and broadcasts `ELECTION_MESSAGES`. The winner takes the master role. The topic has its own bounded Python egress queue and is negotiated on a dedicated gossipsub protocol with its own per-peer handler queue, so saturation from control or telemetry fan-out cannot consume election capacity. A compatibility copy on the legacy protocol lets old and new nodes elect during staggered upgrades; identical candidates received on both paths count once. If a better same-round proposal arrives after the local campaign timeout, the node corrects its completed result using the original vote ordering. Delayed subscription exchange therefore does not require another connection change to repair conflicting masters.
@@ -724,6 +724,150 @@ actually serve it. Speech runners are single-node. The card's `audio` section
 declares what the model truthfully supports (streaming, realtime, reference
 audio, translation, fixed voices), and every serving surface below gates on
 those declarations rather than assuming them per family.
+
+## Video generation cards
+
+Audio-video generation models are ordinary model cards with a `[video]`
+section. The section states model truth and names no engine: the generation
+modes (`t2va` text only, `fl2va` first and/or last frame, `ref2va` reference
+images, clips, and audio), the trained duration range and frame grid (a frame
+count is valid when `count % frame_grid_multiple == frame_grid_offset`, and
+Skulk snaps requests up to that grid), canvas rules, whether output carries a
+synchronized audio track and at what rate, sampling defaults, reference
+bounds, and pinned companion artifacts (turbo LoRAs with their trained step
+counts and sigma shifts, model patches such as a ControlNet union, prompt
+embeddings, and engine graph templates). Every mode implies exactly one task
+family (`TextToVideo`, `ImageToVideo`, `ReferenceToVideo`) and the card's
+`tasks` list must agree, so placement, dispatch, and the catalog read one
+story. An external companion repository must carry its own immutable
+revision, the same rule as MTP sidecars and vision weights. A card may also
+carry a `[license]` section with operator-facing facts, including a
+`display_name` that user interfaces must show prominently when the license
+requires attribution; Skulk surfaces it and never enforces it. Video cards
+stay out of the catalog until `SKULK_ENABLE_VIDEO_MODELS=true`, mirroring the
+image gate, so a fleet without a video engine does not advertise models it
+cannot serve. The bundled MiniMax H3 cards under
+`resources/video_model_cards/` are the transition fallback for the signed
+registry cards and pin every file of the ComfyUI repack by size and content
+identity. The test engine's card lives in `resources/test_engine_cards/`
+instead: it names no artifact, and the registry imports only the artifact
+directories.
+
+### Video jobs
+
+Renders take minutes, so the API exposes them as jobs rather than a held
+request: `POST /v1/videos` validates the request against the card (mode,
+duration range, canvas grid, reference limits), stages any attachments for
+the vision media path, records a `VideoJob`, opens the command's stream
+queue, and sends `VideoGeneration` to the master. The master places it on a
+single-host instance whose card serves the resolved mode. Progress frames on
+`DATA` update the job; the terminal frame carries the output manifest; the
+container itself arrives on `OUTPUT_MEDIA` and is assembled and verified in
+the API node's `VideoStore`. The job completes only when both halves agree.
+`GET /v1/videos/{id}` polls it, `GET /v1/videos/{id}/content` downloads the
+MP4 or thumbnail, and cancel and delete stop whichever phase the job is in:
+a running render is cancelled through the master, a container still in
+flight is stopped at the producing worker. Every failure path, whichever
+half fails first, funnels through one cleanup that deletes partial files,
+releases held frames and deadlines, fails the job, and closes its queue.
+Completed content expires after 24 hours, and the store evicts the oldest
+completed jobs when a new artifact would exceed its byte ceiling or the
+filesystem's reserve. Job records are mirrored to a JSON index so a
+restarted API still lists recent jobs, with anything in flight marked
+failed and completed artifacts re-verified before they are served.
+
+### ComfyUI engine provisioning
+
+The served video engine runs a pinned ComfyUI checkout headless from its own
+managed environment, because ComfyUI ships as a repository rather than a
+wheel and needs a torch build matched to the node's GPU stack. Provisioning
+follows the store pattern the llama-server engine established: a pinned
+commit and a hash-pinned torch wheel set recorded in the manifest, fetched
+on demand, verified before use, and installed under the engines directory
+keyed by pin, variant, and the wheel set's digest (a wheel change without
+a pin change reprovisions rather than reusing an environment built on
+other torch builds), built in a staging directory and renamed into place so
+a half-finished install is never adopted. Two gates beyond the llama-server
+ones apply: the node must have video models enabled, since the wheel set is
+several gigabytes and most nodes never render video, and a variant is
+offered only where a wheel set is recorded for the machine. Two lanes are
+recorded: cu130 wheels from the PyTorch index for NVIDIA nodes (aarch64
+and x86_64), and for x86_64 AMD nodes AMD's own stable ROCm 10.0.0 channel,
+where torch is a host wheel plus a gfx1151 device package on top of the
+`rocm` runtime packages, all bundling the HIP runtime so the host needs
+only the amdgpu kernel driver; the ROCm lane
+launches ComfyUI with `--bf16-vae --disable-mmap --cache-none`, the flags
+validated for MiniMax H3 on Strix Halo (memory-mapping a checkpoint above 64
+GB through unified memory is pathologically slow, the fp32 VAE decode does
+not fit beside the transformer, and node outputs are not worth retaining on
+a host whose GPU memory is the system's). The AMD channel is the one whose
+gfx1151 BLAS libraries are complete for H3: the rocm7.2 torch wheel from the
+PyTorch index, the lane's first wheel set, shipped a gfx1151 rocBLAS without
+the single-precision batched GEMM the Qwen3-VL text encoder's vision tower
+issues for image-conditioned prompts and a hipBLASLt without the bf16
+bias-fused GEMM a second prompt in one process reaches, and each missing
+kernel is a segfault in the HIP runtime. The ROCm 10 set renders every
+prompt shape in one warm server, so the hipBLASLt routing and the
+server-per-render policy that bridged the gap are gone. An
+operator with a hand-built ComfyUI points `SKULK_COMFY_BIN` at its
+interpreter and `SKULK_COMFY_ROOT` at the checkout; both must be valid or
+the engine stays off with a loud conflict. The checkout's commit is the
+engine's build identity in node telemetry.
+
+### ComfyUI runner
+
+The runner keeps ComfyUI at arm's length: it is a subprocess on a loopback
+port, started with custom and API nodes disabled so an operator's node
+packs can never change what a card renders, with Skulk's own input,
+output, temp, and user directories, and with the staged artifact exposed
+through an `extra_model_paths.yaml` rather than copied into the checkout.
+Model loading resolves the card's components and artifact bundle to the
+file names ComfyUI lists (the two VAEs share a directory and are told apart
+by component name), verifies they exist, and starts the server; ComfyUI
+loads weights on the first prompt and keeps them resident, so warm-up is
+the health check.
+
+A render is one graph. The request is resolved against the card exactly as
+the test engine resolves it (canvas from the trained short edge and aspect
+ratio, stepped down to the card's pixel budget; frame count on the trained
+grid; steps from the request, the named adapter, or the card default), then
+bound onto the node graph ComfyUI's own MiniMax H3 workflow templates use:
+the loaders, `MiniMaxH3ImageToVideo` for text and keyframe modes or
+`MiniMaxH3ReferenceToVideo` for numbered image, video, and audio references,
+an optional turbo adapter with its sigma shifts, the `res_multistep` sampler
+on a `simple` schedule, both decoders, and the muxer. References are the
+files the worker already verified, named by their path below the input
+directory. The prompt carries a Skulk-minted id and client id so the
+WebSocket delivers only this render's `executing`, `progress_state`, and
+terminal events; a queue entry from someone using the ComfyUI frontend on
+the same server just shows as `queued` until Skulk's prompt runs. Cancel
+goes through the jobs API and is checked on every event, not only when the
+socket is quiet. A rejected graph or a failed execution fails that task and
+leaves the server up; a server that dies fails the runner so the supervisor
+restarts it. Output is the container ComfyUI saved under the command's
+directory, renamed onto the worker's expected name, plus a first frame
+converted to a JPEG thumbnail. Teardown signals the whole process group,
+and worker startup reaps any init-parented server that was launched with
+Skulk's user directory.
+
+### Test video engine
+
+Before any served video engine exists, and on nodes that will never run
+one, `SKULK_TEST_VIDEO_ENGINE=1` advertises the deterministic test engine
+(`test_video`, `test_video-cpu`). It serves only the bundled
+`foxlight/test-video` card; the worker writes a stand-in model directory at
+startup so the card places without a download. A render walks every real
+stage: the request is resolved against the card's duration grid, canvas
+rules, and step default, progress frames report encoding, sampling,
+decoding, and muxing, the runner writes a seeded synthetic clip (MJPEG
+frames and a stereo PCM tone in a minimal MP4, plus a JPEG thumbnail), and
+the terminal frame carries the manifest the worker streams from. The same
+seed always produces the same bytes, cancellation between sampling steps
+leaves nothing behind, and `SKULK_TEST_VIDEO_STEP_SECONDS` stretches a
+render so cancel and progress paths can be exercised at human speed. It is
+a test instrument, not a product engine. The card is registered as a
+custom card on the node advertising the engine; a multi-node fleet needs it
+on any node that may be elected master too.
 
 ### Text to speech
 
@@ -1798,6 +1942,19 @@ plane, where peers discover it the same way they discover a node's backends;
 the next gossip round. Together these are first-class citizenship expressed as
 plane access: a plugin both reads and writes the telemetry plane, and nothing
 about a tag is event-sourced.
+
+A plugin that runs a managed child with its own user interface (a capability
+node) can also publish a bounded summary of it with
+`publish_capability_node(summary)`: identity, owner-reported status, link
+surfaces, and manifest-declared actions, never credentials or private paths.
+The summary rides the same plane as a `NodeCapabilityNodes` reading, appears
+as `capabilityNodes` in `GET /state`, and the dashboard draws it as a satellite
+of its host in the topology with a flyout that opens the surfaces in a new tab
+and runs descriptor actions through `POST /v1/capabilities/call`.
+`withdraw_capability_node(plugin_id, node_id)` removes it. Satellite health is
+mapped from the summary alone and never folds into the host's own health.
+`SKULK_TEST_CAPABILITY_NODE=<url>` makes a host publish one stand-in node with
+a single link surface so the topology layer can be exercised without a plugin.
 
 ### Providers and capability calls
 

@@ -108,6 +108,35 @@ export interface RawNodeHealth {
   reasons?: RawNodeHealthReason[];
 }
 
+/** One capability node summary as `GET /state` projects it (camelCase). */
+export interface RawCapabilityNodeSummary {
+  pluginId?: string;
+  nodeId?: string;
+  bundleId?: string;
+  version?: string;
+  title?: string | null;
+  status?: string;
+  ownerAvailable?: boolean;
+  surfaces?: Array<{
+    surfaceId?: string;
+    title?: string;
+    kind?: string;
+    url?: string;
+    ready?: boolean;
+  }>;
+  actions?: Array<{
+    actionId?: string;
+    title?: string;
+    kind?: string;
+    surfaceId?: string | null;
+    capabilityId?: string | null;
+    payload?: Record<string, unknown> | null;
+    url?: string | null;
+  }>;
+  operationsActive?: number;
+  observedAt?: string;
+}
+
 export interface RawStateResponse {
   topology?: RawTopology;
   instances?: Record<string, unknown>;
@@ -124,6 +153,8 @@ export interface RawStateResponse {
   nodeResources?: Record<string, RawNodeResources>;
   nodeHealth?: Record<string, RawNodeHealth>;
   nodeCapabilities?: Record<string, string[]>;
+  /** Capability-node summaries per host node id (topology satellites). */
+  capabilityNodes?: Record<string, RawCapabilityNodeSummary[]>;
   thunderboltBridgeCycles?: string[][];
 }
 

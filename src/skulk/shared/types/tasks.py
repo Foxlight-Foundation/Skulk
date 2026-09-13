@@ -14,6 +14,7 @@ from skulk.shared.types.audio import (
 from skulk.shared.types.common import CommandId, Id, NodeId
 from skulk.shared.types.embedding import TextEmbeddingTaskParams
 from skulk.shared.types.text_generation import TextGenerationTaskParams
+from skulk.shared.types.video import VideoGenerationTaskParams
 from skulk.shared.types.worker.instances import BoundInstance, InstanceId
 from skulk.shared.types.worker.runners import RunnerId
 from skulk.shared.types.worker.shards import ShardMetadata
@@ -100,6 +101,18 @@ class ImageEdits(BaseTask):  # emitted by Master
     error_message: str | None = Field(default=None)
 
 
+class VideoGeneration(BaseTask):  # emitted by Master
+    """One audio-video render placed on a single-host video instance."""
+
+    command_id: CommandId
+    owner_node: NodeId | None = None  # owning API node; receives DATA and OUTPUT_MEDIA
+    task_params: VideoGenerationTaskParams
+    trace_enabled: bool = False
+
+    error_type: str | None = Field(default=None)
+    error_message: str | None = Field(default=None)
+
+
 class TextEmbedding(BaseTask):  # emitted by Master
     command_id: CommandId
     owner_node: NodeId | None = None  # owning API node (#279 Phase 2; see TextGeneration)
@@ -160,6 +173,7 @@ Task = (
     | CancelTask
     | ImageGeneration
     | ImageEdits
+    | VideoGeneration
     | TextEmbedding
     | SpeechSynthesis
     | AudioTranscription

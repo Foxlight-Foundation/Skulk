@@ -60,6 +60,14 @@ class VisionMediaPacket(CamelCaseModel):
         max_length=1024,
         description="Bounded failure detail carried only by transport failures.",
     )
+    payload: Literal["base64_image", "reference_media"] = Field(
+        default="base64_image",
+        description=(
+            "How chunk bytes are encoded: ASCII base64 image text for vision "
+            "requests, or raw attachment bytes for video reference media, where "
+            "image_index is the attachment slot and image_count the slot count."
+        ),
+    )
 
     @model_validator(mode="after")
     def _validate_payload(self) -> "VisionMediaPacket":
@@ -130,6 +138,7 @@ class VisionMediaPacket(CamelCaseModel):
             model=self.model,
             sequence=self.sequence,
             kind="accepted",
+            payload=self.payload,
         )
 
     def transport_failure(self, message: str) -> "VisionMediaPacket":
@@ -145,6 +154,7 @@ class VisionMediaPacket(CamelCaseModel):
             sequence=self.sequence,
             kind="transport_failed",
             error_message=message,
+            payload=self.payload,
         )
 
 
@@ -164,6 +174,7 @@ def encode_vision_media_packet(packet: VisionMediaPacket) -> bytes:
             "image_count": packet.image_count,
             "sha256": packet.sha256,
             "error_message": packet.error_message,
+            "payload": packet.payload,
         },
         sort_keys=True,
         separators=(",", ":"),

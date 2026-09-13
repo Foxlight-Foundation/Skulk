@@ -18,6 +18,7 @@ from skulk.shared.models.model_cards import (
     PromptRendererType,
     ReasoningFormat,
     ToolCallFormat,
+    card_serves_video,
     get_card,
 )
 from skulk.shared.types.text_generation import ReasoningEffort, TextGenerationTaskParams
@@ -52,6 +53,10 @@ class ResolvedCapabilityProfile(FrozenModel):
     prompt_renderer: PromptRendererType = PromptRendererType.Tokenizer
     output_parser: OutputParserType = OutputParserType.Generic
     supports_native_multimodal: bool = False
+    supports_video_output: bool = False
+    """Whether the model generates video (with or without an audio track)."""
+    video_modes: tuple[str, ...] = ()
+    """Card-declared generation modes (``t2va``, ``fl2va``, ``ref2va``)."""
 
 
 def _infer_family(model_id: ModelId, model_card: ModelCard | None) -> str:
@@ -369,6 +374,12 @@ def resolve_model_capability_profile(
         supports_tool_calling=supports_tool_calling,
         thinking_format=thinking_format,
         supports_native_multimodal=False,
+        supports_video_output=bool(card is not None and card_serves_video(card)),
+        video_modes=(
+            tuple(mode.value for mode in card.video.modes)
+            if card is not None and card.video is not None
+            else ()
+        ),
     )
 
     # Family-specific defaults preserve current behavior until cards opt in to

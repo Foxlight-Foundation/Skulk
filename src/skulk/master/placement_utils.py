@@ -81,7 +81,7 @@ class CycleMemoryDiagnostics(CamelCaseModel):
 # against VRAM, not system RAM). Both the in-process llama.cpp runner and the
 # served llama-server engine launch with ``-ngl`` full-GPU offload; vLLM would
 # join here too. The bare CPU compute tag is excluded by the ``-cpu`` check.
-_GPU_OFFLOAD_ENGINE_PREFIXES: Final = ("llama_cpp-", "llama_server-", "vllm-")
+_GPU_OFFLOAD_ENGINE_PREFIXES: Final = ("llama_cpp-", "llama_server-", "vllm-", "comfy-")
 
 
 def _has_gpu_offload_backend(backends: frozenset[str]) -> bool:
@@ -95,6 +95,8 @@ def _has_gpu_offload_backend(backends: frozenset[str]) -> bool:
     served ``llama_server`` engine is included because it launches
     ``llama-server -ngl 99``, and ``vllm`` because ``vllm serve`` allocates weights +
     KV from the GPU -- both use VRAM exactly like the in-process llama.cpp runner.
+    The ``comfy`` video engine holds the diffusion transformer, encoders, and VAEs
+    on the GPU the same way.
     """
     return any(
         tag.startswith(_GPU_OFFLOAD_ENGINE_PREFIXES) and not tag.endswith("-cpu")

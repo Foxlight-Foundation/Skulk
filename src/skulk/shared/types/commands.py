@@ -20,6 +20,7 @@ from skulk.shared.types.steward_actions import (
     StewardActionProposalId,
 )
 from skulk.shared.types.text_generation import TextGenerationTaskParams
+from skulk.shared.types.video import VideoGenerationTaskParams
 from skulk.shared.types.worker.downloads import DownloadAttemptId
 from skulk.shared.types.worker.instances import (
     Instance,
@@ -63,6 +64,15 @@ class ImageGeneration(BaseCommand):
 class ImageEdits(BaseCommand):
     task_params: ImageEditsTaskParams
     owner_node: NodeId | None = None
+
+
+class VideoGeneration(BaseCommand):
+    """Command to render one audio-video clip on a mounted video model."""
+
+    task_params: VideoGenerationTaskParams
+    owner_node: NodeId | None = None
+    """API node that owns the job, receives progress on DATA, and receives the
+    finished container on OUTPUT_MEDIA."""
 
 
 class TextEmbedding(BaseCommand):
@@ -307,6 +317,7 @@ Command = (
     | TextGeneration
     | ImageGeneration
     | ImageEdits
+    | VideoGeneration
     | TextEmbedding
     | SpeechSynthesis
     | AudioTranscription

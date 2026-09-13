@@ -204,6 +204,26 @@ SKULK_ENABLE_IMAGE_MODELS = (
     _env("SKULK_ENABLE_IMAGE_MODELS", "false") or "false"
 ).lower() == "true"
 
+# Video cards stay out of the catalog until a node can serve them; the served
+# video engines flip this by default once they exist, the same way image
+# models are gated today.
+SKULK_ENABLE_VIDEO_MODELS = (
+    _env("SKULK_ENABLE_VIDEO_MODELS", "false") or "false"
+).lower() == "true"
+
+# Video generation moves whole containers between processes by path rather
+# than inline: a worker writes verified reference media here for its runner,
+# the runner writes finished output here for the worker to stream, and the
+# owning API keeps completed jobs in its own store until they expire.
+SKULK_VIDEO_INPUT_DIR = SKULK_CACHE_HOME / "video_input"
+SKULK_VIDEO_OUTPUT_DIR = SKULK_CACHE_HOME / "video_output"
+SKULK_VIDEO_STORE_DIR = SKULK_CACHE_HOME / "videos"
+# Ceiling on finished video artifacts one API node keeps on disk; the store
+# evicts the oldest completed jobs when a new artifact would exceed it.
+SKULK_VIDEO_STORE_MAX_BYTES = int(
+    _env("SKULK_VIDEO_STORE_MAX_BYTES", str(32 * 1024**3)) or 32 * 1024**3
+)
+
 SKULK_OFFLINE = (_env("SKULK_OFFLINE", "false") or "false").lower() == "true"
 
 SKULK_TRACING_ENABLED = (

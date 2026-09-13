@@ -25,6 +25,7 @@ import { NetworkMesh } from './components/common/NetworkMesh';
 import { SceneBackdrop } from './components/common/SceneBackdrop';
 import { ShootingStars } from './components/common/ShootingStars';
 import { ObservabilityPanel } from './components/observability/ObservabilityPanel';
+import { CapabilityPanel } from './components/capabilities/CapabilityPanel';
 import { SettingsPanel } from './components/layout/SettingsPanel';
 import { TelemetryConsentModal } from './components/layout/TelemetryConsentModal';
 import { ModelStorePage } from './components/pages/DownloadsPage';
@@ -222,6 +223,7 @@ export function App() {
     nodeThunderboltBridge,
     nodeRdmaCtl,
     nodeCapabilities,
+    capabilityNodes,
     nodeResources,
     thunderboltBridgeCycles,
   } = useClusterState();
@@ -730,8 +732,13 @@ export function App() {
               <PluginsPage />
             ) : topology ? (
               <TopologyGraph
+                capabilityNodes={capabilityNodes}
                 data={topology}
+                localNodeId={localNodeId}
                 onInspectNode={(nodeId) => openObservability('node', nodeId)}
+                onOpenCapabilityPanel={(hostNodeId, key) =>
+                  dispatch(uiActions.openCapabilityPanel({ target: { hostNodeId, key } }))
+                }
               />
             ) : (
               <EmptyState>
@@ -753,6 +760,7 @@ export function App() {
         </ContentRow>
         <ToastContainer />
         <ObservabilityPanel />
+        <CapabilityPanel />
         <SettingsPanel open={settingsOpen} onClose={() => setSettingsOpen(false)} />
         <TelemetryConsentModal />
       </Shell>

@@ -134,3 +134,67 @@ export function computeTopologyPositions(
 export function clampTelemetryRatio(value: number): number {
   return Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : 0;
 }
+
+/** Orbit radius of capability satellites around their host, in node units. */
+export const SATELLITE_ORBIT_RADIUS = 72;
+/** Satellite disc radius, in node units. */
+export const SATELLITE_RADIUS = 10;
+/** Satellites drawn before the remainder collapses into one overflow glyph. */
+export const MAX_VISIBLE_SATELLITES = 6;
+
+/** Node-local center of one satellite (before the host group's scale). */
+export interface SatellitePosition {
+  index: number;
+  x: number;
+  y: number;
+}
+
+/** Placement of a host's satellites plus how many did not fit. */
+export interface SatelliteLayout {
+  positions: SatellitePosition[];
+  /** Satellites beyond the visible cap, summarized by the overflow glyph. */
+  overflow: number;
+  /** Where the overflow glyph sits, when there is one. */
+  overflowPosition: SatellitePosition | null;
+}
+
+/**
+ * Places capability satellites on an arc above their host node. The arc
+ * stays in the upper half so it never meets the name, telemetry, or action
+ * rail drawn below the node, and it leans away from the hardware badge so
+ * the badge and the first satellite do not crowd each other. At most
+ * `MAX_VISIBLE_SATELLITES` are placed; the rest share one overflow slot at
+ * the end of the arc.
+ */
+export function computeSatellitePositions(
+  count: number,
+  hardwareBadgeSide: HardwareBadgeSide,
+): SatelliteLayout {
+  if (count <= 0) return { positions: [], overflow: 0, overflowPosition: null };
+  const visible = Math.min(count, MAX_VISIBLE_SATELLITES);
+  const overflow = count - visible;
+  const slots = visible + (overflow > 0 ? 1 : 0);
+  // Degrees, SVG orientation (negative y is up). The badge sits on the
+  // outer side at y = -17..17, so the arc's near end stops well above it
+  // while its far end reaches further down on the badge-free side; a lone
+  // satellite therefore sits just off the vertical, away from the badge.
+  const [startDegrees, endDegrees] = hardwareBadgeSide === 'left' ? [-140, -20] : [-40, -160];
+  const angleFor = (slot: number): number => {
+    if (slots === 1) return (startDegrees + endDegrees) / 2;
+    return startDegrees + ((endDegrees - startDegrees) * slot) / (slots - 1);
+  };
+  const place = (slot: number): SatellitePosition => {
+    const radians = (angleFor(slot) * Math.PI) / 180;
+    return {
+      index: slot,
+      x: SATELLITE_ORBIT_RADIUS * Math.cos(radians),
+      y: SATELLITE_ORBIT_RADIUS * Math.sin(radians),
+    };
+  };
+  const positions = Array.from({ length: visible }, (_, slot) => place(slot));
+  return {
+    positions,
+    overflow,
+    overflowPosition: overflow > 0 ? place(visible) : null,
+  };
+}

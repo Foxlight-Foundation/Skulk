@@ -546,6 +546,43 @@ def entrypoint(
         # failure-reporting boundary so a denied card becomes an actionable
         # RunnerFailed state rather than an unreported process-exit retry loop.
         require_remote_code_approval(shard.model_card)
+        if bound_instance.is_video_model:
+            # Video placements are single-host. The master normally stamps
+            # the resolved backend; an unstamped shard (telemetry still
+            # warming, or a manual launch) resolves locally exactly like the
+            # text engines do.
+            from skulk.shared.backends import engine_of
+
+            resolved = shard.resolved_backend
+            video_engine = (
+                engine_of(resolved)
+                if resolved is not None
+                else _resolve_text_engine(bound_instance)
+            )
+            if video_engine == "test_video":
+                from skulk.worker.runner.test_video.runner import (
+                    Runner as TestVideoRunner,
+                )
+
+                runner = TestVideoRunner(
+                    bound_instance, event_sender, task_receiver, cancel_receiver
+                )
+                runner.main()
+                return
+            if video_engine == "comfy":
+                from skulk.worker.runner.comfy.runner import Runner as ComfyRunner
+
+                runner = ComfyRunner(
+                    bound_instance, event_sender, task_receiver, cancel_receiver
+                )
+                runner.main()
+                return
+            # Fail loudly with the reason instead of letting a text runner
+            # try to load a diffusion stack and report something unrelated.
+            raise RuntimeError(
+                "no video engine serves this placement on this node "
+                f"(resolved backend {resolved!r})"
+            )
         if bound_instance.is_image_model:
             from skulk.worker.runner.image_models.runner import Runner as ImageRunner
 

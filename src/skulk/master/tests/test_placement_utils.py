@@ -1398,3 +1398,12 @@ class TestCfgParallelPlacement:
         # First shard starts at 0, last shard ends at 57
         assert layer_ranges[0][0] == 0
         assert layer_ranges[-1][1] == 57
+
+
+def test_comfy_gpu_tags_count_as_vram_offload() -> None:
+    from skulk.master.placement_utils import (
+        _has_gpu_offload_backend,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    assert _has_gpu_offload_backend(frozenset({"comfy", "comfy-cuda"}))
+    assert not _has_gpu_offload_backend(frozenset({"comfy"}))

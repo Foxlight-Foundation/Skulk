@@ -5,6 +5,17 @@ import type { ThemeName } from '../../theme';
 /** Tabs available inside the observability panel. */
 export type ObservabilityTab = 'live' | 'node' | 'traces' | 'performance';
 
+/** Tabs available inside the capability panel. */
+export type CapabilityPanelTab = 'overview' | 'surfaces' | 'actions';
+
+/** Which capability node the capability panel shows. */
+export interface CapabilityPanelTarget {
+  /** Node id of the host running the capability node. */
+  hostNodeId: string;
+  /** `pluginId/nodeId` of the capability node. */
+  key: string;
+}
+
 /** Default width of the right-side observability panel, in pixels. */
 const OBSERVABILITY_WIDTH_DEFAULT = 560;
 /**
@@ -42,6 +53,10 @@ export interface UIState {
   /** Panel width in pixels. Persisted to localStorage. */
   observabilityPanelWidth: number;
   observabilitySelectedNodeId: string | null;
+
+  capabilityPanelOpen: boolean;
+  capabilityPanelTab: CapabilityPanelTab;
+  capabilityPanelTarget: CapabilityPanelTarget | null;
 }
 
 function clampPanelWidth(value: number): number {
@@ -106,6 +121,9 @@ function defaultState(): UIState {
     observabilityActiveTab: 'live',
     observabilityPanelWidth: loadPersistedObservabilityWidth(),
     observabilitySelectedNodeId: null,
+    capabilityPanelOpen: false,
+    capabilityPanelTab: 'overview',
+    capabilityPanelTarget: null,
   };
 }
 
@@ -168,6 +186,20 @@ const slice = createSlice({
     },
     setObservabilitySelectedNodeId(state, action: PayloadAction<string | null>) {
       state.observabilitySelectedNodeId = action.payload;
+    },
+    openCapabilityPanel(
+      state,
+      action: PayloadAction<{ target: CapabilityPanelTarget; tab?: CapabilityPanelTab }>,
+    ) {
+      state.capabilityPanelOpen = true;
+      state.capabilityPanelTarget = action.payload.target;
+      state.capabilityPanelTab = action.payload.tab ?? 'overview';
+    },
+    closeCapabilityPanel(state) {
+      state.capabilityPanelOpen = false;
+    },
+    setCapabilityPanelTab(state, action: PayloadAction<CapabilityPanelTab>) {
+      state.capabilityPanelTab = action.payload;
     },
   },
 });

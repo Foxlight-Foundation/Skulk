@@ -9,6 +9,7 @@ from skulk.shared.models.model_cards import (
     AudioCardKind,
     AudioResponseFormat,
     BuiltinToolType,
+    LicenseCardConfig,
     ModelCard,
     ModelTask,
     OutputParserType,
@@ -18,6 +19,11 @@ from skulk.shared.models.model_cards import (
     RuntimeCapabilityCardConfig,
     ToolCallFormat,
     ToolingCardConfig,
+    VideoCardConfig,
+    VideoCompanionConfig,
+    VideoCompanionKind,
+    VideoMode,
+    VideoReferenceLimits,
 )
 from skulk.shared.models.registry import (
     RegistryCapabilityClaim,
@@ -398,3 +404,53 @@ def test_model_list_entry_serializes_builtin_tools_in_snake_case() -> None:
         "open_url",
         "extract_page",
     ]
+
+
+def test_model_list_entry_projects_the_video_and_license_sections() -> None:
+    """A video card's contract and license reach clients without a copy of the card."""
+    card = ModelCard(
+        model_id=ModelId("Comfy-Org/MiniMax-H3-Test"),
+        storage_size=Memory.from_bytes(1024),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextToVideo, ModelTask.ReferenceToVideo],
+        video=VideoCardConfig(
+            modes=(VideoMode.TextToAudioVideo, VideoMode.ReferenceToAudioVideo),
+            min_seconds=4,
+            max_seconds=15,
+            fps=24,
+            frame_grid_multiple=17,
+            frame_grid_offset=5,
+            canvas_multiple=32,
+            default_short_edge=768,
+            max_pixels=1032192,
+            aspect_ratios=("16:9", "1:1"),
+            audio_output=True,
+            audio_sample_rate=32000,
+            audio_channels=2,
+            default_steps=20,
+            reference_limits=VideoReferenceLimits(max_images=4, max_videos=1, max_audio_clips=1),
+            companions=(
+                VideoCompanionConfig(kind=VideoCompanionKind.Lora, name="turbo_8step", path="loras/turbo.safetensors", modes=(VideoMode.TextToAudioVideo,), steps=8, strength=1.0),
+                VideoCompanionConfig(kind=VideoCompanionKind.Embedding, name="style", path="embeddings/style.safetensors"),
+            ),
+        ),
+        license=LicenseCardConfig(name="Test License", url="https://example.invalid/LICENSE", notice="Regional terms apply.", display_name="MiniMax H3"),
+    )
+
+    payload = API._model_list_entry(card).model_dump(by_alias=True)
+
+    assert payload["video"]["modes"] == ["t2va", "ref2va"]
+    assert (payload["video"]["min_seconds"], payload["video"]["max_seconds"], payload["video"]["fps"]) == (4, 15, 24)
+    assert (payload["video"]["frame_grid_multiple"], payload["video"]["frame_grid_offset"], payload["video"]["canvas_multiple"]) == (17, 5, 32)
+    assert payload["video"]["audio_output"] is True and payload["video"]["audio_sample_rate"] == 32000
+    assert payload["video"]["reference_limits"]["max_images"] == 4
+    # Only adapters are selectable per request; embeddings and patches are not listed.
+    assert payload["video"]["adapters"] == [{"name": "turbo_8step", "modes": ["t2va"], "steps": 8, "strength": 1.0}]
+    assert payload["license"] == {"name": "Test License", "url": "https://example.invalid/LICENSE", "spdx_id": None, "notice": "Regional terms apply.", "display_name": "MiniMax H3"}
+
+    text_card = ModelCard(model_id=ModelId("mlx-community/text"), storage_size=Memory.from_bytes(1024), n_layers=1, hidden_size=1, supports_tensor=False, tasks=[ModelTask.TextGeneration])
+    text_payload = API._model_list_entry(text_card).model_dump(by_alias=True)
+    assert text_payload["video"] is None and text_payload["license"] is None
+

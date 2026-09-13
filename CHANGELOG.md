@@ -9,6 +9,69 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- Capability nodes in the dashboard topology. A plugin that runs a managed
+  child with its own user interface publishes a bounded, credential-free
+  `CapabilityNodeSummary` (status, link surfaces, manifest actions) through
+  `ExtensionContext.publish_capability_node`; hosts gossip it on the
+  telemetry plane as `NodeCapabilityNodes`, `GET /state` projects it as
+  `capabilityNodes`, and the dashboard draws each node as a satellite of its
+  host with a flyout that opens surfaces in a new tab, runs descriptor
+  actions on the local host, and opens a capability panel built on the
+  shared `RightDrawer` chrome now also used by the observability panel.
+  `SKULK_TEST_CAPABILITY_NODE=<url>` publishes a stand-in node for trying
+  the layer without a plugin; `VITE_CAPABILITY_SATELLITES=0` builds the
+  dashboard without it.
+- Video jobs accept timed keyframes: repeatable `keyframe` parts, each paired
+  with a `keyframe_at` time in seconds, anchor frames anywhere in the clip
+  (one H3 guide per frame), alongside or instead of the first and last frame.
+- Video jobs take their canvas from an attached keyframe: with no `size` and
+  no `aspect_ratio`, the `first_frame` (else `last_frame`) image sets the
+  shape, read from its header alone, so a keyframe keeps its framing.
+- Audio-video generation substrate and the `/v1/videos` job API. Model
+  cards gain a `[video]` section (modes `t2va` / `fl2va` / `ref2va`,
+  duration and frame grid, canvas rules, audio output, reference limits,
+  pinned LoRA / model-patch / embedding / graph-template companions) and a
+  `[license]` section, gated behind `SKULK_ENABLE_VIDEO_MODELS`, with
+  bundled MiniMax H3 fallback cards. A `VideoGeneration` command and task
+  place on a single-host instance whose card serves the requested mode,
+  reference attachments ride the vision media plane as raw slot-keyed bytes
+  with per-slot digest verification, render progress rides `DATA` as
+  `VideoChunk`, and the finished container returns on the new
+  `OUTPUT_MEDIA` plane into the API node's expiring, byte-bounded
+  `VideoStore`. The OpenAI-shaped job routes create (JSON or multipart with
+  `input_reference`, `first_frame`, `last_frame`, and repeated `reference`
+  parts), list, retrieve, download (`content` with a `variant`), cancel,
+  and delete jobs; a job completes only when the render's terminal report
+  and the verified container both arrive. A deterministic test video engine
+  (`SKULK_TEST_VIDEO_ENGINE`, bundled card `foxlight/test-video`) renders
+  seeded synthetic clips through every stage of the pipeline so the
+  substrate works end to end on nodes without a GPU. The `comfy` engine's
+  provisioning lands first: a pinned ComfyUI checkout (v0.35.0) in a
+  managed environment with a hash-pinned torch wheel set (cu130 from the
+  PyTorch index on NVIDIA; on AMD Strix Halo, AMD's stable ROCm 10.0.0
+  channel with torch's gfx1151 device packages, whose BLAS libraries carry
+  every kernel H3 reaches, where the rocm7.2 wheel's did not; installs are
+  keyed by pin and wheel-set digest so a wheel change reprovisions),
+  provisioned on Linux NVIDIA and AMD nodes that enable video models or by
+  `skulk doctor --fix`, advertised as `comfy-cuda` or `comfy-rocm` (the
+  ROCm lane launches ComfyUI with `--bf16-vae --disable-mmap
+  --cache-none`), with `SKULK_COMFY_BIN` and
+  `SKULK_COMFY_ROOT` for hand-built installs. The ComfyUI runner drives that install headless:
+  it exposes the staged H3 artifact through an `extra_model_paths.yaml`,
+  binds each request onto ComfyUI's own MiniMax H3 node graph (text, first
+  and last frame, and numbered image, video, and audio references; named
+  turbo adapters with their trained step counts and sigma shifts), follows
+  step progress on the WebSocket, cancels mid-render, and delivers the
+  H.264/AAC container with a first-frame thumbnail. H3 cards place on
+  `comfy-cuda` and `comfy-rocm` nodes.
+- `GET /v1/models` entries carry two additive sections from the card: `video`
+  (the declared video contract: modes, clip length range, frame grid and
+  canvas rules, audio output, default steps, reference limits, and the named
+  adapters selectable through a video job's `lora` field) and `license`
+  (name, URL, SPDX id, notice, and the product display name a license may
+  require), so a client such as the Video Studio capability can plan a valid
+  render and show the required attribution from the running node's catalog
+  instead of a copy of the card. Both are null where the card declares none.
 - Muse Glimmer (Meta, August 2026) is a first-class model family on every
   serving lane. The capability resolver now derives the family's wire
   contract from the card family or model id, the same way it does for

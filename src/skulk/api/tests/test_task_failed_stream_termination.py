@@ -7,11 +7,15 @@ responses close with an error and non-streaming handlers raise — instead of
 the HTTP connection hanging until the client's own timeout.
 """
 
+import tempfile
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from skulk.api.main import API
+from skulk.api.video_jobs import VideoJobRegistry
+from skulk.api.video_store import VideoStore
 from skulk.shared.types.audio import RealtimeAudioTranscriptionTaskParams
 from skulk.shared.types.chunks import ErrorChunk
 from skulk.shared.types.common import CommandId, ModelId, NodeId
@@ -23,10 +27,34 @@ from skulk.shared.types.worker.instances import InstanceId
 from skulk.utils.channels import channel
 
 
+def _ample_free_bytes(_store: VideoStore) -> int:
+    return 1 << 40
+
+
+@pytest.fixture(autouse=True)
+def ample_disk(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the store's free-space check off the host's real disk.
+
+    The store leaves a reserve on its filesystem; a test must not depend on
+    how full the machine running it happens to be.
+    """
+
+    monkeypatch.setattr(VideoStore, "_free_disk_bytes", _ample_free_bytes)
+
+
 def _make_api() -> Any:
     api = object.__new__(API)
     api._text_generation_queues = {}
     api._image_generation_queues = {}
+    api._video_generation_queues = {}
+    api._video_jobs = VideoJobRegistry(None)
+    api._video_store = VideoStore(Path(tempfile.mkdtemp()))
+    api._video_job_media_deadlines = {}
+    api._video_output_sources = {}
+    api._early_output_packets = {}
+    api._early_output_packet_bytes = 0
+    api._pending_output_completions = {}
+    api._video_upload_inflight_bytes = 0
     api._embedding_queues = {}
     api._audio_speech_queues = {}
     api._audio_transcription_queues = {}

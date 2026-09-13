@@ -96,12 +96,14 @@ from skulk.extensions.types import (
     DynamicCapabilityProvider,
     EmbedTexts,
     ExtensionContext,
+    PublishCapabilityNode,
     ReadClusterTelemetry,
     SkulkExtension,
     StreamCapability,
     SupportsExtensionShutdown,
     SupportsExtensionStartup,
     WithdrawCapability,
+    WithdrawCapabilityNode,
 )
 from skulk.extensions.vad import (
     VAD_CAPABILITY_DESCRIPTOR,
@@ -142,6 +144,8 @@ __all__ = [
     "MAX_CALL_TIMEOUT_SECONDS",
     "MAX_INLINE_MEDIA_BYTES",
     "AdvertiseCapability",
+    "PublishCapabilityNode",
+    "WithdrawCapabilityNode",
     "BaseChatMiddleware",
     "BlobMediaAttachment",
     "BuiltinSpeechProvider",

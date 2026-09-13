@@ -5,6 +5,13 @@ import { useResizeObserver } from '../../hooks/useResizeObserver';
 import type { Theme } from '../../theme';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 import { ClusterNode } from './ClusterNode';
+import { CapabilityFlyout } from './CapabilityFlyout';
+import { CAPABILITY_SATELLITES_ENABLED } from '../../featureFlags';
+import {
+  capabilityNodeKey,
+  isCapabilityNodeVisible,
+  type CapabilityNodeSummary,
+} from '../../types/capabilityNodes';
 import {
   buildCompleteEdgePairs,
   computeTopologyPositions,
@@ -18,6 +25,12 @@ export interface TopologyGraphProps {
   data: TopologyData;
   /** Called when a node diagnostics inspection is requested. */
   onInspectNode?: (nodeId: string) => void;
+  /** Capability-node summaries per host, from `useClusterState`. */
+  capabilityNodes?: Record<string, CapabilityNodeSummary[]>;
+  /** Node id the dashboard is served by; gates descriptor actions. */
+  localNodeId?: string | null;
+  /** Opens the capability panel on one node of one host. */
+  onOpenCapabilityPanel?: (hostNodeId: string, key: string) => void;
 }
 
 const Container = styled.div`
@@ -42,7 +55,20 @@ function nodeScaleForCanvas(nodeCount: number, width: number, height: number): n
  * canvases. Nodes follow skulk-app's stable orbit while a complete animated
  * mesh preserves the dashboard's bidirectional fabric view.
  */
-export function TopologyGraph({ data, onInspectNode }: TopologyGraphProps) {
+/** The flyout the graph currently shows, if any. */
+interface OpenFlyout {
+  hostNodeId: string;
+  key: string;
+  anchor: { x: number; y: number };
+}
+
+export function TopologyGraph({
+  data,
+  onInspectNode,
+  capabilityNodes = {},
+  localNodeId = null,
+  onOpenCapabilityPanel,
+}: TopologyGraphProps) {
   const { t } = useSkulkTranslation();
   const theme = useTheme() as Theme;
   const graphInstanceId = useId().replace(/:/g, '');
@@ -50,6 +76,25 @@ export function TopologyGraph({ data, onInspectNode }: TopologyGraphProps) {
   const [svgRef, { width, height }] = useResizeObserver<SVGSVGElement>();
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [interactingNodeId, setInteractingNodeId] = useState<string | null>(null);
+  const [openFlyout, setOpenFlyout] = useState<OpenFlyout | null>(null);
+  const closeFlyout = useCallback(() => setOpenFlyout(null), []);
+  // Only visible (non-disabled) nodes get satellites; the per-host map is
+  // memoized so ClusterNode props stay referentially stable between polls
+  // that change nothing.
+  const visibleSatellites = useMemo(() => {
+    const result: Record<string, CapabilityNodeSummary[]> = {};
+    if (!CAPABILITY_SATELLITES_ENABLED) return result;
+    for (const [hostNodeId, summaries] of Object.entries(capabilityNodes)) {
+      const visible = summaries.filter(isCapabilityNodeVisible);
+      if (visible.length > 0) result[hostNodeId] = visible;
+    }
+    return result;
+  }, [capabilityNodes]);
+  const flyoutSummaries = openFlyout ? visibleSatellites[openFlyout.hostNodeId] ?? [] : [];
+  const flyoutStillValid =
+    openFlyout !== null &&
+    data.nodes[openFlyout.hostNodeId] !== undefined &&
+    flyoutSummaries.some((summary) => capabilityNodeKey(summary) === openFlyout.key);
 
   const handleRestart = useCallback((nodeId: string) => {
     fetch(`/admin/restart?node_id=${encodeURIComponent(nodeId)}`, { method: 'POST' }).catch(
@@ -80,9 +125,11 @@ export function TopologyGraph({ data, onInspectNode }: TopologyGraphProps) {
   const effectiveSelectedNodeId =
     selectedNodeId && data.nodes[selectedNodeId] ? selectedNodeId : null;
   const topNodeId =
-    interactingNodeId && data.nodes[interactingNodeId]
-      ? interactingNodeId
-      : effectiveSelectedNodeId;
+    flyoutStillValid && openFlyout
+      ? openFlyout.hostNodeId
+      : interactingNodeId && data.nodes[interactingNodeId]
+        ? interactingNodeId
+        : effectiveSelectedNodeId;
   const paintOrderedPositions = useMemo(
     () => orderTopologyPositionsForPainting(positions, topNodeId),
     [positions, topNodeId],
@@ -212,10 +259,39 @@ export function TopologyGraph({ data, onInspectNode }: TopologyGraphProps) {
               selected={effectiveSelectedNodeId === position.id}
               x={position.x}
               y={position.y}
+              satellites={visibleSatellites[position.id]}
+              activeSatelliteKey={
+                flyoutStillValid && openFlyout?.hostNodeId === position.id ? openFlyout.key : null
+              }
+              onSatelliteSelect={(key, anchor) =>
+                setOpenFlyout((current) =>
+                  current && current.hostNodeId === position.id && current.key === key
+                    ? null
+                    : { hostNodeId: position.id, key, anchor },
+                )
+              }
             />
           );
         })}
       </svg>
+      {flyoutStillValid && openFlyout ? (
+        <CapabilityFlyout
+          anchor={openFlyout.anchor}
+          canvasHeight={height}
+          canvasWidth={width}
+          hostName={data.nodes[openFlyout.hostNodeId]?.friendly_name ?? openFlyout.hostNodeId.slice(-8)}
+          hostNodeId={openFlyout.hostNodeId}
+          localNodeId={localNodeId}
+          onClose={closeFlyout}
+          onOpenPanel={(hostNodeId, key) => {
+            closeFlyout();
+            onOpenCapabilityPanel?.(hostNodeId, key);
+          }}
+          onSelectKey={(key) => setOpenFlyout((current) => (current ? { ...current, key } : current))}
+          selectedKey={openFlyout.key}
+          summaries={flyoutSummaries}
+        />
+      ) : null}
     </Container>
   );
 }

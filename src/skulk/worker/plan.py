@@ -24,6 +24,7 @@ from skulk.shared.types.tasks import (
     TaskStatus,
     TextEmbedding,
     TextGeneration,
+    VideoGeneration,
 )
 from skulk.shared.types.worker.downloads import (
     DownloadCompleted,
@@ -71,6 +72,7 @@ def plan(
     tasks: Mapping[TaskId, Task],
     input_chunk_buffer: Mapping[CommandId, Mapping[int, InputImageChunk]] | None = None,
     speech_media_ready: Set[CommandId] | None = None,
+    reference_media_ready: Set[CommandId] | None = None,
 ) -> Task | None:
     # Python short circuiting OR logic should evaluate these sequentially.
     return (
@@ -91,6 +93,7 @@ def plan(
             all_runners,
             input_chunk_buffer or {},
             speech_media_ready or set(),
+            reference_media_ready or set(),
         )
     )
 
@@ -386,6 +389,7 @@ def _pending_tasks(
     all_runners: Mapping[RunnerId, RunnerStatus],
     input_chunk_buffer: Mapping[CommandId, Mapping[int, InputImageChunk]] | None,
     speech_media_ready: Set[CommandId],
+    reference_media_ready: Set[CommandId],
 ) -> Task | None:
     for task in tasks.values():
         # Forward inference tasks to runners
@@ -395,6 +399,7 @@ def _pending_tasks(
                 TextGeneration,
                 ImageGeneration,
                 ImageEdits,
+                VideoGeneration,
                 TextEmbedding,
                 SpeechSynthesis,
                 AudioTranscription,
@@ -415,6 +420,16 @@ def _pending_tasks(
             received = len(input_chunk_buffer.get(cmd_id, {}))
             if received < expected_image_chunks:
                 continue  # Wait for all chunks to arrive
+
+        # A video render sees its attachments only after the worker verified
+        # every reference slot against the authoritative task and wrote the
+        # bytes to task-local files.
+        if (
+            isinstance(task, VideoGeneration)
+            and task.task_params.total_input_chunks > 0
+            and task.command_id not in reference_media_ready
+        ):
+            continue
 
         if (
             (

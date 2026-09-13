@@ -62,6 +62,7 @@ from skulk.shared.types.artifact_inventory import (
     NodeArtifactInventory,
 )
 from skulk.shared.types.audio import RealtimeAudioInputFrame
+from skulk.shared.types.capability_nodes import CapabilityNodeSummary
 from skulk.shared.types.commands import ForwarderDownloadCommand, SyncConfig
 from skulk.shared.types.common import NodeId, SessionId, SystemId
 from skulk.shared.types.events import (
@@ -96,7 +97,10 @@ from skulk.store.model_store import ModelStore
 from skulk.store.model_store_client import ModelStoreClient, ModelStoreDownloader
 from skulk.store.model_store_server import ModelStoreServer
 from skulk.utils.channels import Receiver, Sender, channel
-from skulk.utils.info_gatherer.info_gatherer import NodeCapabilities
+from skulk.utils.info_gatherer.info_gatherer import (
+    NodeCapabilities,
+    NodeCapabilityNodes,
+)
 from skulk.utils.pydantic_ext import CamelCaseModel
 from skulk.utils.task_group import TaskGroup
 from skulk.worker.main import Worker
@@ -130,6 +134,9 @@ def _derive_zenoh_namespace(raw: str) -> str:
 _LIBP2P_NETWORK_VERSION = "v0.0.2"
 _LIBP2P_NAMESPACE_ENV_VAR = "SKULK_LIBP2P_NAMESPACE"
 _NODE_RESOURCES_POLL_INTERVAL_SECONDS = 2.0
+_CAPABILITY_NODES_REPUBLISH_SECONDS = 30.0
+"""Republish cadence for an unchanged non-empty capability-node snapshot on a
+management-only host; matches the worker gatherer so late joiners learn it."""
 _CLUSTER_CONFIG_SYNC_ATTEMPTS = 30
 _CLUSTER_CONFIG_SYNC_RESPONSE_TIMEOUT_SECONDS = 1.0
 _CLUSTER_CONFIG_SYNC_RETRY_INTERVAL_SECONDS = 0.2
@@ -149,6 +156,10 @@ async def _publish_management_node_resources(
     zenoh_peer_sampler: "ZenohPeerSampler | None" = None,
     poll_interval: float = _NODE_RESOURCES_POLL_INTERVAL_SECONDS,
     capabilities_provider: Callable[[], frozenset[str]] | None = None,
+    capability_nodes_provider: (
+        Callable[[], tuple[CapabilityNodeSummary, ...]] | None
+    ) = None,
+    capability_nodes_republish_interval: float = _CAPABILITY_NODES_REPUBLISH_SECONDS,
 ) -> None:
     """Advertise resource truth for a node started without a worker.
 
@@ -171,11 +182,23 @@ async def _publish_management_node_resources(
         capabilities_provider: Cached extension tags, including withdrawals.
             No provider means an empty reading; capability service never grants
             this host inference placement.
+        capability_nodes_provider: Cached capability-node summaries. A
+            management-only host is exactly where a capability node lives
+            without inference, so the summaries are published from here with
+            the worker gatherer's discipline: on change, republished while
+            non-empty every ``capability_nodes_republish_interval`` seconds
+            for late joiners, and once more as an empty reading after the
+            last one is withdrawn. A full snapshot every tick would be
+            sustained gossip for a host at the summary bounds.
+        capability_nodes_republish_interval: Seconds between republishes of
+            an unchanged non-empty snapshot.
 
     Side effects:
         Publishes one immediate and then periodic ``NodeResources`` reading until
         the owning task is cancelled or telemetry admission closes.
     """
+    last_capability_nodes: tuple[CapabilityNodeSummary, ...] | None = None
+    last_capability_nodes_at = anyio.current_time()
     while True:
         try:
             resources = NodeResources(
@@ -202,6 +225,29 @@ async def _publish_management_node_resources(
                     ),
                 )
             )
+            capability_nodes = (
+                capability_nodes_provider()
+                if capability_nodes_provider is not None
+                else ()
+            )
+            changed = (
+                capability_nodes != last_capability_nodes
+                if last_capability_nodes is not None
+                else bool(capability_nodes)
+            )
+            stale = (
+                anyio.current_time() - last_capability_nodes_at
+                >= capability_nodes_republish_interval
+            )
+            if changed or (capability_nodes and stale):
+                await telemetry_sender.send(
+                    NodeTelemetry(
+                        node_id=node_id,
+                        info=NodeCapabilityNodes(nodes=capability_nodes),
+                    )
+                )
+                last_capability_nodes = capability_nodes
+                last_capability_nodes_at = anyio.current_time()
         except (ClosedResourceError, BrokenResourceError):
             return
         except Exception as error:
@@ -712,6 +758,7 @@ class Node:
         await router.register_topic(topics.SPEECH_MEDIA)
         await router.register_topic(topics.TRACE_DATA)
         await router.register_topic(topics.VISION_MEDIA)
+        await router.register_topic(topics.OUTPUT_MEDIA)
         telemetry_view = TelemetryView()
         realtime_audio_sender, realtime_audio_receiver = channel[
             RealtimeAudioInputFrame
@@ -839,6 +886,8 @@ class Node:
                 trace_data_receiver=router.receiver(topics.TRACE_DATA),
                 vision_media_packet_sender=router.sender(topics.VISION_MEDIA),
                 vision_media_packet_receiver=router.receiver(topics.VISION_MEDIA),
+                output_media_packet_sender=router.sender(topics.OUTPUT_MEDIA),
+                output_media_packet_receiver=router.receiver(topics.OUTPUT_MEDIA),
                 realtime_audio_sender=(
                     None if args.no_worker else realtime_audio_sender
                 ),
@@ -897,6 +946,8 @@ class Node:
                 speech_media_packet_receiver=router.receiver(topics.SPEECH_MEDIA),
                 vision_media_packet_sender=router.sender(topics.VISION_MEDIA),
                 vision_media_packet_receiver=router.receiver(topics.VISION_MEDIA),
+                output_media_packet_sender=router.sender(topics.OUTPUT_MEDIA),
+                output_media_packet_receiver=router.receiver(topics.OUTPUT_MEDIA),
                 connection_message_receiver=router.receiver(topics.CONNECTION_MESSAGES),
                 session_connection_snapshot=router.current_session_connections,
                 store_client=worker_store_client,
@@ -1007,6 +1058,7 @@ class Node:
                     lambda: frozenset(
                         self.telemetry_view.local_advertised_capabilities
                     ),
+                    lambda: tuple(self.telemetry_view.local_capability_nodes.values()),
                 )
             tg.start_soon(self._monitor_zenoh_isolation)
             if self.store_server:
@@ -1711,6 +1763,12 @@ class Node:
                             vision_media_packet_receiver=self.router.receiver(
                                 topics.VISION_MEDIA
                             ),
+                            output_media_packet_sender=self.router.sender(
+                                topics.OUTPUT_MEDIA
+                            ),
+                            output_media_packet_receiver=self.router.receiver(
+                                topics.OUTPUT_MEDIA
+                            ),
                         )
                         if self.download_coordinator is not None and isinstance(
                             self.download_coordinator.shard_downloader,
@@ -1829,12 +1887,14 @@ def main():
     )
     if not args.no_worker and declared_participation != "management":
         from skulk.facts import current_node_facts, refresh_node_facts
-        from skulk.provisioning import ensure_llama_server
+        from skulk.provisioning import ensure_comfy, ensure_llama_server
 
-        if (
-            ensure_llama_server(current_node_facts(), allow_download=not args.offline)
-            is not None
-        ):
+        facts = current_node_facts()
+        wired = ensure_llama_server(facts, allow_download=not args.offline) is not None
+        # The managed ComfyUI install only provisions when video models are
+        # enabled on this node; the torch wheel set is several gigabytes.
+        wired = ensure_comfy(facts, allow_download=not args.offline) is not None or wired
+        if wired:
             refresh_node_facts()
 
     if args.spawn_api:

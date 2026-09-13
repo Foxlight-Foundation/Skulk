@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { NodeInfo } from '../../types/topology';
 import { darkTheme } from '../../theme/theme';
 import { ClusterNode } from './ClusterNode';
+import type { CapabilityNodeSummary } from '../../types/capabilityNodes';
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -109,5 +110,62 @@ describe('ClusterNode interaction surface', () => {
 
     const badge = container.querySelector('[data-hardware-badge-side="right"]');
     expect(badge).toHaveAttribute('transform', 'translate(56, -17)');
+  });
+});
+
+const studioNode: CapabilityNodeSummary = {
+  pluginId: 'foxlight.video-studio',
+  nodeId: 'studio',
+  bundleId: 'foxlight.video-studio',
+  version: '1.0.0',
+  title: 'Video Studio',
+  status: 'ready',
+  ownerAvailable: true,
+  surfaces: [],
+  actions: [],
+  operationsActive: 0,
+  observedAt: new Date().toISOString(),
+};
+
+describe('ClusterNode capability satellites', () => {
+  it('draws a satellite per capability node and reports its canvas anchor', async () => {
+    const onSatelliteSelect = vi.fn();
+    container = document.createElement('div');
+    document.body.append(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(
+        <ThemeProvider theme={darkTheme}>
+          <svg>
+            <ClusterNode
+              nodeId="kite6"
+              nodeInfo={nodeInfo}
+              onSatelliteSelect={onSatelliteSelect}
+              satellites={[studioNode, { ...studioNode, nodeId: 'comfy', title: 'ComfyUI', status: 'failed' }]}
+              scale={0.5}
+              x={100}
+              y={200}
+            />
+          </svg>
+        </ThemeProvider>,
+      );
+    });
+
+    const satellites = container.querySelectorAll('.topology-capability-satellite');
+    expect(satellites).toHaveLength(2);
+    expect(satellites[1]).toHaveAttribute('data-capability-health', 'error');
+    const button = container.querySelector<HTMLButtonElement>(
+      '[data-capability-key="foxlight.video-studio/studio"] button',
+    );
+    expect(button?.title).toBe('Video Studio');
+    await act(async () => button?.click());
+    expect(onSatelliteSelect).toHaveBeenCalledTimes(1);
+    const [key, anchor] = onSatelliteSelect.mock.calls[0] as [string, { x: number; y: number }];
+    expect(key).toBe('foxlight.video-studio/studio');
+    // The anchor is the satellite center scaled into canvas space: above the
+    // node (y < 200) and within half the orbit radius of its center.
+    expect(anchor.y).toBeLessThan(200);
+    expect(Math.hypot(anchor.x - 100, anchor.y - 200)).toBeCloseTo(36);
   });
 });

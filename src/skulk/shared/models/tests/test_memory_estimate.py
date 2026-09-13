@@ -549,3 +549,11 @@ def test_backend_preference_round_trips_and_preserves_order() -> None:
 
     restored = PlacementCardConfig.model_validate(cfg.model_dump(mode="json"))
     assert restored.backend_preference == ("llama_cpp-vulkan", "llama_cpp-rocm")
+
+
+def test_comfy_backend_offloads_to_vram() -> None:
+    from skulk.shared.models.memory_estimate import backend_offloads_to_vram
+
+    assert backend_offloads_to_vram("comfy-cuda") and backend_offloads_to_vram("comfy-rocm")
+    # The engine has no CPU mode, so even the bare tag lands on the GPU.
+    assert backend_offloads_to_vram("comfy")
