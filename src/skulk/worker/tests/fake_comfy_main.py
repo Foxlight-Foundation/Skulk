@@ -20,6 +20,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import sys
 import time
 import uuid
@@ -28,6 +29,10 @@ from typing import Any
 
 from aiohttp import WSMsgType, web
 from PIL import Image
+
+_PROMPT_ID = re.compile(r"[A-Za-z0-9._-]{1,128}")
+"""Identifier shape a submitted prompt id must have: this stand-in names
+files with it, so anything that could leave the output directory is refused."""
 
 NODE_ORDER = (
     "unet",
@@ -56,7 +61,9 @@ class FakeComfy:
         self.queue: asyncio.Queue[tuple[str, dict[str, Any], str]] = asyncio.Queue()
         self.step_seconds = float(os.environ.get("FAKE_COMFY_STEP_SECONDS", "0.01"))
         self.fail_node = os.environ.get("FAKE_COMFY_FAIL_NODE") or None
-        self.history_delay_seconds = float(os.environ.get("FAKE_COMFY_HISTORY_DELAY_SECONDS", "0"))
+        self.history_delay_seconds = float(
+            os.environ.get("FAKE_COMFY_HISTORY_DELAY_SECONDS", "0")
+        )
 
     async def send(self, event: str, data: dict[str, Any], client_id: str) -> None:
         socket = self.sockets.get(client_id)
@@ -71,7 +78,17 @@ class FakeComfy:
         await socket.prepare(request)
         client_id = request.rel_url.query.get("clientId") or uuid.uuid4().hex
         self.sockets[client_id] = socket
-        await socket.send_str(json.dumps({"type": "status", "data": {"status": {"exec_info": {"queue_remaining": 0}}, "sid": client_id}}))
+        await socket.send_str(
+            json.dumps(
+                {
+                    "type": "status",
+                    "data": {
+                        "status": {"exec_info": {"queue_remaining": 0}},
+                        "sid": client_id,
+                    },
+                }
+            )
+        )
         async for message in socket:
             if message.type in (WSMsgType.ERROR, WSMsgType.CLOSE):
                 break
@@ -82,22 +99,74 @@ class FakeComfy:
         body = await request.json()
         graph: dict[str, dict[str, Any]] = body["prompt"]
         prompt_id = body.get("prompt_id") or str(uuid.uuid4())
+        if not isinstance(prompt_id, str) or not _PROMPT_ID.fullmatch(prompt_id):
+            # The real server keys history by the caller's id; this stand-in
+            # also names files with it, so it accepts only an identifier that
+            # cannot leave the output directory.
+            return web.json_response(
+                {
+                    "error": {
+                        "type": "invalid_prompt",
+                        "message": "prompt_id is not an identifier",
+                    },
+                    "node_errors": {},
+                },
+                status=400,
+            )
         node_errors: dict[str, Any] = {}
         for node_id, node in graph.items():
             if "class_type" not in node:
-                return web.json_response({"error": {"type": "invalid_prompt", "message": f"{node_id} has no class_type"}, "node_errors": {}}, status=400)
+                return web.json_response(
+                    {
+                        "error": {
+                            "type": "invalid_prompt",
+                            "message": f"{node_id} has no class_type",
+                        },
+                        "node_errors": {},
+                    },
+                    status=400,
+                )
             inputs = node.get("inputs", {})
             for key in ("image", "file", "audio"):
                 name = inputs.get(key)
-                loads_media = node["class_type"] in ("LoadImage", "LoadVideo", "LoadAudio")
-                if loads_media and isinstance(name, str) and not (self.input_dir / name).is_file():
-                    node_errors[node_id] = {"errors": [{"type": "value_not_in_list", "message": f"{key} not in list: {name}"}], "class_type": node["class_type"]}
+                loads_media = node["class_type"] in (
+                    "LoadImage",
+                    "LoadVideo",
+                    "LoadAudio",
+                )
+                if (
+                    loads_media
+                    and isinstance(name, str)
+                    and not (self.input_dir / name).is_file()
+                ):
+                    node_errors[node_id] = {
+                        "errors": [
+                            {
+                                "type": "value_not_in_list",
+                                "message": f"{key} not in list: {name}",
+                            }
+                        ],
+                        "class_type": node["class_type"],
+                    }
         if node_errors:
-            return web.json_response({"error": {"type": "prompt_outputs_failed_validation", "message": "Prompt outputs failed validation"}, "node_errors": node_errors}, status=400)
-        (self.output_dir / f"{prompt_id}.prompt.json").parent.mkdir(parents=True, exist_ok=True)
+            return web.json_response(
+                {
+                    "error": {
+                        "type": "prompt_outputs_failed_validation",
+                        "message": "Prompt outputs failed validation",
+                    },
+                    "node_errors": node_errors,
+                },
+                status=400,
+            )
+        (self.output_dir / f"{prompt_id}.prompt.json").parent.mkdir(
+            parents=True, exist_ok=True
+        )
         (self.output_dir / f"{prompt_id}.prompt.json").write_text(json.dumps(graph))
         await self.queue.put((prompt_id, graph, body.get("client_id", "")))
-        return web.json_response({"prompt_id": prompt_id, "number": 0, "node_errors": {}})
+        return web.json_response(
+            {"prompt_id": prompt_id, "number": 0, "node_errors": {}}
+        )
 
     async def executor(self) -> None:
         while True:
@@ -117,9 +186,16 @@ class FakeComfy:
         (directory / filename).write_bytes(payload)
         return {"filename": filename, "subfolder": subfolder, "type": "output"}
 
-    async def execute(self, prompt_id: str, graph: dict[str, dict[str, Any]], client_id: str) -> None:
+    async def execute(
+        self, prompt_id: str, graph: dict[str, dict[str, Any]], client_id: str
+    ) -> None:
         outputs: dict[str, Any] = {}
-        messages: list[Any] = [["execution_start", {"prompt_id": prompt_id, "timestamp": int(time.time() * 1000)}]]
+        messages: list[Any] = [
+            [
+                "execution_start",
+                {"prompt_id": prompt_id, "timestamp": int(time.time() * 1000)},
+            ]
+        ]
         status: dict[str, Any]
         steps = int(graph.get("scheduler", {}).get("inputs", {}).get("steps", 1))
         node_id = "unet"
@@ -127,7 +203,11 @@ class FakeComfy:
             for node_id in NODE_ORDER:
                 if node_id not in graph:
                     continue
-                await self.send("executing", {"node": node_id, "display_node": node_id, "prompt_id": prompt_id}, client_id)
+                await self.send(
+                    "executing",
+                    {"node": node_id, "display_node": node_id, "prompt_id": prompt_id},
+                    client_id,
+                )
                 if self.fail_node == node_id:
                     raise RuntimeError(f"fake failure at {node_id}")
                 if node_id == "sampler":
@@ -137,12 +217,25 @@ class FakeComfy:
                             raise InterruptedError
                         await self.send(
                             "progress_state",
-                            {"prompt_id": prompt_id, "nodes": {"sampler": {"value": step, "max": steps, "state": "running", "node_id": "sampler", "prompt_id": prompt_id}}},
+                            {
+                                "prompt_id": prompt_id,
+                                "nodes": {
+                                    "sampler": {
+                                        "value": step,
+                                        "max": steps,
+                                        "state": "running",
+                                        "node_id": "sampler",
+                                        "prompt_id": prompt_id,
+                                    }
+                                },
+                            },
                             client_id,
                         )
                 elif node_id == "save_video":
                     prefix = graph[node_id]["inputs"]["filename_prefix"]
-                    saved = self._save(prefix, "mp4", b"\x00\x00\x00\x18ftypisom" + b"\x00" * 64)
+                    saved = self._save(
+                        prefix, "mp4", b"\x00\x00\x00\x18ftypisom" + b"\x00" * 64
+                    )
                     outputs[node_id] = {"images": [saved], "animated": [True]}
                 elif node_id == "save_thumbnail":
                     prefix = graph[node_id]["inputs"]["filename_prefix"]
@@ -152,26 +245,58 @@ class FakeComfy:
                     Image.new("RGB", (8, 6), (200, 40, 40)).save(buffer, format="PNG")
                     saved = self._save(prefix, "png", buffer.getvalue())
                     outputs[node_id] = {"images": [saved]}
-                await self.send("executed", {"node": node_id, "display_node": node_id, "output": outputs.get(node_id), "prompt_id": prompt_id}, client_id)
+                await self.send(
+                    "executed",
+                    {
+                        "node": node_id,
+                        "display_node": node_id,
+                        "output": outputs.get(node_id),
+                        "prompt_id": prompt_id,
+                    },
+                    client_id,
+                )
         except InterruptedError:
-            data = {"prompt_id": prompt_id, "node_id": "sampler", "node_type": "SamplerCustomAdvanced", "executed": []}
+            data = {
+                "prompt_id": prompt_id,
+                "node_id": "sampler",
+                "node_type": "SamplerCustomAdvanced",
+                "executed": [],
+            }
             messages.append(["execution_interrupted", data])
             status = {"status_str": "error", "completed": False, "messages": messages}
             await self.send("execution_interrupted", data, client_id)
         except Exception as error:  # noqa: BLE001 - mirrors ComfyUI's handler
-            data = {"prompt_id": prompt_id, "node_id": node_id, "node_type": graph[node_id]["class_type"], "exception_message": str(error), "exception_type": type(error).__name__, "traceback": [], "current_inputs": {}, "current_outputs": {}}
+            data = {
+                "prompt_id": prompt_id,
+                "node_id": node_id,
+                "node_type": graph[node_id]["class_type"],
+                "exception_message": str(error),
+                "exception_type": type(error).__name__,
+                "traceback": [],
+                "current_inputs": {},
+                "current_outputs": {},
+            }
             messages.append(["execution_error", data])
             status = {"status_str": "error", "completed": False, "messages": messages}
             await self.send("execution_error", data, client_id)
         else:
-            messages.append(["execution_success", {"prompt_id": prompt_id, "timestamp": int(time.time() * 1000)}])
+            messages.append(
+                [
+                    "execution_success",
+                    {"prompt_id": prompt_id, "timestamp": int(time.time() * 1000)},
+                ]
+            )
             status = {"status_str": "success", "completed": True, "messages": messages}
             await self.send("execution_success", {"prompt_id": prompt_id}, client_id)
         # ComfyUI records the history entry only after the executor returns,
         # so the terminal socket event always precedes it; the delay widens
         # that window the way a slow executor teardown does.
         await asyncio.sleep(self.history_delay_seconds)
-        self.history[prompt_id] = {"prompt": [0, prompt_id, graph, {}, []], "outputs": outputs, "status": status}
+        self.history[prompt_id] = {
+            "prompt": [0, prompt_id, graph, {}, []],
+            "outputs": outputs,
+            "status": status,
+        }
         await self.send("executing", {"node": None, "prompt_id": prompt_id}, client_id)
 
     async def history_entry(self, request: web.Request) -> web.Response:
@@ -201,7 +326,9 @@ class FakeComfy:
             for name, data in entry["status"]["messages"]:
                 if name == "execution_error":
                     error = data
-        return web.json_response({"id": prompt_id, "status": status, "execution_error": error})
+        return web.json_response(
+            {"id": prompt_id, "status": status, "execution_error": error}
+        )
 
     async def cancel(self, request: web.Request) -> web.Response:
         prompt_id = request.match_info["job_id"]

@@ -10774,7 +10774,14 @@ class API:
 
         declared = request.headers.get("content-length", "")
         if not declared.isdigit():
-            return
+            # Without a declared length the parser would spool every file part
+            # to disk before any accounting runs, so a chunked upload could
+            # fill the node's temporary storage. Ordinary multipart clients
+            # declare a length; one that does not is refused here.
+            raise HTTPException(
+                status_code=411,
+                detail="Reference media uploads must declare a Content-Length",
+            )
         length = int(declared)
         if (
             length

@@ -13,7 +13,7 @@ from __future__ import annotations
 import hashlib
 import tempfile
 import time
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Iterator
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import AsyncMock
@@ -819,3 +819,30 @@ def test_create_multipart_pairs_keyframes_with_their_times(
         files=[("keyframe", ("a.mp4", b"\x00\x00clip", "video/mp4"))],
     )
     assert clip.status_code == 400 and api._video_upload_inflight_bytes == 0
+
+
+def test_create_multipart_requires_a_declared_length(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A body with no Content-Length is refused before the parser spools it."""
+    api = _make_api(monkeypatch)
+    client = TestClient(api.app)
+    boundary = "boundary"
+    part = (
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="model"\r\n\r\n'
+        f"{MODEL}\r\n"
+        f"--{boundary}--\r\n"
+    ).encode()
+
+    def chunks() -> Iterator[bytes]:
+        yield part
+
+    response = client.post(
+        "/v1/videos",
+        content=chunks(),
+        headers={"content-type": f"multipart/form-data; boundary={boundary}"},
+    )
+    assert response.status_code == 411
+    assert "Content-Length" in response.json()["error"]["message"]
+    api._send.assert_not_called()
