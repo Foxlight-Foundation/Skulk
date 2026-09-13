@@ -11165,7 +11165,13 @@ class API:
         # phase, and then the producing worker must be told to stop.
         job = self._video_jobs.get(command_id)
         source = self._video_output_sources.get(command_id)
-        upload_started = job is not None and job.render_finished
+        # An output transfer that began before the terminal frame landed is
+        # also an upload in progress: without this the producing worker keeps
+        # streaming the whole container until its acknowledgement deadline.
+        upload_started = job is not None and (
+            job.render_finished
+            or self._video_store.has_open_assembly(command_id, "video")
+        )
         self._finish_video_job(command_id, "the job was cancelled", cancelled=True)
         if upload_started and job is not None and source is not None:
             await self._send_output_media_terminal(

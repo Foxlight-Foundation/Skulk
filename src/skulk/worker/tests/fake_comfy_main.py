@@ -24,6 +24,7 @@ import re
 import sys
 import time
 import uuid
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -114,6 +115,14 @@ class FakeComfy:
                 status=400,
             )
         node_errors: dict[str, Any] = {}
+        # Membership in the directory's own listing, rather than a path built
+        # from the graph's value, so a submitted name can never address a file
+        # outside the input directory.
+        staged = {
+            entry.relative_to(self.input_dir).as_posix()
+            for entry in self.input_dir.rglob("*")
+            if entry.is_file()
+        }
         for node_id, node in graph.items():
             if "class_type" not in node:
                 return web.json_response(
@@ -134,11 +143,7 @@ class FakeComfy:
                     "LoadVideo",
                     "LoadAudio",
                 )
-                if (
-                    loads_media
-                    and isinstance(name, str)
-                    and not (self.input_dir / name).is_file()
-                ):
+                if loads_media and isinstance(name, str) and name not in staged:
                     node_errors[node_id] = {
                         "errors": [
                             {
@@ -159,10 +164,14 @@ class FakeComfy:
                 },
                 status=400,
             )
-        (self.output_dir / f"{prompt_id}.prompt.json").parent.mkdir(
-            parents=True, exist_ok=True
+        # The submitted graph is kept for the tests to read back; its file is
+        # named by a digest of the prompt id, so no submitted value reaches a
+        # path. The tests find it by glob, not by name.
+        submitted = (
+            self.output_dir / f"{sha256(prompt_id.encode()).hexdigest()}.prompt.json"
         )
-        (self.output_dir / f"{prompt_id}.prompt.json").write_text(json.dumps(graph))
+        submitted.parent.mkdir(parents=True, exist_ok=True)
+        submitted.write_text(json.dumps(graph))
         await self.queue.put((prompt_id, graph, body.get("client_id", "")))
         return web.json_response(
             {"prompt_id": prompt_id, "number": 0, "node_errors": {}}
