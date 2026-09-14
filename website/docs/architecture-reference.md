@@ -209,6 +209,14 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   global fail-closed kill switch for both new approvals and recovered dispatches.
   No autonomous approval or per-action grants
   yet.
+- Every Steward turn obtains a fresh, bounded `get_cluster_state` tool result before any
+  model generation, after client history and middleware context. The harness supplies the
+  tool exchange itself; model tool selection cannot skip it. An unavailable or invalid
+  baseline ends the turn with the normal chat error and no generated answer. This also
+  applies to follow-ups, greetings, and both streaming and non-streaming clients.
+  Additional investigation remains model-directed; the baseline guarantees evidence
+  availability, not perfect interpretation.
+
 - Client surface: reserved virtual model id `skulk/steward` on
   `POST /v1/chat/completions` (checked before card resolution; client
   `tools` rejected 400; client system messages ignored; trace streams as

@@ -64,6 +64,10 @@ class _CapturingApi:
         self.dispatched: list[TextGenerationTaskParams] = []
         self.extension_taps: list[bool] = []
 
+    async def get_cluster_state(self) -> dict[str, object]:
+        """Supply the mandatory current-state baseline before generation."""
+        return {"topology": {"nodes": []}}
+
     async def running_model_card(self, model_id: ModelId) -> ModelCard:
         assert str(model_id) == _STEWARD_MODEL
         return _thinking_toggle_card()

@@ -435,7 +435,17 @@ finalists' trust behavior, and it is the harness's request shape rather
 than a card claim. GGUF steward cards must stay text-only or the vision
 platform gate bars them from `llama_server`. Repair builders re-stamp `system_role` (same pattern as #658
 exclusions). `TextGeneration.target_instance_id` pins generation to one
-instance (mirrors SpeechSynthesis). Harness = `src/skulk/api/steward.py`:
+instance (mirrors SpeechSynthesis).
+
+Every Steward turn obtains a fresh, bounded `get_cluster_state` tool result before any
+model generation, after client history and middleware context. The harness supplies the
+tool exchange itself; model tool selection cannot skip it. An unavailable or invalid
+baseline ends the turn with the normal chat error and no generated answer. This also
+applies to follow-ups, greetings, and both streaming and non-streaming clients.
+Additional investigation remains model-directed; the baseline guarantees evidence
+availability, not perfect interpretation.
+
+Harness = `src/skulk/api/steward.py`:
 bounded observation tools (state/resources/telemetry/data-plane/versions/
 envelopes/per-node diagnostics and doctor/catalog), with state normalized into exact heterogeneous
 node facts, non-overlapping operator placement/ready/terminal lifecycle

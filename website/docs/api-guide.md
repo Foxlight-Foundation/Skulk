@@ -2266,6 +2266,13 @@ Semantics of the reserved id:
   each tool step arrives as a `reasoning_content` delta while the
   investigation runs, followed by the answer as `content`; non-streaming
   responses carry the trace in the message's `reasoning_content` field.
+- Every Steward turn obtains a fresh, bounded `get_cluster_state` tool result before any
+  model generation, after client history and middleware context. The harness supplies
+  the tool exchange itself; model tool selection cannot skip it. An unavailable or
+  invalid baseline ends the turn with the normal chat error and no generated answer.
+  This also applies to follow-ups, greetings, and both streaming and non-streaming
+  clients. Additional investigation remains model-directed; the baseline guarantees
+  evidence availability, not perfect interpretation.
 - Client-supplied `tools` are rejected with `400`: the steward's tool
   surface belongs to the server.
 - Client `system` messages are ignored in favor of the steward's own system
