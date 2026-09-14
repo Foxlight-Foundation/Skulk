@@ -1019,7 +1019,15 @@ surfaces and refuses ordinary deletion while the mode is enabled.
 Conversation happens through the standard OpenAI-compatible chat-completions
 endpoint using the reserved virtual model id `skulk/steward`, streaming
 included, so any OpenAI-compatible client can talk to the cluster with no
-steward-specific integration. The reserved id selects the model plus the
+steward-specific integration. Every Steward turn obtains a fresh, bounded
+`get_cluster_state` tool result before any model generation, after client history and
+middleware context. The harness supplies the tool exchange itself; model tool selection
+cannot skip it. An unavailable or invalid baseline ends the turn with the normal chat
+error and no generated answer. This also applies to follow-ups, greetings, and both
+streaming and non-streaming clients. Additional investigation remains model-directed;
+the baseline guarantees evidence availability, not perfect interpretation.
+
+The reserved id selects the model plus the
 server-side harness: a bounded tool surface whose observation tools are
 strictly read-only (cluster
 state normalized into an exact node count, heterogeneous identity, RAM,

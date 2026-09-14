@@ -22,6 +22,7 @@ from collections.abc import AsyncGenerator, Mapping
 from collections.abc import Set as AbstractSet
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Literal, cast, final
+from uuid import uuid4
 
 import anyio
 from pydantic import BaseModel, ConfigDict, Field
@@ -154,9 +155,10 @@ operator questions by investigating your current state through your tools,
 then reporting clearly.
 
 Rules:
-- Investigate before concluding. Start from get_cluster_state unless the
-  question clearly points elsewhere; for what-is and how-to questions,
-  search_docs is the primary source.
+- Each turn starts with a fresh get_cluster_state result supplied by the
+  harness. Use it before answering; do not repeat that call unless you need
+  to refresh it. Investigate further when the snapshot cannot answer the
+  question; for what-is and how-to questions, search_docs is the primary source.
 - Call ONE tool at a time and read its result before deciding the next step.
 - Evidence means concrete observed values from tool results, not guesses.
 - Treat the tool's nodeCount, memory values, capability booleans, and lifecycle
@@ -1962,6 +1964,53 @@ class StewardHarness:
     ) -> "AsyncGenerator[TokenChunk | ErrorChunk | ToolCallChunk | PrefillProgressChunk, None]":
         """The turn's investigation loop; separated so the public stream can
         wrap it with abandonment cleanup."""
+        # Evidence is an execution prerequisite, not a tool-use suggestion.
+        # Fetch on every turn (after conversation/middleware context) so even
+        # a direct answer or a follow-up cannot start from model memory alone.
+        yield TokenChunk(
+            model=ModelId(STEWARD_VIRTUAL_MODEL_ID),
+            text="get_cluster_state\n",
+            token_id=-1,
+            usage=None,
+            is_thinking=True,
+        )
+        result = await self.execute_tool("get_cluster_state", {})
+        try:
+            evidence = cast("object", json.loads(result))
+        except json.JSONDecodeError:
+            evidence = None
+        baseline = _as_object_dict(evidence)
+        node_count = baseline.get("nodeCount")
+        if (
+            "error" in baseline
+            or type(node_count) is not int
+            or node_count < 0
+            or not isinstance(baseline.get("nodes"), list)
+        ):
+            # Tool failures are usually model-readable so investigation can
+            # recover. The mandatory baseline is different: without it there
+            # must be no generation, including no speculative streamed prefix.
+            yield ErrorChunk(
+                model=ModelId(STEWARD_VIRTUAL_MODEL_ID),
+                error_message=(
+                    "Skulk could not read current cluster state. "
+                    "Please retry; no answer was generated."
+                ),
+            )
+            return
+        baseline_call = ToolCall(
+            id=f"steward-state-{uuid4()}",
+            index=0,
+            function=ToolCallItem(name="get_cluster_state", arguments="{}"),
+        )
+        messages.extend(
+            [
+                ChatCompletionMessage(role="assistant", tool_calls=[baseline_call]),
+                ChatCompletionMessage(
+                    role="tool", content=result, tool_call_id=baseline_call.id
+                ),
+            ]
+        )
         reply = ""
         for step_index in range(MAX_STEPS_PER_TURN):
             if step_index == MAX_STEPS_PER_TURN - 1:
