@@ -360,9 +360,9 @@ def runtime_launchers(archive: zipfile.ZipFile) -> list[str]:
             raise ValueError("wheel entry point declaration is not UTF-8") from error
         for raw in text.splitlines():
             line = raw.strip()
-            if not line or line[0] in "#;":
-                # importlib.metadata parses this file with ConfigParser, which
-                # drops comment lines; a "=" inside one is not a declaration.
+            if not line or line.startswith("#"):
+                # importlib.metadata drops blank and "#" lines and nothing
+                # else; a ";" line is a declaration to it, so it is one here.
                 continue
             if line.startswith("[") and line.endswith("]"):
                 section = line[1:-1].strip()

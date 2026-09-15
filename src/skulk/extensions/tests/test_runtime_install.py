@@ -265,9 +265,13 @@ def test_launcher_declarations_follow_importlib_not_a_narrower_grammar() -> None
     assert runtime_launchers(
         wheel(
             b"[skulk.capability_runtime]\n# generated-by = tooling\n"
-            b"; note = kept\nowner = pkg.cli : Runner.main\n"
+            b"owner = pkg.cli : Runner.main\n"
         )
     ) == ["owner"]
+    # importlib.metadata treats a ";" line as a declaration, so a wheel
+    # carrying one is refused here for the same reason load() would fail.
+    with pytest.raises(ValueError, match="invalid launcher"):
+        runtime_launchers(wheel(b"[skulk.capability_runtime]\n; note = kept\n"))
     # importlib.metadata decodes the installed metadata strictly, so a byte
     # accepted here would become an owner that exits on every start.
     with pytest.raises(ValueError, match="UTF-8"):
