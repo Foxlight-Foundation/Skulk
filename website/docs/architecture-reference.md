@@ -217,6 +217,22 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   Additional investigation remains model-directed; the baseline guarantees evidence
   availability, not perfect interpretation.
 
+- Steward also projects immutable inventory observations before compaction, with
+  API read time, explicit scope, and null counts for missing or malformed source
+  sections. Read time is not telemetry freshness. A bounded set of standalone
+  node-count and download-status questions (for example, “How many nodes do you
+  currently have?” and “Are there any downloads in flight?”) receives a deterministic
+  answer from those observations without model generation. Compound, per-model,
+  action and other diagnostic requests continue through the model investigation.
+  Counts describe topology transport peers and node-staging records, not physical
+  hosts, capability nodes, Pods or model-store fetches. Queued, transferring and
+  retained terminal downloads remain distinct; unavailable per-transfer timestamps
+  prevent a claim that bytes are moving now. Exact counts survive detail compaction,
+  which prioritizes active downloads over terminal history. Backend support is
+  inferred only from advertised backend tags, never hardware vendor. This protects
+  the supported inventory answers; it is not a general semantic validator for
+  model-generated diagnostic prose.
+
 - Client surface: reserved virtual model id `skulk/steward` on
   `POST /v1/chat/completions` (checked before card resolution; client
   `tools` rejected 400; client system messages ignored; trace streams as

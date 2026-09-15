@@ -2273,6 +2273,23 @@ Semantics of the reserved id:
   This also applies to follow-ups, greetings, and both streaming and non-streaming
   clients. Additional investigation remains model-directed; the baseline guarantees
   evidence availability, not perfect interpretation.
+
+- Steward also projects immutable inventory observations before compaction, with
+  API read time, explicit scope, and null counts for missing or malformed source
+  sections. Read time is not telemetry freshness. A bounded set of standalone
+  node-count and download-status questions (for example, “How many nodes do you
+  currently have?” and “Are there any downloads in flight?”) receives a deterministic
+  answer from those observations without model generation. Compound, per-model,
+  action and other diagnostic requests continue through the model investigation.
+  Counts describe topology transport peers and node-staging records, not physical
+  hosts, capability nodes, Pods or model-store fetches. Queued, transferring and
+  retained terminal downloads remain distinct; unavailable per-transfer timestamps
+  prevent a claim that bytes are moving now. Exact counts survive detail compaction,
+  which prioritizes active downloads over terminal history. Backend support is
+  inferred only from advertised backend tags, never hardware vendor. This protects
+  the supported inventory answers; it is not a general semantic validator for
+  model-generated diagnostic prose.
+
 - Client-supplied `tools` are rejected with `400`: the steward's tool
   surface belongs to the server.
 - Client `system` messages are ignored in favor of the steward's own system
