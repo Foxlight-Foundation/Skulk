@@ -401,6 +401,23 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   maps every other canonical route onto existing cluster/model/chat/operation/
   device scopes. The ordinary local API/dashboard listener is unchanged and is
   not relay-accessible; no mobile-only replacement surface exists.
+- **Opt-in V2 on-demand carrier:** the same command accepts only a complete
+  generated version-two document. The existing app URL, route/app credential,
+  QR bootstrap, pinned inner TLS, and canonical API are unchanged. Skulk keeps
+  the delegated P-256 key in the encrypted authority journal, durably advances
+  a `u64` connector generation before use, and proves its exact route, region,
+  epoch, term, generation, and five-minute lease over one canonical SKRL control
+  WebSocket. Relay-negotiated heartbeats (currently five seconds) and signed
+  renewal retain that authority.
+  Each `OpenConnection` is mapped to a fresh data WebSocket carrying the exact
+  connection ID and immutable initial hello proof, including after lease
+  renewal; its first frame is the canonical
+  `ConnectionAccepted`, after which only opaque inner-TLS bytes are bridged to
+  the existing loopback listener. The gateway admits at most 64 active data
+  lanes before task or socket allocation; excess requests are left unclaimed
+  for relay-side expiry. No warm data lanes are opened. This path is
+  source-integrated but not enabled by version-one state and is not yet a
+  production scale, mixed-version, persistence, revocation, or rollback claim.
 - **Key boundary:** `AuthorityKeyProvider` supplies the active unwrapped 32-byte
   data key and immutable key-version ID. V1's
   `LocalFileAuthorityKeyProvider` creates one random local key protected by
@@ -1340,6 +1357,28 @@ resources/*_model_cards/  # built-in TOML cards per family (the registry imports
 resources/test_engine_cards/  # cards the synthetic test engines serve; never imported
 rust/                   # libp2p (networking), PyO3 bindings, system_custodian
 ```
+
+## Isolated operator qualification fixture
+
+- Entry: `bench/operator_workload_fixture.py`; opt-in, no Node/discovery/inference.
+- Real auth/gateway: generated encrypted authority, signed version-two connector,
+  TLS 1.3, scoped canonical authorization; no production configuration accepted.
+- Generated API: `bench/operator_fixture_app.py`; bounded input, fixed reads/SSE/PCM.
+- Public rehearsal: explicit `PublicFixtureIngress` on `isolated_fixture` only;
+  run-bound WSS hostname, at most one hour, mutually exclusive with private ingress.
+  Controller must enforce bounded exposure, independent expiry and verified cleanup;
+  naming validation does not attest effects. No CLI opt-in or production target.
+  Public-only route readiness: at most 120 seconds and remaining fixture lease;
+  local/private retries unchanged. Pairing exposure also requires controller-side
+  public readiness after the carrier starts.
+- Local relay lifetime: `bench/operator_fixture_lease.py`; independent expiry and
+  parent-EOF watchdog; normal runner teardown removes temporary authority/QR files.
+- Schema validation: `bench/validate_operator_fixture.cjs`; exact app source commit
+  and matching installed schema dependency versions, not physical-device evidence.
+- Aggregate observation: `bench/observe_operator_workload.py`; bounded opaque TCP
+  bridge + ASGI categories/lengths; verified-copy local recorder subprocess.
+  Gateway-boundary, unattested aggregate only; no content, traces, or app-wire change.
+- Contract and limits: [operator-workload-fixture](operator-workload-fixture.md).
 
 ## Maintenance discipline
 

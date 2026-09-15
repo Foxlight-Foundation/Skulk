@@ -1,6 +1,7 @@
 # pyright: reportPrivateUsage=false
 """Tests that optional relay ingress cannot take down the local API."""
 
+from collections.abc import Callable
 from typing import cast, final
 
 import anyio
@@ -73,9 +74,23 @@ async def test_operator_listener_failure_is_isolated_from_local_api(
     api = _build_api()
     configuration = cast(OperatorRelayConfiguration, object())
     api._operator_relay_configuration = configuration
-    api._operator_pairing_service = cast(OperatorPairingService, object())
     connector_started = anyio.Event()
     connector_stopped = anyio.Event()
+
+    @final
+    class _GenerationService:
+        """Pairing-service stand-in exposing the connector generation callback."""
+
+        @staticmethod
+        def reserve_relay_connector_generation() -> int:
+            """Return one synthetic durable generation."""
+
+            return 1
+
+    api._operator_pairing_service = cast(
+        OperatorPairingService,
+        cast(object, _GenerationService()),
+    )
 
     @final
     class _BlockingConnector:
@@ -96,8 +111,11 @@ async def test_operator_listener_failure_is_isolated_from_local_api(
 
     def _connector_factory(
         received: OperatorRelayConfiguration,
+        *,
+        next_connector_generation: Callable[[], int],
     ) -> _BlockingConnector:
         assert received is configuration
+        assert callable(next_connector_generation)
         return _BlockingConnector()
 
     monkeypatch.setattr(api, "run_operator_api", _failing_operator_api)
