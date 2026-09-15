@@ -336,15 +336,20 @@ def runtime_launchers(archive: zipfile.ZipFile) -> list[str]:
     Repeats are kept so a caller can refuse an ambiguous declaration.
     """
     found: list[str] = []
-    for item in archive.infolist():
-        parts = PurePosixPath(item.filename).parts
-        if (
-            len(parts) != 2
-            or not parts[0].endswith(".dist-info")
-            or parts[1] != "entry_points.txt"
-            or item.file_size > 65536
-        ):
-            continue
+    declarations = [
+        item
+        for item in archive.infolist()
+        if len(PurePosixPath(item.filename).parts) == 2
+        and PurePosixPath(item.filename).parts[0].endswith(".dist-info")
+        and PurePosixPath(item.filename).parts[1] == "entry_points.txt"
+    ]
+    # A wheel has one dist-info; more than one entry_points.txt is malformed,
+    # and reading only the single legitimate member bounds this scan.
+    if len(declarations) > 1:
+        raise ValueError("wheel declares entry points more than once")
+    for item in declarations:
+        if item.file_size > 65536:
+            raise ValueError("wheel entry point declaration exceeds bound")
         section = None
         for raw in archive.read(item).decode("utf-8", "replace").splitlines():
             line = raw.strip()
@@ -400,7 +405,6 @@ def _verified_artifacts(runtime: VerifiedRuntime, directory: Path) -> dict[str, 
         if not tags.intersection(supported):
             raise ValueError("wheel does not support this interpreter")
         with zipfile.ZipFile(io.BytesIO(content)) as archive:
-            launchers += runtime_launchers(archive)
             entries = archive.infolist()
             expanded += sum(item.file_size for item in entries)
             if (
@@ -433,6 +437,10 @@ def _verified_artifacts(runtime: VerifiedRuntime, directory: Path) -> dict[str, 
                 or Version(str(parsed.get("Version", "0"))) != version
             ):
                 raise ValueError("wheel identity differs")
+            # Only after the entry-count, expanded-size and single-metadata
+            # bounds hold: a malformed wheel must not get decompression work
+            # out of the launcher scan before it is rejected.
+            launchers += runtime_launchers(archive)
             for value in parsed.get_all("Requires-Dist", []):
                 requirement = Requirement(str(value))
                 if requirement.marker is not None and not requirement.marker.evaluate(
