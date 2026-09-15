@@ -2341,8 +2341,9 @@ authority. Private values remain in the write-only credential path.
 `extensions/local_setup.py` implements the explicit local
 `skulk-plugin-service setup-plugin` path. It discovers one installed plugin by ID
 through the protected service connection, validates retained authority and the full
-selected runtime, and replaces the terminal process with the signed archive's
-fixed optional `__setup__` entrypoint. Its installer lock survives exec until setup
+selected runtime, and replaces the terminal process with the setup launcher:
+the signed archive's fixed optional `__setup__` entrypoint, or the `setup` entry a
+signed wheel declares under `skulk.capability_runtime`. Its installer lock survives exec until setup
 exits. This is provider-neutral local dispatch; private prompts, credentials and
 any local registration policy stay in the plugin. Remote HTTP management never
 executes this entrypoint or accepts a module/executable path.

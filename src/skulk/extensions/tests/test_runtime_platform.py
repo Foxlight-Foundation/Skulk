@@ -85,3 +85,20 @@ def test_incompatible_architecture_remains_rejected() -> None:
     assert not platform_matches("linux-glibc-x86_64", "linux-glibc-aarch64")
     assert not platform_matches("ubuntu-24.04-x86_64", "linux-glibc-aarch64")
     assert not platform_matches("macos-arm64", "macos-x86_64")
+
+
+def test_other_operating_systems_are_refused_by_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Architecture and libc are open; the operating system is not.
+
+    The release schema admits only darwin and linux, and service registration
+    knows only launchd and systemd, so naming a third system would claim a host
+    the runtime cannot serve and refuse it later with a worse message.
+    """
+    monkeypatch.setattr(sys, "platform", "freebsd14")
+    monkeypatch.setattr(platform, "machine", lambda: "amd64")
+    with pytest.raises(ValueError, match="macOS and Linux"):
+        runtime_artifacts.current_platform()
+    with pytest.raises(ValueError, match="macOS and Linux"):
+        service_platform()

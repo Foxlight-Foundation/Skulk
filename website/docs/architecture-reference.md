@@ -1505,8 +1505,9 @@ authority. Private values remain in the write-only credential path.
 - **Installed local plugin setup:** `extensions/local_setup.py` backs
   `skulk-plugin-service setup-plugin <managed-id> -- <setup-fields>`. It resolves
   the protected local profile and installation, requires retained release/trust
-  history, verifies the selected complete runtime, and execs only signed
-  `__setup__.py`. The installer lock is inherited until exit; disabled selections
+  history, verifies the selected complete runtime, and execs only the signed setup
+  launcher: the archive's `__setup__.py` or a signed wheel's `setup` entry under
+  `skulk.capability_runtime`. The installer lock is inherited until exit; disabled selections
   are allowed. No provider SDK enters Skulk and no HTTP route launches this path.
   Plugin setup owns prompts and explicit local registration, never remote grants.
 
@@ -1533,7 +1534,8 @@ and failed or unrelated lifecycle transitions are never replaced automatically.
 No provider policy, node enablement or paid approval is added to core.
 
 Installed plugin terminal management uses `skulk-plugin-service manage-plugin`
-and the selected archive's fixed optional `__manage__.py`. `extensions/local_setup.py`
+and either the archive's optional `__manage__.py` or the `manage` launcher a signed
+wheel declares under `skulk.capability_runtime`. `extensions/local_setup.py`
 shares verification and inherited generation ownership with `setup-plugin`, while
 keeping entrypoints distinct. The plugin derives durable coordinates and owns its
 fixed CLI verbs; core accepts no executable/module selector and adds no HTTP exec

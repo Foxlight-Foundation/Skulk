@@ -904,11 +904,12 @@ explicit downloads for nodes declaring support. See the
 
 ### Running an installed plugin's local setup
 
-An optional `__setup__.py` in the signed archive supplies provider-owned local
+An optional `__setup__.py` in the signed archive, or a `setup` launcher a signed
+wheel declares under `skulk.capability_runtime`, supplies provider-owned local
 setup. Owners invoke it with `skulk-plugin-service setup-plugin managed.example --
 <plugin setup fields>`. Skulk resolves the installed ID from its protected local
 service profile and verifies the selected archive, full dependency runtime, current
-publisher trust and Skulk compatibility before executing that fixed entrypoint.
+publisher trust and Skulk compatibility before executing that fixed launcher.
 No archive path, Python path, module name or command string is accepted.
 
 The setup process runs as the existing nonroot owner and inherits terminal input
@@ -958,7 +959,9 @@ across changed fences and exposes explicit original-operation resume. See the
 
 ### Installed terminal management
 
-A selected signed archive may provide a fixed optional `__manage__.py` entrypoint.
+A selected generation provides a management launcher: the archive's fixed
+optional `__manage__.py`, or the `manage` entry a signed wheel declares under
+`skulk.capability_runtime`.
 `skulk-plugin-service manage-plugin MANAGED_ID -- PLUGIN_ARGUMENTS` discovers the
 protected service connection and selected installation, verifies its full runtime,
 compatibility, trust and retained release history, then executes only that entrypoint.

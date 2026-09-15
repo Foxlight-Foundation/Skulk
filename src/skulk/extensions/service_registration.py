@@ -48,7 +48,7 @@ def service_platform() -> ServicePlatform:
     if sys.platform == "linux":
         library, _ = platform.libc_ver()
         return f"linux-{library or 'unknown'}-{architecture}"
-    return f"{sys.platform}-{architecture}"
+    raise ValueError("plugin services are qualified on macOS and Linux only")
 
 
 @final

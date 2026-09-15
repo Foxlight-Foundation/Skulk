@@ -75,7 +75,7 @@ def platform_matches(declared: str, host: str) -> bool:
 
 
 def current_platform() -> str:
-    """Name this host's artifact family. Nothing is refused here."""
+    """Name this host's artifact family; only the operating system is closed."""
     machine = platform.machine().lower()
     architecture = {"amd64": "x86_64", "arm64": "aarch64"}.get(machine, machine)
     if sys.platform == "darwin":
@@ -83,7 +83,10 @@ def current_platform() -> str:
     if sys.platform == "linux":
         library, _ = platform.libc_ver()
         return f"linux-{library or 'unknown'}-{architecture}"
-    return f"{sys.platform}-{architecture}"
+    # Architecture and C library are open; the operating system is not. Skulk
+    # itself runs on macOS and Linux, the release schema admits only those, and
+    # naming a third one here would claim a host the runtime cannot serve.
+    raise ValueError("managed runtimes are qualified on macOS and Linux only")
 
 
 class _Contract(BaseModel):
