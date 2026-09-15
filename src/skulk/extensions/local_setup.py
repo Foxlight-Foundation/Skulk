@@ -24,7 +24,7 @@ _MANAGEMENT_ENTRYPOINT = "import runpy,sys;sys.path.insert(0,sys.argv.pop(1));ru
 _LAUNCHER_ENTRYPOINT = (
     "import sys;from importlib.metadata import entry_points;sys.argv.pop(1);"
     "found=[e for e in entry_points(group='skulk.capability_runtime') if e.name=='{name}'];"
-    "sys.exit('this plugin has no selected local entrypoint') if not found else found[0].load()()"
+    "sys.exit('this plugin has no selected local entrypoint') if not found else sys.exit(found[0].load()())"
 )
 
 

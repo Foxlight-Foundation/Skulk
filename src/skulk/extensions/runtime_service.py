@@ -26,7 +26,7 @@ _BOOTSTRAP = "import runpy,sys;sys.path.insert(0,sys.argv.pop(1));runpy.run_modu
 _LAUNCHER_BOOTSTRAP = (
     "import sys;from importlib.metadata import entry_points;sys.argv.pop(1);"
     "found=[e for e in entry_points(group='skulk.capability_runtime') if e.name=='owner'];"
-    "sys.exit('no owner launcher in the runtime') if not found else found[0].load()()"
+    "sys.exit('no owner launcher in the runtime') if not found else sys.exit(found[0].load()())"
 )
 
 
