@@ -351,24 +351,42 @@ def runtime_launchers(archive: zipfile.ZipFile) -> list[str]:
         if item.file_size > 65536:
             raise ValueError("wheel entry point declaration exceeds bound")
         section = None
-        for raw in archive.read(item).decode("utf-8", "replace").splitlines():
+        try:
+            # importlib.metadata reads the installed copy as strict UTF-8, so a
+            # byte tolerated here would only surface as an owner that never
+            # starts; refuse it where refusal is cheap and visible.
+            text = archive.read(item).decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise ValueError("wheel entry point declaration is not UTF-8") from error
+        for raw in text.splitlines():
             line = raw.strip()
             if line.startswith("[") and line.endswith("]"):
                 section = line[1:-1].strip()
             elif section == RUNTIME_LAUNCHER_GROUP and "=" in line:
                 name, _, target = line.partition("=")
-                module, separator, attribute = target.strip().partition(":")
-                if not (
-                    separator
-                    and attribute.isidentifier()
-                    and all(part.isidentifier() for part in module.split("."))
-                ):
+                if not valid_launcher_target(target):
                     # importlib.metadata would build an entry point with this
-                    # value and fail at load(), after staging succeeded; refuse
-                    # it here, where refusal is cheap and visible.
-                    raise ValueError(f"wheel declares an invalid launcher {name.strip()}")
+                    # value and fail at load(), after staging succeeded.
+                    raise ValueError(
+                        f"wheel declares an invalid launcher {name.strip()}"
+                    )
                 found.append(name.strip())
     return found
+
+
+def valid_launcher_target(target: str) -> bool:
+    """Whether ``module:attribute`` names something ``EntryPoint.load`` can resolve.
+
+    The shape importlib accepts: dotted module and dotted attribute paths with
+    optional whitespace around the colon. Extras are refused; a launcher is
+    loaded from the pinned wheelhouse, never resolved against extras.
+    """
+    module, separator, attribute = target.partition(":")
+    return bool(separator) and all(
+        part.isidentifier()
+        for side in (module.strip(), attribute.strip())
+        for part in side.split(".")
+    )
 
 
 def _verified_artifacts(runtime: VerifiedRuntime, directory: Path) -> dict[str, bytes]:

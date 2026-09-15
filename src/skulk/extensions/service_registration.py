@@ -41,7 +41,9 @@ def _is_macos(family: str) -> bool:
 
 def service_platform() -> ServicePlatform:
     """Name this host's family; whether it is qualified is decided at install."""
-    machine = platform.machine().lower()
+    # The same normalization as runtime_artifacts.current_platform(): a hyphen
+    # in the machine name would otherwise split the family into extra parts.
+    machine = platform.machine().lower().replace("-", "_")
     architecture = {"amd64": "x86_64", "arm64": "aarch64"}.get(machine, machine)
     if sys.platform == "darwin":
         return f"macos-{'arm64' if machine == 'arm64' else architecture}"

@@ -81,9 +81,12 @@ def artifacts(
         dup_prefix = "example_dup-1.0.dist-info/"
         dup_files = {
             "example_dup/__init__.py": "",
-            dup_prefix + "METADATA": "Metadata-Version: 2.1\nName: example-dup\nVersion: 1.0\n",
-            dup_prefix + "WHEEL": "Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
-            dup_prefix + "entry_points.txt": "[skulk.capability_runtime]\nowner = example_dup:main\n",
+            dup_prefix
+            + "METADATA": "Metadata-Version: 2.1\nName: example-dup\nVersion: 1.0\n",
+            dup_prefix
+            + "WHEEL": "Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+            dup_prefix
+            + "entry_points.txt": "[skulk.capability_runtime]\nowner = example_dup:main\n",
         }
         dup_files[dup_prefix + "RECORD"] = (
             "".join(f"{name},,\n" for name in dup_files) + dup_prefix + "RECORD,,\n"
@@ -108,14 +111,22 @@ def artifacts(
     write_private(directory / filename, wheel)
     inventory: dict[str, JsonValue] = {"example-dep": "1.0"}
     wheel_claims: list[JsonValue] = [
-        {"filename": filename, "sha256": hashlib.sha256(wheel).hexdigest(), "size": len(wheel)}
+        {
+            "filename": filename,
+            "sha256": hashlib.sha256(wheel).hexdigest(),
+            "size": len(wheel),
+        }
     ]
     if extra is not None:
         dup_name = "example_dup-1.0-py3-none-any.whl"
         write_private(directory / dup_name, extra)
         inventory["example-dup"] = "1.0"
         wheel_claims.append(
-            {"filename": dup_name, "sha256": hashlib.sha256(extra).hexdigest(), "size": len(extra)}
+            {
+                "filename": dup_name,
+                "sha256": hashlib.sha256(extra).hexdigest(),
+                "size": len(extra),
+            }
         )
     now = int(time.time())
     host = QualifiedHost(platform, "3.13.13", "1.5.2", "a" * 64)
@@ -227,6 +238,34 @@ def test_owner_launcher_comes_from_a_shim_or_a_signed_wheel(tmp_path: Path) -> N
     runtime = verify_runtime(metadata, trust, host, now=int(time.time()))
     with pytest.raises(ValueError, match="twice"):
         verified_artifacts(runtime, ambiguous)
+
+
+def test_launcher_declarations_follow_importlib_not_a_narrower_grammar() -> None:
+    """What ``EntryPoint.load`` resolves is accepted; what it cannot read is refused."""
+    from skulk.extensions.runtime_artifacts import (
+        runtime_launchers,
+        valid_launcher_target,
+    )
+
+    assert valid_launcher_target("pkg.cli : Runner.main")
+    assert valid_launcher_target("pkg:main")
+    assert not valid_launcher_target("pkg.cli")
+    assert not valid_launcher_target("pkg:main [extra]")
+    assert not valid_launcher_target("pkg:Runner..main")
+
+    def wheel(declaration: bytes) -> zipfile.ZipFile:
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr("d-1.0.dist-info/entry_points.txt", declaration)
+        return zipfile.ZipFile(io.BytesIO(buffer.getvalue()))
+
+    assert runtime_launchers(
+        wheel(b"[skulk.capability_runtime]\nowner = pkg.cli : Runner.main\n")
+    ) == ["owner"]
+    # importlib.metadata decodes the installed metadata strictly, so a byte
+    # accepted here would become an owner that exits on every start.
+    with pytest.raises(ValueError, match="UTF-8"):
+        runtime_launchers(wheel(b"[skulk.capability_runtime]\nowner = pkg:main\n\xff"))
 
 
 def test_platform_family_is_derived_and_legacy_names_still_match() -> None:
