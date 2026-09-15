@@ -4,6 +4,7 @@ import asyncio
 import os
 import sqlite3
 import sys
+import zipfile
 from pathlib import Path
 from typing import Literal, NoReturn
 
@@ -31,6 +32,7 @@ class ExecutedError(Exception):
     [
         "none",
         "launcher",
+        "unclaimed_wheel",
         "disabled",
         "missing_entry",
         "damaged",
@@ -54,7 +56,7 @@ async def test_local_setup_verifies_before_process_replacement(
     private_directory(manager)
     root = manager / "installations/managed.example"
     source = tmp_path / "source"
-    shimless = fault in ("missing_entry", "launcher")
+    shimless = fault in ("missing_entry", "launcher", "unclaimed_wheel")
     metadata, trust, host = artifacts(
         source,
         setup_source=None if shimless else "print('setup')\n",
@@ -91,6 +93,17 @@ async def test_local_setup_verifies_before_process_replacement(
             root / "generations" / staged.runtime_digest / "artifacts/bundle.pyz",
             b"damaged",
         )
+    elif fault == "unclaimed_wheel":
+        # A wheel dropped into the artifacts directory that the signed runtime
+        # never claimed declares the launcher; it must not authorize the branch.
+        generation = root / "generations" / staged.runtime_digest
+        with zipfile.ZipFile(
+            generation / "artifacts/stray-1.0-py3-none-any.whl", "w"
+        ) as stray:
+            stray.writestr(
+                "stray-1.0.dist-info/entry_points.txt",
+                "[skulk.capability_runtime]\nsetup = stray:main\nmanage = stray:main\n",
+            )
     elif fault == "history":
         with sqlite3.connect(selector.installer.database) as database:
             database.execute("DELETE FROM trust_floor")

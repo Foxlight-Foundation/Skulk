@@ -29,9 +29,24 @@ _LAUNCHER_ENTRYPOINT = (
 
 
 def _declared_launchers(artifacts: Path) -> set[str]:
-    """Launchers the generation's retained signed wheels declare, read as data."""
+    """Launchers the generation's signed wheels declare, read as data.
+
+    Only the wheels the installer actually verified and installed count: it
+    writes them, with their hashes, to the generation's requirements.txt. A
+    stray wheel in the artifacts directory must not be able to authorize the
+    launcher branch and then fail after the process has been replaced.
+    """
+    claimed: list[Path] = []
+    for line in (
+        read_private(artifacts.parent / "requirements.txt", 1048576)
+        .decode()
+        .splitlines()
+    ):
+        head = line.split(" ", 1)[0]
+        if head.startswith("./artifacts/") and head.endswith(".whl"):
+            claimed.append(artifacts / head.removeprefix("./artifacts/"))
     found: list[str] = []
-    for wheel in sorted(artifacts.glob("*.whl")):
+    for wheel in claimed:
         with zipfile.ZipFile(wheel) as archive:
             found += runtime_launchers(archive)
     if len(found) != len(set(found)):
