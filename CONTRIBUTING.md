@@ -510,7 +510,8 @@ arguments, committed fixtures or ordinary diagnostic output.
 
 
 Optional installed-plugin local setup uses the fixed signed `__setup__.py`
-entrypoint and `skulk-plugin-service setup-plugin <managed-id> -- <setup-fields>`.
+entrypoint, or the `setup` launcher a signed wheel declares under
+`skulk.capability_runtime`, and `skulk-plugin-service setup-plugin <managed-id> -- <setup-fields>`.
 Generic path discovery, runtime verification and inherited installation fencing
 live in `extensions/local_setup.py`; provider-specific prompts stay in the plugin.
 Tests cover actual offline runtime execution and terminal/fence inheritance without

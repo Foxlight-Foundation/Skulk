@@ -30,11 +30,13 @@ _LAUNCHER_ENTRYPOINT = (
 
 def _declared_launchers(artifacts: Path) -> set[str]:
     """Launchers the generation's retained signed wheels declare, read as data."""
-    found: set[str] = set()
+    found: list[str] = []
     for wheel in sorted(artifacts.glob("*.whl")):
         with zipfile.ZipFile(wheel) as archive:
-            found |= runtime_launchers(archive)
-    return found
+            found += runtime_launchers(archive)
+    if len(found) != len(set(found)):
+        raise ValueError("signed wheels declare the same runtime launcher twice")
+    return set(found)
 
 
 def _retained_history(root: Path, selection: RuntimeSelection) -> None:

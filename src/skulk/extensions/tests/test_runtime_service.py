@@ -1,6 +1,7 @@
 """Actual isolated generic owner launch, trust refusal and bounded process lifetime."""
 
 import asyncio
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -180,3 +181,20 @@ async def test_owner_ignoring_shutdown_is_killed_within_bound(
             assert await task
     assert service.process is not None and service.process.returncode == -9
     RuntimeLock(selector.root, "supervisor.lock").close()
+
+
+def test_owner_bootstrap_follows_the_bundle_shape(tmp_path: Path) -> None:
+    """A shim in the archive keeps the old launch; none means the declared launcher."""
+    from skulk.extensions.runtime_service import owner_bootstrap
+
+    with_shim = tmp_path / "shim.pyz"
+    with zipfile.ZipFile(with_shim, "w") as archive:
+        archive.writestr("__owner__.py", "pass\n")
+    without = tmp_path / "bare.pyz"
+    with zipfile.ZipFile(without, "w") as archive:
+        archive.writestr("__main__.py", "pass\n")
+    assert "run_module('__owner__'" in owner_bootstrap(with_shim)
+    launcher = owner_bootstrap(without)
+    assert "entry_points(group='skulk.capability_runtime')" in launcher
+    assert "e.name=='owner'" in launcher
+    assert "run_module" not in launcher

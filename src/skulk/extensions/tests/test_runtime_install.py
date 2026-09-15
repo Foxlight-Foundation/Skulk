@@ -42,6 +42,7 @@ def artifacts(
     signing_key: Ed25519PrivateKey | None = None,
     permissions: tuple[str, ...] = ("local synthetic operation",),
     launcher: bool = False,
+    duplicate_launcher: bool = False,
 ) -> tuple[bytes, RuntimeTrust, QualifiedHost]:
     """Create an independently signed generic package with no private SDK metadata."""
     private_directory(directory)
@@ -71,6 +72,25 @@ def artifacts(
         for name, content in files.items():
             archive.writestr(name, content)
     wheel = buffer.getvalue()
+    extra: bytes | None = None
+    if duplicate_launcher:
+        # A second signed wheel claiming the same launcher: metadata order,
+        # not the signature, would decide which owner starts.
+        dup = io.BytesIO()
+        dup_prefix = "example_dup-1.0.dist-info/"
+        dup_files = {
+            "example_dup/__init__.py": "",
+            dup_prefix + "METADATA": "Metadata-Version: 2.1\nName: example-dup\nVersion: 1.0\n",
+            dup_prefix + "WHEEL": "Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+            dup_prefix + "entry_points.txt": "[skulk.capability_runtime]\nowner = example_dup:main\n",
+        }
+        dup_files[dup_prefix + "RECORD"] = (
+            "".join(f"{name},,\n" for name in dup_files) + dup_prefix + "RECORD,,\n"
+        )
+        with zipfile.ZipFile(dup, "w") as archive:
+            for name, content in dup_files.items():
+                archive.writestr(name, content)
+        extra = dup.getvalue()
     bundle_buffer = io.BytesIO()
     with zipfile.ZipFile(bundle_buffer, "w") as archive:
         archive.writestr(
@@ -85,6 +105,17 @@ def artifacts(
     write_private(directory / "bundle.pyz", bundle)
     filename = "example_dep-1.0-py3-none-any.whl"
     write_private(directory / filename, wheel)
+    inventory: dict[str, JsonValue] = {"example-dep": "1.0"}
+    wheel_claims: list[JsonValue] = [
+        {"filename": filename, "sha256": hashlib.sha256(wheel).hexdigest(), "size": len(wheel)}
+    ]
+    if extra is not None:
+        dup_name = "example_dup-1.0-py3-none-any.whl"
+        write_private(directory / dup_name, extra)
+        inventory["example-dup"] = "1.0"
+        wheel_claims.append(
+            {"filename": dup_name, "sha256": hashlib.sha256(extra).hexdigest(), "size": len(extra)}
+        )
     now = int(time.time())
     host = QualifiedHost("macos-arm64", "3.13.13", "1.5.2", "a" * 64)
     key = signing_key or Ed25519PrivateKey.generate()
@@ -117,19 +148,13 @@ def artifacts(
             "python_requires": "==3.13.*",
             "skulk_build_sha256": host.skulk_build_sha256,
             "dependency_lock_sha256": hashlib.sha256(
-                canonical_json({"example-dep": "1.0"})
+                canonical_json(inventory)
             ).hexdigest(),
             "state_schema": "example.v1",
             "compatible_state_schemas": [],
             "permissions": list(permissions),
         },
-        "wheels": [
-            {
-                "filename": filename,
-                "sha256": hashlib.sha256(wheel).hexdigest(),
-                "size": len(wheel),
-            }
-        ],
+        "wheels": wheel_claims,
     }
     signed = canonical_json(
         {"runtime": payload, "signature": key.sign(canonical_json(payload)).hex()}
@@ -191,6 +216,27 @@ def test_owner_launcher_comes_from_a_shim_or_a_signed_wheel(tmp_path: Path) -> N
     metadata, trust, host = artifacts(declared, owner_entrypoint=False, launcher=True)
     runtime = verify_runtime(metadata, trust, host, now=int(time.time()))
     assert "bundle.pyz" in verified_artifacts(runtime, declared)
+    # Two signed wheels claiming the same launcher is an ambiguity, not a
+    # choice: metadata order would pick the owner, and it is unbound by the
+    # signature.
+    ambiguous = tmp_path / "ambiguous"
+    metadata, trust, host = artifacts(
+        ambiguous, owner_entrypoint=False, launcher=True, duplicate_launcher=True
+    )
+    runtime = verify_runtime(metadata, trust, host, now=int(time.time()))
+    with pytest.raises(ValueError, match="twice"):
+        verified_artifacts(runtime, ambiguous)
+
+
+def test_platform_family_is_derived_and_legacy_names_still_match() -> None:
+    """The installer names any host and still installs already-signed releases."""
+    from skulk.extensions.runtime_artifacts import canonical_platform, platform_matches
+
+    assert canonical_platform("ubuntu-24.04-x86_64") == "linux-glibc-x86_64"
+    assert platform_matches("ubuntu-24.04-x86_64", "linux-unknown-x86_64")
+    assert platform_matches("linux-glibc-aarch64", "linux-glibc-aarch64")
+    assert not platform_matches("linux-glibc-x86_64", "linux-glibc-aarch64")
+    assert not platform_matches("macos-arm64", "macos-x86_64")
 
 
 async def test_offline_stage_and_reconnect_leave_host_unchanged(

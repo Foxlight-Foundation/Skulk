@@ -1797,7 +1797,9 @@ The highest selected sequence survives rollback; incompatible state/configuratio
 changes require migration. Selection is separate from observed service health.
 `runtime_service.py` is the separate nonroot launcher for that selected generation.
 It recovers pending local selection, verifies current trust/core/artifacts and the
-installed seal before executing the fixed archive owner entrypoint, and repeats
+installed seal before starting the owner, either the archive's fixed `__owner__`
+entrypoint or the `owner` launcher a signed wheel declares under
+`skulk.capability_runtime`, and repeats
 verification during its lifetime. A protected status record distinguishes selected
 and observed active versions; process existence does not imply capability readiness.
 Owner output is counted and discarded. Shutdown closes an inherited lifetime pipe,
@@ -2369,7 +2371,8 @@ preflight, enablement or paid approval. Public setup-file reads remain separate.
 
 
 Installed plugin terminal management uses `skulk-plugin-service manage-plugin`
-and the selected archive's fixed optional `__manage__.py`. `extensions/local_setup.py`
+and either the archive's optional `__manage__.py` or the `manage` launcher a signed
+wheel declares under `skulk.capability_runtime`. `extensions/local_setup.py`
 shares verification and inherited generation ownership with `setup-plugin`, while
 keeping entrypoints distinct. The plugin derives durable coordinates and owns its
 fixed CLI verbs; core accepts no executable/module selector and adds no HTTP exec

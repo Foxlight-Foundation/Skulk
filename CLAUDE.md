@@ -653,8 +653,9 @@ old transitions become superseded and published ones remain complete. Never
 supersede live work or a pending withdrawal, and never replay provider requests.
 The atomic selection is desired state; service launch must revalidate current
 core compatibility and runtime integrity before executing private code.
-`runtime_service.py` provides that separate nonroot launcher. Keep its entrypoint
-fixed, inherit a lifetime pipe and service fence, discard private owner output,
+`runtime_service.py` provides that separate nonroot launcher. Keep its entrypoints
+fixed (the archive's `__owner__` shim, or the `owner` launcher a signed wheel
+declares under `skulk.capability_runtime`; never a caller-supplied module), inherit a lifetime pipe and service fence, discard private owner output,
 and revalidate current trust and installed integrity while running. Process health
 is distinct from capability readiness. Never report fully stopped while a surviving
 child still holds the supervisor fence, or couple independent cleanup to this service.

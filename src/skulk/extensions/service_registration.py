@@ -22,16 +22,33 @@ from typing import Literal, cast, final
 from uuid import uuid4
 
 # Preserve the signed/persisted Linux artifact identifier; it is not an OS-version gate.
-ServicePlatform = Literal["macos-arm64", "ubuntu-24.04-x86_64"]
+ServicePlatform = str
+"""The same derived family the runtime installer uses, spelled the same way.
+
+This module is executed by file path in an unprivileged subprocess, so it may
+import only the standard library and carries the derivation inline; a test
+asserts it agrees with runtime_artifacts.current_platform(). It was a closed
+pair of names, so the manager service could not register on any host the
+runtime could not, and for the same reason."""
+
+_LEGACY_PLATFORMS: dict[str, str] = {"ubuntu-24.04-x86_64": "linux-glibc-x86_64"}
+
+
+def _is_macos(family: str) -> bool:
+    """launchd or systemd is decided by the operating system, not the CPU."""
+    return _LEGACY_PLATFORMS.get(family, family).startswith("macos")
 
 
 def service_platform() -> ServicePlatform:
-    """Select service layout by OS kernel and CPU architecture."""
-    if sys.platform == "darwin" and platform.machine() == "arm64":
-        return "macos-arm64"
-    if sys.platform == "linux" and platform.machine() == "x86_64":
-        return "ubuntu-24.04-x86_64"
-    raise ValueError("plugin services require Apple Silicon macOS or Linux x86_64")
+    """Name this host's family; whether it is qualified is decided at install."""
+    machine = platform.machine().lower()
+    architecture = {"amd64": "x86_64", "arm64": "aarch64"}.get(machine, machine)
+    if sys.platform == "darwin":
+        return f"macos-{'arm64' if machine == 'arm64' else architecture}"
+    if sys.platform == "linux":
+        library, _ = platform.libc_ver()
+        return f"linux-{library or 'unknown'}-{architecture}"
+    return f"{sys.platform}-{architecture}"
 
 
 @final
@@ -59,7 +76,7 @@ class ServiceLayout:
         """Return a stable service-owned leaf outside Git and login-session storage."""
         parent = (
             Path("/Library/Application Support/SkulkPluginServices")
-            if self.platform == "macos-arm64"
+            if _is_macos(self.platform)
             else Path("/var/lib/skulk-plugin-services")
         )
         return parent / str(self.user_id)
@@ -72,7 +89,7 @@ class ServiceLayout:
     @property
     def unit(self) -> Path:
         """Return the fixed system registration file, never a login-agent location."""
-        if self.platform == "macos-arm64":
+        if _is_macos(self.platform):
             return Path("/Library/LaunchDaemons") / (self.label + ".plist")
         return Path("/etc/systemd/system") / (self.label + ".service")
 
@@ -89,7 +106,7 @@ class ServiceLayout:
             "--root",
             str(self.root),
         ]
-        if self.platform == "macos-arm64":
+        if _is_macos(self.platform):
             return plistlib.dumps(
                 {
                     "Label": self.label,
@@ -126,7 +143,7 @@ class ServiceLayout:
         """Refuse an unrelated unit occupying the reserved name before any OS action."""
         if len(content) > 65536:
             raise ValueError("service definition exceeds bound")
-        if self.platform == "macos-arm64":
+        if _is_macos(self.platform):
             payload = cast(object, plistlib.loads(content))
             if not isinstance(payload, dict):
                 raise ValueError("invalid existing service")
@@ -151,7 +168,7 @@ class ServiceLayout:
                 raise ValueError("invalid existing interpreter identity")
             python = value
         expected = self.definition(Path(python))
-        if self.platform == "ubuntu-24.04-x86_64":
+        if not _is_macos(self.platform):
             # Permit repair of only the exact prior generated unit. systemd
             # rejects its quoted WorkingDirectory before starting any process.
             previous = expected.replace(
@@ -321,7 +338,7 @@ def register(
     if action == "stop":
         if existing is None:
             return
-        if layout.platform == "macos-arm64":
+        if _is_macos(layout.platform):
             _execute(
                 ("/bin/launchctl", "bootout", "system/" + layout.label), (0, 3, 113)
             )
@@ -352,7 +369,7 @@ def register(
             pass
         finally:
             os.close(parent)
-    if layout.platform == "macos-arm64":
+    if _is_macos(layout.platform):
         _execute(("/bin/launchctl", "enable", "system/" + layout.label))
         # Setup stops the old service before activating a new copied runtime.
         _execute(("/bin/launchctl", "bootstrap", "system", str(layout.unit)))

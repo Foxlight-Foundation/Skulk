@@ -30,7 +30,7 @@ _LAUNCHER_BOOTSTRAP = (
 )
 
 
-def _owner_bootstrap(artifact: Path) -> str:
+def owner_bootstrap(artifact: Path) -> str:
     """Use the archive shim when present, otherwise the runtime's declared launcher."""
     with zipfile.ZipFile(artifact) as archive:
         if "__owner__.py" in archive.namelist():
@@ -127,7 +127,7 @@ class RuntimeService:
                 "-I",
                 "-B",
                 "-c",
-                _owner_bootstrap(generation / "artifacts/bundle.pyz"),
+                owner_bootstrap(generation / "artifacts/bundle.pyz"),
                 str(generation / "artifacts/bundle.pyz"),
                 "--root",
                 str(self.root),

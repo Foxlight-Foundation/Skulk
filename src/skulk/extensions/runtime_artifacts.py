@@ -30,7 +30,60 @@ Identifier = Annotated[
     str, Field(min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9._:@-]+$")
 ]
 # Preserve the signed/persisted Linux artifact identifier; it is not an OS-version gate.
-RuntimePlatform = Literal["macos-arm64", "ubuntu-24.04-x86_64"]
+RuntimePlatform = Annotated[
+    str, Field(pattern=r"^[a-z0-9]+(?:[.-][a-z0-9_]+)*$", max_length=64)
+]
+"""An artifact family: operating system, C library where it matters, and machine.
+
+This was a closed pair, which meant the installer refused every other host
+before looking at a single wheel: a Grace Blackwell node on Linux aarch64 could
+not install a capability runtime at all. The family is now derived from the
+host, and each wheel's own tags are still checked against the live interpreter,
+so a wheel that cannot run here is refused whatever the family says."""
+
+LEGACY_PLATFORMS: dict[str, str] = {"ubuntu-24.04-x86_64": "linux-glibc-x86_64"}
+"""Names already written into signed releases. The Ubuntu label never denoted
+that distribution; it meant glibc Linux on x86_64."""
+
+
+def canonical_platform(name: str) -> str:
+    """Resolve a declared family, including the names already signed."""
+    return LEGACY_PLATFORMS.get(name, name)
+
+
+def _family_parts(name: str) -> tuple[str, str | None, str]:
+    parts = canonical_platform(name).split("-")
+    if len(parts) == 3:
+        return parts[0], parts[1], parts[2]
+    return parts[0], None, parts[-1]
+
+
+def platform_matches(declared: str, host: str) -> bool:
+    """Whether an artifact family describes this host.
+
+    A legacy name matched every Linux x86_64 host whatever its C library, and a
+    library reported as ``unknown`` means detection failed rather than that it
+    differs; both compare on operating system and machine only. Two fully
+    derived names must agree on the library as well.
+    """
+    left, right = _family_parts(declared), _family_parts(host)
+    if left[0] != right[0] or left[2] != right[2]:
+        return False
+    if declared in LEGACY_PLATFORMS or host in LEGACY_PLATFORMS:
+        return True
+    return left[1] == right[1] or "unknown" in (left[1], right[1])
+
+
+def current_platform() -> str:
+    """Name this host's artifact family. Nothing is refused here."""
+    machine = platform.machine().lower()
+    architecture = {"amd64": "x86_64", "arm64": "aarch64"}.get(machine, machine)
+    if sys.platform == "darwin":
+        return f"macos-{'arm64' if machine == 'arm64' else architecture}"
+    if sys.platform == "linux":
+        library, _ = platform.libc_ver()
+        return f"linux-{library or 'unknown'}-{architecture}"
+    return f"{sys.platform}-{architecture}"
 
 
 class _Contract(BaseModel):
@@ -161,13 +214,7 @@ def canonical_json(value: JsonValue) -> bytes:
 
 def measure_host() -> QualifiedHost:
     """Measure actual core sources, native bindings, Python and supported platform."""
-    target: RuntimePlatform
-    if sys.platform == "darwin" and platform.machine() == "arm64":
-        target = "macos-arm64"
-    elif sys.platform == "linux" and platform.machine() == "x86_64":
-        target = "ubuntu-24.04-x86_64"
-    else:
-        raise ValueError("unsupported managed runtime platform")
+    target = current_platform()
     if sys.implementation.name != "cpython":
         raise ValueError("unsupported managed Python implementation")
     digest = hashlib.sha256()
@@ -234,10 +281,11 @@ def verify_runtime(
     except (InvalidSignature, ValueError):
         raise ValueError("runtime signature refused") from None
     runtime = VerifiedRuntime(metadata, payload, claims)
-    expected_os = "darwin" if host.platform == "macos-arm64" else "linux"
+    family = canonical_platform(host.platform)
+    expected_os = "darwin" if family.startswith("macos") else family.split("-")[0]
     if (
         not release.created_at <= now < release.expires_at
-        or claims.platform != host.platform
+        or not platform_matches(claims.platform, host.platform)
         or expected_os not in release.platforms
         or host.python_version not in SpecifierSet(release.python_requires)
         or host.skulk_version not in SpecifierSet(release.manifest.skulk_requires)
@@ -277,13 +325,14 @@ only the capability, while the launchers still come from signed, hash-pinned
 bytes installed into the generation runtime."""
 
 
-def runtime_launchers(archive: zipfile.ZipFile) -> set[str]:
+def runtime_launchers(archive: zipfile.ZipFile) -> list[str]:
     """Names declared under the launcher group in a wheel's entry-point metadata.
 
     Read as data from ``*.dist-info/entry_points.txt`` so verification stays
     static: nothing is installed or imported to learn what the wheel offers.
+    Repeats are kept so a caller can refuse an ambiguous declaration.
     """
-    found: set[str] = set()
+    found: list[str] = []
     for item in archive.infolist():
         parts = PurePosixPath(item.filename).parts
         if (
@@ -299,7 +348,7 @@ def runtime_launchers(archive: zipfile.ZipFile) -> set[str]:
             if line.startswith("[") and line.endswith("]"):
                 section = line[1:-1].strip()
             elif section == RUNTIME_LAUNCHER_GROUP and "=" in line:
-                found.add(line.split("=", 1)[0].strip())
+                found.append(line.split("=", 1)[0].strip())
     return found
 
 
@@ -336,7 +385,7 @@ def _verified_artifacts(runtime: VerifiedRuntime, directory: Path) -> dict[str, 
     tags = set(sys_tags())
     expanded = 0
     inventory = runtime.inventory
-    launchers: set[str] = set()
+    launchers: list[str] = []
     for wheel in runtime.claims.wheels:
         content = read_private(directory / wheel.filename, wheel.size)
         if (
@@ -348,7 +397,7 @@ def _verified_artifacts(runtime: VerifiedRuntime, directory: Path) -> dict[str, 
         if not tags.intersection(supported):
             raise ValueError("wheel does not support this interpreter")
         with zipfile.ZipFile(io.BytesIO(content)) as archive:
-            launchers |= runtime_launchers(archive)
+            launchers += runtime_launchers(archive)
             entries = archive.infolist()
             expanded += sum(item.file_size for item in entries)
             if (
@@ -396,6 +445,11 @@ def _verified_artifacts(runtime: VerifiedRuntime, directory: Path) -> dict[str, 
                 ):
                     raise ValueError("incomplete or incompatible wheel dependency")
         result[wheel.filename] = content
+    if len(launchers) != len(set(launchers)):
+        # Which distribution answers importlib.metadata first is not bound by
+        # the signed contract, so two declarations of one launcher would let
+        # metadata order decide which owner starts. Refuse the ambiguity.
+        raise ValueError("signed wheels declare the same runtime launcher twice")
     if owner is None and "owner" not in launchers:
         # Either shape is acceptable, never neither: a bundle with no shim must
         # be launched from a signed wheel that declares the owner launcher.
