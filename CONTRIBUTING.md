@@ -366,10 +366,33 @@ SKULK_PAIRED_RELAY_BINARY=/absolute/path/to/paired-websocket-service \
 uv run pytest src/skulk/operator/tests/test_joined_relay_integration.py
 ```
 
-The test proves QR package generation, Ed25519 device proof, credential
+The test runs both version-one warm lanes and version-two on-demand lanes with
+a binary built from reviewed relay source supporting `provision-on-demand`.
+It proves QR package generation, Ed25519 device proof, credential
 exchange, authenticated canonical `/state`, token rotation, paired-device
 listing, revocation, and rejection of revoked credentials through the actual
-opaque carrier and pinned inner TLS connection.
+opaque carrier and pinned inner TLS connection. It also opens new connections
+after a signed lease renewal and recreates both the gateway and relay while
+retaining the same app pairing material. Test listeners use generated loopback
+ports and protected temporary files. This does not prove relay-side durable
+fencing, physical-device compatibility, or hosted capacity.
+
+The separate `bench/operator_workload_fixture.py` serves deterministic canonical
+reads and synthetic chat/PCM streams behind the real on-demand gateway and
+pairing service without constructing a Node. Its local lifetime, protected QR,
+watchdog, tests and source-pinned schema validator are documented in
+[Isolated operator workload fixture](website/docs/operator-workload-fixture.md).
+It is not an observed workload profile or relay capacity result.
+The explicit programmatic public-rehearsal hook requires a separately reviewed
+bounded, independently expiring ingress controller with verified cleanup; no CLI
+enables it. Its run-bound hostname gate does not attest provider ownership.
+The public hook starts before the carrier, so its controller awaits public
+readiness after fixture startup and before showing pairing. Public route startup
+has a 120-second ceiling within the existing whole-session lease; local/private
+readiness retries are unchanged.
+`bench/observe_operator_workload.py` adds fixed-vocabulary flow controls and a
+bounded aggregate recorder pipe. The same contract documents artifact pins,
+opt-in recorder tests, measurement boundaries, and physical-device prerequisites.
 
 The live vision test is deliberately explicit because it places a real image
 through the built-in dashboard and a running model. Provide the dashboard URL,

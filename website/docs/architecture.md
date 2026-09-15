@@ -1549,11 +1549,24 @@ create parallel model, inference, or command APIs.
 before normal public operation. The app and gateway use distinct 256-bit outer
 carrier credentials and one opaque locator; all are encrypted in the local
 authority journal, while the generated inner-TLS private key is an owner-only
-file. Pairing returns only the app role plus the pinned self-signed gateway
-certificate. On startup the designated gateway maintains a bounded pool of
-outbound WebSockets. Each lane bridges opaque binary messages to a separate
-loopback TLS listener serving the existing FastAPI application. The relay never
-terminates that inner TLS connection.
+file. Pairing returns only the unchanged app role plus the pinned self-signed
+gateway certificate. Version-one provisioning keeps the bounded warm outbound
+WebSocket pool. Explicit version-two provisioning instead stores a delegated
+P-256 connector key, relay region, and authority epoch in that same encrypted
+journal. Before each control connection, Skulk durably advances its connector
+generation, sends a five-minute signed fencing lease, maintains canonical
+relay-negotiated heartbeats (currently five seconds), and renews the lease.
+Data sockets remain bound to the initial hello proof throughout that control
+session; lease renewal extends authority without changing the data binding.
+An app still opens the same
+`/v1/carrier/app` URL and may begin inner TLS immediately; each relay
+`OpenConnection` causes Skulk to claim one independent data WebSocket, send the
+required connection acknowledgement, and bridge it to the same loopback TLS
+listener. The gateway admits at most 64 concurrent version-two data lanes before
+creating a task or opening either socket; excess requests remain unclaimed and
+expire at the relay. There are no warm data lanes in version two. The relay
+never receives the delegated private key and never terminates the inner TLS
+connection.
 
 The loopback TLS listener wraps the canonical application with operator bearer
 validation: reads, model views, inference/WebSockets, mutations, and device
@@ -1566,6 +1579,10 @@ configuration loading, the loopback TLS listener, and the outbound connector
 are supervised as an optional ingress unit: corrupt authority/TLS material,
 bind failures, and connector failures are reported with sanitized messages and
 cannot cancel or prevent startup of the ordinary local API.
+Version two is source-integrated but remains opt-in and is not a production
+capacity claim: mixed-version upgrade/rollback, released-app regression, relay
+authority persistence/revocation, and measured 1,000–10,000-device qualification
+must pass before a production route is migrated.
 
 ### Event log
 
@@ -2233,6 +2250,31 @@ rust/                   # Rust crates: networking (libp2p), skulk_pyo3_bindings,
 **State**: The cluster's current shared view, derived from applying indexed events. A Pydantic model treated as immutable by convention (`apply()` returns a new `State`; the model itself does not enforce `frozen=True`).
 
 **Worker**: The per-node process responsible for downloads, runner supervision, and task dispatch. Every node runs a worker.
+
+## Isolated operator qualification boundary
+
+`bench/operator_workload_fixture.py` is a separate opt-in local process, not a
+Node component. It combines real pairing, the encrypted authority journal,
+signed on-demand connector and TLS authorization with a generated FastAPI app.
+It starts no discovery, inference, or store clients. An independent watchdog
+reaps its generated relay on expiry or parent EOF. See
+[the fixture contract](operator-workload-fixture.md) for lifecycle and evidence
+limits; generated data does not qualify released-device capacity.
+
+An explicit programmatic public-rehearsal hook is separate from private ingress
+and disabled in the CLIs. It requires a run-bound dedicated WSS hostname and a
+one-hour maximum fixture lease. The injected controller owns bounded exposure,
+independent expiry and verified provider cleanup; syntax validation does not
+attest those effects. Production targets and existing authority remain excluded.
+Public route startup alone has a 120-second readiness ceiling, further capped by
+the remaining fixture lease, to allow fresh ingress setup; local/private retries
+are unchanged. The controller verifies public readiness before exposing pairing.
+
+`bench/observe_operator_workload.py` optionally adds a bounded loopback opaque
+TCP bridge and ASGI metadata adapter. A digest-pinned local subprocess reduces
+fixed categories, timings, and sizes to aggregate JSON; no raw trace or content
+is retained. The measured boundary is gateway TCP/ASGI, not device WebSocket
+delivery. Queue overflow and incomplete flows invalidate the observation.
 
 ## Where to read next
 
