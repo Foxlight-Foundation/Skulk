@@ -1239,9 +1239,11 @@ async def test_lease_renewal_sends_signed_control_message(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_before_start", [False, True])
 async def test_on_demand_control_bounds_data_tasks_before_creation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    cancel_before_start: bool,
 ) -> None:
     """Excess opens are declined before they allocate tasks or sockets."""
 
@@ -1303,8 +1305,13 @@ async def test_on_demand_control_bounds_data_tasks_before_creation(
             connector_generation=1,
             admission=admission,
         )
+        if cancel_before_start:
+            for task in asyncio.all_tasks():
+                if task.get_name() == "operator-relay-data-lane":
+                    task.cancel()
         await asyncio.sleep(0)
-        assert started_connection_ids == list(initial_ids[:2])
+        expected_started = [] if cancel_before_start else list(initial_ids[:2])
+        assert started_connection_ids == expected_started
         release_data_lanes.set()
 
     follow_up_id = bytes([4]) * 16
@@ -1321,7 +1328,7 @@ async def test_on_demand_control_bounds_data_tasks_before_creation(
             connector_generation=1,
             admission=admission,
         )
-    assert started_connection_ids == [*initial_ids[:2], follow_up_id]
+    assert started_connection_ids == [*expected_started, follow_up_id]
 
 
 @pytest.mark.asyncio

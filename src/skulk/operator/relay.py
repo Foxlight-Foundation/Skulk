@@ -964,13 +964,13 @@ class OperatorGatewayConnector:
                             "declining connection"
                         )
                         continue
-                    data_coroutine = self._serve_reserved_on_demand_data(
+                    data_coroutine = self._serve_on_demand_data(
                         session,
                         decoded,
                         admission.header_value,
                     )
                     try:
-                        data_tasks.create_task(
+                        data_task = data_tasks.create_task(
                             data_coroutine,
                             name="operator-relay-data-lane",
                         )
@@ -978,6 +978,9 @@ class OperatorGatewayConnector:
                         data_coroutine.close()
                         self._on_demand_data_lanes.release()
                         raise
+                    # A task cancelled before its first step never enters a
+                    # coroutine's finally block. Completion owns the permit.
+                    data_task.add_done_callback(self._release_on_demand_data_lane)
                     continue
                 if isinstance(decoded, HeartbeatAcknowledgement):
                     continue
@@ -1040,18 +1043,10 @@ class OperatorGatewayConnector:
             # that proof would break pending upgrades and all subsequent opens.
             next_renewal = time.monotonic() + _CONNECTOR_RENEWAL_SECONDS
 
-    async def _serve_reserved_on_demand_data(
-        self,
-        session: aiohttp.ClientSession,
-        request: OpenConnection,
-        admission: str,
-    ) -> None:
-        """Serve one admitted data lane and always release its reservation."""
+    def _release_on_demand_data_lane(self, _task: asyncio.Task[None]) -> None:
+        """Release admission even when cancellation prevents the first task step."""
 
-        try:
-            await self._serve_on_demand_data(session, request, admission)
-        finally:
-            self._on_demand_data_lanes.release()
+        self._on_demand_data_lanes.release()
 
     async def _serve_on_demand_data(
         self,
