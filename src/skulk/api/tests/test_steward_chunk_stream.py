@@ -214,7 +214,7 @@ async def test_complete_literal_example_survives_in_final_answer() -> None:
 @pytest.mark.parametrize(
     "question",
     [
-        "Good morning how many nodes do you currently have",
+        "How many nodes have enough memory for my model?",
         "Is everything healthy?",
         "What models are running?",
         "How much memory is available?",

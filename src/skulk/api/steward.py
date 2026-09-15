@@ -27,6 +27,12 @@ from uuid import uuid4
 import anyio
 from pydantic import BaseModel, ConfigDict, Field
 
+from skulk.api.steward_observations import (
+    StewardObservations,
+    factual_question,
+    observe_state,
+    render_observations,
+)
 from skulk.api.types.api import (
     ChatCompletionMessage,
     ChatCompletionRequest,
@@ -185,6 +191,14 @@ Rules:
   cluster directly. Proposal tools create inert, expiring approval requests;
   they never execute an action. Use one only after gathering concrete evidence,
   and explain that an authenticated operator must approve it separately.
+- observations contains exact pre-compaction counts and source coverage. Null
+  means unknown, never zero. read_at is API read time, not telemetry freshness.
+  Counts refer to topology transport peers and node-staging download records,
+  not physical hosts, logical capability nodes, cloud Pods or model-store fetches.
+- Download pending means queued, not transferring; completed/failed are retained
+  history. An ongoing telemetry record alone does not prove bytes are moving now.
+- supports describes advertised backends, not hardware-vendor inference or proof
+  that a particular workload can run. Missing backend telemetry is unknown.
 - Answer in plain language an operator can act on, citing the evidence.
 """
 
@@ -961,11 +975,13 @@ def _node_summaries(
 ) -> list[dict[str, object]]:
     """Project exact heterogeneous-node facts into a compact operator table."""
     topology = _as_object_dict(state_payload.get("topology"))
-    topology_nodes = [
-        node_id
-        for node_id in _as_object_list(topology.get("nodes"))
-        if isinstance(node_id, str)
-    ]
+    topology_nodes = list(
+        dict.fromkeys(
+            node_id
+            for node_id in _as_object_list(topology.get("nodes"))
+            if isinstance(node_id, str) and node_id
+        )
+    )
     identities = _as_object_dict(state_payload.get("nodeIdentities"))
     memory_by_node = _as_object_dict(state_payload.get("nodeMemory"))
     system_by_node = _as_object_dict(state_payload.get("nodeSystem"))
@@ -988,11 +1004,9 @@ def _node_summaries(
             for item in _as_object_list(resources.get("hardwareClasses"))
             if isinstance(item, str)
         )
-        capability_tokens = {item.lower() for item in (*backends, *hardware_classes)}
-        accelerator_vendor = accelerator.get("vendor")
-        if isinstance(accelerator_vendor, str):
-            capability_tokens.add(accelerator_vendor.lower())
-        has_capability_evidence = bool(resources or accelerator)
+        capability_tokens = {item.lower() for item in backends}
+        # Hardware identity does not prove a runtime backend was installed.
+        has_capability_evidence = isinstance(resources.get("backends"), list)
         total_bytes = _memory_bytes(memory.get("ramTotal"))
         available_bytes = _memory_bytes(memory.get("ramAvailable"))
         summaries.append(
@@ -1029,21 +1043,19 @@ def _node_summaries(
                     "cuda": None
                     if not has_capability_evidence
                     else any(
-                        token == "nvidia"
-                        or token.startswith("nvidia:")
-                        or "cuda" in token
+                        token.endswith("-cuda") or token == "cuda"
                         for token in capability_tokens
                     ),
                     "rocm": None
                     if not has_capability_evidence
                     else any(
-                        token == "amd" or token.startswith("amd:") or "rocm" in token
+                        token.endswith("-rocm") or token == "rocm"
                         for token in capability_tokens
                     ),
                     "mlx": None
                     if not has_capability_evidence
                     else any(
-                        token == "apple" or token.startswith(("apple:", "mlx"))
+                        token in {"mlx", "mlx-metal", "mlx_audio", "mlx_audio-metal"}
                         for token in capability_tokens
                     ),
                 },
@@ -1108,6 +1120,8 @@ def _downloads_summary(
                     "kind": kind,
                     "lifecycle": lifecycle,
                     "active": lifecycle in {"pending", "downloading"},
+                    "transferring": lifecycle == "downloading",
+                    "historical": lifecycle in {"completed", "failed"},
                 }
                 # The model id lives on the shard's card; without it a node
                 # staging several models gives the steward ambiguous rows.
@@ -1208,6 +1222,9 @@ def steward_operator_tool_result(state_payload: dict[str, object]) -> str:
         A valid JSON document no longer than :data:`MAX_TOOL_RESULT_CHARS`.
     """
     summary = steward_operator_summary(state_payload)
+    observations = observe_state(state_payload, read_at=datetime.now(timezone.utc))
+    summary["observations"] = observations.model_dump(mode="json")
+    summary["nodeCount"] = observations.node_count
     rendered = _compact_json(summary)
     if len(rendered) <= MAX_TOOL_RESULT_CHARS:
         return rendered
@@ -1242,6 +1259,7 @@ def steward_operator_tool_result(state_payload: dict[str, object]) -> str:
     coverage["nodeDisk"] = {"included": 0, "total": len(node_disk)}
     compact: dict[str, object] = {
         "nodeCount": summary.get("nodeCount"),
+        "observations": summary["observations"],
         "detailState": "compacted",
         "coverage": coverage,
         **{field: [] for field in list_fields},
@@ -1278,30 +1296,29 @@ def steward_operator_tool_result(state_payload: dict[str, object]) -> str:
     for node in nodes:
         if not append_list_row("nodes", node):
             break
-    for row in _as_object_list(summary.get("historicalTerminalFailures")):
-        if not append_list_row("historicalTerminalFailures", row):
-            break
-
     compact_downloads = cast("dict[str, object]", compact["downloads"])
     download_coverage = _as_object_dict(coverage["downloads"])
     included_downloads = 0
-    download_limit_reached = False
-    for node_id, rows in downloads.items():
-        compact_downloads[node_id] = []
-        target_rows = _as_object_list(compact_downloads[node_id])
-        compact_downloads[node_id] = target_rows
-        for row in _as_object_list(rows):
-            target_rows.append(row)
-            download_coverage["included"] = included_downloads + 1
-            if len(_compact_json(compact)) > MAX_TOOL_RESULT_CHARS:
-                target_rows.pop()
-                download_coverage["included"] = included_downloads
-                download_limit_reached = True
-                break
-            included_downloads += 1
-        if not target_rows:
-            del compact_downloads[node_id]
-        if download_limit_reached:
+    # Active staging gets detail space before terminal download/failure history.
+    for active in (True, False):
+        for node_id, rows in downloads.items():
+            for row in _as_object_list(rows):
+                if (_as_object_dict(row).get("active") is True) != active:
+                    continue
+                target_rows = _as_object_list(compact_downloads.get(node_id))
+                compact_downloads[node_id] = target_rows
+                target_rows.append(row)
+                download_coverage["included"] = included_downloads + 1
+                if len(_compact_json(compact)) > MAX_TOOL_RESULT_CHARS:
+                    target_rows.pop()
+                    download_coverage["included"] = included_downloads
+                    if not target_rows:
+                        del compact_downloads[node_id]
+                    continue
+                included_downloads += 1
+
+    for row in _as_object_list(summary.get("historicalTerminalFailures")):
+        if not append_list_row("historicalTerminalFailures", row):
             break
 
     compact["nodeDisk"] = node_disk
@@ -1996,6 +2013,33 @@ class StewardHarness:
                     "Skulk could not read current cluster state. "
                     "Please retry; no answer was generated."
                 ),
+            )
+            return
+        question = next(
+            (
+                str(message.content)
+                for message in reversed(messages)
+                if message.role == "user"
+            ),
+            "",
+        )
+        topic = factual_question(question)
+        if topic is not None:
+            try:
+                observations = StewardObservations.model_validate_json(
+                    json.dumps(baseline.get("observations"))
+                )
+            except ValueError:
+                # Missing typed coverage cannot fall through to an invented count.
+                reply = "I couldn't verify that inventory from the current state snapshot. Please retry."
+            else:
+                reply = render_observations(observations, topic)
+            yield TokenChunk(
+                model=ModelId(STEWARD_VIRTUAL_MODEL_ID),
+                text=reply,
+                token_id=-1,
+                usage=None,
+                finish_reason="stop",
             )
             return
         baseline_call = ToolCall(
