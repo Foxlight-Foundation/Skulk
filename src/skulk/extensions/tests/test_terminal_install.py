@@ -4,6 +4,7 @@ import asyncio
 import getpass
 import io
 import json
+import time
 import warnings
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
@@ -82,7 +83,8 @@ class Journey:
             prompt,
             lambda _question: "hidden-test-feed-token",
             self.output.append,
-            lambda _seconds: asyncio.sleep(0.01),
+            # Real downloads, venv creation and pip keep wall-clock timing.
+            # Accelerating only the poller exhausts its budget on slower hosts.
         )
 
     @property
@@ -95,7 +97,7 @@ class Journey:
 
 @asynccontextmanager
 async def journey(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, artifact_delay: float = 0.0
 ) -> AsyncIterator[Journey]:
     """Use real private sockets, dependency installation and supervised processes."""
     source = tmp_path / "source"
@@ -110,12 +112,14 @@ async def journey(
     manager = RuntimeManager(root)
     fixture = Journey(manager, trust)
 
-    def respond(request: httpx.Request) -> httpx.Response:
+    async def respond(request: httpx.Request) -> httpx.Response:
         assert request.headers["Authorization"] == "Bearer hidden-test-feed-token"
         fixture.urls.append(request.url.path)
         name = request.url.path.rsplit("/", 1)[-1]
         if fixture.fail_download and name != "release.json":
             return httpx.Response(503)
+        if name != "release.json":
+            await asyncio.sleep(artifact_delay)
         return httpx.Response(
             200,
             content=metadata if name == "release.json" else read_private(source / name),
@@ -126,17 +130,27 @@ async def journey(
 
     monkeypatch.setattr("skulk.extensions.runtime_manager.RuntimeDownloads", downloads)
     await manager.start()
+    started = time.monotonic()
     try:
         yield fixture
     finally:
+        # Pytest retains this on failure, including failures raised by an
+        # expected-exception assertion before the intended operation is reached.
+        print(
+            f"Terminal journey elapsed: {time.monotonic() - started:.2f}s; "
+            f"last terminal states: {json.dumps(fixture.output[-8:])}"
+        )
         await manager.close()
 
 
+@pytest.mark.parametrize("artifact_delay", [0.0, 4.0])
 async def test_generated_identity_trust_permissions_and_real_installation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, artifact_delay: float
 ) -> None:
     """External inputs reach verified staging and activation without JSON or paths."""
-    async with journey(tmp_path, monkeypatch) as fixture:
+    # The delayed case exceeds the old 240 * 10ms test polling budget while
+    # preserving real manager IPC, signed artifacts, staging and activation.
+    async with journey(tmp_path, monkeypatch, artifact_delay=artifact_delay) as fixture:
         identifier = await fixture.terminal(fixture.fields("y", "y", "y")).run()
         assert identifier.startswith("managed.") and len(identifier) == 40
         selection = fixture.manager.controllers[identifier].selector.current()
