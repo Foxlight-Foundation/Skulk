@@ -743,14 +743,25 @@ schema and permission summary. Plugin-specific manifest policy stays opaque but
 is covered by the signature. Trust comes from owner-provisioned protected local
 storage, not the release. Revoked or expired artifacts and incompatible hosts
 are refused. Linux distribution names and versions do not restrict installation;
-native wheel tags and dependency checks determine binary compatibility. Supported targets are Apple Silicon macOS and Linux x86_64 with systemd.
+native wheel tags and dependency checks determine binary compatibility. The
+artifact family is derived from the host's operating system, C library and
+processor architecture rather than drawn from a fixed list, so any host whose
+wheels a publisher has qualified can install a runtime; Linux service
+registration uses systemd and macOS uses launchd.
 
 `RuntimeInstaller` in `extensions/runtime_install.py` stages complete supplied
 artifacts under a stable service root. It verifies wheel tags, archive paths,
 metadata identities and dependencies before running offline pip with exact hashes,
-no index, no dependency resolution and no source builds. The archive must contain
-the fixed `__owner__.py` entry point; HTTP callers cannot select an executable or
-Python module. Staging creates a separate virtual environment and checks its exact
+no index, no dependency resolution and no source builds. The owner is started
+one of two ways, and HTTP callers can select neither an executable nor a Python
+module: the archive carries the fixed `__owner__.py` entry point, or one of the
+signed wheels declares an `owner` entry point in the `skulk.capability_runtime`
+group, in which case the launcher comes from hash-pinned bytes installed into
+the generation runtime and the bundle need carry only the capability. The same
+group's `manage` and `setup` entries replace `__manage__.py` and `__setup__.py`
+for installed terminal management and local setup. Verification reads the
+declaration from the wheel's `entry_points.txt` as data; a bundle with no shim
+and no declaring wheel is refused. Staging creates a separate virtual environment and checks its exact
 inventory without changing the Skulk environment. The base interpreter remains
 an explicitly supported host prerequisite.
 
@@ -893,11 +904,12 @@ explicit downloads for nodes declaring support. See the
 
 ### Running an installed plugin's local setup
 
-An optional `__setup__.py` in the signed archive supplies provider-owned local
+An optional `__setup__.py` in the signed archive, or a `setup` launcher a signed
+wheel declares under `skulk.capability_runtime`, supplies provider-owned local
 setup. Owners invoke it with `skulk-plugin-service setup-plugin managed.example --
 <plugin setup fields>`. Skulk resolves the installed ID from its protected local
 service profile and verifies the selected archive, full dependency runtime, current
-publisher trust and Skulk compatibility before executing that fixed entrypoint.
+publisher trust and Skulk compatibility before executing that fixed launcher.
 No archive path, Python path, module name or command string is accepted.
 
 The setup process runs as the existing nonroot owner and inherits terminal input
@@ -947,7 +959,9 @@ across changed fences and exposes explicit original-operation resume. See the
 
 ### Installed terminal management
 
-A selected signed archive may provide a fixed optional `__manage__.py` entrypoint.
+A selected generation provides a management launcher: the archive's fixed
+optional `__manage__.py`, or the `manage` entry a signed wheel declares under
+`skulk.capability_runtime`.
 `skulk-plugin-service manage-plugin MANAGED_ID -- PLUGIN_ARGUMENTS` discovers the
 protected service connection and selected installation, verifies its full runtime,
 compatibility, trust and retained release history, then executes only that entrypoint.

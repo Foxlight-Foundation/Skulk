@@ -7,6 +7,7 @@ import os
 import signal
 import sys
 import time
+import zipfile
 from pathlib import Path
 from typing import Literal, cast, final
 from uuid import uuid4
@@ -19,6 +20,22 @@ from skulk.extensions.runtime_install import finish_runtime_work
 from skulk.extensions.runtime_selection import RuntimeSelection, RuntimeSelector
 
 _BOOTSTRAP = "import runpy,sys;sys.path.insert(0,sys.argv.pop(1));runpy.run_module('__owner__',run_name='__main__')"
+# A bundle with no owner shim is launched from the signed wheels installed in
+# the generation runtime, through the public launcher entry-point group. The
+# artifact argument is consumed so the owner sees the same argv either way.
+_LAUNCHER_BOOTSTRAP = (
+    "import sys;from importlib.metadata import entry_points;sys.argv.pop(1);"
+    "found=[e for e in entry_points(group='skulk.capability_runtime') if e.name=='owner'];"
+    "sys.exit('no owner launcher in the runtime') if not found else sys.exit(found[0].load()())"
+)
+
+
+def owner_bootstrap(artifact: Path) -> str:
+    """Use the archive shim when present, otherwise the runtime's declared launcher."""
+    with zipfile.ZipFile(artifact) as archive:
+        if "__owner__.py" in archive.namelist():
+            return _BOOTSTRAP
+    return _LAUNCHER_BOOTSTRAP
 _CHECK_SECONDS = 30.0
 _SHUTDOWN_SECONDS = 30.0
 
@@ -110,7 +127,7 @@ class RuntimeService:
                 "-I",
                 "-B",
                 "-c",
-                _BOOTSTRAP,
+                owner_bootstrap(generation / "artifacts/bundle.pyz"),
                 str(generation / "artifacts/bundle.pyz"),
                 "--root",
                 str(self.root),

@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from skulk.extensions.runtime_artifacts import QualifiedHost
 from skulk.extensions.runtime_files import RuntimeLock, read_private, write_private
 from skulk.extensions.runtime_selection import RuntimeSelector, SelectionOperation
 from skulk.extensions.tests.test_runtime_install import artifacts
@@ -195,4 +196,48 @@ async def test_disable_withdraws_revoked_interrupted_initial_selection(
     assert selector.disable(expected_revision=expected_revision, operation_id=disable_id) == recovered
     assert read_private(selector.root / "receipts") == b"synthetic outstanding cleanup"
     assert (selector.root / "generations" / staged.runtime_digest).is_dir()
+    assert not selector.pending.exists()
+
+
+async def test_recovery_accepts_a_selection_journaled_under_the_legacy_platform_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pending selection from before the family was derived still recovers.
+
+    It stores the old Ubuntu label; the same host now measures as
+    linux-glibc-x86_64. Exact host equality refused that compatible generation
+    even though verification treats the two names as equivalent.
+    """
+    source = tmp_path / "source"
+    metadata, trust, legacy_host = artifacts(source, platform="ubuntu-24.04-x86_64")
+    monkeypatch.setattr(
+        "skulk.extensions.runtime_install.measure_host", lambda: legacy_host
+    )
+    selector = RuntimeSelector(tmp_path / "installed")
+    write_private(
+        selector.root / "publisher-trust.json", trust.model_dump_json().encode()
+    )
+    staged = await selector.installer.stage(metadata, source)
+
+    def fail_write(path: Path, value: bytes) -> None:
+        if path == selector.root / "runtime-selection.json":
+            raise OSError("synthetic disk failure")
+        write_private(path, value)
+
+    with monkeypatch.context() as failure:
+        failure.setattr("skulk.extensions.runtime_selection.write_private", fail_write)
+        with pytest.raises(OSError):
+            await selector.activate(staged.runtime_digest, expected_revision=0)
+    assert selector.pending.exists()
+    derived_host = QualifiedHost(
+        "linux-glibc-x86_64",
+        legacy_host.python_version,
+        legacy_host.skulk_version,
+        legacy_host.skulk_build_sha256,
+    )
+    monkeypatch.setattr(
+        "skulk.extensions.runtime_install.measure_host", lambda: derived_host
+    )
+    recovered = await selector.recover()
+    assert recovered.state == "complete"
     assert not selector.pending.exists()

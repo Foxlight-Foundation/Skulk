@@ -1,5 +1,14 @@
-"""Managed runtime and system-service selection use kernel and architecture only."""
+"""An artifact family is derived from the host, never enumerated in advance.
 
+Two closed pairs of names, one in the runtime installer and one in the manager
+service registration, meant a Grace Blackwell node on Linux aarch64 could not
+install a capability runtime or register the service. These tests pin the
+derived vocabulary, the names already written into signed releases, the
+agreement between the two derivations, and the one property the old closed set
+guarded: x86_64 artifacts are never taken for an aarch64 host.
+"""
+
+import os
 import platform
 import sys
 from importlib.machinery import ModuleSpec
@@ -8,7 +17,40 @@ from pathlib import Path
 import pytest
 
 from skulk.extensions import runtime_artifacts
+from skulk.extensions.runtime_artifacts import canonical_platform, platform_matches
 from skulk.extensions.service_registration import service_platform
+
+
+def _linux(
+    monkeypatch: pytest.MonkeyPatch,
+    machine: str,
+    libc: str = "glibc",
+    systemd: bool = True,
+    systemd_running: bool = True,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(platform, "machine", lambda: machine)
+    monkeypatch.setattr(platform, "libc_ver", lambda: (libc, "2.39" if libc else ""))
+    real_exists = os.path.exists
+
+    def exists(path: str) -> bool:
+        if path == "/usr/bin/systemctl":
+            return systemd
+        if path == "/run/systemd/system":
+            return systemd_running
+        return real_exists(path)
+
+    monkeypatch.setattr("skulk.extensions.service_registration.os.path.exists", exists)
+
+
+def _synthetic_core(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    source = tmp_path / "__init__.py"
+    source.write_text("# synthetic core package\n")
+
+    def specification(name: str) -> ModuleSpec:
+        return ModuleSpec(name, loader=None, origin=str(source))
+
+    monkeypatch.setattr(runtime_artifacts.importlib.util, "find_spec", specification)
 
 
 @pytest.mark.parametrize(
@@ -24,28 +66,71 @@ from skulk.extensions.service_registration import service_platform
 def test_linux_distribution_does_not_gate_installation(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, release: dict[str, str]
 ) -> None:
-    """Actual host measurement and service setup admit later and non-Ubuntu Linux."""
-    monkeypatch.setattr(sys, "platform", "linux")
-    monkeypatch.setattr(platform, "machine", lambda: "x86_64")
+    """A distribution name or version never appears in the family."""
+    _linux(monkeypatch, "x86_64")
     monkeypatch.setattr(platform, "freedesktop_os_release", lambda: release)
-    source = tmp_path / "__init__.py"
-    source.write_text("# synthetic core package\n")
-
-    def specification(name: str) -> ModuleSpec:
-        return ModuleSpec(name, loader=None, origin=str(source))
-
-    monkeypatch.setattr(runtime_artifacts.importlib.util, "find_spec", specification)
-    assert runtime_artifacts.measure_host().platform == "ubuntu-24.04-x86_64"
-    assert service_platform() == "ubuntu-24.04-x86_64"
+    _synthetic_core(monkeypatch, tmp_path)
+    assert runtime_artifacts.measure_host().platform == "linux-glibc-x86_64"
+    assert service_platform() == "linux-glibc-x86_64"
 
 
-def test_incompatible_architecture_remains_rejected(
+def test_every_host_names_its_own_family(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No host is refused, and the installer and service registration agree."""
+    _synthetic_core(monkeypatch, tmp_path)
+    _linux(monkeypatch, "aarch64")
+    assert runtime_artifacts.measure_host().platform == "linux-glibc-aarch64"
+    assert service_platform() == "linux-glibc-aarch64"
+    _linux(monkeypatch, "x86_64", libc="")
+    assert runtime_artifacts.current_platform() == service_platform()
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(platform, "machine", lambda: "x86_64")
+    assert runtime_artifacts.current_platform() == service_platform() == "macos-x86_64"
+
+
+def test_signed_legacy_names_still_resolve() -> None:
+    """Releases already signed with the old Ubuntu label keep installing."""
+    assert canonical_platform("ubuntu-24.04-x86_64") == "linux-glibc-x86_64"
+    assert platform_matches("ubuntu-24.04-x86_64", "linux-glibc-x86_64")
+    assert platform_matches("ubuntu-24.04-x86_64", "linux-unknown-x86_64")
+    assert platform_matches("linux-glibc-x86_64", "linux-unknown-x86_64")
+
+
+def test_incompatible_architecture_remains_rejected() -> None:
+    """Opening the family set cannot select x86_64 artifacts for an ARM host."""
+    assert not platform_matches("linux-glibc-x86_64", "linux-glibc-aarch64")
+    assert not platform_matches("ubuntu-24.04-x86_64", "linux-glibc-aarch64")
+    assert not platform_matches("macos-arm64", "macos-x86_64")
+
+
+def test_other_operating_systems_are_refused_by_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Removing a distribution gate cannot select x86 wheels for an ARM host."""
-    monkeypatch.setattr(sys, "platform", "linux")
-    monkeypatch.setattr(platform, "machine", lambda: "aarch64")
-    with pytest.raises(ValueError, match="platform"):
-        runtime_artifacts.measure_host()
-    with pytest.raises(ValueError, match="Linux x86_64"):
+    """Architecture and libc are open; the operating system is not.
+
+    The release schema admits only darwin and linux, and service registration
+    knows only launchd and systemd, so naming a third system would claim a host
+    the runtime cannot serve and refuse it later with a worse message.
+    """
+    monkeypatch.setattr(sys, "platform", "freebsd14")
+    monkeypatch.setattr(platform, "machine", lambda: "amd64")
+    with pytest.raises(ValueError, match="macOS and Linux"):
+        runtime_artifacts.current_platform()
+    with pytest.raises(ValueError, match="macOS and Linux"):
+        service_platform()
+
+
+def test_linux_without_systemd_is_refused_before_registration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Registration drives systemctl, so a host without it is refused up front."""
+    _linux(monkeypatch, "aarch64", systemd=False)
+    with pytest.raises(ValueError, match="systemd"):
+        service_platform()
+    # The binary alone does not prove a manager: a container can carry
+    # systemctl while nothing answers it, and setup would fail at daemon-reload
+    # after privileged preparation had begun.
+    _linux(monkeypatch, "aarch64", systemd_running=False)
+    with pytest.raises(ValueError, match="running systemd"):
         service_platform()

@@ -4458,7 +4458,9 @@ them as inert text, and hides an earlier export after a failed refresh.
 ### Installed plugin local setup command
 
 `skulk-plugin-service setup-plugin <managed-plugin-id> -- <plugin-setup-fields>`
-executes the selected verified archive's optional fixed `__setup__.py` entrypoint.
+executes the selected verified generation's setup launcher: the archive's optional
+fixed `__setup__.py`, or the `setup` entry a signed wheel declares under
+`skulk.capability_runtime`.
 The managed plugin ID is the same ID shown by inventory. Installation roots and
 runtime paths resolve from the protected local service connection, never from
 caller-supplied executable or module paths. No new HTTP endpoint is introduced:
@@ -4531,7 +4533,9 @@ Closing or reopening the panel does not cancel or repeat server-owned setup.
 `skulk-plugin-service manage-plugin MANAGED_ID -- PLUGIN_ARGUMENTS` is a local
 terminal command, not an HTTP route. It verifies the protected service profile,
 selected signed runtime, qualified host and retained trust before executing the
-archive's fixed optional `__manage__.py`. Paths and module names cannot be supplied.
+management launcher, the archive's fixed optional `__manage__.py` or the `manage`
+entry a signed wheel declares under `skulk.capability_runtime`. Paths and module
+names cannot be supplied.
 The generation fence and terminal I/O survive process replacement; the plugin
 supplies fixed management verbs and derives its durable state coordinates.
 Local setup and management wait up to 30 seconds for installation ownership before

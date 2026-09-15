@@ -9,6 +9,7 @@ from typing import Literal
 
 from pydantic import TypeAdapter
 
+from skulk.extensions.runtime_artifacts import runtime_launchers
 from skulk.extensions.runtime_attachment import (
     HostSettings,
     InstallationIdentifier,
@@ -20,6 +21,28 @@ from skulk.shared.constants import SKULK_CONFIG_HOME
 
 _SETUP_ENTRYPOINT = "import runpy,sys;sys.path.insert(0,sys.argv.pop(1));runpy.run_module('__setup__',run_name='__main__')"
 _MANAGEMENT_ENTRYPOINT = "import runpy,sys;sys.path.insert(0,sys.argv.pop(1));runpy.run_module('__manage__',run_name='__main__')"
+_LAUNCHER_ENTRYPOINT = (
+    "import sys;from importlib.metadata import entry_points;sys.argv.pop(1);"
+    "found=[e for e in entry_points(group='skulk.capability_runtime') if e.name=='{name}'];"
+    "sys.exit('this plugin has no selected local entrypoint') if not found else sys.exit(found[0].load()())"
+)
+
+
+def _declared_launchers(artifacts: Path, claimed: tuple[str, ...]) -> set[str]:
+    """Launchers the signed, installed wheels declare, read as data.
+
+    ``claimed`` is the verified runtime's own wheel list, so only wheels the
+    signature covers and the installer installed can authorize the launcher
+    branch. A stray wheel in the directory, or a stray line in any file on
+    disk, cannot.
+    """
+    found: list[str] = []
+    for filename in claimed:
+        with zipfile.ZipFile(artifacts / filename) as archive:
+            found += runtime_launchers(archive)
+    if len(found) != len(set(found)):
+        raise ValueError("signed wheels declare the same runtime launcher twice")
+    return set(found)
 
 
 def _retained_history(root: Path, selection: RuntimeSelection) -> None:
@@ -42,9 +65,10 @@ async def setup_installed_plugin(plugin_id: str, arguments: tuple[str, ...]) -> 
     """Replace this local terminal process with the selected plugin's setup command.
 
     Resolve the installation from the protected local service connection, verify
-    signatures, compatibility and all executable bytes, then execute only the
-    archive's fixed optional __setup__ entrypoint. Arguments are plugin-owned setup
-    fields, never a command/module selector. The inherited installation lock blocks
+    signatures, compatibility and all executable bytes, then execute the setup
+    launcher: the archive's fixed optional __setup__ entrypoint, or the ``setup``
+    launcher a signed wheel declares in the ``skulk.capability_runtime`` group.
+    Arguments are plugin-owned setup fields, never a command/module selector. The inherited installation lock blocks
     generation changes until setup exits. No remote route invokes this operation.
     """
     await _run_installed_plugin(plugin_id, arguments, "setup")
@@ -89,7 +113,7 @@ async def _run_installed_plugin(
     selector = RuntimeSelector(root)
     async with selector.installer.locked_generation(
         selection.runtime_digest, inherit_on_exec=True, wait_for_ownership=True
-    ):
+    ) as (runtime, _):
         if selector.current() != selection or selector.pending.exists():
             raise ValueError("plugin selection changed or requires recovery")
         generation = root / "generations" / selection.runtime_digest
@@ -100,10 +124,18 @@ async def _run_installed_plugin(
             try:
                 entry = archive.getinfo(entrypoint)
             except KeyError:
-                raise ValueError(
-                    "this plugin has no selected local entrypoint"
-                ) from None
-            if entry.is_dir() or entry.file_size > 16384:
+                # No shim in the bundle: launch from the signed wheels installed
+                # in the generation runtime instead, and only if one of them
+                # declares this launcher. That is decided here, before the
+                # process is replaced, exactly as a missing shim always was.
+                entry = None
+                claimed = tuple(wheel.filename for wheel in runtime.claims.wheels)
+                if action not in _declared_launchers(generation / "artifacts", claimed):
+                    raise ValueError(
+                        "this plugin has no selected local entrypoint"
+                    ) from None
+                bootstrap = _LAUNCHER_ENTRYPOINT.format(name=action)
+            if entry is not None and (entry.is_dir() or entry.file_size > 16384):
                 raise ValueError("invalid plugin setup entrypoint")
         python = str(generation / "runtime/bin/python")
         # Exec retains terminal I/O and normal interrupt behavior. Only the verified

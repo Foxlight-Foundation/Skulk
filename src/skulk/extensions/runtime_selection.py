@@ -21,6 +21,7 @@ from skulk.extensions.runtime_artifacts import (
     RuntimePlatform,
     VerifiedRuntime,
     canonical_json,
+    platform_matches,
 )
 from skulk.extensions.runtime_files import (
     RuntimeLock,
@@ -509,11 +510,16 @@ class RuntimeSelector:
                 operation.selection.runtime_digest
             ) as (_, host):
                 expected = operation.selection
-                if host != QualifiedHost(
-                    expected.platform,
-                    expected.python_version,
-                    expected.skulk_version,
-                    expected.skulk_build_sha256,
+                # The platform compares through the legacy names: a selection
+                # journaled before the family was derived stores the old Ubuntu
+                # label, and the same host now measures as linux-glibc-x86_64.
+                # Exact equality here would refuse a compatible generation that
+                # verify_runtime() deliberately accepts.
+                if (
+                    not platform_matches(expected.platform, host.platform)
+                    or host.python_version != expected.python_version
+                    or host.skulk_version != expected.skulk_version
+                    or host.skulk_build_sha256 != expected.skulk_build_sha256
                 ):
                     raise ValueError("recovery host differs")
                 return self._recover_locked(operation)

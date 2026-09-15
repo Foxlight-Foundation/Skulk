@@ -4,6 +4,7 @@ import asyncio
 import os
 import sqlite3
 import sys
+import zipfile
 from pathlib import Path
 from typing import Literal, NoReturn
 
@@ -30,6 +31,8 @@ class ExecutedError(Exception):
     "fault",
     [
         "none",
+        "launcher",
+        "unclaimed_wheel",
         "disabled",
         "missing_entry",
         "damaged",
@@ -53,10 +56,14 @@ async def test_local_setup_verifies_before_process_replacement(
     private_directory(manager)
     root = manager / "installations/managed.example"
     source = tmp_path / "source"
+    shimless = fault in ("missing_entry", "launcher", "unclaimed_wheel")
     metadata, trust, host = artifacts(
         source,
-        setup_source=None if fault == "missing_entry" else "print('setup')\n",
-        management_source=None if fault == "missing_entry" else "print('manage')\n",
+        setup_source=None if shimless else "print('setup')\n",
+        management_source=None if shimless else "print('manage')\n",
+        # A bundle with no shims is launched from a signed wheel that declares
+        # the launcher; without such a wheel it is refused before exec.
+        launcher=fault == "launcher",
     )
     monkeypatch.setattr("skulk.extensions.runtime_install.measure_host", lambda: host)
     monkeypatch.setattr(
@@ -86,6 +93,17 @@ async def test_local_setup_verifies_before_process_replacement(
             root / "generations" / staged.runtime_digest / "artifacts/bundle.pyz",
             b"damaged",
         )
+    elif fault == "unclaimed_wheel":
+        # A wheel dropped into the artifacts directory that the signed runtime
+        # never claimed declares the launcher; it must not authorize the branch.
+        generation = root / "generations" / staged.runtime_digest
+        with zipfile.ZipFile(
+            generation / "artifacts/stray-1.0-py3-none-any.whl", "w"
+        ) as stray:
+            stray.writestr(
+                "stray-1.0.dist-info/entry_points.txt",
+                "[skulk.capability_runtime]\nsetup = stray:main\nmanage = stray:main\n",
+            )
     elif fault == "history":
         with sqlite3.connect(selector.installer.database) as database:
             database.execute("DELETE FROM trust_floor")
@@ -107,7 +125,12 @@ async def test_local_setup_verifies_before_process_replacement(
             root / "generations" / staged.runtime_digest / "runtime/bin/python"
         )
         assert arguments[1:4] == ("-I", "-B", "-c")
-        assert f"run_module('__{action}__'" in arguments[4]
+        if fault == "launcher":
+            assert "entry_points(group='skulk.capability_runtime')" in arguments[4]
+            assert f"e.name=='{action}'" in arguments[4]
+            assert "run_module" not in arguments[4]
+        else:
+            assert f"run_module('__{action}__'" in arguments[4]
         assert arguments[-2:] == ("--example-input", "$(inert)")
         assert "PYTHONPATH" not in environment
         with pytest.raises(BlockingIOError):
@@ -134,7 +157,7 @@ async def test_local_setup_verifies_before_process_replacement(
                 0.05, write_private, root / "runtime-selection.json", replacement
             )
             asyncio.get_running_loop().call_later(0.06, held.close)
-    if fault in ("none", "disabled", "contention"):
+    if fault in ("none", "launcher", "disabled", "contention"):
         with pytest.raises(ExecutedError):
             await command("managed.example", ("--example-input", "$(inert)"))
         assert executed

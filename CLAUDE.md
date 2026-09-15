@@ -653,8 +653,9 @@ old transitions become superseded and published ones remain complete. Never
 supersede live work or a pending withdrawal, and never replay provider requests.
 The atomic selection is desired state; service launch must revalidate current
 core compatibility and runtime integrity before executing private code.
-`runtime_service.py` provides that separate nonroot launcher. Keep its entrypoint
-fixed, inherit a lifetime pipe and service fence, discard private owner output,
+`runtime_service.py` provides that separate nonroot launcher. Keep its entrypoints
+fixed (the archive's `__owner__` shim, or the `owner` launcher a signed wheel
+declares under `skulk.capability_runtime`; never a caller-supplied module), inherit a lifetime pipe and service fence, discard private owner output,
 and revalidate current trust and installed integrity while running. Process health
 is distinct from capability readiness. Never report fully stopped while a surviving
 child still holds the supervisor fence, or couple independent cleanup to this service.
@@ -1269,7 +1270,8 @@ explicit downloads without changing credentials or granting lifecycle/spending
 authority. Private values remain in the write-only credential path.
 
 
-Installed plugins may ship a fixed optional signed `__setup__.py`. The local
+Installed plugins may ship a fixed optional signed `__setup__.py`, or a signed
+wheel may declare a `setup` launcher under `skulk.capability_runtime`. The local
 `skulk-plugin-service setup-plugin <managed-id> -- <setup-fields>` command delegates
 through `extensions/local_setup.py` after complete current runtime verification.
 The installer fence survives exec; disabled selection is allowed and lost retained
@@ -1292,7 +1294,8 @@ preflight, enablement or paid approval. Public setup-file reads remain separate.
 
 
 Installed plugin terminal management uses `skulk-plugin-service manage-plugin`
-and the selected archive's fixed optional `__manage__.py`. `extensions/local_setup.py`
+and either the archive's optional `__manage__.py` or the `manage` launcher a signed
+wheel declares under `skulk.capability_runtime`. `extensions/local_setup.py`
 shares verification and inherited generation ownership with `setup-plugin`, while
 keeping entrypoints distinct. The plugin derives durable coordinates and owns its
 fixed CLI verbs; core accepts no executable/module selector and adds no HTTP exec

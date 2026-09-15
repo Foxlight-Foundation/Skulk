@@ -30,7 +30,63 @@ Identifier = Annotated[
     str, Field(min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9._:@-]+$")
 ]
 # Preserve the signed/persisted Linux artifact identifier; it is not an OS-version gate.
-RuntimePlatform = Literal["macos-arm64", "ubuntu-24.04-x86_64"]
+RuntimePlatform = Annotated[
+    str, Field(pattern=r"^[a-z0-9]+(?:[.-][a-z0-9_]+)*$", max_length=64)
+]
+"""An artifact family: operating system, C library where it matters, and machine.
+
+This was a closed pair, which meant the installer refused every other host
+before looking at a single wheel: a Grace Blackwell node on Linux aarch64 could
+not install a capability runtime at all. The family is now derived from the
+host, and each wheel's own tags are still checked against the live interpreter,
+so a wheel that cannot run here is refused whatever the family says."""
+
+LEGACY_PLATFORMS: dict[str, str] = {"ubuntu-24.04-x86_64": "linux-glibc-x86_64"}
+"""Names already written into signed releases. The Ubuntu label never denoted
+that distribution; it meant glibc Linux on x86_64."""
+
+
+def canonical_platform(name: str) -> str:
+    """Resolve a declared family, including the names already signed."""
+    return LEGACY_PLATFORMS.get(name, name)
+
+
+def _family_parts(name: str) -> tuple[str, str | None, str]:
+    parts = canonical_platform(name).split("-", 2)
+    if len(parts) == 3:
+        return parts[0], parts[1], parts[2]
+    return parts[0], None, parts[-1]
+
+
+def platform_matches(declared: str, host: str) -> bool:
+    """Whether an artifact family describes this host.
+
+    A legacy name matched every Linux x86_64 host whatever its C library, and a
+    library reported as ``unknown`` means detection failed rather than that it
+    differs; both compare on operating system and machine only. Two fully
+    derived names must agree on the library as well.
+    """
+    left, right = _family_parts(declared), _family_parts(host)
+    if left[0] != right[0] or left[2] != right[2]:
+        return False
+    if declared in LEGACY_PLATFORMS or host in LEGACY_PLATFORMS:
+        return True
+    return left[1] == right[1] or "unknown" in (left[1], right[1])
+
+
+def current_platform() -> str:
+    """Name this host's artifact family; only the operating system is closed."""
+    machine = platform.machine().lower().replace("-", "_")
+    architecture = {"amd64": "x86_64", "arm64": "aarch64"}.get(machine, machine)
+    if sys.platform == "darwin":
+        return f"macos-{'arm64' if machine == 'arm64' else architecture}"
+    if sys.platform == "linux":
+        library, _ = platform.libc_ver()
+        return f"linux-{library or 'unknown'}-{architecture}"
+    # Architecture and C library are open; the operating system is not. Skulk
+    # itself runs on macOS and Linux, the release schema admits only those, and
+    # naming a third one here would claim a host the runtime cannot serve.
+    raise ValueError("managed runtimes are qualified on macOS and Linux only")
 
 
 class _Contract(BaseModel):
@@ -161,13 +217,7 @@ def canonical_json(value: JsonValue) -> bytes:
 
 def measure_host() -> QualifiedHost:
     """Measure actual core sources, native bindings, Python and supported platform."""
-    target: RuntimePlatform
-    if sys.platform == "darwin" and platform.machine() == "arm64":
-        target = "macos-arm64"
-    elif sys.platform == "linux" and platform.machine() == "x86_64":
-        target = "ubuntu-24.04-x86_64"
-    else:
-        raise ValueError("unsupported managed runtime platform")
+    target = current_platform()
     if sys.implementation.name != "cpython":
         raise ValueError("unsupported managed Python implementation")
     digest = hashlib.sha256()
@@ -234,10 +284,11 @@ def verify_runtime(
     except (InvalidSignature, ValueError):
         raise ValueError("runtime signature refused") from None
     runtime = VerifiedRuntime(metadata, payload, claims)
-    expected_os = "darwin" if host.platform == "macos-arm64" else "linux"
+    family = canonical_platform(host.platform)
+    expected_os = "darwin" if family.startswith("macos") else family.split("-")[0]
     if (
         not release.created_at <= now < release.expires_at
-        or claims.platform != host.platform
+        or not platform_matches(claims.platform, host.platform)
         or expected_os not in release.platforms
         or host.python_version not in SpecifierSet(release.python_requires)
         or host.skulk_version not in SpecifierSet(release.manifest.skulk_requires)
@@ -269,6 +320,84 @@ def verified_artifacts(runtime: VerifiedRuntime, directory: Path) -> dict[str, b
         raise ValueError("invalid or unsupported runtime archive") from None
 
 
+RUNTIME_LAUNCHER_GROUP = "skulk.capability_runtime"
+"""Entry-point group a signed runtime wheel uses to declare the owner,
+management and setup launchers. A bundle used to carry those as fixed shims
+that embedded the whole SDK; a wheel that declares them lets the bundle carry
+only the capability, while the launchers still come from signed, hash-pinned
+bytes installed into the generation runtime."""
+
+
+def runtime_launchers(archive: zipfile.ZipFile) -> list[str]:
+    """Names declared under the launcher group in a wheel's entry-point metadata.
+
+    Read as data from ``*.dist-info/entry_points.txt`` so verification stays
+    static: nothing is installed or imported to learn what the wheel offers.
+    Repeats are kept so a caller can refuse an ambiguous declaration.
+    """
+    found: list[str] = []
+    declarations = [
+        item
+        for item in archive.infolist()
+        if len(PurePosixPath(item.filename).parts) == 2
+        and PurePosixPath(item.filename).parts[0].endswith(".dist-info")
+        and PurePosixPath(item.filename).parts[1] == "entry_points.txt"
+    ]
+    # A wheel has one dist-info; more than one entry_points.txt is malformed,
+    # and reading only the single legitimate member bounds this scan.
+    if len(declarations) > 1:
+        raise ValueError("wheel declares entry points more than once")
+    for item in declarations:
+        if item.file_size > 65536:
+            raise ValueError("wheel entry point declaration exceeds bound")
+        section = None
+        try:
+            # importlib.metadata reads the installed copy as strict UTF-8, so a
+            # byte tolerated here would only surface as an owner that never
+            # starts; refuse it where refusal is cheap and visible.
+            text = archive.read(item).decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise ValueError("wheel entry point declaration is not UTF-8") from error
+        for raw in text.splitlines():
+            line = raw.strip()
+            if not line or line[0] in "#;":
+                # importlib.metadata parses this file with ConfigParser, which
+                # drops comment lines; a "=" inside one is not a declaration.
+                continue
+            if line.startswith("[") and line.endswith("]"):
+                section = line[1:-1].strip()
+            elif section == RUNTIME_LAUNCHER_GROUP and "=" in line:
+                name, _, target = line.partition("=")
+                if not valid_launcher_target(target):
+                    # importlib.metadata would build an entry point with this
+                    # value and fail at load(), after staging succeeded.
+                    raise ValueError(
+                        f"wheel declares an invalid launcher {name.strip()}"
+                    )
+                found.append(name.strip())
+    return found
+
+
+def valid_launcher_target(target: str) -> bool:
+    """Whether ``module:attribute`` names something ``EntryPoint.load`` can resolve.
+
+    The shape importlib accepts: dotted module and dotted attribute paths with
+    optional whitespace around the colon. Extras are refused; a launcher is
+    loaded from the pinned wheelhouse, never resolved against extras. The
+    match runs through importlib's own pattern because its character class is
+    narrower than ``str.isidentifier``: a combining mark passes the latter and
+    would only fail at ``EntryPoint.load``, after staging.
+    """
+    match = importlib.metadata.EntryPoint.pattern.match(target.strip())
+    if match is None or match.group("attr") is None or match.group("extras"):
+        return False
+    return all(
+        part.isidentifier()
+        for side in (match.group("module"), match.group("attr"))
+        for part in side.split(".")
+    )
+
+
 def _verified_artifacts(runtime: VerifiedRuntime, directory: Path) -> dict[str, bytes]:
     """Verify exact bundle and wheels, archive paths, tags and complete dependencies."""
     release = runtime.claims.release
@@ -297,11 +426,12 @@ def _verified_artifacts(runtime: VerifiedRuntime, directory: Path) -> dict[str, 
         owner = next(
             (item for item in entries if item.filename == "__owner__.py"), None
         )
-        if owner is None or not 0 < owner.file_size <= 65536:
-            raise ValueError("bundle requires the fixed owner entrypoint")
+        if owner is not None and not 0 < owner.file_size <= 65536:
+            raise ValueError("bundle owner entrypoint has an invalid size")
     tags = set(sys_tags())
     expanded = 0
     inventory = runtime.inventory
+    launchers: list[str] = []
     for wheel in runtime.claims.wheels:
         content = read_private(directory / wheel.filename, wheel.size)
         if (
@@ -345,6 +475,10 @@ def _verified_artifacts(runtime: VerifiedRuntime, directory: Path) -> dict[str, 
                 or Version(str(parsed.get("Version", "0"))) != version
             ):
                 raise ValueError("wheel identity differs")
+            # Only after the entry-count, expanded-size and single-metadata
+            # bounds hold: a malformed wheel must not get decompression work
+            # out of the launcher scan before it is rejected.
+            launchers += runtime_launchers(archive)
             for value in parsed.get_all("Requires-Dist", []):
                 requirement = Requirement(str(value))
                 if requirement.marker is not None and not requirement.marker.evaluate(
@@ -360,4 +494,15 @@ def _verified_artifacts(runtime: VerifiedRuntime, directory: Path) -> dict[str, 
                 ):
                     raise ValueError("incomplete or incompatible wheel dependency")
         result[wheel.filename] = content
+    if len(launchers) != len(set(launchers)):
+        # Which distribution answers importlib.metadata first is not bound by
+        # the signed contract, so two declarations of one launcher would let
+        # metadata order decide which owner starts. Refuse the ambiguity.
+        raise ValueError("signed wheels declare the same runtime launcher twice")
+    if owner is None and "owner" not in launchers:
+        # Either shape is acceptable, never neither: a bundle with no shim must
+        # be launched from a signed wheel that declares the owner launcher.
+        raise ValueError(
+            "bundle carries no owner entrypoint and no signed wheel declares one"
+        )
     return result
