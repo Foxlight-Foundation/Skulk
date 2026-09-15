@@ -794,11 +794,10 @@ class OperatorGatewayConnector:
                         raise OperatorRelayUnavailableError(
                             "connector generation provider is unavailable"
                         )
-                    connector_generation = generation_provider()
                     await self._serve_control_connection(
                         session,
                         data_tasks,
-                        connector_generation,
+                        generation_provider,
                     )
                     raise OperatorRelayError(
                         "operator relay control connection ended"
@@ -835,7 +834,7 @@ class OperatorGatewayConnector:
         self,
         session: aiohttp.ClientSession,
         data_tasks: asyncio.TaskGroup,
-        connector_generation: int,
+        generation_provider: Callable[[], int],
     ) -> None:
         """Authenticate one control socket and dispatch its data-lane requests."""
 
@@ -844,17 +843,6 @@ class OperatorGatewayConnector:
             raise OperatorRelayUnavailableError("connector control URL is unavailable")
         private_key, key_id, locator, region, epoch = self._connector_authority()
         connector_id = os.urandom(16)
-        hello, lease = build_connector_hello(
-            private_key=private_key,
-            authority_key_id=key_id,
-            routing_locator=locator,
-            region_id=region,
-            connector_id=connector_id,
-            authority_epoch=epoch,
-            authority_term=_CONNECTOR_AUTHORITY_TERM,
-            connector_generation=connector_generation,
-            now_unix_millis=self._now_unix_millis(),
-        )
         headers = self._gateway_headers()
         async with session.ws_connect(
             control_url,
@@ -864,6 +852,20 @@ class OperatorGatewayConnector:
             autoclose=True,
             max_msg_size=_aiohttp_receive_limit_bytes(65_536),
         ) as websocket:
+            # Failed DNS/TCP/upgrade attempts must not grow the durable journal.
+            # Reserve before sending authority so accepted sessions stay fenced.
+            connector_generation = generation_provider()
+            hello, lease = build_connector_hello(
+                private_key=private_key,
+                authority_key_id=key_id,
+                routing_locator=locator,
+                region_id=region,
+                connector_id=connector_id,
+                authority_epoch=epoch,
+                authority_term=_CONNECTOR_AUTHORITY_TERM,
+                connector_generation=connector_generation,
+                now_unix_millis=self._now_unix_millis(),
+            )
             await websocket.send_bytes(hello)
             first_message = await websocket.receive(
                 timeout=_CONTROL_HELLO_TIMEOUT_SECONDS

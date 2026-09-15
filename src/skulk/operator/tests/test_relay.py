@@ -1028,9 +1028,11 @@ async def test_on_demand_connector_backs_off_after_clean_control_close(
     async def close_cleanly(
         _session: aiohttp.ClientSession,
         _data_tasks: asyncio.TaskGroup,
-        _connector_generation: int,
+        generation_provider: Callable[[], int],
     ) -> None:
         """Model a relay that accepts and then cleanly closes control."""
+
+        generation_provider()
 
     monkeypatch.setattr(connector, "_serve_control_connection", close_cleanly)
     connector_task = asyncio.create_task(connector.run())
@@ -1041,6 +1043,68 @@ async def test_on_demand_connector_backs_off_after_clean_control_close(
         connector_task.cancel()
         with suppress(asyncio.CancelledError):
             await connector_task
+
+
+@pytest.mark.asyncio
+async def test_failed_control_upgrade_does_not_reserve_generation(
+    tmp_path: Path,
+) -> None:
+    """An unavailable relay writes nothing; an open socket reserves before hello."""
+
+    generations: list[int] = []
+    accepting = False
+    observed_generation = asyncio.Event()
+
+    async def control(request: web.Request) -> web.StreamResponse:
+        if not accepting:
+            return web.Response(status=503)
+        websocket = web.WebSocketResponse()
+        await websocket.prepare(request)
+        message = await websocket.receive()
+        if message.type is aiohttp.WSMsgType.BINARY and generations == [1]:
+            observed_generation.set()
+        await websocket.close()
+        return websocket
+
+    application = web.Application()
+    application.router.add_get("/v1/connector/control", control)
+    runner = web.AppRunner(application)
+    await runner.setup()
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    port = cast(tuple[str, int], listener.getsockname())[1]
+    await web.SockSite(runner, listener).start()
+    service, _ = _service(tmp_path)
+    configuration = service.configure_relay(
+        _on_demand_provisioning(f"ws://127.0.0.1:{port}"),
+        operator_api_port=52416,
+    )
+
+    def reserve_generation() -> int:
+        generation = service.reserve_relay_connector_generation()
+        generations.append(generation)
+        return generation
+
+    connector = OperatorGatewayConnector(
+        configuration, next_connector_generation=reserve_generation
+    )
+    try:
+        async with aiohttp.ClientSession() as session, asyncio.TaskGroup() as tasks:
+            for _ in range(3):
+                with pytest.raises(aiohttp.WSServerHandshakeError):
+                    await connector._serve_control_connection(  # pyright: ignore[reportPrivateUsage]
+                        session, tasks, reserve_generation
+                    )
+            assert generations == []
+            accepting = True
+            with pytest.raises(relay_module.OperatorRelayError):
+                await connector._serve_control_connection(  # pyright: ignore[reportPrivateUsage]
+                    session, tasks, reserve_generation
+                )
+            assert observed_generation.is_set()
+            assert generations == [1]
+    finally:
+        await runner.cleanup()
 
 
 @final
