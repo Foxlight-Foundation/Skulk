@@ -41,6 +41,7 @@ def artifacts(
     management_source: str | None = None,
     signing_key: Ed25519PrivateKey | None = None,
     permissions: tuple[str, ...] = ("local synthetic operation",),
+    launcher: bool = False,
 ) -> tuple[bytes, RuntimeTrust, QualifiedHost]:
     """Create an independently signed generic package with no private SDK metadata."""
     private_directory(directory)
@@ -55,6 +56,15 @@ def artifacts(
             prefix
             + "WHEEL": "Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
         }
+        if launcher:
+            # A wheel that declares the owner launcher lets the bundle omit the
+            # fixed shim; the launcher then comes from signed, pinned bytes.
+            files[prefix + "entry_points.txt"] = (
+                "[skulk.capability_runtime]\n"
+                "owner = example_dep:main\n"
+                "manage = example_dep:main\n"
+                "setup = example_dep:main\n"
+            )
         files[prefix + "RECORD"] = (
             "".join(f"{name},,\n" for name in files) + prefix + "RECORD,,\n"
         )
@@ -167,12 +177,20 @@ def test_complete_wheel_closure_required(tmp_path: Path, dependency: str) -> Non
         verified_artifacts(runtime, tmp_path)
 
 
-def test_fixed_owner_entrypoint_is_required(tmp_path: Path) -> None:
-    """A validly signed bundle still needs the generic owner's fixed entrypoint."""
+def test_owner_launcher_comes_from_a_shim_or_a_signed_wheel(tmp_path: Path) -> None:
+    """A bundle supplies the owner shim or a signed wheel declares the launcher.
+
+    Neither is a refusal: the bundle would carry the SDK's host machinery for no
+    reason, or nothing would be able to start the owner at all.
+    """
     metadata, trust, host = artifacts(tmp_path, owner_entrypoint=False)
     runtime = verify_runtime(metadata, trust, host, now=int(time.time()))
     with pytest.raises(ValueError, match="owner entrypoint"):
         verified_artifacts(runtime, tmp_path)
+    declared = tmp_path / "declared"
+    metadata, trust, host = artifacts(declared, owner_entrypoint=False, launcher=True)
+    runtime = verify_runtime(metadata, trust, host, now=int(time.time()))
+    assert "bundle.pyz" in verified_artifacts(runtime, declared)
 
 
 async def test_offline_stage_and_reconnect_leave_host_unchanged(

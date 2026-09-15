@@ -30,6 +30,7 @@ class ExecutedError(Exception):
     "fault",
     [
         "none",
+        "launcher",
         "disabled",
         "missing_entry",
         "damaged",
@@ -53,10 +54,14 @@ async def test_local_setup_verifies_before_process_replacement(
     private_directory(manager)
     root = manager / "installations/managed.example"
     source = tmp_path / "source"
+    shimless = fault in ("missing_entry", "launcher")
     metadata, trust, host = artifacts(
         source,
-        setup_source=None if fault == "missing_entry" else "print('setup')\n",
-        management_source=None if fault == "missing_entry" else "print('manage')\n",
+        setup_source=None if shimless else "print('setup')\n",
+        management_source=None if shimless else "print('manage')\n",
+        # A bundle with no shims is launched from a signed wheel that declares
+        # the launcher; without such a wheel it is refused before exec.
+        launcher=fault == "launcher",
     )
     monkeypatch.setattr("skulk.extensions.runtime_install.measure_host", lambda: host)
     monkeypatch.setattr(
@@ -107,7 +112,12 @@ async def test_local_setup_verifies_before_process_replacement(
             root / "generations" / staged.runtime_digest / "runtime/bin/python"
         )
         assert arguments[1:4] == ("-I", "-B", "-c")
-        assert f"run_module('__{action}__'" in arguments[4]
+        if fault == "launcher":
+            assert "entry_points(group='skulk.capability_runtime')" in arguments[4]
+            assert f"e.name=='{action}'" in arguments[4]
+            assert "run_module" not in arguments[4]
+        else:
+            assert f"run_module('__{action}__'" in arguments[4]
         assert arguments[-2:] == ("--example-input", "$(inert)")
         assert "PYTHONPATH" not in environment
         with pytest.raises(BlockingIOError):
@@ -134,7 +144,7 @@ async def test_local_setup_verifies_before_process_replacement(
                 0.05, write_private, root / "runtime-selection.json", replacement
             )
             asyncio.get_running_loop().call_later(0.06, held.close)
-    if fault in ("none", "disabled", "contention"):
+    if fault in ("none", "launcher", "disabled", "contention"):
         with pytest.raises(ExecutedError):
             await command("managed.example", ("--example-input", "$(inert)"))
         assert executed

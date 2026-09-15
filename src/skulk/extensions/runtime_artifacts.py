@@ -269,6 +269,40 @@ def verified_artifacts(runtime: VerifiedRuntime, directory: Path) -> dict[str, b
         raise ValueError("invalid or unsupported runtime archive") from None
 
 
+RUNTIME_LAUNCHER_GROUP = "skulk.capability_runtime"
+"""Entry-point group a signed runtime wheel uses to declare the owner,
+management and setup launchers. A bundle used to carry those as fixed shims
+that embedded the whole SDK; a wheel that declares them lets the bundle carry
+only the capability, while the launchers still come from signed, hash-pinned
+bytes installed into the generation runtime."""
+
+
+def runtime_launchers(archive: zipfile.ZipFile) -> set[str]:
+    """Names declared under the launcher group in a wheel's entry-point metadata.
+
+    Read as data from ``*.dist-info/entry_points.txt`` so verification stays
+    static: nothing is installed or imported to learn what the wheel offers.
+    """
+    found: set[str] = set()
+    for item in archive.infolist():
+        parts = PurePosixPath(item.filename).parts
+        if (
+            len(parts) != 2
+            or not parts[0].endswith(".dist-info")
+            or parts[1] != "entry_points.txt"
+            or item.file_size > 65536
+        ):
+            continue
+        section = None
+        for raw in archive.read(item).decode("utf-8", "replace").splitlines():
+            line = raw.strip()
+            if line.startswith("[") and line.endswith("]"):
+                section = line[1:-1].strip()
+            elif section == RUNTIME_LAUNCHER_GROUP and "=" in line:
+                found.add(line.split("=", 1)[0].strip())
+    return found
+
+
 def _verified_artifacts(runtime: VerifiedRuntime, directory: Path) -> dict[str, bytes]:
     """Verify exact bundle and wheels, archive paths, tags and complete dependencies."""
     release = runtime.claims.release
@@ -297,11 +331,12 @@ def _verified_artifacts(runtime: VerifiedRuntime, directory: Path) -> dict[str, 
         owner = next(
             (item for item in entries if item.filename == "__owner__.py"), None
         )
-        if owner is None or not 0 < owner.file_size <= 65536:
-            raise ValueError("bundle requires the fixed owner entrypoint")
+        if owner is not None and not 0 < owner.file_size <= 65536:
+            raise ValueError("bundle owner entrypoint has an invalid size")
     tags = set(sys_tags())
     expanded = 0
     inventory = runtime.inventory
+    launchers: set[str] = set()
     for wheel in runtime.claims.wheels:
         content = read_private(directory / wheel.filename, wheel.size)
         if (
@@ -313,6 +348,7 @@ def _verified_artifacts(runtime: VerifiedRuntime, directory: Path) -> dict[str, 
         if not tags.intersection(supported):
             raise ValueError("wheel does not support this interpreter")
         with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            launchers |= runtime_launchers(archive)
             entries = archive.infolist()
             expanded += sum(item.file_size for item in entries)
             if (
@@ -360,4 +396,10 @@ def _verified_artifacts(runtime: VerifiedRuntime, directory: Path) -> dict[str, 
                 ):
                     raise ValueError("incomplete or incompatible wheel dependency")
         result[wheel.filename] = content
+    if owner is None and "owner" not in launchers:
+        # Either shape is acceptable, never neither: a bundle with no shim must
+        # be launched from a signed wheel that declares the owner launcher.
+        raise ValueError(
+            "bundle carries no owner entrypoint and no signed wheel declares one"
+        )
     return result
