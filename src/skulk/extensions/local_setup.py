@@ -65,9 +65,10 @@ async def setup_installed_plugin(plugin_id: str, arguments: tuple[str, ...]) -> 
     """Replace this local terminal process with the selected plugin's setup command.
 
     Resolve the installation from the protected local service connection, verify
-    signatures, compatibility and all executable bytes, then execute only the
-    archive's fixed optional __setup__ entrypoint. Arguments are plugin-owned setup
-    fields, never a command/module selector. The inherited installation lock blocks
+    signatures, compatibility and all executable bytes, then execute the setup
+    launcher: the archive's fixed optional __setup__ entrypoint, or the ``setup``
+    launcher a signed wheel declares in the ``skulk.capability_runtime`` group.
+    Arguments are plugin-owned setup fields, never a command/module selector. The inherited installation lock blocks
     generation changes until setup exits. No remote route invokes this operation.
     """
     await _run_installed_plugin(plugin_id, arguments, "setup")

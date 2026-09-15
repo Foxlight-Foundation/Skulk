@@ -252,6 +252,9 @@ def test_launcher_declarations_follow_importlib_not_a_narrower_grammar() -> None
     assert not valid_launcher_target("pkg.cli")
     assert not valid_launcher_target("pkg:main [extra]")
     assert not valid_launcher_target("pkg:Runner..main")
+    # A combining mark is an identifier to str.isidentifier and not a word
+    # character to EntryPoint.pattern; the latter decides at load().
+    assert not valid_launcher_target("pkg:a\u0301")
 
     def wheel(declaration: bytes) -> zipfile.ZipFile:
         buffer = io.BytesIO()

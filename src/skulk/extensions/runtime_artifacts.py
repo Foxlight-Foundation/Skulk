@@ -379,12 +379,17 @@ def valid_launcher_target(target: str) -> bool:
 
     The shape importlib accepts: dotted module and dotted attribute paths with
     optional whitespace around the colon. Extras are refused; a launcher is
-    loaded from the pinned wheelhouse, never resolved against extras.
+    loaded from the pinned wheelhouse, never resolved against extras. The
+    match runs through importlib's own pattern because its character class is
+    narrower than ``str.isidentifier``: a combining mark passes the latter and
+    would only fail at ``EntryPoint.load``, after staging.
     """
-    module, separator, attribute = target.partition(":")
-    return bool(separator) and all(
+    match = importlib.metadata.EntryPoint.pattern.match(target.strip())
+    if match is None or match.group("attr") is None or match.group("extras"):
+        return False
+    return all(
         part.isidentifier()
-        for side in (module.strip(), attribute.strip())
+        for side in (match.group("module"), match.group("attr"))
         for part in side.split(".")
     )
 
