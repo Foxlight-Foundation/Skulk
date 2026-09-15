@@ -52,7 +52,7 @@ def canonical_platform(name: str) -> str:
 
 
 def _family_parts(name: str) -> tuple[str, str | None, str]:
-    parts = canonical_platform(name).split("-")
+    parts = canonical_platform(name).split("-", 2)
     if len(parts) == 3:
         return parts[0], parts[1], parts[2]
     return parts[0], None, parts[-1]
@@ -76,7 +76,7 @@ def platform_matches(declared: str, host: str) -> bool:
 
 def current_platform() -> str:
     """Name this host's artifact family; only the operating system is closed."""
-    machine = platform.machine().lower()
+    machine = platform.machine().lower().replace("-", "_")
     architecture = {"amd64": "x86_64", "arm64": "aarch64"}.get(machine, machine)
     if sys.platform == "darwin":
         return f"macos-{'arm64' if machine == 'arm64' else architecture}"
@@ -356,7 +356,18 @@ def runtime_launchers(archive: zipfile.ZipFile) -> list[str]:
             if line.startswith("[") and line.endswith("]"):
                 section = line[1:-1].strip()
             elif section == RUNTIME_LAUNCHER_GROUP and "=" in line:
-                found.append(line.split("=", 1)[0].strip())
+                name, _, target = line.partition("=")
+                module, separator, attribute = target.strip().partition(":")
+                if not (
+                    separator
+                    and attribute.isidentifier()
+                    and all(part.isidentifier() for part in module.split("."))
+                ):
+                    # importlib.metadata would build an entry point with this
+                    # value and fail at load(), after staging succeeded; refuse
+                    # it here, where refusal is cheap and visible.
+                    raise ValueError(f"wheel declares an invalid launcher {name.strip()}")
+                found.append(name.strip())
     return found
 
 

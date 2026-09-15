@@ -28,26 +28,17 @@ _LAUNCHER_ENTRYPOINT = (
 )
 
 
-def _declared_launchers(artifacts: Path) -> set[str]:
-    """Launchers the generation's signed wheels declare, read as data.
+def _declared_launchers(artifacts: Path, claimed: tuple[str, ...]) -> set[str]:
+    """Launchers the signed, installed wheels declare, read as data.
 
-    Only the wheels the installer actually verified and installed count: it
-    writes them, with their hashes, to the generation's requirements.txt. A
-    stray wheel in the artifacts directory must not be able to authorize the
-    launcher branch and then fail after the process has been replaced.
+    ``claimed`` is the verified runtime's own wheel list, so only wheels the
+    signature covers and the installer installed can authorize the launcher
+    branch. A stray wheel in the directory, or a stray line in any file on
+    disk, cannot.
     """
-    claimed: list[Path] = []
-    for line in (
-        read_private(artifacts.parent / "requirements.txt", 1048576)
-        .decode()
-        .splitlines()
-    ):
-        head = line.split(" ", 1)[0]
-        if head.startswith("./artifacts/") and head.endswith(".whl"):
-            claimed.append(artifacts / head.removeprefix("./artifacts/"))
     found: list[str] = []
-    for wheel in claimed:
-        with zipfile.ZipFile(wheel) as archive:
+    for filename in claimed:
+        with zipfile.ZipFile(artifacts / filename) as archive:
             found += runtime_launchers(archive)
     if len(found) != len(set(found)):
         raise ValueError("signed wheels declare the same runtime launcher twice")
@@ -121,7 +112,7 @@ async def _run_installed_plugin(
     selector = RuntimeSelector(root)
     async with selector.installer.locked_generation(
         selection.runtime_digest, inherit_on_exec=True, wait_for_ownership=True
-    ):
+    ) as (runtime, _):
         if selector.current() != selection or selector.pending.exists():
             raise ValueError("plugin selection changed or requires recovery")
         generation = root / "generations" / selection.runtime_digest
@@ -137,7 +128,8 @@ async def _run_installed_plugin(
                 # declares this launcher. That is decided here, before the
                 # process is replaced, exactly as a missing shim always was.
                 entry = None
-                if action not in _declared_launchers(generation / "artifacts"):
+                claimed = tuple(wheel.filename for wheel in runtime.claims.wheels)
+                if action not in _declared_launchers(generation / "artifacts", claimed):
                     raise ValueError(
                         "this plugin has no selected local entrypoint"
                     ) from None
