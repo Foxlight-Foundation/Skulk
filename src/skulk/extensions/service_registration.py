@@ -50,9 +50,15 @@ def service_platform() -> ServicePlatform:
     if sys.platform == "linux":
         # Registration below drives /usr/bin/systemctl unconditionally, so a
         # Linux host without it must be refused here, before it is advertised
-        # as supported, rather than at the first service command.
-        if not os.path.exists("/usr/bin/systemctl"):
-            raise ValueError("plugin services on Linux require systemd")
+        # as supported, rather than at the first service command. The binary
+        # alone is not enough: a container or a WSL install can carry it with
+        # no manager running, and /run/systemd/system is what sd_booted()
+        # checks for a live one.
+        if not (
+            os.path.exists("/usr/bin/systemctl")
+            and os.path.exists("/run/systemd/system")
+        ):
+            raise ValueError("plugin services on Linux require a running systemd")
         library, _ = platform.libc_ver()
         return f"linux-{library or 'unknown'}-{architecture}"
     raise ValueError("plugin services are qualified on macOS and Linux only")

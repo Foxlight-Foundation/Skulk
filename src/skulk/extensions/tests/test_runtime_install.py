@@ -263,7 +263,10 @@ def test_launcher_declarations_follow_importlib_not_a_narrower_grammar() -> None
         return zipfile.ZipFile(io.BytesIO(buffer.getvalue()))
 
     assert runtime_launchers(
-        wheel(b"[skulk.capability_runtime]\nowner = pkg.cli : Runner.main\n")
+        wheel(
+            b"[skulk.capability_runtime]\n# generated-by = tooling\n"
+            b"; note = kept\nowner = pkg.cli : Runner.main\n"
+        )
     ) == ["owner"]
     # importlib.metadata decodes the installed metadata strictly, so a byte
     # accepted here would become an owner that exits on every start.

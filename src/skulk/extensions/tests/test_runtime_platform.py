@@ -26,6 +26,7 @@ def _linux(
     machine: str,
     libc: str = "glibc",
     systemd: bool = True,
+    systemd_running: bool = True,
 ) -> None:
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(platform, "machine", lambda: machine)
@@ -33,7 +34,11 @@ def _linux(
     real_exists = os.path.exists
 
     def exists(path: str) -> bool:
-        return systemd if path == "/usr/bin/systemctl" else real_exists(path)
+        if path == "/usr/bin/systemctl":
+            return systemd
+        if path == "/run/systemd/system":
+            return systemd_running
+        return real_exists(path)
 
     monkeypatch.setattr("skulk.extensions.service_registration.os.path.exists", exists)
 
@@ -122,4 +127,10 @@ def test_linux_without_systemd_is_refused_before_registration(
     """Registration drives systemctl, so a host without it is refused up front."""
     _linux(monkeypatch, "aarch64", systemd=False)
     with pytest.raises(ValueError, match="systemd"):
+        service_platform()
+    # The binary alone does not prove a manager: a container can carry
+    # systemctl while nothing answers it, and setup would fail at daemon-reload
+    # after privileged preparation had begun.
+    _linux(monkeypatch, "aarch64", systemd_running=False)
+    with pytest.raises(ValueError, match="running systemd"):
         service_platform()
