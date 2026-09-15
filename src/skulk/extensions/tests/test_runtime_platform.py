@@ -8,6 +8,7 @@ agreement between the two derivations, and the one property the old closed set
 guarded: x86_64 artifacts are never taken for an aarch64 host.
 """
 
+import os
 import platform
 import sys
 from importlib.machinery import ModuleSpec
@@ -20,10 +21,21 @@ from skulk.extensions.runtime_artifacts import canonical_platform, platform_matc
 from skulk.extensions.service_registration import service_platform
 
 
-def _linux(monkeypatch: pytest.MonkeyPatch, machine: str, libc: str = "glibc") -> None:
+def _linux(
+    monkeypatch: pytest.MonkeyPatch,
+    machine: str,
+    libc: str = "glibc",
+    systemd: bool = True,
+) -> None:
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(platform, "machine", lambda: machine)
     monkeypatch.setattr(platform, "libc_ver", lambda: (libc, "2.39" if libc else ""))
+    real_exists = os.path.exists
+
+    def exists(path: str) -> bool:
+        return systemd if path == "/usr/bin/systemctl" else real_exists(path)
+
+    monkeypatch.setattr("skulk.extensions.service_registration.os.path.exists", exists)
 
 
 def _synthetic_core(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -101,4 +113,13 @@ def test_other_operating_systems_are_refused_by_name(
     with pytest.raises(ValueError, match="macOS and Linux"):
         runtime_artifacts.current_platform()
     with pytest.raises(ValueError, match="macOS and Linux"):
+        service_platform()
+
+
+def test_linux_without_systemd_is_refused_before_registration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Registration drives systemctl, so a host without it is refused up front."""
+    _linux(monkeypatch, "aarch64", systemd=False)
+    with pytest.raises(ValueError, match="systemd"):
         service_platform()

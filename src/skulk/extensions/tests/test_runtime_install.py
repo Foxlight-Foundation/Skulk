@@ -43,6 +43,7 @@ def artifacts(
     permissions: tuple[str, ...] = ("local synthetic operation",),
     launcher: bool = False,
     duplicate_launcher: bool = False,
+    platform: str = "macos-arm64",
 ) -> tuple[bytes, RuntimeTrust, QualifiedHost]:
     """Create an independently signed generic package with no private SDK metadata."""
     private_directory(directory)
@@ -117,7 +118,7 @@ def artifacts(
             {"filename": dup_name, "sha256": hashlib.sha256(extra).hexdigest(), "size": len(extra)}
         )
     now = int(time.time())
-    host = QualifiedHost("macos-arm64", "3.13.13", "1.5.2", "a" * 64)
+    host = QualifiedHost(platform, "3.13.13", "1.5.2", "a" * 64)
     key = signing_key or Ed25519PrivateKey.generate()
     trust = RuntimeTrust(
         revision=1,
@@ -144,7 +145,7 @@ def artifacts(
                 "executable_sha256": hashlib.sha256(bundle).hexdigest(),
                 "plugin_specific_policy": {"opaque": True},
             },
-            "platforms": ["darwin"],
+            "platforms": ["darwin" if platform.startswith("macos") else "linux"],
             "python_requires": "==3.13.*",
             "skulk_build_sha256": host.skulk_build_sha256,
             "dependency_lock_sha256": hashlib.sha256(
