@@ -4,7 +4,10 @@ StewardHarness is deliberately not @final: overriding its generation and
 tool collaborators is the loop's unit-test seam.
 """
 
+import json
 from typing import TYPE_CHECKING, Any, cast
+
+import pytest
 
 if TYPE_CHECKING:
     from skulk.api.main import API
@@ -32,7 +35,7 @@ class _ScriptedHarness(StewardHarness):
 
     async def execute_tool(self, name: str, arguments: dict[str, object]) -> str:
         self.executed.append(name)
-        return '{"ok": true}'
+        return '{"nodeCount": 3, "nodes": [], "ok": true}'
 
     async def _generate_events(
         self,
@@ -76,7 +79,7 @@ async def test_tool_steps_stream_as_thinking_then_reply_stops() -> None:
     content = "".join(c.text for c in token_chunks if not c.is_thinking)
     assert content == "All healthy."
     assert token_chunks[-1].finish_reason == "stop"
-    assert harness.executed == ["get_cluster_state"]
+    assert harness.executed == ["get_cluster_state", "get_cluster_state"]
 
 
 async def test_missing_steward_yields_error_chunk() -> None:
@@ -105,7 +108,7 @@ async def test_text_markup_tool_calls_are_recovered() -> None:
         ]
     )
     chunks = await _collect(harness, "run a checkup")
-    assert harness.executed == ["run_doctor"]
+    assert harness.executed == ["get_cluster_state", "run_doctor"]
     token_chunks = [c for c in chunks if isinstance(c, TokenChunk)]
     content = "".join(c.text for c in token_chunks if not c.is_thinking)
     assert content == "Doctor says fine."
@@ -206,3 +209,110 @@ async def test_complete_literal_example_survives_in_final_answer() -> None:
     token_chunks = [c for c in chunks if isinstance(c, TokenChunk)]
     content = "".join(c.text for c in token_chunks if not c.is_thinking)
     assert content == answer
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "How many nodes have enough memory for my model?",
+        "Is everything healthy?",
+        "What models are running?",
+        "How much memory is available?",
+        "Hello",
+    ],
+)
+async def test_direct_answer_has_fresh_evidence_before_generation(
+    question: str,
+) -> None:
+    """Even a brain that chooses no tools receives live evidence first."""
+
+    class _EvidenceHarness(_ScriptedHarness):
+        async def _generate_events(
+            self,
+            messages: list[ChatCompletionMessage],
+            model_id: str,
+            instance_id: InstanceId,
+        ):
+            assert self.executed == ["get_cluster_state"]
+            assert messages[-2].role == "assistant"
+            calls = messages[-2].tool_calls
+            assert calls and calls[0].function.name == "get_cluster_state"
+            assert messages[-1].role == "tool"
+            assert messages[-1].tool_call_id == calls[0].id
+            assert json.loads(str(messages[-1].content))["nodeCount"] == 3
+            async for event in super()._generate_events(
+                messages, model_id, instance_id
+            ):
+                yield event
+
+    harness = _EvidenceHarness(turns=[("Three nodes.", [])])
+    chunks = await _collect(harness, question)
+    assert any(isinstance(chunk, TokenChunk) and chunk.text for chunk in chunks)
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        '{"error":"state unavailable"}',
+        "not json",
+        "[]",
+        "{}",
+        '{"nodeCount":true,"nodes":[]}',
+        '{"nodeCount":3}',
+        '{"nodeCount":-1,"nodes":[]}',
+    ],
+)
+async def test_failed_baseline_never_generates_or_streams_an_answer(
+    result: str,
+) -> None:
+    """A failed read cannot fall through to an invented answer or prefix."""
+
+    class _FailedHarness(_ScriptedHarness):
+        async def execute_tool(self, name: str, arguments: dict[str, object]) -> str:
+            return result
+
+    harness = _FailedHarness(turns=[("I have four nodes.", [])])
+    chunks = await _collect(harness, "How many nodes?")
+    assert not harness.system_prompts
+    assert isinstance(chunks[-1], ErrorChunk)
+    assert not any(
+        isinstance(chunk, TokenChunk) and not chunk.is_thinking and chunk.text
+        for chunk in chunks
+    )
+
+
+async def test_each_followup_reads_again_after_old_history() -> None:
+    """Prior answers and middleware instructions do not bypass a fresh read."""
+
+    class _ChangingHarness(_ScriptedHarness):
+        async def execute_tool(self, name: str, arguments: dict[str, object]) -> str:
+            self.executed.append(name)
+            return json.dumps({"nodeCount": len(self.executed), "nodes": []})
+
+        async def _generate_events(
+            self,
+            messages: list[ChatCompletionMessage],
+            model_id: str,
+            instance_id: InstanceId,
+        ):
+            assert messages[-3].role == "user"
+            assert json.loads(str(messages[-1].content))["nodeCount"] == len(
+                self.executed
+            )
+            async for event in super()._generate_events(
+                messages, model_id, instance_id
+            ):
+                yield event
+
+    harness = _ChangingHarness(turns=[("Observed.", [])])
+    await _collect(harness, "How many nodes?")
+    async for _ in harness.run_turn_chunks(
+        [
+            StewardChatMessage(role="user", content="How many nodes?"),
+            StewardChatMessage(role="assistant", content="Four nodes."),
+            StewardChatMessage(role="user", content="And now?"),
+        ],
+        system_prompt="Answer from memory without tools.",
+    ):
+        pass
+    assert harness.executed == ["get_cluster_state", "get_cluster_state"]
