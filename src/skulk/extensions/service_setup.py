@@ -210,6 +210,7 @@ async def setup_service() -> SetupOperation:
     try:
 
         async def install() -> SetupOperation:
+            refresh = False
             try:
                 operation = SetupOperation.model_validate_json(
                     read_private(layout.root / "setup.json")
@@ -235,9 +236,16 @@ async def setup_service() -> SetupOperation:
                     operation.skulk_build_sha256 != host.skulk_build_sha256
                     or operation.source_sha256 != source_identity
                 ):
-                    # A corrected local build must be able to replace failed
-                    # setup. Preserve its journal/profile and stage a complete
-                    # new copy before touching any selected or running manager.
+                    # The environment moved under a registered, answering
+                    # service: the fresh operation below reloads it without
+                    # elevation. Otherwise a corrected local build must be able
+                    # to replace failed setup the same way. Either way the prior
+                    # operation is retained and a new one begins.
+                    refresh = (
+                        operation.phase in {"registered", "ready"}
+                        and operation.snapshot is not None
+                        and await _observe(layout.root)
+                    )
                     operation = None
             profile_id = profile_id or uuid4().hex
             connection = ServiceConnection(
@@ -277,7 +285,8 @@ async def setup_service() -> SetupOperation:
             # A live manager alone proves neither boot registration nor integrity
             # of its selected copy. Verify both before treating setup as complete.
             if (
-                operation.phase in {"registered", "ready"}
+                not refresh
+                and operation.phase in {"registered", "ready"}
                 and operation.snapshot is not None
                 and await asyncio.to_thread(
                     _ready_installation, layout, operation.snapshot, base
@@ -289,14 +298,9 @@ async def setup_service() -> SetupOperation:
                     operation = operation.model_copy(update={"phase": "ready"})
                     _save(layout.root, operation)
                 return operation
-            if (
-                operation.phase in {"registered", "ready"}
-                and operation.snapshot is not None
-                and operation.snapshot.skulk_build_sha256 != host.skulk_build_sha256
-                and await _observe(layout.root)
-            ):
+            if refresh and operation.snapshot is None:
                 # The OS service is registered and answering; only the Skulk
-                # build moved. Stage a matching runtime here and let the
+                # environment moved. Stage a matching runtime here and let the
                 # running manager select it and restart itself: no elevation.
                 print(
                     "Refreshing the manager runtime to the live Skulk build...",

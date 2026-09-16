@@ -401,3 +401,37 @@ async def test_a_build_mismatch_stages_a_matching_runtime_and_asks_for_a_reload(
     assert staged == [tmp_path]
     assert len(sent) == 1 and isinstance(sent[0], ReloadRuntimeRequest)
     assert sent[0].generation == "d" * 32
+
+
+def test_a_generation_staged_for_the_live_build_is_reused_not_restaged(
+    tmp_path: Path,
+) -> None:
+    from skulk.extensions.managed_services import staged_generation_for
+    from skulk.extensions.runtime_files import write_private
+    from skulk.extensions.service_snapshot import ServiceSnapshot
+
+    generations = tmp_path / "core-runtimes"
+    generations.mkdir(mode=0o700)
+    for name, build in (("a" * 32, "f" * 64), ("b" * 32, "9" * 64)):
+        (generations / name).mkdir(mode=0o700)
+        write_private(
+            generations / name / "staged.json",
+            ServiceSnapshot(
+                generation=name,
+                manifest_sha256="e" * 64,
+                skulk_build_sha256=build,
+                copied_files=1,
+                copied_bytes=1,
+            )
+            .model_dump_json()
+            .encode(),
+        )
+    found = staged_generation_for(tmp_path, "f" * 64)
+    assert found is not None and found.generation == "a" * 32
+    # The selected generation is never offered again, and an unknown build is not found.
+    write_private(
+        tmp_path / "core-runtime.json",
+        b'{"generation": "' + b"a" * 32 + b'", "manifest_sha256": "x"}',
+    )
+    assert staged_generation_for(tmp_path, "f" * 64) is None
+    assert staged_generation_for(tmp_path, "0" * 64) is None

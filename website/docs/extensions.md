@@ -757,7 +757,7 @@ service's keep-alive restarts it on the new generation. `skulk-plugin-service
 setup` takes the same path when the service is registered and only the build
 moved, without elevation.
 
-That refusal is the one manager error surfaced by name:
+That refusal is the second manager error surfaced by name (the first is the build mismatch above):
 the manager answers `release_protocol_unsupported` with the kind, the number
 offered and the numbers accepted (integers only); the guided installer prints
 what to do (update Skulk on the host, or choose a release published for it);

@@ -302,14 +302,22 @@ class RuntimeManager:
             ):
                 raise ValueError("staged manager generation differs")
             installer = RuntimeLock(self.root)
-            try:
-                await asyncio.to_thread(activate_staged_runtime, self.root, snapshot)
-            finally:
-                installer.close()
-            if self.request_stop is not None:
-                # After the reply has been written: the OS service restarts
-                # this process on the generation just selected.
-                asyncio.get_running_loop().call_later(0.5, self.request_stop)
+
+            async def activate() -> None:
+                try:
+                    await asyncio.to_thread(
+                        activate_staged_runtime, self.root, snapshot
+                    )
+                finally:
+                    installer.close()
+                if self.request_stop is not None:
+                    # After the reply has been written: the OS service restarts
+                    # this process on the generation just selected.
+                    asyncio.get_running_loop().call_later(0.5, self.request_stop)
+
+            # Owned work: a request waiter cancelled by its deadline neither
+            # releases the fence early nor loses the stop after a selection.
+            await finish_runtime_work(asyncio.create_task(activate()))
             return {"generation": snapshot.generation, "restarting": True}
 
     async def _attach(self, request: AttachmentRequest) -> dict[str, JsonValue]:

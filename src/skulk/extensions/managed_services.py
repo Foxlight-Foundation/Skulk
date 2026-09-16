@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import json
+import shutil
 import time
 from pathlib import Path
 from typing import Literal, final
@@ -33,7 +34,7 @@ from skulk.extensions.runtime_manager import (
     manager_request,
 )
 from skulk.extensions.runtime_service import RuntimeServiceStatus
-from skulk.extensions.service_snapshot import stage_service_runtime
+from skulk.extensions.service_snapshot import ServiceSnapshot, stage_service_runtime
 from skulk.extensions.types import ExtensionContext
 
 _WINDOW = TypeAdapter(list[int])
@@ -55,6 +56,31 @@ def protocol_refusal(result: dict[str, JsonValue]) -> ProtocolUnsupportedError |
     ):
         return None
     return ProtocolUnsupportedError(str(kind), offered, tuple(accepted))
+
+
+def staged_generation_for(root: Path, build: str) -> ServiceSnapshot | None:
+    """A generation already staged from ``build`` that is not the selected one."""
+    try:
+        selected = read_private(root / "core-runtime.json", 4096)
+    except (OSError, ValueError):
+        selected = b""
+    generations = root / "core-runtimes"
+    try:
+        names = sorted(path.name for path in generations.iterdir() if path.is_dir())
+    except OSError:
+        return None
+    for name in names:
+        if name.encode() in selected:
+            continue
+        try:
+            snapshot = ServiceSnapshot.model_validate_json(
+                read_private(generations / name / "staged.json", 131072)
+            )
+        except (OSError, ValueError):
+            continue
+        if snapshot.generation == name and snapshot.skulk_build_sha256 == build:
+            return snapshot
+    return None
 
 
 class ManagedInstallation(BaseModel):
@@ -205,12 +231,23 @@ class ManagedServices:
             f"{differs.manager[:12]} while this host runs {differs.live[:12]}; "
             "staging a matching manager runtime"
         )
-        self.runtime_refresh = asyncio.create_task(self._refresh_manager_runtime(root))
+        self.runtime_refresh = asyncio.create_task(
+            self._refresh_manager_runtime(root, differs.live)
+        )
 
-    async def _refresh_manager_runtime(self, root: Path) -> None:
-        """Stage the manager runtime from this host's build and ask for a reload."""
+    async def _refresh_manager_runtime(self, root: Path, live: str) -> None:
+        """Stage the manager runtime from this host's build and ask for a reload.
+
+        A generation already staged for this build is reused, and one the
+        manager refuses is removed, so repeated attempts against a broken
+        manager do not accumulate copies of Skulk on the service volume.
+        """
+        staged_here: Path | None = None
         try:
-            snapshot = await stage_service_runtime(root)
+            snapshot = staged_generation_for(root, live)
+            if snapshot is None:
+                snapshot = await stage_service_runtime(root)
+                staged_here = root / "core-runtimes" / snapshot.generation
             reply = await manager_request(
                 root,
                 ReloadRuntimeRequest(
@@ -225,6 +262,8 @@ class ManagedServices:
                 "the service restarts on it"
             )
         except (OSError, ValueError, TimeoutError) as error:
+            if staged_here is not None:
+                shutil.rmtree(staged_here, ignore_errors=True)
             logger.warning(
                 "plugin manager runtime refresh failed: "
                 f"{type(error).__name__}; rerun skulk-plugin-service setup"
