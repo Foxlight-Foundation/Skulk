@@ -9,6 +9,7 @@ import platform
 import stat
 import sys
 import zipfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from email.parser import BytesParser
 from pathlib import Path, PurePosixPath
@@ -21,7 +22,7 @@ from packaging.specifiers import SpecifierSet
 from packaging.tags import sys_tags
 from packaging.utils import canonicalize_name, parse_wheel_filename
 from packaging.version import Version
-from pydantic import BaseModel, ConfigDict, Field, JsonValue
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, JsonValue
 
 from skulk.extensions.runtime_files import read_private
 
@@ -131,6 +132,35 @@ class RuntimeWheel(_Contract):
         return str(name), str(version)
 
 
+ACCEPTED_RELEASE_PROTOCOLS: tuple[int, ...] = (1,)
+"""Release record protocols this host installs: the current and, once there is
+one, the previous. A capability published against the previous protocol keeps
+installing for one release cycle; anything else is refused by name."""
+
+ACCEPTED_RUNTIME_PROTOCOLS: tuple[int, ...] = (2,)
+"""Isolated runtime envelope protocols this host installs, on the same rule."""
+
+
+def _accepted(name: str, accepted: tuple[int, ...]) -> Callable[[int], int]:
+    def check(value: int) -> int:
+        if value not in accepted:
+            window = " or ".join(str(item) for item in accepted)
+            raise ValueError(
+                f"{name} protocol {value} is not accepted; this host accepts {window}"
+            )
+        return value
+
+    return check
+
+
+ReleaseProtocol = Annotated[
+    int, AfterValidator(_accepted("release", ACCEPTED_RELEASE_PROTOCOLS))
+]
+RuntimeProtocol = Annotated[
+    int, AfterValidator(_accepted("runtime", ACCEPTED_RUNTIME_PROTOCOLS))
+]
+
+
 class _ManifestClaims(BaseModel):
     # Plugin-specific policy remains opaque. The signature covers the original
     # canonical payload, never this partial interpretation of its common claims.
@@ -143,7 +173,7 @@ class _ManifestClaims(BaseModel):
 
 
 class _ReleaseClaims(_Contract):
-    protocol: Literal[1]
+    protocol: ReleaseProtocol
     publisher: Identifier
     sequence: int = Field(ge=1)
     created_at: int = Field(gt=0)
@@ -165,7 +195,7 @@ class _ReleaseClaims(_Contract):
 
 
 class _RuntimeClaims(_Contract):
-    protocol: Literal[2]
+    protocol: RuntimeProtocol
     implementation: Literal["cpython"]
     platform: RuntimePlatform
     release: _ReleaseClaims

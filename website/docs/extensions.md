@@ -742,7 +742,14 @@ and wheel bytes, supported platform/Python version, qualified Skulk build, state
 schema and permission summary. Plugin-specific manifest policy stays opaque but
 is covered by the signature. Trust comes from owner-provisioned protected local
 storage, not the release. Revoked or expired artifacts and incompatible hosts
-are refused. Linux distribution names and versions do not restrict installation;
+are refused. Compatibility across releases is a window, not a pin: the release
+record and the isolated runtime envelope each carry a protocol number, and the
+host accepts the current protocol and, once there is one, the previous, so a
+capability published against the previous protocol keeps installing for one
+release cycle; a protocol outside the window is refused with a message naming
+what the host accepts. Both members of a window are tested on every change,
+so the window never grows beyond two. Linux distribution names and versions do
+not restrict installation;
 native wheel tags and dependency checks determine binary compatibility. The
 artifact family is derived from the host's operating system, C library and
 processor architecture rather than drawn from a fixed list, so any host whose
