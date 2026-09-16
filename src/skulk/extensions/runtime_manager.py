@@ -15,7 +15,7 @@ from typing import Annotated, Literal, cast, final
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
 
-from skulk.extensions.runtime_artifacts import measure_host
+from skulk.extensions.runtime_artifacts import ProtocolUnsupportedError, measure_host
 from skulk.extensions.runtime_attachment import (
     AttachmentJournal,
     AttachmentRequest,
@@ -48,6 +48,26 @@ PluginIdentifier = Annotated[
 ]
 _PLUGIN_ID: TypeAdapter[str] = TypeAdapter(PluginIdentifier)
 _OBJECT = TypeAdapter(dict[str, JsonValue])
+
+
+PROTOCOL_UNSUPPORTED = "release_protocol_unsupported"
+"""Manager error naming a release outside this host's protocol window."""
+
+
+def refusal_payload(refused: ProtocolUnsupportedError) -> bytes:
+    """Encode the typed refusal as a fixed vocabulary: a code and integers only."""
+    return (
+        json.dumps(
+            {
+                "error": PROTOCOL_UNSUPPORTED,
+                "kind": refused.kind,
+                "offered": refused.offered,
+                "accepted": list(refused.accepted),
+            },
+            sort_keys=True,
+        ).encode()
+        + b"\n"
+    )
 
 
 class _Request(BaseModel):
@@ -326,6 +346,13 @@ class RuntimeManager:
                     raise ValueError("manager response exceeds bound")
                 writer.write(payload)
                 await writer.drain()
+        except ProtocolUnsupportedError as refused:
+            # The one refusal named by design: a fixed vocabulary of ints, so
+            # the installer and the plugin routes can say what to do next.
+            with contextlib.suppress(OSError, TimeoutError):
+                async with asyncio.timeout(1):
+                    writer.write(refusal_payload(refused))
+                    await writer.drain()
         except (OSError, ValueError, TimeoutError):
             with contextlib.suppress(OSError, TimeoutError):
                 async with asyncio.timeout(1):

@@ -310,3 +310,34 @@ def test_cli_lost_response_directs_owner_to_generated_resume_command(
     assert "printed resume command with its installation ID" in captured.err
     assert "Rerun the same local command" not in captured.err
     assert "sensitive connection details" not in captured.err
+
+
+async def test_a_protocol_refusal_is_the_one_manager_error_the_terminal_names() -> None:
+    """The installer says what to do about a release outside the window, and nothing else."""
+    from skulk.extensions.terminal_install import protocol_refusal
+
+    refusal: dict[str, JsonValue] = {
+        "error": "release_protocol_unsupported",
+        "kind": "release",
+        "offered": 2,
+        "accepted": [1],
+    }
+    named = protocol_refusal(refusal)
+    assert named is not None
+    assert "accepts release protocol 1; the release offers 2" in named
+    assert protocol_refusal({"error": "manager_operation_refused"}) is None
+    assert (
+        protocol_refusal({"error": "release_protocol_unsupported", "kind": "x"}) is None
+    )
+    # bool is an int to Python and not to the fixed vocabulary.
+    assert protocol_refusal({**refusal, "offered": True}) is None
+    assert protocol_refusal({**refusal, "accepted": [True]}) is None
+    output: list[str] = []
+
+    async def request(_: ManagerRequest) -> dict[str, JsonValue]:
+        return dict(refusal)
+
+    terminal = TerminalInstaller(request, lambda _: "", lambda _: "", output.append)
+    with pytest.raises(ValueError, match="manager request incomplete"):
+        await terminal.run("managed." + "a" * 32)
+    assert any("the release offers 2" in line for line in output)

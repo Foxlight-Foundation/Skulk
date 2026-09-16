@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from pydantic import JsonValue
+from pydantic import JsonValue, TypeAdapter
 
 from skulk.extensions.runtime_artifacts import (
     QualifiedHost,
@@ -460,6 +460,7 @@ def test_the_protocol_window_is_current_and_previous_and_refuses_beyond_by_name(
     from skulk.extensions.runtime_artifacts import (
         ACCEPTED_RELEASE_PROTOCOLS,
         ACCEPTED_RUNTIME_PROTOCOLS,
+        ProtocolUnsupportedError,
     )
 
     assert 1 <= len(ACCEPTED_RELEASE_PROTOCOLS) <= 2
@@ -477,11 +478,38 @@ def test_the_protocol_window_is_current_and_previous_and_refuses_beyond_by_name(
     metadata, trust, host = artifacts(
         beyond, runtime_protocol=max(ACCEPTED_RUNTIME_PROTOCOLS) + 1
     )
-    with pytest.raises(ValueError, match="runtime protocol .* is not accepted"):
+    with pytest.raises(ProtocolUnsupportedError) as refused:
         verify_runtime(metadata, trust, host, now=int(time.time()))
+    # The refusal is typed and carries only the numbers, so every surface can
+    # name it without disclosing anything else from the release.
+    assert (refused.value.kind, refused.value.offered, refused.value.accepted) == (
+        "runtime",
+        max(ACCEPTED_RUNTIME_PROTOCOLS) + 1,
+        ACCEPTED_RUNTIME_PROTOCOLS,
+    )
+    assert "is not accepted; this host accepts" in str(refused.value)
     metadata, trust, host = artifacts(
         tmp_path / "beyond-release",
         release_protocol=max(ACCEPTED_RELEASE_PROTOCOLS) + 1,
     )
-    with pytest.raises(ValueError, match="release protocol .* is not accepted"):
+    with pytest.raises(ProtocolUnsupportedError) as refused:
         verify_runtime(metadata, trust, host, now=int(time.time()))
+    assert (refused.value.kind, refused.value.offered) == (
+        "release",
+        max(ACCEPTED_RELEASE_PROTOCOLS) + 1,
+    )
+
+
+def test_a_protocol_refusal_is_named_only_after_the_signature_verifies(
+    tmp_path: Path,
+) -> None:
+    """A feed cannot forge upgrade guidance: an unsigned payload is a signature refusal."""
+    from skulk.extensions.runtime_artifacts import ACCEPTED_RUNTIME_PROTOCOLS
+
+    metadata, trust, host = artifacts(
+        tmp_path, runtime_protocol=max(ACCEPTED_RUNTIME_PROTOCOLS) + 1
+    )
+    document = TypeAdapter(dict[str, JsonValue]).validate_json(metadata)
+    document["signature"] = "0" * len(str(document["signature"]))
+    with pytest.raises(ValueError, match="runtime signature refused"):
+        verify_runtime(json.dumps(document).encode(), trust, host, now=int(time.time()))

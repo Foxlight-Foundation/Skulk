@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Literal
 
 import pytest
+from pydantic import JsonValue, TypeAdapter
 
 from skulk.extensions.runtime_controller import LifecycleRequest
 from skulk.extensions.runtime_files import (
@@ -30,7 +31,9 @@ from skulk.extensions.tests.test_runtime_service import OWNER_SOURCE, running
 
 @pytest.mark.parametrize("action", ["disable", "uninstall"])
 async def test_socket_registration_activation_disconnect_and_reconnect(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, action: Literal["disable", "uninstall"]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    action: Literal["disable", "uninstall"],
 ) -> None:
     """The shared terminal/API socket persists accepted work after the client closes."""
     private_directory(tmp_path)
@@ -109,7 +112,9 @@ async def test_socket_registration_activation_disconnect_and_reconnect(
         current = controller.selector.current()
         assert current is not None and current.revision == 2
         inventory = await manager_request(tmp_path, InventoryRequest())
-        assert json.loads(json.dumps(inventory))["result"]["installations"][0]["uninstalled"] == (action == "uninstall")
+        assert json.loads(json.dumps(inventory))["result"]["installations"][0][
+            "uninstalled"
+        ] == (action == "uninstall")
         assert await reader.read() == b""
         inspection = await manager_request(
             tmp_path, InstallationRequest(action="get", plugin_id=identifier)
@@ -197,3 +202,19 @@ async def test_socket_removal_failure_still_releases_manager_ownership(
             await manager.close()
     RuntimeLock(tmp_path, "manager.lock").close()
     manager.path.unlink(missing_ok=True)
+
+
+def test_a_protocol_refusal_is_a_fixed_vocabulary_of_a_code_and_integers() -> None:
+    """The manager names exactly one refusal, and names it with numbers only."""
+    from skulk.extensions.runtime_artifacts import ProtocolUnsupportedError
+    from skulk.extensions.runtime_manager import PROTOCOL_UNSUPPORTED, refusal_payload
+
+    payload = TypeAdapter(dict[str, JsonValue]).validate_json(
+        refusal_payload(ProtocolUnsupportedError("release", 3, (1, 2)))
+    )
+    assert payload == {
+        "error": PROTOCOL_UNSUPPORTED,
+        "kind": "release",
+        "offered": 3,
+        "accepted": [1, 2],
+    }

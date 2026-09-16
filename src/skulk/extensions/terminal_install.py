@@ -6,12 +6,12 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import final
+from typing import TypeGuard, final
 from uuid import uuid4
 
 from pydantic import JsonValue, SecretStr, TypeAdapter
 
-from skulk.extensions.runtime_artifacts import RuntimeTrust
+from skulk.extensions.runtime_artifacts import RuntimeTrust, protocol_refusal_sentence
 from skulk.extensions.runtime_attachment import InstallationIdentifier
 from skulk.extensions.runtime_controller import LifecycleOperation, LifecycleRequest
 from skulk.extensions.runtime_download import (
@@ -22,6 +22,7 @@ from skulk.extensions.runtime_download import (
     SourceUpdate,
 )
 from skulk.extensions.runtime_manager import (
+    PROTOCOL_UNSUPPORTED,
     InstallationRequest,
     InstallRecoveryRequest,
     InstallSubmission,
@@ -35,6 +36,33 @@ from skulk.extensions.runtime_selection import RuntimeSelection
 
 _OBJECT = TypeAdapter(dict[str, JsonValue])
 _IDENTIFIER = TypeAdapter[str](InstallationIdentifier)
+
+
+_WINDOW = TypeAdapter(list[int])
+
+
+def _is_integer(value: JsonValue) -> TypeGuard[int]:
+    """An integer of the fixed vocabulary; bool is an int to Python and not here."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def protocol_refusal(response: dict[str, JsonValue]) -> str | None:
+    """The one manager error the terminal names: a protocol outside the window.
+
+    Only the fixed vocabulary is read (a code, a kind, integers); anything else
+    in the response stays undisclosed.
+    """
+    if response.get("error") != PROTOCOL_UNSUPPORTED:
+        return None
+    kind = response.get("kind")
+    offered = response.get("offered")
+    try:
+        accepted = _WINDOW.validate_python(response.get("accepted"), strict=True)
+    except ValueError:
+        return None
+    if kind not in ("release", "runtime") or not _is_integer(offered):
+        return None
+    return protocol_refusal_sentence(str(kind), offered, tuple(accepted))
 
 
 @final
@@ -56,6 +84,9 @@ class TerminalInstaller:
     async def _call(self, request: ManagerRequest) -> dict[str, JsonValue]:
         response = await self.request(request)
         if "error" in response or "result" not in response:
+            named = protocol_refusal(response)
+            if named is not None:
+                self.output(named)
             # Neither manager errors nor rejected credential inputs belong in
             # terminal diagnostics. The resume command was printed before effects.
             raise ValueError("manager request incomplete; inspect retained status")

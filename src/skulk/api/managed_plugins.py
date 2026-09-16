@@ -22,6 +22,10 @@ from skulk.extensions.managed_services import (
     ManagedInventory,
     ManagedServices,
 )
+from skulk.extensions.runtime_artifacts import (
+    ProtocolUnsupportedError,
+    protocol_refusal_sentence,
+)
 from skulk.extensions.runtime_attachment import (
     InstallationIdentifier,
     ProfileIdentifier,
@@ -154,6 +158,13 @@ def create_managed_plugins_router(
         except (OSError, RuntimeError):
             raise HTTPException(
                 status_code=503, detail="local plugin manager is unavailable"
+            ) from None
+        except ProtocolUnsupportedError as refused:
+            raise HTTPException(
+                status_code=409,
+                detail=protocol_refusal_sentence(
+                    refused.kind, refused.offered, refused.accepted
+                ),
             ) from None
         except ValueError:
             raise HTTPException(
