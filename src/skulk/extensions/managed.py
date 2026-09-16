@@ -207,12 +207,24 @@ class ManagedNode(_WireModel):
     operations_available: bool = Field(
         default=False, description="Whether the node runs durable operations."
     )
-    credentials_configurable: bool = False
-    preflight_available: bool = False
-    setup_available: bool = False
-    setup_actions_available: bool = False
-    proposals_available: bool = False
-    proposal_actions_available: bool = False
+    credentials_configurable: bool = Field(
+        default=False, description="Whether the node declares credential inputs."
+    )
+    preflight_available: bool = Field(
+        default=False, description="Whether the node answers preflight checks."
+    )
+    setup_available: bool = Field(
+        default=False, description="Whether the node offers guided setup."
+    )
+    setup_actions_available: bool = Field(
+        default=False, description="Whether guided setup exposes actions."
+    )
+    proposals_available: bool = Field(
+        default=False, description="Whether the node records steward proposals."
+    )
+    proposal_actions_available: bool = Field(
+        default=False, description="Whether proposals can be decided here."
+    )
     descriptors: tuple[CapabilityDescriptor, ...] = Field(max_length=8)
 
     def public(self) -> ConfigurableNode:
@@ -319,6 +331,7 @@ class ManagedOwner:
         self.host_task: asyncio.Task[None] | None = None
         self.host_callbacks_available = False
         self.published: set[str] = set()
+        self.stopping = False
         self.unavailable_reason: str | None = None
         self.unavailable_noted = 0.0
         self.refresh_lock = asyncio.Lock()
@@ -457,7 +470,7 @@ class ManagedOwner:
         its nodes visible with ``owner_available`` false; a node that
         disappears from the description is withdrawn.
         """
-        if self.context is None:
+        if self.context is None or self.stopping:
             return
         current: set[str] = set()
         try:
@@ -536,6 +549,8 @@ class ManagedOwner:
     async def on_stop(self) -> None:
         """Stop observation and admission without stopping independent owner cleanup."""
         self.available = False
+        # A refresh already in flight must not republish after this point.
+        self.stopping = True
         self._withdraw_summaries()
         # Legacy discovery and live manager inventory can share one adapter.
         # Claim its observer before yielding so concurrent shutdown releases once.

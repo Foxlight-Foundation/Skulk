@@ -100,6 +100,12 @@ async def test_the_owner_publishes_after_refresh_and_withdraws_on_stop(
     owner.poll_task = asyncio.create_task(observer())
     await owner.on_stop()
     assert withdrawn[-1] == ("managed.fixture", "node-1")
+    # A refresh that finishes after stop cannot leave a satellite behind.
+    before = len(published)
+    owner.nodes = (_node(),)
+    owner.available = True
+    owner._publish_summaries()  # pyright: ignore[reportPrivateUsage]
+    assert len(published) == before
 
 
 def test_malformed_display_metadata_never_decides_availability() -> None:
