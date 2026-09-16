@@ -279,6 +279,11 @@ class ManagedServices:
         self.task: asyncio.Task[None] | None = None
         self.runtime_refresh: asyncio.Task[None] | None = None
         self.runtime_refreshed = 0.0
+        # Staging retains an interrupted copy and never activates it; an
+        # environment that cannot be staged would grow one such copy every
+        # attempt, so after a staging failure no further attempt is made until
+        # the host restarts (which is when its environment changes).
+        self.runtime_refresh_exhausted = False
         self.guard = asyncio.Lock()
         self.closed = False
 
@@ -318,6 +323,8 @@ class ManagedServices:
 
     def _schedule_runtime_refresh(self, differs: ManagerBuildMismatchError) -> None:
         if self.runtime_refresh is not None and not self.runtime_refresh.done():
+            return
+        if self.runtime_refresh_exhausted:
             return
         if time.monotonic() - self.runtime_refreshed < 300:
             return
@@ -375,7 +382,14 @@ class ManagedServices:
                 )
             snapshot = staged_generation_for(root, live)
             if snapshot is None:
-                snapshot = await stage_service_runtime(root)
+                try:
+                    snapshot = await stage_service_runtime(root)
+                except (OSError, ValueError):
+                    self.runtime_refresh_exhausted = True
+                    raise ValueError(
+                        "the manager runtime could not be staged from this "
+                        "environment; no further attempt until the host restarts"
+                    ) from None
             candidate = root / "core-runtimes" / snapshot.generation
             if reloads:
                 reply = await manager_request(

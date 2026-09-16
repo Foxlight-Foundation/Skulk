@@ -625,6 +625,40 @@ async def test_a_legacy_manager_under_another_interpreter_is_left_for_setup(
     assert not (tmp_path / "core-runtimes").exists()
 
 
+async def test_a_staging_failure_ends_automatic_attempts_until_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An environment that cannot be staged does not grow a copy every attempt."""
+    from skulk.extensions import managed_services
+    from skulk.extensions.runtime_manager import ManagerBuildMismatchError
+    from skulk.extensions.service_snapshot import ServiceSnapshot
+
+    attempts: list[Path] = []
+
+    async def stage(root: Path) -> ServiceSnapshot:
+        attempts.append(root)
+        raise ValueError("copied service identity differs")
+
+    async def request(root: Path, request: object) -> dict[str, JsonValue]:
+        return {"result": {"installations": [], "reload_runtime": True}}
+
+    monkeypatch.setattr(managed_services, "stage_service_runtime", stage)
+    monkeypatch.setattr(managed_services, "manager_request", request)
+    services = ManagedServices(tmp_path / "connection.json")
+    services.connection = ServiceConnection(
+        manager_root=str(tmp_path), profile_id=PROFILE
+    )
+    differs = ManagerBuildMismatchError("a" * 64, "f" * 64)
+    services._schedule_runtime_refresh(differs)  # pyright: ignore[reportPrivateUsage]
+    assert services.runtime_refresh is not None
+    await services.runtime_refresh
+    services.runtime_refreshed = 0.0
+    services._schedule_runtime_refresh(differs)  # pyright: ignore[reportPrivateUsage]
+    assert services.runtime_refresh.done()
+    assert attempts == [tmp_path]
+    assert services.runtime_refresh_exhausted
+
+
 def test_a_generation_staged_for_the_live_build_is_reused_not_restaged(
     tmp_path: Path,
 ) -> None:
