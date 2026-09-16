@@ -772,7 +772,10 @@ host reads it before asking: a manager from before this protocol does not
 name it, so the host stops that manager, selects the staged generation under
 both fences and lets the keep-alive restart it, while a manager that names it
 and still refuses the generation is a refusal, and the unselected candidate
-is removed. `skulk-plugin-service setup` takes the
+is removed. A stopped manager keeps its fence until it has closed every owner
+it supervises, and the host waits for that exit before selecting. A refresh
+that succeeds records the new generation in the setup state, so
+`skulk-plugin-service status` verifies the copy the service runs on. `skulk-plugin-service setup` takes the
 reload path when the service is registered and answering and its registered
 definition still names the current interpreter (the Skulk build or its
 dependencies moved); a moved interpreter takes the ordinary re-registration

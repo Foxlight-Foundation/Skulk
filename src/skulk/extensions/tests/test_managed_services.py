@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 from dataclasses import replace
 from pathlib import Path
 
@@ -31,6 +32,7 @@ from skulk.extensions.runtime_manager import (
     SubmitRequest,
     manager_request,
 )
+from skulk.extensions.service_setup import SetupOperation
 from skulk.extensions.tests.test_managed import Dynamic
 from skulk.extensions.tests.test_runtime_install import artifacts
 from skulk.extensions.tests.test_runtime_service import OWNER_SOURCE, running
@@ -397,6 +399,26 @@ async def test_a_build_mismatch_stages_a_matching_runtime_and_asks_for_a_reload(
         "skulk.extensions.managed_services.stage_service_runtime", stage
     )
     monkeypatch.setattr("skulk.extensions.managed_services.manager_request", request)
+    write_private(
+        tmp_path / "setup.json",
+        SetupOperation(
+            operation_id=PROFILE,
+            profile_id=PROFILE,
+            skulk_build_sha256="a" * 64,
+            source_sha256="c" * 64,
+            configuration_directory=str(tmp_path),
+            phase="ready",
+            snapshot=ServiceSnapshot(
+                generation="0" * 32,
+                manifest_sha256="e" * 64,
+                skulk_build_sha256="a" * 64,
+                copied_files=1,
+                copied_bytes=1,
+            ),
+        )
+        .model_dump_json()
+        .encode(),
+    )
     services = ManagedServices(tmp_path / "connection.json")
     services.connection = ServiceConnection(
         manager_root=str(tmp_path), profile_id=PROFILE
@@ -416,6 +438,11 @@ async def test_a_build_mismatch_stages_a_matching_runtime_and_asks_for_a_reload(
     ]
     assert isinstance(sent[1], ReloadRuntimeRequest)
     assert sent[1].generation == "d" * 32
+    recorded = SetupOperation.model_validate_json(read_private(tmp_path / "setup.json"))
+    assert recorded.snapshot is not None
+    assert recorded.snapshot.generation == "d" * 32
+    assert recorded.skulk_build_sha256 == "f" * 64
+    assert recorded.phase == "registered"
 
 
 async def test_a_refused_reload_removes_the_unselected_candidate_generation(
@@ -543,3 +570,29 @@ def test_a_legacy_manager_is_stopped_and_the_generation_selected(
     snapshot = staged(tmp_path)
     reload_legacy_manager(tmp_path, snapshot)
     assert snapshot.generation.encode() in read_private(tmp_path / "core-runtime.json")
+
+
+def test_a_legacy_manager_that_keeps_running_is_not_selected_over(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The selection waits for the stopped manager's exit and reports a stuck one."""
+    from skulk.extensions import managed_services
+    from skulk.extensions.managed_services import reload_legacy_manager
+    from skulk.extensions.tests.test_service_snapshot import staged
+
+    signalled: list[int] = []
+
+    def still_running(root: Path) -> list[int]:
+        return [os.getpid()]
+
+    def record(pid: int, signal_number: int) -> None:
+        signalled.append(pid)
+
+    monkeypatch.setattr(managed_services, "manager_pids", still_running)
+    monkeypatch.setattr(managed_services.os, "kill", record)
+    monkeypatch.setattr(managed_services, "_MANAGER_STOP_SECONDS", 0.6)
+    snapshot = staged(tmp_path)
+    with pytest.raises(OSError, match="has not exited"):
+        reload_legacy_manager(tmp_path, snapshot)
+    assert signalled == [os.getpid()]
+    assert not (tmp_path / "core-runtime.json").exists()

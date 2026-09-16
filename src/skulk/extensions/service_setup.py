@@ -112,6 +112,33 @@ def _save(root: Path, operation: SetupOperation) -> None:
     write_private(root / "setup.json", raw)
 
 
+def record_refreshed_snapshot(root: Path, snapshot: ServiceSnapshot) -> None:
+    """Record the generation a running manager was moved to without setup.
+
+    The host refreshes the manager runtime on its own after a Skulk update;
+    the retained setup state then names that generation as registered, so
+    ``service_status`` verifies the copy the service runs on and a setup
+    rerun completes on it rather than staging another. Missing or unreadable
+    setup state is left alone: there is nothing to reconcile.
+    """
+    try:
+        operation = SetupOperation.model_validate_json(
+            read_private(root / "setup.json")
+        )
+    except (OSError, ValueError):
+        return
+    _save(
+        root,
+        operation.model_copy(
+            update={
+                "snapshot": snapshot,
+                "skulk_build_sha256": snapshot.skulk_build_sha256,
+                "phase": "registered",
+            }
+        ),
+    )
+
+
 def _outside_checkout(path: Path) -> None:
     if any((parent / ".git").exists() for parent in (path, *path.parents)):
         raise ValueError(

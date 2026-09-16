@@ -37,6 +37,7 @@ from skulk.extensions.runtime_manager import (
     manager_request,
 )
 from skulk.extensions.runtime_service import RuntimeServiceStatus
+from skulk.extensions.service_setup import record_refreshed_snapshot
 from skulk.extensions.service_snapshot import (
     ServiceSnapshot,
     activate_service_runtime,
@@ -64,6 +65,11 @@ def protocol_refusal(result: dict[str, JsonValue]) -> ProtocolUnsupportedError |
     ):
         return None
     return ProtocolUnsupportedError(str(kind), offered, tuple(accepted))
+
+
+# A stopping manager allows each supervised owner thirty seconds to exit and
+# closes them together; this covers that plus its client drain, with margin.
+_MANAGER_STOP_SECONDS = 120.0
 
 
 def _selected(root: Path, generation: str) -> bool:
@@ -94,12 +100,22 @@ def reload_legacy_manager(root: Path, snapshot: ServiceSnapshot) -> None:
     The manager holds its fence while it runs, so it is stopped first (it is
     this user's process, no elevation), the generation is selected under both
     fences, and the OS service's keep-alive starts the manager on it. The
-    restart races the selection; the fences settle it, with bounded retries.
+    stopped manager keeps its fence until it has closed every owner it
+    supervises, which takes up to ``_MANAGER_STOP_SECONDS``; the selection
+    waits for that exit rather than for a shorter deadline, or the keep-alive
+    would restart the old generation and every attempt would fail the same
+    way. The restart races the selection; the fences settle it, with bounded
+    retries.
     """
     pids = manager_pids(root)
     for pid in pids:
         with contextlib.suppress(OSError):
             os.kill(pid, signal.SIGTERM)
+    exited = time.monotonic() + _MANAGER_STOP_SECONDS
+    while any(pid in manager_pids(root) for pid in pids):
+        if time.monotonic() >= exited:
+            raise OSError("the stopped plugin manager has not exited")
+        time.sleep(0.5)
     deadline = time.monotonic() + 15
     while True:
         try:
@@ -345,6 +361,10 @@ class ManagedServices:
                 # A manager from before this protocol: select the generation
                 # for it and restart it.
                 await asyncio.to_thread(reload_legacy_manager, root, snapshot)
+            # Setup state names the generation the service runs on; status
+            # verifies against it and a setup rerun would otherwise stage
+            # and restart yet another generation for the same build.
+            record_refreshed_snapshot(root, snapshot)
             logger.info(
                 "plugin manager runtime refreshed to this host's Skulk build; "
                 "the service restarts on it"
