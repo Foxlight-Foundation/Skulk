@@ -435,3 +435,40 @@ def test_a_generation_staged_for_the_live_build_is_reused_not_restaged(
     )
     assert staged_generation_for(tmp_path, "f" * 64) is None
     assert staged_generation_for(tmp_path, "0" * 64) is None
+
+
+def test_a_legacy_manager_is_detected_from_its_selected_generation(
+    tmp_path: Path,
+) -> None:
+    from skulk.extensions.managed_attachment import selected_manager_build
+    from skulk.extensions.runtime_files import write_private
+
+    assert selected_manager_build(tmp_path) is None
+    generations = tmp_path / "core-runtimes"
+    generations.mkdir(mode=0o700)
+    (generations / ("a" * 32)).mkdir(mode=0o700)
+    write_private(
+        generations / ("a" * 32) / "staged.json",
+        b'{"skulk_build_sha256": "' + b"f" * 64 + b'"}',
+    )
+    write_private(
+        tmp_path / "core-runtime.json",
+        b'{"generation": "' + b"a" * 32 + b'", "manifest_sha256": "x"}',
+    )
+    assert selected_manager_build(tmp_path) == "f" * 64
+
+
+def test_a_legacy_manager_is_stopped_and_the_generation_selected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skulk.extensions.managed_services import reload_legacy_manager
+    from skulk.extensions.runtime_files import read_private
+    from skulk.extensions.tests.test_service_snapshot import staged
+
+    def no_manager(root: Path) -> list[int]:
+        return []
+
+    monkeypatch.setattr("skulk.extensions.managed_services.manager_pids", no_manager)
+    snapshot = staged(tmp_path)
+    reload_legacy_manager(tmp_path, snapshot)
+    assert snapshot.generation.encode() in read_private(tmp_path / "core-runtime.json")

@@ -3,11 +3,14 @@
 import asyncio
 import contextlib
 import json
+import os
 import shutil
+import signal
 import time
 from pathlib import Path
 from typing import Literal, final
 
+import psutil
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
 
@@ -34,7 +37,11 @@ from skulk.extensions.runtime_manager import (
     manager_request,
 )
 from skulk.extensions.runtime_service import RuntimeServiceStatus
-from skulk.extensions.service_snapshot import ServiceSnapshot, stage_service_runtime
+from skulk.extensions.service_snapshot import (
+    ServiceSnapshot,
+    activate_service_runtime,
+    stage_service_runtime,
+)
 from skulk.extensions.types import ExtensionContext
 
 _WINDOW = TypeAdapter(list[int])
@@ -56,6 +63,59 @@ def protocol_refusal(result: dict[str, JsonValue]) -> ProtocolUnsupportedError |
     ):
         return None
     return ProtocolUnsupportedError(str(kind), offered, tuple(accepted))
+
+
+def _selected(root: Path, generation: str) -> bool:
+    try:
+        return generation.encode() in read_private(root / "core-runtime.json", 4096)
+    except (OSError, ValueError):
+        return False
+
+
+def manager_pids(root: Path) -> list[int]:
+    """Processes serving the manager at ``root``; they run as this user."""
+    found: list[int] = []
+    arguments = TypeAdapter(list[str])
+    for process in psutil.process_iter():
+        try:
+            cmdline = arguments.validate_python(process.cmdline())
+        except (psutil.Error, ValueError):
+            continue
+        if (
+            "skulk.extensions.runtime_manager" in cmdline
+            and "serve" in cmdline
+            and str(root) in cmdline
+        ):
+            found.append(int(process.pid))
+    return found
+
+
+def reload_legacy_manager(root: Path, snapshot: ServiceSnapshot) -> None:
+    """Select a staged generation for a manager that predates reload_runtime.
+
+    The manager holds its fence while it runs, so it is stopped first (it is
+    this user's process, no elevation), the generation is selected under both
+    fences, and the OS service's keep-alive starts the manager on it. The
+    restart races the selection; the fences settle it, with bounded retries.
+    """
+    pids = manager_pids(root)
+    for pid in pids:
+        with contextlib.suppress(OSError):
+            os.kill(pid, signal.SIGTERM)
+    deadline = time.monotonic() + 15
+    while True:
+        try:
+            activate_service_runtime(root, snapshot)
+            return
+        except ValueError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.25)
+            for pid in manager_pids(root):
+                if pid not in pids and _selected(root, snapshot.generation):
+                    return
+                with contextlib.suppress(OSError):
+                    os.kill(pid, signal.SIGTERM)
 
 
 def staged_generation_for(root: Path, build: str) -> ServiceSnapshot | None:
@@ -256,17 +316,27 @@ class ManagedServices:
                 ),
             )
             if "result" not in reply:
-                raise ValueError("manager runtime reload refused")
+                # A manager from before this protocol does not know the
+                # request: select the generation for it and restart it.
+                await asyncio.to_thread(reload_legacy_manager, root, snapshot)
             logger.info(
                 "plugin manager runtime refreshed to this host's Skulk build; "
                 "the service restarts on it"
             )
-        except (OSError, ValueError, TimeoutError) as error:
-            if staged_here is not None:
+        except ValueError as error:
+            # An explicit refusal: the copy staged here is not selected and
+            # can go. Transport failures are ambiguous (the manager drains an
+            # activation past the request deadline), so those keep it.
+            if staged_here is not None and not _selected(root, staged_here.name):
                 shutil.rmtree(staged_here, ignore_errors=True)
             logger.warning(
                 "plugin manager runtime refresh failed: "
                 f"{type(error).__name__}; rerun skulk-plugin-service setup"
+            )
+        except (OSError, TimeoutError) as error:
+            logger.warning(
+                "plugin manager runtime refresh is indeterminate: "
+                f"{type(error).__name__}; the staged generation is retained"
             )
 
     async def request(self, request: ManagementRequest) -> dict[str, JsonValue]:

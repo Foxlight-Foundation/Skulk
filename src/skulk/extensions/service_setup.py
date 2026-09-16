@@ -145,6 +145,16 @@ async def _observe(root: Path) -> bool:
         return False
 
 
+def _unit_names_base(layout: ServiceLayout, base: Path) -> bool:
+    """Whether the registered OS service still invokes this interpreter."""
+    try:
+        descriptor = os.open(layout.unit, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return False
+    with os.fdopen(descriptor, "rb") as source:
+        return source.read(65537) == layout.definition(base)
+
+
 def _ready_installation(
     layout: ServiceLayout, snapshot: ServiceSnapshot, base: Path
 ) -> bool:
@@ -244,6 +254,8 @@ async def setup_service() -> SetupOperation:
                     refresh = (
                         operation.phase in {"registered", "ready"}
                         and operation.snapshot is not None
+                        and operation.source_sha256 == source_identity
+                        and await asyncio.to_thread(_unit_names_base, layout, base)
                         and await _observe(layout.root)
                     )
                     operation = None
@@ -298,6 +310,7 @@ async def setup_service() -> SetupOperation:
                     operation = operation.model_copy(update={"phase": "ready"})
                     _save(layout.root, operation)
                 return operation
+            reply: dict[str, JsonValue] | None = None
             if refresh and operation.snapshot is None:
                 # The OS service is registered and answering; only the Skulk
                 # environment moved. Stage a matching runtime here and let the
@@ -313,6 +326,10 @@ async def setup_service() -> SetupOperation:
                     != source_identity
                 ):
                     raise ValueError("source environment changed during local setup")
+                operation = operation.model_copy(
+                    update={"snapshot": snapshot, "phase": "staged"}
+                )
+                _save(layout.root, operation)
                 reply = await manager_request(
                     layout.root,
                     ReloadRuntimeRequest(
@@ -321,21 +338,20 @@ async def setup_service() -> SetupOperation:
                     ),
                 )
                 if "result" not in reply:
-                    raise ValueError("manager runtime reload refused")
-                operation = operation.model_copy(
-                    update={
-                        "snapshot": snapshot,
-                        "skulk_build_sha256": host.skulk_build_sha256,
-                        "source_sha256": source_identity,
-                        "phase": "registered",
-                    }
-                )
+                    # A manager from before this protocol, or one that refused:
+                    # the staged copy is kept and the ordinary path below
+                    # re-registers it with elevation.
+                    print("Manager did not reload; re-registering.", flush=True)
+                    reply = None
+            if refresh and reply is not None and operation.snapshot is not None:
+                selected = operation.snapshot
+                operation = operation.model_copy(update={"phase": "registered"})
                 _save(layout.root, operation)
                 deadline = time.monotonic() + _READINESS_WAIT_SECONDS
                 while not (
                     await _observe(layout.root)
                     and await asyncio.to_thread(
-                        _ready_installation, layout, snapshot, base
+                        _ready_installation, layout, selected, base
                     )
                 ):
                     if time.monotonic() >= deadline:
