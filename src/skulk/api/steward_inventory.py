@@ -7,6 +7,16 @@ from typing import Literal, cast
 from skulk.shared.types.capability_nodes import CapabilityNodeSummary
 
 
+def observed_build_value(value: object) -> str | None:
+    """Return a reported build identifier, or None for unavailable sentinels."""
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    # Runtime diagnostics use textual sentinels when package/identity reads fail.
+    # They are missing evidence, not valid build identifiers.
+    return normalized if normalized and normalized.lower() != "unknown" else None
+
+
 def internal_service_question(question: str) -> bool:
     """Opt into resident-service details only for explicitly internal subjects."""
     return (

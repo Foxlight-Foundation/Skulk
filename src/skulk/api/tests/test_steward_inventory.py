@@ -229,3 +229,117 @@ def test_partial_versions_do_not_claim_all_nodes_current() -> None:
     assert "Coverage is incomplete" in answer
     assert "not checked" in answer
     assert "consistent" not in answer
+
+
+@pytest.mark.parametrize(
+    "version,commit,missing",
+    [
+        ("unknown", "build123", "version unavailable"),
+        ("1.5.2", "Unknown", "commit unavailable"),
+        (" UNKNOWN ", "", "version unavailable"),
+    ],
+)
+async def test_runtime_sentinels_remain_missing_in_version_answers(
+    version: str, commit: str, missing: str
+) -> None:
+    class _Api:
+        async def get_cluster_state(self) -> dict[str, object]:
+            return {
+                "topology": {"nodes": ["a"]},
+                "downloads": {},
+                "nodeIdentities": {
+                    "a": {"skulkVersion": version, "skulkCommit": commit}
+                },
+            }
+
+        async def get_cluster_diagnostics(self) -> SimpleNamespace:
+            return SimpleNamespace(
+                generated_at="2026-09-16T00:00:00Z",
+                version_status="unknown",
+                nodes=[
+                    SimpleNamespace(
+                        node_id="a",
+                        ok=True,
+                        version_status="unknown",
+                        diagnostics=SimpleNamespace(
+                            runtime=SimpleNamespace(
+                                skulk_version=version, skulk_commit=commit
+                            )
+                        ),
+                    )
+                ],
+            )
+
+    api = _Api()
+    # General answers see the same normalized identity evidence as the dedicated
+    # version tool, so switching paths cannot turn a sentinel into a build.
+    state_result = steward_operator_tool_result(await api.get_cluster_state())
+    assert '"unknown"' not in state_result.lower()
+    harness = StewardHarness(cast("API", cast(object, api)))
+    harness.steward_instance = lambda: (InstanceId(), "org/brain")
+    chunks = [
+        chunk
+        async for chunk in harness.run_turn_chunks(
+            [StewardChatMessage(role="user", content="What skulk version?")]
+        )
+    ]
+    answer = "".join(
+        chunk.text
+        for chunk in chunks
+        if isinstance(chunk, TokenChunk) and not chunk.is_thinking
+    )
+    assert missing in answer
+    assert "Coverage is incomplete" in answer
+    assert "commit Unknown" not in answer
+
+
+async def test_capability_only_hosts_keep_advertisements_without_inflating_nodes() -> (
+    None
+):
+    class _Api:
+        async def get_cluster_state(self) -> dict[str, object]:
+            return {
+                "topology": {"nodes": ["physical"]},
+                "downloads": {},
+                "capabilityNodes": {
+                    "telemetry-only-routing-id": [
+                        {
+                            "pluginId": "example",
+                            "nodeId": "service",
+                            "bundleId": "example.service",
+                            "version": "0.1.0",
+                            "title": "Example service",
+                            "status": "disabled",
+                            "ownerAvailable": False,
+                        }
+                    ]
+                },
+            }
+
+    api = _Api()
+    state_result = cast(
+        "dict[str, object]",
+        json.loads(steward_operator_tool_result(await api.get_cluster_state())),
+    )
+    assert state_result["nodeCount"] == 1
+    harness = StewardHarness(cast("API", cast(object, api)))
+    harness.steward_instance = lambda: (InstanceId(), "org/brain")
+    chunks = [
+        chunk
+        async for chunk in harness.run_turn_chunks(
+            [
+                StewardChatMessage(
+                    role="user", content="What capabilities are available?"
+                )
+            ]
+        )
+    ]
+    answer = "".join(
+        chunk.text
+        for chunk in chunks
+        if isinstance(chunk, TokenChunk) and not chunk.is_thinking
+    )
+    assert "Example service on Node 2: disabled, owner unavailable" in answer
+    assert "telemetry-only-routing-id" not in answer
+    assert "Coverage is incomplete" not in answer
+    assert "No capability nodes" not in answer

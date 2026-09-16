@@ -2305,7 +2305,11 @@ Semantics of the reserved id:
   owner status and bundle versions separately from hardware and inference backends.
   Standalone capability-inventory questions use these observations directly; no current
   advertisements does not prove nothing is installed, and discovery grants no execution
-  authority. These Steward views leave capability lifecycle and authorization unchanged.
+  authority. Capability-only hosts without identity telemetry receive safe fallback
+  names and remain in this inventory without increasing the topology node count.
+  Blank or `unknown` build identifiers are missing observations, including when
+  diagnostics returned successfully. These Steward views leave capability lifecycle
+  and authorization unchanged.
 
 - Steward also projects immutable inventory observations before compaction, with
   API read time, explicit scope, and null counts for missing or malformed source

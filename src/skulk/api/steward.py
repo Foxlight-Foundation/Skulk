@@ -32,6 +32,7 @@ from skulk.api.steward_inventory import (
     capability_inventory,
     internal_service_question,
     inventory_question,
+    observed_build_value,
     render_inventory,
 )
 from skulk.api.steward_observations import (
@@ -864,6 +865,7 @@ def _node_name_lookup(state_payload: dict[str, object]) -> dict[str, str]:
         "nodeDisk",
         "nodeRdmaCtl",
         "nodeCapabilities",
+        "capabilityNodes",
         "nodeHealth",
     ):
         telemetry_node_ids.update(_as_object_dict(state_payload.get(field)))
@@ -1036,8 +1038,8 @@ def _node_summaries(
                 "model": identity.get("modelId"),
                 "chip": identity.get("chipId"),
                 "operatingSystem": identity.get("osVersion"),
-                "skulkVersion": identity.get("skulkVersion"),
-                "skulkCommit": identity.get("skulkCommit"),
+                "skulkVersion": observed_build_value(identity.get("skulkVersion")),
+                "skulkCommit": observed_build_value(identity.get("skulkCommit")),
                 "health": _as_object_dict(health_by_node.get(node_id)),
                 "memory": {
                     "ramTotalBytes": total_bytes,
@@ -1782,8 +1784,12 @@ class StewardHarness:
                     {
                         "name": node_names.get(str(node.node_id), "Unavailable node"),
                         "ok": node.ok,
-                        "skulkVersion": runtime.skulk_version if runtime else None,
-                        "skulkCommit": runtime.skulk_commit if runtime else None,
+                        "skulkVersion": observed_build_value(
+                            runtime.skulk_version if runtime else None
+                        ),
+                        "skulkCommit": observed_build_value(
+                            runtime.skulk_commit if runtime else None
+                        ),
                         "versionStatus": node.version_status,
                     }
                 )
