@@ -44,8 +44,81 @@ from skulk.extensions.setup import NodeSetup
 from skulk.extensions.setup_actions import SetupActions, SetupMutation, SetupOperation
 from skulk.extensions.steward import StewardTool
 from skulk.extensions.types import ExtensionContext
+from skulk.shared.types.capability_nodes import (
+    CapabilityNodeAction,
+    CapabilityNodeStatus,
+    CapabilityNodeSummary,
+    CapabilityNodeSurface,
+)
 
 _OBJECT = TypeAdapter(dict[str, JsonValue])
+
+
+_SUMMARY_STATUS: dict[str, CapabilityNodeStatus] = {
+    "installed": "installed",
+    "starting": "starting",
+    "ready": "ready",
+    "degraded": "degraded",
+    "disabled": "disabled",
+    "configuration_invalid": "configuration_invalid",
+    "failed": "failed",
+    # The owner's vocabulary names two terminal states the summary folds
+    # into one: the node is not coming back without an operator.
+    "restart_exhausted": "failed",
+    "incompatible": "failed",
+}
+
+
+def summaries_for(
+    plugin_id: str, nodes: "tuple[ManagedNode, ...]", owner_available: bool
+) -> tuple[CapabilityNodeSummary, ...]:
+    """Bounded, credential-free topology summaries for an owner's nodes.
+
+    Only link surfaces the owner reported ready with a URL are carried; an
+    unready surface has no endpoint to open, and proxied surfaces wait for
+    that contract. Each carried surface gets an open action.
+    """
+    summaries: list[CapabilityNodeSummary] = []
+    for node in nodes:
+        surfaces: list[CapabilityNodeSurface] = []
+        actions: list[CapabilityNodeAction] = []
+        for surface in node.surfaces:
+            if surface.kind != "link" or not surface.ready or surface.url is None:
+                continue
+            surfaces.append(
+                CapabilityNodeSurface(
+                    surface_id=surface.surface_id,
+                    title=surface.title,
+                    url=surface.url,
+                    ready=node.status == "ready",
+                )
+            )
+            actions.append(
+                CapabilityNodeAction(
+                    action_id=f"open-{surface.surface_id}",
+                    title=f"Open {surface.title}",
+                    kind="surface",
+                    surface_id=surface.surface_id,
+                )
+            )
+        try:
+            summaries.append(
+                CapabilityNodeSummary(
+                    plugin_id=plugin_id,
+                    node_id=node.node_id,
+                    bundle_id=node.bundle_id,
+                    version=node.version,
+                    title=node.title or node.bundle_id,
+                    status=_SUMMARY_STATUS.get(node.status, "failed"),
+                    owner_available=owner_available,
+                    surfaces=tuple(surfaces),
+                    actions=tuple(actions),
+                )
+            )
+        except ValueError:
+            # An identity the topology cannot key is left off it, not fatal.
+            continue
+    return tuple(summaries)
 
 
 class _WireModel(BaseModel):
@@ -90,12 +163,26 @@ class ManagedConnection(_WireModel):
         return self
 
 
-class _Node(_WireModel):
+class ManagedSurface(_WireModel):
+    surface_id: str
+    title: str
+    kind: str
+    ready: bool
+    url: str | None = None
+
+
+class ManagedNode(_WireModel):
     node_id: str
     bundle_id: str
     version: str
     status: str
     configurable: bool
+    # The extended description adds what the topology shows: a title, the
+    # surfaces with their readiness, and projections this host reads elsewhere.
+    title: str | None = None
+    surfaces: tuple[ManagedSurface, ...] = Field(default=(), max_length=4)
+    steward: tuple[dict[str, JsonValue], ...] = Field(default=(), max_length=16)
+    operations_available: bool = False
     credentials_configurable: bool = False
     preflight_available: bool = False
     setup_available: bool = False
@@ -124,7 +211,7 @@ class _Node(_WireModel):
 class _Description(_WireModel):
     transport_node_id: str
     host_callbacks_available: bool = False
-    nodes: tuple[_Node, ...] = Field(max_length=16)
+    nodes: tuple[ManagedNode, ...] = Field(max_length=16)
 
 
 class _Settings(_WireModel):
@@ -199,7 +286,7 @@ class ManagedOwner:
             )
         self.disabled = disabled
         self.context: ExtensionContext | None = None
-        self.nodes: tuple[_Node, ...] = ()
+        self.nodes: tuple[ManagedNode, ...] = ()
         self.observed = 0.0
         self.available = False
         self.manager_available = True
@@ -207,6 +294,7 @@ class ManagedOwner:
         self.poll_task: asyncio.Task[None] | None = None
         self.host_task: asyncio.Task[None] | None = None
         self.host_callbacks_available = False
+        self.published: set[str] = set()
         self.refresh_lock = asyncio.Lock()
 
     def chat_middleware(self) -> None:
@@ -286,7 +374,9 @@ class ManagedOwner:
             try:
                 if self.attachment is not None:
                     await self.attachment.ensure()
-                result = await self._request({"operation": "describe"}, timeout=1)
+                result = await self._request(
+                    {"operation": "describe-extended"}, timeout=1
+                )
                 snapshot = _Description.model_validate_json(json.dumps(result))
                 if self.context is None or snapshot.transport_node_id != str(
                     self.context.node_id
@@ -311,10 +401,43 @@ class ManagedOwner:
                 self.host_callbacks_available = snapshot.host_callbacks_available
                 self.observed = time.monotonic()
                 self.available = True
+                self._publish_summaries()
             except (OSError, ValueError, TimeoutError):
                 self.available = False
                 self.host_callbacks_available = False
+                self._publish_summaries()
                 raise RuntimeError("managed owner unavailable") from None
+
+    def _publish_summaries(self) -> None:
+        """Project the installed nodes onto the topology, withdrawing what left.
+
+        A managed installation is a satellite of its host the same way the
+        private bridge's nodes were: identity from the manifest, lifecycle from
+        the owner, the ready link surfaces to open. An unreachable owner keeps
+        its nodes visible with ``owner_available`` false; a node that
+        disappears from the description is withdrawn.
+        """
+        if self.context is None:
+            return
+        current: set[str] = set()
+        for summary in summaries_for(self.name, self.nodes, self.available):
+            try:
+                self.context.publish_capability_node(summary)
+            except Exception:  # noqa: BLE001 - one bad projection must not stop the rest
+                continue
+            current.add(summary.node_id)
+        for node_id in self.published - current:
+            with contextlib.suppress(Exception):
+                self.context.withdraw_capability_node(self.name, node_id)
+        self.published = current
+
+    def _withdraw_summaries(self) -> None:
+        if self.context is None:
+            return
+        for node_id in self.published:
+            with contextlib.suppress(Exception):
+                self.context.withdraw_capability_node(self.name, node_id)
+        self.published = set()
 
     def on_start(self, context: ExtensionContext) -> None:
         """Begin nonblocking local health observation; the OS owns the service."""
@@ -351,6 +474,7 @@ class ManagedOwner:
     async def on_stop(self) -> None:
         """Stop observation and admission without stopping independent owner cleanup."""
         self.available = False
+        self._withdraw_summaries()
         # Legacy discovery and live manager inventory can share one adapter.
         # Claim its observer before yielding so concurrent shutdown releases once.
         task, self.poll_task = self.poll_task, None
@@ -503,7 +627,7 @@ class ManagedOwner:
             timeout=20,
         )
 
-    def _node(self, node_id: str) -> _Node:
+    def _node(self, node_id: str) -> ManagedNode:
         for node in self.nodes:
             if node.node_id == node_id:
                 return node
