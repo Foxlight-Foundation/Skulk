@@ -532,10 +532,13 @@ class RuntimeManager:
         if isinstance(request, ReloadRuntimeRequest):
             return await self._reload(request)
         if isinstance(request, InventoryRequest):
+            # Naming reload support lets a host tell a manager from before the
+            # request apart from one refusing it, before it sends the request.
             return {
                 "installations": [
                     self._summary(identifier) for identifier in self._identifiers()
-                ]
+                ],
+                "reload_runtime": True,
             }
         if isinstance(request, AttachmentRequest):
             return await finish_runtime_work(asyncio.create_task(self._attach(request)))

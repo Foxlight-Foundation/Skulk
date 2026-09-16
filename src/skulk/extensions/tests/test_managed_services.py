@@ -1,6 +1,7 @@
 """Late local setup and live manager membership without API process restart."""
 
 import asyncio
+import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -16,7 +17,12 @@ from skulk.extensions.runtime_artifacts import QualifiedHost
 from skulk.extensions.runtime_attachment import HostSettings, ServiceConnection
 from skulk.extensions.runtime_controller import LifecycleRequest
 from skulk.extensions.runtime_download import ReleaseSource
-from skulk.extensions.runtime_files import RuntimeLock, read_private, write_private
+from skulk.extensions.runtime_files import (
+    RuntimeLock,
+    private_directory,
+    read_private,
+    write_private,
+)
 from skulk.extensions.runtime_manager import (
     InstallationRequest,
     InventoryRequest,
@@ -383,6 +389,8 @@ async def test_a_build_mismatch_stages_a_matching_runtime_and_asks_for_a_reload(
 
     async def request(root: Path, request: object) -> dict[str, JsonValue]:
         sent.append(request)
+        if isinstance(request, InventoryRequest):
+            return {"result": {"installations": [], "reload_runtime": True}}
         return {"result": {"generation": "d" * 32, "restarting": True}}
 
     monkeypatch.setattr(
@@ -397,10 +405,73 @@ async def test_a_build_mismatch_stages_a_matching_runtime_and_asks_for_a_reload(
     services._schedule_runtime_refresh(differs)  # pyright: ignore[reportPrivateUsage]
     services._schedule_runtime_refresh(differs)  # pyright: ignore[reportPrivateUsage]
     assert services.runtime_refresh is not None
-    await services.runtime_refresh
+    # Detaching drains the refresh instead of cancelling it: its selection
+    # runs in a thread that cancellation would leave running.
+    await services._settle_runtime_refresh()  # pyright: ignore[reportPrivateUsage]
+    assert services.runtime_refresh is None
     assert staged == [tmp_path]
-    assert len(sent) == 1 and isinstance(sent[0], ReloadRuntimeRequest)
-    assert sent[0].generation == "d" * 32
+    assert [type(request) for request in sent] == [
+        InventoryRequest,
+        ReloadRuntimeRequest,
+    ]
+    assert isinstance(sent[1], ReloadRuntimeRequest)
+    assert sent[1].generation == "d" * 32
+
+
+async def test_a_refused_reload_removes_the_unselected_candidate_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A reused generation the manager refuses does not pile up on the volume."""
+    from skulk.extensions.runtime_manager import (
+        ManagerBuildMismatchError,
+        ReloadRuntimeRequest,
+    )
+    from skulk.extensions.service_snapshot import ServiceSnapshot
+
+    build = "f" * 64
+    reused = ServiceSnapshot(
+        generation="d" * 32,
+        manifest_sha256="e" * 64,
+        skulk_build_sha256=build,
+        copied_files=1,
+        copied_bytes=1,
+    )
+    generation = tmp_path / "core-runtimes" / reused.generation
+    private_directory(generation)
+    write_private(generation / "staged.json", reused.model_dump_json().encode())
+    selected = tmp_path / "core-runtimes" / ("1" * 32)
+    private_directory(selected)
+    write_private(
+        tmp_path / "core-runtime.json",
+        json.dumps({"generation": "1" * 32, "manifest_sha256": "2" * 64}).encode(),
+    )
+    sent: list[object] = []
+
+    async def stage(root: Path) -> ServiceSnapshot:
+        raise AssertionError("a matching generation was already staged")
+
+    async def request(root: Path, request: object) -> dict[str, JsonValue]:
+        sent.append(request)
+        if isinstance(request, InventoryRequest):
+            return {"result": {"installations": [], "reload_runtime": True}}
+        return {"error": "staged service identity differs"}
+
+    monkeypatch.setattr(
+        "skulk.extensions.managed_services.stage_service_runtime", stage
+    )
+    monkeypatch.setattr("skulk.extensions.managed_services.manager_request", request)
+    services = ManagedServices(tmp_path / "connection.json")
+    services.connection = ServiceConnection(
+        manager_root=str(tmp_path), profile_id=PROFILE
+    )
+    services._schedule_runtime_refresh(  # pyright: ignore[reportPrivateUsage]
+        ManagerBuildMismatchError("a" * 64, build)
+    )
+    assert services.runtime_refresh is not None
+    await services.runtime_refresh
+    assert isinstance(sent[-1], ReloadRuntimeRequest)
+    assert not generation.exists()
+    assert selected.exists()
 
 
 def test_a_generation_staged_for_the_live_build_is_reused_not_restaged(

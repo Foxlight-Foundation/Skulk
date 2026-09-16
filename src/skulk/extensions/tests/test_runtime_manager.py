@@ -46,7 +46,7 @@ async def test_socket_registration_activation_disconnect_and_reconnect(
     identifier = "managed.fixture"
     try:
         assert await manager_request(tmp_path, InventoryRequest()) == {
-            "result": {"installations": []}
+            "result": {"installations": [], "reload_runtime": True}
         }
         await manager_request(
             tmp_path, InstallationRequest(action="register", plugin_id=identifier)

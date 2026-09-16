@@ -17,7 +17,7 @@ from typing import final
 from uuid import uuid4
 
 from packaging.utils import canonicalize_name
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
 
 from skulk.extensions import service_bootstrap
 from skulk.extensions.runtime_artifacts import Digest, measure_host
@@ -324,6 +324,21 @@ async def stage_service_runtime(root: Path) -> ServiceSnapshot:
         return await finish_runtime_work(asyncio.create_task(prepare()))
     finally:
         lock.close()
+
+
+def selected_generation(root: Path) -> str | None:
+    """The generation ``core-runtime.json`` selects for the next manager start.
+
+    ``None`` when nothing is selected or the pointer is unreadable; callers
+    treat that as "not this generation" rather than as an error.
+    """
+    document = TypeAdapter(dict[str, JsonValue])
+    try:
+        pointer = document.validate_json(read_private(root / "core-runtime.json", 4096))
+    except (OSError, ValueError):
+        return None
+    generation = pointer.get("generation")
+    return generation if isinstance(generation, str) else None
 
 
 def activate_staged_runtime(root: Path, snapshot: ServiceSnapshot) -> None:

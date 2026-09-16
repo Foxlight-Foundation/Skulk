@@ -44,6 +44,7 @@ from skulk.extensions.service_registration import ServiceLayout, local_layout
 from skulk.extensions.service_snapshot import (
     ServiceSnapshot,
     activate_service_runtime,
+    selected_generation,
     service_source_identity,
     stage_service_runtime,
 )
@@ -51,6 +52,8 @@ from skulk.extensions.terminal_install import TerminalInstaller
 from skulk.shared.constants import SKULK_CONFIG_HOME
 
 _READINESS_WAIT_SECONDS = 60.0
+# How long a manager that answered nothing gets to show the selection it made.
+_RELOAD_SETTLE_SECONDS = 10.0
 
 
 class SetupOperation(BaseModel):
@@ -135,6 +138,16 @@ async def _elevate(
     )
     if await process.wait() != 0:
         raise ValueError("explicit local service registration did not complete")
+
+
+async def _selected_within(root: Path, generation: str, seconds: float) -> bool:
+    """Whether the manager selects ``generation`` before ``seconds`` pass."""
+    deadline = time.monotonic() + seconds
+    while selected_generation(root) != generation:
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(0.5)
+    return True
 
 
 async def _observe(root: Path) -> bool:
@@ -333,17 +346,24 @@ async def setup_service() -> SetupOperation:
                     update={"snapshot": snapshot, "phase": "staged"}
                 )
                 _save(layout.root, operation)
-                reply = await manager_request(
-                    layout.root,
-                    ReloadRuntimeRequest(
-                        generation=snapshot.generation,
-                        manifest_sha256=snapshot.manifest_sha256,
-                    ),
-                )
-                if "result" not in reply:
+                try:
+                    reply = await manager_request(
+                        layout.root,
+                        ReloadRuntimeRequest(
+                            generation=snapshot.generation,
+                            manifest_sha256=snapshot.manifest_sha256,
+                        ),
+                    )
+                except (OSError, TimeoutError):
+                    reply = {}
+                if "result" not in reply and not await _selected_within(
+                    layout.root, snapshot.generation, _RELOAD_SETTLE_SECONDS
+                ):
                     # A manager from before this protocol, or one that refused:
                     # the staged copy is kept and the ordinary path below
-                    # re-registers it with elevation.
+                    # re-registers it with elevation. A lost reply is not a
+                    # refusal: the manager may have selected the generation
+                    # while restarting, which the pointer shows.
                     print("Manager did not reload; re-registering.", flush=True)
                     reply = None
             if refresh and reply is not None and operation.snapshot is not None:

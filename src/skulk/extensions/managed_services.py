@@ -40,6 +40,7 @@ from skulk.extensions.runtime_service import RuntimeServiceStatus
 from skulk.extensions.service_snapshot import (
     ServiceSnapshot,
     activate_service_runtime,
+    selected_generation,
     stage_service_runtime,
 )
 from skulk.extensions.types import ExtensionContext
@@ -66,10 +67,7 @@ def protocol_refusal(result: dict[str, JsonValue]) -> ProtocolUnsupportedError |
 
 
 def _selected(root: Path, generation: str) -> bool:
-    try:
-        return generation.encode() in read_private(root / "core-runtime.json", 4096)
-    except (OSError, ValueError):
-        return False
+    return selected_generation(root) == generation
 
 
 def manager_pids(root: Path) -> list[int]:
@@ -202,6 +200,10 @@ class ManagedInventory(BaseModel):
     installations: tuple[ManagedInstallation, ...] = Field(
         max_length=16, description="Bounded registered plugin installations."
     )
+    reload_runtime: bool = Field(
+        default=False,
+        description="Whether this manager can select a staged runtime and restart on request.",
+    )
 
 
 type ManagementRequest = (
@@ -298,14 +300,15 @@ class ManagedServices:
         )
 
     async def _settle_runtime_refresh(self) -> None:
-        """Finish or cancel a manager refresh before this observer detaches.
+        """Wait for a manager refresh to finish before this observer detaches.
 
-        Cancellation drains the staging copy's owned work; a refresh must not
-        keep selecting or restarting a manager this host has let go of.
+        The refresh runs its selection in a worker thread that cancellation
+        would not stop, so the task is drained rather than cancelled: a
+        refresh must not keep selecting or restarting a manager this host has
+        let go of. The refresh already handles its own failures.
         """
         task, self.runtime_refresh = self.runtime_refresh, None
         if task is not None and not task.done():
-            task.cancel()
             await asyncio.gather(task, return_exceptions=True)
 
     async def _refresh_manager_runtime(self, root: Path, live: str) -> None:
@@ -315,33 +318,44 @@ class ManagedServices:
         manager refuses is removed, so repeated attempts against a broken
         manager do not accumulate copies of Skulk on the service volume.
         """
-        staged_here: Path | None = None
+        candidate: Path | None = None
         try:
+            # The inventory answers without an attachment and names whether
+            # the manager knows the reload request, so a manager from before
+            # it is told apart from one that refuses the staged generation.
+            inventory = (await manager_request(root, InventoryRequest())).get("result")
+            reloads = (
+                isinstance(inventory, dict) and inventory.get("reload_runtime") is True
+            )
             snapshot = staged_generation_for(root, live)
             if snapshot is None:
                 snapshot = await stage_service_runtime(root)
-                staged_here = root / "core-runtimes" / snapshot.generation
-            reply = await manager_request(
-                root,
-                ReloadRuntimeRequest(
-                    generation=snapshot.generation,
-                    manifest_sha256=snapshot.manifest_sha256,
-                ),
-            )
-            if "result" not in reply:
-                # A manager from before this protocol does not know the
-                # request: select the generation for it and restart it.
+            candidate = root / "core-runtimes" / snapshot.generation
+            if reloads:
+                reply = await manager_request(
+                    root,
+                    ReloadRuntimeRequest(
+                        generation=snapshot.generation,
+                        manifest_sha256=snapshot.manifest_sha256,
+                    ),
+                )
+                if "result" not in reply:
+                    raise ValueError("manager refused the staged generation")
+            else:
+                # A manager from before this protocol: select the generation
+                # for it and restart it.
                 await asyncio.to_thread(reload_legacy_manager, root, snapshot)
             logger.info(
                 "plugin manager runtime refreshed to this host's Skulk build; "
                 "the service restarts on it"
             )
         except ValueError as error:
-            # An explicit refusal: the copy staged here is not selected and
-            # can go. Transport failures are ambiguous (the manager drains an
-            # activation past the request deadline), so those keep it.
-            if staged_here is not None and not _selected(root, staged_here.name):
-                shutil.rmtree(staged_here, ignore_errors=True)
+            # An explicit refusal: the candidate generation is not selected
+            # and can go, whether it was staged now or reused. Transport
+            # failures are ambiguous (the manager drains an activation past
+            # the request deadline), so those keep it.
+            if candidate is not None and not _selected(root, candidate.name):
+                shutil.rmtree(candidate, ignore_errors=True)
             logger.warning(
                 "plugin manager runtime refresh failed: "
                 f"{type(error).__name__}; rerun skulk-plugin-service setup"

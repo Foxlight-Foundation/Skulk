@@ -767,10 +767,12 @@ a Skulk update restarts the host on a new build, the host stages a matching
 manager runtime from its own environment and asks the running manager to
 `reload_runtime`; the manager verifies the staged generation's seal, selects
 it, and exits, and the OS service's keep-alive restarts it on the new
-generation. A manager from before this protocol answers neither by name; the
-host then reads the manager's selected generation itself, and if its build
-differs, stops the manager, selects the staged generation under both fences
-and lets the keep-alive restart it. `skulk-plugin-service setup` takes the
+generation. The manager's inventory names `reload_runtime` support, and the
+host reads it before asking: a manager from before this protocol does not
+name it, so the host stops that manager, selects the staged generation under
+both fences and lets the keep-alive restart it, while a manager that names it
+and still refuses the generation is a refusal, and the unselected candidate
+is removed. `skulk-plugin-service setup` takes the
 reload path when the service is registered and answering and its registered
 definition still names the current interpreter (the Skulk build or its
 dependencies moved); a moved interpreter takes the ordinary re-registration
