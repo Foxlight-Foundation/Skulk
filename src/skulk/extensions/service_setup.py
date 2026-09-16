@@ -112,12 +112,15 @@ def _save(root: Path, operation: SetupOperation) -> None:
     write_private(root / "setup.json", raw)
 
 
-def record_refreshed_snapshot(root: Path, snapshot: ServiceSnapshot) -> None:
+def record_refreshed_snapshot(
+    root: Path, snapshot: ServiceSnapshot, source_sha256: str
+) -> None:
     """Record the generation a running manager was moved to without setup.
 
     The host refreshes the manager runtime on its own after a Skulk update;
-    the retained setup state then names that generation as registered, so
-    ``service_status`` verifies the copy the service runs on and a setup
+    the retained setup state then names that generation as registered, with
+    the build and the source identity of the environment it was staged from,
+    so ``service_status`` verifies the copy the service runs on and a setup
     rerun completes on it rather than staging another. Missing or unreadable
     setup state is left alone: there is nothing to reconcile.
     """
@@ -133,6 +136,7 @@ def record_refreshed_snapshot(root: Path, snapshot: ServiceSnapshot) -> None:
             update={
                 "snapshot": snapshot,
                 "skulk_build_sha256": snapshot.skulk_build_sha256,
+                "source_sha256": source_sha256,
                 "phase": "registered",
             }
         ),

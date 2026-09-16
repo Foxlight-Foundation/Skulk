@@ -42,6 +42,7 @@ from skulk.extensions.service_snapshot import (
     ServiceSnapshot,
     activate_service_runtime,
     selected_generation,
+    service_source_identity,
     stage_service_runtime,
 )
 from skulk.extensions.types import ExtensionContext
@@ -72,8 +73,21 @@ def protocol_refusal(result: dict[str, JsonValue]) -> ProtocolUnsupportedError |
 _MANAGER_STOP_SECONDS = 120.0
 
 
+# How long a manager that answered nothing gets to show the selection it made.
+_SELECTION_WAIT_SECONDS = 120.0
+
+
 def _selected(root: Path, generation: str) -> bool:
     return selected_generation(root) == generation
+
+
+def _selected_within(root: Path, generation: str, seconds: float) -> bool:
+    deadline = time.monotonic() + seconds
+    while not _selected(root, generation):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.5)
+    return True
 
 
 def manager_pids(root: Path) -> list[int]:
@@ -335,6 +349,7 @@ class ManagedServices:
         manager do not accumulate copies of Skulk on the service volume.
         """
         candidate: Path | None = None
+        snapshot: ServiceSnapshot | None = None
         try:
             # The inventory answers without an attachment and names whether
             # the manager knows the reload request, so a manager from before
@@ -361,14 +376,7 @@ class ManagedServices:
                 # A manager from before this protocol: select the generation
                 # for it and restart it.
                 await asyncio.to_thread(reload_legacy_manager, root, snapshot)
-            # Setup state names the generation the service runs on; status
-            # verifies against it and a setup rerun would otherwise stage
-            # and restart yet another generation for the same build.
-            record_refreshed_snapshot(root, snapshot)
-            logger.info(
-                "plugin manager runtime refreshed to this host's Skulk build; "
-                "the service restarts on it"
-            )
+            await self._record_refresh(root, snapshot)
         except ValueError as error:
             # An explicit refusal: the candidate generation is not selected
             # and can go, whether it was staged now or reused. Transport
@@ -381,10 +389,30 @@ class ManagedServices:
                 f"{type(error).__name__}; rerun skulk-plugin-service setup"
             )
         except (OSError, TimeoutError) as error:
+            # The manager may still be verifying the seal past the request
+            # deadline and select the generation afterwards; once it does,
+            # nothing else would reconcile the setup state, so wait for it.
+            if snapshot is not None and await asyncio.to_thread(
+                _selected_within, root, snapshot.generation, _SELECTION_WAIT_SECONDS
+            ):
+                await self._record_refresh(root, snapshot)
+                return
             logger.warning(
                 "plugin manager runtime refresh is indeterminate: "
                 f"{type(error).__name__}; the staged generation is retained"
             )
+
+    async def _record_refresh(self, root: Path, snapshot: ServiceSnapshot) -> None:
+        # Setup state names the generation the service runs on, its build and
+        # the source identity it was staged from; status verifies against it
+        # and a setup rerun would otherwise stage and restart yet another
+        # generation for the same build.
+        source = await asyncio.to_thread(service_source_identity)
+        record_refreshed_snapshot(root, snapshot, source)
+        logger.info(
+            "plugin manager runtime refreshed to this host's Skulk build; "
+            "the service restarts on it"
+        )
 
     async def request(self, request: ManagementRequest) -> dict[str, JsonValue]:
         """Send one typed local management request; never accept an attachment override.

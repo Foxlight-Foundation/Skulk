@@ -399,6 +399,9 @@ async def test_a_build_mismatch_stages_a_matching_runtime_and_asks_for_a_reload(
         "skulk.extensions.managed_services.stage_service_runtime", stage
     )
     monkeypatch.setattr("skulk.extensions.managed_services.manager_request", request)
+    monkeypatch.setattr(
+        "skulk.extensions.managed_services.service_source_identity", lambda: "9" * 64
+    )
     write_private(
         tmp_path / "setup.json",
         SetupOperation(
@@ -442,6 +445,81 @@ async def test_a_build_mismatch_stages_a_matching_runtime_and_asks_for_a_reload(
     assert recorded.snapshot is not None
     assert recorded.snapshot.generation == "d" * 32
     assert recorded.skulk_build_sha256 == "f" * 64
+    assert recorded.source_sha256 == "9" * 64
+    assert recorded.phase == "registered"
+
+
+async def test_a_reload_that_outlives_its_request_is_still_recorded_once_selected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A manager that selects after the request deadline still updates setup state."""
+    from skulk.extensions import managed_services
+    from skulk.extensions.runtime_manager import (
+        ManagerBuildMismatchError,
+        ReloadRuntimeRequest,
+    )
+    from skulk.extensions.service_snapshot import ServiceSnapshot
+
+    snapshot = ServiceSnapshot(
+        generation="d" * 32,
+        manifest_sha256="e" * 64,
+        skulk_build_sha256="f" * 64,
+        copied_files=1,
+        copied_bytes=1,
+    )
+
+    async def stage(root: Path) -> ServiceSnapshot:
+        return snapshot
+
+    async def request(root: Path, request: object) -> dict[str, JsonValue]:
+        if isinstance(request, InventoryRequest):
+            return {"result": {"installations": [], "reload_runtime": True}}
+        assert isinstance(request, ReloadRuntimeRequest)
+        # The manager selected the generation while the client gave up.
+        write_private(
+            root / "core-runtime.json",
+            json.dumps(
+                {"generation": request.generation, "manifest_sha256": "e" * 64}
+            ).encode(),
+        )
+        raise TimeoutError
+
+    monkeypatch.setattr(managed_services, "stage_service_runtime", stage)
+    monkeypatch.setattr(managed_services, "manager_request", request)
+    monkeypatch.setattr(managed_services, "service_source_identity", lambda: "9" * 64)
+    monkeypatch.setattr(managed_services, "_SELECTION_WAIT_SECONDS", 1.0)
+    write_private(
+        tmp_path / "setup.json",
+        SetupOperation(
+            operation_id=PROFILE,
+            profile_id=PROFILE,
+            skulk_build_sha256="a" * 64,
+            source_sha256="c" * 64,
+            configuration_directory=str(tmp_path),
+            phase="ready",
+            snapshot=ServiceSnapshot(
+                generation="0" * 32,
+                manifest_sha256="e" * 64,
+                skulk_build_sha256="a" * 64,
+                copied_files=1,
+                copied_bytes=1,
+            ),
+        )
+        .model_dump_json()
+        .encode(),
+    )
+    services = ManagedServices(tmp_path / "connection.json")
+    services.connection = ServiceConnection(
+        manager_root=str(tmp_path), profile_id=PROFILE
+    )
+    services._schedule_runtime_refresh(  # pyright: ignore[reportPrivateUsage]
+        ManagerBuildMismatchError("a" * 64, "f" * 64)
+    )
+    assert services.runtime_refresh is not None
+    await services.runtime_refresh
+    recorded = SetupOperation.model_validate_json(read_private(tmp_path / "setup.json"))
+    assert recorded.snapshot == snapshot
+    assert recorded.source_sha256 == "9" * 64
     assert recorded.phase == "registered"
 
 
