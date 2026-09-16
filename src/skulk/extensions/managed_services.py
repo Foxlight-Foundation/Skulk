@@ -43,7 +43,11 @@ def protocol_refusal(result: dict[str, JsonValue]) -> ProtocolUnsupportedError |
         accepted = _WINDOW.validate_python(result.get("accepted"), strict=True)
     except ValueError:
         return None
-    if kind not in ("release", "runtime") or not isinstance(offered, int):
+    if (
+        kind not in ("release", "runtime")
+        or not isinstance(offered, int)
+        or isinstance(offered, bool)
+    ):
         return None
     return ProtocolUnsupportedError(str(kind), offered, tuple(accepted))
 

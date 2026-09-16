@@ -22,7 +22,10 @@ from skulk.extensions.managed_services import (
     ManagedInventory,
     ManagedServices,
 )
-from skulk.extensions.runtime_artifacts import ProtocolUnsupportedError
+from skulk.extensions.runtime_artifacts import (
+    ProtocolUnsupportedError,
+    protocol_refusal_sentence,
+)
 from skulk.extensions.runtime_attachment import (
     InstallationIdentifier,
     ProfileIdentifier,
@@ -157,13 +160,10 @@ def create_managed_plugins_router(
                 status_code=503, detail="local plugin manager is unavailable"
             ) from None
         except ProtocolUnsupportedError as refused:
-            window = " or ".join(str(item) for item in refused.accepted)
             raise HTTPException(
                 status_code=409,
-                detail=(
-                    f"this host accepts {refused.kind} protocol {window}; the release "
-                    f"offers {refused.offered}. Update Skulk on this host, or choose a "
-                    "release published for it"
+                detail=protocol_refusal_sentence(
+                    refused.kind, refused.offered, refused.accepted
                 ),
             ) from None
         except ValueError:

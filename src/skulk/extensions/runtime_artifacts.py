@@ -305,6 +305,24 @@ def measure_host() -> QualifiedHost:
     )
 
 
+def _claimed_publisher(runtime: dict[str, JsonValue]) -> str | None:
+    """The publisher a payload names, read without interpreting anything else."""
+    release = runtime.get("release")
+    publisher = release.get("publisher") if isinstance(release, dict) else None
+    return publisher if isinstance(publisher, str) else None
+
+
+def protocol_refusal_sentence(
+    kind: str, offered: int, accepted: tuple[int, ...]
+) -> str:
+    """The one sentence every surface uses for a release outside the window."""
+    window = " or ".join(str(item) for item in accepted)
+    return (
+        f"This host accepts {kind} protocol {window}; the release offers {offered}. "
+        "Update Skulk on this host, or choose a release published for it."
+    )
+
+
 def _check_protocol_window(runtime: dict[str, JsonValue]) -> None:
     """Name a protocol outside the window before the claims are validated.
 
@@ -344,14 +362,16 @@ def verify_runtime(
     if len(metadata) > 131072:
         raise ValueError("runtime metadata exceeds bound")
     signed = _Signed.model_validate_json(metadata)
-    _check_protocol_window(signed.runtime)
     payload = canonical_json(signed.runtime)
-    claims = _RuntimeClaims.model_validate_json(payload)
-    release = claims.release
-    public = trust.publishers.get(release.publisher)
+    # The publisher is read minimally so the signature can be checked before
+    # anything else is interpreted: a named protocol refusal must come from an
+    # authenticated payload, never from whatever a feed happens to serve.
+    publisher = _claimed_publisher(signed.runtime)
+    public = trust.publishers.get(publisher) if publisher is not None else None
     if (
-        public is None
-        or release.publisher in trust.revoked_publishers
+        publisher is None
+        or public is None
+        or publisher in trust.revoked_publishers
         or now >= trust.expires_at
     ):
         raise ValueError("runtime publisher trust refused")
@@ -361,6 +381,9 @@ def verify_runtime(
         )
     except (InvalidSignature, ValueError):
         raise ValueError("runtime signature refused") from None
+    _check_protocol_window(signed.runtime)
+    claims = _RuntimeClaims.model_validate_json(payload)
+    release = claims.release
     runtime = VerifiedRuntime(metadata, payload, claims)
     family = canonical_platform(host.platform)
     expected_os = "darwin" if family.startswith("macos") else family.split("-")[0]

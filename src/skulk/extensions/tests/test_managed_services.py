@@ -345,3 +345,14 @@ def test_the_api_side_rebuilds_the_typed_refusal_from_the_fixed_vocabulary() -> 
         protocol_refusal({"error": "release_protocol_unsupported", "accepted": ["2"]})
         is None
     )
+    assert (
+        protocol_refusal(
+            {
+                "error": "release_protocol_unsupported",
+                "kind": "runtime",
+                "offered": True,
+                "accepted": [2],
+            }
+        )
+        is None
+    )

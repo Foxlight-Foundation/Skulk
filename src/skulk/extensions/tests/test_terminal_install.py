@@ -329,6 +329,9 @@ async def test_a_protocol_refusal_is_the_one_manager_error_the_terminal_names() 
     assert (
         protocol_refusal({"error": "release_protocol_unsupported", "kind": "x"}) is None
     )
+    # bool is an int to Python and not to the fixed vocabulary.
+    assert protocol_refusal({**refusal, "offered": True}) is None
+    assert protocol_refusal({**refusal, "accepted": [True]}) is None
     output: list[str] = []
 
     async def request(_: ManagerRequest) -> dict[str, JsonValue]:
