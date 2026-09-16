@@ -18,6 +18,7 @@ from pydantic import (
     Field,
     JsonValue,
     TypeAdapter,
+    ValidationError,
     model_validator,
 )
 
@@ -44,8 +45,86 @@ from skulk.extensions.setup import NodeSetup
 from skulk.extensions.setup_actions import SetupActions, SetupMutation, SetupOperation
 from skulk.extensions.steward import StewardTool
 from skulk.extensions.types import ExtensionContext
+from skulk.shared.types.capability_nodes import (
+    CapabilityNodeAction,
+    CapabilityNodeStatus,
+    CapabilityNodeSummary,
+    CapabilityNodeSurface,
+)
 
 _OBJECT = TypeAdapter(dict[str, JsonValue])
+
+
+_SUMMARY_STATUS: dict[str, CapabilityNodeStatus] = {
+    "installed": "installed",
+    "starting": "starting",
+    "ready": "ready",
+    "degraded": "degraded",
+    "disabled": "disabled",
+    "configuration_invalid": "configuration_invalid",
+    "failed": "failed",
+    # The owner's vocabulary names two terminal states the summary folds
+    # into one: the node is not coming back without an operator.
+    "restart_exhausted": "failed",
+    "incompatible": "failed",
+}
+
+
+def summaries_for(
+    plugin_id: str, nodes: "tuple[ManagedNode, ...]", owner_available: bool
+) -> tuple[CapabilityNodeSummary, ...]:
+    """Bounded, credential-free topology summaries for an owner's nodes.
+
+    Only link surfaces the owner reported ready with a URL are carried; an
+    unready surface has no endpoint to open, and proxied surfaces wait for
+    that contract. Each carried surface gets an open action.
+    """
+    summaries: list[CapabilityNodeSummary] = []
+    for node in nodes:
+        surfaces: list[CapabilityNodeSurface] = []
+        actions: list[CapabilityNodeAction] = []
+        for surface in node.surfaces:
+            if surface.kind != "link" or not surface.ready or surface.url is None:
+                continue
+            try:
+                carried = CapabilityNodeSurface(
+                    surface_id=surface.surface_id,
+                    title=surface.title,
+                    url=surface.url,
+                    ready=surface.ready,
+                )
+                action = CapabilityNodeAction(
+                    action_id=f"open-{surface.surface_id}",
+                    title=f"Open {surface.title}",
+                    kind="surface",
+                    surface_id=surface.surface_id,
+                )
+            except ValueError:
+                # Display metadata the topology cannot carry (a non-HTTP URL,
+                # a title or identifier at the shared text bound once the
+                # action's prefix is added) is left off the summary; it never
+                # decides whether the owner is available.
+                continue
+            surfaces.append(carried)
+            actions.append(action)
+        try:
+            summaries.append(
+                CapabilityNodeSummary(
+                    plugin_id=plugin_id,
+                    node_id=node.node_id,
+                    bundle_id=node.bundle_id,
+                    version=node.version,
+                    title=node.title or node.bundle_id,
+                    status=_SUMMARY_STATUS.get(node.status, "failed"),
+                    owner_available=owner_available,
+                    surfaces=tuple(surfaces),
+                    actions=tuple(actions),
+                )
+            )
+        except ValueError:
+            # An identity the topology cannot key is left off it, not fatal.
+            continue
+    return tuple(summaries)
 
 
 class _WireModel(BaseModel):
@@ -90,19 +169,65 @@ class ManagedConnection(_WireModel):
         return self
 
 
-class _Node(_WireModel):
-    node_id: str
-    bundle_id: str
-    version: str
-    status: str
-    configurable: bool
-    credentials_configurable: bool = False
-    preflight_available: bool = False
-    setup_available: bool = False
-    setup_actions_available: bool = False
-    proposals_available: bool = False
-    proposal_actions_available: bool = False
-    descriptors: tuple[CapabilityDescriptor, ...] = Field(max_length=8)
+class ManagedSurface(_WireModel):
+    """One surface a managed node reports in its extended description.
+
+    A surface is a user-facing endpoint the node serves (a page, or a link to
+    one). Only link surfaces reported ready with a URL reach the topology.
+    """
+
+    surface_id: str = Field(description="Manifest-declared surface identifier.")
+    title: str = Field(description="Operator-facing surface title.")
+    kind: str = Field(description="`link` opens the URL; other kinds are not shown.")
+    ready: bool = Field(description="Whether the node reports the surface answering.")
+    url: str | None = Field(default=None, description="Where a ready link opens.")
+
+
+class ManagedNode(_WireModel):
+    """One installed node as the owner describes it over its control socket.
+
+    The basic description carries identity, lifecycle status and the facets
+    this host manages; the extended description adds what the topology shows.
+    """
+
+    node_id: str = Field(description="Stable installed node identifier.")
+    bundle_id: str = Field(description="Bundle the node runs.")
+    version: str = Field(description="Bundle version the node runs.")
+    status: str = Field(description="Owner-reported lifecycle status.")
+    configurable: bool = Field(description="Whether ordinary configuration exists.")
+    title: str | None = Field(default=None, description="Operator title, if declared.")
+    surfaces: tuple[ManagedSurface, ...] = Field(
+        default=(), max_length=4, description="Declared surfaces with readiness."
+    )
+    steward: tuple[dict[str, JsonValue], ...] = Field(
+        default=(),
+        max_length=16,
+        description="Steward exposure projection; opaque here.",
+    )
+    operations_available: bool = Field(
+        default=False, description="Whether the node runs durable operations."
+    )
+    credentials_configurable: bool = Field(
+        default=False, description="Whether the node declares credential inputs."
+    )
+    preflight_available: bool = Field(
+        default=False, description="Whether the node answers preflight checks."
+    )
+    setup_available: bool = Field(
+        default=False, description="Whether the node offers guided setup."
+    )
+    setup_actions_available: bool = Field(
+        default=False, description="Whether guided setup exposes actions."
+    )
+    proposals_available: bool = Field(
+        default=False, description="Whether the node records steward proposals."
+    )
+    proposal_actions_available: bool = Field(
+        default=False, description="Whether proposals can be decided here."
+    )
+    descriptors: tuple[CapabilityDescriptor, ...] = Field(
+        max_length=8, description="Capability contracts this node serves."
+    )
 
     def public(self) -> ConfigurableNode:
         """Project an installed node onto the ordinary management inventory."""
@@ -124,7 +249,7 @@ class _Node(_WireModel):
 class _Description(_WireModel):
     transport_node_id: str
     host_callbacks_available: bool = False
-    nodes: tuple[_Node, ...] = Field(max_length=16)
+    nodes: tuple[ManagedNode, ...] = Field(max_length=16)
 
 
 class _Settings(_WireModel):
@@ -199,7 +324,7 @@ class ManagedOwner:
             )
         self.disabled = disabled
         self.context: ExtensionContext | None = None
-        self.nodes: tuple[_Node, ...] = ()
+        self.nodes: tuple[ManagedNode, ...] = ()
         self.observed = 0.0
         self.available = False
         self.manager_available = True
@@ -207,6 +332,10 @@ class ManagedOwner:
         self.poll_task: asyncio.Task[None] | None = None
         self.host_task: asyncio.Task[None] | None = None
         self.host_callbacks_available = False
+        self.published: set[str] = set()
+        self.stopping = False
+        self.unavailable_reason: str | None = None
+        self.unavailable_noted = 0.0
         self.refresh_lock = asyncio.Lock()
 
     def chat_middleware(self) -> None:
@@ -286,7 +415,14 @@ class ManagedOwner:
             try:
                 if self.attachment is not None:
                     await self.attachment.ensure()
-                result = await self._request({"operation": "describe"}, timeout=1)
+                try:
+                    result = await self._request(
+                        {"operation": "describe-extended"}, timeout=1
+                    )
+                except ValueError:
+                    # An owner from before the extended description answers
+                    # only describe; it stays admitted, without topology detail.
+                    result = await self._request({"operation": "describe"}, timeout=1)
                 snapshot = _Description.model_validate_json(json.dumps(result))
                 if self.context is None or snapshot.transport_node_id != str(
                     self.context.node_id
@@ -311,15 +447,64 @@ class ManagedOwner:
                 self.host_callbacks_available = snapshot.host_callbacks_available
                 self.observed = time.monotonic()
                 self.available = True
-            except (OSError, ValueError, TimeoutError):
+                self._publish_summaries()
+            except (OSError, ValueError, TimeoutError) as error:
                 self.available = False
                 self.host_callbacks_available = False
-                raise RuntimeError("managed owner unavailable") from None
+                self._publish_summaries()
+                # OSError text can carry paths and a validation error echoes
+                # the owner's payload; their class is enough. Every other
+                # ValueError and TimeoutError here is this host's own fixed
+                # sentence.
+                reason = (
+                    type(error).__name__
+                    if isinstance(error, (OSError, ValidationError))
+                    else f"{type(error).__name__}: {error}"
+                )
+                raise RuntimeError(f"managed owner unavailable ({reason})") from None
+
+    def _publish_summaries(self) -> None:
+        """Project the installed nodes onto the topology, withdrawing what left.
+
+        A managed installation is a satellite of its host the same way the
+        private bridge's nodes were: identity from the manifest, lifecycle from
+        the owner, the ready link surfaces to open. An unreachable owner keeps
+        its nodes visible with ``owner_available`` false; a node that
+        disappears from the description is withdrawn.
+        """
+        if self.context is None or self.stopping:
+            return
+        current: set[str] = set()
+        try:
+            summaries = summaries_for(self.name, self.nodes, self.available)
+        except Exception:  # noqa: BLE001 - topology is a projection, never a health input
+            summaries = ()
+        for summary in summaries:
+            try:
+                self.context.publish_capability_node(summary)
+            except Exception:  # noqa: BLE001 - one bad projection must not stop the rest
+                continue
+            current.add(summary.node_id)
+        for node_id in self.published - current:
+            with contextlib.suppress(Exception):
+                self.context.withdraw_capability_node(self.name, node_id)
+        self.published = current
+
+    def _withdraw_summaries(self) -> None:
+        if self.context is None:
+            return
+        for node_id in self.published:
+            with contextlib.suppress(Exception):
+                self.context.withdraw_capability_node(self.name, node_id)
+        self.published = set()
 
     def on_start(self, context: ExtensionContext) -> None:
         """Begin nonblocking local health observation; the OS owns the service."""
         if self.poll_task is not None:
             return
+        # A new observer lifetime: an owner stopped and started again (an
+        # installation that left the inventory and came back) publishes again.
+        self.stopping = False
         self.context = context
         if self.attachment is not None:
             self.attachment.retain(str(context.node_id))
@@ -344,13 +529,34 @@ class ManagedOwner:
 
     async def _poll(self) -> None:
         while True:
-            with contextlib.suppress(RuntimeError):
+            try:
                 await self.refresh()
+                self.unavailable_reason = None
+            except RuntimeError as error:
+                self._note_unavailable(str(error))
+            except Exception as error:  # noqa: BLE001 - observation must outlive one bad snapshot
+                self._note_unavailable(f"{type(error).__name__}")
             await asyncio.sleep(1)
+
+    def _note_unavailable(self, reason: str) -> None:
+        """Log why this owner is unavailable, once per reason and at most once a minute.
+
+        The refusals are this host's own fixed sentences; nothing from the
+        owner's output is repeated. Without this line an owner that never
+        becomes available leaves no trace anywhere an operator can read.
+        """
+        now = time.monotonic()
+        if reason != self.unavailable_reason or now - self.unavailable_noted >= 60:
+            logger.warning(f"managed owner {self.name} unavailable: {reason}")
+            self.unavailable_reason = reason
+            self.unavailable_noted = now
 
     async def on_stop(self) -> None:
         """Stop observation and admission without stopping independent owner cleanup."""
         self.available = False
+        # A refresh already in flight must not republish after this point.
+        self.stopping = True
+        self._withdraw_summaries()
         # Legacy discovery and live manager inventory can share one adapter.
         # Claim its observer before yielding so concurrent shutdown releases once.
         task, self.poll_task = self.poll_task, None
@@ -503,7 +709,7 @@ class ManagedOwner:
             timeout=20,
         )
 
-    def _node(self, node_id: str) -> _Node:
+    def _node(self, node_id: str) -> ManagedNode:
         for node in self.nodes:
             if node.node_id == node_id:
                 return node

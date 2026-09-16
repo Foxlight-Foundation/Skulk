@@ -747,6 +747,15 @@ record and the isolated runtime envelope each carry a protocol number, and the
 host accepts the current protocol and, once there is one, the previous, so a
 capability published against the previous protocol keeps installing for one
 release cycle; a protocol outside the window is refused with a message naming
+what the host accepts. A managed installation is a satellite of its host on the dashboard: the host
+reads the owner's extended description every second and publishes one
+bounded, credential-free summary per node (identity, lifecycle status, the
+ready link surfaces with an open action each), marks the owner unavailable
+when the description cannot be read, and withdraws the summary when the node
+leaves the description or the owner stops.
+
+That refusal is the one manager error surfaced by name:
+
 what the host accepts. The manager survives a Skulk update. Its independent core runtime is a copy
 of the Skulk build it was set up with, and a host running a different build
 is refused with `manager_build_differs`. When a Skulk update restarts the
