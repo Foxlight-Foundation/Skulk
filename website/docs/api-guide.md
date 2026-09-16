@@ -4030,6 +4030,7 @@ The local socket accepts these typed requests:
 | `submit` | `plugin_id`, `request` | Accepts a local lifecycle request after validating its revision and target. The nested request contains `operation_id` (32 lowercase hexadecimal characters), `action` (`activate`, `select`, `disable` or `uninstall`), `expected_revision`, and for activation or stopped selection `runtime_digest`, optional `rollback` and `accept_permissions`. No spending authority is conveyed. |
 | `operation` | `plugin_id`, `operation_id` | Reads retained progress. Reconnect reads this result; reusing an ID with different intent is refused. |
 | `recover` | `plugin_id`, `operation_id` | Explicitly resumes only that retained local intent after its fault is corrected. Completed or superseded operations remain unchanged. No new request or provider operation is created. |
+| `reload_runtime` | `generation`, `manifest_sha256` | Selects a manager generation staged from the live Skulk build, verifying its seal under the manager's own fences, then stops so the OS service restarts on it. Refused when the generation is not staged or differs. |
 
 Activation validates signed artifacts, permission expansion and migration
 compatibility before stopping the owner; it repeats admission checks before
@@ -4056,7 +4057,7 @@ requesting socket. Validation failures do not interrupt a healthy owner.
 The socket is owner-only and accepts eight concurrent clients, one request per
 connection, at most 16 KiB request and 256 KiB response, with a thirty-second
 request deadline. Errors contain the stable `manager_operation_refused` code, with
-one named exception: a verified release outside this host's protocol window answers
+two named exceptions: a host whose live Skulk build differs from the manager's answers `manager_build_differs` with the two build digests, and a verified release outside this host's protocol window answers
 `release_protocol_unsupported` with `kind` (`release` or `runtime`), the integer
 `offered` and the integers `accepted`, nothing else;
 local operation records distinguish validation, ownership and local I/O failures.

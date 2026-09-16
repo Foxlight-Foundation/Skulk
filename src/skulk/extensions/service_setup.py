@@ -37,6 +37,7 @@ from skulk.extensions.runtime_manager import (
     MANAGER_REQUEST,
     InventoryRequest,
     ManagerRequest,
+    ReloadRuntimeRequest,
     manager_request,
 )
 from skulk.extensions.service_registration import ServiceLayout, local_layout
@@ -287,6 +288,58 @@ async def setup_service() -> SetupOperation:
                 if operation.phase == "registered":
                     operation = operation.model_copy(update={"phase": "ready"})
                     _save(layout.root, operation)
+                return operation
+            if (
+                operation.phase in {"registered", "ready"}
+                and operation.snapshot is not None
+                and operation.snapshot.skulk_build_sha256 != host.skulk_build_sha256
+                and await _observe(layout.root)
+            ):
+                # The OS service is registered and answering; only the Skulk
+                # build moved. Stage a matching runtime here and let the
+                # running manager select it and restart itself: no elevation.
+                print(
+                    "Refreshing the manager runtime to the live Skulk build...",
+                    flush=True,
+                )
+                snapshot = await stage_service_runtime(layout.root)
+                if (
+                    snapshot.skulk_build_sha256 != host.skulk_build_sha256
+                    or await asyncio.to_thread(service_source_identity)
+                    != source_identity
+                ):
+                    raise ValueError("source environment changed during local setup")
+                reply = await manager_request(
+                    layout.root,
+                    ReloadRuntimeRequest(
+                        generation=snapshot.generation,
+                        manifest_sha256=snapshot.manifest_sha256,
+                    ),
+                )
+                if "result" not in reply:
+                    raise ValueError("manager runtime reload refused")
+                operation = operation.model_copy(
+                    update={
+                        "snapshot": snapshot,
+                        "skulk_build_sha256": host.skulk_build_sha256,
+                        "source_sha256": source_identity,
+                        "phase": "registered",
+                    }
+                )
+                _save(layout.root, operation)
+                deadline = time.monotonic() + _READINESS_WAIT_SECONDS
+                while not (
+                    await _observe(layout.root)
+                    and await asyncio.to_thread(
+                        _ready_installation, layout, snapshot, base
+                    )
+                ):
+                    if time.monotonic() >= deadline:
+                        raise ServiceReadinessPendingError(operation.operation_id)
+                    await asyncio.sleep(0.5)
+                write_private(connection_path, connection.model_dump_json().encode())
+                operation = operation.model_copy(update={"phase": "ready"})
+                _save(layout.root, operation)
                 return operation
             if not prepared:
                 await _elevate(layout, "prepare")

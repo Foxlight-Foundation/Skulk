@@ -326,8 +326,50 @@ async def stage_service_runtime(root: Path) -> ServiceSnapshot:
         lock.close()
 
 
+def activate_staged_runtime(root: Path, snapshot: ServiceSnapshot) -> None:
+    """Select a staged generation for the next manager start, holding no lock.
+
+    The caller owns the installer and manager fences: local setup takes both
+    with the manager stopped, and the running manager takes the installer
+    fence beside the manager fence it already holds when it activates its own
+    successor before exiting for the OS service to restart it.
+    """
+    generation = root / "core-runtimes" / snapshot.generation
+    if (
+        ServiceSnapshot.model_validate_json(read_private(generation / "staged.json"))
+        != snapshot
+    ):
+        raise ValueError("staged service identity differs")
+    raw = read_private(generation / "snapshot.json", 67108864)
+    if hashlib.sha256(raw).hexdigest() != snapshot.manifest_sha256:
+        raise ValueError("service manifest integrity differs")
+    metadata = service_bootstrap.document(raw)
+    base = Path(sys.executable).resolve(strict=True)
+    if (
+        metadata.get("base_python") != str(base)
+        or metadata.get("base_sha256") != service_bootstrap.digest_file(base)
+        or metadata.get("entries")
+        != service_bootstrap.runtime_tree(generation / "runtime", base)
+    ):
+        raise ValueError("staged service runtime differs")
+    bootstrap = read_private(generation / "bootstrap.py", 65536)
+    if hashlib.sha256(bootstrap).hexdigest() != metadata.get("bootstrap_sha256"):
+        raise ValueError("service bootstrap differs")
+    write_private(root / "service-bootstrap.py", bootstrap)
+    write_private(
+        root / "core-runtime.json",
+        json.dumps(
+            {
+                "generation": snapshot.generation,
+                "manifest_sha256": snapshot.manifest_sha256,
+            },
+            sort_keys=True,
+        ).encode(),
+    )
+
+
 def activate_service_runtime(root: Path, snapshot: ServiceSnapshot) -> None:
-    """Select a staged service copy only while the generic manager is stopped.
+    """Select a staged generation with the manager stopped and both fences held.
 
     This owner-local setup step changes only the generic manager runtime. Plugin
     selections, credentials and independently supervised cleanup stay untouched.
@@ -336,42 +378,7 @@ def activate_service_runtime(root: Path, snapshot: ServiceSnapshot) -> None:
     try:
         owner = RuntimeLock(root, "manager.lock")
         try:
-            generation = root / "core-runtimes" / snapshot.generation
-            if (
-                ServiceSnapshot.model_validate_json(
-                    read_private(generation / "staged.json")
-                )
-                != snapshot
-            ):
-                raise ValueError("staged service identity differs")
-            raw = read_private(generation / "snapshot.json", 67108864)
-            if hashlib.sha256(raw).hexdigest() != snapshot.manifest_sha256:
-                raise ValueError("service manifest integrity differs")
-            metadata = service_bootstrap.document(raw)
-            base = Path(sys.executable).resolve(strict=True)
-            if (
-                metadata.get("base_python") != str(base)
-                or metadata.get("base_sha256") != service_bootstrap.digest_file(base)
-                or metadata.get("entries")
-                != service_bootstrap.runtime_tree(generation / "runtime", base)
-            ):
-                raise ValueError("staged service runtime differs")
-            bootstrap = read_private(generation / "bootstrap.py", 65536)
-            if hashlib.sha256(bootstrap).hexdigest() != metadata.get(
-                "bootstrap_sha256"
-            ):
-                raise ValueError("service bootstrap differs")
-            write_private(root / "service-bootstrap.py", bootstrap)
-            write_private(
-                root / "core-runtime.json",
-                json.dumps(
-                    {
-                        "generation": snapshot.generation,
-                        "manifest_sha256": snapshot.manifest_sha256,
-                    },
-                    sort_keys=True,
-                ).encode(),
-            )
+            activate_staged_runtime(root, snapshot)
         finally:
             owner.close()
     finally:

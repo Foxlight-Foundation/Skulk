@@ -3,9 +3,11 @@
 import asyncio
 import contextlib
 import json
+import time
 from pathlib import Path
 from typing import Literal, final
 
+from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
 
 from skulk.extensions.managed import ManagedConnection, ManagedOwner
@@ -22,13 +24,16 @@ from skulk.extensions.runtime_manager import (
     InstallRecoveryRequest,
     InstallSubmission,
     InventoryRequest,
+    ManagerBuildMismatchError,
     OperationRequest,
     ReleaseRequest,
+    ReloadRuntimeRequest,
     SourceRegistration,
     SubmitRequest,
     manager_request,
 )
 from skulk.extensions.runtime_service import RuntimeServiceStatus
+from skulk.extensions.service_snapshot import stage_service_runtime
 from skulk.extensions.types import ExtensionContext
 
 _WINDOW = TypeAdapter(list[int])
@@ -148,6 +153,8 @@ class ManagedServices:
         self.attachment: ManagedAttachment | None = None
         self.owners: dict[str, ManagedOwner] = {}
         self.task: asyncio.Task[None] | None = None
+        self.runtime_refresh: asyncio.Task[None] | None = None
+        self.runtime_refreshed = 0.0
         self.guard = asyncio.Lock()
         self.closed = False
 
@@ -185,6 +192,44 @@ class ManagedServices:
         assert self.attachment is not None
         await self.attachment.ensure()
 
+    def _schedule_runtime_refresh(self, differs: ManagerBuildMismatchError) -> None:
+        if self.runtime_refresh is not None and not self.runtime_refresh.done():
+            return
+        if time.monotonic() - self.runtime_refreshed < 300:
+            return
+        self.runtime_refreshed = time.monotonic()
+        assert self.connection is not None
+        root = Path(self.connection.manager_root)
+        logger.warning(
+            "plugin manager runs Skulk build "
+            f"{differs.manager[:12]} while this host runs {differs.live[:12]}; "
+            "staging a matching manager runtime"
+        )
+        self.runtime_refresh = asyncio.create_task(self._refresh_manager_runtime(root))
+
+    async def _refresh_manager_runtime(self, root: Path) -> None:
+        """Stage the manager runtime from this host's build and ask for a reload."""
+        try:
+            snapshot = await stage_service_runtime(root)
+            reply = await manager_request(
+                root,
+                ReloadRuntimeRequest(
+                    generation=snapshot.generation,
+                    manifest_sha256=snapshot.manifest_sha256,
+                ),
+            )
+            if "result" not in reply:
+                raise ValueError("manager runtime reload refused")
+            logger.info(
+                "plugin manager runtime refreshed to this host's Skulk build; "
+                "the service restarts on it"
+            )
+        except (OSError, ValueError, TimeoutError) as error:
+            logger.warning(
+                "plugin manager runtime refresh failed: "
+                f"{type(error).__name__}; rerun skulk-plugin-service setup"
+            )
+
     async def request(self, request: ManagementRequest) -> dict[str, JsonValue]:
         """Send one typed local management request; never accept an attachment override.
 
@@ -210,7 +255,15 @@ class ManagedServices:
         """Reconcile current manager membership without restarting Skulk's API."""
         async with self.guard:
             try:
-                await self._connect()
+                try:
+                    await self._connect()
+                except ManagerBuildMismatchError as differs:
+                    # A Skulk update restarted this host on a build the manager
+                    # does not run. Stage a matching manager runtime from this
+                    # process and ask the manager to reload; the OS service
+                    # restarts it and the next refresh attaches.
+                    self._schedule_runtime_refresh(differs)
+                    raise
                 assert self.connection is not None and self.context is not None
                 assert self.attachment is not None
                 result = await manager_request(

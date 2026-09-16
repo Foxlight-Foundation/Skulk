@@ -8,7 +8,11 @@ from typing import final
 from skulk.extensions.runtime_artifacts import measure_host
 from skulk.extensions.runtime_attachment import AttachmentRequest
 from skulk.extensions.runtime_files import RuntimeLock
-from skulk.extensions.runtime_manager import manager_request
+from skulk.extensions.runtime_manager import (
+    MANAGER_BUILD_DIFFERS,
+    ManagerBuildMismatchError,
+    manager_request,
+)
 
 
 @final
@@ -56,6 +60,10 @@ class ManagedAttachment:
                 skulk_build_sha256=self.build,
             )
             result = await manager_request(self.root, request)
+            if result.get("error") == MANAGER_BUILD_DIFFERS:
+                raise ManagerBuildMismatchError(
+                    str(result.get("manager")), str(result.get("live"))
+                )
             if result != {
                 "result": {
                     "transport_node_id": self.transport_node_id,

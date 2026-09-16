@@ -747,7 +747,17 @@ record and the isolated runtime envelope each carry a protocol number, and the
 host accepts the current protocol and, once there is one, the previous, so a
 capability published against the previous protocol keeps installing for one
 release cycle; a protocol outside the window is refused with a message naming
-what the host accepts. That refusal is the one manager error surfaced by name:
+what the host accepts. The manager survives a Skulk update. Its independent core runtime is a copy
+of the Skulk build it was set up with, and a host running a different build
+is refused with `manager_build_differs`. When a Skulk update restarts the
+host on a new build, the host stages a matching manager runtime from its own
+environment and asks the running manager to `reload_runtime`; the manager
+verifies the staged generation's seal, selects it, and exits, and the OS
+service's keep-alive restarts it on the new generation. `skulk-plugin-service
+setup` takes the same path when the service is registered and only the build
+moved, without elevation.
+
+That refusal is the one manager error surfaced by name:
 the manager answers `release_protocol_unsupported` with the kind, the number
 offered and the numbers accepted (integers only); the guided installer prints
 what to do (update Skulk on the host, or choose a release published for it);

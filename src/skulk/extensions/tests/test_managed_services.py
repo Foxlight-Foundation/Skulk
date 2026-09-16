@@ -356,3 +356,48 @@ def test_the_api_side_rebuilds_the_typed_refusal_from_the_fixed_vocabulary() -> 
         )
         is None
     )
+
+
+async def test_a_build_mismatch_stages_a_matching_runtime_and_asks_for_a_reload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The host refreshes the manager on its own after a Skulk update, once."""
+    from skulk.extensions.runtime_manager import (
+        ManagerBuildMismatchError,
+        ReloadRuntimeRequest,
+    )
+    from skulk.extensions.service_snapshot import ServiceSnapshot
+
+    staged: list[Path] = []
+    sent: list[object] = []
+
+    async def stage(root: Path) -> ServiceSnapshot:
+        staged.append(root)
+        return ServiceSnapshot(
+            generation="d" * 32,
+            manifest_sha256="e" * 64,
+            skulk_build_sha256="f" * 64,
+            copied_files=1,
+            copied_bytes=1,
+        )
+
+    async def request(root: Path, request: object) -> dict[str, JsonValue]:
+        sent.append(request)
+        return {"result": {"generation": "d" * 32, "restarting": True}}
+
+    monkeypatch.setattr(
+        "skulk.extensions.managed_services.stage_service_runtime", stage
+    )
+    monkeypatch.setattr("skulk.extensions.managed_services.manager_request", request)
+    services = ManagedServices(tmp_path / "connection.json")
+    services.connection = ServiceConnection(
+        manager_root=str(tmp_path), profile_id=PROFILE
+    )
+    differs = ManagerBuildMismatchError("a" * 64, "b" * 64)
+    services._schedule_runtime_refresh(differs)  # pyright: ignore[reportPrivateUsage]
+    services._schedule_runtime_refresh(differs)  # pyright: ignore[reportPrivateUsage]
+    assert services.runtime_refresh is not None
+    await services.runtime_refresh
+    assert staged == [tmp_path]
+    assert len(sent) == 1 and isinstance(sent[0], ReloadRuntimeRequest)
+    assert sent[0].generation == "d" * 32

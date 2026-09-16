@@ -218,3 +218,59 @@ def test_a_protocol_refusal_is_a_fixed_vocabulary_of_a_code_and_integers() -> No
         "offered": 3,
         "accepted": [1, 2],
     }
+
+
+async def test_reload_runtime_selects_the_staged_generation_and_stops(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The running manager activates its own successor and asks its loop to stop."""
+    from pydantic import JsonValue, TypeAdapter
+
+    from skulk.extensions.runtime_files import read_private
+    from skulk.extensions.runtime_manager import (
+        MANAGER_BUILD_DIFFERS,
+        ManagerBuildMismatchError,
+        ReloadRuntimeRequest,
+        build_mismatch_payload,
+    )
+    from skulk.extensions.tests.test_managed_services import manager_fixture
+    from skulk.extensions.tests.test_service_snapshot import staged
+
+    stops: list[bool] = []
+    manager = manager_fixture(tmp_path, monkeypatch)
+    manager.request_stop = lambda: stops.append(True)
+    snapshot = staged(tmp_path)
+    await manager.start()
+    try:
+        result = await manager_request(
+            tmp_path,
+            ReloadRuntimeRequest(
+                generation=snapshot.generation, manifest_sha256=snapshot.manifest_sha256
+            ),
+        )
+        assert result == {
+            "result": {"generation": snapshot.generation, "restarting": True}
+        }
+        assert TypeAdapter(dict[str, JsonValue]).validate_json(
+            read_private(tmp_path / "core-runtime.json")
+        ) == {
+            "generation": snapshot.generation,
+            "manifest_sha256": snapshot.manifest_sha256,
+        }
+        await asyncio.sleep(0.8)
+        assert stops == [True]
+        refused = await manager_request(
+            tmp_path,
+            ReloadRuntimeRequest(generation="b" * 32, manifest_sha256="c" * 64),
+        )
+        assert refused == {"error": "manager_operation_refused"}
+    finally:
+        await manager.close()
+    payload = TypeAdapter(dict[str, JsonValue]).validate_json(
+        build_mismatch_payload(ManagerBuildMismatchError("a" * 64, "b" * 64))
+    )
+    assert payload == {
+        "error": MANAGER_BUILD_DIFFERS,
+        "manager": "a" * 64,
+        "live": "b" * 64,
+    }
