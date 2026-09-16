@@ -18,6 +18,7 @@ from pydantic import (
     Field,
     JsonValue,
     TypeAdapter,
+    ValidationError,
     model_validator,
 )
 
@@ -86,27 +87,26 @@ def summaries_for(
             if surface.kind != "link" or not surface.ready or surface.url is None:
                 continue
             try:
-                surfaces.append(
-                    CapabilityNodeSurface(
-                        surface_id=surface.surface_id,
-                        title=surface.title,
-                        url=surface.url,
-                        ready=surface.ready,
-                    )
+                carried = CapabilityNodeSurface(
+                    surface_id=surface.surface_id,
+                    title=surface.title,
+                    url=surface.url,
+                    ready=surface.ready,
                 )
-            except ValueError:
-                # Display metadata the topology cannot carry (a non-HTTP URL,
-                # an oversized title) is left off the summary; it never
-                # decides whether the owner is available.
-                continue
-            actions.append(
-                CapabilityNodeAction(
+                action = CapabilityNodeAction(
                     action_id=f"open-{surface.surface_id}",
                     title=f"Open {surface.title}",
                     kind="surface",
                     surface_id=surface.surface_id,
                 )
-            )
+            except ValueError:
+                # Display metadata the topology cannot carry (a non-HTTP URL,
+                # a title or identifier at the shared text bound once the
+                # action's prefix is added) is left off the summary; it never
+                # decides whether the owner is available.
+                continue
+            surfaces.append(carried)
+            actions.append(action)
         try:
             summaries.append(
                 CapabilityNodeSummary(
@@ -437,11 +437,13 @@ class ManagedOwner:
                 self.available = False
                 self.host_callbacks_available = False
                 self._publish_summaries()
-                # OSError text can carry paths; its class is enough. The other
-                # two are this host's own fixed sentences.
+                # OSError text can carry paths and a validation error echoes
+                # the owner's payload; their class is enough. Every other
+                # ValueError and TimeoutError here is this host's own fixed
+                # sentence.
                 reason = (
                     type(error).__name__
-                    if isinstance(error, OSError)
+                    if isinstance(error, (OSError, ValidationError))
                     else f"{type(error).__name__}: {error}"
                 )
                 raise RuntimeError(f"managed owner unavailable ({reason})") from None

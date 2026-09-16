@@ -128,6 +128,19 @@ def test_malformed_display_metadata_never_decides_availability() -> None:
     assert [s.surface_id for s in summary.surfaces] == ["studio"]
     # Readiness is the surface's own report, not the node's lifecycle.
     assert summary.status == "degraded" and summary.surfaces[0].ready
+    # A title at the shared text bound is valid for the surface and not for
+    # the synthesized open action; the pair is dropped, the node is kept.
+    long = ManagedSurface(
+        surface_id="long",
+        title="t" * 198,
+        kind="link",
+        ready=True,
+        url="http://127.0.0.1:1/",
+    )
+    (summary,) = summaries_for(
+        "managed.fixture", (node.model_copy(update={"surfaces": (long,)}),), True
+    )
+    assert summary.surfaces == () and summary.actions == ()
 
 
 async def test_an_owner_answering_only_describe_stays_admitted(tmp_path: Path) -> None:
