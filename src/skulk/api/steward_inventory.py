@@ -4,7 +4,23 @@ import json
 import re
 from typing import Literal, cast
 
+from skulk.api.build_identity import known_build_identifier
 from skulk.shared.types.capability_nodes import CapabilityNodeSummary
+
+
+def observed_build_value(value: object) -> str | None:
+    """Return a reported build identifier without changing valid display casing.
+
+    Args:
+        value: Untrusted build version or commit from state or diagnostics.
+
+    Returns:
+        The stripped identifier, or None for non-string values and canonical
+        unavailable sentinels. This pure normalization has no side effects.
+    """
+    if not isinstance(value, str) or known_build_identifier(value) is None:
+        return None
+    return value.strip()
 
 
 def internal_service_question(question: str) -> bool:

@@ -32,6 +32,7 @@ from skulk.api.steward_inventory import (
     capability_inventory,
     internal_service_question,
     inventory_question,
+    observed_build_value,
     render_inventory,
 )
 from skulk.api.steward_observations import (
@@ -841,7 +842,9 @@ def _memory_bytes(value: object) -> int | None:
 _NODE_IDENTIFIER = re.compile(r"\b12D3Koo[A-Za-z0-9]+\b")
 
 
-def _node_name_lookup(state_payload: dict[str, object]) -> dict[str, str]:
+def _node_name_lookup(
+    state_payload: dict[str, object], *, include_capability_hosts: bool = False
+) -> dict[str, str]:
     """Map routing identities to unique operator-facing names.
 
     Internal libp2p identifiers are intentionally absent from the returned
@@ -867,6 +870,11 @@ def _node_name_lookup(state_payload: dict[str, object]) -> dict[str, str]:
         "nodeHealth",
     ):
         telemetry_node_ids.update(_as_object_dict(state_payload.get(field)))
+    # Capability-only API participants may not have a routable topology address.
+    # Only inventory requests need aliases for them; node-targeting tools keep
+    # their existing identity lookup.
+    if include_capability_hosts:
+        telemetry_node_ids.update(_as_object_dict(state_payload.get("capabilityNodes")))
     # Topology order remains authoritative for familiar fallback names. Extra
     # management/API participants are sorted so aliases do not depend on the
     # order in which their telemetry reached this API process.
@@ -1036,8 +1044,8 @@ def _node_summaries(
                 "model": identity.get("modelId"),
                 "chip": identity.get("chipId"),
                 "operatingSystem": identity.get("osVersion"),
-                "skulkVersion": identity.get("skulkVersion"),
-                "skulkCommit": identity.get("skulkCommit"),
+                "skulkVersion": observed_build_value(identity.get("skulkVersion")),
+                "skulkCommit": observed_build_value(identity.get("skulkCommit")),
                 "health": _as_object_dict(health_by_node.get(node_id)),
                 "memory": {
                     "ramTotalBytes": total_bytes,
@@ -1766,7 +1774,10 @@ class StewardHarness:
         if name == "get_capability_nodes":
             payload = await api.get_cluster_state()
             return bounded_inventory(
-                capability_inventory(payload, _node_name_lookup(payload)),
+                capability_inventory(
+                    payload,
+                    _node_name_lookup(payload, include_capability_hosts=True),
+                ),
                 MAX_TOOL_RESULT_CHARS,
             )
         if name == "get_cluster_versions":
@@ -1782,8 +1793,12 @@ class StewardHarness:
                     {
                         "name": node_names.get(str(node.node_id), "Unavailable node"),
                         "ok": node.ok,
-                        "skulkVersion": runtime.skulk_version if runtime else None,
-                        "skulkCommit": runtime.skulk_commit if runtime else None,
+                        "skulkVersion": observed_build_value(
+                            runtime.skulk_version if runtime else None
+                        ),
+                        "skulkCommit": observed_build_value(
+                            runtime.skulk_commit if runtime else None
+                        ),
                         "versionStatus": node.version_status,
                     }
                 )
