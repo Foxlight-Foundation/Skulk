@@ -278,7 +278,10 @@ class ManagedServices:
         self.owners: dict[str, ManagedOwner] = {}
         self.task: asyncio.Task[None] | None = None
         self.runtime_refresh: asyncio.Task[None] | None = None
-        self.runtime_refreshed = 0.0
+        # None until an attempt is made: the monotonic clock starts near zero
+        # at boot, so a zero origin would hold the first attempt for five
+        # minutes on a host that starts Skulk right after booting.
+        self.runtime_refreshed: float | None = None
         # Staging retains an interrupted copy and never activates it; an
         # environment that cannot be staged would grow one such copy every
         # attempt, so after a staging failure no further attempt is made until
@@ -326,7 +329,10 @@ class ManagedServices:
             return
         if self.runtime_refresh_exhausted:
             return
-        if time.monotonic() - self.runtime_refreshed < 300:
+        if (
+            self.runtime_refreshed is not None
+            and time.monotonic() - self.runtime_refreshed < 300
+        ):
             return
         self.runtime_refreshed = time.monotonic()
         assert self.connection is not None
@@ -400,6 +406,19 @@ class ManagedServices:
                     ),
                 )
                 if "result" not in reply:
+                    # The manager's own handler deadline answers with the
+                    # generic refusal while its selection may still finish;
+                    # a named refusal is final.
+                    if reply.get(
+                        "error"
+                    ) == "manager_operation_refused" and await asyncio.to_thread(
+                        _selected_within,
+                        root,
+                        snapshot.generation,
+                        _SELECTION_WAIT_SECONDS,
+                    ):
+                        await self._record_refresh(root, snapshot)
+                        return
                     raise ValueError("manager refused the staged generation")
             else:
                 # A manager from before this protocol: select the generation
