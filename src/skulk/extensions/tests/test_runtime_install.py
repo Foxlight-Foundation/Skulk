@@ -44,6 +44,8 @@ def artifacts(
     launcher: bool = False,
     duplicate_launcher: bool = False,
     platform: str = "macos-arm64",
+    runtime_protocol: int = 2,
+    release_protocol: int = 1,
 ) -> tuple[bytes, RuntimeTrust, QualifiedHost]:
     """Create an independently signed generic package with no private SDK metadata."""
     private_directory(directory)
@@ -137,11 +139,11 @@ def artifacts(
         publishers={"fixture": key.public_key().public_bytes_raw().hex()},
     )
     payload: dict[str, JsonValue] = {
-        "protocol": 2,
+        "protocol": runtime_protocol,
         "implementation": "cpython",
         "platform": host.platform,
         "release": {
-            "protocol": 1,
+            "protocol": release_protocol,
             "publisher": "fixture",
             "sequence": sequence,
             "created_at": now - 1,
@@ -445,3 +447,41 @@ async def test_cancelled_request_retains_installer_ownership(
         with pytest.raises(asyncio.CancelledError):
             await task
     assert installer.operation("3" * 32).state == "staged"
+
+
+def test_the_protocol_window_is_current_and_previous_and_refuses_beyond_by_name(
+    tmp_path: Path,
+) -> None:
+    """Every accepted protocol installs; one beyond is refused naming the window.
+
+    Both windows hold one member today; the moment a second exists this runs
+    both rows, so compatibility code is never left untested.
+    """
+    from skulk.extensions.runtime_artifacts import (
+        ACCEPTED_RELEASE_PROTOCOLS,
+        ACCEPTED_RUNTIME_PROTOCOLS,
+    )
+
+    assert 1 <= len(ACCEPTED_RELEASE_PROTOCOLS) <= 2
+    assert 1 <= len(ACCEPTED_RUNTIME_PROTOCOLS) <= 2
+    for runtime_protocol in ACCEPTED_RUNTIME_PROTOCOLS:
+        for release_protocol in ACCEPTED_RELEASE_PROTOCOLS:
+            directory = tmp_path / f"{runtime_protocol}-{release_protocol}"
+            metadata, trust, host = artifacts(
+                directory,
+                runtime_protocol=runtime_protocol,
+                release_protocol=release_protocol,
+            )
+            assert verify_runtime(metadata, trust, host, now=int(time.time()))
+    beyond = tmp_path / "beyond"
+    metadata, trust, host = artifacts(
+        beyond, runtime_protocol=max(ACCEPTED_RUNTIME_PROTOCOLS) + 1
+    )
+    with pytest.raises(ValueError, match="runtime protocol .* is not accepted"):
+        verify_runtime(metadata, trust, host, now=int(time.time()))
+    metadata, trust, host = artifacts(
+        tmp_path / "beyond-release",
+        release_protocol=max(ACCEPTED_RELEASE_PROTOCOLS) + 1,
+    )
+    with pytest.raises(ValueError, match="release protocol .* is not accepted"):
+        verify_runtime(metadata, trust, host, now=int(time.time()))
