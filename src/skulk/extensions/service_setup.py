@@ -251,10 +251,13 @@ async def setup_service() -> SetupOperation:
                     # elevation. Otherwise a corrected local build must be able
                     # to replace failed setup the same way. Either way the prior
                     # operation is retained and a new one begins.
+                    # The source identity always moves with the build, so the
+                    # gate is the registered service definition still naming
+                    # this interpreter (a moved interpreter re-registers) and
+                    # the manager answering.
                     refresh = (
                         operation.phase in {"registered", "ready"}
                         and operation.snapshot is not None
-                        and operation.source_sha256 == source_identity
                         and await asyncio.to_thread(_unit_names_base, layout, base)
                         and await _observe(layout.root)
                     )

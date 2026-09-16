@@ -771,9 +771,10 @@ generation. A manager from before this protocol answers neither by name; the
 host then reads the manager's selected generation itself, and if its build
 differs, stops the manager, selects the staged generation under both fences
 and lets the keep-alive restart it. `skulk-plugin-service setup` takes the
-reload path when the service is registered and answering, only the Skulk
-build moved, and the registered service definition still names the current
-interpreter; anything else takes the ordinary re-registration path. Both members of a window are tested on every change,
+reload path when the service is registered and answering and its registered
+definition still names the current interpreter (the Skulk build or its
+dependencies moved); a moved interpreter takes the ordinary re-registration
+path. Both members of a window are tested on every change,
 so the window never grows beyond two. Linux distribution names and versions do
 not restrict installation;
 native wheel tags and dependency checks determine binary compatibility. The

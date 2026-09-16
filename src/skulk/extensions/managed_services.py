@@ -107,7 +107,9 @@ def reload_legacy_manager(root: Path, snapshot: ServiceSnapshot) -> None:
         try:
             activate_service_runtime(root, snapshot)
             return
-        except ValueError:
+        except (OSError, ValueError):
+            # The fence is still held while the stopped manager finishes, or
+            # its keep-alive replacement took it first: keep asking.
             if time.monotonic() >= deadline:
                 raise
             time.sleep(0.25)
@@ -295,6 +297,17 @@ class ManagedServices:
             self._refresh_manager_runtime(root, differs.live)
         )
 
+    async def _settle_runtime_refresh(self) -> None:
+        """Finish or cancel a manager refresh before this observer detaches.
+
+        Cancellation drains the staging copy's owned work; a refresh must not
+        keep selecting or restarting a manager this host has let go of.
+        """
+        task, self.runtime_refresh = self.runtime_refresh, None
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
     async def _refresh_manager_runtime(self, root: Path, live: str) -> None:
         """Stage the manager runtime from this host's build and ask for a reload.
 
@@ -452,6 +465,7 @@ class ManagedServices:
             await asyncio.sleep(1)
 
     async def _detach(self) -> None:
+        await self._settle_runtime_refresh()
         owners, self.owners = tuple(self.owners.values()), {}
         await asyncio.gather(*(owner.on_stop() for owner in owners))
         if self.attachment is not None:
@@ -468,5 +482,6 @@ class ManagedServices:
             self.task.cancel()
             await asyncio.gather(self.task, return_exceptions=True)
             self.task = None
+        await self._settle_runtime_refresh()
         async with self.guard:
             await self._detach()
