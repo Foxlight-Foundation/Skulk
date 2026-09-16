@@ -100,3 +100,57 @@ async def test_the_owner_publishes_after_refresh_and_withdraws_on_stop(
     owner.poll_task = asyncio.create_task(observer())
     await owner.on_stop()
     assert withdrawn[-1] == ("managed.fixture", "node-1")
+
+
+def test_malformed_display_metadata_never_decides_availability() -> None:
+    """A surface the topology cannot carry is left off; the node is still summarized."""
+    node = ManagedNode(
+        node_id="node-1",
+        bundle_id="foxlight.video-studio",
+        version="0.1.0",
+        status="degraded",
+        configurable=True,
+        descriptors=(),
+        surfaces=(
+            ManagedSurface(
+                surface_id="bad", title="Bad", kind="link", ready=True, url="ftp://x"
+            ),
+            ManagedSurface(
+                surface_id="studio",
+                title="Studio",
+                kind="link",
+                ready=True,
+                url="http://127.0.0.1:1/s/",
+            ),
+        ),
+    )
+    (summary,) = summaries_for("managed.fixture", (node,), True)
+    assert [s.surface_id for s in summary.surfaces] == ["studio"]
+    # Readiness is the surface's own report, not the node's lifecycle.
+    assert summary.status == "degraded" and summary.surfaces[0].ready
+
+
+async def test_an_owner_answering_only_describe_stays_admitted(tmp_path: Path) -> None:
+    owner = ManagedOwner(
+        ManagedConnection(plugin_id="managed.fixture", state_root=str(tmp_path)),
+        attachment=ManagedAttachment(tmp_path, PROFILE),
+    )
+    owner.attachment = None
+    ctx = context()
+    owner.context = ctx
+    asked: list[str] = []
+
+    async def request(
+        message: dict[str, object], *, timeout: float
+    ) -> dict[str, object]:
+        asked.append(str(message["operation"]))
+        if message["operation"] == "describe-extended":
+            raise ValueError("managed operation refused")
+        return {
+            "transport_node_id": str(ctx.node_id),
+            "nodes": [_node().model_dump(mode="json")],
+        }
+
+    owner._request = request  # type: ignore[method-assign]
+    await owner.refresh()
+    assert asked == ["describe-extended", "describe"] and owner.available

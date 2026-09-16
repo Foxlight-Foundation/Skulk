@@ -85,14 +85,20 @@ def summaries_for(
         for surface in node.surfaces:
             if surface.kind != "link" or not surface.ready or surface.url is None:
                 continue
-            surfaces.append(
-                CapabilityNodeSurface(
-                    surface_id=surface.surface_id,
-                    title=surface.title,
-                    url=surface.url,
-                    ready=node.status == "ready",
+            try:
+                surfaces.append(
+                    CapabilityNodeSurface(
+                        surface_id=surface.surface_id,
+                        title=surface.title,
+                        url=surface.url,
+                        ready=surface.ready,
+                    )
                 )
-            )
+            except ValueError:
+                # Display metadata the topology cannot carry (a non-HTTP URL,
+                # an oversized title) is left off the summary; it never
+                # decides whether the owner is available.
+                continue
             actions.append(
                 CapabilityNodeAction(
                     action_id=f"open-{surface.surface_id}",
@@ -164,25 +170,43 @@ class ManagedConnection(_WireModel):
 
 
 class ManagedSurface(_WireModel):
-    surface_id: str
-    title: str
-    kind: str
-    ready: bool
-    url: str | None = None
+    """One surface a managed node reports in its extended description.
+
+    A surface is a user-facing endpoint the node serves (a page, or a link to
+    one). Only link surfaces reported ready with a URL reach the topology.
+    """
+
+    surface_id: str = Field(description="Manifest-declared surface identifier.")
+    title: str = Field(description="Operator-facing surface title.")
+    kind: str = Field(description="`link` opens the URL; other kinds are not shown.")
+    ready: bool = Field(description="Whether the node reports the surface answering.")
+    url: str | None = Field(default=None, description="Where a ready link opens.")
 
 
 class ManagedNode(_WireModel):
-    node_id: str
-    bundle_id: str
-    version: str
-    status: str
-    configurable: bool
-    # The extended description adds what the topology shows: a title, the
-    # surfaces with their readiness, and projections this host reads elsewhere.
-    title: str | None = None
-    surfaces: tuple[ManagedSurface, ...] = Field(default=(), max_length=4)
-    steward: tuple[dict[str, JsonValue], ...] = Field(default=(), max_length=16)
-    operations_available: bool = False
+    """One installed node as the owner describes it over its control socket.
+
+    The basic description carries identity, lifecycle status and the facets
+    this host manages; the extended description adds what the topology shows.
+    """
+
+    node_id: str = Field(description="Stable installed node identifier.")
+    bundle_id: str = Field(description="Bundle the node runs.")
+    version: str = Field(description="Bundle version the node runs.")
+    status: str = Field(description="Owner-reported lifecycle status.")
+    configurable: bool = Field(description="Whether ordinary configuration exists.")
+    title: str | None = Field(default=None, description="Operator title, if declared.")
+    surfaces: tuple[ManagedSurface, ...] = Field(
+        default=(), max_length=4, description="Declared surfaces with readiness."
+    )
+    steward: tuple[dict[str, JsonValue], ...] = Field(
+        default=(),
+        max_length=16,
+        description="Steward exposure projection; opaque here.",
+    )
+    operations_available: bool = Field(
+        default=False, description="Whether the node runs durable operations."
+    )
     credentials_configurable: bool = False
     preflight_available: bool = False
     setup_available: bool = False
@@ -295,6 +319,8 @@ class ManagedOwner:
         self.host_task: asyncio.Task[None] | None = None
         self.host_callbacks_available = False
         self.published: set[str] = set()
+        self.unavailable_reason: str | None = None
+        self.unavailable_noted = 0.0
         self.refresh_lock = asyncio.Lock()
 
     def chat_middleware(self) -> None:
@@ -374,9 +400,14 @@ class ManagedOwner:
             try:
                 if self.attachment is not None:
                     await self.attachment.ensure()
-                result = await self._request(
-                    {"operation": "describe-extended"}, timeout=1
-                )
+                try:
+                    result = await self._request(
+                        {"operation": "describe-extended"}, timeout=1
+                    )
+                except ValueError:
+                    # An owner from before the extended description answers
+                    # only describe; it stays admitted, without topology detail.
+                    result = await self._request({"operation": "describe"}, timeout=1)
                 snapshot = _Description.model_validate_json(json.dumps(result))
                 if self.context is None or snapshot.transport_node_id != str(
                     self.context.node_id
@@ -402,11 +433,18 @@ class ManagedOwner:
                 self.observed = time.monotonic()
                 self.available = True
                 self._publish_summaries()
-            except (OSError, ValueError, TimeoutError):
+            except (OSError, ValueError, TimeoutError) as error:
                 self.available = False
                 self.host_callbacks_available = False
                 self._publish_summaries()
-                raise RuntimeError("managed owner unavailable") from None
+                # OSError text can carry paths; its class is enough. The other
+                # two are this host's own fixed sentences.
+                reason = (
+                    type(error).__name__
+                    if isinstance(error, OSError)
+                    else f"{type(error).__name__}: {error}"
+                )
+                raise RuntimeError(f"managed owner unavailable ({reason})") from None
 
     def _publish_summaries(self) -> None:
         """Project the installed nodes onto the topology, withdrawing what left.
@@ -420,7 +458,11 @@ class ManagedOwner:
         if self.context is None:
             return
         current: set[str] = set()
-        for summary in summaries_for(self.name, self.nodes, self.available):
+        try:
+            summaries = summaries_for(self.name, self.nodes, self.available)
+        except Exception:  # noqa: BLE001 - topology is a projection, never a health input
+            summaries = ()
+        for summary in summaries:
             try:
                 self.context.publish_capability_node(summary)
             except Exception:  # noqa: BLE001 - one bad projection must not stop the rest
@@ -467,9 +509,27 @@ class ManagedOwner:
 
     async def _poll(self) -> None:
         while True:
-            with contextlib.suppress(RuntimeError):
+            try:
                 await self.refresh()
+                self.unavailable_reason = None
+            except RuntimeError as error:
+                self._note_unavailable(str(error))
+            except Exception as error:  # noqa: BLE001 - observation must outlive one bad snapshot
+                self._note_unavailable(f"{type(error).__name__}")
             await asyncio.sleep(1)
+
+    def _note_unavailable(self, reason: str) -> None:
+        """Log why this owner is unavailable, once per reason and at most once a minute.
+
+        The refusals are this host's own fixed sentences; nothing from the
+        owner's output is repeated. Without this line an owner that never
+        becomes available leaves no trace anywhere an operator can read.
+        """
+        now = time.monotonic()
+        if reason != self.unavailable_reason or now - self.unavailable_noted >= 60:
+            logger.warning(f"managed owner {self.name} unavailable: {reason}")
+            self.unavailable_reason = reason
+            self.unavailable_noted = now
 
     async def on_stop(self) -> None:
         """Stop observation and admission without stopping independent owner cleanup."""
