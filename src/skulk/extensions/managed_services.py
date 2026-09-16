@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import signal
+import sys
 import time
 from pathlib import Path
 from typing import Literal, final
@@ -37,7 +38,10 @@ from skulk.extensions.runtime_manager import (
     manager_request,
 )
 from skulk.extensions.runtime_service import RuntimeServiceStatus
-from skulk.extensions.service_setup import record_refreshed_snapshot
+from skulk.extensions.service_setup import (
+    record_refreshed_snapshot,
+    registered_unit_names_base,
+)
 from skulk.extensions.service_snapshot import (
     ServiceSnapshot,
     activate_service_runtime,
@@ -358,6 +362,17 @@ class ManagedServices:
             reloads = (
                 isinstance(inventory, dict) and inventory.get("reload_runtime") is True
             )
+            if not reloads and not await asyncio.to_thread(
+                registered_unit_names_base, Path(sys.executable).resolve(strict=True)
+            ):
+                # The legacy path selects a generation sealed to this
+                # interpreter for the OS service to start; a service
+                # registered to invoke another one could not come back, and
+                # only an elevated setup re-registers it. Nothing is staged.
+                raise ValueError(
+                    "the registered service invokes another interpreter; "
+                    "rerun skulk-plugin-service setup"
+                )
             snapshot = staged_generation_for(root, live)
             if snapshot is None:
                 snapshot = await stage_service_runtime(root)
@@ -378,15 +393,16 @@ class ManagedServices:
                 await asyncio.to_thread(reload_legacy_manager, root, snapshot)
             await self._record_refresh(root, snapshot)
         except ValueError as error:
-            # An explicit refusal: the candidate generation is not selected
-            # and can go, whether it was staged now or reused. Transport
+            # An explicit refusal (or a service this host cannot restart): the
+            # candidate generation is not selected and can go, whether it was
+            # staged now or reused. Transport
             # failures are ambiguous (the manager drains an activation past
             # the request deadline), so those keep it.
             if candidate is not None and not _selected(root, candidate.name):
                 shutil.rmtree(candidate, ignore_errors=True)
             logger.warning(
-                "plugin manager runtime refresh failed: "
-                f"{type(error).__name__}; rerun skulk-plugin-service setup"
+                f"plugin manager runtime refresh failed: {error}; "
+                "rerun skulk-plugin-service setup"
             )
         except (OSError, TimeoutError) as error:
             # The manager may still be verifying the seal past the request

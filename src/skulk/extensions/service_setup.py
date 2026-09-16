@@ -189,6 +189,16 @@ async def _observe(root: Path) -> bool:
         return False
 
 
+def registered_unit_names_base(base: Path) -> bool:
+    """Whether this user's registered OS service invokes ``base``.
+
+    A generation staged from this process is sealed to its interpreter; a
+    service registered to invoke another one cannot start on it, so a host
+    checks this before it selects a generation the OS service must start.
+    """
+    return _unit_names_base(local_layout(os.getuid()), base)
+
+
 def _unit_names_base(layout: ServiceLayout, base: Path) -> bool:
     """Whether the registered OS service still invokes this interpreter."""
     try:

@@ -579,6 +579,52 @@ async def test_a_refused_reload_removes_the_unselected_candidate_generation(
     assert selected.exists()
 
 
+async def test_a_legacy_manager_under_another_interpreter_is_left_for_setup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The legacy path never stops a service this interpreter could not restart."""
+    from skulk.extensions import managed_services
+    from skulk.extensions.runtime_manager import ManagerBuildMismatchError
+    from skulk.extensions.service_snapshot import ServiceSnapshot
+
+    signalled: list[int] = []
+
+    async def stage(root: Path) -> ServiceSnapshot:
+        raise AssertionError("nothing is staged for a service setup must repair")
+
+    async def request(root: Path, request: object) -> dict[str, JsonValue]:
+        assert isinstance(request, InventoryRequest)
+        return {"result": {"installations": []}}
+
+    def record(pid: int, signal_number: int) -> None:
+        signalled.append(pid)
+
+    def another_interpreter(base: Path) -> bool:
+        return False
+
+    def running(root: Path) -> list[int]:
+        return [os.getpid()]
+
+    monkeypatch.setattr(managed_services, "stage_service_runtime", stage)
+    monkeypatch.setattr(managed_services, "manager_request", request)
+    monkeypatch.setattr(
+        managed_services, "registered_unit_names_base", another_interpreter
+    )
+    monkeypatch.setattr(managed_services, "manager_pids", running)
+    monkeypatch.setattr(managed_services.os, "kill", record)
+    services = ManagedServices(tmp_path / "connection.json")
+    services.connection = ServiceConnection(
+        manager_root=str(tmp_path), profile_id=PROFILE
+    )
+    services._schedule_runtime_refresh(  # pyright: ignore[reportPrivateUsage]
+        ManagerBuildMismatchError("a" * 64, "f" * 64)
+    )
+    assert services.runtime_refresh is not None
+    await services.runtime_refresh
+    assert signalled == []
+    assert not (tmp_path / "core-runtimes").exists()
+
+
 def test_a_generation_staged_for_the_live_build_is_reused_not_restaged(
     tmp_path: Path,
 ) -> None:

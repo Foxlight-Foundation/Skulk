@@ -773,7 +773,10 @@ name it, so the host stops that manager, selects the staged generation under
 both fences and lets the keep-alive restart it, while a manager that names it
 and still refuses the generation is a refusal, and the unselected candidate
 is removed. A stopped manager keeps its fence until it has closed every owner
-it supervises, and the host waits for that exit before selecting. A refresh
+it supervises, and the host waits for that exit before selecting, and only
+when the registered service invokes this host's interpreter, since the staged
+generation is sealed to it; otherwise the host leaves the service running and
+asks for `skulk-plugin-service setup`. A refresh
 that succeeds records the new generation in the setup state, so
 `skulk-plugin-service status` verifies the copy the service runs on. `skulk-plugin-service setup` takes the
 reload path when the service is registered and answering and its registered
