@@ -225,7 +225,9 @@ class ManagedNode(_WireModel):
     proposal_actions_available: bool = Field(
         default=False, description="Whether proposals can be decided here."
     )
-    descriptors: tuple[CapabilityDescriptor, ...] = Field(max_length=8)
+    descriptors: tuple[CapabilityDescriptor, ...] = Field(
+        max_length=8, description="Capability contracts this node serves."
+    )
 
     def public(self) -> ConfigurableNode:
         """Project an installed node onto the ordinary management inventory."""
@@ -500,6 +502,9 @@ class ManagedOwner:
         """Begin nonblocking local health observation; the OS owns the service."""
         if self.poll_task is not None:
             return
+        # A new observer lifetime: an owner stopped and started again (an
+        # installation that left the inventory and came back) publishes again.
+        self.stopping = False
         self.context = context
         if self.attachment is not None:
             self.attachment.retain(str(context.node_id))
