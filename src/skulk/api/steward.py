@@ -27,6 +27,13 @@ from uuid import uuid4
 import anyio
 from pydantic import BaseModel, ConfigDict, Field
 
+from skulk.api.steward_inventory import (
+    bounded_inventory,
+    capability_inventory,
+    internal_service_question,
+    inventory_question,
+    render_inventory,
+)
 from skulk.api.steward_observations import (
     StewardObservations,
     factual_question,
@@ -179,6 +186,13 @@ Rules:
   names begin with "operator". An empty operator field means there are none.
 - "Placing" means only the entries in operatorActivePlacements. Ready or
   running instances are already placed and must not be described as placing.
+- Do not volunteer the resident model, steward role, or its hosting node in routine answers.
+  Discuss internal services only when the operator explicitly asks about them.
+- Capability nodes are installed extensions providing fabric services/actions, not
+  GPUs, model modalities, or backend engines. For available capabilities, read
+  get_capability_nodes; distinguish owner availability from permission to execute.
+- Report Skulk versions only from actual skulkVersion/skulkCommit evidence.
+  A current/consistent build status does not mean the latest release.
 - fabricSystemInstances are internal services, not operator-placed models. Do
   not count them as active operator models unless explicitly asked about
   internal fabric services.
@@ -248,14 +262,14 @@ def steward_tool_definitions(*, include_proposals: bool = True) -> list[dict[str
             "Fetch the cluster's authoritative state summary: nodes with "
             "exact identity, memory, accelerator and backend facts; model "
             "instances split into current operator lifecycle buckets versus "
-            "internal fabric services; explicitly historical terminal "
+            "internal services only on explicit internal-service questions; historical terminal "
             "failures; and typed download records. This is the first thing "
             "to look at, and it supersedes earlier conversation claims.",
             no_args,
         ),
         (
             "get_node_resources",
-            "Fetch per-node resource and capability detail: advertised "
+            "Fetch per-node hardware and inference-backend detail: advertised "
             "backend engines, data transport, zenoh peer counts, and "
             "capability conflicts.",
             {
@@ -301,8 +315,15 @@ def steward_tool_definitions(*, include_proposals: bool = True) -> list[dict[str
         ),
         (
             "get_cluster_versions",
-            "Fetch per-node Skulk version status. Mixed versions across a "
+            "Fetch actual per-node Skulk versions and commits. Mixed versions across a "
             "cluster are unsupported and explain many strange failures.",
+            no_args,
+        ),
+        (
+            "get_capability_nodes",
+            "Read current capability-node advertisements, owner status and bundle versions. "
+            "An empty result is not proof that no packages are installed. "
+            "These are extension services, not inference backend or hardware capabilities.",
             no_args,
         ),
         (
@@ -1015,6 +1036,8 @@ def _node_summaries(
                 "model": identity.get("modelId"),
                 "chip": identity.get("chipId"),
                 "operatingSystem": identity.get("osVersion"),
+                "skulkVersion": identity.get("skulkVersion"),
+                "skulkCommit": identity.get("skulkCommit"),
                 "health": _as_object_dict(health_by_node.get(node_id)),
                 "memory": {
                     "ramTotalBytes": total_bytes,
@@ -1202,12 +1225,19 @@ def _compact_node_summary(node: dict[str, object]) -> dict[str, object]:
             "total": memory.get("ramTotalGiB"),
             "available": memory.get("ramAvailableGiB"),
         },
+        **{
+            key: node[key]
+            for key in ("skulkVersion", "skulkCommit")
+            if node.get(key) is not None
+        },
         "backends": node.get("backends"),
         "supports": node.get("supports"),
     }
 
 
-def steward_operator_tool_result(state_payload: dict[str, object]) -> str:
+def steward_operator_tool_result(
+    state_payload: dict[str, object], *, include_internal_services: bool = False
+) -> str:
     """Render authoritative operator truth within the steward tool budget.
 
     The complete compact record is preferred. If it is still too large, the
@@ -1217,11 +1247,19 @@ def steward_operator_tool_result(state_payload: dict[str, object]) -> str:
 
     Args:
         state_payload: JSON-compatible cluster state returned by the API.
+        include_internal_services: Include resident service details only for an explicit question.
 
     Returns:
         A valid JSON document no longer than :data:`MAX_TOOL_RESULT_CHARS`.
     """
     summary = steward_operator_summary(state_payload)
+    if not include_internal_services:
+        summary.pop("fabricSystemInstances", None)
+        summary["historicalTerminalFailures"] = [
+            failure
+            for failure in _as_object_list(summary.get("historicalTerminalFailures"))
+            if not _as_object_dict(failure).get("systemRole")
+        ]
     observations = observe_state(state_payload, read_at=datetime.now(timezone.utc))
     summary["observations"] = observations.model_dump(mode="json")
     summary["nodeCount"] = observations.node_count
@@ -1233,7 +1271,7 @@ def steward_operator_tool_result(state_payload: dict[str, object]) -> str:
         "operatorActivePlacements",
         "operatorReadyOrRunningInstances",
         "operatorStoppingOrFailedInstances",
-        "fabricSystemInstances",
+        *(("fabricSystemInstances",) if include_internal_services else ()),
         "historicalTerminalFailures",
     )
     nodes = [
@@ -1287,7 +1325,7 @@ def steward_operator_tool_result(state_payload: dict[str, object]) -> str:
         "operatorActivePlacements",
         "operatorReadyOrRunningInstances",
         "operatorStoppingOrFailedInstances",
-        "fabricSystemInstances",
+        *(("fabricSystemInstances",) if include_internal_services else ()),
     )
     for field in current_fields:
         for row in _as_object_list(summary.get(field)):
@@ -1450,6 +1488,7 @@ class StewardHarness:
         self._api = api
         self._proposals_allowed = proposals_allowed
         self._extension_tools: tuple[StewardToolBinding, ...] = ()
+        self._include_internal_services = False
         # The inner TextGeneration currently in flight for this turn, so an
         # abandoned stream (client disconnect, cancel button) can stop the
         # runner instead of leaving it generating for nobody.
@@ -1653,7 +1692,9 @@ class StewardHarness:
             )
         if name == "get_cluster_state":
             payload = await api.get_cluster_state()
-            return steward_operator_tool_result(payload)
+            return steward_operator_tool_result(
+                payload, include_internal_services=self._include_internal_services
+            )
         if name == "get_node_resources":
             payload = await api.get_cluster_state()
             node_names = _node_name_lookup(payload)
@@ -1722,28 +1763,46 @@ class StewardHarness:
                     ),
                 }
             )
+        if name == "get_capability_nodes":
+            payload = await api.get_cluster_state()
+            return bounded_inventory(
+                capability_inventory(payload, _node_name_lookup(payload)),
+                MAX_TOOL_RESULT_CHARS,
+            )
         if name == "get_cluster_versions":
             cluster = await api.get_cluster_diagnostics()
             payload = await api.get_cluster_state()
             node_names = _node_name_lookup(payload)
-            return _bounded(
+            rows: list[dict[str, object]] = []
+            for node in cluster.nodes:
+                runtime = (
+                    node.diagnostics.runtime if node.ok and node.diagnostics else None
+                )
+                rows.append(
+                    {
+                        "name": node_names.get(str(node.node_id), "Unavailable node"),
+                        "ok": node.ok,
+                        "skulkVersion": runtime.skulk_version if runtime else None,
+                        "skulkCommit": runtime.skulk_commit if runtime else None,
+                        "versionStatus": node.version_status,
+                    }
+                )
+            observed = observe_state(payload, read_at=datetime.now(timezone.utc))
+            return bounded_inventory(
                 {
+                    "source": "/v1/diagnostics/cluster",
+                    "observedAt": cluster.generated_at,
                     "versionStatus": cluster.version_status,
-                    "masterNode": node_names.get(str(cluster.master_node_id))
-                    if cluster.master_node_id is not None
-                    else None,
-                    "nodes": [
-                        {
-                            "name": node_names.get(
-                                str(node.node_id), "Unavailable node"
-                            ),
-                            "ok": node.ok,
-                            "versionStatus": node.version_status,
-                            "error": node.error,
-                        }
-                        for node in cluster.nodes
-                    ],
-                }
+                    "coverageComplete": observed.node_count == len(rows)
+                    and bool(rows)
+                    and all(
+                        row["ok"] and row["skulkVersion"] and row["skulkCommit"]
+                        for row in rows
+                    ),
+                    "nodes": rows,
+                    "releaseCurrency": "not checked",
+                },
+                MAX_TOOL_RESULT_CHARS,
             )
         if name == "get_performance_envelopes":
             report = await api.get_performance_envelopes()
@@ -1942,6 +2001,16 @@ class StewardHarness:
             return
         instance_id, model_id = located
 
+        question = next(
+            (
+                message.content.lower()
+                for message in reversed(history)
+                if message.role == "user"
+            ),
+            "",
+        )
+        self._include_internal_services = internal_service_question(question)
+
         messages: list[ChatCompletionMessage] = [
             ChatCompletionMessage(role="system", content=system_prompt)
         ]
@@ -2023,6 +2092,36 @@ class StewardHarness:
             ),
             "",
         )
+        inventory_topic = inventory_question(question)
+        if inventory_topic is not None:
+            tool = (
+                "get_cluster_versions"
+                if inventory_topic == "versions"
+                else "get_capability_nodes"
+            )
+            yield TokenChunk(
+                model=ModelId(STEWARD_VIRTUAL_MODEL_ID),
+                text=tool + "\n",
+                token_id=-1,
+                usage=None,
+                is_thinking=True,
+            )
+            inventory = await self.execute_tool(tool, {})
+            inventory_payload: dict[str, object]
+            try:
+                inventory_payload = _as_object_dict(
+                    cast("object", json.loads(inventory))
+                )
+            except json.JSONDecodeError:
+                inventory_payload = {"error": "invalid inventory"}
+            yield TokenChunk(
+                model=ModelId(STEWARD_VIRTUAL_MODEL_ID),
+                text=render_inventory(inventory_payload, inventory_topic),
+                token_id=-1,
+                usage=None,
+                finish_reason="stop",
+            )
+            return
         topic = factual_question(question)
         if topic is not None:
             try:
