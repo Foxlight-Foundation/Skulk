@@ -22,6 +22,7 @@ from skulk.extensions.runtime_download import (
     SourceUpdate,
 )
 from skulk.extensions.runtime_manager import (
+    PROTOCOL_UNSUPPORTED,
     InstallationRequest,
     InstallRecoveryRequest,
     InstallSubmission,
@@ -35,6 +36,32 @@ from skulk.extensions.runtime_selection import RuntimeSelection
 
 _OBJECT = TypeAdapter(dict[str, JsonValue])
 _IDENTIFIER = TypeAdapter[str](InstallationIdentifier)
+
+
+_WINDOW = TypeAdapter(list[int])
+
+
+def protocol_refusal(response: dict[str, JsonValue]) -> str | None:
+    """The one manager error the terminal names: a protocol outside the window.
+
+    Only the fixed vocabulary is read (a code, a kind, integers); anything else
+    in the response stays undisclosed.
+    """
+    if response.get("error") != PROTOCOL_UNSUPPORTED:
+        return None
+    kind = response.get("kind")
+    offered = response.get("offered")
+    try:
+        accepted = _WINDOW.validate_python(response.get("accepted"), strict=True)
+    except ValueError:
+        return None
+    if kind not in ("release", "runtime") or not isinstance(offered, int):
+        return None
+    window = " or ".join(str(item) for item in accepted)
+    return (
+        f"This host accepts {kind} protocol {window}; the release offers {offered}. "
+        "Update Skulk on this host, or choose a release published for it."
+    )
 
 
 @final
@@ -56,6 +83,9 @@ class TerminalInstaller:
     async def _call(self, request: ManagerRequest) -> dict[str, JsonValue]:
         response = await self.request(request)
         if "error" in response or "result" not in response:
+            named = protocol_refusal(response)
+            if named is not None:
+                self.output(named)
             # Neither manager errors nor rejected credential inputs belong in
             # terminal diagnostics. The resume command was printed before effects.
             raise ValueError("manager request incomplete; inspect retained status")

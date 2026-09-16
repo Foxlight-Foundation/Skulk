@@ -324,3 +324,24 @@ async def test_slow_release_inspection_does_not_block_inventory(
             await asyncio.gather(operation, return_exceptions=True)
         await services.on_stop()
         await manager.close()
+
+
+def test_the_api_side_rebuilds_the_typed_refusal_from_the_fixed_vocabulary() -> None:
+    from skulk.extensions.managed_services import protocol_refusal
+    from skulk.extensions.runtime_artifacts import ProtocolUnsupportedError
+
+    refused = protocol_refusal(
+        {
+            "error": "release_protocol_unsupported",
+            "kind": "runtime",
+            "offered": 3,
+            "accepted": [2],
+        }
+    )
+    assert isinstance(refused, ProtocolUnsupportedError)
+    assert (refused.kind, refused.offered, refused.accepted) == ("runtime", 3, (2,))
+    assert protocol_refusal({"error": "manager_operation_refused"}) is None
+    assert (
+        protocol_refusal({"error": "release_protocol_unsupported", "accepted": ["2"]})
+        is None
+    )

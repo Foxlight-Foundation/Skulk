@@ -460,6 +460,7 @@ def test_the_protocol_window_is_current_and_previous_and_refuses_beyond_by_name(
     from skulk.extensions.runtime_artifacts import (
         ACCEPTED_RELEASE_PROTOCOLS,
         ACCEPTED_RUNTIME_PROTOCOLS,
+        ProtocolUnsupportedError,
     )
 
     assert 1 <= len(ACCEPTED_RELEASE_PROTOCOLS) <= 2
@@ -477,11 +478,23 @@ def test_the_protocol_window_is_current_and_previous_and_refuses_beyond_by_name(
     metadata, trust, host = artifacts(
         beyond, runtime_protocol=max(ACCEPTED_RUNTIME_PROTOCOLS) + 1
     )
-    with pytest.raises(ValueError, match="runtime protocol .* is not accepted"):
+    with pytest.raises(ProtocolUnsupportedError) as refused:
         verify_runtime(metadata, trust, host, now=int(time.time()))
+    # The refusal is typed and carries only the numbers, so every surface can
+    # name it without disclosing anything else from the release.
+    assert (refused.value.kind, refused.value.offered, refused.value.accepted) == (
+        "runtime",
+        max(ACCEPTED_RUNTIME_PROTOCOLS) + 1,
+        ACCEPTED_RUNTIME_PROTOCOLS,
+    )
+    assert "is not accepted; this host accepts" in str(refused.value)
     metadata, trust, host = artifacts(
         tmp_path / "beyond-release",
         release_protocol=max(ACCEPTED_RELEASE_PROTOCOLS) + 1,
     )
-    with pytest.raises(ValueError, match="release protocol .* is not accepted"):
+    with pytest.raises(ProtocolUnsupportedError) as refused:
         verify_runtime(metadata, trust, host, now=int(time.time()))
+    assert (refused.value.kind, refused.value.offered) == (
+        "release",
+        max(ACCEPTED_RELEASE_PROTOCOLS) + 1,
+    )

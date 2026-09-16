@@ -141,6 +141,25 @@ ACCEPTED_RUNTIME_PROTOCOLS: tuple[int, ...] = (2,)
 """Isolated runtime envelope protocols this host installs, on the same rule."""
 
 
+class ProtocolUnsupportedError(ValueError):
+    """A release outside this host's protocol window, named without disclosure.
+
+    Carries only the protocol kind, the number offered and the numbers this host
+    accepts, so the manager, the guided installer and the plugin routes can say
+    exactly what to do (update the host, or pick a release published for it)
+    without surfacing anything else from the release.
+    """
+
+    def __init__(self, kind: str, offered: int, accepted: tuple[int, ...]) -> None:
+        window = " or ".join(str(item) for item in accepted)
+        super().__init__(
+            f"{kind} protocol {offered} is not accepted; this host accepts {window}"
+        )
+        self.kind = kind
+        self.offered = offered
+        self.accepted = accepted
+
+
 def _accepted(name: str, accepted: tuple[int, ...]) -> Callable[[int], int]:
     def check(value: int) -> int:
         if value not in accepted:
@@ -286,6 +305,34 @@ def measure_host() -> QualifiedHost:
     )
 
 
+def _check_protocol_window(runtime: dict[str, JsonValue]) -> None:
+    """Name a protocol outside the window before the claims are validated.
+
+    The claim models refuse the same values; this runs first so the refusal is
+    the typed one every surface can name. Anything malformed is left to the
+    claim models' own validation.
+    """
+    release = runtime.get("release")
+    offered_runtime = runtime.get("protocol")
+    offered_release = release.get("protocol") if isinstance(release, dict) else None
+    if (
+        isinstance(offered_runtime, int)
+        and not isinstance(offered_runtime, bool)
+        and offered_runtime not in ACCEPTED_RUNTIME_PROTOCOLS
+    ):
+        raise ProtocolUnsupportedError(
+            "runtime", offered_runtime, ACCEPTED_RUNTIME_PROTOCOLS
+        )
+    if (
+        isinstance(offered_release, int)
+        and not isinstance(offered_release, bool)
+        and offered_release not in ACCEPTED_RELEASE_PROTOCOLS
+    ):
+        raise ProtocolUnsupportedError(
+            "release", offered_release, ACCEPTED_RELEASE_PROTOCOLS
+        )
+
+
 def verify_runtime(
     metadata: bytes, trust: RuntimeTrust, host: QualifiedHost, *, now: int
 ) -> VerifiedRuntime:
@@ -297,6 +344,7 @@ def verify_runtime(
     if len(metadata) > 131072:
         raise ValueError("runtime metadata exceeds bound")
     signed = _Signed.model_validate_json(metadata)
+    _check_protocol_window(signed.runtime)
     payload = canonical_json(signed.runtime)
     claims = _RuntimeClaims.model_validate_json(payload)
     release = claims.release

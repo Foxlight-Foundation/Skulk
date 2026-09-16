@@ -6,11 +6,11 @@ import json
 from pathlib import Path
 from typing import Literal, final
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
 
 from skulk.extensions.managed import ManagedConnection, ManagedOwner
 from skulk.extensions.managed_attachment import ManagedAttachment
-from skulk.extensions.runtime_artifacts import Digest
+from skulk.extensions.runtime_artifacts import Digest, ProtocolUnsupportedError
 from skulk.extensions.runtime_attachment import (
     InstallationIdentifier,
     ProfileIdentifier,
@@ -30,6 +30,22 @@ from skulk.extensions.runtime_manager import (
 )
 from skulk.extensions.runtime_service import RuntimeServiceStatus
 from skulk.extensions.types import ExtensionContext
+
+_WINDOW = TypeAdapter(list[int])
+
+
+def protocol_refusal(result: dict[str, JsonValue]) -> ProtocolUnsupportedError | None:
+    """Rebuild the typed refusal from the manager's fixed vocabulary, or nothing."""
+    if result.get("error") != "release_protocol_unsupported":
+        return None
+    kind, offered = result.get("kind"), result.get("offered")
+    try:
+        accepted = _WINDOW.validate_python(result.get("accepted"), strict=True)
+    except ValueError:
+        return None
+    if kind not in ("release", "runtime") or not isinstance(offered, int):
+        return None
+    return ProtocolUnsupportedError(str(kind), offered, tuple(accepted))
 
 
 class ManagedInstallation(BaseModel):
@@ -180,6 +196,9 @@ class ManagedServices:
         result = await manager_request(root, request)
         payload = result.get("result")
         if set(result) != {"result"} or not isinstance(payload, dict):
+            refused = protocol_refusal(result)
+            if refused is not None:
+                raise refused
             raise ValueError("managed service request refused")
         return payload
 
