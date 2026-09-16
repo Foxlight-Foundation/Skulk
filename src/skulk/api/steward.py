@@ -842,7 +842,9 @@ def _memory_bytes(value: object) -> int | None:
 _NODE_IDENTIFIER = re.compile(r"\b12D3Koo[A-Za-z0-9]+\b")
 
 
-def _node_name_lookup(state_payload: dict[str, object]) -> dict[str, str]:
+def _node_name_lookup(
+    state_payload: dict[str, object], *, include_capability_hosts: bool = False
+) -> dict[str, str]:
     """Map routing identities to unique operator-facing names.
 
     Internal libp2p identifiers are intentionally absent from the returned
@@ -865,10 +867,14 @@ def _node_name_lookup(state_payload: dict[str, object]) -> dict[str, str]:
         "nodeDisk",
         "nodeRdmaCtl",
         "nodeCapabilities",
-        "capabilityNodes",
         "nodeHealth",
     ):
         telemetry_node_ids.update(_as_object_dict(state_payload.get(field)))
+    # Capability-only API participants may not have a routable topology address.
+    # Only inventory requests need aliases for them; node-targeting tools keep
+    # their existing identity lookup.
+    if include_capability_hosts:
+        telemetry_node_ids.update(_as_object_dict(state_payload.get("capabilityNodes")))
     # Topology order remains authoritative for familiar fallback names. Extra
     # management/API participants are sorted so aliases do not depend on the
     # order in which their telemetry reached this API process.
@@ -1768,7 +1774,10 @@ class StewardHarness:
         if name == "get_capability_nodes":
             payload = await api.get_cluster_state()
             return bounded_inventory(
-                capability_inventory(payload, _node_name_lookup(payload)),
+                capability_inventory(
+                    payload,
+                    _node_name_lookup(payload, include_capability_hosts=True),
+                ),
                 MAX_TOOL_RESULT_CHARS,
             )
         if name == "get_cluster_versions":

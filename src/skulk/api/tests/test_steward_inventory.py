@@ -237,6 +237,8 @@ def test_partial_versions_do_not_claim_all_nodes_current() -> None:
         ("unknown", "build123", "version unavailable"),
         ("1.5.2", "Unknown", "commit unavailable"),
         (" UNKNOWN ", "", "version unavailable"),
+        ("None", "build123", "version unavailable"),
+        ("1.5.2", "null", "commit unavailable"),
     ],
 )
 async def test_runtime_sentinels_remain_missing_in_version_answers(
@@ -343,3 +345,11 @@ async def test_capability_only_hosts_keep_advertisements_without_inflating_nodes
     assert "telemetry-only-routing-id" not in answer
     assert "Coverage is incomplete" not in answer
     assert "No capability nodes" not in answer
+
+    for tool_name in ("get_node_diagnostics", "run_doctor"):
+        result = cast(
+            "dict[str, str]",
+            json.loads(await harness.execute_tool(tool_name, {"node_name": "Node 2"})),
+        )
+        assert "error" in result
+        assert "tool failed" not in result["error"]

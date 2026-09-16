@@ -2306,8 +2306,9 @@ Semantics of the reserved id:
   Standalone capability-inventory questions use these observations directly; no current
   advertisements does not prove nothing is installed, and discovery grants no execution
   authority. Capability-only hosts without identity telemetry receive safe fallback
-  names and remain in this inventory without increasing the topology node count.
-  Blank or `unknown` build identifiers are missing observations, including when
+  names and remain in this inventory without increasing the topology node count
+  or becoming targets for node-diagnostic tools.
+  Blank, `unknown`, `none`, or `null` build identifiers are missing observations, including when
   diagnostics returned successfully. These Steward views leave capability lifecycle
   and authorization unchanged.
 
