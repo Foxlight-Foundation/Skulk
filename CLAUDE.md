@@ -465,6 +465,17 @@ applies to follow-ups, greetings, and both streaming and non-streaming clients.
 Additional investigation remains model-directed; the baseline guarantees evidence
 availability, not perfect interpretation.
 
+Steward omits resident-model/service details from routine cluster summaries; explicit
+questions about the steward or internal services may include them. Its version tool
+returns actual per-node Skulk versions and commits, not just comparison status.
+Standalone version questions receive verified build listings with unknown/partial
+coverage preserved; matching builds do not establish release currency. The read-only
+`get_capability_nodes` tool projects current `/state.capabilityNodes` advertisements,
+owner status and bundle versions separately from hardware and inference backends.
+Standalone capability-inventory questions use these observations directly; no current
+advertisements does not prove nothing is installed, and discovery grants no execution
+authority. These Steward views leave capability lifecycle and authorization unchanged.
+
 Steward also projects immutable inventory observations before compaction, with
 API read time, explicit scope, and null counts for missing or malformed source
 sections. Read time is not telemetry freshness. A bounded set of standalone
