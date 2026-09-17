@@ -228,6 +228,31 @@ async def test_a_newer_release_at_the_source_upgrades_the_installation(
             await fixture.terminal(iter(("y",))).run(identifier)
         assert selector.current() == second
         assert sum(isinstance(r, InstallSubmission) for r in fixture.requests) == 2
+        # A selection with no retained download operation (selected outside
+        # this wizard) is compared the same way: nothing to stage at the
+        # selected release, a rollback refused before transfer, and a newer
+        # release upgraded over it.
+        retained = (
+            fixture.manager.root
+            / "installations"
+            / identifier
+            / "downloads"
+            / "current.json"
+        )
+        assert retained.exists()
+        retained.unlink()
+        fixture.publish(2)
+        await fixture.terminal(iter(())).run(identifier)
+        assert any("retained at sequence 2" in line for line in fixture.output)
+        fixture.publish(1)
+        with pytest.raises(ValueError, match="rollback"):
+            await fixture.terminal(iter(("y",))).run(identifier)
+        assert sum(isinstance(r, InstallSubmission) for r in fixture.requests) == 2
+        fixture.publish(3)
+        await fixture.terminal(iter(("y", "y"))).run(identifier)
+        third = selector.current()
+        assert third is not None and third.sequence == 3 and third.revision == 3
+        assert sum(isinstance(r, InstallSubmission) for r in fixture.requests) == 3
 
 
 @pytest.mark.parametrize(

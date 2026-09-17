@@ -169,10 +169,9 @@ class TerminalInstaller:
     ) -> InstallOperation | None:
         operation = await self._install_status(identifier)
         review: ReleaseReview | None = None
-        selection: RuntimeSelection | None = None
-        in_flight = False
-        if operation is not None and operation.state == "staged":
-            in_flight, selection = await self._installation(identifier)
+        in_flight, selection = await self._installation(identifier)
+        if in_flight and operation is None:
+            raise ValueError("another lifecycle operation needs inspection")
         if operation is None or (operation.state == "staged" and not in_flight):
             # With nothing in flight, the source is inspected again: an
             # installation that already holds a staged release is upgraded
@@ -187,6 +186,16 @@ class TerminalInstaller:
                     )
                 )
             )
+        if (
+            review is not None
+            and operation is None
+            and selection is not None
+            and selection.runtime_digest == review.runtime_digest
+        ):
+            # A selected release with no retained download operation (an
+            # installation selected outside this wizard): nothing to stage.
+            self.output(f"Installation retained at sequence {selection.sequence}")
+            return None
         if review is not None and (
             operation is None
             or operation.review.runtime_digest != review.runtime_digest
@@ -210,7 +219,7 @@ class TerminalInstaller:
             self._review(review)
             question = (
                 "Install this exact verified release?"
-                if operation is None
+                if operation is None and selection is None
                 else "Stage this newer verified release beside the installed one?"
             )
             if not self._confirm(question):
