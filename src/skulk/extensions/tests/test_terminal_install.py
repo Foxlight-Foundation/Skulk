@@ -580,6 +580,64 @@ async def test_catalog_installs_refuse_by_name_before_any_transfer(
         ]
         assert elsewhere == [False]
         assert sum(isinstance(r, InstallSubmission) for r in fixture.requests) == 1
+        # A staged release whose activation was declined leaves no selection
+        # but is still the installation's bundle and high-water mark.
+        fixture.list_releases(
+            {
+                1: "https://releases.example.test/1/",
+                2: "https://releases.example.test/2/",
+                3: "https://releases.example.test/3/",
+            },
+            revision=5,
+        )
+        staged_only = await fixture.terminal(iter(("y", "y", "n"))).run_from_catalog(
+            "example.plugin"
+        )
+        assert fixture.manager.controllers[staged_only].selector.current() is None
+        held = fixture.manager.downloads[staged_only]
+        retained = held.current()
+        assert retained is not None and retained.state == "staged"
+        bound = held.source().revision
+        with pytest.raises(ValueError, match="manager request incomplete"):
+            await fixture.terminal(iter(("y",))).run_from_catalog(
+                "example.other", plugin_id=staged_only
+            )
+        with pytest.raises(ValueError, match="manager request incomplete"):
+            await fixture.terminal(iter(("y",))).run_from_catalog(
+                "example.plugin", sequence=1, plugin_id=staged_only
+            )
+        assert held.source().revision == bound
+        # A publisher the installation trusts under another key is never
+        # swapped by a binding: refused before the source is touched.
+        keyed = "managed." + "d" * 32
+        assert "result" in await fixture.request(
+            InstallationRequest(action="register", plugin_id=keyed)
+        )
+        assert "result" in await fixture.request(
+            SourceRegistration(
+                plugin_id=keyed,
+                request=SourceUpdate(
+                    expected_revision=0,
+                    base_url="https://releases.example.test/",
+                    metadata_filename="release.json",
+                    trust=RuntimeTrust(
+                        revision=1,
+                        expires_at=fixture.trust.expires_at,
+                        publishers={
+                            "fixture": Ed25519PrivateKey.generate()
+                            .public_key()
+                            .public_bytes_raw()
+                            .hex()
+                        },
+                    ),
+                ),
+            )
+        )
+        with pytest.raises(ValueError, match="manager request incomplete"):
+            await fixture.terminal(iter(("y",))).run_from_catalog(
+                "example.plugin", plugin_id=keyed
+            )
+        assert fixture.manager.downloads[keyed].source().revision == 1
 
 
 async def test_catalog_binding_rebases_trust_onto_the_installations_history(

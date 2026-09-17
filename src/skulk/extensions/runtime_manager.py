@@ -234,9 +234,9 @@ def _release_trust(
     histories, so the listed publisher's key is rebased onto the
     installation's own: kept as is when it already authorizes that key, is
     current and carries every discovery revocation, else the next revision
-    of the installation's trust with the key added (a changed key replaces
-    the old one under the same name), the later expiry, and every
-    revocation of both records. Revocations always travel: a catalog entry
+    of the installation's trust with the key added, the later expiry, and
+    every revocation of both records. A publisher the installation trusts
+    under another key refuses the binding. Revocations always travel: a catalog entry
     names no wheel digests, so a wheel the operator revoked for discovery
     is refused by the release path only if the installation's trust has it.
     """
@@ -247,6 +247,14 @@ def _release_trust(
         )
     except FileNotFoundError:
         current = None
+    if current is not None and current.publishers.get(publisher, key) != key:
+        # A key is never swapped under a name by a binding: the operator
+        # reconfigures the installation's trust on purpose, or installs the
+        # listing as a new installation.
+        raise ValueError(
+            "the installation trusts this publisher under another key; "
+            "reconfigure its source before binding it to the listing"
+        )
     if (
         current is not None
         and current.publishers.get(publisher) == key
@@ -695,9 +703,15 @@ class RuntimeManager:
                 skulk_build_sha256=host.skulk_build_sha256, platform=host.platform
             ).model_dump(mode="json")
         if isinstance(request, CatalogRegistration):
-            return (await self.catalog.configure(request.request)).model_dump(
-                mode="json"
-            )
+            # Configuration takes the same lock as reads and bindings, so a
+            # binding cannot see catalog state change between accepting a
+            # listing and configuring the release source.
+            if self.catalog_read.locked():
+                raise ValueError("catalog source is busy")
+            async with self.catalog_read:
+                return (await self.catalog.configure(request.request)).model_dump(
+                    mode="json"
+                )
         if isinstance(request, CatalogInstallRequest):
             return (await self._install_from_catalog(request.request)).model_dump(
                 mode="json"
@@ -861,20 +875,38 @@ class RuntimeManager:
             if controller is None or downloads is None:
                 raise ValueError("installation is unavailable")
             selection = controller.selector.current()
-            if selection is not None:
-                # The same refusals the guided installer makes before any
-                # transfer, here before the source is touched: an existing
-                # installation keeps its bundle and never goes back.
-                if selection.bundle_id != entry.bundle_id:
-                    raise ValueError(
-                        "the listed release belongs to another bundle; "
-                        "install it as a new installation"
-                    )
-                if entry.sequence < selection.highest_sequence:
-                    raise ValueError(
-                        "the listed release is older than the installed one; "
-                        "rollback is an explicit lifecycle operation"
-                    )
+            retained = downloads.current()
+            if retained is not None and retained.state == "recovery_required":
+                raise ValueError(
+                    "an interrupted installation needs explicit recovery "
+                    "before the source is bound to a listing"
+                )
+            # The same refusals the guided installer makes before any
+            # transfer, here before the source is touched: an existing
+            # installation keeps its bundle and never goes back. A retained
+            # staged release with no selection counts like the installer's
+            # own high-water mark.
+            installed = (
+                selection.bundle_id
+                if selection is not None
+                else retained.review.bundle_id
+                if retained is not None
+                else None
+            )
+            if installed is not None and installed != entry.bundle_id:
+                raise ValueError(
+                    "the listed release belongs to another bundle; "
+                    "install it as a new installation"
+                )
+            highest = max(
+                selection.highest_sequence if selection is not None else 0,
+                retained.review.sequence if retained is not None else 0,
+            )
+            if entry.sequence < highest:
+                raise ValueError(
+                    "the listed release is older than the installed one; "
+                    "rollback is an explicit lifecycle operation"
+                )
             try:
                 previous: ReleaseSource | None = downloads.source()
             except FileNotFoundError:
