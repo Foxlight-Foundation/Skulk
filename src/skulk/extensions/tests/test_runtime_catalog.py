@@ -21,7 +21,11 @@ from skulk.extensions.runtime_catalog import (
     HostCatalog,
     verify_catalog,
 )
-from skulk.extensions.runtime_files import private_directory, read_private
+from skulk.extensions.runtime_files import (
+    private_directory,
+    read_private,
+    write_private,
+)
 
 PUBLISHER = "fixture"
 _RECORD: TypeAdapter[dict[str, JsonValue]] = TypeAdapter(dict[str, JsonValue])
@@ -341,7 +345,7 @@ async def test_the_host_catalog_configures_fetches_and_retains_without_disclosur
     (tmp_path / "catalog-state.json").unlink()
     with pytest.raises(ValueError, match="local maintenance"):
         await catalog.fetch()
-    (tmp_path / "catalog-state.json").write_bytes(state)
+    write_private(tmp_path / "catalog-state.json", state)
     served[0] = _catalog(key, [_entry(1), _entry(2)], revision=11)
     listed = await catalog.fetch()
     (tmp_path / "catalog" / (listed.sha256 + ".json")).write_bytes(b"{}")

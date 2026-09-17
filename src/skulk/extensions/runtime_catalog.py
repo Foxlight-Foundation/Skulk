@@ -782,9 +782,21 @@ class HostCatalog:
                 raise ValueError("catalog revision rollback refused")
             destination = self.directory / (verified.sha256 + ".json")
             floors = dict(current.floors)
+            floors.pop(key, None)
             floors[key] = _Floor(
                 revision=verified.claims.revision, sha256=verified.sha256
             )
+            # The map is bounded: beyond 32 floors the oldest ones for other
+            # addresses go, so the state document stays inside its bound
+            # across any number of owner-approved moves.
+            prefix = _floor_key(source, "")
+            while len(floors) > 32:
+                stale = next(
+                    (name for name in floors if not name.startswith(prefix)), None
+                )
+                if stale is None:
+                    break
+                del floors[stale]
             if not destination.exists():
                 self._prune(floors, keep=8)
             # The floor moves before the document lands: a crash in between
