@@ -540,15 +540,23 @@ class ManagedServices:
         selected = selected_generation_for(root, build)
         if selected is None or self.setup_reconciled == selected.generation:
             return
+        # Remembered only once the state is current, so a failed record is
+        # retried on the next attach rather than skipped for the process.
+        if not setup_state_names(root, selected.generation):
+            try:
+                await self._record_refresh(
+                    root,
+                    selected,
+                    "plugin manager attached on the generation staged for this "
+                    "host's Skulk build; the setup state now names it",
+                )
+            except (OSError, ValueError) as error:
+                logger.warning(
+                    f"setup state not reconciled: {type(error).__name__}; "
+                    "retrying on the next attach"
+                )
+                return
         self.setup_reconciled = selected.generation
-        if setup_state_names(root, selected.generation):
-            return
-        await self._record_refresh(
-            root,
-            selected,
-            "plugin manager attached on the generation staged for this host's "
-            "Skulk build; the setup state now names it",
-        )
 
     async def request(self, request: ManagementRequest) -> dict[str, JsonValue]:
         """Send one typed local management request; never accept an attachment override.

@@ -927,10 +927,17 @@ async def test_an_attached_manager_on_a_selection_brings_the_setup_state_along(
 
     def identity() -> str:
         identities.append("9" * 64)
+        if len(identities) == 1:
+            raise OSError("transient")
         return "9" * 64
 
     monkeypatch.setattr(managed_services, "service_source_identity", identity)
     services = ManagedServices(tmp_path / "connection.json")
+    # A failed record is retried on the next attach, not remembered as done.
+    await services._reconcile_setup_state(  # pyright: ignore[reportPrivateUsage]
+        tmp_path, "f" * 64
+    )
+    assert services.setup_reconciled is None
     await services._reconcile_setup_state(  # pyright: ignore[reportPrivateUsage]
         tmp_path, "f" * 64
     )
@@ -941,13 +948,13 @@ async def test_an_attached_manager_on_a_selection_brings_the_setup_state_along(
     await services._reconcile_setup_state(  # pyright: ignore[reportPrivateUsage]
         tmp_path, "f" * 64
     )
-    assert identities == ["9" * 64]
+    assert identities == ["9" * 64] * 2
     # A selection from another build is not this host's to record.
     services.setup_reconciled = None
     await services._reconcile_setup_state(  # pyright: ignore[reportPrivateUsage]
         tmp_path, "b" * 64
     )
-    assert identities == ["9" * 64]
+    assert identities == ["9" * 64] * 2
 
 
 async def test_a_selection_without_a_restarted_manager_is_not_a_completed_refresh(
