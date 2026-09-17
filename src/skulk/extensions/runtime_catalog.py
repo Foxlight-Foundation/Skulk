@@ -498,19 +498,16 @@ def _trust_digest(trust: RuntimeTrust) -> str:
 def bounded_floors(
     floors: dict[str, "AcceptedFloor"], key: str, prefix: str, *, bound: int = 32
 ) -> dict[str, "AcceptedFloor"]:
-    """Keep the map within ``bound``: other addresses' floors go first, then the
-    oldest at the current address other than ``key``, so the state document
-    stays inside its read bound whatever rotates."""
-    kept = dict(floors)
-    while len(kept) > bound:
-        stale = next(
-            (name for name in kept if not name.startswith(prefix)),
-            next((name for name in kept if name != key), None),
-        )
-        if stale is None:
-            break
-        del kept[stale]
-    return kept
+    """Refuse a new history beyond ``bound``; no accepted floor is ever dropped.
+
+    A floor is rollback evidence, so the map keeps every one it has; a new
+    address-and-publisher history past the bound is refused by name, which is
+    the explicit maintenance path, while existing histories keep recording.
+    """
+    del prefix  # every history is kept; the address no longer orders eviction
+    if len(floors) > bound:
+        raise ValueError("catalog history requires local maintenance")
+    return dict(floors)
 
 
 def _floor_key(source: CatalogSource, publisher: str) -> str:
@@ -550,11 +547,24 @@ class HostCatalog:
                 ) from None
             return _CatalogState()
         try:
-            return _CatalogState.model_validate_json(raw)
+            state = _CatalogState.model_validate_json(raw)
         except ValueError:
             raise ValueError(
                 "catalog state unreadable; local maintenance required"
             ) from None
+        # Trust and its floor are always written together; a trust below its
+        # floor, another trust at the floor's revision, or trust without a
+        # floor is a rolled-back or edited document, never read past.
+        if state.trust is not None and (
+            state.trust_floor is None
+            or state.trust.revision < state.trust_floor.revision
+            or (
+                state.trust.revision == state.trust_floor.revision
+                and _trust_digest(state.trust) != state.trust_floor.sha256
+            )
+        ):
+            raise ValueError("discovery trust rollback refused")
+        return state
 
     def _save(self, state: "_CatalogState") -> None:
         # One document, replaced atomically: no ordering between the source,

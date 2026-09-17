@@ -345,6 +345,14 @@ async def test_the_host_catalog_configures_fetches_and_retains_without_disclosur
     (tmp_path / "catalog-state.json").unlink()
     with pytest.raises(ValueError, match="local maintenance"):
         await catalog.fetch()
+    # A document whose trust sits below its own floor is a rolled-back view.
+    rolled = _RECORD.validate_json(state)
+    trust_view = rolled["trust"]
+    assert isinstance(trust_view, dict)
+    trust_view["revision"] = 1
+    write_private(tmp_path / "catalog-state.json", _RECORD.dump_json(rolled))
+    with pytest.raises(ValueError, match="trust rollback"):
+        await catalog.fetch()
     write_private(tmp_path / "catalog-state.json", state)
     served[0] = _catalog(key, [_entry(1), _entry(2)], revision=11)
     listed = await catalog.fetch()
@@ -395,25 +403,16 @@ def test_a_revoked_release_or_artifact_is_not_offered() -> None:
     assert [e.sequence for e in review.entries] == [3]
 
 
-def test_the_floor_map_stays_bounded_whatever_rotates() -> None:
-    from skulk.extensions.runtime_catalog import (
-        AcceptedFloor,
-        bounded_floors,
-    )
+def test_the_floor_map_refuses_a_new_history_at_the_bound() -> None:
+    from skulk.extensions.runtime_catalog import AcceptedFloor, bounded_floors
 
     prefix = "https://catalog.example.test/foxlight/\ncatalog.json\n"
     floors = {
-        f"https://elsewhere.example.test/\ncatalog.json\np{i}": AcceptedFloor(
-            revision=1, sha256="a" * 64
-        )
-        for i in range(5)
+        f"{prefix}publisher-{i}": AcceptedFloor(revision=i + 1, sha256="b" * 64)
+        for i in range(32)
     }
-    for i in range(40):
-        floors[f"{prefix}publisher-{i}"] = AcceptedFloor(
-            revision=i + 1, sha256="b" * 64
-        )
-    key = f"{prefix}publisher-39"
-    kept = bounded_floors(floors, key, prefix)
-    assert len(kept) == 32 and key in kept
-    assert not any(name.startswith("https://elsewhere") for name in kept)
-    assert f"{prefix}publisher-0" not in kept and f"{prefix}publisher-8" in kept
+    # Existing histories keep recording at the bound; a new one is refused.
+    assert bounded_floors(floors, f"{prefix}publisher-3", prefix) == floors
+    floors[f"{prefix}publisher-32"] = AcceptedFloor(revision=1, sha256="c" * 64)
+    with pytest.raises(ValueError, match="local maintenance"):
+        bounded_floors(floors, f"{prefix}publisher-32", prefix)
