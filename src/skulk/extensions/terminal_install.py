@@ -190,10 +190,13 @@ class TerminalInstaller:
             review is not None
             and operation is None
             and selection is not None
+            and selection.enabled
             and selection.runtime_digest == review.runtime_digest
         ):
-            # A selected release with no retained download operation (an
-            # installation selected outside this wizard): nothing to stage.
+            # An enabled selection with no retained download operation (an
+            # installation selected outside this wizard) at the reviewed
+            # release: nothing to stage or start. A disabled one falls
+            # through, so the release is staged again and activation offered.
             self.output(f"Installation retained at sequence {selection.sequence}")
             return None
         if review is not None and (
