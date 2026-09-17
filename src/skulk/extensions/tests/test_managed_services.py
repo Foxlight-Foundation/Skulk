@@ -357,6 +357,31 @@ def test_a_stopped_installation_expects_no_owner(tmp_path: Path) -> None:
     assert owner._owner_expected()  # pyright: ignore[reportPrivateUsage]
 
 
+async def test_a_manager_outage_forgets_the_reported_owner_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After the manager stops answering, a stopped owner's absence warns again."""
+
+    services = ManagedServices(tmp_path / "connection.json")
+    owner = ManagedOwner(
+        ManagedConnection(plugin_id="managed.stopped", state_root=str(tmp_path))
+    )
+    owner.manager_enabled = True
+    owner.manager_available = False
+    owner.manager_state = "stopped"
+    services.owners["managed.stopped"] = owner
+
+    async def unreachable() -> None:
+        raise OSError("manager socket gone")
+
+    monkeypatch.setattr(services, "_connect", unreachable)
+    with pytest.raises(OSError):
+        await services.refresh()
+    assert owner.manager_state is None
+    assert owner.manager_enabled is None
+    assert owner._owner_expected()  # pyright: ignore[reportPrivateUsage]
+
+
 def test_the_api_side_rebuilds_the_typed_refusal_from_the_fixed_vocabulary() -> None:
     from skulk.extensions.managed_services import protocol_refusal
     from skulk.extensions.runtime_artifacts import ProtocolUnsupportedError

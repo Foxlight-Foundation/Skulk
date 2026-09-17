@@ -684,6 +684,9 @@ class ManagedServices:
                     owner.available = False
                     owner.manager_available = False
                     owner.manager_enabled = None
+                    # The last reported owner state is no longer known
+                    # either; an absent owner must warn again.
+                    owner.manager_state = None
                 raise
 
     async def _poll(self) -> None:
