@@ -45,6 +45,7 @@ from skulk.extensions.runtime_manager import (
     SubmitRequest,
     manager_request,
 )
+from skulk.extensions.runtime_selection import RuntimeSelection
 from skulk.extensions.terminal_install import TerminalInstaller
 from skulk.extensions.tests.test_runtime_install import artifacts
 from skulk.extensions.tests.test_runtime_service import OWNER_SOURCE
@@ -696,6 +697,29 @@ async def test_catalog_installs_refuse_by_name_before_any_transfer(
             "elsewhere.example.test",
             "/3/release.json",
             True,
+        )
+        # A retained operation for another release that is still in flight
+        # is never resumed as the bound release: pinned staging refuses.
+        from skulk.extensions.terminal_install import TerminalInstaller as Installer
+
+        async def in_flight(
+            _self: Installer, _identifier: str
+        ) -> tuple[bool, RuntimeSelection | None]:
+            return True, None
+
+        original = Installer._installation  # pyright: ignore[reportPrivateUsage]
+        Installer._installation = in_flight  # type: ignore[method-assign]
+        submissions = sum(isinstance(r, InstallSubmission) for r in fixture.requests)
+        try:
+            with pytest.raises(ValueError, match="must settle"):
+                await fixture.terminal(iter(()))._stage(  # pyright: ignore[reportPrivateUsage]
+                    identifier, downloads.source_status(), "0" * 64
+                )
+        finally:
+            Installer._installation = original  # type: ignore[method-assign]
+        assert (
+            sum(isinstance(r, InstallSubmission) for r in fixture.requests)
+            == submissions
         )
         # A staged release whose activation was declined leaves no selection
         # but is still the installation's bundle and high-water mark.

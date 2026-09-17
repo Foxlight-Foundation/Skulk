@@ -184,6 +184,18 @@ class TerminalInstaller:
         in_flight, selection = await self._installation(identifier)
         if in_flight and operation is None:
             raise ValueError("another lifecycle operation needs inspection")
+        if (
+            expected_digest is not None
+            and operation is not None
+            and operation.request.runtime_digest != expected_digest
+            and (in_flight or operation.state != "staged")
+        ):
+            # A retained operation for another release that cannot be
+            # inspected past would be resumed as if it were the bound one.
+            raise ValueError(
+                "a retained installation operation for another release must "
+                "settle before the listed release is staged"
+            )
         if operation is None or (operation.state == "staged" and not in_flight):
             # With nothing in flight, the source is inspected again: an
             # installation that already holds a staged release is upgraded
