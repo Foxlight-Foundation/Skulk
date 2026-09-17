@@ -494,10 +494,14 @@ class ManagedServices:
                 "rerun skulk-plugin-service setup"
             )
         except ManagerNotRestartedError as error:
-            # The selection is in place and kept; the mismatch a manager
-            # running an older generation presents schedules the next
-            # attempt, which restarts it onto this selection.
-            logger.warning(f"plugin manager runtime refresh incomplete: {error}")
+            # The selection is in place and kept. A service still verifying
+            # the generation attaches on it later and the setup state follows
+            # then; a manager that comes up on an older generation is the
+            # mismatch the next attempt restarts onto this selection.
+            logger.warning(
+                f"plugin manager runtime selected but not yet started: {error}; "
+                "the setup state follows when the service attaches on it"
+            )
         except (OSError, TimeoutError) as error:
             # The manager may still be verifying the seal past the request
             # deadline and select the generation afterwards; once it does,
@@ -661,6 +665,16 @@ class ManagedServices:
                         if item.selected_digest is not None and item.error_code is None
                         else None
                     )
+                    # A stale or errored row may carry the previous service
+                    # instance's state; only a current observation says an
+                    # owner is absent by design.
+                    self.owners[identifier].manager_state = (
+                        item.service.state
+                        if item.service is not None
+                        and not item.stale
+                        and item.error_code is None
+                        else None
+                    )
                     self.owners[identifier].manager_available = (
                         item.enabled
                         and not item.stale
@@ -677,6 +691,9 @@ class ManagedServices:
                     owner.available = False
                     owner.manager_available = False
                     owner.manager_enabled = None
+                    # The last reported owner state is no longer known
+                    # either; an absent owner must warn again.
+                    owner.manager_state = None
                 raise
 
     async def _poll(self) -> None:

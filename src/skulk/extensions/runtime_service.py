@@ -36,6 +36,13 @@ def owner_bootstrap(artifact: Path) -> str:
         if "__owner__.py" in archive.namelist():
             return _BOOTSTRAP
     return _LAUNCHER_BOOTSTRAP
+
+
+type ServiceProcessState = Literal[
+    "verifying", "running", "stopping", "stopped", "failed"
+]
+"""Observed local owner process states, independent of desired selection."""
+
 _CHECK_SECONDS = 30.0
 _SHUTDOWN_SECONDS = 30.0
 
@@ -48,7 +55,7 @@ class RuntimeServiceStatus(BaseModel):
     observed_at: float = Field(
         description="Unix observation time; old records are stale."
     )
-    state: Literal["verifying", "running", "stopping", "stopped", "failed"] = Field(
+    state: ServiceProcessState = Field(
         description="Observed local owner process state, independent of desired selection."
     )
     selected_digest: Digest | None = Field(description="Desired selected generation.")
@@ -88,7 +95,7 @@ class RuntimeService:
 
     def _status(
         self,
-        state: Literal["verifying", "running", "stopping", "stopped", "failed"],
+        state: ServiceProcessState,
         error: Literal[
             "verification_failed", "owner_exited", "ownership_busy", "service_failed"
         ]

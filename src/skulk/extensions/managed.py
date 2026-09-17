@@ -41,6 +41,7 @@ from skulk.extensions.proposal_review import (
     ProposalReview,
 )
 from skulk.extensions.runtime_attachment import ProfileIdentifier
+from skulk.extensions.runtime_service import ServiceProcessState
 from skulk.extensions.setup import NodeSetup
 from skulk.extensions.setup_actions import SetupActions, SetupMutation, SetupOperation
 from skulk.extensions.steward import StewardTool
@@ -329,6 +330,10 @@ class ManagedOwner:
         self.available = False
         self.manager_available = True
         self.manager_enabled: bool | None = None
+        # The owner process state the manager last reported, so an owner that
+        # is absent because the installation is stopped is told apart from
+        # one that failed.
+        self.manager_state: ServiceProcessState | None = None
         self.poll_task: asyncio.Task[None] | None = None
         self.host_task: asyncio.Task[None] | None = None
         self.host_callbacks_available = False
@@ -538,6 +543,18 @@ class ManagedOwner:
                 self._note_unavailable(f"{type(error).__name__}")
             await asyncio.sleep(1)
 
+    def _owner_expected(self) -> bool:
+        """Whether the manager says this installation's owner should be running.
+
+        A disabled or stopped installation has no owner by design; its absence
+        is the manager's own inventory truth, not a fault worth a warning. An
+        enabled installation whose owner failed, or one the manager has said
+        nothing about, keeps the warning.
+        """
+        if self.manager_enabled is False:
+            return False
+        return self.manager_state not in ("stopped", "stopping")
+
     def _note_unavailable(self, reason: str) -> None:
         """Log why this owner is unavailable, once per reason and at most once a minute.
 
@@ -547,7 +564,8 @@ class ManagedOwner:
         """
         now = time.monotonic()
         if reason != self.unavailable_reason or now - self.unavailable_noted >= 60:
-            logger.warning(f"managed owner {self.name} unavailable: {reason}")
+            if self._owner_expected():
+                logger.warning(f"managed owner {self.name} unavailable: {reason}")
             self.unavailable_reason = reason
             self.unavailable_noted = now
 
