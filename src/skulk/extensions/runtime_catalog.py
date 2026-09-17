@@ -521,6 +521,13 @@ class HostCatalog:
         try:
             raw = read_private(self.root / "catalog-state.json", 262144)
         except FileNotFoundError:
+            # First use has no retained document either; a state document
+            # lost beside remaining evidence would reset every floor.
+            if any(True for _ in islice(self.directory.iterdir(), 1)):
+                raise ValueError(
+                    "catalog state missing while retained documents remain; "
+                    "local maintenance required"
+                ) from None
             return _CatalogState()
         try:
             return _CatalogState.model_validate_json(raw)
