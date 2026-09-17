@@ -143,6 +143,19 @@ def test_a_catalog_verifies_against_discovery_trust_and_names_refusals() -> None
             _trust(key),
             now=now,
         )
+    # Aliases of one family are the same listing.
+    with pytest.raises(ValueError, match="twice"):
+        verify_catalog(
+            _catalog(
+                key,
+                [
+                    _entry(3, runtime_platform="linux-glibc-x86_64"),
+                    _entry(3, runtime_platform="ubuntu-24.04-x86_64"),
+                ],
+            ),
+            _trust(key),
+            now=now,
+        )
     stranger = Ed25519PrivateKey.generate()
     with pytest.raises(ValueError, match="trust refused"):
         verify_catalog(document, _trust(stranger, publishers={"x": "0" * 64}), now=now)

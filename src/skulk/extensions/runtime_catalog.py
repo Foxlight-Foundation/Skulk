@@ -37,6 +37,7 @@ from skulk.extensions.runtime_artifacts import (
     ProtocolUnsupportedError,
     RuntimeTrust,
     canonical_json,
+    canonical_platform,
     platform_matches,
 )
 from skulk.extensions.runtime_attachment import ProfileIdentifier
@@ -138,8 +139,15 @@ class _CatalogClaims(_Contract):
         for entry in self.entries:
             if entry.publisher != self.publisher:
                 raise ValueError("catalog entries must belong to the catalog publisher")
-            # One sequence may ship one artifact family per runtime platform.
-            key = (entry.bundle_id, entry.sequence, entry.runtime_platform)
+            # One sequence may ship one artifact family per runtime platform;
+            # aliases of a family (a distribution name and its libc family)
+            # are the same listing, as runtime compatibility treats them.
+            family = (
+                canonical_platform(entry.runtime_platform)
+                if entry.runtime_platform is not None
+                else None
+            )
+            key = (entry.bundle_id, entry.sequence, family)
             if key in seen:
                 raise ValueError("catalog lists one bundle sequence twice")
             seen.add(key)
