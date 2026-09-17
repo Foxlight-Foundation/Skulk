@@ -475,7 +475,9 @@ class CatalogSourceStatus(BaseModel):
     )
 
 
-class _Floor(_Contract):
+class AcceptedFloor(_Contract):
+    """The newest catalog revision this host accepted, and its document digest."""
+
     revision: int = Field(ge=1)
     sha256: Digest
 
@@ -485,12 +487,30 @@ class _CatalogState(_Contract):
 
     source: CatalogSource | None = None
     trust: RuntimeTrust | None = None
-    trust_floor: _Floor | None = None
-    floors: dict[str, _Floor] = Field(default_factory=dict)
+    trust_floor: AcceptedFloor | None = None
+    floors: dict[str, AcceptedFloor] = Field(default_factory=dict)
 
 
 def _trust_digest(trust: RuntimeTrust) -> str:
     return hashlib.sha256(canonical_json(trust.model_dump(mode="json"))).hexdigest()
+
+
+def bounded_floors(
+    floors: dict[str, "AcceptedFloor"], key: str, prefix: str, *, bound: int = 32
+) -> dict[str, "AcceptedFloor"]:
+    """Keep the map within ``bound``: other addresses' floors go first, then the
+    oldest at the current address other than ``key``, so the state document
+    stays inside its read bound whatever rotates."""
+    kept = dict(floors)
+    while len(kept) > bound:
+        stale = next(
+            (name for name in kept if not name.startswith(prefix)),
+            next((name for name in kept if name != key), None),
+        )
+        if stale is None:
+            break
+        del kept[stale]
+    return kept
 
 
 def _floor_key(source: CatalogSource, publisher: str) -> str:
@@ -689,7 +709,7 @@ class HostCatalog:
                         update={
                             "source": source,
                             "trust": next_trust,
-                            "trust_floor": _Floor(
+                            "trust_floor": AcceptedFloor(
                                 revision=next_trust.revision,
                                 sha256=_trust_digest(next_trust),
                             ),
@@ -783,20 +803,10 @@ class HostCatalog:
             destination = self.directory / (verified.sha256 + ".json")
             floors = dict(current.floors)
             floors.pop(key, None)
-            floors[key] = _Floor(
+            floors[key] = AcceptedFloor(
                 revision=verified.claims.revision, sha256=verified.sha256
             )
-            # The map is bounded: beyond 32 floors the oldest ones for other
-            # addresses go, so the state document stays inside its bound
-            # across any number of owner-approved moves.
-            prefix = _floor_key(source, "")
-            while len(floors) > 32:
-                stale = next(
-                    (name for name in floors if not name.startswith(prefix)), None
-                )
-                if stale is None:
-                    break
-                del floors[stale]
+            floors = bounded_floors(floors, key, _floor_key(source, ""))
             if not destination.exists():
                 self._prune(floors, keep=8)
             # The floor moves before the document lands: a crash in between
@@ -806,7 +816,7 @@ class HostCatalog:
             write_private(destination, verified.document)
             return verified
 
-    def _prune(self, floors: dict[str, "_Floor"], *, keep: int) -> None:
+    def _prune(self, floors: dict[str, "AcceptedFloor"], *, keep: int) -> None:
         """Drop retained documents beyond the newest ``keep``, never an accepted floor.
 
         A catalog that updates regularly would otherwise fill its retention

@@ -393,3 +393,27 @@ def test_a_revoked_release_or_artifact_is_not_offered() -> None:
     assert verified.entry("example.plugin", 1, None) is None
     review = verified.review(skulk_build_sha256="a" * 64, platform="macos-arm64")
     assert [e.sequence for e in review.entries] == [3]
+
+
+def test_the_floor_map_stays_bounded_whatever_rotates() -> None:
+    from skulk.extensions.runtime_catalog import (
+        AcceptedFloor,
+        bounded_floors,
+    )
+
+    prefix = "https://catalog.example.test/foxlight/\ncatalog.json\n"
+    floors = {
+        f"https://elsewhere.example.test/\ncatalog.json\np{i}": AcceptedFloor(
+            revision=1, sha256="a" * 64
+        )
+        for i in range(5)
+    }
+    for i in range(40):
+        floors[f"{prefix}publisher-{i}"] = AcceptedFloor(
+            revision=i + 1, sha256="b" * 64
+        )
+    key = f"{prefix}publisher-39"
+    kept = bounded_floors(floors, key, prefix)
+    assert len(kept) == 32 and key in kept
+    assert not any(name.startswith("https://elsewhere") for name in kept)
+    assert f"{prefix}publisher-0" not in kept and f"{prefix}publisher-8" in kept
