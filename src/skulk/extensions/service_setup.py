@@ -115,14 +115,15 @@ def _save(root: Path, operation: SetupOperation) -> None:
 def setup_state_names(root: Path, generation: str) -> bool:
     """Whether the retained setup state already names ``generation``.
 
-    Missing or unreadable setup state counts as named: there is nothing to
-    reconcile without a setup operation to carry the generation.
+    Missing setup state counts as named: there is nothing to reconcile
+    without a setup operation to carry the generation. Any other read failure
+    propagates, so a caller does not remember a state it could not read.
     """
     try:
         operation = SetupOperation.model_validate_json(
             read_private(root / "setup.json")
         )
-    except (OSError, ValueError):
+    except FileNotFoundError:
         return True
     return (
         operation.snapshot is not None and operation.snapshot.generation == generation
@@ -138,14 +139,15 @@ def record_refreshed_snapshot(
     the retained setup state then names that generation as registered, with
     the build and the source identity of the environment it was staged from,
     so ``service_status`` verifies the copy the service runs on and a setup
-    rerun completes on it rather than staging another. Missing or unreadable
-    setup state is left alone: there is nothing to reconcile.
+    rerun completes on it rather than staging another. Missing setup state
+    is left alone: there is nothing to reconcile. Any other failure
+    propagates, so the caller can retry rather than believe it recorded.
     """
     try:
         operation = SetupOperation.model_validate_json(
             read_private(root / "setup.json")
         )
-    except (OSError, ValueError):
+    except FileNotFoundError:
         return
     _save(
         root,

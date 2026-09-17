@@ -933,6 +933,14 @@ async def test_an_attached_manager_on_a_selection_brings_the_setup_state_along(
 
     monkeypatch.setattr(managed_services, "service_source_identity", identity)
     services = ManagedServices(tmp_path / "connection.json")
+    # A state that cannot be read is not remembered as current.
+    (tmp_path / "setup.json").chmod(0o644)
+    await services._reconcile_setup_state(  # pyright: ignore[reportPrivateUsage]
+        tmp_path, "f" * 64
+    )
+    assert services.setup_reconciled is None
+    assert identities == []
+    (tmp_path / "setup.json").chmod(0o600)
     # A failed record is retried on the next attach, not remembered as done.
     await services._reconcile_setup_state(  # pyright: ignore[reportPrivateUsage]
         tmp_path, "f" * 64

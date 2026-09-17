@@ -520,14 +520,23 @@ class ManagedServices:
             "plugin manager runtime refreshed to this host's Skulk build; "
             "the service restarts on it"
         ),
-    ) -> None:
+    ) -> bool:
         # Setup state names the generation the service runs on, its build and
         # the source identity it was staged from; status verifies against it
         # and a setup rerun would otherwise stage and restart yet another
-        # generation for the same build.
-        source = await asyncio.to_thread(service_source_identity)
-        record_refreshed_snapshot(root, snapshot, source)
+        # generation for the same build. A record that fails is reported,
+        # not believed: the next attach reconciles it.
+        try:
+            source = await asyncio.to_thread(service_source_identity)
+            record_refreshed_snapshot(root, snapshot, source)
+        except (OSError, ValueError) as error:
+            logger.warning(
+                f"setup state not recorded: {type(error).__name__}; "
+                "reconciled on the next attach"
+            )
+            return False
         logger.info(message)
+        return True
 
     async def _reconcile_setup_state(self, root: Path, build: str) -> None:
         """Make the setup state follow a selection the manager attached on.
@@ -540,22 +549,24 @@ class ManagedServices:
         selected = selected_generation_for(root, build)
         if selected is None or self.setup_reconciled == selected.generation:
             return
-        # Remembered only once the state is current, so a failed record is
-        # retried on the next attach rather than skipped for the process.
-        if not setup_state_names(root, selected.generation):
-            try:
-                await self._record_refresh(
-                    root,
-                    selected,
-                    "plugin manager attached on the generation staged for this "
-                    "host's Skulk build; the setup state now names it",
-                )
-            except (OSError, ValueError) as error:
-                logger.warning(
-                    f"setup state not reconciled: {type(error).__name__}; "
-                    "retrying on the next attach"
-                )
-                return
+        # Remembered only once the state is confirmed current, so a state
+        # that could not be read or recorded is retried on the next attach
+        # rather than skipped for the rest of the process.
+        try:
+            current = setup_state_names(root, selected.generation)
+        except (OSError, ValueError) as error:
+            logger.warning(
+                f"setup state not readable: {type(error).__name__}; "
+                "reconciled on the next attach"
+            )
+            return
+        if not current and not await self._record_refresh(
+            root,
+            selected,
+            "plugin manager attached on the generation staged for this "
+            "host's Skulk build; the setup state now names it",
+        ):
+            return
         self.setup_reconciled = selected.generation
 
     async def request(self, request: ManagementRequest) -> dict[str, JsonValue]:
