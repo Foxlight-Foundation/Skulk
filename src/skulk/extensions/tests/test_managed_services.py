@@ -808,6 +808,16 @@ def test_a_legacy_manager_is_stopped_and_the_generation_selected(
 
     monkeypatch.setattr("skulk.extensions.managed_services.manager_pids", no_manager)
     snapshot = staged(tmp_path)
+    interpreter = str(
+        tmp_path / "core-runtimes" / snapshot.generation / "runtime" / "bin" / "python"
+    )
+
+    def restarted(root: Path) -> list[tuple[int, list[str]]]:
+        return [(4444, [interpreter, "-m", "skulk.extensions.runtime_manager"])]
+
+    monkeypatch.setattr(
+        "skulk.extensions.managed_services.manager_processes", restarted
+    )
     reload_legacy_manager(tmp_path, snapshot)
     assert snapshot.generation.encode() in read_private(tmp_path / "core-runtime.json")
 
@@ -843,9 +853,31 @@ def test_a_manager_started_before_the_selection_is_stopped_again(
         ]
 
     monkeypatch.setattr(managed_attachment, "manager_processes", running)
+    monkeypatch.setattr(managed_services, "manager_processes", running)
     monkeypatch.setattr(managed_services.os, "kill", record)
     reload_legacy_manager(tmp_path, snapshot)
     assert signalled == [4242, 4343]
+
+
+def test_a_reload_is_not_complete_until_a_manager_runs_the_selection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A replacement still in its bootstrap is invisible; the reload waits for it."""
+    from skulk.extensions import managed_attachment, managed_services
+    from skulk.extensions.managed_services import reload_legacy_manager
+    from skulk.extensions.tests.test_service_snapshot import staged
+
+    snapshot = staged(tmp_path)
+
+    def nothing_yet(root: Path) -> list[tuple[int, list[str]]]:
+        return []
+
+    monkeypatch.setattr(managed_attachment, "manager_processes", nothing_yet)
+    monkeypatch.setattr(managed_services, "manager_processes", nothing_yet)
+    monkeypatch.setattr(managed_services, "_MANAGER_START_SECONDS", 0.6)
+    with pytest.raises(OSError, match="has not started"):
+        reload_legacy_manager(tmp_path, snapshot)
+    assert snapshot.generation.encode() in read_private(tmp_path / "core-runtime.json")
 
 
 def test_a_running_manager_names_the_build_of_the_generation_it_started_from(

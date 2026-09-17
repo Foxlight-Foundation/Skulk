@@ -18,7 +18,8 @@ from skulk.extensions.managed import ManagedConnection, ManagedOwner
 from skulk.extensions.managed_attachment import (
     ManagedAttachment,
     manager_pids,
-    stale_manager_pids,
+    manager_processes,
+    runs_generation,
 )
 from skulk.extensions.runtime_artifacts import Digest, ProtocolUnsupportedError
 from skulk.extensions.runtime_attachment import (
@@ -78,6 +79,10 @@ def protocol_refusal(result: dict[str, JsonValue]) -> ProtocolUnsupportedError |
 # A stopping manager allows each supervised owner thirty seconds to exit and
 # closes them together; this covers that plus its client drain, with margin.
 _MANAGER_STOP_SECONDS = 120.0
+# The keep-alive throttles restarts to ten seconds apart and the bootstrap
+# verifies the runtime tree before it starts the manager; several such
+# rounds fit in this, after which the refresh is reported indeterminate.
+_MANAGER_START_SECONDS = 90.0
 
 
 # How long a manager that answered nothing gets to show the selection it made.
@@ -139,11 +144,27 @@ def reload_legacy_manager(root: Path, snapshot: ServiceSnapshot) -> None:
                 continue
             break
     # The keep-alive may have started a manager between the stop and the
-    # selection; it read the previous pointer and runs the old generation.
-    # Stopping it once more makes its replacement read the new one.
-    for pid in stale_manager_pids(root, snapshot.generation):
-        with contextlib.suppress(OSError):
-            os.kill(pid, signal.SIGTERM)
+    # selection; it read the previous pointer and runs the old generation,
+    # or is still in its bootstrap and not yet visible as a manager at all.
+    # Stop each such manager as it appears until one runs the selected
+    # generation: only then has the service restarted on it.
+    started = time.monotonic() + _MANAGER_START_SECONDS
+    while True:
+        processes = manager_processes(root)
+        for pid, cmdline in processes:
+            if not runs_generation(cmdline, root, snapshot.generation):
+                with contextlib.suppress(OSError):
+                    os.kill(pid, signal.SIGTERM)
+        if any(
+            runs_generation(cmdline, root, snapshot.generation)
+            for _, cmdline in processes
+        ):
+            return
+        if time.monotonic() >= started:
+            raise OSError(
+                "the plugin manager has not started on the selected generation"
+            )
+        time.sleep(0.5)
 
 
 def selected_generation_for(root: Path, build: str) -> ServiceSnapshot | None:
