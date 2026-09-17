@@ -131,6 +131,13 @@ def test_a_catalog_verifies_against_discovery_trust_and_names_refusals() -> None
     found = listed.entry("example.plugin", 3, "linux-x86_64")
     assert found is not None and found.runtime_platform == "linux-x86_64"
     assert listed.entry("example.plugin", 3, None) is None
+    # An alias of a listed family finds the same listing.
+    glibc = verify_catalog(
+        _catalog(key, [_entry(3, runtime_platform="linux-glibc-x86_64")]),
+        _trust(key),
+        now=now,
+    )
+    assert glibc.entry("example.plugin", 3, "ubuntu-24.04-x86_64") is not None
     with pytest.raises(ValueError, match="twice"):
         verify_catalog(
             _catalog(
@@ -276,6 +283,24 @@ async def test_the_host_catalog_configures_fetches_and_retains_without_disclosur
         CatalogSourceUpdate(expected_revision=3, trust=_trust(key, revision=3))
     )
     assert catalog.trust().revoked_publishers == ("gone",)
+    # A restored older trust file (one that could drop a revocation) is
+    # refused against the floor the host recorded; the current one reads,
+    # and a damaged floor fails the read closed.
+    current_trust = (tmp_path / "catalog-trust.json").read_bytes()
+    (tmp_path / "catalog-trust.json").write_bytes(
+        _trust(key, revision=2).model_dump_json().encode()
+    )
+    with pytest.raises(ValueError, match="trust rollback"):
+        catalog.trust()
+    (tmp_path / "catalog-trust.json").write_bytes(current_trust)
+    assert catalog.trust().revision == 3
+    floor_record = (tmp_path / "catalog-trust-floor.json").read_bytes()
+    (tmp_path / "catalog-trust-floor.json").write_bytes(
+        b'{"revision": 0, "sha256": "short"}'
+    )
+    with pytest.raises(ValueError, match="local maintenance"):
+        catalog.trust()
+    (tmp_path / "catalog-trust-floor.json").write_bytes(floor_record)
     # Moving to another catalog (with its credential supplied again) starts
     # a new revision history: revision 1 there is not a rollback.
     await catalog.configure(
@@ -287,6 +312,7 @@ async def test_the_host_catalog_configures_fetches_and_retains_without_disclosur
     )
     served[0] = document
     assert (await catalog.fetch()).claims.revision == 1
+    assert (tmp_path / "catalog-revision.json").exists()
     # Two trusted publishers at one address keep separate floors: serving
     # the other publisher does not erase the first one's history.
     other_key = Ed25519PrivateKey.generate()

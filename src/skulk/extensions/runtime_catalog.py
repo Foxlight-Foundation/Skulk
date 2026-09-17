@@ -247,11 +247,21 @@ class VerifiedCatalog:
         One sequence may be listed once per runtime platform; the family is
         part of the identity, so a plain release is found only with ``None``.
         """
+        wanted = (
+            canonical_platform(runtime_platform)
+            if runtime_platform is not None
+            else None
+        )
         for entry in self.entries:
+            listed = (
+                canonical_platform(entry.runtime_platform)
+                if entry.runtime_platform is not None
+                else None
+            )
             if (
                 entry.bundle_id == bundle_id
                 and entry.sequence == sequence
-                and entry.runtime_platform == runtime_platform
+                and listed == wanted
             ):
                 return entry
         return None
@@ -510,7 +520,9 @@ class HostCatalog:
         if (
             not isinstance(revision, int)
             or isinstance(revision, bool)
+            or revision < 1
             or not isinstance(sha256, str)
+            or not re.fullmatch(r"[a-f0-9]{64}", sha256)
         ):
             raise ValueError(
                 "discovery trust floor unreadable; local maintenance required"
@@ -645,20 +657,30 @@ class HostCatalog:
                     document_filename=filename,
                     credential_reference=reference,
                 )
-                write_private(
-                    self.root / "catalog-trust.json",
-                    next_trust.model_dump_json().encode(),
-                )
-                write_private(
-                    self.root / "catalog-source.json", source.model_dump_json().encode()
-                )
                 if previous is not None and (
                     previous.base_url != source.base_url
                     or previous.document_filename != source.document_filename
                 ):
                     # An owner-authorized move to another catalog starts a
-                    # new revision history; the old floor would refuse it.
+                    # new revision history. The old record goes first: a
+                    # crash between the writes leaves the old address without
+                    # a floor (re-established on its next read), never the
+                    # new address refused by the old one.
                     (self.root / "catalog-revision.json").unlink(missing_ok=True)
+                trust_bytes = next_trust.model_dump_json().encode()
+                write_private(self.root / "catalog-trust.json", trust_bytes)
+                write_private(
+                    self.root / "catalog-trust-floor.json",
+                    json.dumps(
+                        {
+                            "revision": next_trust.revision,
+                            "sha256": hashlib.sha256(trust_bytes).hexdigest(),
+                        }
+                    ).encode(),
+                )
+                write_private(
+                    self.root / "catalog-source.json", source.model_dump_json().encode()
+                )
                 return self.source_status()
             finally:
                 lock.close()
