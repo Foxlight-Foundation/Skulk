@@ -4300,7 +4300,7 @@ trust and credentials, reads accepted installation/activation status, and never
 automatically resubmits an effect. Interrupted downloads require explicit recovery
 consent under their original operation ID. An unrelated or failed lifecycle
 transition requires explicit lifecycle inspection/recovery; it is not replaced.
-A newer release at the configured source is reviewed, staged beside the selected one and, after explicit consent, activated over it under the selection revision; an older release at the source is a rollback, which the manager refuses at inspection, since rollback is an explicit lifecycle operation.
+A newer release at the configured source is reviewed, staged beside the selected one and, after explicit consent, activated over it under the selection revision; an older release at the source is a rollback, refused before any transfer, since rollback is an explicit lifecycle operation.
 Polling is bounded; exiting the terminal leaves manager-owned work running.
 The command accepts at most one installation ID and no executable, path or
 provider command. The existing typed-JSON `manage` interface remains available

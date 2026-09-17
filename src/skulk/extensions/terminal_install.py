@@ -133,8 +133,10 @@ class TerminalInstaller:
             clear_token=not token,
         )
 
-    async def _work_in_flight(self, identifier: str) -> bool:
-        """Whether the manager still owns a lifecycle operation for this installation.
+    async def _installation(
+        self, identifier: str
+    ) -> tuple[bool, RuntimeSelection | None]:
+        """Whether the manager still owns work for this installation, and its selection.
 
         An activation whose reply was lost is resumed, never inspected past:
         the manager refuses inspection while it owns work, and the retained
@@ -144,7 +146,12 @@ class TerminalInstaller:
             InstallationRequest(action="get", plugin_id=identifier)
         )
         summary = _OBJECT.validate_python(state["installation"], strict=True)
-        return summary.get("operation_state") not in (None, "complete")
+        selection = (
+            RuntimeSelection.model_validate_json(json.dumps(state["selection"]))
+            if state["selection"] is not None
+            else None
+        )
+        return summary.get("operation_state") not in (None, "complete"), selection
 
     async def _install_status(self, identifier: str) -> InstallOperation | None:
         result = await self._call(
@@ -162,9 +169,11 @@ class TerminalInstaller:
     ) -> InstallOperation | None:
         operation = await self._install_status(identifier)
         review: ReleaseReview | None = None
-        if operation is None or (
-            operation.state == "staged" and not await self._work_in_flight(identifier)
-        ):
+        selection: RuntimeSelection | None = None
+        in_flight = False
+        if operation is not None and operation.state == "staged":
+            in_flight, selection = await self._installation(identifier)
+        if operation is None or (operation.state == "staged" and not in_flight):
             # With nothing in flight, the source is inspected again: an
             # installation that already holds a staged release is upgraded
             # when the source now publishes a newer one, instead of resuming
@@ -182,6 +191,22 @@ class TerminalInstaller:
             operation is None
             or operation.review.runtime_digest != review.runtime_digest
         ):
+            # The high-water mark is the selection's when one exists, else
+            # the staged release's. Going below it is a rollback, which the
+            # terminal never requests: refused here, before any transfer,
+            # rather than after staging by the selector.
+            highest = (
+                selection.highest_sequence
+                if selection is not None
+                else operation.review.sequence
+                if operation is not None
+                else 0
+            )
+            if review.sequence < highest:
+                raise ValueError(
+                    "the release at the source is older than the installed one; "
+                    "rollback is an explicit lifecycle operation"
+                )
             self._review(review)
             question = (
                 "Install this exact verified release?"

@@ -925,8 +925,8 @@ by reading retained operations; only explicitly confirmed download recovery retr
 the original local installation. Run against an installation whose source now
 publishes a newer release, the same command inspects it, stages it beside the
 selected release and, with consent, activates it over it (the owner restarts on
-the new release); an older release at the source is refused at inspection as a
-rollback. Continue with the plugin's own configuration and
+the new release); an older release at the source is refused as a rollback
+before any transfer. Continue with the plugin's own configuration and
 preflight commands before enabling capability work. This command adds no provider
 policy or spending authority to core.
 

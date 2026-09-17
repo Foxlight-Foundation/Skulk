@@ -48,6 +48,7 @@ class Journey:
     source: Path
     metadata: bytes
     signing_key: Ed25519PrivateKey
+    releases: dict[int, tuple[Path, bytes]] = field(default_factory=dict)
     fail_response: str | None = None
     fail_download: bool = False
     requests: list[ManagerRequest] = field(default_factory=list)
@@ -92,14 +93,22 @@ class Journey:
         )
 
     def publish(self, sequence: int) -> None:
-        """Replace the feed's release with the next sequence, signed by the same key."""
-        self.source = self.source.parent / f"source-{sequence}"
-        self.metadata, _, _ = artifacts(
-            self.source,
-            owner_source=OWNER_SOURCE,
-            signing_key=self.signing_key,
-            sequence=sequence,
-        )
+        """Serve ``sequence`` from the feed: built once per sequence, then reused.
+
+        Re-serving an earlier sequence reuses its exact metadata, so the feed
+        rolls back rather than equivocating (the same sequence with different
+        bytes, which inspection refuses on its own).
+        """
+        if sequence not in self.releases:
+            source = self.source.parent / f"source-{sequence}"
+            metadata, _, _ = artifacts(
+                source,
+                owner_source=OWNER_SOURCE,
+                signing_key=self.signing_key,
+                sequence=sequence,
+            )
+            self.releases[sequence] = (source, metadata)
+        self.source, self.metadata = self.releases[sequence]
 
     @property
     def identifier(self) -> str:
@@ -128,6 +137,7 @@ async def journey(
     )
     manager = RuntimeManager(root)
     fixture = Journey(manager, trust, source, metadata, signing_key)
+    fixture.releases[1] = (source, metadata)
 
     async def respond(request: httpx.Request) -> httpx.Response:
         assert request.headers["Authorization"] == "Bearer hidden-test-feed-token"
@@ -210,10 +220,11 @@ async def test_a_newer_release_at_the_source_upgrades_the_installation(
         await fixture.terminal(iter(())).run(identifier)
         assert sum(isinstance(r, InstallSubmission) for r in fixture.requests) == 2
         assert sum(isinstance(r, SubmitRequest) for r in fixture.requests) == 2
-        # An older release at the source is a rollback: the manager refuses
-        # it at inspection, before anything is staged, and nothing changes.
+        # The feed rolled back to the exact sequence 1 it served before: the
+        # terminal refuses the rollback before any transfer, nothing is
+        # submitted or staged, and the selection stands.
         fixture.publish(1)
-        with pytest.raises(ValueError, match="manager request incomplete"):
+        with pytest.raises(ValueError, match="rollback"):
             await fixture.terminal(iter(("y",))).run(identifier)
         assert selector.current() == second
         assert sum(isinstance(r, InstallSubmission) for r in fixture.requests) == 2
