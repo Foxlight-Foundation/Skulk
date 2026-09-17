@@ -1867,6 +1867,8 @@ separates trust, download and owner-execution consent. Resume observes existing
 operations; interrupted downloads require explicit recovery. It never changes node
 configuration or approves spending, and introduces no HTTP or privileged operation.
 
+A host can also read a signed capability catalog for discovery. The owner configures one catalog address with its own discovery trust (a publisher-trust record separate from any installation's) and an optional write-only credential; the manager fetches the document with the same no-redirect, identity-encoding policy as a release feed, verifies its signature and windows, and returns a review of the listed releases (what each can do and spend, and whether it matches this host) without any address or credential. The catalog is discovery and consent only: reading it selects, stages and installs nothing, and an install from a listing still registers the release source and passes inspection, staging and activation, where the release record itself is verified against installation trust.
+
 Extension startup and serving share one event loop. The API starts hooks only
 once its runtime begins and invokes optional asynchronous shutdown hooks before
 closing its lifetime, with discovery withdrawn and a shared thirty-second cleanup

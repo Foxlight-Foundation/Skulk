@@ -25,7 +25,11 @@ from pydantic import (
 
 from skulk.extensions import service_bootstrap, service_registration
 from skulk.extensions.local_setup import manage_installed_plugin, setup_installed_plugin
-from skulk.extensions.runtime_artifacts import Digest, measure_host
+from skulk.extensions.runtime_artifacts import (
+    Digest,
+    measure_host,
+    protocol_refusal_sentence,
+)
 from skulk.extensions.runtime_attachment import (
     HostSettings,
     ProfileIdentifier,
@@ -35,6 +39,7 @@ from skulk.extensions.runtime_files import RuntimeLock, read_private, write_priv
 from skulk.extensions.runtime_install import finish_runtime_work
 from skulk.extensions.runtime_manager import (
     MANAGER_REQUEST,
+    CatalogRequest,
     InventoryRequest,
     ManagerRequest,
     ReloadRuntimeRequest,
@@ -559,6 +564,7 @@ def main() -> None:
             "setup-plugin",
             "manage-plugin",
             "install-plugin",
+            "catalog",
         ),
     )
     parser.add_argument("setup_arguments", nargs=argparse.REMAINDER)
@@ -620,6 +626,54 @@ def main() -> None:
                     {"operation_id": operation.operation_id, "phase": operation.phase}
                 )
             )
+        elif action == "catalog":
+            if os.geteuid() == 0:
+                raise ValueError("plugin management requires the nonroot service owner")
+            connection = ServiceConnection.model_validate_json(
+                read_private(
+                    SKULK_CONFIG_HOME / "managed-service" / "connection.json", 8192
+                )
+            )
+            reply = asyncio.run(
+                manager_request(
+                    Path(connection.manager_root),
+                    CatalogRequest(action="read_catalog"),
+                )
+            )
+            listing = reply.get("result")
+            if set(reply) != {"result"} or not isinstance(listing, dict):
+                # A refused read fails the command with its own sentence: an
+                # unconfigured, unreachable or refused catalog must not look
+                # like an empty listing, and a protocol refusal is named with
+                # the one sentence every surface uses rather than the generic
+                # failure the outer handler prints.
+                kind, offered, accepted = (
+                    reply.get("kind"),
+                    reply.get("offered"),
+                    reply.get("accepted"),
+                )
+                if (
+                    reply.get("error") == "release_protocol_unsupported"
+                    and isinstance(kind, str)
+                    and isinstance(offered, int)
+                    and isinstance(accepted, list)
+                ):
+                    print(
+                        protocol_refusal_sentence(
+                            kind,
+                            offered,
+                            tuple(item for item in accepted if isinstance(item, int)),
+                        ),
+                        file=sys.stderr,
+                    )
+                else:
+                    print(
+                        "Catalog read refused; configure the catalog source and "
+                        "discovery trust, then retry.",
+                        file=sys.stderr,
+                    )
+                raise SystemExit(1)
+            print(json.dumps(listing, indent=2))
         elif action == "manage":
             if os.geteuid() == 0:
                 raise ValueError("plugin management requires the nonroot service owner")

@@ -29,6 +29,8 @@ from skulk.extensions.runtime_attachment import (
 )
 from skulk.extensions.runtime_files import read_private
 from skulk.extensions.runtime_manager import (
+    CatalogRegistration,
+    CatalogRequest,
     InstallationRequest,
     InstallRecoveryRequest,
     InstallSubmission,
@@ -69,7 +71,7 @@ def protocol_refusal(result: dict[str, JsonValue]) -> ProtocolUnsupportedError |
     except ValueError:
         return None
     if (
-        kind not in ("release", "runtime")
+        kind not in ("release", "runtime", "catalog")
         or not isinstance(offered, int)
         or isinstance(offered, bool)
     ):
@@ -291,6 +293,8 @@ class ManagedInventory(BaseModel):
 
 type ManagementRequest = (
     InventoryRequest
+    | CatalogRequest
+    | CatalogRegistration
     | InstallationRequest
     | SubmitRequest
     | OperationRequest

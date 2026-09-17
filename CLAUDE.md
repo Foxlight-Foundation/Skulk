@@ -764,7 +764,10 @@ system prompt in `instructions` plus the operator history in `input`, and only
 those two are read back. Invariants: every extension call is guarded (a raising
 extension never degrades inference), extensions never own the chunk stream,
 and no extension installed = Skulk unchanged. Kill switch:
-`SKULK_EXTENSIONS_DISABLE=1`.
+`SKULK_EXTENSIONS_DISABLE=1`. Managed plugins are installed by the plugin
+manager from signed releases; the host can also read one signed capability
+catalog for discovery (`extensions/runtime_catalog.py`, host-scoped source and
+discovery trust, `read_catalog`), which selects and installs nothing.
 
 Optional `StewardToolProvider` offers bounded `extension_*` read and inert-proposal
 tools through `extensions/steward.py`. The steward binds each model step to the

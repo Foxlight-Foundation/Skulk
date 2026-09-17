@@ -302,8 +302,22 @@ class RuntimeInstaller:
             lock.close()
 
     async def inspect_metadata(self, metadata: bytes) -> VerifiedRuntime:
-        """Verify signed metadata and trust floors without downloading or executing code."""
-        lock = RuntimeLock(self.installer)
+        """Verify signed metadata and trust floors without downloading or executing code.
+
+        Inspection has no effects, so it waits briefly for the fence that an
+        owner start's verification holds moments after an activation rather
+        than refusing the read that follows one; past that it is the same
+        refusal as before, since a long-held fence means real work.
+        """
+        deadline = time.monotonic() + 2.0
+        while True:
+            try:
+                lock = RuntimeLock(self.installer)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise
+                await asyncio.sleep(0.1)
         try:
             host = await asyncio.to_thread(measure_host)
             return self._verify(metadata, host)

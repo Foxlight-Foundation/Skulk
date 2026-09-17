@@ -16,7 +16,11 @@ from typing import Annotated, Literal, cast, final
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
 
-from skulk.extensions.runtime_artifacts import ProtocolUnsupportedError, measure_host
+from skulk.extensions.runtime_artifacts import (
+    ProtocolUnsupportedError,
+    QualifiedHost,
+    measure_host,
+)
 from skulk.extensions.runtime_attachment import (
     AttachmentJournal,
     AttachmentRequest,
@@ -25,6 +29,7 @@ from skulk.extensions.runtime_attachment import (
     finish_attachment,
     recover_attachment,
 )
+from skulk.extensions.runtime_catalog import CatalogSourceUpdate, HostCatalog
 from skulk.extensions.runtime_controller import (
     LifecycleOperation,
     LifecycleRequest,
@@ -198,9 +203,24 @@ def build_mismatch_payload(differs: ManagerBuildMismatchError) -> bytes:
     )
 
 
+class CatalogRequest(_Request):
+    """Read the host's signed catalog or its source readiness; nothing installs."""
+
+    action: Literal["read_catalog", "catalog_status"]
+
+
+class CatalogRegistration(_Request):
+    """Configure the host's one catalog address and discovery trust."""
+
+    action: Literal["configure_catalog"] = "configure_catalog"
+    request: CatalogSourceUpdate = Field(description="Owner-supplied catalog settings.")
+
+
 type ManagerRequest = (
     InventoryRequest
     | ReloadRuntimeRequest
+    | CatalogRequest
+    | CatalogRegistration
     | InstallationRequest
     | SubmitRequest
     | OperationRequest
@@ -241,6 +261,13 @@ class RuntimeManager:
         self.path = manager_socket(self.root)
         self.controllers: dict[str, RuntimeController] = {}
         self.downloads: dict[str, RuntimeDownloads] = {}
+        self.catalog = HostCatalog(root)
+        # One catalog read at a time: a second reader is refused as busy.
+        # The host is measured once per manager lifetime (its environment
+        # is fixed while it runs), so no read repeats the tree hash and a
+        # cancelled first measurement cannot overlap a later one.
+        self.catalog_read = asyncio.Lock()
+        self.host: asyncio.Task[QualifiedHost] | None = None
         self.errors: dict[str, str] = {}
         self.server: asyncio.Server | None = None
         self.lock: RuntimeLock | None = None
@@ -430,7 +457,10 @@ class RuntimeManager:
                     raise ValueError("manager request exceeds bound")
                 request = MANAGER_REQUEST.validate_json(raw)
                 result = await self.dispatch(request)
-                payload = json.dumps({"result": result}).encode() + b"\n"
+                # UTF-8 as written: escaping non-ASCII text would inflate a
+                # reply (a catalog's permissions, say) past the bound.
+                payload = json.dumps({"result": result}, ensure_ascii=False).encode()
+                payload += b"\n"
                 if len(payload) > 262144:
                     raise ValueError("manager response exceeds bound")
                 writer.write(payload)
@@ -542,6 +572,28 @@ class RuntimeManager:
             }
         if isinstance(request, AttachmentRequest):
             return await finish_runtime_work(asyncio.create_task(self._attach(request)))
+        if isinstance(request, CatalogRequest):
+            if request.action == "catalog_status":
+                return self.catalog.source_status().model_dump(mode="json")
+            # A slow catalog server must not block inventory or attachment
+            # renewal behind the manager-wide lock, like release inspection.
+            if self.catalog_read.locked():
+                raise ValueError("catalog source is busy")
+            async with self.catalog_read:
+                verified = await self.catalog.fetch()
+                if self.host is None or (self.host.done() and self.host.exception()):
+                    self.host = asyncio.create_task(asyncio.to_thread(measure_host))
+                # A request that times out does not cancel the measurement;
+                # the next read reuses the same task instead of starting
+                # another tree hash.
+                host = await asyncio.shield(self.host)
+            return verified.review(
+                skulk_build_sha256=host.skulk_build_sha256, platform=host.platform
+            ).model_dump(mode="json")
+        if isinstance(request, CatalogRegistration):
+            return (await self.catalog.configure(request.request)).model_dump(
+                mode="json"
+            )
         if isinstance(request, ReleaseRequest) and request.action == "inspect_release":
             async with self.guard:
                 downloads = self.downloads.get(request.plugin_id)
@@ -650,6 +702,7 @@ class RuntimeManager:
                 results = await asyncio.gather(
                     *(controller.close() for controller in self.controllers.values()),
                     *(downloads.close() for downloads in self.downloads.values()),
+                    self.catalog.close(),
                     return_exceptions=True,
                 )
                 if any(isinstance(result, BaseException) for result in results):
@@ -686,7 +739,7 @@ async def manager_request(root: Path, request: ManagerRequest) -> dict[str, Json
         try:
             payload = request.model_dump(mode="json")
             if (
-                isinstance(request, SourceRegistration)
+                isinstance(request, SourceRegistration | CatalogRegistration)
                 and request.request.token is not None
             ):
                 # SecretStr redacts diagnostics by default. Only this protected
