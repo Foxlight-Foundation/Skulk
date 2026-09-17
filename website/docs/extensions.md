@@ -747,18 +747,42 @@ record and the isolated runtime envelope each carry a protocol number, and the
 host accepts the current protocol and, once there is one, the previous, so a
 capability published against the previous protocol keeps installing for one
 release cycle; a protocol outside the window is refused with a message naming
-what the host accepts. A managed installation is a satellite of its host on the dashboard: the host
+what the host accepts. That refusal is one of two manager errors surfaced by
+name: the manager answers `release_protocol_unsupported` with the kind, the
+number offered and the numbers accepted (integers only); the guided installer
+prints what to do (update Skulk on the host, or choose a release published for
+it); and the plugin routes answer HTTP 409 with the same sentence.
+
+A managed installation is a satellite of its host on the dashboard: the host
 reads the owner's extended description every second and publishes one
 bounded, credential-free summary per node (identity, lifecycle status, the
 ready link surfaces with an open action each), marks the owner unavailable
 when the description cannot be read, and withdraws the summary when the node
 leaves the description or the owner stops.
 
-That refusal is the one manager error surfaced by name:
-the manager answers `release_protocol_unsupported` with the kind, the number
-offered and the numbers accepted (integers only); the guided installer prints
-what to do (update Skulk on the host, or choose a release published for it);
-and the plugin routes answer HTTP 409 with the same sentence. Both members of a window are tested on every change,
+The manager survives a Skulk update. Its independent core runtime is a copy
+of the Skulk build it was set up with, and a host running a different build
+is refused with `manager_build_differs`, the other named manager error. When
+a Skulk update restarts the host on a new build, the host stages a matching
+manager runtime from its own environment and asks the running manager to
+`reload_runtime`; the manager verifies the staged generation's seal, selects
+it, and exits, and the OS service's keep-alive restarts it on the new
+generation. The manager's inventory names `reload_runtime` support, and the
+host reads it before asking: a manager from before this protocol does not
+name it, so the host stops that manager, selects the staged generation under
+both fences and lets the keep-alive restart it, while a manager that names it
+and still refuses the generation is a refusal, and the unselected candidate
+is removed. A stopped manager keeps its fence until it has closed every owner
+it supervises, and the host waits for that exit before selecting, and only
+when the registered service invokes this host's interpreter, since the staged
+generation is sealed to it; otherwise the host leaves the service running and
+asks for `skulk-plugin-service setup`. A refresh
+that succeeds records the new generation in the setup state, so
+`skulk-plugin-service status` verifies the copy the service runs on. `skulk-plugin-service setup` takes the
+reload path when the service is registered and answering and its registered
+definition still names the current interpreter (the Skulk build or its
+dependencies moved); a moved interpreter takes the ordinary re-registration
+path. Both members of a window are tested on every change,
 so the window never grows beyond two. Linux distribution names and versions do
 not restrict installation;
 native wheel tags and dependency checks determine binary compatibility. The

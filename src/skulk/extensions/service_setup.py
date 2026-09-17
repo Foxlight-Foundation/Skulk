@@ -37,12 +37,14 @@ from skulk.extensions.runtime_manager import (
     MANAGER_REQUEST,
     InventoryRequest,
     ManagerRequest,
+    ReloadRuntimeRequest,
     manager_request,
 )
 from skulk.extensions.service_registration import ServiceLayout, local_layout
 from skulk.extensions.service_snapshot import (
     ServiceSnapshot,
     activate_service_runtime,
+    selected_generation,
     service_source_identity,
     stage_service_runtime,
 )
@@ -50,6 +52,8 @@ from skulk.extensions.terminal_install import TerminalInstaller
 from skulk.shared.constants import SKULK_CONFIG_HOME
 
 _READINESS_WAIT_SECONDS = 60.0
+# How long a manager that answered nothing gets to show the selection it made.
+_RELOAD_SETTLE_SECONDS = 10.0
 
 
 class SetupOperation(BaseModel):
@@ -108,6 +112,37 @@ def _save(root: Path, operation: SetupOperation) -> None:
     write_private(root / "setup.json", raw)
 
 
+def record_refreshed_snapshot(
+    root: Path, snapshot: ServiceSnapshot, source_sha256: str
+) -> None:
+    """Record the generation a running manager was moved to without setup.
+
+    The host refreshes the manager runtime on its own after a Skulk update;
+    the retained setup state then names that generation as registered, with
+    the build and the source identity of the environment it was staged from,
+    so ``service_status`` verifies the copy the service runs on and a setup
+    rerun completes on it rather than staging another. Missing or unreadable
+    setup state is left alone: there is nothing to reconcile.
+    """
+    try:
+        operation = SetupOperation.model_validate_json(
+            read_private(root / "setup.json")
+        )
+    except (OSError, ValueError):
+        return
+    _save(
+        root,
+        operation.model_copy(
+            update={
+                "snapshot": snapshot,
+                "skulk_build_sha256": snapshot.skulk_build_sha256,
+                "source_sha256": source_sha256,
+                "phase": "registered",
+            }
+        ),
+    )
+
+
 def _outside_checkout(path: Path) -> None:
     if any((parent / ".git").exists() for parent in (path, *path.parents)):
         raise ValueError(
@@ -136,12 +171,42 @@ async def _elevate(
         raise ValueError("explicit local service registration did not complete")
 
 
+async def _selected_within(root: Path, generation: str, seconds: float) -> bool:
+    """Whether the manager selects ``generation`` before ``seconds`` pass."""
+    deadline = time.monotonic() + seconds
+    while selected_generation(root) != generation:
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(0.5)
+    return True
+
+
 async def _observe(root: Path) -> bool:
     try:
         result = await manager_request(root, InventoryRequest())
         return "result" in result and "error" not in result
     except (OSError, ValueError, TimeoutError):
         return False
+
+
+def registered_unit_names_base(base: Path) -> bool:
+    """Whether this user's registered OS service invokes ``base``.
+
+    A generation staged from this process is sealed to its interpreter; a
+    service registered to invoke another one cannot start on it, so a host
+    checks this before it selects a generation the OS service must start.
+    """
+    return _unit_names_base(local_layout(os.getuid()), base)
+
+
+def _unit_names_base(layout: ServiceLayout, base: Path) -> bool:
+    """Whether the registered OS service still invokes this interpreter."""
+    try:
+        descriptor = os.open(layout.unit, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return False
+    with os.fdopen(descriptor, "rb") as source:
+        return source.read(65537) == layout.definition(base)
 
 
 def _ready_installation(
@@ -209,6 +274,7 @@ async def setup_service() -> SetupOperation:
     try:
 
         async def install() -> SetupOperation:
+            refresh = False
             try:
                 operation = SetupOperation.model_validate_json(
                     read_private(layout.root / "setup.json")
@@ -234,9 +300,21 @@ async def setup_service() -> SetupOperation:
                     operation.skulk_build_sha256 != host.skulk_build_sha256
                     or operation.source_sha256 != source_identity
                 ):
-                    # A corrected local build must be able to replace failed
-                    # setup. Preserve its journal/profile and stage a complete
-                    # new copy before touching any selected or running manager.
+                    # The environment moved under a registered, answering
+                    # service: the fresh operation below reloads it without
+                    # elevation. Otherwise a corrected local build must be able
+                    # to replace failed setup the same way. Either way the prior
+                    # operation is retained and a new one begins.
+                    # The source identity always moves with the build, so the
+                    # gate is the registered service definition still naming
+                    # this interpreter (a moved interpreter re-registers) and
+                    # the manager answering.
+                    refresh = (
+                        operation.phase in {"registered", "ready"}
+                        and operation.snapshot is not None
+                        and await asyncio.to_thread(_unit_names_base, layout, base)
+                        and await _observe(layout.root)
+                    )
                     operation = None
             profile_id = profile_id or uuid4().hex
             connection = ServiceConnection(
@@ -276,7 +354,8 @@ async def setup_service() -> SetupOperation:
             # A live manager alone proves neither boot registration nor integrity
             # of its selected copy. Verify both before treating setup as complete.
             if (
-                operation.phase in {"registered", "ready"}
+                not refresh
+                and operation.phase in {"registered", "ready"}
                 and operation.snapshot is not None
                 and await asyncio.to_thread(
                     _ready_installation, layout, operation.snapshot, base
@@ -287,6 +366,64 @@ async def setup_service() -> SetupOperation:
                 if operation.phase == "registered":
                     operation = operation.model_copy(update={"phase": "ready"})
                     _save(layout.root, operation)
+                return operation
+            reply: dict[str, JsonValue] | None = None
+            if refresh and operation.snapshot is None:
+                # The OS service is registered and answering; only the Skulk
+                # environment moved. Stage a matching runtime here and let the
+                # running manager select it and restart itself: no elevation.
+                print(
+                    "Refreshing the manager runtime to the live Skulk build...",
+                    flush=True,
+                )
+                snapshot = await stage_service_runtime(layout.root)
+                if (
+                    snapshot.skulk_build_sha256 != host.skulk_build_sha256
+                    or await asyncio.to_thread(service_source_identity)
+                    != source_identity
+                ):
+                    raise ValueError("source environment changed during local setup")
+                operation = operation.model_copy(
+                    update={"snapshot": snapshot, "phase": "staged"}
+                )
+                _save(layout.root, operation)
+                try:
+                    reply = await manager_request(
+                        layout.root,
+                        ReloadRuntimeRequest(
+                            generation=snapshot.generation,
+                            manifest_sha256=snapshot.manifest_sha256,
+                        ),
+                    )
+                except (OSError, TimeoutError):
+                    reply = {}
+                if "result" not in reply and not await _selected_within(
+                    layout.root, snapshot.generation, _RELOAD_SETTLE_SECONDS
+                ):
+                    # A manager from before this protocol, or one that refused:
+                    # the staged copy is kept and the ordinary path below
+                    # re-registers it with elevation. A lost reply is not a
+                    # refusal: the manager may have selected the generation
+                    # while restarting, which the pointer shows.
+                    print("Manager did not reload; re-registering.", flush=True)
+                    reply = None
+            if refresh and reply is not None and operation.snapshot is not None:
+                selected = operation.snapshot
+                operation = operation.model_copy(update={"phase": "registered"})
+                _save(layout.root, operation)
+                deadline = time.monotonic() + _READINESS_WAIT_SECONDS
+                while not (
+                    await _observe(layout.root)
+                    and await asyncio.to_thread(
+                        _ready_installation, layout, selected, base
+                    )
+                ):
+                    if time.monotonic() >= deadline:
+                        raise ServiceReadinessPendingError(operation.operation_id)
+                    await asyncio.sleep(0.5)
+                write_private(connection_path, connection.model_dump_json().encode())
+                operation = operation.model_copy(update={"phase": "ready"})
+                _save(layout.root, operation)
                 return operation
             if not prepared:
                 await _elevate(layout, "prepare")

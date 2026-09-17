@@ -1,14 +1,21 @@
 """One process-lifetime local bridge to an independently supervised manager."""
 
 import asyncio
+import re
 import time
 from pathlib import Path
 from typing import final
 
+from pydantic import JsonValue, TypeAdapter
+
 from skulk.extensions.runtime_artifacts import measure_host
 from skulk.extensions.runtime_attachment import AttachmentRequest
-from skulk.extensions.runtime_files import RuntimeLock
-from skulk.extensions.runtime_manager import manager_request
+from skulk.extensions.runtime_files import RuntimeLock, read_private
+from skulk.extensions.runtime_manager import (
+    MANAGER_BUILD_DIFFERS,
+    ManagerBuildMismatchError,
+    manager_request,
+)
 
 
 @final
@@ -56,6 +63,16 @@ class ManagedAttachment:
                 skulk_build_sha256=self.build,
             )
             result = await manager_request(self.root, request)
+            if result.get("error") == MANAGER_BUILD_DIFFERS:
+                raise ManagerBuildMismatchError(
+                    str(result.get("manager")), str(result.get("live"))
+                )
+            if "error" in result:
+                # A manager from before the named refusal answers generically;
+                # its selected generation says which build it runs.
+                selected = selected_manager_build(self.root)
+                if selected is not None and selected != self.build:
+                    raise ManagerBuildMismatchError(selected, self.build)
             if result != {
                 "result": {
                     "transport_node_id": self.transport_node_id,
@@ -73,3 +90,22 @@ class ManagedAttachment:
                 self.lock.close()
                 self.lock = None
                 self.observed = 0.0
+
+
+def selected_manager_build(root: Path) -> str | None:
+    """The Skulk build the manager's selected generation was staged from."""
+    document = TypeAdapter(dict[str, JsonValue])
+    try:
+        pointer = document.validate_json(read_private(root / "core-runtime.json", 4096))
+        generation = pointer.get("generation")
+        if not isinstance(generation, str) or not re.fullmatch(
+            r"[a-f0-9]{32}", generation
+        ):
+            return None
+        staged = document.validate_json(
+            read_private(root / "core-runtimes" / generation / "staged.json", 131072)
+        )
+    except (OSError, ValueError):
+        return None
+    build = staged.get("skulk_build_sha256")
+    return build if isinstance(build, str) else None

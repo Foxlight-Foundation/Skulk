@@ -4030,6 +4030,7 @@ The local socket accepts these typed requests:
 | `submit` | `plugin_id`, `request` | Accepts a local lifecycle request after validating its revision and target. The nested request contains `operation_id` (32 lowercase hexadecimal characters), `action` (`activate`, `select`, `disable` or `uninstall`), `expected_revision`, and for activation or stopped selection `runtime_digest`, optional `rollback` and `accept_permissions`. No spending authority is conveyed. |
 | `operation` | `plugin_id`, `operation_id` | Reads retained progress. Reconnect reads this result; reusing an ID with different intent is refused. |
 | `recover` | `plugin_id`, `operation_id` | Explicitly resumes only that retained local intent after its fault is corrected. Completed or superseded operations remain unchanged. No new request or provider operation is created. |
+| `reload_runtime` | `generation`, `manifest_sha256` | Selects a manager generation staged from the live Skulk build, verifying its seal under the manager's own fences, then stops so the OS service restarts on it. Refused when the generation is not staged or differs. |
 
 Activation validates signed artifacts, permission expansion and migration
 compatibility before stopping the owner; it repeats admission checks before
@@ -4056,7 +4057,7 @@ requesting socket. Validation failures do not interrupt a healthy owner.
 The socket is owner-only and accepts eight concurrent clients, one request per
 connection, at most 16 KiB request and 256 KiB response, with a thirty-second
 request deadline. Errors contain the stable `manager_operation_refused` code, with
-one named exception: a verified release outside this host's protocol window answers
+two named exceptions: a host whose live Skulk build differs from the manager's answers `manager_build_differs` with the two build digests, and a verified release outside this host's protocol window answers
 `release_protocol_unsupported` with `kind` (`release` or `runtime`), the integer
 `offered` and the integers `accepted`, nothing else;
 local operation records distinguish validation, ownership and local I/O failures.
@@ -4162,7 +4163,7 @@ without restart. Missing setup returns an actionable unavailable response.
 
 | Method | Path | Parameters and behavior |
 | --- | --- | --- |
-| GET | `/v1/plugins/managed` | Requires `plugins:read`. Returns `installations`, at most sixteen entries, with `plugin_id`, `selected_digest`, `selection_revision`, `enabled`, `service`, `stale`, `error_code`, `operation_id` and `operation_state`. Pending or selected operation references allow reconnect to resume observation without repeating a mutation. |
+| GET | `/v1/plugins/managed` | Requires `plugins:read`. Returns `installations`, at most sixteen entries, with `plugin_id`, `selected_digest`, `selection_revision`, `enabled`, `service`, `stale`, `error_code`, `operation_id` and `operation_state`. `reload_runtime` is true when the manager can select a staged runtime and restart on request; a host reads it before asking, so a manager from before that request is told apart from one refusing a generation. Pending or selected operation references allow reconnect to resume observation without repeating a mutation. |
 | POST | `/v1/plugins/managed/installations` | Requires `plugins:manage`. Body: `plugin_id` in the `managed.*` namespace. Registers an empty installation and returns its observation. Does not download, stage or enable a release. |
 | GET | `/v1/plugins/managed/installations/{plugin_id}` | Requires `plugins:read`. Returns `installation` observation and `selection`, nullable before a release is selected. |
 | POST | `/v1/plugins/managed/installations/{plugin_id}/operations` | Requires `plugins:manage`. Body: `operation_id` (32 lowercase hexadecimal characters), `action` (`activate`, `select`, `disable` or `uninstall`), `expected_revision` (nonnegative integer), and activation/selection-only `runtime_digest`, optional `rollback` and `accept_permissions` booleans. Returns the retained `LifecycleOperation`. Activation and stopped selection accept only an already staged, verified generation. `select` keeps its owner stopped until a later explicit `activate` request. An explicit `disable` can withdraw a stalled activation/selection, including a revoked release, using the current selection revision. Live work and a pending withdrawal cannot be superseded. `activate` and `select` revalidate the staged metadata; a runtime that a host update has moved outside the protocol window answers `409` with the sentence the guided installer prints (which protocol the host accepts, which the runtime offers, and that the fix is to update Skulk on this host or choose a release published for it). |

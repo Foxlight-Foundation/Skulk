@@ -10,6 +10,7 @@ import signal
 import stat
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated, Literal, cast, final
 
@@ -42,6 +43,7 @@ from skulk.extensions.runtime_files import (
 )
 from skulk.extensions.runtime_install import finish_runtime_work
 from skulk.extensions.runtime_service import RuntimeServiceStatus
+from skulk.extensions.service_snapshot import ServiceSnapshot, activate_staged_runtime
 
 PluginIdentifier = Annotated[
     str, Field(pattern=r"^managed\.[a-z0-9][a-z0-9._-]{0,80}$")
@@ -148,8 +150,57 @@ class InstallRecoveryRequest(_Request):
     )
 
 
+class ReloadRuntimeRequest(_Request):
+    """Activate a staged manager generation and exit for the OS service to restart.
+
+    Local setup or the Skulk host stages the generation from the live Skulk
+    build; the running manager verifies its seal under the fences it holds,
+    selects it, and stops. Launchd and systemd keep the service alive, so the
+    next start runs the new generation without an elevated registration step.
+    """
+
+    action: Literal["reload_runtime"] = "reload_runtime"
+    generation: str = Field(pattern=r"^[a-f0-9]{32}$", description="Staged generation.")
+    manifest_sha256: str = Field(
+        pattern=r"^[a-f0-9]{64}$", description="Its snapshot manifest digest."
+    )
+
+
+class ManagerBuildMismatchError(ValueError):
+    """The live Skulk build differs from the one the manager runs; named on purpose.
+
+    Carries the two build digests so the host can stage a matching runtime and
+    ask the manager to reload rather than treating it as a generic refusal.
+    """
+
+    def __init__(self, manager: str, live: str) -> None:
+        super().__init__("live Skulk build differs from manager")
+        self.manager = manager
+        self.live = live
+
+
+MANAGER_BUILD_DIFFERS = "manager_build_differs"
+"""Manager error naming a live Skulk build the manager does not run."""
+
+
+def build_mismatch_payload(differs: ManagerBuildMismatchError) -> bytes:
+    """Encode the mismatch as a fixed vocabulary: a code and two digests."""
+    return (
+        json.dumps(
+            {
+                "error": MANAGER_BUILD_DIFFERS,
+                "manager": differs.manager,
+                "live": differs.live,
+            },
+            sort_keys=True,
+        ).encode()
+        + b"\n"
+    )
+
+
 type ManagerRequest = (
     InventoryRequest
+    | ReloadRuntimeRequest
     | InstallationRequest
     | SubmitRequest
     | OperationRequest
@@ -174,7 +225,9 @@ def manager_socket(root: Path) -> Path:
 class RuntimeManager:
     """Supervise bounded local installations independently of Skulk's API lifetime."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(
+        self, root: Path, request_stop: Callable[[], None] | None = None
+    ) -> None:
         """Read only the fixed local host binding and prepare owner-only storage."""
         if os.geteuid() == 0:
             raise ValueError("plugin manager must run without root")
@@ -191,6 +244,9 @@ class RuntimeManager:
         self.errors: dict[str, str] = {}
         self.server: asyncio.Server | None = None
         self.lock: RuntimeLock | None = None
+        # Set by the serving loop: a reload activates the successor, then asks
+        # the loop to stop so the OS service restarts on it.
+        self.request_stop = request_stop
         self.tasks: set[asyncio.Task[None]] = set()
         self.boot: asyncio.Task[None] | None = None
         self.guard = asyncio.Lock()
@@ -233,13 +289,46 @@ class RuntimeManager:
         for identifier in self._identifiers():
             await self._load(identifier)
 
+    async def _reload(self, request: ReloadRuntimeRequest) -> dict[str, JsonValue]:
+        """Select a staged successor under this manager's own fences, then stop."""
+        async with self.guard:
+            generation = self.root / "core-runtimes" / request.generation
+            snapshot = ServiceSnapshot.model_validate_json(
+                read_private(generation / "staged.json", 131072)
+            )
+            if (
+                snapshot.generation != request.generation
+                or snapshot.manifest_sha256 != request.manifest_sha256
+            ):
+                raise ValueError("staged manager generation differs")
+            installer = RuntimeLock(self.root)
+
+            async def activate() -> None:
+                try:
+                    await asyncio.to_thread(
+                        activate_staged_runtime, self.root, snapshot
+                    )
+                finally:
+                    installer.close()
+                if self.request_stop is not None:
+                    # After the reply has been written: the OS service restarts
+                    # this process on the generation just selected.
+                    asyncio.get_running_loop().call_later(0.5, self.request_stop)
+
+            # Owned work: a request waiter cancelled by its deadline neither
+            # releases the fence early nor loses the stop after a selection.
+            await finish_runtime_work(asyncio.create_task(activate()))
+            return {"generation": snapshot.generation, "restarting": True}
+
     async def _attach(self, request: AttachmentRequest) -> dict[str, JsonValue]:
         async with self.guard:
             if self.settings.profile_id != request.profile_id:
                 raise ValueError("attachment profile differs")
             host = await asyncio.to_thread(measure_host)
             if request.skulk_build_sha256 != host.skulk_build_sha256:
-                raise ValueError("live Skulk build differs from manager")
+                raise ManagerBuildMismatchError(
+                    host.skulk_build_sha256, request.skulk_build_sha256
+                )
             # The bridge holds this fence for its whole API lifetime. Two local
             # Skulk profiles must not alternately attach this manager to themselves.
             try:
@@ -346,6 +435,11 @@ class RuntimeManager:
                     raise ValueError("manager response exceeds bound")
                 writer.write(payload)
                 await writer.drain()
+        except ManagerBuildMismatchError as differs:
+            with contextlib.suppress(OSError, TimeoutError):
+                async with asyncio.timeout(1):
+                    writer.write(build_mismatch_payload(differs))
+                    await writer.drain()
         except ProtocolUnsupportedError as refused:
             # The one refusal named by design: a fixed vocabulary of ints, so
             # the installer and the plugin routes can say what to do next.
@@ -435,11 +529,16 @@ class RuntimeManager:
         """Execute the same fixed operations for terminal and authenticated API callers."""
         if self.closed:
             raise ValueError("manager is closing")
+        if isinstance(request, ReloadRuntimeRequest):
+            return await self._reload(request)
         if isinstance(request, InventoryRequest):
+            # Naming reload support lets a host tell a manager from before the
+            # request apart from one refusing it, before it sends the request.
             return {
                 "installations": [
                     self._summary(identifier) for identifier in self._identifiers()
-                ]
+                ],
+                "reload_runtime": True,
             }
         if isinstance(request, AttachmentRequest):
             return await finish_runtime_work(asyncio.create_task(self._attach(request)))
@@ -605,8 +704,8 @@ async def manager_request(root: Path, request: ManagerRequest) -> dict[str, Json
 
 
 async def _serve(root: Path) -> None:
-    manager = RuntimeManager(root)
     stopped = asyncio.Event()
+    manager = RuntimeManager(root, request_stop=stopped.set)
     loop = asyncio.get_running_loop()
     for shutdown_signal in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(shutdown_signal, stopped.set)

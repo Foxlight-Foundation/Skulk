@@ -3,9 +3,16 @@
 import asyncio
 import contextlib
 import json
+import os
+import shutil
+import signal
+import sys
+import time
 from pathlib import Path
 from typing import Literal, final
 
+import psutil
+from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
 
 from skulk.extensions.managed import ManagedConnection, ManagedOwner
@@ -22,13 +29,26 @@ from skulk.extensions.runtime_manager import (
     InstallRecoveryRequest,
     InstallSubmission,
     InventoryRequest,
+    ManagerBuildMismatchError,
     OperationRequest,
     ReleaseRequest,
+    ReloadRuntimeRequest,
     SourceRegistration,
     SubmitRequest,
     manager_request,
 )
 from skulk.extensions.runtime_service import RuntimeServiceStatus
+from skulk.extensions.service_setup import (
+    record_refreshed_snapshot,
+    registered_unit_names_base,
+)
+from skulk.extensions.service_snapshot import (
+    ServiceSnapshot,
+    activate_service_runtime,
+    selected_generation,
+    service_source_identity,
+    stage_service_runtime,
+)
 from skulk.extensions.types import ExtensionContext
 
 _WINDOW = TypeAdapter(list[int])
@@ -50,6 +70,111 @@ def protocol_refusal(result: dict[str, JsonValue]) -> ProtocolUnsupportedError |
     ):
         return None
     return ProtocolUnsupportedError(str(kind), offered, tuple(accepted))
+
+
+# A stopping manager allows each supervised owner thirty seconds to exit and
+# closes them together; this covers that plus its client drain, with margin.
+_MANAGER_STOP_SECONDS = 120.0
+
+
+# How long a manager that answered nothing gets to show the selection it made.
+_SELECTION_WAIT_SECONDS = 120.0
+
+
+def _selected(root: Path, generation: str) -> bool:
+    return selected_generation(root) == generation
+
+
+def _selected_within(root: Path, generation: str, seconds: float) -> bool:
+    deadline = time.monotonic() + seconds
+    while not _selected(root, generation):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.5)
+    return True
+
+
+def manager_pids(root: Path) -> list[int]:
+    """Processes serving the manager at ``root``; they run as this user."""
+    found: list[int] = []
+    arguments = TypeAdapter(list[str])
+    for process in psutil.process_iter():
+        try:
+            cmdline = arguments.validate_python(process.cmdline())
+        except (psutil.Error, ValueError):
+            continue
+        if (
+            "skulk.extensions.runtime_manager" in cmdline
+            and "serve" in cmdline
+            and str(root) in cmdline
+        ):
+            found.append(int(process.pid))
+    return found
+
+
+def reload_legacy_manager(root: Path, snapshot: ServiceSnapshot) -> None:
+    """Select a staged generation for a manager that predates reload_runtime.
+
+    The manager holds its fence while it runs, so it is stopped first (it is
+    this user's process, no elevation), the generation is selected under both
+    fences, and the OS service's keep-alive starts the manager on it. The
+    stopped manager keeps its fence until it has closed every owner it
+    supervises, which takes up to ``_MANAGER_STOP_SECONDS``; the selection
+    waits for that exit rather than for a shorter deadline, or the keep-alive
+    would restart the old generation and every attempt would fail the same
+    way. The restart races the selection; the fences settle it, with bounded
+    retries.
+    """
+    pids = manager_pids(root)
+    for pid in pids:
+        with contextlib.suppress(OSError):
+            os.kill(pid, signal.SIGTERM)
+    exited = time.monotonic() + _MANAGER_STOP_SECONDS
+    while any(pid in manager_pids(root) for pid in pids):
+        if time.monotonic() >= exited:
+            raise OSError("the stopped plugin manager has not exited")
+        time.sleep(0.5)
+    deadline = time.monotonic() + 15
+    while True:
+        try:
+            activate_service_runtime(root, snapshot)
+            return
+        except (OSError, ValueError):
+            # The fence is still held while the stopped manager finishes, or
+            # its keep-alive replacement took it first: keep asking.
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.25)
+            for pid in manager_pids(root):
+                if pid not in pids and _selected(root, snapshot.generation):
+                    return
+                with contextlib.suppress(OSError):
+                    os.kill(pid, signal.SIGTERM)
+
+
+def staged_generation_for(root: Path, build: str) -> ServiceSnapshot | None:
+    """A generation already staged from ``build`` that is not the selected one."""
+    try:
+        selected = read_private(root / "core-runtime.json", 4096)
+    except (OSError, ValueError):
+        selected = b""
+    generations = root / "core-runtimes"
+    try:
+        names = sorted(path.name for path in generations.iterdir() if path.is_dir())
+    except OSError:
+        return None
+    for name in names:
+        if name.encode() in selected:
+            continue
+        try:
+            snapshot = ServiceSnapshot.model_validate_json(
+                read_private(generations / name / "staged.json", 131072)
+            )
+        except (OSError, ValueError):
+            continue
+        if snapshot.generation == name and snapshot.skulk_build_sha256 == build:
+            return snapshot
+    return None
 
 
 class ManagedInstallation(BaseModel):
@@ -109,6 +234,10 @@ class ManagedInventory(BaseModel):
     installations: tuple[ManagedInstallation, ...] = Field(
         max_length=16, description="Bounded registered plugin installations."
     )
+    reload_runtime: bool = Field(
+        default=False,
+        description="Whether this manager can select a staged runtime and restart on request.",
+    )
 
 
 type ManagementRequest = (
@@ -148,6 +277,16 @@ class ManagedServices:
         self.attachment: ManagedAttachment | None = None
         self.owners: dict[str, ManagedOwner] = {}
         self.task: asyncio.Task[None] | None = None
+        self.runtime_refresh: asyncio.Task[None] | None = None
+        # None until an attempt is made: the monotonic clock starts near zero
+        # at boot, so a zero origin would hold the first attempt for five
+        # minutes on a host that starts Skulk right after booting.
+        self.runtime_refreshed: float | None = None
+        # Staging retains an interrupted copy and never activates it; an
+        # environment that cannot be staged would grow one such copy every
+        # attempt, so after a staging failure no further attempt is made until
+        # the host restarts (which is when its environment changes).
+        self.runtime_refresh_exhausted = False
         self.guard = asyncio.Lock()
         self.closed = False
 
@@ -185,6 +324,147 @@ class ManagedServices:
         assert self.attachment is not None
         await self.attachment.ensure()
 
+    def _schedule_runtime_refresh(self, differs: ManagerBuildMismatchError) -> None:
+        if self.runtime_refresh is not None and not self.runtime_refresh.done():
+            return
+        if self.runtime_refresh_exhausted:
+            return
+        if (
+            self.runtime_refreshed is not None
+            and time.monotonic() - self.runtime_refreshed < 300
+        ):
+            return
+        self.runtime_refreshed = time.monotonic()
+        assert self.connection is not None
+        root = Path(self.connection.manager_root)
+        logger.warning(
+            "plugin manager runs Skulk build "
+            f"{differs.manager[:12]} while this host runs {differs.live[:12]}; "
+            "staging a matching manager runtime"
+        )
+        self.runtime_refresh = asyncio.create_task(
+            self._refresh_manager_runtime(root, differs.live)
+        )
+
+    async def _settle_runtime_refresh(self) -> None:
+        """Wait for a manager refresh to finish before this observer detaches.
+
+        The refresh runs its selection in a worker thread that cancellation
+        would not stop, so the task is drained rather than cancelled: a
+        refresh must not keep selecting or restarting a manager this host has
+        let go of. The refresh already handles its own failures.
+        """
+        task, self.runtime_refresh = self.runtime_refresh, None
+        if task is not None and not task.done():
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def _refresh_manager_runtime(self, root: Path, live: str) -> None:
+        """Stage the manager runtime from this host's build and ask for a reload.
+
+        A generation already staged for this build is reused, and one the
+        manager refuses is removed, so repeated attempts against a broken
+        manager do not accumulate copies of Skulk on the service volume.
+        """
+        candidate: Path | None = None
+        snapshot: ServiceSnapshot | None = None
+        try:
+            # The inventory answers without an attachment and names whether
+            # the manager knows the reload request, so a manager from before
+            # it is told apart from one that refuses the staged generation.
+            inventory = (await manager_request(root, InventoryRequest())).get("result")
+            reloads = (
+                isinstance(inventory, dict) and inventory.get("reload_runtime") is True
+            )
+            if not reloads and not await asyncio.to_thread(
+                registered_unit_names_base, Path(sys.executable).resolve(strict=True)
+            ):
+                # The legacy path selects a generation sealed to this
+                # interpreter for the OS service to start; a service
+                # registered to invoke another one could not come back, and
+                # only an elevated setup re-registers it. Nothing is staged.
+                raise ValueError(
+                    "the registered service invokes another interpreter; "
+                    "rerun skulk-plugin-service setup"
+                )
+            snapshot = staged_generation_for(root, live)
+            if snapshot is None:
+                try:
+                    snapshot = await stage_service_runtime(root)
+                except (OSError, TimeoutError, ValueError):
+                    # Qualification past its deadline has populated the
+                    # generation directory as surely as a failed copy has.
+                    self.runtime_refresh_exhausted = True
+                    raise ValueError(
+                        "the manager runtime could not be staged from this "
+                        "environment; no further attempt until the host restarts"
+                    ) from None
+            candidate = root / "core-runtimes" / snapshot.generation
+            if reloads:
+                reply = await manager_request(
+                    root,
+                    ReloadRuntimeRequest(
+                        generation=snapshot.generation,
+                        manifest_sha256=snapshot.manifest_sha256,
+                    ),
+                )
+                if "result" not in reply:
+                    # The manager's own handler deadline answers with the
+                    # generic refusal while its selection may still finish;
+                    # a named refusal is final.
+                    if reply.get(
+                        "error"
+                    ) == "manager_operation_refused" and await asyncio.to_thread(
+                        _selected_within,
+                        root,
+                        snapshot.generation,
+                        _SELECTION_WAIT_SECONDS,
+                    ):
+                        await self._record_refresh(root, snapshot)
+                        return
+                    raise ValueError("manager refused the staged generation")
+            else:
+                # A manager from before this protocol: select the generation
+                # for it and restart it.
+                await asyncio.to_thread(reload_legacy_manager, root, snapshot)
+            await self._record_refresh(root, snapshot)
+        except ValueError as error:
+            # An explicit refusal (or a service this host cannot restart): the
+            # candidate generation is not selected and can go, whether it was
+            # staged now or reused. Transport
+            # failures are ambiguous (the manager drains an activation past
+            # the request deadline), so those keep it.
+            if candidate is not None and not _selected(root, candidate.name):
+                shutil.rmtree(candidate, ignore_errors=True)
+            logger.warning(
+                f"plugin manager runtime refresh failed: {error}; "
+                "rerun skulk-plugin-service setup"
+            )
+        except (OSError, TimeoutError) as error:
+            # The manager may still be verifying the seal past the request
+            # deadline and select the generation afterwards; once it does,
+            # nothing else would reconcile the setup state, so wait for it.
+            if snapshot is not None and await asyncio.to_thread(
+                _selected_within, root, snapshot.generation, _SELECTION_WAIT_SECONDS
+            ):
+                await self._record_refresh(root, snapshot)
+                return
+            logger.warning(
+                "plugin manager runtime refresh is indeterminate: "
+                f"{type(error).__name__}; the staged generation is retained"
+            )
+
+    async def _record_refresh(self, root: Path, snapshot: ServiceSnapshot) -> None:
+        # Setup state names the generation the service runs on, its build and
+        # the source identity it was staged from; status verifies against it
+        # and a setup rerun would otherwise stage and restart yet another
+        # generation for the same build.
+        source = await asyncio.to_thread(service_source_identity)
+        record_refreshed_snapshot(root, snapshot, source)
+        logger.info(
+            "plugin manager runtime refreshed to this host's Skulk build; "
+            "the service restarts on it"
+        )
+
     async def request(self, request: ManagementRequest) -> dict[str, JsonValue]:
         """Send one typed local management request; never accept an attachment override.
 
@@ -210,7 +490,15 @@ class ManagedServices:
         """Reconcile current manager membership without restarting Skulk's API."""
         async with self.guard:
             try:
-                await self._connect()
+                try:
+                    await self._connect()
+                except ManagerBuildMismatchError as differs:
+                    # A Skulk update restarted this host on a build the manager
+                    # does not run. Stage a matching manager runtime from this
+                    # process and ask the manager to reload; the OS service
+                    # restarts it and the next refresh attaches.
+                    self._schedule_runtime_refresh(differs)
+                    raise
                 assert self.connection is not None and self.context is not None
                 assert self.attachment is not None
                 result = await manager_request(
@@ -290,6 +578,7 @@ class ManagedServices:
             await asyncio.sleep(1)
 
     async def _detach(self) -> None:
+        await self._settle_runtime_refresh()
         owners, self.owners = tuple(self.owners.values()), {}
         await asyncio.gather(*(owner.on_stop() for owner in owners))
         if self.attachment is not None:
@@ -306,5 +595,6 @@ class ManagedServices:
             self.task.cancel()
             await asyncio.gather(self.task, return_exceptions=True)
             self.task = None
+        await self._settle_runtime_refresh()
         async with self.guard:
             await self._detach()
