@@ -41,6 +41,7 @@ from skulk.extensions.proposal_review import (
     ProposalReview,
 )
 from skulk.extensions.runtime_attachment import ProfileIdentifier
+from skulk.extensions.runtime_service import ServiceProcessState
 from skulk.extensions.setup import NodeSetup
 from skulk.extensions.setup_actions import SetupActions, SetupMutation, SetupOperation
 from skulk.extensions.steward import StewardTool
@@ -332,7 +333,7 @@ class ManagedOwner:
         # The owner process state the manager last reported, so an owner that
         # is absent because the installation is stopped is told apart from
         # one that failed.
-        self.manager_state: str | None = None
+        self.manager_state: ServiceProcessState | None = None
         self.poll_task: asyncio.Task[None] | None = None
         self.host_task: asyncio.Task[None] | None = None
         self.host_callbacks_available = False

@@ -665,8 +665,15 @@ class ManagedServices:
                         if item.selected_digest is not None and item.error_code is None
                         else None
                     )
+                    # A stale or errored row may carry the previous service
+                    # instance's state; only a current observation says an
+                    # owner is absent by design.
                     self.owners[identifier].manager_state = (
-                        item.service.state if item.service is not None else None
+                        item.service.state
+                        if item.service is not None
+                        and not item.stale
+                        and item.error_code is None
+                        else None
                     )
                     self.owners[identifier].manager_available = (
                         item.enabled
