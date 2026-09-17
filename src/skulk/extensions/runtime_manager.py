@@ -43,6 +43,7 @@ from skulk.extensions.runtime_controller import (
 from skulk.extensions.runtime_download import (
     InstallRequest,
     ReleaseReview,
+    ReleaseSource,
     RuntimeDownloads,
     SourceStatus,
     SourceUpdate,
@@ -807,6 +808,10 @@ class RuntimeManager:
                         "the listed release is older than the installed one; "
                         "rollback is an explicit lifecycle operation"
                     )
+            try:
+                previous: ReleaseSource | None = downloads.source()
+            except FileNotFoundError:
+                previous = None
             source = await downloads.configure(
                 SourceUpdate(
                     expected_revision=downloads.source_status().revision,
@@ -819,18 +824,61 @@ class RuntimeManager:
             )
         # Inspection reaches the feed; like inspect_release it runs outside
         # the manager-wide lock so a slow server blocks nothing else.
-        review = await downloads.inspect()
-        if (
-            review.runtime_digest != entry.release_digest
-            or review.bundle_id != entry.bundle_id
-            or review.sequence != entry.sequence
-        ):
-            raise ValueError(
-                "the release served at the listed feed differs from the listing"
-            )
+        try:
+            review = await downloads.inspect()
+            if (
+                review.runtime_digest != entry.release_digest
+                or review.bundle_id != entry.bundle_id
+                or review.sequence != entry.sequence
+            ):
+                raise ValueError(
+                    "the release served at the listed feed differs from the listing"
+                )
+        except ValueError:
+            # A refused listing leaves an existing installation on the source
+            # it had: later plain upgrades and recovery must not read the feed
+            # that just failed. A new installation keeps the listed source
+            # (nothing is selected there) so the plain path can retry it.
+            if previous is not None:
+                await self._restore_source(downloads, previous, source.revision)
+            raise
         return CatalogInstallation(
             plugin_id=identifier, listing=listing, source=source, review=review
         )
+
+    async def _restore_source(
+        self, downloads: RuntimeDownloads, previous: ReleaseSource, revision: int
+    ) -> None:
+        """Put an installation's source back after a refused catalog binding.
+
+        The prior credential file is retained by configuration, so the same
+        token is supplied again under a fresh reference; trust is left as
+        raised, since it only tightened. A restore that itself fails is
+        named, so the operator inspects source status rather than trusting
+        the refusal alone.
+        """
+        token: str | None = None
+        try:
+            if previous.credential_reference is not None:
+                token = read_private(
+                    downloads.root / "feed-credentials" / previous.credential_reference,
+                    8192,
+                ).decode("ascii")
+            async with self.guard:
+                await downloads.configure(
+                    SourceUpdate(
+                        expected_revision=revision,
+                        base_url=previous.base_url,
+                        metadata_filename=previous.metadata_filename,
+                        token=SecretStr(token) if token is not None else None,
+                        clear_token=token is None,
+                    )
+                )
+        except (OSError, ValueError):
+            raise ValueError(
+                "listed feed refused and the prior source could not be restored; "
+                "inspect source status"
+            ) from None
 
     async def close(self) -> None:
         """Stop new clients, finish accepted work and close every owned runtime."""

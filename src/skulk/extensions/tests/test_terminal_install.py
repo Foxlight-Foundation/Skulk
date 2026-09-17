@@ -490,10 +490,25 @@ async def test_catalog_installs_refuse_by_name_before_any_transfer(
             revision=2,
             digests={2: "f" * 64},
         )
+        downloads = fixture.manager.downloads[identifier]
+        before = downloads.source()
         with pytest.raises(ValueError, match="manager request incomplete"):
             await fixture.terminal(iter(("y",))).run_from_catalog(
                 "example.plugin", plugin_id=identifier
             )
+        assert sum(isinstance(r, InstallSubmission) for r in fixture.requests) == 1
+        # The refused binding put the installation back on the source it had,
+        # with the same credential under a fresh reference, so the plain
+        # command still resumes there and nothing is staged.
+        restored = downloads.source()
+        assert (restored.base_url, restored.metadata_filename) == (
+            before.base_url,
+            before.metadata_filename,
+        )
+        assert restored.revision == before.revision + 2
+        assert restored.credential_reference not in (None, before.credential_reference)
+        await fixture.terminal(iter(())).run(identifier)
+        assert any("retained at sequence 1" in line for line in fixture.output)
         assert sum(isinstance(r, InstallSubmission) for r in fixture.requests) == 1
         # The digest of a superseded listing is refused: consent names the
         # listing the operator reviewed, and that one is no longer current.
