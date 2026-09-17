@@ -92,12 +92,13 @@ class Journey:
             # Accelerating only the poller exhausts its budget on slower hosts.
         )
 
-    def publish(self, sequence: int) -> None:
+    def publish(self, sequence: int, *, bundle: str | None = None) -> None:
         """Serve ``sequence`` from the feed: built once per sequence, then reused.
 
         Re-serving an earlier sequence reuses its exact metadata, so the feed
         rolls back rather than equivocating (the same sequence with different
-        bytes, which inspection refuses on its own).
+        bytes, which inspection refuses on its own). ``bundle`` publishes the
+        sequence under another bundle identity.
         """
         if sequence not in self.releases:
             source = self.source.parent / f"source-{sequence}"
@@ -106,6 +107,7 @@ class Journey:
                 owner_source=OWNER_SOURCE,
                 signing_key=self.signing_key,
                 sequence=sequence,
+                bundle_id=bundle if bundle is not None else "example.plugin",
             )
             self.releases[sequence] = (source, metadata)
         self.source, self.metadata = self.releases[sequence]
@@ -253,6 +255,21 @@ async def test_a_newer_release_at_the_source_upgrades_the_installation(
         third = selector.current()
         assert third is not None and third.sequence == 3 and third.revision == 3
         assert sum(isinstance(r, InstallSubmission) for r in fixture.requests) == 3
+        # A staged release whose activation was declined still raises the
+        # high-water mark: the feed going back below it is a rollback.
+        fixture.publish(4)
+        await fixture.terminal(iter(("y", "n"))).run(identifier)
+        assert selector.current() == third
+        assert sum(isinstance(r, InstallSubmission) for r in fixture.requests) == 4
+        fixture.publish(3)
+        with pytest.raises(ValueError, match="rollback"):
+            await fixture.terminal(iter(("y",))).run(identifier)
+        assert sum(isinstance(r, InstallSubmission) for r in fixture.requests) == 4
+        # A different bundle at the source is refused before any transfer.
+        fixture.publish(5, bundle="example.other")
+        with pytest.raises(ValueError, match="another bundle"):
+            await fixture.terminal(iter(("y",))).run(identifier)
+        assert sum(isinstance(r, InstallSubmission) for r in fixture.requests) == 4
 
 
 @pytest.mark.parametrize(

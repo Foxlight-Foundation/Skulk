@@ -203,18 +203,31 @@ class TerminalInstaller:
             # The high-water mark is the selection's when one exists, else
             # the staged release's. Going below it is a rollback, which the
             # terminal never requests: refused here, before any transfer,
-            # rather than after staging by the selector.
-            highest = (
-                selection.highest_sequence
-                if selection is not None
-                else operation.review.sequence
-                if operation is not None
-                else 0
+            # rather than after staging by the selector. A staged release
+            # that was never activated counts too, so a feed that goes back
+            # below it cannot replace the retained operation.
+            highest = max(
+                selection.highest_sequence if selection is not None else 0,
+                operation.review.sequence if operation is not None else 0,
             )
             if review.sequence < highest:
                 raise ValueError(
                     "the release at the source is older than the installed one; "
                     "rollback is an explicit lifecycle operation"
+                )
+            installed = (
+                selection.bundle_id
+                if selection is not None
+                else operation.review.bundle_id
+                if operation is not None
+                else None
+            )
+            if installed is not None and review.bundle_id != installed:
+                # The selector refuses a bundle change after staging; refusing
+                # it here leaves no unusable generation behind.
+                raise ValueError(
+                    "the release at the source belongs to another bundle; "
+                    "install it as a new installation"
                 )
             self._review(review)
             question = (
