@@ -774,8 +774,8 @@ both fences and lets the keep-alive restart it, while a manager that names it
 and still refuses the generation is a refusal, and the unselected candidate
 is removed. A stopped manager keeps its fence until it has closed every owner
 it supervises, and the host waits for that exit before selecting (a manager
-the keep-alive started in between, on the old pointer, is stopped once more
-so its replacement reads the new one), and only
+the keep-alive started in between, on the old pointer, is stopped once more,
+and the refresh completes only once a manager runs the selected generation), and only
 when the registered service invokes this host's interpreter, since the staged
 generation is sealed to it; otherwise the host leaves the service running and
 asks for `skulk-plugin-service setup`. A refresh
