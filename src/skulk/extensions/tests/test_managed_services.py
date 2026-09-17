@@ -816,7 +816,7 @@ def test_a_manager_started_before_the_selection_is_stopped_again(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A keep-alive restart that read the old pointer runs the old generation."""
-    from skulk.extensions import managed_services
+    from skulk.extensions import managed_attachment, managed_services
     from skulk.extensions.managed_services import reload_legacy_manager
     from skulk.extensions.tests.test_service_snapshot import staged
 
@@ -842,10 +842,43 @@ def test_a_manager_started_before_the_selection_is_stopped_again(
             (4444, [new, *serve, str(tmp_path)]),
         ]
 
-    monkeypatch.setattr(managed_services, "_manager_processes", running)
+    monkeypatch.setattr(managed_attachment, "manager_processes", running)
     monkeypatch.setattr(managed_services.os, "kill", record)
     reload_legacy_manager(tmp_path, snapshot)
     assert signalled == [4242, 4343]
+
+
+def test_a_running_manager_names_the_build_of_the_generation_it_started_from(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The interpreter path the OS service started the manager with names its generation."""
+    from skulk.extensions import managed_attachment
+    from skulk.extensions.managed_attachment import running_manager_build
+    from skulk.extensions.service_snapshot import ServiceSnapshot
+
+    generation = tmp_path / "core-runtimes" / ("0" * 32)
+    private_directory(generation)
+    write_private(
+        generation / "staged.json",
+        ServiceSnapshot(
+            generation="0" * 32,
+            manifest_sha256="e" * 64,
+            skulk_build_sha256="a" * 64,
+            copied_files=1,
+            copied_bytes=1,
+        )
+        .model_dump_json()
+        .encode(),
+    )
+    interpreter = str(generation / "runtime" / "bin" / "python")
+
+    def running(root: Path) -> list[tuple[int, list[str]]]:
+        return [(4242, [interpreter, "-m", "skulk.extensions.runtime_manager"])]
+
+    monkeypatch.setattr(managed_attachment, "manager_processes", running)
+    assert running_manager_build(tmp_path) == "a" * 64
+    assert managed_attachment.stale_manager_pids(tmp_path, "0" * 32) == []
+    assert managed_attachment.stale_manager_pids(tmp_path, "1" * 32) == [4242]
 
 
 async def test_a_selected_generation_for_the_live_build_is_reused_without_staging(

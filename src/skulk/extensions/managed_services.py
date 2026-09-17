@@ -11,12 +11,15 @@ import time
 from pathlib import Path
 from typing import Literal, final
 
-import psutil
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
 
 from skulk.extensions.managed import ManagedConnection, ManagedOwner
-from skulk.extensions.managed_attachment import ManagedAttachment
+from skulk.extensions.managed_attachment import (
+    ManagedAttachment,
+    manager_pids,
+    stale_manager_pids,
+)
 from skulk.extensions.runtime_artifacts import Digest, ProtocolUnsupportedError
 from skulk.extensions.runtime_attachment import (
     InstallationIdentifier,
@@ -92,51 +95,6 @@ def _selected_within(root: Path, generation: str, seconds: float) -> bool:
             return False
         time.sleep(0.5)
     return True
-
-
-def _manager_processes(root: Path) -> list[tuple[int, list[str]]]:
-    found: list[tuple[int, list[str]]] = []
-    arguments = TypeAdapter(list[str])
-    for process in psutil.process_iter():
-        try:
-            cmdline = arguments.validate_python(process.cmdline())
-        except (psutil.Error, ValueError):
-            continue
-        if (
-            "skulk.extensions.runtime_manager" in cmdline
-            and "serve" in cmdline
-            and str(root) in cmdline
-        ):
-            found.append((int(process.pid), cmdline))
-    return found
-
-
-def manager_pids(root: Path) -> list[int]:
-    """Processes serving the manager at ``root``; they run as this user."""
-    return [pid for pid, _ in _manager_processes(root)]
-
-
-def runs_generation(cmdline: list[str], root: Path, generation: str) -> bool:
-    """Whether a manager command line runs from ``generation``'s runtime under ``root``.
-
-    The OS service starts the manager through the interpreter of the selected
-    generation, so the interpreter path names the generation it runs.
-    """
-    prefix = str(root / "core-runtimes" / generation) + os.sep
-    return bool(cmdline) and cmdline[0].startswith(prefix)
-
-
-def stale_manager_pids(root: Path, generation: str) -> list[int]:
-    """Managers at ``root`` not running from ``generation``.
-
-    A keep-alive restart that began before the selection runs the previous
-    generation; it must be stopped again so the next start reads the pointer.
-    """
-    return [
-        pid
-        for pid, cmdline in _manager_processes(root)
-        if not runs_generation(cmdline, root, generation)
-    ]
 
 
 def reload_legacy_manager(root: Path, snapshot: ServiceSnapshot) -> None:
