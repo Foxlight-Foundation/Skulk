@@ -969,7 +969,15 @@ class RuntimeManager:
                         downloads, entry.publisher, discovery, now=int(time.time())
                     ),
                     token=SecretStr(token) if token is not None else None,
-                    clear_token=token is None,
+                    # A credential the installation already holds for this
+                    # feed address is kept when the catalog's own cannot be
+                    # presented; only a feed elsewhere starts anonymous.
+                    clear_token=token is None
+                    and not (
+                        previous is not None
+                        and previous.base_url == entry.feed_url
+                        and previous.credential_reference is not None
+                    ),
                 )
             )
         # Inspection reaches the feed; like inspect_release it runs outside

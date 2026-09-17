@@ -467,32 +467,33 @@ class TerminalInstaller:
     ) -> CatalogEntryReview:
         """The one listing to install: the newest of the bundle that fits this host.
 
-        Only listings that fit this host are considered. Without
-        ``--platform`` the host's own match decides; with it, only
-        runtime-bearing listings of that artifact family are considered, and
-        ``--platform plain`` selects the plain listing (no artifact family)
-        that fits the host. Two artifacts at the same sequence are an
-        ambiguity the operator resolves by naming one, never a guess.
+        Only runtime-bearing listings that fit this host are considered: this
+        host installs signed runtime records only, so a listing without an
+        artifact family is not installable here. Without ``--platform`` the
+        host's own match decides; with it, only listings of that artifact
+        family. Two artifacts at the same sequence are an ambiguity the
+        operator resolves by naming the family, never a guess.
         """
-        wanted = (
-            canonical_platform(platform)
-            if platform is not None and platform != "plain"
-            else None
-        )
-        candidates = [
+        wanted = canonical_platform(platform) if platform is not None else None
+        listed = [
             entry
             for entry in review.entries
             if entry.bundle_id == bundle_id
             and (sequence is None or entry.sequence == sequence)
+        ]
+        candidates = [
+            entry
+            for entry in listed
+            if entry.runtime_platform is not None
             and entry.matches_host
-            and (
-                (platform != "plain" or entry.runtime_platform is None)
-                if wanted is None
-                else entry.runtime_platform is not None
-                and canonical_platform(entry.runtime_platform) == wanted
-            )
+            and (wanted is None or canonical_platform(entry.runtime_platform) == wanted)
         ]
         if not candidates:
+            if listed and all(entry.runtime_platform is None for entry in listed):
+                raise ValueError(
+                    "this bundle is listed without an installable runtime record "
+                    "for this host; read the catalog"
+                )
             raise ValueError(
                 "no listed release of this bundle fits this host; read the catalog"
             )
@@ -501,7 +502,7 @@ class TerminalInstaller:
         if len(newest) > 1:
             raise ValueError(
                 "several listed artifacts fit this host at the same sequence; "
-                "name the family with --platform, or --platform plain"
+                "name the family with --platform"
             )
         return newest[0]
 

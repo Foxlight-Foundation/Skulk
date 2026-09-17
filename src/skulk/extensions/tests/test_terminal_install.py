@@ -662,6 +662,41 @@ async def test_catalog_installs_refuse_by_name_before_any_transfer(
             ).run_from_catalog("example.plugin", plugin_id=identifier)
         fixture.releases[2] = second
         assert sum(isinstance(r, InstallSubmission) for r in fixture.requests) == 1
+        # A credential the installation already holds for a feed elsewhere
+        # is kept by the binding, since the catalog's own is not presented
+        # to another origin.
+        provisioned = "managed." + "f" * 32
+        assert "result" in await fixture.request(
+            InstallationRequest(action="register", plugin_id=provisioned)
+        )
+        assert "result" in await fixture.request(
+            SourceRegistration(
+                plugin_id=provisioned,
+                request=SourceUpdate(
+                    expected_revision=0,
+                    base_url="https://elsewhere.example.test/3/",
+                    metadata_filename="release.json",
+                    trust=fixture.trust,
+                    token=SecretStr("hidden-test-feed-token"),
+                ),
+            )
+        )
+        fixture.list_releases(
+            {
+                1: "https://releases.example.test/1/",
+                3: "https://elsewhere.example.test/3/",
+            },
+            revision=14,
+        )
+        with pytest.raises(ValueError, match="manager request incomplete"):
+            await fixture.terminal(iter(("y",))).run_from_catalog(
+                "example.other", plugin_id=provisioned
+            )
+        assert fixture.authorized[-1] == (
+            "elsewhere.example.test",
+            "/3/release.json",
+            True,
+        )
         # A staged release whose activation was declined leaves no selection
         # but is still the installation's bundle and high-water mark.
         fixture.list_releases(
@@ -670,7 +705,7 @@ async def test_catalog_installs_refuse_by_name_before_any_transfer(
                 2: "https://releases.example.test/2/",
                 3: "https://releases.example.test/3/",
             },
-            revision=13,
+            revision=15,
         )
         staged_only = await fixture.terminal(iter(("y", "y", "n"))).run_from_catalog(
             "example.plugin"
@@ -874,7 +909,9 @@ def test_two_artifacts_at_one_sequence_need_the_family_named() -> None:
 
     listed = TerminalInstaller._listed  # pyright: ignore[reportPrivateUsage]
     both = review(
-        entry(2, None, True), entry(2, "macos-arm64", True), entry(1, None, True)
+        entry(2, "macos-arm64", True),
+        entry(2, "linux-glibc-x86_64", True),
+        entry(1, "macos-arm64", True),
     )
     with pytest.raises(ValueError, match="name the family"):
         listed(both, "example.plugin", None, None)
@@ -883,15 +920,27 @@ def test_two_artifacts_at_one_sequence_need_the_family_named() -> None:
         == "macos-arm64"
     )
     assert listed(both, "example.plugin", 1, None).sequence == 1
-    assert listed(both, "example.plugin", None, "plain").runtime_platform is None
+    # A listing without an artifact family is not installable on this host,
+    # so it is never a candidate and is named when it is all there is.
+    with pytest.raises(ValueError, match="without an installable runtime record"):
+        listed(review(entry(1, None, True)), "example.plugin", None, None)
+    assert (
+        listed(
+            review(entry(2, None, True), entry(1, "macos-arm64", True)),
+            "example.plugin",
+            None,
+            None,
+        ).sequence
+        == 1
+    )
     # An explicit family still has to fit this host: the newer listing that
     # does not is passed over for the older one that does.
     builds = review(entry(2, "macos-arm64", False), entry(1, "macos-arm64", True))
     assert listed(builds, "example.plugin", None, "macos-arm64").sequence == 1
-    with pytest.raises(ValueError, match="no listed release"):
-        listed(review(entry(1, "macos-arm64", True)), "example.plugin", None, "plain")
-    with pytest.raises(ValueError, match="no listed release"):
+    with pytest.raises(ValueError, match="installable runtime record"):
         listed(review(entry(1, None, False)), "example.plugin", None, None)
+    with pytest.raises(ValueError, match="no listed release"):
+        listed(review(entry(1, "macos-arm64", False)), "example.plugin", None, None)
     # An alias names the same family.
     assert (
         listed(
