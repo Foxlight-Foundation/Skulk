@@ -71,7 +71,7 @@ def protocol_refusal(result: dict[str, JsonValue]) -> ProtocolUnsupportedError |
     except ValueError:
         return None
     if (
-        kind not in ("release", "runtime")
+        kind not in ("release", "runtime", "catalog")
         or not isinstance(offered, int)
         or isinstance(offered, bool)
     ):

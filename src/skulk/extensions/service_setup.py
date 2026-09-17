@@ -25,6 +25,7 @@ from pydantic import (
 
 from skulk.extensions import service_bootstrap, service_registration
 from skulk.extensions.local_setup import manage_installed_plugin, setup_installed_plugin
+from skulk.extensions.managed_services import protocol_refusal
 from skulk.extensions.runtime_artifacts import Digest, measure_host
 from skulk.extensions.runtime_attachment import (
     HostSettings,
@@ -630,17 +631,26 @@ def main() -> None:
                     SKULK_CONFIG_HOME / "managed-service" / "connection.json", 8192
                 )
             )
-            print(
-                json.dumps(
-                    asyncio.run(
-                        manager_request(
-                            Path(connection.manager_root),
-                            CatalogRequest(action="read_catalog"),
-                        )
-                    ),
-                    indent=2,
+            reply = asyncio.run(
+                manager_request(
+                    Path(connection.manager_root),
+                    CatalogRequest(action="read_catalog"),
                 )
             )
+            listing = reply.get("result")
+            if set(reply) != {"result"} or not isinstance(listing, dict):
+                # A refused read fails the command: an unconfigured, unreachable
+                # or refused catalog must not look like an empty listing.
+                refusal = protocol_refusal(reply)
+                raise (
+                    refusal
+                    if refusal is not None
+                    else ValueError(
+                        "catalog read refused; configure the catalog source and "
+                        "discovery trust, then retry"
+                    )
+                )
+            print(json.dumps(listing, indent=2))
         elif action == "manage":
             if os.geteuid() == 0:
                 raise ValueError("plugin management requires the nonroot service owner")
