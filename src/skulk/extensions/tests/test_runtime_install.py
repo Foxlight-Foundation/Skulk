@@ -46,6 +46,7 @@ def artifacts(
     platform: str = "macos-arm64",
     runtime_protocol: int = 2,
     release_protocol: int = 1,
+    bundle_id: str = "example.plugin",
 ) -> tuple[bytes, RuntimeTrust, QualifiedHost]:
     """Create an independently signed generic package with no private SDK metadata."""
     private_directory(directory)
@@ -151,7 +152,7 @@ def artifacts(
             "artifact_name": "bundle.pyz",
             "artifact_size": len(bundle),
             "manifest": {
-                "bundle_id": "example.plugin",
+                "bundle_id": bundle_id,
                 "bundle_version": "1.0.0",
                 "skulk_requires": "==1.5.2",
                 "executable": "bundle.pyz",
