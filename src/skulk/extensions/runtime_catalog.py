@@ -699,43 +699,78 @@ class HostCatalog:
             ):
                 raise ValueError("catalog history requires local maintenance")
             write_private(destination, verified.document)
+            floors = self._floors()
+            floors[verified.claims.publisher] = {
+                "revision": verified.claims.revision,
+                "sha256": verified.sha256,
+            }
             write_private(
                 self.root / "catalog-revision.json",
                 json.dumps(
                     {
                         "base_url": source.base_url,
                         "document_filename": source.document_filename,
-                        "publisher": verified.claims.publisher,
-                        "revision": verified.claims.revision,
-                        "sha256": verified.sha256,
+                        "floors": floors,
                     }
                 ).encode(),
             )
             return verified
 
-    def _floor(self, source: CatalogSource, publisher: str) -> tuple[int, str] | None:
-        # The accepted revision belongs to one catalog: the same address,
-        # document and publisher. Another catalog starts its own history.
+    def _floors(self) -> dict[str, JsonValue]:
+        """Accepted revisions per publisher at the configured catalog address.
+
+        A missing record is first use. A damaged one fails closed: it is
+        retained evidence, and reading past it could accept an older catalog.
+        """
         try:
-            document = _OBJECT.validate_json(
-                read_private(self.root / "catalog-revision.json", 4096)
-            )
-        except (FileNotFoundError, ValueError):
+            raw = read_private(self.root / "catalog-revision.json", 16384)
+        except FileNotFoundError:
+            return {}
+        try:
+            document = _OBJECT.validate_json(raw)
+            floors = document.get("floors")
+            if not isinstance(floors, dict):
+                raise ValueError("catalog revision record malformed")
+        except ValueError:
+            raise ValueError(
+                "catalog revision record unreadable; local maintenance required"
+            ) from None
+        return floors
+
+    def _floor(self, source: CatalogSource, publisher: str) -> tuple[int, str] | None:
+        # The accepted revision belongs to one catalog address and one
+        # publisher; a second trusted publisher at the same address keeps
+        # its own floor, so serving one cannot erase the other's history.
+        # Another address starts its own history (configure clears it).
+        try:
+            raw = read_private(self.root / "catalog-revision.json", 16384)
+        except FileNotFoundError:
             return None
+        try:
+            document = _OBJECT.validate_json(raw)
+        except ValueError:
+            raise ValueError(
+                "catalog revision record unreadable; local maintenance required"
+            ) from None
         if (
             document.get("base_url") != source.base_url
             or document.get("document_filename") != source.document_filename
-            or document.get("publisher") != publisher
         ):
             return None
-        revision, sha256 = document.get("revision"), document.get("sha256")
+        floors = document.get("floors")
+        entry = floors.get(publisher) if isinstance(floors, dict) else None
+        if not isinstance(entry, dict):
+            return None
+        revision, sha256 = entry.get("revision"), entry.get("sha256")
         if (
             isinstance(revision, int)
             and not isinstance(revision, bool)
             and isinstance(sha256, str)
         ):
             return revision, sha256
-        return None
+        raise ValueError(
+            "catalog revision record unreadable; local maintenance required"
+        )
 
     def retained(self, catalog_sha256: str) -> bytes:
         """The verified catalog document retained under ``catalog_sha256``."""

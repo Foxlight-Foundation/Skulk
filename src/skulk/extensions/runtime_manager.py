@@ -258,6 +258,9 @@ class RuntimeManager:
         self.controllers: dict[str, RuntimeController] = {}
         self.downloads: dict[str, RuntimeDownloads] = {}
         self.catalog = HostCatalog(root)
+        # One catalog read at a time, measurement included: a second reader
+        # is refused as busy rather than hashing the tree in parallel.
+        self.catalog_read = asyncio.Lock()
         self.errors: dict[str, str] = {}
         self.server: asyncio.Server | None = None
         self.lock: RuntimeLock | None = None
@@ -564,10 +567,11 @@ class RuntimeManager:
                 return self.catalog.source_status().model_dump(mode="json")
             # A slow catalog server must not block inventory or attachment
             # renewal behind the manager-wide lock, like release inspection.
-            # The fetch is admitted first, so concurrent reads refused as
-            # busy never pay for a host measurement (a tree hash).
-            verified = await self.catalog.fetch()
-            host = await asyncio.to_thread(measure_host)
+            if self.catalog_read.locked():
+                raise ValueError("catalog source is busy")
+            async with self.catalog_read:
+                verified = await self.catalog.fetch()
+                host = await asyncio.to_thread(measure_host)
             return verified.review(
                 skulk_build_sha256=host.skulk_build_sha256, platform=host.platform
             ).model_dump(mode="json")

@@ -260,6 +260,35 @@ async def test_the_host_catalog_configures_fetches_and_retains_without_disclosur
     )
     served[0] = document
     assert (await catalog.fetch()).claims.revision == 1
+    # Two trusted publishers at one address keep separate floors: serving
+    # the other publisher does not erase the first one's history.
+    other_key = Ed25519PrivateKey.generate()
+    both = RuntimeTrust.model_validate(
+        {
+            "revision": 5,
+            "expires_at": int(time.time()) + 3600,
+            "publishers": {
+                PUBLISHER: key.public_key().public_bytes_raw().hex(),
+                "second": other_key.public_key().public_bytes_raw().hex(),
+            },
+            "revoked_publishers": ("gone",),
+        }
+    )
+    await catalog.configure(CatalogSourceUpdate(expected_revision=5, trust=both))
+    served[0] = _catalog(key, [_entry(1), _entry(2)], revision=10)
+    assert (await catalog.fetch()).claims.revision == 10
+    served[0] = _catalog(
+        other_key, [_entry(1, publisher="second")], publisher="second", revision=1
+    )
+    assert (await catalog.fetch()).claims.publisher == "second"
+    served[0] = document
+    with pytest.raises(ValueError, match="rollback"):
+        await catalog.fetch()
+    # A damaged revision record fails closed rather than reading as first use.
+    (tmp_path / "catalog-revision.json").write_bytes(b"{not json")
+    served[0] = _catalog(key, [_entry(1), _entry(2)], revision=11)
+    with pytest.raises(ValueError, match="local maintenance"):
+        await catalog.fetch()
     await catalog.close()
     with pytest.raises(ValueError, match="closed"):
         await catalog.fetch()
