@@ -102,6 +102,21 @@ def _selected_within(root: Path, generation: str, seconds: float) -> bool:
     return True
 
 
+@final
+class ManagerNotRestartedError(RuntimeError):
+    """The selection landed but no manager started on it within the wait.
+
+    Distinct from a transport failure: the pointer alone must not be read as
+    a completed refresh, since no usable manager runs the selection yet.
+    """
+
+    def __init__(self, generation: str) -> None:
+        super().__init__(
+            f"the plugin manager has not started on generation {generation}"
+        )
+        self.generation = generation
+
+
 def reload_legacy_manager(root: Path, snapshot: ServiceSnapshot) -> None:
     """Select a staged generation for a manager that predates reload_runtime.
 
@@ -148,7 +163,7 @@ def reload_legacy_manager(root: Path, snapshot: ServiceSnapshot) -> None:
     # or is still in its bootstrap and not yet visible as a manager at all.
     # Stop each such manager as it appears until one runs the selected
     # generation: only then has the service restarted on it.
-    started = time.monotonic() + _MANAGER_START_SECONDS
+    start_deadline = time.monotonic() + _MANAGER_START_SECONDS
     while True:
         processes = manager_processes(root)
         for pid, cmdline in processes:
@@ -160,10 +175,8 @@ def reload_legacy_manager(root: Path, snapshot: ServiceSnapshot) -> None:
             for _, cmdline in processes
         ):
             return
-        if time.monotonic() >= started:
-            raise OSError(
-                "the plugin manager has not started on the selected generation"
-            )
+        if time.monotonic() >= start_deadline:
+            raise ManagerNotRestartedError(snapshot.generation)
         time.sleep(0.5)
 
 
@@ -476,6 +489,11 @@ class ManagedServices:
                 f"plugin manager runtime refresh failed: {error}; "
                 "rerun skulk-plugin-service setup"
             )
+        except ManagerNotRestartedError as error:
+            # The selection is in place and kept; the mismatch a manager
+            # running an older generation presents schedules the next
+            # attempt, which restarts it onto this selection.
+            logger.warning(f"plugin manager runtime refresh incomplete: {error}")
         except (OSError, TimeoutError) as error:
             # The manager may still be verifying the seal past the request
             # deadline and select the generation afterwards; once it does,
