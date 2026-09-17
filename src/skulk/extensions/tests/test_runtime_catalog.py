@@ -27,12 +27,6 @@ PUBLISHER = "fixture"
 _RECORD: TypeAdapter[dict[str, JsonValue]] = TypeAdapter(dict[str, JsonValue])
 
 
-def _floors(raw: bytes) -> dict[str, JsonValue]:
-    floors = _RECORD.validate_json(raw)["floors"]
-    assert isinstance(floors, dict)
-    return floors
-
-
 def _entry(sequence: int, **overrides: object) -> dict[str, object]:
     return {
         "bundle_id": "example.plugin",
@@ -214,6 +208,8 @@ async def test_the_host_catalog_configures_fetches_and_retains_without_disclosur
     private_directory(tmp_path)
     catalog = HostCatalog(tmp_path, transport=httpx.MockTransport(respond))
     assert not catalog.source_status().configured
+    with pytest.raises(ValueError, match="unconfigured"):
+        await catalog.fetch()
     with pytest.raises(ValueError, match="requires directory"):
         await catalog.configure(CatalogSourceUpdate(expected_revision=0))
     status = await catalog.configure(
@@ -234,7 +230,7 @@ async def test_the_host_catalog_configures_fetches_and_retains_without_disclosur
     assert retained == document
     assert catalog.retained(verified.sha256) == document
     with pytest.raises(ValueError, match="digest required"):
-        catalog.retained("../catalog-source")
+        catalog.retained("../catalog-state")
     assert "hidden-catalog-token" not in json.dumps(
         verified.review(
             skulk_build_sha256="a" * 64, platform="macos-arm64"
@@ -271,7 +267,8 @@ async def test_the_host_catalog_configures_fetches_and_retains_without_disclosur
     )
     with pytest.raises(ValueError, match="download refused"):
         await catalog.fetch()
-    # A newer trust revision keeps prior revocations.
+    # A newer trust revision keeps prior revocations; the trust floor refuses
+    # a lower revision even through a reconfiguration.
     await catalog.configure(
         CatalogSourceUpdate(
             expected_revision=2,
@@ -283,26 +280,12 @@ async def test_the_host_catalog_configures_fetches_and_retains_without_disclosur
         CatalogSourceUpdate(expected_revision=3, trust=_trust(key, revision=3))
     )
     assert catalog.trust().revoked_publishers == ("gone",)
-    # A restored older trust file (one that could drop a revocation) is
-    # refused against the floor the host recorded; the current one reads,
-    # and a damaged floor fails the read closed.
-    current_trust = (tmp_path / "catalog-trust.json").read_bytes()
-    (tmp_path / "catalog-trust.json").write_bytes(
-        _trust(key, revision=2).model_dump_json().encode()
-    )
-    with pytest.raises(ValueError, match="trust rollback"):
-        catalog.trust()
-    (tmp_path / "catalog-trust.json").write_bytes(current_trust)
-    assert catalog.trust().revision == 3
-    floor_record = (tmp_path / "catalog-trust-floor.json").read_bytes()
-    (tmp_path / "catalog-trust-floor.json").write_bytes(
-        b'{"revision": 0, "sha256": "short"}'
-    )
-    with pytest.raises(ValueError, match="local maintenance"):
-        catalog.trust()
-    (tmp_path / "catalog-trust-floor.json").write_bytes(floor_record)
-    # Moving to another catalog (with its credential supplied again) starts
-    # a new revision history: revision 1 there is not a rollback.
+    with pytest.raises(ValueError, match="revision conflict"):
+        await catalog.configure(
+            CatalogSourceUpdate(expected_revision=4, trust=_trust(key, revision=2))
+        )
+    # Another address has its own history: revision 1 there is accepted, and
+    # coming back to the first address meets its floor again.
     await catalog.configure(
         CatalogSourceUpdate(
             expected_revision=4,
@@ -312,7 +295,17 @@ async def test_the_host_catalog_configures_fetches_and_retains_without_disclosur
     )
     served[0] = document
     assert (await catalog.fetch()).claims.revision == 1
-    assert (tmp_path / "catalog-revision.json").exists()
+    await catalog.configure(
+        CatalogSourceUpdate(
+            expected_revision=5,
+            base_url="https://catalog.example.test/foxlight/",
+            token=SecretStr("hidden-catalog-token"),
+        )
+    )
+    with pytest.raises(ValueError, match="rollback"):
+        await catalog.fetch()
+    served[0] = _catalog(key, [_entry(1), _entry(2)], revision=3)
+    assert (await catalog.fetch()).claims.revision == 3
     # Two trusted publishers at one address keep separate floors: serving
     # the other publisher does not erase the first one's history.
     other_key = Ed25519PrivateKey.generate()
@@ -327,7 +320,7 @@ async def test_the_host_catalog_configures_fetches_and_retains_without_disclosur
             "revoked_publishers": ("gone",),
         }
     )
-    await catalog.configure(CatalogSourceUpdate(expected_revision=5, trust=both))
+    await catalog.configure(CatalogSourceUpdate(expected_revision=6, trust=both))
     served[0] = _catalog(key, [_entry(1), _entry(2)], revision=10)
     assert (await catalog.fetch()).claims.revision == 10
     served[0] = _catalog(
@@ -337,40 +330,34 @@ async def test_the_host_catalog_configures_fetches_and_retains_without_disclosur
     served[0] = document
     with pytest.raises(ValueError, match="rollback"):
         await catalog.fetch()
-    # A damaged revision record fails closed rather than reading as first use,
-    # whether the file or one publisher's floor is the damaged part.
-    record = (tmp_path / "catalog-revision.json").read_bytes()
-    (tmp_path / "catalog-revision.json").write_bytes(b"{not json")
+    # A damaged state document fails every read closed rather than reading
+    # as first use; a tampered retained document is refused by its digest.
+    state = (tmp_path / "catalog-state.json").read_bytes()
+    (tmp_path / "catalog-state.json").write_bytes(b"{not json")
+    with pytest.raises(ValueError, match="local maintenance"):
+        await catalog.fetch()
+    with pytest.raises(ValueError, match="local maintenance"):
+        catalog.trust()
+    (tmp_path / "catalog-state.json").write_bytes(state)
     served[0] = _catalog(key, [_entry(1), _entry(2)], revision=11)
-    with pytest.raises(ValueError, match="local maintenance"):
-        await catalog.fetch()
-    damaged = _RECORD.validate_json(record)
-    _floors(record)[PUBLISHER] = {"revision": 0, "sha256": "short"}
-    damaged_floors = damaged["floors"]
-    assert isinstance(damaged_floors, dict)
-    damaged_floors[PUBLISHER] = {"revision": 0, "sha256": "short"}
-    (tmp_path / "catalog-revision.json").write_bytes(_RECORD.dump_json(damaged))
-    with pytest.raises(ValueError, match="local maintenance"):
-        await catalog.fetch()
-    moved = _RECORD.validate_json(record)
-    moved["base_url"] = "https://elsewhere.example.test/"
-    (tmp_path / "catalog-revision.json").write_bytes(_RECORD.dump_json(moved))
-    with pytest.raises(ValueError, match="local maintenance"):
-        await catalog.fetch()
-    (tmp_path / "catalog-revision.json").write_bytes(record)
-    assert (await catalog.fetch()).claims.revision == 11
+    listed = await catalog.fetch()
+    (tmp_path / "catalog" / (listed.sha256 + ".json")).write_bytes(b"{}")
+    with pytest.raises(ValueError, match="differs from its digest"):
+        catalog.retained(listed.sha256)
     # Retention keeps the newest documents and every accepted floor; a
     # regularly updated catalog never runs out of room.
     for revision in range(12, 24):
         served[0] = _catalog(key, [_entry(1), _entry(2)], revision=revision)
         await catalog.fetch()
-    floors = _floors((tmp_path / "catalog-revision.json").read_bytes())
+    floors = _RECORD.validate_json((tmp_path / "catalog-state.json").read_bytes())[
+        "floors"
+    ]
+    assert isinstance(floors, dict)
     retained_documents = list((tmp_path / "catalog").iterdir())
-    # The newest eight plus one accepted document per publisher, at most.
     assert len(retained_documents) <= 8 + len(floors)
-    for entry in floors.values():
-        assert isinstance(entry, dict)
-        sha256 = entry["sha256"]
+    for floor in floors.values():
+        assert isinstance(floor, dict)
+        sha256 = floor["sha256"]
         assert isinstance(sha256, str)
         assert (tmp_path / "catalog" / (sha256 + ".json")).exists()
     await catalog.close()

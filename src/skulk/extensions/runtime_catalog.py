@@ -10,7 +10,6 @@ release record itself is authenticated against installation trust.
 
 import asyncio
 import hashlib
-import json
 import re
 import time
 from itertools import islice
@@ -476,6 +475,28 @@ class CatalogSourceStatus(BaseModel):
     )
 
 
+class _Floor(_Contract):
+    revision: int = Field(ge=1)
+    sha256: Digest
+
+
+class _CatalogState(_Contract):
+    """Everything host-scoped about the catalog, replaced as one document."""
+
+    source: CatalogSource | None = None
+    trust: RuntimeTrust | None = None
+    trust_floor: _Floor | None = None
+    floors: dict[str, _Floor] = Field(default_factory=dict)
+
+
+def _trust_digest(trust: RuntimeTrust) -> str:
+    return hashlib.sha256(canonical_json(trust.model_dump(mode="json"))).hexdigest()
+
+
+def _floor_key(source: CatalogSource, publisher: str) -> str:
+    return "\n".join((source.base_url, source.document_filename, publisher))
+
+
 @final
 class HostCatalog:
     """The one host-scoped catalog source, read on request and never automatically."""
@@ -491,74 +512,66 @@ class HostCatalog:
         self.guard = asyncio.Lock()
         self.closed = False
 
-    def source(self) -> CatalogSource:
-        """Read the configured catalog address; a missing credential never falls back."""
-        return CatalogSource.model_validate_json(
-            read_private(self.root / "catalog-source.json", 8192)
-        )
+    def _state(self) -> "_CatalogState":
+        """Read the one host-scoped catalog state document.
 
-    def trust(self) -> RuntimeTrust:
-        """Read the publishers this host trusts for discovery, against its floor.
-
-        The floor records the newest trust revision this host accepted; a
-        restored older trust file (one that could drop a revocation) is
-        refused rather than read.
+        Missing means first use. Anything unreadable fails closed: the state
+        carries the floors that keep a replayed catalog or trust out.
         """
-        raw = read_private(self.root / "catalog-trust.json")
-        trust = RuntimeTrust.model_validate_json(raw)
         try:
-            floor = _OBJECT.validate_json(
-                read_private(self.root / "catalog-trust-floor.json", 4096)
-            )
+            raw = read_private(self.root / "catalog-state.json", 262144)
         except FileNotFoundError:
-            return trust
+            return _CatalogState()
+        try:
+            return _CatalogState.model_validate_json(raw)
         except ValueError:
             raise ValueError(
-                "discovery trust floor unreadable; local maintenance required"
+                "catalog state unreadable; local maintenance required"
             ) from None
-        revision, sha256 = floor.get("revision"), floor.get("sha256")
-        if (
-            not isinstance(revision, int)
-            or isinstance(revision, bool)
-            or revision < 1
-            or not isinstance(sha256, str)
-            or not re.fullmatch(r"[a-f0-9]{64}", sha256)
-        ):
-            raise ValueError(
-                "discovery trust floor unreadable; local maintenance required"
-            )
-        if trust.revision < revision or (
-            trust.revision == revision and hashlib.sha256(raw).hexdigest() != sha256
-        ):
-            raise ValueError("discovery trust rollback refused")
-        return trust
+
+    def _save(self, state: "_CatalogState") -> None:
+        # One document, replaced atomically: no ordering between the source,
+        # the trust, its floor and the revision floors can be observed.
+        write_private(
+            self.root / "catalog-state.json", state.model_dump_json().encode()
+        )
+
+    def source(self) -> CatalogSource:
+        """Read the configured catalog address; a missing credential never falls back."""
+        source = self._state().source
+        if source is None:
+            raise FileNotFoundError("catalog source unconfigured")
+        return source
+
+    def trust(self) -> RuntimeTrust:
+        """Read the publishers this host trusts for discovery, against its floor."""
+        state = self._state()
+        if state.trust is None:
+            raise FileNotFoundError("discovery trust unconfigured")
+        return state.trust
 
     def source_status(self) -> CatalogSourceStatus:
         """Read readiness without network I/O or disclosing the credential."""
-        try:
-            trust_revision: int | None = self.trust().revision
-        except (FileNotFoundError, ValueError):
-            trust_revision = None
-        try:
-            source = self.source()
-        except FileNotFoundError:
+        state = self._state()
+        trust_revision = state.trust.revision if state.trust is not None else None
+        if state.source is None:
             return CatalogSourceStatus(
                 revision=0,
                 configured=False,
                 credential_ready=False,
                 trust_revision=trust_revision,
             )
-        ready = source.credential_reference is None
-        if source.credential_reference is not None:
+        ready = state.source.credential_reference is None
+        if state.source.credential_reference is not None:
             try:
-                self._token(source.credential_reference)
+                self._token(state.source.credential_reference)
                 ready = True
             except (OSError, ValueError):
                 ready = False
         return CatalogSourceStatus(
-            revision=source.revision,
+            revision=state.source.revision,
             configured=trust_revision is not None,
-            credential_reference=source.credential_reference,
+            credential_reference=state.source.credential_reference,
             credential_ready=ready,
             trust_revision=trust_revision,
         )
@@ -572,16 +585,11 @@ class HostCatalog:
                 raise ValueError("catalog closed")
             lock = RuntimeLock(self.root, "catalog.lock")
             try:
-                try:
-                    previous = self.source()
-                except FileNotFoundError:
-                    previous = None
+                state = self._state()
+                previous = state.source
                 if (previous.revision if previous else 0) != update.expected_revision:
                     raise ValueError("catalog source revision conflict")
-                try:
-                    trust = self.trust()
-                except FileNotFoundError:
-                    trust = None
+                trust = state.trust
                 next_trust = update.trust if update.trust is not None else trust
                 base_url = (
                     update.base_url
@@ -601,6 +609,7 @@ class HostCatalog:
                     raise ValueError(
                         "initial catalog setup requires directory and discovery trust"
                     )
+                floor = state.trust_floor
                 if next_trust.expires_at <= time.time() or (
                     trust is not None
                     and (
@@ -612,6 +621,14 @@ class HostCatalog:
                     )
                 ):
                     raise ValueError("discovery trust revision conflict or expiry")
+                if floor is not None and (
+                    next_trust.revision < floor.revision
+                    or (
+                        next_trust.revision == floor.revision
+                        and _trust_digest(next_trust) != floor.sha256
+                    )
+                ):
+                    raise ValueError("discovery trust rollback refused")
                 if trust is not None and next_trust.revision > trust.revision:
                     # A trust update never silently restores a publisher or
                     # artifact the owner previously revoked.
@@ -657,29 +674,20 @@ class HostCatalog:
                     document_filename=filename,
                     credential_reference=reference,
                 )
-                if previous is not None and (
-                    previous.base_url != source.base_url
-                    or previous.document_filename != source.document_filename
-                ):
-                    # An owner-authorized move to another catalog starts a
-                    # new revision history. The old record goes first: a
-                    # crash between the writes leaves the old address without
-                    # a floor (re-established on its next read), never the
-                    # new address refused by the old one.
-                    (self.root / "catalog-revision.json").unlink(missing_ok=True)
-                trust_bytes = next_trust.model_dump_json().encode()
-                write_private(self.root / "catalog-trust.json", trust_bytes)
-                write_private(
-                    self.root / "catalog-trust-floor.json",
-                    json.dumps(
-                        {
-                            "revision": next_trust.revision,
-                            "sha256": hashlib.sha256(trust_bytes).hexdigest(),
+                # Revision floors are keyed by address and publisher and kept
+                # across moves: another address starts its own history, and
+                # returning to an old one meets its old floor again.
+                self._save(
+                    state.model_copy(
+                        update={
+                            "source": source,
+                            "trust": next_trust,
+                            "trust_floor": _Floor(
+                                revision=next_trust.revision,
+                                sha256=_trust_digest(next_trust),
+                            ),
                         }
-                    ).encode(),
-                )
-                write_private(
-                    self.root / "catalog-source.json", source.model_dump_json().encode()
+                    )
                 )
                 return self.source_status()
             finally:
@@ -720,8 +728,10 @@ class HostCatalog:
         async with self.guard:
             if self.closed:
                 raise ValueError("catalog closed")
-            source = self.source()
-            trust = self.trust()
+            state = self._state()
+            if state.source is None or state.trust is None:
+                raise ValueError("catalog source unconfigured")
+            source, trust = state.source, state.trust
             try:
                 async with (
                     asyncio.timeout(20),
@@ -746,54 +756,44 @@ class HostCatalog:
             verified = verify_catalog(
                 bytes(raw), trust, now=now if now is not None else int(time.time())
             )
-            if source != self.source():
+            current = self._state()
+            if current.source != source:
                 raise ValueError("catalog source changed")
             # A replayed older revision, or a different document at the
             # accepted revision, could hide newer releases or re-present
-            # withdrawn ones; the accepted revision only moves forward.
-            floor = self._floor(source, verified.claims.publisher)
+            # withdrawn ones; the accepted revision only moves forward, per
+            # catalog address and publisher.
+            key = _floor_key(source, verified.claims.publisher)
+            floor = current.floors.get(key)
             if floor is not None and (
-                verified.claims.revision < floor[0]
+                verified.claims.revision < floor.revision
                 or (
-                    verified.claims.revision == floor[0] and verified.sha256 != floor[1]
+                    verified.claims.revision == floor.revision
+                    and verified.sha256 != floor.sha256
                 )
             ):
                 raise ValueError("catalog revision rollback refused")
             destination = self.directory / (verified.sha256 + ".json")
-            floors = self._floors()
+            floors = dict(current.floors)
+            floors[key] = _Floor(
+                revision=verified.claims.revision, sha256=verified.sha256
+            )
             if not destination.exists():
                 self._prune(floors, keep=8)
             # The floor moves before the document lands: a crash in between
             # leaves a floor naming a document to fetch again, never a
             # document the floor would let an older catalog replace.
-            floors[verified.claims.publisher] = {
-                "revision": verified.claims.revision,
-                "sha256": verified.sha256,
-            }
-            write_private(
-                self.root / "catalog-revision.json",
-                json.dumps(
-                    {
-                        "base_url": source.base_url,
-                        "document_filename": source.document_filename,
-                        "floors": floors,
-                    }
-                ).encode(),
-            )
+            self._save(current.model_copy(update={"floors": floors}))
             write_private(destination, verified.document)
             return verified
 
-    def _prune(self, floors: dict[str, JsonValue], *, keep: int) -> None:
+    def _prune(self, floors: dict[str, "_Floor"], *, keep: int) -> None:
         """Drop retained documents beyond the newest ``keep``, never an accepted floor.
 
         A catalog that updates regularly would otherwise fill its retention
         and stop; superseded documents are evidence with a short life.
         """
-        accepted: set[str] = set()
-        for entry in floors.values():
-            sha256 = entry.get("sha256") if isinstance(entry, dict) else None
-            if isinstance(sha256, str):
-                accepted.add(sha256)
+        accepted = {floor.sha256 for floor in floors.values()}
         retained = sorted(
             (path for path in islice(self.directory.iterdir(), 256)),
             key=lambda path: path.stat().st_mtime,
@@ -803,80 +803,14 @@ class HostCatalog:
             if path.stem not in accepted:
                 path.unlink(missing_ok=True)
 
-    def _floors(self) -> dict[str, JsonValue]:
-        """Accepted revisions per publisher at the configured catalog address.
-
-        A missing record is first use. A damaged one fails closed: it is
-        retained evidence, and reading past it could accept an older catalog.
-        """
-        try:
-            raw = read_private(self.root / "catalog-revision.json", 16384)
-        except FileNotFoundError:
-            return {}
-        try:
-            document = _OBJECT.validate_json(raw)
-            floors = document.get("floors")
-            if not isinstance(floors, dict):
-                raise ValueError("catalog revision record malformed")
-        except ValueError:
-            raise ValueError(
-                "catalog revision record unreadable; local maintenance required"
-            ) from None
-        return floors
-
-    def _floor(self, source: CatalogSource, publisher: str) -> tuple[int, str] | None:
-        # The accepted revision belongs to one catalog address and one
-        # publisher; a second trusted publisher at the same address keeps
-        # its own floor, so serving one cannot erase the other's history.
-        # Another address starts its own history (configure clears it).
-        try:
-            raw = read_private(self.root / "catalog-revision.json", 16384)
-        except FileNotFoundError:
-            return None
-        try:
-            document = _OBJECT.validate_json(raw)
-        except ValueError:
-            raise ValueError(
-                "catalog revision record unreadable; local maintenance required"
-            ) from None
-        if (
-            document.get("base_url") != source.base_url
-            or document.get("document_filename") != source.document_filename
-        ):
-            # A move of the address clears this record; a record naming
-            # another address is damaged evidence, not first use.
-            raise ValueError(
-                "catalog revision record unreadable; local maintenance required"
-            )
-        floors = document.get("floors")
-        if not isinstance(floors, dict):
-            raise ValueError(
-                "catalog revision record unreadable; local maintenance required"
-            )
-        if publisher not in floors:
-            # This publisher has no accepted revision here yet: first use.
-            return None
-        entry = floors[publisher]
-        revision = entry.get("revision") if isinstance(entry, dict) else None
-        sha256 = entry.get("sha256") if isinstance(entry, dict) else None
-        if (
-            isinstance(revision, int)
-            and not isinstance(revision, bool)
-            and revision >= 1
-            and isinstance(sha256, str)
-            and len(sha256) == 64
-        ):
-            return revision, sha256
-        # A present but malformed floor is damaged evidence, not first use.
-        raise ValueError(
-            "catalog revision record unreadable; local maintenance required"
-        )
-
     def retained(self, catalog_sha256: str) -> bytes:
         """The verified catalog document retained under ``catalog_sha256``."""
         if not re.fullmatch(r"[a-f0-9]{64}", catalog_sha256):
             raise ValueError("catalog digest required")
-        return read_private(self.directory / (catalog_sha256 + ".json"), 262144)
+        document = read_private(self.directory / (catalog_sha256 + ".json"), 262144)
+        if hashlib.sha256(document).hexdigest() != catalog_sha256:
+            raise ValueError("retained catalog document differs from its digest")
+        return document
 
     async def close(self) -> None:
         """Refuse further reads; nothing is owned in flight."""
