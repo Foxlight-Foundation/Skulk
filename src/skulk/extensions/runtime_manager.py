@@ -232,10 +232,13 @@ def _release_trust(
 
     Discovery trust and an installation's trust have independent revision
     histories, so the listed publisher's key is rebased onto the
-    installation's own: kept as is when it already authorizes that key and
-    is current, else the next revision of the installation's trust with the
-    key added (a changed key replaces the old one under the same name), the
-    later expiry, and every revocation of both records.
+    installation's own: kept as is when it already authorizes that key, is
+    current and carries every discovery revocation, else the next revision
+    of the installation's trust with the key added (a changed key replaces
+    the old one under the same name), the later expiry, and every
+    revocation of both records. Revocations always travel: a catalog entry
+    names no wheel digests, so a wheel the operator revoked for discovery
+    is refused by the release path only if the installation's trust has it.
     """
     key = discovery.publishers[publisher]
     try:
@@ -249,6 +252,8 @@ def _release_trust(
         and current.publishers.get(publisher) == key
         and publisher not in current.revoked_publishers
         and now < current.expires_at
+        and set(discovery.revoked_publishers) <= set(current.revoked_publishers)
+        and set(discovery.revoked_artifacts) <= set(current.revoked_artifacts)
     ):
         return None
     publishers = dict(current.publishers) if current is not None else {}

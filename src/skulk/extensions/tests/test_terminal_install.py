@@ -632,21 +632,42 @@ async def test_catalog_binding_rebases_trust_onto_the_installations_history(
         assert trust.expires_at == fixture.trust.expires_at + 60
         assert trust.revoked_artifacts == ("9" * 64,)
         # Bound again at the same listing, the trust already authorizes the
-        # publisher and is left alone.
+        # publisher and carries every discovery revocation: left alone.
         await fixture.terminal(iter(("y",))).run_from_catalog(
             "example.plugin", plugin_id=identifier
         )
+        installed = fixture.manager.root / "installations" / identifier
         assert (
             RuntimeTrust.model_validate_json(
-                read_private(
-                    fixture.manager.root
-                    / "installations"
-                    / identifier
-                    / "publisher-trust.json"
-                )
+                read_private(installed / "publisher-trust.json")
             ).revision
             == 3
         )
+        # A wheel revoked for discovery is not named by any listing, so the
+        # binding carries the revocation into the installation's trust,
+        # where the release path enforces it.
+        response = await fixture.request(
+            CatalogRegistration(
+                request=CatalogSourceUpdate(
+                    expected_revision=1,
+                    trust=RuntimeTrust(
+                        revision=2,
+                        expires_at=fixture.trust.expires_at,
+                        publishers=fixture.trust.publishers,
+                        revoked_artifacts=("8" * 64,),
+                    ),
+                )
+            )
+        )
+        assert "result" in response
+        await fixture.terminal(iter(("y",))).run_from_catalog(
+            "example.plugin", plugin_id=identifier
+        )
+        carried = RuntimeTrust.model_validate_json(
+            read_private(installed / "publisher-trust.json")
+        )
+        assert carried.revision == 4
+        assert carried.revoked_artifacts == ("8" * 64, "9" * 64)
 
 
 def test_two_artifacts_at_one_sequence_need_the_family_named() -> None:
