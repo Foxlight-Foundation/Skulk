@@ -564,8 +564,10 @@ class RuntimeManager:
                 return self.catalog.source_status().model_dump(mode="json")
             # A slow catalog server must not block inventory or attachment
             # renewal behind the manager-wide lock, like release inspection.
-            host = await asyncio.to_thread(measure_host)
+            # The fetch is admitted first, so concurrent reads refused as
+            # busy never pay for a host measurement (a tree hash).
             verified = await self.catalog.fetch()
+            host = await asyncio.to_thread(measure_host)
             return verified.review(
                 skulk_build_sha256=host.skulk_build_sha256, platform=host.platform
             ).model_dump(mode="json")

@@ -219,13 +219,24 @@ class VerifiedCatalog:
             entry
             for entry in claims.entries
             if entry.release_digest not in revoked_artifacts
+            and entry.release_sha256 not in revoked_artifacts
             and entry.artifact_sha256 not in revoked_artifacts
         )
 
-    def entry(self, bundle_id: str, sequence: int) -> _CatalogEntryClaims | None:
-        """The listed, unrevoked release for one bundle sequence, if any."""
+    def entry(
+        self, bundle_id: str, sequence: int, runtime_platform: str | None
+    ) -> _CatalogEntryClaims | None:
+        """The listed, unrevoked release for one bundle sequence and artifact family.
+
+        One sequence may be listed once per runtime platform; the family is
+        part of the identity, so a plain release is found only with ``None``.
+        """
         for entry in self.entries:
-            if entry.bundle_id == bundle_id and entry.sequence == sequence:
+            if (
+                entry.bundle_id == bundle_id
+                and entry.sequence == sequence
+                and entry.runtime_platform == runtime_platform
+            ):
                 return entry
         return None
 
@@ -596,6 +607,13 @@ class HostCatalog:
                 write_private(
                     self.root / "catalog-source.json", source.model_dump_json().encode()
                 )
+                if previous is not None and (
+                    previous.base_url != source.base_url
+                    or previous.document_filename != source.document_filename
+                ):
+                    # An owner-authorized move to another catalog starts a
+                    # new revision history; the old floor would refuse it.
+                    (self.root / "catalog-revision.json").unlink(missing_ok=True)
                 return self.source_status()
             finally:
                 lock.close()
@@ -666,7 +684,7 @@ class HostCatalog:
             # A replayed older revision, or a different document at the
             # accepted revision, could hide newer releases or re-present
             # withdrawn ones; the accepted revision only moves forward.
-            floor = self._floor()
+            floor = self._floor(source, verified.claims.publisher)
             if floor is not None and (
                 verified.claims.revision < floor[0]
                 or (
@@ -684,17 +702,31 @@ class HostCatalog:
             write_private(
                 self.root / "catalog-revision.json",
                 json.dumps(
-                    {"revision": verified.claims.revision, "sha256": verified.sha256}
+                    {
+                        "base_url": source.base_url,
+                        "document_filename": source.document_filename,
+                        "publisher": verified.claims.publisher,
+                        "revision": verified.claims.revision,
+                        "sha256": verified.sha256,
+                    }
                 ).encode(),
             )
             return verified
 
-    def _floor(self) -> tuple[int, str] | None:
+    def _floor(self, source: CatalogSource, publisher: str) -> tuple[int, str] | None:
+        # The accepted revision belongs to one catalog: the same address,
+        # document and publisher. Another catalog starts its own history.
         try:
             document = _OBJECT.validate_json(
                 read_private(self.root / "catalog-revision.json", 4096)
             )
         except (FileNotFoundError, ValueError):
+            return None
+        if (
+            document.get("base_url") != source.base_url
+            or document.get("document_filename") != source.document_filename
+            or document.get("publisher") != publisher
+        ):
             return None
         revision, sha256 = document.get("revision"), document.get("sha256")
         if (

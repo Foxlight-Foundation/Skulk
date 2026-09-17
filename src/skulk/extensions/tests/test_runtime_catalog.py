@@ -86,8 +86,8 @@ def test_a_catalog_verifies_against_discovery_trust_and_names_refusals() -> None
     document = _catalog(key, [_entry(1), _entry(2)])
     verified = verify_catalog(document, _trust(key), now=now)
     assert verified.sha256 == hashlib.sha256(document).hexdigest()
-    assert verified.entry("example.plugin", 2) is not None
-    assert verified.entry("example.plugin", 3) is None
+    assert verified.entry("example.plugin", 2, None) is not None
+    assert verified.entry("example.plugin", 3, None) is None
     review = verified.review(skulk_build_sha256="a" * 64, platform="macos-arm64")
     assert [e.sequence for e in review.entries] == [1, 2]
     assert all(e.matches_host for e in review.entries)
@@ -109,6 +109,20 @@ def test_a_catalog_verifies_against_discovery_trust_and_names_refusals() -> None
         now=now,
     ).review(skulk_build_sha256="a" * 64, platform="macos-arm64")
     assert [e.matches_host for e in families.entries] == [True, False]
+    listed = verify_catalog(
+        _catalog(
+            key,
+            [
+                _entry(3, runtime_platform="macos-arm64"),
+                _entry(3, runtime_platform="linux-x86_64"),
+            ],
+        ),
+        _trust(key),
+        now=now,
+    )
+    found = listed.entry("example.plugin", 3, "linux-x86_64")
+    assert found is not None and found.runtime_platform == "linux-x86_64"
+    assert listed.entry("example.plugin", 3, None) is None
     with pytest.raises(ValueError, match="twice"):
         verify_catalog(
             _catalog(
@@ -235,6 +249,17 @@ async def test_the_host_catalog_configures_fetches_and_retains_without_disclosur
         CatalogSourceUpdate(expected_revision=3, trust=_trust(key, revision=3))
     )
     assert catalog.trust().revoked_publishers == ("gone",)
+    # Moving to another catalog (with its credential supplied again) starts
+    # a new revision history: revision 1 there is not a rollback.
+    await catalog.configure(
+        CatalogSourceUpdate(
+            expected_revision=4,
+            base_url="https://catalog.example.test/other/",
+            token=SecretStr("hidden-catalog-token"),
+        )
+    )
+    served[0] = document
+    assert (await catalog.fetch()).claims.revision == 1
     await catalog.close()
     with pytest.raises(ValueError, match="closed"):
         await catalog.fetch()
@@ -249,12 +274,15 @@ def test_a_revoked_release_or_artifact_is_not_offered() -> None:
             _entry(1, release_digest="4" * 64),
             _entry(2, artifact_sha256="5" * 64),
             _entry(3),
+            _entry(4, release_sha256="6" * 64),
         ],
     )
     verified = verify_catalog(
-        document, _trust(key, revoked_artifacts=("4" * 64, "5" * 64)), now=now
+        document,
+        _trust(key, revoked_artifacts=("4" * 64, "5" * 64, "6" * 64)),
+        now=now,
     )
     assert [e.sequence for e in verified.entries] == [3]
-    assert verified.entry("example.plugin", 1) is None
+    assert verified.entry("example.plugin", 1, None) is None
     review = verified.review(skulk_build_sha256="a" * 64, platform="macos-arm64")
     assert [e.sequence for e in review.entries] == [3]
