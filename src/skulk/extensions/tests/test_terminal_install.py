@@ -531,6 +531,37 @@ async def test_catalog_installs_refuse_by_name_before_any_transfer(
             before.base_url,
             before.revision + 2,
         )
+        # The request deadline cancelling a slow inspection rolls back the
+        # same way, and the deadline still reports.
+        before = downloads.source()
+        current = await fixture.catalog_review()
+
+        async def slow() -> object:
+            await asyncio.sleep(30)
+            raise AssertionError("unreachable")
+
+        downloads.inspect = slow  # type: ignore[method-assign]
+        try:
+            with pytest.raises(TimeoutError):
+                async with asyncio.timeout(0.5):
+                    await fixture.manager.dispatch(
+                        CatalogInstallRequest(
+                            request=CatalogInstall(
+                                catalog_sha256=current.catalog_sha256,
+                                bundle_id="example.plugin",
+                                sequence=2,
+                                runtime_platform="macos-arm64",
+                                plugin_id=identifier,
+                            )
+                        )
+                    )
+        finally:
+            del downloads.inspect
+        restored = downloads.source()
+        assert (restored.base_url, restored.revision) == (
+            before.base_url,
+            before.revision + 2,
+        )
         # The digest of a superseded listing is refused: consent names the
         # listing the operator reviewed, and that one is no longer current.
         response = await fixture.request(
@@ -687,7 +718,8 @@ async def test_catalog_binding_rebases_trust_onto_the_installations_history(
             "other": other,
             "fixture": fixture.trust.publishers["fixture"],
         }
-        assert trust.expires_at == fixture.trust.expires_at + 60
+        # The earlier expiry wins: a binding never lengthens a window.
+        assert trust.expires_at == fixture.trust.expires_at
         assert trust.revoked_artifacts == ("9" * 64,)
         # Bound again at the same listing, the trust already authorizes the
         # publisher and carries every discovery revocation: left alone.
@@ -726,6 +758,30 @@ async def test_catalog_binding_rebases_trust_onto_the_installations_history(
         )
         assert carried.revision == 4
         assert carried.revoked_artifacts == ("8" * 64, "9" * 64)
+        # An expired record is not revived: its other publishers are dropped
+        # and only its revocations carry, under the discovery expiry.
+        write_private(
+            installed / "publisher-trust.json",
+            RuntimeTrust(
+                revision=4,
+                expires_at=int(time.time()) - 1,
+                publishers={"other": other, "fixture": carried.publishers["fixture"]},
+                revoked_publishers=("gone",),
+                revoked_artifacts=carried.revoked_artifacts,
+            )
+            .model_dump_json()
+            .encode(),
+        )
+        await fixture.terminal(iter(("y",))).run_from_catalog(
+            "example.plugin", plugin_id=identifier
+        )
+        revived = RuntimeTrust.model_validate_json(
+            read_private(installed / "publisher-trust.json")
+        )
+        assert revived.revision == 5
+        assert revived.publishers == {"fixture": fixture.trust.publishers["fixture"]}
+        assert revived.revoked_publishers == ("gone",)
+        assert revived.revoked_artifacts == ("8" * 64, "9" * 64)
 
 
 def test_two_artifacts_at_one_sequence_need_the_family_named() -> None:

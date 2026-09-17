@@ -234,9 +234,10 @@ def _release_trust(
     histories, so the listed publisher's key is rebased onto the
     installation's own: kept as is when it already authorizes that key, is
     current and carries every discovery revocation, else the next revision
-    of the installation's trust with the key added, the later expiry, and
-    every revocation of both records. A publisher the installation trusts
-    under another key refuses the binding. Revocations always travel: a catalog entry
+    of the installation's trust with the key added, the earlier expiry, and
+    every revocation of both records; an expired record contributes only
+    its revocations. A publisher the installation trusts under another key
+    refuses the binding. Revocations always travel: a catalog entry
     names no wheel digests, so a wheel the operator revoked for discovery
     is refused by the release path only if the installation's trust has it.
     """
@@ -264,12 +265,17 @@ def _release_trust(
         and set(discovery.revoked_artifacts) <= set(current.revoked_artifacts)
     ):
         return None
-    publishers = dict(current.publishers) if current is not None else {}
+    # Authorization never widens through a binding: an expired record keeps
+    # only its revocations (its publishers are not revived under the
+    # discovery expiry), and a current record's publishers keep the earlier
+    # of the two expiries rather than gaining the later one.
+    live = current is not None and now < current.expires_at
+    publishers = dict(current.publishers) if current is not None and live else {}
     publishers[publisher] = key
     return RuntimeTrust(
         revision=current.revision + 1 if current is not None else 1,
-        expires_at=max(discovery.expires_at, current.expires_at)
-        if current is not None
+        expires_at=min(discovery.expires_at, current.expires_at)
+        if current is not None and live
         else discovery.expires_at,
         publishers=publishers,
         revoked_publishers=tuple(
@@ -935,15 +941,19 @@ class RuntimeManager:
                 raise ValueError(
                     "the release served at the listed feed differs from the listing"
                 )
-        except (OSError, ValueError):
+        except (OSError, ValueError, asyncio.CancelledError):
             # A refused listing (a feed that fails, a record other than the
-            # listed one, or the installer fence held by another operation)
-            # leaves an existing installation on the source it had: later
-            # plain upgrades and recovery must not read the feed that just
-            # failed. A new installation keeps the listed source (nothing is
-            # selected there) so the plain path can retry it.
+            # listed one, the installer fence held by another operation, or
+            # the request deadline cancelling a slow inspection) leaves an
+            # existing installation on the source it had: later plain
+            # upgrades and recovery must not read the feed that just failed.
+            # A new installation keeps the listed source (nothing is selected
+            # there) so the plain path can retry it. The restore is shielded
+            # so the cancellation that reached this task cannot cut it short.
             if previous is not None:
-                await self._restore_source(downloads, previous, source.revision)
+                await asyncio.shield(
+                    self._restore_source(downloads, previous, source.revision)
+                )
             raise
         return CatalogInstallation(
             plugin_id=identifier, listing=listing, source=source, review=review
