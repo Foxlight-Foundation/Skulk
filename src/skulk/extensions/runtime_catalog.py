@@ -11,6 +11,7 @@ release record itself is authenticated against installation trust.
 import asyncio
 import hashlib
 import json
+import re
 import time
 from itertools import islice
 from pathlib import Path
@@ -107,6 +108,8 @@ class _CatalogEntryClaims(_Contract):
     @model_validator(mode="after")
     def served_from_a_directory(self) -> Self:
         """A feed is an explicit HTTPS directory, like a configured release source."""
+        if self.transfer_bytes < self.artifact_size:
+            raise ValueError("catalog entry transfer size cannot be below its artifact")
         parsed = urlsplit(self.feed_url)
         if (
             parsed.scheme != "https"
@@ -710,7 +713,9 @@ class HostCatalog:
             floors = self._floors()
             if not destination.exists():
                 self._prune(floors, keep=8)
-            write_private(destination, verified.document)
+            # The floor moves before the document lands: a crash in between
+            # leaves a floor naming a document to fetch again, never a
+            # document the floor would let an older catalog replace.
             floors[verified.claims.publisher] = {
                 "revision": verified.claims.revision,
                 "sha256": verified.sha256,
@@ -725,6 +730,7 @@ class HostCatalog:
                     }
                 ).encode(),
             )
+            write_private(destination, verified.document)
             return verified
 
     def _prune(self, floors: dict[str, JsonValue], *, keep: int) -> None:
@@ -787,7 +793,11 @@ class HostCatalog:
             document.get("base_url") != source.base_url
             or document.get("document_filename") != source.document_filename
         ):
-            return None
+            # A move of the address clears this record; a record naming
+            # another address is damaged evidence, not first use.
+            raise ValueError(
+                "catalog revision record unreadable; local maintenance required"
+            )
         floors = document.get("floors")
         if not isinstance(floors, dict):
             raise ValueError(
@@ -814,6 +824,8 @@ class HostCatalog:
 
     def retained(self, catalog_sha256: str) -> bytes:
         """The verified catalog document retained under ``catalog_sha256``."""
+        if not re.fullmatch(r"[a-f0-9]{64}", catalog_sha256):
+            raise ValueError("catalog digest required")
         return read_private(self.directory / (catalog_sha256 + ".json"), 262144)
 
     async def close(self) -> None:

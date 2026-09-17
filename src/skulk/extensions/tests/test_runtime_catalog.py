@@ -183,6 +183,10 @@ def test_a_catalog_verifies_against_discovery_trust_and_names_refusals() -> None
         )
     with pytest.raises(ValueError, match="exceeds bound"):
         verify_catalog(b"{" + b" " * 262144 + b"}", _trust(key), now=now)
+    with pytest.raises(ValueError, match="below its artifact"):
+        verify_catalog(
+            _catalog(key, [_entry(1, transfer_bytes=1)]), _trust(key), now=now
+        )
 
 
 async def test_the_host_catalog_configures_fetches_and_retains_without_disclosure(
@@ -222,6 +226,8 @@ async def test_the_host_catalog_configures_fetches_and_retains_without_disclosur
     retained = read_private(tmp_path / "catalog" / (verified.sha256 + ".json"))
     assert retained == document
     assert catalog.retained(verified.sha256) == document
+    with pytest.raises(ValueError, match="digest required"):
+        catalog.retained("../catalog-source")
     assert "hidden-catalog-token" not in json.dumps(
         verified.review(
             skulk_build_sha256="a" * 64, platform="macos-arm64"
@@ -318,6 +324,11 @@ async def test_the_host_catalog_configures_fetches_and_retains_without_disclosur
     assert isinstance(damaged_floors, dict)
     damaged_floors[PUBLISHER] = {"revision": 0, "sha256": "short"}
     (tmp_path / "catalog-revision.json").write_bytes(_RECORD.dump_json(damaged))
+    with pytest.raises(ValueError, match="local maintenance"):
+        await catalog.fetch()
+    moved = _RECORD.validate_json(record)
+    moved["base_url"] = "https://elsewhere.example.test/"
+    (tmp_path / "catalog-revision.json").write_bytes(_RECORD.dump_json(moved))
     with pytest.raises(ValueError, match="local maintenance"):
         await catalog.fetch()
     (tmp_path / "catalog-revision.json").write_bytes(record)

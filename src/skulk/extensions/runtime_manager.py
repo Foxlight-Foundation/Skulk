@@ -267,7 +267,7 @@ class RuntimeManager:
         # is fixed while it runs), so no read repeats the tree hash and a
         # cancelled first measurement cannot overlap a later one.
         self.catalog_read = asyncio.Lock()
-        self.host: QualifiedHost | None = None
+        self.host: asyncio.Task[QualifiedHost] | None = None
         self.errors: dict[str, str] = {}
         self.server: asyncio.Server | None = None
         self.lock: RuntimeLock | None = None
@@ -578,9 +578,12 @@ class RuntimeManager:
                 raise ValueError("catalog source is busy")
             async with self.catalog_read:
                 verified = await self.catalog.fetch()
-                if self.host is None:
-                    self.host = await asyncio.to_thread(measure_host)
-                host = self.host
+                if self.host is None or (self.host.done() and self.host.exception()):
+                    self.host = asyncio.create_task(asyncio.to_thread(measure_host))
+                # A request that times out does not cancel the measurement;
+                # the next read reuses the same task instead of starting
+                # another tree hash.
+                host = await asyncio.shield(self.host)
             return verified.review(
                 skulk_build_sha256=host.skulk_build_sha256, platform=host.platform
             ).model_dump(mode="json")
