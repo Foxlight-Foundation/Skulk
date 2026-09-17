@@ -665,6 +665,9 @@ class ManagedServices:
                         if item.selected_digest is not None and item.error_code is None
                         else None
                     )
+                    self.owners[identifier].manager_state = (
+                        item.service.state if item.service is not None else None
+                    )
                     self.owners[identifier].manager_available = (
                         item.enabled
                         and not item.stale

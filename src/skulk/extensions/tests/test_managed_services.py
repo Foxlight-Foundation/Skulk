@@ -343,12 +343,17 @@ def test_a_stopped_installation_expects_no_owner(tmp_path: Path) -> None:
     assert owner._owner_expected()  # pyright: ignore[reportPrivateUsage]
     owner.manager_available = False
     owner.manager_enabled = True
+    owner.manager_state = "stopped"
+    assert not owner._owner_expected()  # pyright: ignore[reportPrivateUsage]
+    # An enabled owner that failed is exactly what the warning is for.
+    owner.manager_state = "failed"
+    assert owner._owner_expected()  # pyright: ignore[reportPrivateUsage]
+    # A disabled installation has no owner by design, whatever its last state.
+    owner.manager_enabled = False
     assert not owner._owner_expected()  # pyright: ignore[reportPrivateUsage]
     # Unknown manager state (transport failure) keeps the warning.
     owner.manager_enabled = None
-    assert owner._owner_expected()  # pyright: ignore[reportPrivateUsage]
-    owner.manager_available = True
-    owner.manager_enabled = True
+    owner.manager_state = None
     assert owner._owner_expected()  # pyright: ignore[reportPrivateUsage]
 
 

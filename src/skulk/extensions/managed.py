@@ -329,6 +329,10 @@ class ManagedOwner:
         self.available = False
         self.manager_available = True
         self.manager_enabled: bool | None = None
+        # The owner process state the manager last reported, so an owner that
+        # is absent because the installation is stopped is told apart from
+        # one that failed.
+        self.manager_state: str | None = None
         self.poll_task: asyncio.Task[None] | None = None
         self.host_task: asyncio.Task[None] | None = None
         self.host_callbacks_available = False
@@ -542,9 +546,13 @@ class ManagedOwner:
         """Whether the manager says this installation's owner should be running.
 
         A disabled or stopped installation has no owner by design; its absence
-        is the manager's own inventory truth, not a fault worth a warning.
+        is the manager's own inventory truth, not a fault worth a warning. An
+        enabled installation whose owner failed, or one the manager has said
+        nothing about, keeps the warning.
         """
-        return self.manager_available or self.manager_enabled is None
+        if self.manager_enabled is False:
+            return False
+        return self.manager_state not in ("stopped", "stopping")
 
     def _note_unavailable(self, reason: str) -> None:
         """Log why this owner is unavailable, once per reason and at most once a minute.
