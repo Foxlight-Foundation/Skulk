@@ -812,6 +812,121 @@ def test_a_legacy_manager_is_stopped_and_the_generation_selected(
     assert snapshot.generation.encode() in read_private(tmp_path / "core-runtime.json")
 
 
+def test_a_manager_started_before_the_selection_is_stopped_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A keep-alive restart that read the old pointer runs the old generation."""
+    from skulk.extensions import managed_services
+    from skulk.extensions.managed_services import reload_legacy_manager
+    from skulk.extensions.tests.test_service_snapshot import staged
+
+    snapshot = staged(tmp_path)
+    old = str(tmp_path / "core-runtimes" / ("0" * 32) / "runtime" / "bin" / "python")
+    new = str(tmp_path / "core-runtimes" / snapshot.generation / "runtime/bin/python")
+    serve = ["-I", "-B", "-m", "skulk.extensions.runtime_manager", "serve", "--root"]
+    processes: list[tuple[int, list[str]]] = []
+    signalled: list[int] = []
+
+    def running(root: Path) -> list[tuple[int, list[str]]]:
+        # The old manager exited on the first signal; its keep-alive
+        # replacement (on the old pointer) and a manager on the new
+        # generation are both present once the selection lands.
+        if signalled:
+            return list(processes)
+        return [(4242, [old, *serve, str(root)])]
+
+    def record(pid: int, signal_number: int) -> None:
+        signalled.append(pid)
+        processes[:] = [
+            (4343, [old, *serve, str(tmp_path)]),
+            (4444, [new, *serve, str(tmp_path)]),
+        ]
+
+    monkeypatch.setattr(managed_services, "_manager_processes", running)
+    monkeypatch.setattr(managed_services.os, "kill", record)
+    reload_legacy_manager(tmp_path, snapshot)
+    assert signalled == [4242, 4343]
+
+
+async def test_a_selected_generation_for_the_live_build_is_reused_without_staging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A selected generation the manager never started on needs a restart, not a copy."""
+    from skulk.extensions import managed_services
+    from skulk.extensions.runtime_manager import ManagerBuildMismatchError
+    from skulk.extensions.service_snapshot import ServiceSnapshot
+
+    selected = ServiceSnapshot(
+        generation="d" * 32,
+        manifest_sha256="e" * 64,
+        skulk_build_sha256="f" * 64,
+        copied_files=1,
+        copied_bytes=1,
+    )
+    generation = tmp_path / "core-runtimes" / selected.generation
+    private_directory(generation)
+    write_private(generation / "staged.json", selected.model_dump_json().encode())
+    write_private(
+        tmp_path / "core-runtime.json",
+        json.dumps(
+            {"generation": selected.generation, "manifest_sha256": "e" * 64}
+        ).encode(),
+    )
+    reloaded: list[str] = []
+
+    async def stage(root: Path) -> ServiceSnapshot:
+        raise AssertionError("the selected generation already matches the build")
+
+    async def request(root: Path, request: object) -> dict[str, JsonValue]:
+        return {"result": {"installations": []}}
+
+    def legacy(root: Path, snapshot: ServiceSnapshot) -> None:
+        reloaded.append(snapshot.generation)
+
+    def this_interpreter(base: Path) -> bool:
+        return True
+
+    monkeypatch.setattr(managed_services, "stage_service_runtime", stage)
+    monkeypatch.setattr(managed_services, "manager_request", request)
+    monkeypatch.setattr(managed_services, "reload_legacy_manager", legacy)
+    monkeypatch.setattr(
+        managed_services, "registered_unit_names_base", this_interpreter
+    )
+    monkeypatch.setattr(managed_services, "service_source_identity", lambda: "9" * 64)
+    write_private(
+        tmp_path / "setup.json",
+        SetupOperation(
+            operation_id=PROFILE,
+            profile_id=PROFILE,
+            skulk_build_sha256="a" * 64,
+            source_sha256="c" * 64,
+            configuration_directory=str(tmp_path),
+            phase="ready",
+            snapshot=ServiceSnapshot(
+                generation="0" * 32,
+                manifest_sha256="e" * 64,
+                skulk_build_sha256="a" * 64,
+                copied_files=1,
+                copied_bytes=1,
+            ),
+        )
+        .model_dump_json()
+        .encode(),
+    )
+    services = ManagedServices(tmp_path / "connection.json")
+    services.connection = ServiceConnection(
+        manager_root=str(tmp_path), profile_id=PROFILE
+    )
+    services._schedule_runtime_refresh(  # pyright: ignore[reportPrivateUsage]
+        ManagerBuildMismatchError("a" * 64, "f" * 64)
+    )
+    assert services.runtime_refresh is not None
+    await services.runtime_refresh
+    assert reloaded == [selected.generation]
+    recorded = SetupOperation.model_validate_json(read_private(tmp_path / "setup.json"))
+    assert recorded.snapshot == selected
+
+
 def test_a_legacy_manager_that_keeps_running_is_not_selected_over(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

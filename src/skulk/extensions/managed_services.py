@@ -94,9 +94,8 @@ def _selected_within(root: Path, generation: str, seconds: float) -> bool:
     return True
 
 
-def manager_pids(root: Path) -> list[int]:
-    """Processes serving the manager at ``root``; they run as this user."""
-    found: list[int] = []
+def _manager_processes(root: Path) -> list[tuple[int, list[str]]]:
+    found: list[tuple[int, list[str]]] = []
     arguments = TypeAdapter(list[str])
     for process in psutil.process_iter():
         try:
@@ -108,8 +107,36 @@ def manager_pids(root: Path) -> list[int]:
             and "serve" in cmdline
             and str(root) in cmdline
         ):
-            found.append(int(process.pid))
+            found.append((int(process.pid), cmdline))
     return found
+
+
+def manager_pids(root: Path) -> list[int]:
+    """Processes serving the manager at ``root``; they run as this user."""
+    return [pid for pid, _ in _manager_processes(root)]
+
+
+def runs_generation(cmdline: list[str], root: Path, generation: str) -> bool:
+    """Whether a manager command line runs from ``generation``'s runtime under ``root``.
+
+    The OS service starts the manager through the interpreter of the selected
+    generation, so the interpreter path names the generation it runs.
+    """
+    prefix = str(root / "core-runtimes" / generation) + os.sep
+    return bool(cmdline) and cmdline[0].startswith(prefix)
+
+
+def stale_manager_pids(root: Path, generation: str) -> list[int]:
+    """Managers at ``root`` not running from ``generation``.
+
+    A keep-alive restart that began before the selection runs the previous
+    generation; it must be stopped again so the next start reads the pointer.
+    """
+    return [
+        pid
+        for pid, cmdline in _manager_processes(root)
+        if not runs_generation(cmdline, root, generation)
+    ]
 
 
 def reload_legacy_manager(root: Path, snapshot: ServiceSnapshot) -> None:
@@ -138,7 +165,7 @@ def reload_legacy_manager(root: Path, snapshot: ServiceSnapshot) -> None:
     while True:
         try:
             activate_service_runtime(root, snapshot)
-            return
+            break
         except (OSError, ValueError):
             # The fence is still held while the stopped manager finishes, or
             # its keep-alive replacement took it first: keep asking.
@@ -147,9 +174,38 @@ def reload_legacy_manager(root: Path, snapshot: ServiceSnapshot) -> None:
             time.sleep(0.25)
             for pid in manager_pids(root):
                 if pid not in pids and _selected(root, snapshot.generation):
-                    return
+                    break
                 with contextlib.suppress(OSError):
                     os.kill(pid, signal.SIGTERM)
+            else:
+                continue
+            break
+    # The keep-alive may have started a manager between the stop and the
+    # selection; it read the previous pointer and runs the old generation.
+    # Stopping it once more makes its replacement read the new one.
+    for pid in stale_manager_pids(root, snapshot.generation):
+        with contextlib.suppress(OSError):
+            os.kill(pid, signal.SIGTERM)
+
+
+def selected_generation_for(root: Path, build: str) -> ServiceSnapshot | None:
+    """The selected generation when it was staged from ``build``.
+
+    A previous attempt may have selected a matching generation while the
+    manager kept running the old one; nothing new is staged for that.
+    """
+    generation = selected_generation(root)
+    if generation is None:
+        return None
+    try:
+        snapshot = ServiceSnapshot.model_validate_json(
+            read_private(root / "core-runtimes" / generation / "staged.json", 131072)
+        )
+    except (OSError, ValueError):
+        return None
+    if snapshot.generation == generation and snapshot.skulk_build_sha256 == build:
+        return snapshot
+    return None
 
 
 def staged_generation_for(root: Path, build: str) -> ServiceSnapshot | None:
@@ -386,7 +442,9 @@ class ManagedServices:
                     "the registered service invokes another interpreter; "
                     "rerun skulk-plugin-service setup"
                 )
-            snapshot = staged_generation_for(root, live)
+            snapshot = selected_generation_for(root, live) or staged_generation_for(
+                root, live
+            )
             if snapshot is None:
                 try:
                     snapshot = await stage_service_runtime(root)
