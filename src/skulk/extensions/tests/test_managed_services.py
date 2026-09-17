@@ -334,6 +334,24 @@ async def test_slow_release_inspection_does_not_block_inventory(
         await manager.close()
 
 
+def test_a_stopped_installation_expects_no_owner(tmp_path: Path) -> None:
+    """The manager's inventory already says a stopped owner is absent by design."""
+    owner = ManagedOwner(
+        ManagedConnection(plugin_id="managed.stopped", state_root=str(tmp_path))
+    )
+    # Fresh owner: the manager has said nothing yet, so absence is a fault.
+    assert owner._owner_expected()  # pyright: ignore[reportPrivateUsage]
+    owner.manager_available = False
+    owner.manager_enabled = True
+    assert not owner._owner_expected()  # pyright: ignore[reportPrivateUsage]
+    # Unknown manager state (transport failure) keeps the warning.
+    owner.manager_enabled = None
+    assert owner._owner_expected()  # pyright: ignore[reportPrivateUsage]
+    owner.manager_available = True
+    owner.manager_enabled = True
+    assert owner._owner_expected()  # pyright: ignore[reportPrivateUsage]
+
+
 def test_the_api_side_rebuilds_the_typed_refusal_from_the_fixed_vocabulary() -> None:
     from skulk.extensions.managed_services import protocol_refusal
     from skulk.extensions.runtime_artifacts import ProtocolUnsupportedError

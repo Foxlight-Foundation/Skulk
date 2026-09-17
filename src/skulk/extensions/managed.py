@@ -538,6 +538,14 @@ class ManagedOwner:
                 self._note_unavailable(f"{type(error).__name__}")
             await asyncio.sleep(1)
 
+    def _owner_expected(self) -> bool:
+        """Whether the manager says this installation's owner should be running.
+
+        A disabled or stopped installation has no owner by design; its absence
+        is the manager's own inventory truth, not a fault worth a warning.
+        """
+        return self.manager_available or self.manager_enabled is None
+
     def _note_unavailable(self, reason: str) -> None:
         """Log why this owner is unavailable, once per reason and at most once a minute.
 
@@ -547,7 +555,8 @@ class ManagedOwner:
         """
         now = time.monotonic()
         if reason != self.unavailable_reason or now - self.unavailable_noted >= 60:
-            logger.warning(f"managed owner {self.name} unavailable: {reason}")
+            if self._owner_expected():
+                logger.warning(f"managed owner {self.name} unavailable: {reason}")
             self.unavailable_reason = reason
             self.unavailable_noted = now
 
