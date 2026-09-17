@@ -133,6 +133,19 @@ class TerminalInstaller:
             clear_token=not token,
         )
 
+    async def _work_in_flight(self, identifier: str) -> bool:
+        """Whether the manager still owns a lifecycle operation for this installation.
+
+        An activation whose reply was lost is resumed, never inspected past:
+        the manager refuses inspection while it owns work, and the retained
+        operation is the one to observe.
+        """
+        state = await self._call(
+            InstallationRequest(action="get", plugin_id=identifier)
+        )
+        summary = _OBJECT.validate_python(state["installation"], strict=True)
+        return summary.get("operation_state") not in (None, "complete")
+
     async def _install_status(self, identifier: str) -> InstallOperation | None:
         result = await self._call(
             ReleaseRequest(action="install_status", plugin_id=identifier)
@@ -148,7 +161,16 @@ class TerminalInstaller:
         self, identifier: str, source: SourceStatus
     ) -> InstallOperation | None:
         operation = await self._install_status(identifier)
-        if operation is None:
+        review: ReleaseReview | None = None
+        if operation is None or (
+            operation.state == "staged" and not await self._work_in_flight(identifier)
+        ):
+            # With nothing in flight, the source is inspected again: an
+            # installation that already holds a staged release is upgraded
+            # when the source now publishes a newer one, instead of resuming
+            # the retained operation forever. Inspection reads and verifies;
+            # it downloads and activates nothing. An interrupted operation is
+            # never inspected past: recovery stays bound to its own digest.
             review = ReleaseReview.model_validate_json(
                 json.dumps(
                     await self._call(
@@ -156,8 +178,17 @@ class TerminalInstaller:
                     )
                 )
             )
+        if review is not None and (
+            operation is None
+            or operation.review.runtime_digest != review.runtime_digest
+        ):
             self._review(review)
-            if not self._confirm("Install this exact verified release?"):
+            question = (
+                "Install this exact verified release?"
+                if operation is None
+                else "Stage this newer verified release beside the installed one?"
+            )
+            if not self._confirm(question):
                 return None
             request = InstallRequest(
                 operation_id=uuid4().hex,
@@ -172,6 +203,8 @@ class TerminalInstaller:
                     )
                 )
             )
+        elif operation is None:
+            raise ValueError("release inspection produced no installation")
         elif operation.state == "recovery_required":
             self._review(operation.review)
             self.output("Interrupted installation: " + operation.request.operation_id)
@@ -249,13 +282,25 @@ class TerminalInstaller:
                     raise ValueError("another lifecycle operation needs inspection")
                 await self._observe_activation(identifier, operation)
                 return
-        if selection is not None:
-            if selection.runtime_digest != staged.request.runtime_digest:
-                raise ValueError("selection changed; use explicit lifecycle management")
-            if selection.enabled:
-                return
+        replacing = (
+            selection is not None
+            and selection.runtime_digest != staged.request.runtime_digest
+        )
+        if selection is not None and replacing:
+            # A staged release older than the selected one would be a
+            # rollback, which the manager refuses at inspection and again at
+            # selection; only a newer release reaches this point.
+            self.output(f"Selected release sequence: {selection.sequence}")
+        elif selection is not None and selection.enabled:
+            return
         self._review(staged.review)
-        if not self._confirm("Accept these permissions and start the plugin owner?"):
+        question = (
+            "Accept these permissions, replace the selected release and restart "
+            "the plugin owner?"
+            if replacing
+            else "Accept these permissions and start the plugin owner?"
+        )
+        if not self._confirm(question):
             return
         request = LifecycleRequest(
             operation_id=uuid4().hex,
