@@ -26,7 +26,7 @@ from skulk.extensions.runtime_catalog import (
     CatalogSourceUpdate,
     HostCatalog,
 )
-from skulk.extensions.runtime_download import RuntimeDownloads
+from skulk.extensions.runtime_download import RuntimeDownloads, SourceUpdate
 from skulk.extensions.runtime_files import (
     private_directory,
     read_private,
@@ -508,8 +508,29 @@ async def test_catalog_installs_refuse_by_name_before_any_transfer(
         assert restored.revision == before.revision + 2
         assert restored.credential_reference not in (None, before.credential_reference)
         await fixture.terminal(iter(())).run(identifier)
-        assert any("retained at sequence 1" in line for line in fixture.output)
+        assert fixture.urls[-1] == "/1/release.json"
         assert sum(isinstance(r, InstallSubmission) for r in fixture.requests) == 1
+        assert sum(isinstance(r, SubmitRequest) for r in fixture.requests) == 1
+        # The installer fence held by another operation is a refusal like
+        # any other: the source goes back, and the fence's refusal is raised.
+        before = downloads.source()
+
+        async def fenced() -> object:
+            raise BlockingIOError("installer fence busy")
+
+        downloads.inspect = fenced  # type: ignore[method-assign]
+        try:
+            with pytest.raises(ValueError, match="manager request incomplete"):
+                await fixture.terminal(iter(("y",))).run_from_catalog(
+                    "example.plugin", plugin_id=identifier
+                )
+        finally:
+            del downloads.inspect
+        restored = downloads.source()
+        assert (restored.base_url, restored.revision) == (
+            before.base_url,
+            before.revision + 2,
+        )
         # The digest of a superseded listing is refused: consent names the
         # listing the operator reviewed, and that one is no longer current.
         response = await fixture.request(
@@ -559,6 +580,73 @@ async def test_catalog_installs_refuse_by_name_before_any_transfer(
         ]
         assert elsewhere == [False]
         assert sum(isinstance(r, InstallSubmission) for r in fixture.requests) == 1
+
+
+async def test_catalog_binding_rebases_trust_onto_the_installations_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An installation trusting another publisher gains the listed one, keeps its own."""
+    async with journey(tmp_path, monkeypatch) as fixture:
+        fixture.list_releases({1: "https://releases.example.test/1/"}, revision=1)
+        await fixture.configure_catalog()
+        identifier = "managed." + "c" * 32
+        assert "result" in await fixture.request(
+            InstallationRequest(action="register", plugin_id=identifier)
+        )
+        other = Ed25519PrivateKey.generate().public_key().public_bytes_raw().hex()
+        configured = await fixture.request(
+            SourceRegistration(
+                plugin_id=identifier,
+                request=SourceUpdate(
+                    expected_revision=0,
+                    base_url="https://elsewhere.example.test/",
+                    metadata_filename="release.json",
+                    trust=RuntimeTrust(
+                        revision=2,
+                        expires_at=fixture.trust.expires_at + 60,
+                        publishers={"other": other},
+                        revoked_artifacts=("9" * 64,),
+                    ),
+                ),
+            )
+        )
+        assert "result" in configured
+        await fixture.terminal(iter(("y", "y", "y"))).run_from_catalog(
+            "example.plugin", plugin_id=identifier
+        )
+        selection = fixture.manager.controllers[identifier].selector.current()
+        assert selection is not None and selection.enabled
+        trust = RuntimeTrust.model_validate_json(
+            read_private(
+                fixture.manager.root
+                / "installations"
+                / identifier
+                / "publisher-trust.json"
+            )
+        )
+        assert trust.revision == 3
+        assert trust.publishers == {
+            "other": other,
+            "fixture": fixture.trust.publishers["fixture"],
+        }
+        assert trust.expires_at == fixture.trust.expires_at + 60
+        assert trust.revoked_artifacts == ("9" * 64,)
+        # Bound again at the same listing, the trust already authorizes the
+        # publisher and is left alone.
+        await fixture.terminal(iter(("y",))).run_from_catalog(
+            "example.plugin", plugin_id=identifier
+        )
+        assert (
+            RuntimeTrust.model_validate_json(
+                read_private(
+                    fixture.manager.root
+                    / "installations"
+                    / identifier
+                    / "publisher-trust.json"
+                )
+            ).revision
+            == 3
+        )
 
 
 def test_two_artifacts_at_one_sequence_need_the_family_named() -> None:

@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, SecretStr, TypeAda
 from skulk.extensions.runtime_artifacts import (
     ProtocolUnsupportedError,
     QualifiedHost,
+    RuntimeTrust,
     measure_host,
 )
 from skulk.extensions.runtime_attachment import (
@@ -222,6 +223,55 @@ class CatalogRegistration(_Request):
 
     action: Literal["configure_catalog"] = "configure_catalog"
     request: CatalogSourceUpdate = Field(description="Owner-supplied catalog settings.")
+
+
+def _release_trust(
+    downloads: RuntimeDownloads, publisher: str, discovery: RuntimeTrust, *, now: int
+) -> RuntimeTrust | None:
+    """The installation's publisher trust after a catalog binding, or ``None`` to keep it.
+
+    Discovery trust and an installation's trust have independent revision
+    histories, so the listed publisher's key is rebased onto the
+    installation's own: kept as is when it already authorizes that key and
+    is current, else the next revision of the installation's trust with the
+    key added (a changed key replaces the old one under the same name), the
+    later expiry, and every revocation of both records.
+    """
+    key = discovery.publishers[publisher]
+    try:
+        current: RuntimeTrust | None = RuntimeTrust.model_validate_json(
+            read_private(downloads.root / "publisher-trust.json")
+        )
+    except FileNotFoundError:
+        current = None
+    if (
+        current is not None
+        and current.publishers.get(publisher) == key
+        and publisher not in current.revoked_publishers
+        and now < current.expires_at
+    ):
+        return None
+    publishers = dict(current.publishers) if current is not None else {}
+    publishers[publisher] = key
+    return RuntimeTrust(
+        revision=current.revision + 1 if current is not None else 1,
+        expires_at=max(discovery.expires_at, current.expires_at)
+        if current is not None
+        else discovery.expires_at,
+        publishers=publishers,
+        revoked_publishers=tuple(
+            sorted(
+                set(discovery.revoked_publishers)
+                | set(current.revoked_publishers if current is not None else ())
+            )
+        ),
+        revoked_artifacts=tuple(
+            sorted(
+                set(discovery.revoked_artifacts)
+                | set(current.revoked_artifacts if current is not None else ())
+            )
+        ),
+    )
 
 
 class CatalogInstall(BaseModel):
@@ -762,26 +812,38 @@ class RuntimeManager:
         be the record the listing names. Staging and activation stay
         separate consents on the existing requests.
         """
-        verified = self.catalog.accepted(install.catalog_sha256, now=int(time.time()))
-        entry = verified.entry(
-            install.bundle_id, install.sequence, install.runtime_platform
-        )
-        if entry is None:
-            raise ValueError("release is not listed in the accepted catalog")
-        trust = self.catalog.trust()
-        if (
-            entry.publisher not in trust.publishers
-            or entry.publisher in trust.revoked_publishers
-        ):
-            raise ValueError("listed release publisher is not trusted for discovery")
         host = await self._measured_host()
-        listing = verified.entry_review(
-            entry, skulk_build_sha256=host.skulk_build_sha256, platform=host.platform
-        )
-        if not listing.matches_host:
-            raise ValueError("listed release does not match this host")
-        token = self.catalog.credential_for(entry.feed_url)
-        async with self.guard:
+        # The accepted listing is read and the source bound under the catalog
+        # read lock as well as the manager guard: a concurrent catalog read
+        # is refused as busy rather than superseding the reviewed digest
+        # between its check and the binding.
+        if self.catalog_read.locked():
+            raise ValueError("catalog source is busy")
+        async with self.catalog_read, self.guard:
+            verified = self.catalog.accepted(
+                install.catalog_sha256, now=int(time.time())
+            )
+            entry = verified.entry(
+                install.bundle_id, install.sequence, install.runtime_platform
+            )
+            if entry is None:
+                raise ValueError("release is not listed in the accepted catalog")
+            discovery = self.catalog.trust()
+            if (
+                entry.publisher not in discovery.publishers
+                or entry.publisher in discovery.revoked_publishers
+            ):
+                raise ValueError(
+                    "listed release publisher is not trusted for discovery"
+                )
+            listing = verified.entry_review(
+                entry,
+                skulk_build_sha256=host.skulk_build_sha256,
+                platform=host.platform,
+            )
+            if not listing.matches_host:
+                raise ValueError("listed release does not match this host")
+            token = self.catalog.credential_for(entry.feed_url)
             self._attachment_settled()
             identifier = (
                 install.plugin_id
@@ -817,7 +879,9 @@ class RuntimeManager:
                     expected_revision=downloads.source_status().revision,
                     base_url=entry.feed_url,
                     metadata_filename="release.json",
-                    trust=trust,
+                    trust=_release_trust(
+                        downloads, entry.publisher, discovery, now=int(time.time())
+                    ),
                     token=SecretStr(token) if token is not None else None,
                     clear_token=token is None,
                 )
@@ -834,11 +898,13 @@ class RuntimeManager:
                 raise ValueError(
                     "the release served at the listed feed differs from the listing"
                 )
-        except ValueError:
-            # A refused listing leaves an existing installation on the source
-            # it had: later plain upgrades and recovery must not read the feed
-            # that just failed. A new installation keeps the listed source
-            # (nothing is selected there) so the plain path can retry it.
+        except (OSError, ValueError):
+            # A refused listing (a feed that fails, a record other than the
+            # listed one, or the installer fence held by another operation)
+            # leaves an existing installation on the source it had: later
+            # plain upgrades and recovery must not read the feed that just
+            # failed. A new installation keeps the listed source (nothing is
+            # selected there) so the plain path can retry it.
             if previous is not None:
                 await self._restore_source(downloads, previous, source.revision)
             raise
