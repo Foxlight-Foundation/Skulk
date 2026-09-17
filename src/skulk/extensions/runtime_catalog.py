@@ -488,10 +488,38 @@ class HostCatalog:
         )
 
     def trust(self) -> RuntimeTrust:
-        """Read the publishers this host trusts for discovery."""
-        return RuntimeTrust.model_validate_json(
-            read_private(self.root / "catalog-trust.json")
-        )
+        """Read the publishers this host trusts for discovery, against its floor.
+
+        The floor records the newest trust revision this host accepted; a
+        restored older trust file (one that could drop a revocation) is
+        refused rather than read.
+        """
+        raw = read_private(self.root / "catalog-trust.json")
+        trust = RuntimeTrust.model_validate_json(raw)
+        try:
+            floor = _OBJECT.validate_json(
+                read_private(self.root / "catalog-trust-floor.json", 4096)
+            )
+        except FileNotFoundError:
+            return trust
+        except ValueError:
+            raise ValueError(
+                "discovery trust floor unreadable; local maintenance required"
+            ) from None
+        revision, sha256 = floor.get("revision"), floor.get("sha256")
+        if (
+            not isinstance(revision, int)
+            or isinstance(revision, bool)
+            or not isinstance(sha256, str)
+        ):
+            raise ValueError(
+                "discovery trust floor unreadable; local maintenance required"
+            )
+        if trust.revision < revision or (
+            trust.revision == revision and hashlib.sha256(raw).hexdigest() != sha256
+        ):
+            raise ValueError("discovery trust rollback refused")
+        return trust
 
     def source_status(self) -> CatalogSourceStatus:
         """Read readiness without network I/O or disclosing the credential."""

@@ -457,7 +457,10 @@ class RuntimeManager:
                     raise ValueError("manager request exceeds bound")
                 request = MANAGER_REQUEST.validate_json(raw)
                 result = await self.dispatch(request)
-                payload = json.dumps({"result": result}).encode() + b"\n"
+                # UTF-8 as written: escaping non-ASCII text would inflate a
+                # reply (a catalog's permissions, say) past the bound.
+                payload = json.dumps({"result": result}, ensure_ascii=False).encode()
+                payload += b"\n"
                 if len(payload) > 262144:
                     raise ValueError("manager response exceeds bound")
                 writer.write(payload)
