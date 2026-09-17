@@ -95,6 +95,32 @@ def test_a_catalog_verifies_against_discovery_trust_and_names_refusals() -> None
     assert "releases.example.test" not in review.model_dump_json()
     other = verified.review(skulk_build_sha256="b" * 64, platform="linux-x86_64")
     assert not any(e.matches_host for e in other.entries)
+    # A runtime-bearing entry names its artifact family; one sequence may be
+    # listed once per family, and only the matching family fits this host.
+    families = verify_catalog(
+        _catalog(
+            key,
+            [
+                _entry(3, runtime_platform="macos-arm64"),
+                _entry(3, runtime_platform="linux-x86_64"),
+            ],
+        ),
+        _trust(key),
+        now=now,
+    ).review(skulk_build_sha256="a" * 64, platform="macos-arm64")
+    assert [e.matches_host for e in families.entries] == [True, False]
+    with pytest.raises(ValueError, match="twice"):
+        verify_catalog(
+            _catalog(
+                key,
+                [
+                    _entry(3, runtime_platform="macos-arm64"),
+                    _entry(3, runtime_platform="macos-arm64"),
+                ],
+            ),
+            _trust(key),
+            now=now,
+        )
     stranger = Ed25519PrivateKey.generate()
     with pytest.raises(ValueError, match="trust refused"):
         verify_catalog(document, _trust(stranger, publishers={"x": "0" * 64}), now=now)
@@ -129,6 +155,7 @@ async def test_the_host_catalog_configures_fetches_and_retains_without_disclosur
 ) -> None:
     key = Ed25519PrivateKey.generate()
     document = _catalog(key, [_entry(1)])
+    served = [document]
     calls: list[str] = []
 
     def respond(request: httpx.Request) -> httpx.Response:
@@ -136,7 +163,7 @@ async def test_the_host_catalog_configures_fetches_and_retains_without_disclosur
         assert request.headers["Authorization"] == "Bearer hidden-catalog-token"
         if request.url.path.endswith("/redirect.json"):
             return httpx.Response(302, headers={"Location": "https://x.test/"})
-        return httpx.Response(200, content=document)
+        return httpx.Response(200, content=served[0])
 
     private_directory(tmp_path)
     catalog = HostCatalog(tmp_path, transport=httpx.MockTransport(respond))
@@ -165,6 +192,24 @@ async def test_the_host_catalog_configures_fetches_and_retains_without_disclosur
             skulk_build_sha256="a" * 64, platform="macos-arm64"
         ).model_dump()
     )
+    # The accepted revision only moves forward: another document at the
+    # same revision, or an older revision, is refused; a newer one accepted.
+    served[0] = _catalog(key, [_entry(1), _entry(2)], revision=1)
+    with pytest.raises(ValueError, match="rollback"):
+        await catalog.fetch()
+    served[0] = _catalog(key, [_entry(1), _entry(2)], revision=2)
+    assert (await catalog.fetch()).claims.revision == 2
+    served[0] = document
+    with pytest.raises(ValueError, match="rollback"):
+        await catalog.fetch()
+    served[0] = _catalog(key, [_entry(1), _entry(2)], revision=2)
+    # A damaged credential file reads as not ready, as the fetch would find.
+    reference = catalog.source().credential_reference
+    assert reference is not None
+    (tmp_path / "catalog-credentials" / reference).write_bytes(b"bad token\n")
+    assert not catalog.source_status().credential_ready
+    (tmp_path / "catalog-credentials" / reference).write_bytes(b"hidden-catalog-token")
+    assert catalog.source_status().credential_ready
     # Moving the catalog without supplying its credential again is refused;
     # a redirect is never followed.
     with pytest.raises(ValueError, match="credential replacement"):
@@ -193,3 +238,23 @@ async def test_the_host_catalog_configures_fetches_and_retains_without_disclosur
     await catalog.close()
     with pytest.raises(ValueError, match="closed"):
         await catalog.fetch()
+
+
+def test_a_revoked_release_or_artifact_is_not_offered() -> None:
+    key = Ed25519PrivateKey.generate()
+    now = int(time.time())
+    document = _catalog(
+        key,
+        [
+            _entry(1, release_digest="4" * 64),
+            _entry(2, artifact_sha256="5" * 64),
+            _entry(3),
+        ],
+    )
+    verified = verify_catalog(
+        document, _trust(key, revoked_artifacts=("4" * 64, "5" * 64)), now=now
+    )
+    assert [e.sequence for e in verified.entries] == [3]
+    assert verified.entry("example.plugin", 1) is None
+    review = verified.review(skulk_build_sha256="a" * 64, platform="macos-arm64")
+    assert [e.sequence for e in review.entries] == [3]

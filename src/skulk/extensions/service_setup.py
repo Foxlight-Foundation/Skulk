@@ -25,8 +25,11 @@ from pydantic import (
 
 from skulk.extensions import service_bootstrap, service_registration
 from skulk.extensions.local_setup import manage_installed_plugin, setup_installed_plugin
-from skulk.extensions.managed_services import protocol_refusal
-from skulk.extensions.runtime_artifacts import Digest, measure_host
+from skulk.extensions.runtime_artifacts import (
+    Digest,
+    measure_host,
+    protocol_refusal_sentence,
+)
 from skulk.extensions.runtime_attachment import (
     HostSettings,
     ProfileIdentifier,
@@ -639,17 +642,37 @@ def main() -> None:
             )
             listing = reply.get("result")
             if set(reply) != {"result"} or not isinstance(listing, dict):
-                # A refused read fails the command: an unconfigured, unreachable
-                # or refused catalog must not look like an empty listing.
-                refusal = protocol_refusal(reply)
-                raise (
-                    refusal
-                    if refusal is not None
-                    else ValueError(
-                        "catalog read refused; configure the catalog source and "
-                        "discovery trust, then retry"
-                    )
+                # A refused read fails the command with its own sentence: an
+                # unconfigured, unreachable or refused catalog must not look
+                # like an empty listing, and a protocol refusal is named with
+                # the one sentence every surface uses rather than the generic
+                # failure the outer handler prints.
+                kind, offered, accepted = (
+                    reply.get("kind"),
+                    reply.get("offered"),
+                    reply.get("accepted"),
                 )
+                if (
+                    reply.get("error") == "release_protocol_unsupported"
+                    and isinstance(kind, str)
+                    and isinstance(offered, int)
+                    and isinstance(accepted, list)
+                ):
+                    print(
+                        protocol_refusal_sentence(
+                            kind,
+                            offered,
+                            tuple(item for item in accepted if isinstance(item, int)),
+                        ),
+                        file=sys.stderr,
+                    )
+                else:
+                    print(
+                        "Catalog read refused; configure the catalog source and "
+                        "discovery trust, then retry.",
+                        file=sys.stderr,
+                    )
+                raise SystemExit(1)
             print(json.dumps(listing, indent=2))
         elif action == "manage":
             if os.geteuid() == 0:

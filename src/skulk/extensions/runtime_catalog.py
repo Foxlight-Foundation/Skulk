@@ -10,6 +10,7 @@ release record itself is authenticated against installation trust.
 
 import asyncio
 import hashlib
+import json
 import time
 from itertools import islice
 from pathlib import Path
@@ -36,6 +37,7 @@ from skulk.extensions.runtime_artifacts import (
     ProtocolUnsupportedError,
     RuntimeTrust,
     canonical_json,
+    platform_matches,
 )
 from skulk.extensions.runtime_attachment import ProfileIdentifier
 from skulk.extensions.runtime_files import (
@@ -80,6 +82,7 @@ class _CatalogEntryClaims(_Contract):
     feed_url: str = Field(max_length=512)
     release_sha256: Digest
     release_digest: Digest
+    runtime_platform: Annotated[str, Field(max_length=64)] | None = None
     artifact_sha256: Digest
     artifact_size: int = Field(ge=1, le=67108864)
     platforms: tuple[Literal["darwin", "linux"], ...] = Field(
@@ -130,11 +133,12 @@ class _CatalogClaims(_Contract):
         """The listing is the signer's own and names a bundle sequence once."""
         if not self.created_at < self.expires_at:
             raise ValueError("catalog expiry must follow creation")
-        seen: set[tuple[str, int]] = set()
+        seen: set[tuple[str, int, str | None]] = set()
         for entry in self.entries:
             if entry.publisher != self.publisher:
                 raise ValueError("catalog entries must belong to the catalog publisher")
-            key = (entry.bundle_id, entry.sequence)
+            # One sequence may ship one artifact family per runtime platform.
+            key = (entry.bundle_id, entry.sequence, entry.runtime_platform)
             if key in seen:
                 raise ValueError("catalog lists one bundle sequence twice")
             seen.add(key)
@@ -157,7 +161,11 @@ class CatalogEntryReview(BaseModel):
     publisher: str = Field(description="Publisher that signed the release.")
     sequence: int = Field(description="Publisher release sequence.")
     release_digest: str = Field(
-        description="Digest of the signed release claims, as inspection reviews them."
+        description="Digest of the signed claims, as inspection reviews them."
+    )
+    runtime_platform: str | None = Field(
+        default=None,
+        description="Exact artifact family of a runtime-bearing release; None for a plain one.",
     )
     artifact_sha256: str = Field(description="Digest of the executable artifact.")
     artifact_bytes: int = Field(description="Signed artifact size in bytes.")
@@ -195,14 +203,28 @@ class CatalogReview(BaseModel):
 class VerifiedCatalog:
     """A catalog whose signature and window this host has checked."""
 
-    def __init__(self, document: bytes, claims: _CatalogClaims) -> None:
+    def __init__(
+        self,
+        document: bytes,
+        claims: _CatalogClaims,
+        revoked_artifacts: frozenset[str] = frozenset(),
+    ) -> None:
         self.document = document
         self.claims = claims
         self.sha256 = hashlib.sha256(document).hexdigest()
+        # A listing whose release or artifact this host's discovery trust
+        # revokes is not offered: revocation is the operator's word over the
+        # publisher's, at discovery as at install.
+        self.entries = tuple(
+            entry
+            for entry in claims.entries
+            if entry.release_digest not in revoked_artifacts
+            and entry.artifact_sha256 not in revoked_artifacts
+        )
 
     def entry(self, bundle_id: str, sequence: int) -> _CatalogEntryClaims | None:
-        """The listed release for one bundle sequence, if any."""
-        for entry in self.claims.entries:
+        """The listed, unrevoked release for one bundle sequence, if any."""
+        for entry in self.entries:
             if entry.bundle_id == bundle_id and entry.sequence == sequence:
                 return entry
         return None
@@ -226,6 +248,7 @@ class VerifiedCatalog:
                     publisher=entry.publisher,
                     sequence=entry.sequence,
                     release_digest=entry.release_digest,
+                    runtime_platform=entry.runtime_platform,
                     artifact_sha256=entry.artifact_sha256,
                     artifact_bytes=entry.artifact_size,
                     platforms=entry.platforms,
@@ -237,9 +260,13 @@ class VerifiedCatalog:
                     steward_risks=entry.steward_risks,
                     expires_at=entry.expires_at,
                     matches_host=entry.skulk_build_sha256 == skulk_build_sha256
-                    and expected_os in entry.platforms,
+                    and expected_os in entry.platforms
+                    and (
+                        entry.runtime_platform is None
+                        or platform_matches(entry.runtime_platform, platform)
+                    ),
                 )
-                for entry in self.claims.entries
+                for entry in self.entries
             ),
         )
 
@@ -290,7 +317,7 @@ def verify_catalog(
     claims = _CatalogClaims.model_validate_json(payload)
     if not claims.created_at <= now < claims.expires_at:
         raise ValueError("catalog window refused")
-    return VerifiedCatalog(document, claims)
+    return VerifiedCatalog(document, claims, frozenset(trust.revoked_artifacts))
 
 
 def _catalog_trust(value: object) -> RuntimeTrust:
@@ -456,10 +483,7 @@ class HostCatalog:
         ready = source.credential_reference is None
         if source.credential_reference is not None:
             try:
-                read_private(
-                    self.root / "catalog-credentials" / source.credential_reference,
-                    8192,
-                )
+                self._token(source.credential_reference)
                 ready = True
             except (OSError, ValueError):
                 ready = False
@@ -576,23 +600,26 @@ class HostCatalog:
             finally:
                 lock.close()
 
+    def _token(self, reference: str) -> str:
+        """The stored bearer, validated the way the fetch uses it."""
+        token = (
+            read_private(self.root / "catalog-credentials" / reference, 8192)
+            .decode("ascii")
+            .strip()
+        )
+        if not token or any(character.isspace() for character in token):
+            raise ValueError("catalog credential unavailable")
+        return token
+
     def _client(self, source: CatalogSource) -> httpx.AsyncClient:
         # The same policy as the release feed client: no redirects, no
         # environment proxies, identity encoding, a bearer only from the
         # protected credential file.
         headers = {"Accept": "application/json", "Accept-Encoding": "identity"}
         if source.credential_reference is not None:
-            token = (
-                read_private(
-                    self.root / "catalog-credentials" / source.credential_reference,
-                    8192,
-                )
-                .decode("ascii")
-                .strip()
+            headers["Authorization"] = "Bearer " + self._token(
+                source.credential_reference
             )
-            if not token or any(character.isspace() for character in token):
-                raise ValueError("catalog credential unavailable")
-            headers["Authorization"] = "Bearer " + token
         return httpx.AsyncClient(
             transport=self.transport,
             timeout=10,
@@ -636,6 +663,17 @@ class HostCatalog:
             )
             if source != self.source():
                 raise ValueError("catalog source changed")
+            # A replayed older revision, or a different document at the
+            # accepted revision, could hide newer releases or re-present
+            # withdrawn ones; the accepted revision only moves forward.
+            floor = self._floor()
+            if floor is not None and (
+                verified.claims.revision < floor[0]
+                or (
+                    verified.claims.revision == floor[0] and verified.sha256 != floor[1]
+                )
+            ):
+                raise ValueError("catalog revision rollback refused")
             destination = self.directory / (verified.sha256 + ".json")
             if (
                 not destination.exists()
@@ -643,7 +681,29 @@ class HostCatalog:
             ):
                 raise ValueError("catalog history requires local maintenance")
             write_private(destination, verified.document)
+            write_private(
+                self.root / "catalog-revision.json",
+                json.dumps(
+                    {"revision": verified.claims.revision, "sha256": verified.sha256}
+                ).encode(),
+            )
             return verified
+
+    def _floor(self) -> tuple[int, str] | None:
+        try:
+            document = _OBJECT.validate_json(
+                read_private(self.root / "catalog-revision.json", 4096)
+            )
+        except (FileNotFoundError, ValueError):
+            return None
+        revision, sha256 = document.get("revision"), document.get("sha256")
+        if (
+            isinstance(revision, int)
+            and not isinstance(revision, bool)
+            and isinstance(sha256, str)
+        ):
+            return revision, sha256
+        return None
 
     def retained(self, catalog_sha256: str) -> bytes:
         """The verified catalog document retained under ``catalog_sha256``."""
