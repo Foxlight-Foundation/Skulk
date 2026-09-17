@@ -174,7 +174,10 @@ class TerminalInstaller:
         )
 
     async def _stage(
-        self, identifier: str, source: SourceStatus
+        self,
+        identifier: str,
+        source: SourceStatus,
+        expected_digest: str | None = None,
     ) -> InstallOperation | None:
         operation = await self._install_status(identifier)
         review: ReleaseReview | None = None
@@ -195,6 +198,13 @@ class TerminalInstaller:
                     )
                 )
             )
+            if expected_digest is not None and review.runtime_digest != expected_digest:
+                # A catalog binding consented to one record; a feed that
+                # serves another since is refused before any transfer.
+                raise ValueError(
+                    "the release at the feed changed since the listing was bound; "
+                    "read the catalog again"
+                )
         if (
             review is not None
             and operation is None
@@ -429,8 +439,13 @@ class TerminalInstaller:
         await self._stage_and_activate(identifier, source)
         return identifier
 
-    async def _stage_and_activate(self, identifier: str, source: SourceStatus) -> None:
-        staged = await self._stage(identifier, source)
+    async def _stage_and_activate(
+        self,
+        identifier: str,
+        source: SourceStatus,
+        expected_digest: str | None = None,
+    ) -> None:
+        staged = await self._stage(identifier, source, expected_digest)
         if staged is None:
             return
         await self._activate(identifier, staged)
@@ -452,7 +467,8 @@ class TerminalInstaller:
     ) -> CatalogEntryReview:
         """The one listing to install: the newest of the bundle that fits this host.
 
-        Without ``--platform`` the host's own match decides; with it, only
+        Only listings that fit this host are considered. Without
+        ``--platform`` the host's own match decides; with it, only
         runtime-bearing listings of that artifact family are considered, and
         ``--platform plain`` selects the plain listing (no artifact family)
         that fits the host. Two artifacts at the same sequence are an
@@ -468,9 +484,9 @@ class TerminalInstaller:
             for entry in review.entries
             if entry.bundle_id == bundle_id
             and (sequence is None or entry.sequence == sequence)
+            and entry.matches_host
             and (
-                entry.matches_host
-                and (platform != "plain" or entry.runtime_platform is None)
+                (platform != "plain" or entry.runtime_platform is None)
                 if wanted is None
                 else entry.runtime_platform is not None
                 and canonical_platform(entry.runtime_platform) == wanted
@@ -536,5 +552,7 @@ class TerminalInstaller:
         )
         if not bound.source.credential_ready:
             raise ValueError("replace the unavailable feed credential before resuming")
-        await self._stage_and_activate(identifier, bound.source)
+        await self._stage_and_activate(
+            identifier, bound.source, bound.review.runtime_digest
+        )
         return identifier

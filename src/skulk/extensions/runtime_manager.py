@@ -21,6 +21,7 @@ from skulk.extensions.runtime_artifacts import (
     ProtocolUnsupportedError,
     QualifiedHost,
     RuntimeTrust,
+    canonical_platform,
     measure_host,
 )
 from skulk.extensions.runtime_attachment import (
@@ -290,6 +291,48 @@ def _release_trust(
                 | set(current.revoked_artifacts if current is not None else ())
             )
         ),
+    )
+
+
+def _listing_matches(
+    listing: CatalogEntryReview,
+    release_sha256: str,
+    review: ReleaseReview,
+    downloads: RuntimeDownloads,
+) -> bool:
+    """Whether every consent fact the listing carries is the verified record's own.
+
+    The listing is the consent screen, so it must describe the record the
+    release path verified: the served document by hash, the signed claims
+    the review exposes, and the artifact identity read from the retained
+    reviewed metadata. A listing without an artifact family cannot describe
+    a runtime-bearing record, which is the only kind this host installs.
+    """
+    metadata = read_private(
+        downloads.directory / "reviews" / (review.runtime_digest + ".json"), 131072
+    )
+    signed = _OBJECT.validate_json(metadata)
+    runtime = _OBJECT.validate_python(signed["runtime"])
+    release = _OBJECT.validate_python(runtime["release"])
+    manifest = _OBJECT.validate_python(release["manifest"])
+    platforms = TypeAdapter(list[str]).validate_python(release["platforms"])
+    return (
+        review.runtime_digest == listing.release_digest
+        and hashlib.sha256(metadata).hexdigest() == release_sha256
+        and review.publisher == listing.publisher
+        and review.bundle_id == listing.bundle_id
+        and review.version == listing.bundle_version
+        and review.sequence == listing.sequence
+        and listing.runtime_platform is not None
+        and canonical_platform(review.platform)
+        == canonical_platform(listing.runtime_platform)
+        and review.skulk_build_sha256 == listing.skulk_build_sha256
+        and tuple(review.permissions) == tuple(listing.permissions)
+        and review.artifact_bytes == listing.transfer_bytes
+        and review.expires_at == listing.expires_at
+        and manifest.get("executable_sha256") == listing.artifact_sha256
+        and release.get("artifact_size") == listing.artifact_bytes
+        and sorted(platforms) == sorted(listing.platforms)
     )
 
 
@@ -933,12 +976,7 @@ class RuntimeManager:
         # the manager-wide lock so a slow server blocks nothing else.
         try:
             review = await downloads.inspect()
-            if (
-                review.runtime_digest != entry.release_digest
-                or review.publisher != entry.publisher
-                or review.bundle_id != entry.bundle_id
-                or review.sequence != entry.sequence
-            ):
+            if not _listing_matches(listing, entry.release_sha256, review, downloads):
                 raise ValueError(
                     "the release served at the listed feed differs from the listing"
                 )

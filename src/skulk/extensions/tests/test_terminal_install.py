@@ -138,6 +138,7 @@ class Journey:
         *,
         revision: int,
         digests: dict[int, str] | None = None,
+        overrides: dict[int, dict[str, JsonValue]] | None = None,
     ) -> None:
         """Serve a signed catalog listing the built sequences at the given feeds.
 
@@ -188,6 +189,7 @@ class Journey:
                     "operations": False,
                     "steward_risks": [],
                     "expires_at": release["expires_at"],
+                    **(overrides or {}).get(sequence, {}),
                 }
             )
         catalog: JsonValue = {
@@ -611,6 +613,55 @@ async def test_catalog_installs_refuse_by_name_before_any_transfer(
         ]
         assert elsewhere == [False]
         assert sum(isinstance(r, InstallSubmission) for r in fixture.requests) == 1
+        # A listing whose consent facts differ from the verified record, or
+        # whose document hash differs, is refused with the source restored.
+        mismatches: list[tuple[int, dict[str, JsonValue]]] = [
+            (10, {"permissions": ["something else"]}),
+            (11, {"release_sha256": "e" * 64}),
+        ]
+        for revision, override in mismatches:
+            fixture.list_releases(
+                {
+                    1: "https://releases.example.test/1/",
+                    2: "https://releases.example.test/2/",
+                },
+                revision=revision,
+                overrides={2: override},
+            )
+            before = downloads.source()
+            with pytest.raises(ValueError, match="manager request incomplete"):
+                await fixture.terminal(iter(("y",))).run_from_catalog(
+                    "example.plugin", plugin_id=identifier
+                )
+            restored = downloads.source()
+            assert (restored.base_url, restored.revision) == (
+                before.base_url,
+                before.revision + 2,
+            )
+        # A feed that serves another record after the binding reply is
+        # refused before any transfer: staging is pinned to the bound digest.
+        fixture.publish(4)
+        fixture.list_releases(
+            {
+                1: "https://releases.example.test/1/",
+                2: "https://releases.example.test/2/",
+            },
+            revision=12,
+        )
+        second = fixture.releases[2]
+
+        async def swapping(request: ManagerRequest) -> dict[str, JsonValue]:
+            response = await fixture.request(request)
+            if isinstance(request, CatalogInstallRequest):
+                fixture.releases[2] = fixture.releases[4]
+            return response
+
+        with pytest.raises(ValueError, match="changed since the listing was bound"):
+            await TerminalInstaller(
+                swapping, lambda _q: "y", lambda _q: "", fixture.output.append
+            ).run_from_catalog("example.plugin", plugin_id=identifier)
+        fixture.releases[2] = second
+        assert sum(isinstance(r, InstallSubmission) for r in fixture.requests) == 1
         # A staged release whose activation was declined leaves no selection
         # but is still the installation's bundle and high-water mark.
         fixture.list_releases(
@@ -619,7 +670,7 @@ async def test_catalog_installs_refuse_by_name_before_any_transfer(
                 2: "https://releases.example.test/2/",
                 3: "https://releases.example.test/3/",
             },
-            revision=5,
+            revision=13,
         )
         staged_only = await fixture.terminal(iter(("y", "y", "n"))).run_from_catalog(
             "example.plugin"
@@ -833,6 +884,10 @@ def test_two_artifacts_at_one_sequence_need_the_family_named() -> None:
     )
     assert listed(both, "example.plugin", 1, None).sequence == 1
     assert listed(both, "example.plugin", None, "plain").runtime_platform is None
+    # An explicit family still has to fit this host: the newer listing that
+    # does not is passed over for the older one that does.
+    builds = review(entry(2, "macos-arm64", False), entry(1, "macos-arm64", True))
+    assert listed(builds, "example.plugin", None, "macos-arm64").sequence == 1
     with pytest.raises(ValueError, match="no listed release"):
         listed(review(entry(1, "macos-arm64", True)), "example.plugin", None, "plain")
     with pytest.raises(ValueError, match="no listed release"):
