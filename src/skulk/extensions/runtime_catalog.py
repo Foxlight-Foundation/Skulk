@@ -267,9 +267,6 @@ class VerifiedCatalog:
 
     def review(self, *, skulk_build_sha256: str, platform: str) -> CatalogReview:
         """Project the catalog for operators, naming what fits this host."""
-        expected_os = (
-            "darwin" if platform.startswith("macos") else platform.split("-")[0]
-        )
         return CatalogReview(
             publisher=self.claims.publisher,
             revision=self.claims.revision,
@@ -277,33 +274,45 @@ class VerifiedCatalog:
             expires_at=self.claims.expires_at,
             catalog_sha256=self.sha256,
             entries=tuple(
-                CatalogEntryReview(
-                    bundle_id=entry.bundle_id,
-                    bundle_version=entry.bundle_version,
-                    title=entry.title,
-                    publisher=entry.publisher,
-                    sequence=entry.sequence,
-                    release_digest=entry.release_digest,
-                    runtime_platform=entry.runtime_platform,
-                    artifact_sha256=entry.artifact_sha256,
-                    artifact_bytes=entry.artifact_size,
-                    transfer_bytes=entry.transfer_bytes,
-                    platforms=entry.platforms,
-                    skulk_build_sha256=entry.skulk_build_sha256,
-                    permissions=entry.permissions,
-                    descriptors=entry.descriptors,
-                    surfaces=entry.surfaces,
-                    operations=entry.operations,
-                    steward_risks=entry.steward_risks,
-                    expires_at=entry.expires_at,
-                    matches_host=entry.skulk_build_sha256 == skulk_build_sha256
-                    and expected_os in entry.platforms
-                    and (
-                        entry.runtime_platform is None
-                        or platform_matches(entry.runtime_platform, platform)
-                    ),
+                self.entry_review(
+                    entry, skulk_build_sha256=skulk_build_sha256, platform=platform
                 )
                 for entry in self.entries
+            ),
+        )
+
+    @staticmethod
+    def entry_review(
+        entry: _CatalogEntryClaims, *, skulk_build_sha256: str, platform: str
+    ) -> CatalogEntryReview:
+        """One listing as consent facts, with whether it fits this host."""
+        expected_os = (
+            "darwin" if platform.startswith("macos") else platform.split("-")[0]
+        )
+        return CatalogEntryReview(
+            bundle_id=entry.bundle_id,
+            bundle_version=entry.bundle_version,
+            title=entry.title,
+            publisher=entry.publisher,
+            sequence=entry.sequence,
+            release_digest=entry.release_digest,
+            runtime_platform=entry.runtime_platform,
+            artifact_sha256=entry.artifact_sha256,
+            artifact_bytes=entry.artifact_size,
+            transfer_bytes=entry.transfer_bytes,
+            platforms=entry.platforms,
+            skulk_build_sha256=entry.skulk_build_sha256,
+            permissions=entry.permissions,
+            descriptors=entry.descriptors,
+            surfaces=entry.surfaces,
+            operations=entry.operations,
+            steward_risks=entry.steward_risks,
+            expires_at=entry.expires_at,
+            matches_host=entry.skulk_build_sha256 == skulk_build_sha256
+            and expected_os in entry.platforms
+            and (
+                entry.runtime_platform is None
+                or platform_matches(entry.runtime_platform, platform)
             ),
         )
 
@@ -850,6 +859,44 @@ class HostCatalog:
         if hashlib.sha256(document).hexdigest() != catalog_sha256:
             raise ValueError("retained catalog document differs from its digest")
         return document
+
+    def accepted(self, catalog_sha256: str, *, now: int) -> VerifiedCatalog:
+        """The retained listing under ``catalog_sha256``, verified again and still current.
+
+        An install names the digest the operator reviewed. The document is
+        verified again against the present discovery trust and clock, so a
+        revocation or expiry since the read applies at consent as it did at
+        discovery, and it must be the newest listing this host accepted from
+        its configured source for that publisher: a listing a later read
+        superseded is refused by name rather than installed from a stale page.
+        """
+        state = self._state()
+        if state.source is None or state.trust is None:
+            raise FileNotFoundError("catalog source unconfigured")
+        verified = verify_catalog(self.retained(catalog_sha256), state.trust, now=now)
+        floor = state.floors.get(_floor_key(state.source, verified.claims.publisher))
+        if floor is None or floor.sha256 != catalog_sha256:
+            raise ValueError("catalog listing superseded; read the catalog again")
+        return verified
+
+    def credential_for(self, feed_url: str) -> str | None:
+        """The catalog bearer for a feed at the catalog's own origin, else ``None``.
+
+        A credential was given for the catalog's origin and is presented only
+        there: a listed feed at another origin is read anonymously until its
+        installation is given a credential of its own.
+        """
+        source = self.source()
+        if source.credential_reference is None:
+            return None
+        catalog, feed = urlsplit(source.base_url), urlsplit(feed_url)
+        if (catalog.scheme, catalog.hostname, catalog.port) != (
+            feed.scheme,
+            feed.hostname,
+            feed.port,
+        ):
+            return None
+        return self._token(source.credential_reference)
 
     async def close(self) -> None:
         """Refuse further reads; nothing is owned in flight."""

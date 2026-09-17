@@ -13,8 +13,9 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated, Literal, cast, final
+from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, SecretStr, TypeAdapter
 
 from skulk.extensions.runtime_artifacts import (
     ProtocolUnsupportedError,
@@ -29,7 +30,11 @@ from skulk.extensions.runtime_attachment import (
     finish_attachment,
     recover_attachment,
 )
-from skulk.extensions.runtime_catalog import CatalogSourceUpdate, HostCatalog
+from skulk.extensions.runtime_catalog import (
+    CatalogEntryReview,
+    CatalogSourceUpdate,
+    HostCatalog,
+)
 from skulk.extensions.runtime_controller import (
     LifecycleOperation,
     LifecycleRequest,
@@ -37,7 +42,9 @@ from skulk.extensions.runtime_controller import (
 )
 from skulk.extensions.runtime_download import (
     InstallRequest,
+    ReleaseReview,
     RuntimeDownloads,
+    SourceStatus,
     SourceUpdate,
 )
 from skulk.extensions.runtime_files import (
@@ -216,11 +223,57 @@ class CatalogRegistration(_Request):
     request: CatalogSourceUpdate = Field(description="Owner-supplied catalog settings.")
 
 
+class CatalogInstall(BaseModel):
+    """One reviewed listing to bind an installation to; no address or credential."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+    catalog_sha256: str = Field(
+        pattern=r"^[a-f0-9]{64}$",
+        description="Digest of the reviewed catalog document, from its review.",
+    )
+    bundle_id: str = Field(max_length=200, description="Listed bundle identity.")
+    sequence: int = Field(ge=1, description="Listed publisher release sequence.")
+    runtime_platform: str | None = Field(
+        default=None,
+        max_length=64,
+        description="Listed artifact family of a runtime-bearing release, else null.",
+    )
+    plugin_id: PluginIdentifier | None = Field(
+        default=None,
+        description="Existing installation to upgrade, or omit to register a new one.",
+    )
+
+
+class CatalogInstallRequest(_Request):
+    """Bind an installation's source to one listed release and inspect it.
+
+    Direct owner provisioning like ``configure_source``: the listing supplies
+    the feed and the discovery trust supplies the publisher; nothing is
+    downloaded beyond the release record, and nothing is staged or activated.
+    """
+
+    action: Literal["install_from_catalog"] = "install_from_catalog"
+    request: CatalogInstall = Field(description="The reviewed listing to install.")
+
+
+class CatalogInstallation(BaseModel):
+    """An installation bound to a listing, with the release record as inspected."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+    plugin_id: PluginIdentifier = Field(description="The bound installation.")
+    listing: CatalogEntryReview = Field(description="The listing as reviewed.")
+    source: SourceStatus = Field(description="Source readiness after binding.")
+    review: ReleaseReview = Field(
+        description="The verified release record at the listed feed; it matches the listing."
+    )
+
+
 type ManagerRequest = (
     InventoryRequest
     | ReloadRuntimeRequest
     | CatalogRequest
     | CatalogRegistration
+    | CatalogInstallRequest
     | InstallationRequest
     | SubmitRequest
     | OperationRequest
@@ -581,17 +634,16 @@ class RuntimeManager:
                 raise ValueError("catalog source is busy")
             async with self.catalog_read:
                 verified = await self.catalog.fetch()
-                if self.host is None or (self.host.done() and self.host.exception()):
-                    self.host = asyncio.create_task(asyncio.to_thread(measure_host))
-                # A request that times out does not cancel the measurement;
-                # the next read reuses the same task instead of starting
-                # another tree hash.
-                host = await asyncio.shield(self.host)
+                host = await self._measured_host()
             return verified.review(
                 skulk_build_sha256=host.skulk_build_sha256, platform=host.platform
             ).model_dump(mode="json")
         if isinstance(request, CatalogRegistration):
             return (await self.catalog.configure(request.request)).model_dump(
+                mode="json"
+            )
+        if isinstance(request, CatalogInstallRequest):
+            return (await self._install_from_catalog(request.request)).model_dump(
                 mode="json"
             )
         if isinstance(request, ReleaseRequest) and request.action == "inspect_release":
@@ -616,29 +668,9 @@ class RuntimeManager:
         | InstallRecoveryRequest,
     ) -> dict[str, JsonValue]:
         identifier = request.plugin_id
-        try:
-            attachment = AttachmentJournal.model_validate_json(
-                read_private(self.root / "attachment.json")
-            )
-        except FileNotFoundError:
-            attachment = None
-        if attachment is not None and attachment.state == "pending":
-            # Registration must not introduce an owner outside the recorded
-            # membership while a partially written attachment is unresolved.
-            raise ValueError("attachment recovery is required")
+        self._attachment_settled()
         if isinstance(request, InstallationRequest) and request.action == "register":
-            identifiers = self._identifiers()
-            if identifier not in identifiers:
-                if len(identifiers) >= 16:
-                    raise ValueError("installation count exceeds bound")
-                root = self.installations / identifier
-                private_directory(root)
-                write_private(
-                    root / "owner.json",
-                    self.settings.owner_binding().model_dump_json().encode(),
-                )
-            if identifier not in self.controllers:
-                await self._load(identifier)
+            await self._register(identifier)
             return self._summary(identifier)
         controller = self.controllers.get(identifier)
         if controller is None:
@@ -681,6 +713,124 @@ class RuntimeManager:
             else controller.operation(request.operation_id)
         )
         return operation.model_dump(mode="json")
+
+    def _attachment_settled(self) -> None:
+        try:
+            attachment = AttachmentJournal.model_validate_json(
+                read_private(self.root / "attachment.json")
+            )
+        except FileNotFoundError:
+            return
+        if attachment.state == "pending":
+            # Registration must not introduce an owner outside the recorded
+            # membership while a partially written attachment is unresolved.
+            raise ValueError("attachment recovery is required")
+
+    async def _register(self, identifier: str) -> None:
+        """Register ``identifier`` if new and load it; held under the manager guard."""
+        identifiers = self._identifiers()
+        if identifier not in identifiers:
+            if len(identifiers) >= 16:
+                raise ValueError("installation count exceeds bound")
+            root = self.installations / identifier
+            private_directory(root)
+            write_private(
+                root / "owner.json",
+                self.settings.owner_binding().model_dump_json().encode(),
+            )
+        if identifier not in self.controllers:
+            await self._load(identifier)
+
+    async def _measured_host(self) -> QualifiedHost:
+        if self.host is None or (self.host.done() and self.host.exception()):
+            self.host = asyncio.create_task(asyncio.to_thread(measure_host))
+        # A request that times out does not cancel the measurement; the next
+        # one reuses the same task instead of starting another tree hash.
+        return await asyncio.shield(self.host)
+
+    async def _install_from_catalog(
+        self, install: CatalogInstall
+    ) -> CatalogInstallation:
+        """Bind one installation to a reviewed listing, then inspect its release.
+
+        The listing is taken from the retained catalog under the reviewed
+        digest, verified again; its feed becomes the installation's source
+        and the discovery trust its publisher trust, with the catalog
+        credential only when the feed shares the catalog's origin. The
+        release record is then inspected through the ordinary path and must
+        be the record the listing names. Staging and activation stay
+        separate consents on the existing requests.
+        """
+        verified = self.catalog.accepted(install.catalog_sha256, now=int(time.time()))
+        entry = verified.entry(
+            install.bundle_id, install.sequence, install.runtime_platform
+        )
+        if entry is None:
+            raise ValueError("release is not listed in the accepted catalog")
+        trust = self.catalog.trust()
+        if (
+            entry.publisher not in trust.publishers
+            or entry.publisher in trust.revoked_publishers
+        ):
+            raise ValueError("listed release publisher is not trusted for discovery")
+        host = await self._measured_host()
+        listing = verified.entry_review(
+            entry, skulk_build_sha256=host.skulk_build_sha256, platform=host.platform
+        )
+        if not listing.matches_host:
+            raise ValueError("listed release does not match this host")
+        token = self.catalog.credential_for(entry.feed_url)
+        async with self.guard:
+            self._attachment_settled()
+            identifier = (
+                install.plugin_id
+                if install.plugin_id is not None
+                else "managed." + uuid4().hex
+            )
+            await self._register(identifier)
+            controller = self.controllers.get(identifier)
+            downloads = self.downloads.get(identifier)
+            if controller is None or downloads is None:
+                raise ValueError("installation is unavailable")
+            selection = controller.selector.current()
+            if selection is not None:
+                # The same refusals the guided installer makes before any
+                # transfer, here before the source is touched: an existing
+                # installation keeps its bundle and never goes back.
+                if selection.bundle_id != entry.bundle_id:
+                    raise ValueError(
+                        "the listed release belongs to another bundle; "
+                        "install it as a new installation"
+                    )
+                if entry.sequence < selection.highest_sequence:
+                    raise ValueError(
+                        "the listed release is older than the installed one; "
+                        "rollback is an explicit lifecycle operation"
+                    )
+            source = await downloads.configure(
+                SourceUpdate(
+                    expected_revision=downloads.source_status().revision,
+                    base_url=entry.feed_url,
+                    metadata_filename="release.json",
+                    trust=trust,
+                    token=SecretStr(token) if token is not None else None,
+                    clear_token=token is None,
+                )
+            )
+        # Inspection reaches the feed; like inspect_release it runs outside
+        # the manager-wide lock so a slow server blocks nothing else.
+        review = await downloads.inspect()
+        if (
+            review.runtime_digest != entry.release_digest
+            or review.bundle_id != entry.bundle_id
+            or review.sequence != entry.sequence
+        ):
+            raise ValueError(
+                "the release served at the listed feed differs from the listing"
+            )
+        return CatalogInstallation(
+            plugin_id=identifier, listing=listing, source=source, review=review
+        )
 
     async def close(self) -> None:
         """Stop new clients, finish accepted work and close every owned runtime."""

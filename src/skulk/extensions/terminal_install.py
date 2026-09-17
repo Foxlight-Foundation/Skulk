@@ -11,8 +11,13 @@ from uuid import uuid4
 
 from pydantic import JsonValue, SecretStr, TypeAdapter
 
-from skulk.extensions.runtime_artifacts import RuntimeTrust, protocol_refusal_sentence
+from skulk.extensions.runtime_artifacts import (
+    RuntimeTrust,
+    canonical_platform,
+    protocol_refusal_sentence,
+)
 from skulk.extensions.runtime_attachment import InstallationIdentifier
+from skulk.extensions.runtime_catalog import CatalogEntryReview, CatalogReview
 from skulk.extensions.runtime_controller import LifecycleOperation, LifecycleRequest
 from skulk.extensions.runtime_download import (
     InstallOperation,
@@ -23,6 +28,10 @@ from skulk.extensions.runtime_download import (
 )
 from skulk.extensions.runtime_manager import (
     PROTOCOL_UNSUPPORTED,
+    CatalogInstall,
+    CatalogInstallation,
+    CatalogInstallRequest,
+    CatalogRequest,
     InstallationRequest,
     InstallRecoveryRequest,
     InstallSubmission,
@@ -417,15 +426,109 @@ class TerminalInstaller:
             )
         if not source.credential_ready:
             raise ValueError("replace the unavailable feed credential before resuming")
+        await self._stage_and_activate(identifier, source)
+        return identifier
+
+    async def _stage_and_activate(self, identifier: str, source: SourceStatus) -> None:
         staged = await self._stage(identifier, source)
-        if staged is not None:
-            await self._activate(identifier, staged)
-            self.output(
-                "Installation retained: "
-                + identifier
-                + ". Continue through this plugin's documented terminal setup or the Plugins dashboard."
+        if staged is None:
+            return
+        await self._activate(identifier, staged)
+        self.output(
+            "Installation retained: "
+            + identifier
+            + ". Continue through this plugin's documented terminal setup or the Plugins dashboard."
+        )
+        self.output(
+            "After owner activation, run plugin preflight before enabling capability work."
+        )
+
+    @staticmethod
+    def _listed(
+        review: CatalogReview,
+        bundle_id: str,
+        sequence: int | None,
+        platform: str | None,
+    ) -> CatalogEntryReview:
+        """The one listing to install: the newest of the bundle that fits this host.
+
+        Without ``--platform`` the host's own match decides; with it, only
+        runtime-bearing listings of that artifact family are considered. Two
+        artifacts at the same sequence are an ambiguity the operator resolves
+        by naming the family, never a guess.
+        """
+        wanted = canonical_platform(platform) if platform is not None else None
+        candidates = [
+            entry
+            for entry in review.entries
+            if entry.bundle_id == bundle_id
+            and (sequence is None or entry.sequence == sequence)
+            and (
+                entry.matches_host
+                if wanted is None
+                else entry.runtime_platform is not None
+                and canonical_platform(entry.runtime_platform) == wanted
             )
-            self.output(
-                "After owner activation, run plugin preflight before enabling capability work."
+        ]
+        if not candidates:
+            raise ValueError(
+                "no listed release of this bundle fits this host; read the catalog"
             )
+        highest = max(entry.sequence for entry in candidates)
+        newest = [entry for entry in candidates if entry.sequence == highest]
+        if len(newest) > 1:
+            raise ValueError(
+                "several listed artifacts fit this host at the same sequence; "
+                "name the family with --platform"
+            )
+        return newest[0]
+
+    async def run_from_catalog(
+        self,
+        bundle_id: str,
+        *,
+        sequence: int | None = None,
+        platform: str | None = None,
+        plugin_id: str | None = None,
+    ) -> str:
+        """Install a listed release: the catalog supplies the feed and publisher.
+
+        The listing is shown as consent facts before anything is registered;
+        binding the installation to it is one consent, staging the verified
+        release and activating it stay the existing separate consents. The
+        installation's later resume and upgrade go through the ordinary
+        install-plugin path, since its source is then configured.
+        """
+        identifier = _IDENTIFIER.validate_python(
+            plugin_id if plugin_id is not None else "managed." + uuid4().hex,
+            strict=True,
+        )
+        review = CatalogReview.model_validate_json(
+            json.dumps(await self._call(CatalogRequest(action="read_catalog")))
+        )
+        listing = self._listed(review, bundle_id, sequence, platform)
+        self.output(json.dumps(listing.model_dump(mode="json"), indent=2))
+        self.output("Resume: skulk-plugin-service install-plugin " + identifier)
+        if not self._confirm(
+            "Bind this installation to the listed release's feed and publisher?"
+        ):
+            return identifier
+        bound = CatalogInstallation.model_validate_json(
+            json.dumps(
+                await self._call(
+                    CatalogInstallRequest(
+                        request=CatalogInstall(
+                            catalog_sha256=review.catalog_sha256,
+                            bundle_id=listing.bundle_id,
+                            sequence=listing.sequence,
+                            runtime_platform=listing.runtime_platform,
+                            plugin_id=identifier,
+                        )
+                    )
+                )
+            )
+        )
+        if not bound.source.credential_ready:
+            raise ValueError("replace the unavailable feed credential before resuming")
+        await self._stage_and_activate(identifier, bound.source)
         return identifier

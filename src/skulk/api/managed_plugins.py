@@ -44,6 +44,9 @@ from skulk.extensions.runtime_download import (
     SourceUpdate,
 )
 from skulk.extensions.runtime_manager import (
+    CatalogInstall,
+    CatalogInstallation,
+    CatalogInstallRequest,
     CatalogRegistration,
     CatalogRequest,
     InstallationRequest,
@@ -353,6 +356,25 @@ def create_managed_plugins_router(
         async def action() -> CatalogSourceStatus:
             result = await services.request(CatalogRegistration(request=body))
             return CatalogSourceStatus.model_validate_json(json.dumps(result))
+
+        return await invoke(action)
+
+    @router.post(
+        "/catalog/install",
+        response_model=CatalogInstallation,
+        summary="Bind an installation to a listed release from the catalog",
+        description="Direct localhost/Tailscale owner administration only. Body: catalog_sha256 (the reviewed catalog's digest), bundle_id, sequence, optional runtime_platform (the listed artifact family) and optional plugin_id (an existing installation to upgrade; omitted registers a new one). The listing is taken from the retained catalog under that digest, verified again against discovery trust, and must still be the newest accepted listing; the installation's source becomes the listed feed with the discovery trust as publisher trust, and the catalog credential is presented only to a feed at the catalog's own origin. The release record is then inspected through the ordinary path and must be the record the listing names. Returns the installation, the listing, source readiness and the release review; nothing is downloaded beyond the record, staged or activated: continue with the install and activate requests.",
+    )
+    async def install_from_catalog(
+        body: CatalogInstall, request: Request, response: Response
+    ) -> CatalogInstallation:
+        """Bind one installation to a reviewed listing through a fixed operation."""
+        await authorize_plugin_owner_request(request, tailnet_peer_verifier)
+        services = await authorized(request, response, "plugins:manage")
+
+        async def action() -> CatalogInstallation:
+            result = await services.request(CatalogInstallRequest(request=body))
+            return CatalogInstallation.model_validate_json(json.dumps(result))
 
         return await invoke(action)
 

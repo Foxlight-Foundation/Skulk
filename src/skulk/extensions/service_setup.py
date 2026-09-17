@@ -545,6 +545,50 @@ class _ServiceArguments(argparse.Namespace):
         self.setup_arguments: list[str] = []
 
 
+class _InstallArguments(argparse.Namespace):
+    def __init__(self) -> None:
+        super().__init__()
+        self.plugin_id: str | None = None
+        self.bundle_id: str | None = None
+        self.sequence: int | None = None
+        self.platform: str | None = None
+
+
+def _install_arguments(remaining: list[str]) -> _InstallArguments:
+    """Parse ``install-plugin [MANAGED_ID] [--from-catalog BUNDLE [--sequence N] [--platform FAMILY]]``."""
+    parser = argparse.ArgumentParser(
+        prog="skulk-plugin-service install-plugin",
+        description="Guided installation from a configured source, or from a listing in the host's signed catalog.",
+    )
+    parser.add_argument(
+        "plugin_id",
+        nargs="?",
+        help="installation to resume or upgrade; omitted registers a new one",
+    )
+    parser.add_argument(
+        "--from-catalog",
+        dest="bundle_id",
+        metavar="BUNDLE_ID",
+        help="install the listed release of this bundle: the catalog supplies the feed and publisher",
+    )
+    parser.add_argument(
+        "--sequence",
+        type=int,
+        help="a listed sequence instead of the newest that fits this host",
+    )
+    parser.add_argument(
+        "--platform",
+        help="the listed artifact family instead of the host's own match",
+    )
+    arguments = _InstallArguments()
+    _ = parser.parse_args(remaining, namespace=arguments)
+    if arguments.bundle_id is None and (
+        arguments.sequence is not None or arguments.platform is not None
+    ):
+        raise ValueError("--sequence and --platform select a catalog listing")
+    return arguments
+
+
 def read_hidden_credential(prompt: str) -> str:
     """Refuse a terminal that cannot disable echo before reading a credential."""
     with warnings.catch_warnings():
@@ -580,11 +624,11 @@ def main() -> None:
                 os.geteuid() == 0
                 or os.geteuid() != os.getuid()
                 or not sys.stdin.isatty()
-                or len(remaining) > 1
             ):
                 raise ValueError(
                     "guided installation requires the nonroot owner terminal"
                 )
+            options = _install_arguments(remaining)
             connection = ServiceConnection.model_validate_json(
                 read_private(
                     SKULK_CONFIG_HOME / "managed-service/connection.json", 8192
@@ -598,9 +642,18 @@ def main() -> None:
                 def output(message: str) -> None:
                     print(message, flush=True)
 
-                _ = await TerminalInstaller(
+                installer = TerminalInstaller(
                     request, input, read_hidden_credential, output
-                ).run(remaining[0] if remaining else None)
+                )
+                if options.bundle_id is not None:
+                    _ = await installer.run_from_catalog(
+                        options.bundle_id,
+                        sequence=options.sequence,
+                        platform=options.platform,
+                        plugin_id=options.plugin_id,
+                    )
+                else:
+                    _ = await installer.run(options.plugin_id)
 
             asyncio.run(install())
             return

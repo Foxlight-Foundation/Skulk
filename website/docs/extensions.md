@@ -939,9 +939,16 @@ catalog against the publishers it trusts for discovery, a trust record separate
 from any installation's, and shows the listing with whether each release matches
 this host's build and platform (`GET /v1/plugins/managed/catalog`,
 `skulk-plugin-service catalog`). Reading the catalog selects, stages and installs
-nothing: an install still registers the release source and goes through
-inspection, staging and activation, where the release record itself is verified
-against installation trust.
+nothing. Installing from a listing is one more consent, not a shortcut:
+`skulk-plugin-service install-plugin --from-catalog BUNDLE_ID` (or the owner-only
+`POST /v1/plugins/managed/catalog/install`) shows the listing that fits this
+host, binds an installation's release source to the listed feed with the
+discovery trust as its publisher trust (the catalog credential is presented
+only to a feed at the catalog's own origin), and requires the record served
+there to be the record the listing names; staging and activation then follow
+the ordinary path, where the release record itself is verified against
+installation trust. An existing installation keeps its bundle and never goes
+back through a listing.
 
 ## Public node setup exports
 

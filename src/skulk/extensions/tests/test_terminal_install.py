@@ -2,6 +2,7 @@
 
 import asyncio
 import getpass
+import hashlib
 import io
 import json
 import time
@@ -15,10 +16,16 @@ from pathlib import Path
 import httpx
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from pydantic import JsonValue
+from pydantic import JsonValue, SecretStr, TypeAdapter
 
-from skulk.extensions.runtime_artifacts import RuntimeTrust
+from skulk.extensions.runtime_artifacts import RuntimeTrust, canonical_json
 from skulk.extensions.runtime_attachment import HostSettings, ServiceConnection
+from skulk.extensions.runtime_catalog import (
+    CatalogEntryReview,
+    CatalogReview,
+    CatalogSourceUpdate,
+    HostCatalog,
+)
 from skulk.extensions.runtime_download import RuntimeDownloads
 from skulk.extensions.runtime_files import (
     private_directory,
@@ -26,6 +33,10 @@ from skulk.extensions.runtime_files import (
     write_private,
 )
 from skulk.extensions.runtime_manager import (
+    CatalogInstall,
+    CatalogInstallRequest,
+    CatalogRegistration,
+    CatalogRequest,
     InstallationRequest,
     InstallSubmission,
     ManagerRequest,
@@ -54,6 +65,8 @@ class Journey:
     requests: list[ManagerRequest] = field(default_factory=list)
     output: list[str] = field(default_factory=list)
     urls: list[str] = field(default_factory=list)
+    catalog: bytes | None = None
+    authorized: list[tuple[str, str, bool]] = field(default_factory=list)
 
     async def request(self, request: ManagerRequest) -> dict[str, JsonValue]:
         """Lose a chosen accepted response without cancelling its manager task."""
@@ -119,6 +132,98 @@ class Journey:
         assert isinstance(request, InstallationRequest)
         return request.plugin_id
 
+    def list_releases(
+        self,
+        feeds: dict[int, str],
+        *,
+        revision: int,
+        digests: dict[int, str] | None = None,
+    ) -> None:
+        """Serve a signed catalog listing the built sequences at the given feeds.
+
+        Each entry is derived from the sequence's real signed record the way
+        the publisher's tool derives it; ``digests`` lets a listing claim a
+        record other than the one its feed serves.
+        """
+        now = int(time.time())
+        entries: list[JsonValue] = []
+        for sequence, feed in sorted(feeds.items()):
+            _, metadata = self.releases[sequence]
+            objects = TypeAdapter(dict[str, JsonValue])
+            signed = objects.validate_json(metadata)
+            runtime = objects.validate_python(signed["runtime"])
+            release = objects.validate_python(runtime["release"])
+            manifest = objects.validate_python(release["manifest"])
+            artifact_size = TypeAdapter(int).validate_python(release["artifact_size"])
+            wheel_sizes = TypeAdapter(list[int]).validate_python(
+                [
+                    objects.validate_python(wheel)["size"]
+                    for wheel in TypeAdapter(list[JsonValue]).validate_python(
+                        runtime["wheels"]
+                    )
+                ]
+            )
+            entries.append(
+                {
+                    "bundle_id": manifest["bundle_id"],
+                    "bundle_version": manifest["bundle_version"],
+                    "title": "Example plugin",
+                    "publisher": release["publisher"],
+                    "sequence": release["sequence"],
+                    "feed_url": feed,
+                    "release_sha256": hashlib.sha256(metadata).hexdigest(),
+                    "release_digest": (digests or {}).get(
+                        sequence,
+                        hashlib.sha256(canonical_json(runtime)).hexdigest(),
+                    ),
+                    "runtime_platform": runtime["platform"],
+                    "artifact_sha256": manifest["executable_sha256"],
+                    "artifact_size": artifact_size,
+                    "transfer_bytes": artifact_size + sum(wheel_sizes),
+                    "platforms": release["platforms"],
+                    "skulk_build_sha256": release["skulk_build_sha256"],
+                    "permissions": release["permissions"],
+                    "descriptors": ["example.echo@1.0.0"],
+                    "surfaces": [],
+                    "operations": False,
+                    "steward_risks": [],
+                    "expires_at": release["expires_at"],
+                }
+            )
+        catalog: JsonValue = {
+            "protocol": 1,
+            "publisher": "fixture",
+            "revision": revision,
+            "created_at": now - 1,
+            "expires_at": now + 3600,
+            "entries": entries,
+        }
+        self.catalog = json.dumps(
+            {
+                "catalog": catalog,
+                "signature": self.signing_key.sign(canonical_json(catalog)).hex(),
+            }
+        ).encode()
+
+    async def configure_catalog(self) -> None:
+        """Point the host's catalog at the same protected origin as the feed."""
+        response = await self.request(
+            CatalogRegistration(
+                request=CatalogSourceUpdate(
+                    expected_revision=0,
+                    base_url="https://releases.example.test/",
+                    trust=self.trust,
+                    token=SecretStr("hidden-test-feed-token"),
+                )
+            )
+        )
+        assert "result" in response
+
+    async def catalog_review(self) -> CatalogReview:
+        """Read the catalog as the terminal does."""
+        response = await self.request(CatalogRequest(action="read_catalog"))
+        return CatalogReview.model_validate_json(json.dumps(response["result"]))
+
 
 @asynccontextmanager
 async def journey(
@@ -131,35 +236,61 @@ async def journey(
         source, owner_source=OWNER_SOURCE, signing_key=signing_key
     )
     monkeypatch.setattr("skulk.extensions.runtime_install.measure_host", lambda: host)
+    # The catalog review compares listings with the host the manager measures.
+    monkeypatch.setattr("skulk.extensions.runtime_manager.measure_host", lambda: host)
     root = tmp_path / "manager"
     private_directory(root)
     write_private(
         root / "host.json",
         HostSettings(transport_node_id="fixture-peer").model_dump_json().encode(),
     )
-    manager = RuntimeManager(root)
-    fixture = Journey(manager, trust, source, metadata, signing_key)
-    fixture.releases[1] = (source, metadata)
+    # The transports are patched before the manager exists: it opens its
+    # catalog in its constructor, and the fixture the responder reads is
+    # bound by name once the manager is built.
+    fixture: Journey
 
     async def respond(request: httpx.Request) -> httpx.Response:
-        assert request.headers["Authorization"] == "Bearer hidden-test-feed-token"
+        authorized = (
+            "Authorization" in request.headers
+            and request.headers["Authorization"] == "Bearer hidden-test-feed-token"
+        )
+        fixture.authorized.append((request.url.host, request.url.path, authorized))
+        if request.url.host != "releases.example.test":
+            # Another origin: nothing is served there, and the credential
+            # given for the feed's origin must not have been presented.
+            return httpx.Response(404)
+        assert authorized
         fixture.urls.append(request.url.path)
         name = request.url.path.rsplit("/", 1)[-1]
+        if name == "catalog.json":
+            assert fixture.catalog is not None
+            return httpx.Response(200, content=fixture.catalog)
+        # A catalog lists each sequence in its own directory; the plain
+        # root keeps serving whatever is published, as before.
+        source, metadata = fixture.source, fixture.metadata
+        first = request.url.path.strip("/").split("/")[0]
+        if first.isdigit() and int(first) in fixture.releases:
+            source, metadata = fixture.releases[int(first)]
         if fixture.fail_download and name != "release.json":
             return httpx.Response(503)
         if name != "release.json":
             await asyncio.sleep(artifact_delay)
         return httpx.Response(
             200,
-            content=fixture.metadata
-            if name == "release.json"
-            else read_private(fixture.source / name),
+            content=metadata if name == "release.json" else read_private(source / name),
         )
 
     def downloads(root: Path) -> RuntimeDownloads:
         return RuntimeDownloads(root, transport=httpx.MockTransport(respond))
 
+    def catalog(root: Path) -> HostCatalog:
+        return HostCatalog(root, transport=httpx.MockTransport(respond))
+
     monkeypatch.setattr("skulk.extensions.runtime_manager.RuntimeDownloads", downloads)
+    monkeypatch.setattr("skulk.extensions.runtime_manager.HostCatalog", catalog)
+    manager = RuntimeManager(root)
+    fixture = Journey(manager, trust, source, metadata, signing_key)
+    fixture.releases[1] = (source, metadata)
     await manager.start()
     started = time.monotonic()
     try:
@@ -270,6 +401,242 @@ async def test_a_newer_release_at_the_source_upgrades_the_installation(
         with pytest.raises(ValueError, match="another bundle"):
             await fixture.terminal(iter(("y",))).run(identifier)
         assert sum(isinstance(r, InstallSubmission) for r in fixture.requests) == 4
+
+
+async def test_a_listed_release_installs_and_upgrades_from_the_catalog(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The catalog supplies feed and publisher; consent, staging and activation stay."""
+    async with journey(tmp_path, monkeypatch) as fixture:
+        fixture.list_releases({1: "https://releases.example.test/1/"}, revision=1)
+        await fixture.configure_catalog()
+        identifier = await fixture.terminal(iter(("y", "y", "y"))).run_from_catalog(
+            "example.plugin"
+        )
+        assert identifier.startswith("managed.") and len(identifier) == 40
+        selector = fixture.manager.controllers[identifier].selector
+        first = selector.current()
+        assert first is not None and first.enabled and first.sequence == 1
+        # No source prompt was answered: the listing bound the source, and
+        # the record, artifact and wheel came from the listed directory with
+        # the catalog's credential (same origin).
+        assert not any(isinstance(r, SourceRegistration) for r in fixture.requests)
+        assert sum(isinstance(r, CatalogInstallRequest) for r in fixture.requests) == 1
+        assert fixture.urls[0] == "/catalog.json"
+        assert all(path.startswith("/1/") for path in fixture.urls[1:])
+        assert all(authorized for _, _, authorized in fixture.authorized)
+        assert "hidden-test-feed-token" not in "\n".join(fixture.output)
+        assert "releases.example.test" not in "\n".join(fixture.output)
+        assert any('"title": "Example plugin"' in line for line in fixture.output)
+        assert fixture.output[1].endswith(identifier)
+        # The newest listing that fits this host upgrades the installation
+        # in place; the older listing is refused as a rollback before the
+        # source is touched.
+        fixture.publish(2)
+        fixture.list_releases(
+            {
+                1: "https://releases.example.test/1/",
+                2: "https://releases.example.test/2/",
+            },
+            revision=2,
+        )
+        await fixture.terminal(iter(("y", "y", "y"))).run_from_catalog(
+            "example.plugin", plugin_id=identifier
+        )
+        second = selector.current()
+        assert second is not None and second.enabled and second.sequence == 2
+        downloads = fixture.manager.downloads[identifier]
+        revision = downloads.source_status().revision
+        with pytest.raises(ValueError, match="manager request incomplete"):
+            await fixture.terminal(iter(("y",))).run_from_catalog(
+                "example.plugin", sequence=1, plugin_id=identifier
+            )
+        assert downloads.source_status().revision == revision
+        assert selector.current() == second
+        # Running the ordinary command afterwards resumes on the bound source.
+        await fixture.terminal(iter(())).run(identifier)
+        assert sum(isinstance(r, InstallSubmission) for r in fixture.requests) == 2
+
+
+async def test_catalog_installs_refuse_by_name_before_any_transfer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unlisted, superseded, mismatched, foreign-bundle and foreign-origin listings."""
+    async with journey(tmp_path, monkeypatch) as fixture:
+        fixture.list_releases({1: "https://releases.example.test/1/"}, revision=1)
+        await fixture.configure_catalog()
+        stale = await fixture.catalog_review()
+        with pytest.raises(ValueError, match="no listed release"):
+            await fixture.terminal(iter(())).run_from_catalog(
+                "example.plugin", sequence=2
+            )
+        with pytest.raises(ValueError, match="no listed release"):
+            await fixture.terminal(iter(())).run_from_catalog("example.other")
+        assert not any(isinstance(r, CatalogInstallRequest) for r in fixture.requests)
+        identifier = await fixture.terminal(iter(("y", "y", "y"))).run_from_catalog(
+            "example.plugin"
+        )
+        selector = fixture.manager.controllers[identifier].selector
+        installed = selector.current()
+        assert installed is not None and installed.sequence == 1
+        # A listing claiming a record other than the one its feed serves is
+        # refused after inspection; nothing is staged.
+        fixture.publish(2)
+        fixture.list_releases(
+            {
+                1: "https://releases.example.test/1/",
+                2: "https://releases.example.test/2/",
+            },
+            revision=2,
+            digests={2: "f" * 64},
+        )
+        with pytest.raises(ValueError, match="manager request incomplete"):
+            await fixture.terminal(iter(("y",))).run_from_catalog(
+                "example.plugin", plugin_id=identifier
+            )
+        assert sum(isinstance(r, InstallSubmission) for r in fixture.requests) == 1
+        # The digest of a superseded listing is refused: consent names the
+        # listing the operator reviewed, and that one is no longer current.
+        response = await fixture.request(
+            CatalogInstallRequest(
+                request=CatalogInstall(
+                    catalog_sha256=stale.catalog_sha256,
+                    bundle_id="example.plugin",
+                    sequence=1,
+                    runtime_platform="macos-arm64",
+                    plugin_id=identifier,
+                )
+            )
+        )
+        assert "error" in response
+        # Another bundle cannot take over an installation.
+        fixture.publish(3, bundle="example.other")
+        fixture.list_releases(
+            {
+                1: "https://releases.example.test/1/",
+                3: "https://releases.example.test/3/",
+            },
+            revision=3,
+        )
+        revision = fixture.manager.downloads[identifier].source_status().revision
+        with pytest.raises(ValueError, match="manager request incomplete"):
+            await fixture.terminal(iter(("y",))).run_from_catalog(
+                "example.other", plugin_id=identifier
+            )
+        assert (
+            fixture.manager.downloads[identifier].source_status().revision == revision
+        )
+        assert selector.current() == installed
+        # A feed at another origin is read without the catalog's credential.
+        fixture.list_releases(
+            {
+                1: "https://releases.example.test/1/",
+                3: "https://elsewhere.example.test/3/",
+            },
+            revision=4,
+        )
+        with pytest.raises(ValueError, match="manager request incomplete"):
+            await fixture.terminal(iter(("y",))).run_from_catalog("example.other")
+        elsewhere = [
+            authorized
+            for host, _, authorized in fixture.authorized
+            if host == "elsewhere.example.test"
+        ]
+        assert elsewhere == [False]
+        assert sum(isinstance(r, InstallSubmission) for r in fixture.requests) == 1
+
+
+def test_two_artifacts_at_one_sequence_need_the_family_named() -> None:
+    """The terminal never guesses between listings that both fit the host."""
+    from skulk.extensions.terminal_install import TerminalInstaller
+
+    def entry(sequence: int, platform: str | None, fits: bool) -> CatalogEntryReview:
+        return CatalogEntryReview(
+            bundle_id="example.plugin",
+            bundle_version="1.0.0",
+            title="Example plugin",
+            publisher="fixture",
+            sequence=sequence,
+            release_digest="1" * 64,
+            runtime_platform=platform,
+            artifact_sha256="2" * 64,
+            artifact_bytes=1,
+            transfer_bytes=1,
+            platforms=("darwin",),
+            skulk_build_sha256="a" * 64,
+            permissions=(),
+            descriptors=(),
+            surfaces=(),
+            operations=False,
+            steward_risks=(),
+            expires_at=2,
+            matches_host=fits,
+        )
+
+    def review(*entries: CatalogEntryReview) -> CatalogReview:
+        return CatalogReview(
+            publisher="fixture",
+            revision=1,
+            created_at=1,
+            expires_at=2,
+            catalog_sha256="3" * 64,
+            entries=entries,
+        )
+
+    listed = TerminalInstaller._listed  # pyright: ignore[reportPrivateUsage]
+    both = review(
+        entry(2, None, True), entry(2, "macos-arm64", True), entry(1, None, True)
+    )
+    with pytest.raises(ValueError, match="name the family"):
+        listed(both, "example.plugin", None, None)
+    assert (
+        listed(both, "example.plugin", None, "macos-arm64").runtime_platform
+        == "macos-arm64"
+    )
+    assert listed(both, "example.plugin", 1, None).sequence == 1
+    with pytest.raises(ValueError, match="no listed release"):
+        listed(review(entry(1, None, False)), "example.plugin", None, None)
+    # An alias names the same family.
+    assert (
+        listed(
+            review(entry(1, "ubuntu-24.04-x86_64", True)),
+            "example.plugin",
+            None,
+            "linux-glibc-x86_64",
+        ).sequence
+        == 1
+    )
+
+
+def test_install_plugin_arguments_select_a_listing_only_with_a_bundle() -> None:
+    """The one command keeps its bare form and gains the catalog selection flags."""
+    from skulk.extensions.service_setup import (
+        _install_arguments,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    assert _install_arguments([]).plugin_id is None
+    assert _install_arguments(["managed.abc"]).plugin_id == "managed.abc"
+    options = _install_arguments(
+        [
+            "--from-catalog",
+            "example.plugin",
+            "--sequence",
+            "2",
+            "--platform",
+            "linux-glibc-x86_64",
+            "managed.abc",
+        ]
+    )
+    assert (
+        options.bundle_id,
+        options.sequence,
+        options.platform,
+        options.plugin_id,
+    ) == ("example.plugin", 2, "linux-glibc-x86_64", "managed.abc")
+    with pytest.raises(ValueError, match="select a catalog listing"):
+        _install_arguments(["--sequence", "2"])
+    with pytest.raises(SystemExit):
+        _install_arguments(["managed.abc", "managed.def"])
 
 
 @pytest.mark.parametrize(

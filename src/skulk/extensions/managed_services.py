@@ -29,6 +29,7 @@ from skulk.extensions.runtime_attachment import (
 )
 from skulk.extensions.runtime_files import read_private
 from skulk.extensions.runtime_manager import (
+    CatalogInstallRequest,
     CatalogRegistration,
     CatalogRequest,
     InstallationRequest,
@@ -295,6 +296,7 @@ type ManagementRequest = (
     InventoryRequest
     | CatalogRequest
     | CatalogRegistration
+    | CatalogInstallRequest
     | InstallationRequest
     | SubmitRequest
     | OperationRequest
