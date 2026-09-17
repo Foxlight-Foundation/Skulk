@@ -697,8 +697,17 @@ async def test_a_legacy_manager_under_another_interpreter_is_left_for_setup(
     assert not (tmp_path / "core-runtimes").exists()
 
 
+@pytest.mark.parametrize(
+    "failure",
+    [
+        ValueError("copied service identity differs"),
+        OSError(28, "no space"),
+        TimeoutError(),
+    ],
+    ids=["identity", "space", "qualification"],
+)
 async def test_a_staging_failure_ends_automatic_attempts_until_restart(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: Exception
 ) -> None:
     """An environment that cannot be staged does not grow a copy every attempt."""
     from skulk.extensions import managed_services
@@ -709,7 +718,7 @@ async def test_a_staging_failure_ends_automatic_attempts_until_restart(
 
     async def stage(root: Path) -> ServiceSnapshot:
         attempts.append(root)
-        raise ValueError("copied service identity differs")
+        raise failure
 
     async def request(root: Path, request: object) -> dict[str, JsonValue]:
         return {"result": {"installations": [], "reload_runtime": True}}

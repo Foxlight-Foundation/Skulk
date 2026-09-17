@@ -390,7 +390,9 @@ class ManagedServices:
             if snapshot is None:
                 try:
                     snapshot = await stage_service_runtime(root)
-                except (OSError, ValueError):
+                except (OSError, TimeoutError, ValueError):
+                    # Qualification past its deadline has populated the
+                    # generation directory as surely as a failed copy has.
                     self.runtime_refresh_exhausted = True
                     raise ValueError(
                         "the manager runtime could not be staged from this "
