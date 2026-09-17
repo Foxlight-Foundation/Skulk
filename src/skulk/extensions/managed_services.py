@@ -11,12 +11,16 @@ import time
 from pathlib import Path
 from typing import Literal, final
 
-import psutil
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
 
 from skulk.extensions.managed import ManagedConnection, ManagedOwner
-from skulk.extensions.managed_attachment import ManagedAttachment
+from skulk.extensions.managed_attachment import (
+    ManagedAttachment,
+    manager_pids,
+    manager_processes,
+    runs_generation,
+)
 from skulk.extensions.runtime_artifacts import Digest, ProtocolUnsupportedError
 from skulk.extensions.runtime_attachment import (
     InstallationIdentifier,
@@ -41,6 +45,7 @@ from skulk.extensions.runtime_service import RuntimeServiceStatus
 from skulk.extensions.service_setup import (
     record_refreshed_snapshot,
     registered_unit_names_base,
+    setup_state_names,
 )
 from skulk.extensions.service_snapshot import (
     ServiceSnapshot,
@@ -75,6 +80,10 @@ def protocol_refusal(result: dict[str, JsonValue]) -> ProtocolUnsupportedError |
 # A stopping manager allows each supervised owner thirty seconds to exit and
 # closes them together; this covers that plus its client drain, with margin.
 _MANAGER_STOP_SECONDS = 120.0
+# The keep-alive throttles restarts to ten seconds apart and the bootstrap
+# verifies the runtime tree before it starts the manager; several such
+# rounds fit in this, after which the refresh is reported indeterminate.
+_MANAGER_START_SECONDS = 90.0
 
 
 # How long a manager that answered nothing gets to show the selection it made.
@@ -94,22 +103,19 @@ def _selected_within(root: Path, generation: str, seconds: float) -> bool:
     return True
 
 
-def manager_pids(root: Path) -> list[int]:
-    """Processes serving the manager at ``root``; they run as this user."""
-    found: list[int] = []
-    arguments = TypeAdapter(list[str])
-    for process in psutil.process_iter():
-        try:
-            cmdline = arguments.validate_python(process.cmdline())
-        except (psutil.Error, ValueError):
-            continue
-        if (
-            "skulk.extensions.runtime_manager" in cmdline
-            and "serve" in cmdline
-            and str(root) in cmdline
-        ):
-            found.append(int(process.pid))
-    return found
+@final
+class ManagerNotRestartedError(RuntimeError):
+    """The selection landed but no manager started on it within the wait.
+
+    Distinct from a transport failure: the pointer alone must not be read as
+    a completed refresh, since no usable manager runs the selection yet.
+    """
+
+    def __init__(self, generation: str) -> None:
+        super().__init__(
+            f"the plugin manager has not started on generation {generation}"
+        )
+        self.generation = generation
 
 
 def reload_legacy_manager(root: Path, snapshot: ServiceSnapshot) -> None:
@@ -138,7 +144,7 @@ def reload_legacy_manager(root: Path, snapshot: ServiceSnapshot) -> None:
     while True:
         try:
             activate_service_runtime(root, snapshot)
-            return
+            break
         except (OSError, ValueError):
             # The fence is still held while the stopped manager finishes, or
             # its keep-alive replacement took it first: keep asking.
@@ -147,9 +153,52 @@ def reload_legacy_manager(root: Path, snapshot: ServiceSnapshot) -> None:
             time.sleep(0.25)
             for pid in manager_pids(root):
                 if pid not in pids and _selected(root, snapshot.generation):
-                    return
+                    break
                 with contextlib.suppress(OSError):
                     os.kill(pid, signal.SIGTERM)
+            else:
+                continue
+            break
+    # The keep-alive may have started a manager between the stop and the
+    # selection; it read the previous pointer and runs the old generation,
+    # or is still in its bootstrap and not yet visible as a manager at all.
+    # Stop each such manager as it appears until one runs the selected
+    # generation: only then has the service restarted on it.
+    start_deadline = time.monotonic() + _MANAGER_START_SECONDS
+    while True:
+        processes = manager_processes(root)
+        for pid, cmdline in processes:
+            if not runs_generation(cmdline, root, snapshot.generation):
+                with contextlib.suppress(OSError):
+                    os.kill(pid, signal.SIGTERM)
+        if any(
+            runs_generation(cmdline, root, snapshot.generation)
+            for _, cmdline in processes
+        ):
+            return
+        if time.monotonic() >= start_deadline:
+            raise ManagerNotRestartedError(snapshot.generation)
+        time.sleep(0.5)
+
+
+def selected_generation_for(root: Path, build: str) -> ServiceSnapshot | None:
+    """The selected generation when it was staged from ``build``.
+
+    A previous attempt may have selected a matching generation while the
+    manager kept running the old one; nothing new is staged for that.
+    """
+    generation = selected_generation(root)
+    if generation is None:
+        return None
+    try:
+        snapshot = ServiceSnapshot.model_validate_json(
+            read_private(root / "core-runtimes" / generation / "staged.json", 131072)
+        )
+    except (OSError, ValueError):
+        return None
+    if snapshot.generation == generation and snapshot.skulk_build_sha256 == build:
+        return snapshot
+    return None
 
 
 def staged_generation_for(root: Path, build: str) -> ServiceSnapshot | None:
@@ -287,6 +336,9 @@ class ManagedServices:
         # attempt, so after a staging failure no further attempt is made until
         # the host restarts (which is when its environment changes).
         self.runtime_refresh_exhausted = False
+        # The selected generation the setup state was last reconciled with,
+        # so an attached manager costs no file reads on every poll.
+        self.setup_reconciled: str | None = None
         self.guard = asyncio.Lock()
         self.closed = False
 
@@ -386,7 +438,9 @@ class ManagedServices:
                     "the registered service invokes another interpreter; "
                     "rerun skulk-plugin-service setup"
                 )
-            snapshot = staged_generation_for(root, live)
+            snapshot = selected_generation_for(root, live) or staged_generation_for(
+                root, live
+            )
             if snapshot is None:
                 try:
                     snapshot = await stage_service_runtime(root)
@@ -439,6 +493,11 @@ class ManagedServices:
                 f"plugin manager runtime refresh failed: {error}; "
                 "rerun skulk-plugin-service setup"
             )
+        except ManagerNotRestartedError as error:
+            # The selection is in place and kept; the mismatch a manager
+            # running an older generation presents schedules the next
+            # attempt, which restarts it onto this selection.
+            logger.warning(f"plugin manager runtime refresh incomplete: {error}")
         except (OSError, TimeoutError) as error:
             # The manager may still be verifying the seal past the request
             # deadline and select the generation afterwards; once it does,
@@ -453,17 +512,62 @@ class ManagedServices:
                 f"{type(error).__name__}; the staged generation is retained"
             )
 
-    async def _record_refresh(self, root: Path, snapshot: ServiceSnapshot) -> None:
+    async def _record_refresh(
+        self,
+        root: Path,
+        snapshot: ServiceSnapshot,
+        message: str = (
+            "plugin manager runtime refreshed to this host's Skulk build; "
+            "the service restarts on it"
+        ),
+    ) -> bool:
         # Setup state names the generation the service runs on, its build and
         # the source identity it was staged from; status verifies against it
         # and a setup rerun would otherwise stage and restart yet another
-        # generation for the same build.
-        source = await asyncio.to_thread(service_source_identity)
-        record_refreshed_snapshot(root, snapshot, source)
-        logger.info(
-            "plugin manager runtime refreshed to this host's Skulk build; "
-            "the service restarts on it"
-        )
+        # generation for the same build. A record that fails is reported,
+        # not believed: the next attach reconciles it.
+        try:
+            source = await asyncio.to_thread(service_source_identity)
+            record_refreshed_snapshot(root, snapshot, source)
+        except (OSError, ValueError) as error:
+            logger.warning(
+                f"setup state not recorded: {type(error).__name__}; "
+                "reconciled on the next attach"
+            )
+            return False
+        logger.info(message)
+        return True
+
+    async def _reconcile_setup_state(self, root: Path, build: str) -> None:
+        """Make the setup state follow a selection the manager attached on.
+
+        A refresh that could not see the manager start (a bootstrap that
+        outlived the wait) recorded nothing; once the manager attaches on the
+        selected generation staged from this build, the setup state is the
+        only thing left behind, and no mismatch would ever schedule it.
+        """
+        selected = selected_generation_for(root, build)
+        if selected is None or self.setup_reconciled == selected.generation:
+            return
+        # Remembered only once the state is confirmed current, so a state
+        # that could not be read or recorded is retried on the next attach
+        # rather than skipped for the rest of the process.
+        try:
+            current = setup_state_names(root, selected.generation)
+        except (OSError, ValueError) as error:
+            logger.warning(
+                f"setup state not readable: {type(error).__name__}; "
+                "reconciled on the next attach"
+            )
+            return
+        if not current and not await self._record_refresh(
+            root,
+            selected,
+            "plugin manager attached on the generation staged for this "
+            "host's Skulk build; the setup state now names it",
+        ):
+            return
+        self.setup_reconciled = selected.generation
 
     async def request(self, request: ManagementRequest) -> dict[str, JsonValue]:
         """Send one typed local management request; never accept an attachment override.
@@ -501,6 +605,10 @@ class ManagedServices:
                     raise
                 assert self.connection is not None and self.context is not None
                 assert self.attachment is not None
+                if self.attachment.build is not None:
+                    await self._reconcile_setup_state(
+                        Path(self.connection.manager_root), self.attachment.build
+                    )
                 result = await manager_request(
                     Path(self.connection.manager_root), InventoryRequest()
                 )
