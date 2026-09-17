@@ -453,11 +453,16 @@ class TerminalInstaller:
         """The one listing to install: the newest of the bundle that fits this host.
 
         Without ``--platform`` the host's own match decides; with it, only
-        runtime-bearing listings of that artifact family are considered. Two
-        artifacts at the same sequence are an ambiguity the operator resolves
-        by naming the family, never a guess.
+        runtime-bearing listings of that artifact family are considered, and
+        ``--platform plain`` selects the plain listing (no artifact family)
+        that fits the host. Two artifacts at the same sequence are an
+        ambiguity the operator resolves by naming one, never a guess.
         """
-        wanted = canonical_platform(platform) if platform is not None else None
+        wanted = (
+            canonical_platform(platform)
+            if platform is not None and platform != "plain"
+            else None
+        )
         candidates = [
             entry
             for entry in review.entries
@@ -465,6 +470,7 @@ class TerminalInstaller:
             and (sequence is None or entry.sequence == sequence)
             and (
                 entry.matches_host
+                and (platform != "plain" or entry.runtime_platform is None)
                 if wanted is None
                 else entry.runtime_platform is not None
                 and canonical_platform(entry.runtime_platform) == wanted
@@ -479,7 +485,7 @@ class TerminalInstaller:
         if len(newest) > 1:
             raise ValueError(
                 "several listed artifacts fit this host at the same sequence; "
-                "name the family with --platform"
+                "name the family with --platform, or --platform plain"
             )
         return newest[0]
 

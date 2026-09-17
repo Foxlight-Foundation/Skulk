@@ -578,7 +578,8 @@ def _install_arguments(remaining: list[str]) -> _InstallArguments:
     )
     parser.add_argument(
         "--platform",
-        help="the listed artifact family instead of the host's own match",
+        help="the listed artifact family instead of the host's own match; "
+        "'plain' selects the listing without an artifact family",
     )
     arguments = _InstallArguments()
     _ = parser.parse_args(remaining, namespace=arguments)

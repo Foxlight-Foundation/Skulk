@@ -935,6 +935,7 @@ class RuntimeManager:
             review = await downloads.inspect()
             if (
                 review.runtime_digest != entry.release_digest
+                or review.publisher != entry.publisher
                 or review.bundle_id != entry.bundle_id
                 or review.sequence != entry.sequence
             ):

@@ -832,6 +832,9 @@ def test_two_artifacts_at_one_sequence_need_the_family_named() -> None:
         == "macos-arm64"
     )
     assert listed(both, "example.plugin", 1, None).sequence == 1
+    assert listed(both, "example.plugin", None, "plain").runtime_platform is None
+    with pytest.raises(ValueError, match="no listed release"):
+        listed(review(entry(1, "macos-arm64", True)), "example.plugin", None, "plain")
     with pytest.raises(ValueError, match="no listed release"):
         listed(review(entry(1, None, False)), "example.plugin", None, None)
     # An alias names the same family.
