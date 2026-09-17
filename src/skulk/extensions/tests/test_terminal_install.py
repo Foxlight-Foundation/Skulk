@@ -14,6 +14,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from pydantic import JsonValue
 
 from skulk.extensions.runtime_artifacts import RuntimeTrust
@@ -44,6 +45,10 @@ class Journey:
 
     manager: RuntimeManager
     trust: RuntimeTrust
+    source: Path
+    metadata: bytes
+    signing_key: Ed25519PrivateKey
+    releases: dict[int, tuple[Path, bytes]] = field(default_factory=dict)
     fail_response: str | None = None
     fail_download: bool = False
     requests: list[ManagerRequest] = field(default_factory=list)
@@ -87,6 +92,26 @@ class Journey:
             # Accelerating only the poller exhausts its budget on slower hosts.
         )
 
+    def publish(self, sequence: int, *, bundle: str | None = None) -> None:
+        """Serve ``sequence`` from the feed: built once per sequence, then reused.
+
+        Re-serving an earlier sequence reuses its exact metadata, so the feed
+        rolls back rather than equivocating (the same sequence with different
+        bytes, which inspection refuses on its own). ``bundle`` publishes the
+        sequence under another bundle identity.
+        """
+        if sequence not in self.releases:
+            source = self.source.parent / f"source-{sequence}"
+            metadata, _, _ = artifacts(
+                source,
+                owner_source=OWNER_SOURCE,
+                signing_key=self.signing_key,
+                sequence=sequence,
+                bundle_id=bundle if bundle is not None else "example.plugin",
+            )
+            self.releases[sequence] = (source, metadata)
+        self.source, self.metadata = self.releases[sequence]
+
     @property
     def identifier(self) -> str:
         """Read the generated identity from the first registration request."""
@@ -101,7 +126,10 @@ async def journey(
 ) -> AsyncIterator[Journey]:
     """Use real private sockets, dependency installation and supervised processes."""
     source = tmp_path / "source"
-    metadata, trust, host = artifacts(source, owner_source=OWNER_SOURCE)
+    signing_key = Ed25519PrivateKey.generate()
+    metadata, trust, host = artifacts(
+        source, owner_source=OWNER_SOURCE, signing_key=signing_key
+    )
     monkeypatch.setattr("skulk.extensions.runtime_install.measure_host", lambda: host)
     root = tmp_path / "manager"
     private_directory(root)
@@ -110,7 +138,8 @@ async def journey(
         HostSettings(transport_node_id="fixture-peer").model_dump_json().encode(),
     )
     manager = RuntimeManager(root)
-    fixture = Journey(manager, trust)
+    fixture = Journey(manager, trust, source, metadata, signing_key)
+    fixture.releases[1] = (source, metadata)
 
     async def respond(request: httpx.Request) -> httpx.Response:
         assert request.headers["Authorization"] == "Bearer hidden-test-feed-token"
@@ -122,7 +151,9 @@ async def journey(
             await asyncio.sleep(artifact_delay)
         return httpx.Response(
             200,
-            content=metadata if name == "release.json" else read_private(source / name),
+            content=fixture.metadata
+            if name == "release.json"
+            else read_private(fixture.source / name),
         )
 
     def downloads(root: Path) -> RuntimeDownloads:
@@ -165,6 +196,80 @@ async def test_generated_identity_trust_permissions_and_real_installation(
         assert sum(isinstance(r, InstallSubmission) for r in fixture.requests) == 1
         assert sum(isinstance(r, SubmitRequest) for r in fixture.requests) == 1
         assert sum(isinstance(r, SourceRegistration) for r in fixture.requests) == 1
+
+
+async def test_a_newer_release_at_the_source_upgrades_the_installation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sequence N+1 is staged beside N and activated over it with one command."""
+    async with journey(tmp_path, monkeypatch) as fixture:
+        identifier = await fixture.terminal(fixture.fields("y", "y", "y")).run()
+        selector = fixture.manager.controllers[identifier].selector
+        first = selector.current()
+        assert first is not None and first.sequence == 1 and first.revision == 1
+        fixture.publish(2)
+        # The retained operation is not resumed: the newer release is
+        # reviewed, staged and confirmed as a replacement.
+        await fixture.terminal(iter(("y", "y"))).run(identifier)
+        second = selector.current()
+        assert second is not None and second.enabled
+        assert second.sequence == 2 and second.revision == 2
+        assert second.runtime_digest != first.runtime_digest
+        assert sum(isinstance(r, InstallSubmission) for r in fixture.requests) == 2
+        assert sum(isinstance(r, SubmitRequest) for r in fixture.requests) == 2
+        assert any("Selected release sequence: 1" in line for line in fixture.output)
+        # Running again with nothing new at the source changes nothing.
+        await fixture.terminal(iter(())).run(identifier)
+        assert sum(isinstance(r, InstallSubmission) for r in fixture.requests) == 2
+        assert sum(isinstance(r, SubmitRequest) for r in fixture.requests) == 2
+        # The feed rolled back to the exact sequence 1 it served before: the
+        # terminal refuses the rollback before any transfer, nothing is
+        # submitted or staged, and the selection stands.
+        fixture.publish(1)
+        with pytest.raises(ValueError, match="rollback"):
+            await fixture.terminal(iter(("y",))).run(identifier)
+        assert selector.current() == second
+        assert sum(isinstance(r, InstallSubmission) for r in fixture.requests) == 2
+        # A selection with no retained download operation (selected outside
+        # this wizard) is compared the same way: nothing to stage at the
+        # selected release, a rollback refused before transfer, and a newer
+        # release upgraded over it.
+        retained = (
+            fixture.manager.root
+            / "installations"
+            / identifier
+            / "downloads"
+            / "current.json"
+        )
+        assert retained.exists()
+        retained.unlink()
+        fixture.publish(2)
+        await fixture.terminal(iter(())).run(identifier)
+        assert any("retained at sequence 2" in line for line in fixture.output)
+        fixture.publish(1)
+        with pytest.raises(ValueError, match="rollback"):
+            await fixture.terminal(iter(("y",))).run(identifier)
+        assert sum(isinstance(r, InstallSubmission) for r in fixture.requests) == 2
+        fixture.publish(3)
+        await fixture.terminal(iter(("y", "y"))).run(identifier)
+        third = selector.current()
+        assert third is not None and third.sequence == 3 and third.revision == 3
+        assert sum(isinstance(r, InstallSubmission) for r in fixture.requests) == 3
+        # A staged release whose activation was declined still raises the
+        # high-water mark: the feed going back below it is a rollback.
+        fixture.publish(4)
+        await fixture.terminal(iter(("y", "n"))).run(identifier)
+        assert selector.current() == third
+        assert sum(isinstance(r, InstallSubmission) for r in fixture.requests) == 4
+        fixture.publish(3)
+        with pytest.raises(ValueError, match="rollback"):
+            await fixture.terminal(iter(("y",))).run(identifier)
+        assert sum(isinstance(r, InstallSubmission) for r in fixture.requests) == 4
+        # A different bundle at the source is refused before any transfer.
+        fixture.publish(5, bundle="example.other")
+        with pytest.raises(ValueError, match="another bundle"):
+            await fixture.terminal(iter(("y",))).run(identifier)
+        assert sum(isinstance(r, InstallSubmission) for r in fixture.requests) == 4
 
 
 @pytest.mark.parametrize(
