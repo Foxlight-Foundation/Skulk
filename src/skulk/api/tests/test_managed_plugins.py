@@ -367,3 +367,127 @@ async def test_http_scopes_lifecycle_status_and_api_loss(
     finally:
         await extensions.run_shutdown_hooks()
         await manager.close()
+
+
+async def test_http_catalog_routes_read_a_verified_listing_without_disclosure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The catalog is host-scoped, owner-configured, read with plugins:read, address-free."""
+    import time
+
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    from skulk.extensions.runtime_artifacts import canonical_json
+    from skulk.extensions.runtime_catalog import CatalogReview, CatalogSourceStatus
+
+    manager = manager_fixture(tmp_path / "manager", monkeypatch)
+    await manager.start()
+    path = tmp_path / "config/managed-service/connection.json"
+    connect(path, manager.root)
+    services = ManagedServices(path)
+    extensions = LoadedExtensions([], managed_services=services)
+    extensions.run_startup_hooks(replace(context(), skulk_version="1.5.2"))
+    pairing, exchange = paired_service(tmp_path / "pairing")
+    app = FastAPI()
+    app.include_router(create_plugins_router(extensions, pairing))
+    transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 52000))
+    bearer = {"Authorization": f"Bearer {exchange.access_token}"}
+    owner = {"X-Skulk-Dashboard": "pairing-v1", "Origin": "https://localhost"}
+    prefix = "/v1/plugins/managed"
+    key = Ed25519PrivateKey.generate()
+    now = int(time.time())
+    catalog: dict[str, object] = {
+        "protocol": 1,
+        "publisher": "fixture",
+        "revision": 1,
+        "created_at": now - 1,
+        "expires_at": now + 3600,
+        "entries": [
+            {
+                "bundle_id": "example.plugin",
+                "bundle_version": "1.0.0",
+                "title": "Example plugin",
+                "publisher": "fixture",
+                "sequence": 1,
+                "feed_url": "https://releases.example.test/example/1/",
+                "release_sha256": "1" * 64,
+                "release_digest": "2" * 64,
+                "artifact_sha256": "3" * 64,
+                "artifact_size": 4096,
+                "platforms": ["darwin", "linux"],
+                "skulk_build_sha256": "a" * 64,
+                "permissions": ["local synthetic operation"],
+                "descriptors": ["example.echo@1.0.0"],
+                "surfaces": [],
+                "operations": False,
+                "steward_risks": [],
+                "expires_at": now + 86400,
+            }
+        ],
+    }
+    document = json.dumps(
+        {
+            "catalog": catalog,
+            "signature": key.sign(canonical_json(catalog)).hex(),  # type: ignore[arg-type]
+        }
+    ).encode()
+
+    def served(request: httpx.Request) -> httpx.Response:
+        assert request.headers["Authorization"] == "Bearer private-catalog-test-secret"
+        return httpx.Response(200, content=document)
+
+    manager.catalog.transport = httpx.MockTransport(served)
+    trust = {
+        "revision": 1,
+        "expires_at": now + 3600,
+        "publishers": {"fixture": key.public_key().public_bytes_raw().hex()},
+    }
+    try:
+        async with httpx.AsyncClient(
+            transport=transport, base_url="https://localhost"
+        ) as client:
+            assert (
+                await client.get(prefix + "/catalog", headers=bearer)
+            ).status_code == 403
+            assert (
+                await client.get(prefix + "/catalog/source", headers=bearer)
+            ).status_code == 403
+            pairing.set_plugin_grant(
+                exchange.device_id,
+                PluginGrantUpdate(
+                    expected_revision=0, scopes=("plugins:read", "plugins:manage")
+                ),
+            )
+            unconfigured = await client.get(prefix + "/catalog/source", headers=bearer)
+            assert unconfigured.status_code == 200
+            assert not CatalogSourceStatus.model_validate_json(
+                unconfigured.content
+            ).configured
+            # Configuring the address is owner administration, never a paired grant.
+            body = {
+                "expected_revision": 0,
+                "base_url": "https://catalog.example.test/foxlight/",
+                "trust": trust,
+                "token": "private-catalog-test-secret",
+            }
+            assert (
+                await client.post(prefix + "/catalog/source", headers=bearer, json=body)
+            ).status_code == 403
+            configured = await client.post(
+                prefix + "/catalog/source", headers=owner, json=body
+            )
+            assert configured.status_code == 200
+            status = CatalogSourceStatus.model_validate_json(configured.content)
+            assert status.configured and status.credential_ready
+            assert "private-catalog-test-secret" not in configured.text
+            listed = await client.get(prefix + "/catalog", headers=bearer)
+            assert listed.status_code == 200
+            review = CatalogReview.model_validate_json(listed.content)
+            assert [entry.sequence for entry in review.entries] == [1]
+            assert review.entries[0].descriptors == ("example.echo@1.0.0",)
+            assert "releases.example.test" not in listed.text
+            assert "private-catalog-test-secret" not in listed.text
+            assert listed.headers["Cache-Control"] == "no-store"
+    finally:
+        await extensions.run_shutdown_hooks()
+        await manager.close()

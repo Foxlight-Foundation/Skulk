@@ -927,6 +927,18 @@ preflight commands before enabling capability work. This command adds no provide
 policy or spending authority to core.
 
 
+The host can also read a signed catalog for discovery. A publisher lists the
+releases it signed (identity, sequence, platforms, size and digests, the signed
+permissions, capability ids, surfaces, durable operations and steward risk
+classes, and where each signed release record is served); the host verifies the
+catalog against the publishers it trusts for discovery, a trust record separate
+from any installation's, and shows the listing with whether each release matches
+this host's build and platform (`GET /v1/plugins/managed/catalog`,
+`skulk-plugin-service catalog`). Reading the catalog selects, stages and installs
+nothing: an install still registers the release source and goes through
+inspection, staging and activation, where the release record itself is verified
+against installation trust.
+
 ## Public node setup exports
 
 An installed management provider may implement `NodeSetupProvider` from

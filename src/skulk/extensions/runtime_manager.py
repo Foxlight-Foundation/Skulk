@@ -25,6 +25,7 @@ from skulk.extensions.runtime_attachment import (
     finish_attachment,
     recover_attachment,
 )
+from skulk.extensions.runtime_catalog import CatalogSourceUpdate, HostCatalog
 from skulk.extensions.runtime_controller import (
     LifecycleOperation,
     LifecycleRequest,
@@ -198,9 +199,24 @@ def build_mismatch_payload(differs: ManagerBuildMismatchError) -> bytes:
     )
 
 
+class CatalogRequest(_Request):
+    """Read the host's signed catalog or its source readiness; nothing installs."""
+
+    action: Literal["read_catalog", "catalog_status"]
+
+
+class CatalogRegistration(_Request):
+    """Configure the host's one catalog address and discovery trust."""
+
+    action: Literal["configure_catalog"] = "configure_catalog"
+    request: CatalogSourceUpdate = Field(description="Owner-supplied catalog settings.")
+
+
 type ManagerRequest = (
     InventoryRequest
     | ReloadRuntimeRequest
+    | CatalogRequest
+    | CatalogRegistration
     | InstallationRequest
     | SubmitRequest
     | OperationRequest
@@ -241,6 +257,7 @@ class RuntimeManager:
         self.path = manager_socket(self.root)
         self.controllers: dict[str, RuntimeController] = {}
         self.downloads: dict[str, RuntimeDownloads] = {}
+        self.catalog = HostCatalog(root)
         self.errors: dict[str, str] = {}
         self.server: asyncio.Server | None = None
         self.lock: RuntimeLock | None = None
@@ -542,6 +559,20 @@ class RuntimeManager:
             }
         if isinstance(request, AttachmentRequest):
             return await finish_runtime_work(asyncio.create_task(self._attach(request)))
+        if isinstance(request, CatalogRequest):
+            if request.action == "catalog_status":
+                return self.catalog.source_status().model_dump(mode="json")
+            # A slow catalog server must not block inventory or attachment
+            # renewal behind the manager-wide lock, like release inspection.
+            host = await asyncio.to_thread(measure_host)
+            verified = await self.catalog.fetch()
+            return verified.review(
+                skulk_build_sha256=host.skulk_build_sha256, platform=host.platform
+            ).model_dump(mode="json")
+        if isinstance(request, CatalogRegistration):
+            return (await self.catalog.configure(request.request)).model_dump(
+                mode="json"
+            )
         if isinstance(request, ReleaseRequest) and request.action == "inspect_release":
             async with self.guard:
                 downloads = self.downloads.get(request.plugin_id)
@@ -650,6 +681,7 @@ class RuntimeManager:
                 results = await asyncio.gather(
                     *(controller.close() for controller in self.controllers.values()),
                     *(downloads.close() for downloads in self.downloads.values()),
+                    self.catalog.close(),
                     return_exceptions=True,
                 )
                 if any(isinstance(result, BaseException) for result in results):
@@ -686,7 +718,7 @@ async def manager_request(root: Path, request: ManagerRequest) -> dict[str, Json
         try:
             payload = request.model_dump(mode="json")
             if (
-                isinstance(request, SourceRegistration)
+                isinstance(request, SourceRegistration | CatalogRegistration)
                 and request.request.token is not None
             ):
                 # SecretStr redacts diagnostics by default. Only this protected

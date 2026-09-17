@@ -30,6 +30,11 @@ from skulk.extensions.runtime_attachment import (
     InstallationIdentifier,
     ProfileIdentifier,
 )
+from skulk.extensions.runtime_catalog import (
+    CatalogReview,
+    CatalogSourceStatus,
+    CatalogSourceUpdate,
+)
 from skulk.extensions.runtime_controller import LifecycleOperation, LifecycleRequest
 from skulk.extensions.runtime_download import (
     InstallOperation,
@@ -39,6 +44,8 @@ from skulk.extensions.runtime_download import (
     SourceUpdate,
 )
 from skulk.extensions.runtime_manager import (
+    CatalogRegistration,
+    CatalogRequest,
     InstallationRequest,
     InstallRecoveryRequest,
     InstallSubmission,
@@ -293,6 +300,59 @@ def create_managed_plugins_router(
                 )
             )
             return LifecycleOperation.model_validate_json(json.dumps(result))
+
+        return await invoke(action)
+
+    @router.get(
+        "/catalog",
+        response_model=CatalogReview,
+        summary="Read the host's signed capability catalog",
+        description="Fetch the owner-configured signed catalog and verify it against the host's discovery trust before listing its releases: identity, sequence, platforms, size and digests, the signed permissions, capability ids, surfaces, durable operations and steward risk classes, and whether each release matches this host. Requires plugins:read. Returns no addresses or credentials; selects, stages and installs nothing.",
+    )
+    async def catalog(request: Request, response: Response) -> CatalogReview:
+        """Read the one host-scoped catalog without touching any installation."""
+        services = await authorized(request, response, "plugins:read")
+
+        async def action() -> CatalogReview:
+            result = await services.request(CatalogRequest(action="read_catalog"))
+            return CatalogReview.model_validate_json(json.dumps(result))
+
+        return await invoke(action)
+
+    @router.get(
+        "/catalog/source",
+        response_model=CatalogSourceStatus,
+        summary="Read the host's catalog source readiness",
+        description="Report whether a catalog address and discovery trust are configured and whether the catalog credential is readable, without network I/O, addresses, paths or credential values. Requires plugins:read.",
+    )
+    async def catalog_source(
+        request: Request, response: Response
+    ) -> CatalogSourceStatus:
+        """Report catalog source readiness without disclosing where it points."""
+        services = await authorized(request, response, "plugins:read")
+
+        async def action() -> CatalogSourceStatus:
+            result = await services.request(CatalogRequest(action="catalog_status"))
+            return CatalogSourceStatus.model_validate_json(json.dumps(result))
+
+        return await invoke(action)
+
+    @router.post(
+        "/catalog/source",
+        response_model=CatalogSourceStatus,
+        summary="Configure the host's catalog source",
+        description="Direct localhost/Tailscale owner administration only: set the HTTPS catalog directory, document basename and the publishers trusted for discovery at expected_revision, optionally provisioning a write-only bearer. Omitted fields retain configured values; initial setup requires the directory and trust. Existing revocations remain in force; moving the catalog requires supplying its credential again. Nothing is fetched or installed.",
+    )
+    async def configure_catalog(
+        body: CatalogSourceUpdate, request: Request, response: Response
+    ) -> CatalogSourceStatus:
+        """Provision the host's discovery address and trust through a fixed operation."""
+        await authorize_plugin_owner_request(request, tailnet_peer_verifier)
+        services = await authorized(request, response, "plugins:manage")
+
+        async def action() -> CatalogSourceStatus:
+            result = await services.request(CatalogRegistration(request=body))
+            return CatalogSourceStatus.model_validate_json(json.dumps(result))
 
         return await invoke(action)
 

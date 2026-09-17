@@ -35,6 +35,7 @@ from skulk.extensions.runtime_files import RuntimeLock, read_private, write_priv
 from skulk.extensions.runtime_install import finish_runtime_work
 from skulk.extensions.runtime_manager import (
     MANAGER_REQUEST,
+    CatalogRequest,
     InventoryRequest,
     ManagerRequest,
     ReloadRuntimeRequest,
@@ -559,6 +560,7 @@ def main() -> None:
             "setup-plugin",
             "manage-plugin",
             "install-plugin",
+            "catalog",
         ),
     )
     parser.add_argument("setup_arguments", nargs=argparse.REMAINDER)
@@ -618,6 +620,25 @@ def main() -> None:
             print(
                 json.dumps(
                     {"operation_id": operation.operation_id, "phase": operation.phase}
+                )
+            )
+        elif action == "catalog":
+            if os.geteuid() == 0:
+                raise ValueError("plugin management requires the nonroot service owner")
+            connection = ServiceConnection.model_validate_json(
+                read_private(
+                    SKULK_CONFIG_HOME / "managed-service" / "connection.json", 8192
+                )
+            )
+            print(
+                json.dumps(
+                    asyncio.run(
+                        manager_request(
+                            Path(connection.manager_root),
+                            CatalogRequest(action="read_catalog"),
+                        )
+                    ),
+                    indent=2,
                 )
             )
         elif action == "manage":

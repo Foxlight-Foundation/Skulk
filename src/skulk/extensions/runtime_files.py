@@ -75,6 +75,7 @@ class RuntimeLock:
             "manager.lock",
             "attachment.lock",
             "setup.lock",
+            "catalog.lock",
         }:
             raise ValueError("unknown runtime lock")
         private_directory(root)

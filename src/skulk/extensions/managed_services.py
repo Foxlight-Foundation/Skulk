@@ -29,6 +29,8 @@ from skulk.extensions.runtime_attachment import (
 )
 from skulk.extensions.runtime_files import read_private
 from skulk.extensions.runtime_manager import (
+    CatalogRegistration,
+    CatalogRequest,
     InstallationRequest,
     InstallRecoveryRequest,
     InstallSubmission,
@@ -291,6 +293,8 @@ class ManagedInventory(BaseModel):
 
 type ManagementRequest = (
     InventoryRequest
+    | CatalogRequest
+    | CatalogRegistration
     | InstallationRequest
     | SubmitRequest
     | OperationRequest
