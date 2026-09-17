@@ -423,7 +423,28 @@ async def test_http_catalog_routes_read_a_verified_listing_without_disclosure(
                 "operations": False,
                 "steward_risks": [],
                 "expires_at": now + 86400,
-            }
+            },
+            {
+                "bundle_id": "example.plugin",
+                "bundle_version": "1.1.0",
+                "title": "Example plugin",
+                "publisher": "fixture",
+                "sequence": 2,
+                "feed_url": "https://releases.example.test/example/2/",
+                "release_sha256": "4" * 64,
+                "release_digest": "5" * 64,
+                "artifact_sha256": "6" * 64,
+                "artifact_size": 4096,
+                "transfer_bytes": 4096,
+                "platforms": ["darwin", "linux"],
+                "skulk_build_sha256": "b" * 64,
+                "permissions": ["local synthetic operation"],
+                "descriptors": ["example.echo@1.0.0"],
+                "surfaces": [],
+                "operations": False,
+                "steward_risks": [],
+                "expires_at": now + 86400,
+            },
         ],
     }
     document = json.dumps(
@@ -484,11 +505,33 @@ async def test_http_catalog_routes_read_a_verified_listing_without_disclosure(
             listed = await client.get(prefix + "/catalog", headers=bearer)
             assert listed.status_code == 200
             review = CatalogReview.model_validate_json(listed.content)
-            assert [entry.sequence for entry in review.entries] == [1]
+            assert [entry.sequence for entry in review.entries] == [1, 2]
             assert review.entries[0].descriptors == ("example.echo@1.0.0",)
+            assert [entry.matches_host for entry in review.entries] == [True, False]
             assert "releases.example.test" not in listed.text
             assert "private-catalog-test-secret" not in listed.text
             assert listed.headers["Cache-Control"] == "no-store"
+            # Binding an installation to a listing is owner administration;
+            # a listing that does not fit this host is refused by the manager
+            # before any installation is registered or any feed is reached.
+            install = {
+                "catalog_sha256": review.catalog_sha256,
+                "bundle_id": "example.plugin",
+                "sequence": 2,
+            }
+            assert (
+                await client.post(
+                    prefix + "/catalog/install", headers=bearer, json=install
+                )
+            ).status_code == 403
+            refused = await client.post(
+                prefix + "/catalog/install", headers=owner, json=install
+            )
+            assert refused.status_code == 409
+            assert "releases.example.test" not in refused.text
+            inventory = await client.get(prefix, headers=bearer)
+            assert inventory.status_code == 200
+            assert b"managed." not in inventory.content
     finally:
         await extensions.run_shutdown_hooks()
         await manager.close()

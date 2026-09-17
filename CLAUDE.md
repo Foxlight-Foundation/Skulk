@@ -767,7 +767,12 @@ and no extension installed = Skulk unchanged. Kill switch:
 `SKULK_EXTENSIONS_DISABLE=1`. Managed plugins are installed by the plugin
 manager from signed releases; the host can also read one signed capability
 catalog for discovery (`extensions/runtime_catalog.py`, host-scoped source and
-discovery trust, `read_catalog`), which selects and installs nothing.
+discovery trust, `read_catalog`), which selects and installs nothing, and bind
+an installation to a listing with consent (`install_from_catalog`, the
+owner-only `POST /v1/plugins/managed/catalog/install`,
+`install-plugin --from-catalog`): the listed feed becomes the source under the
+discovery trust and the served record must be the one listed; staging and
+activation stay separate consents.
 
 Optional `StewardToolProvider` offers bounded `extension_*` read and inert-proposal
 tools through `extensions/steward.py`. The steward binds each model step to the

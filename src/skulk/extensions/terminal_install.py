@@ -11,8 +11,13 @@ from uuid import uuid4
 
 from pydantic import JsonValue, SecretStr, TypeAdapter
 
-from skulk.extensions.runtime_artifacts import RuntimeTrust, protocol_refusal_sentence
+from skulk.extensions.runtime_artifacts import (
+    RuntimeTrust,
+    canonical_platform,
+    protocol_refusal_sentence,
+)
 from skulk.extensions.runtime_attachment import InstallationIdentifier
+from skulk.extensions.runtime_catalog import CatalogEntryReview, CatalogReview
 from skulk.extensions.runtime_controller import LifecycleOperation, LifecycleRequest
 from skulk.extensions.runtime_download import (
     InstallOperation,
@@ -23,6 +28,10 @@ from skulk.extensions.runtime_download import (
 )
 from skulk.extensions.runtime_manager import (
     PROTOCOL_UNSUPPORTED,
+    CatalogInstall,
+    CatalogInstallation,
+    CatalogInstallRequest,
+    CatalogRequest,
     InstallationRequest,
     InstallRecoveryRequest,
     InstallSubmission,
@@ -165,13 +174,28 @@ class TerminalInstaller:
         )
 
     async def _stage(
-        self, identifier: str, source: SourceStatus
+        self,
+        identifier: str,
+        source: SourceStatus,
+        expected_digest: str | None = None,
     ) -> InstallOperation | None:
         operation = await self._install_status(identifier)
         review: ReleaseReview | None = None
         in_flight, selection = await self._installation(identifier)
         if in_flight and operation is None:
             raise ValueError("another lifecycle operation needs inspection")
+        if (
+            expected_digest is not None
+            and operation is not None
+            and operation.request.runtime_digest != expected_digest
+            and (in_flight or operation.state != "staged")
+        ):
+            # A retained operation for another release that cannot be
+            # inspected past would be resumed as if it were the bound one.
+            raise ValueError(
+                "a retained installation operation for another release must "
+                "settle before the listed release is staged"
+            )
         if operation is None or (operation.state == "staged" and not in_flight):
             # With nothing in flight, the source is inspected again: an
             # installation that already holds a staged release is upgraded
@@ -186,6 +210,13 @@ class TerminalInstaller:
                     )
                 )
             )
+            if expected_digest is not None and review.runtime_digest != expected_digest:
+                # A catalog binding consented to one record; a feed that
+                # serves another since is refused before any transfer.
+                raise ValueError(
+                    "the release at the feed changed since the listing was bound; "
+                    "read the catalog again"
+                )
         if (
             review is not None
             and operation is None
@@ -417,15 +448,124 @@ class TerminalInstaller:
             )
         if not source.credential_ready:
             raise ValueError("replace the unavailable feed credential before resuming")
-        staged = await self._stage(identifier, source)
-        if staged is not None:
-            await self._activate(identifier, staged)
-            self.output(
-                "Installation retained: "
-                + identifier
-                + ". Continue through this plugin's documented terminal setup or the Plugins dashboard."
+        await self._stage_and_activate(identifier, source)
+        return identifier
+
+    async def _stage_and_activate(
+        self,
+        identifier: str,
+        source: SourceStatus,
+        expected_digest: str | None = None,
+    ) -> None:
+        staged = await self._stage(identifier, source, expected_digest)
+        if staged is None:
+            return
+        await self._activate(identifier, staged)
+        self.output(
+            "Installation retained: "
+            + identifier
+            + ". Continue through this plugin's documented terminal setup or the Plugins dashboard."
+        )
+        self.output(
+            "After owner activation, run plugin preflight before enabling capability work."
+        )
+
+    @staticmethod
+    def _listed(
+        review: CatalogReview,
+        bundle_id: str,
+        sequence: int | None,
+        platform: str | None,
+    ) -> CatalogEntryReview:
+        """The one listing to install: the newest of the bundle that fits this host.
+
+        Only runtime-bearing listings that fit this host are considered: this
+        host installs signed runtime records only, so a listing without an
+        artifact family is not installable here. Without ``--platform`` the
+        host's own match decides; with it, only listings of that artifact
+        family. Two artifacts at the same sequence are an ambiguity the
+        operator resolves by naming the family, never a guess.
+        """
+        wanted = canonical_platform(platform) if platform is not None else None
+        listed = [
+            entry
+            for entry in review.entries
+            if entry.bundle_id == bundle_id
+            and (sequence is None or entry.sequence == sequence)
+        ]
+        candidates = [
+            entry
+            for entry in listed
+            if entry.runtime_platform is not None
+            and entry.matches_host
+            and (wanted is None or canonical_platform(entry.runtime_platform) == wanted)
+        ]
+        if not candidates:
+            if listed and all(entry.runtime_platform is None for entry in listed):
+                raise ValueError(
+                    "this bundle is listed without an installable runtime record "
+                    "for this host; read the catalog"
+                )
+            raise ValueError(
+                "no listed release of this bundle fits this host; read the catalog"
             )
-            self.output(
-                "After owner activation, run plugin preflight before enabling capability work."
+        highest = max(entry.sequence for entry in candidates)
+        newest = [entry for entry in candidates if entry.sequence == highest]
+        if len(newest) > 1:
+            raise ValueError(
+                "several listed artifacts fit this host at the same sequence; "
+                "name the family with --platform"
             )
+        return newest[0]
+
+    async def run_from_catalog(
+        self,
+        bundle_id: str,
+        *,
+        sequence: int | None = None,
+        platform: str | None = None,
+        plugin_id: str | None = None,
+    ) -> str:
+        """Install a listed release: the catalog supplies the feed and publisher.
+
+        The listing is shown as consent facts before anything is registered;
+        binding the installation to it is one consent, staging the verified
+        release and activating it stay the existing separate consents. The
+        installation's later resume and upgrade go through the ordinary
+        install-plugin path, since its source is then configured.
+        """
+        identifier = _IDENTIFIER.validate_python(
+            plugin_id if plugin_id is not None else "managed." + uuid4().hex,
+            strict=True,
+        )
+        review = CatalogReview.model_validate_json(
+            json.dumps(await self._call(CatalogRequest(action="read_catalog")))
+        )
+        listing = self._listed(review, bundle_id, sequence, platform)
+        self.output(json.dumps(listing.model_dump(mode="json"), indent=2))
+        self.output("Resume: skulk-plugin-service install-plugin " + identifier)
+        if not self._confirm(
+            "Bind this installation to the listed release's feed and publisher?"
+        ):
+            return identifier
+        bound = CatalogInstallation.model_validate_json(
+            json.dumps(
+                await self._call(
+                    CatalogInstallRequest(
+                        request=CatalogInstall(
+                            catalog_sha256=review.catalog_sha256,
+                            bundle_id=listing.bundle_id,
+                            sequence=listing.sequence,
+                            runtime_platform=listing.runtime_platform,
+                            plugin_id=identifier,
+                        )
+                    )
+                )
+            )
+        )
+        if not bound.source.credential_ready:
+            raise ValueError("replace the unavailable feed credential before resuming")
+        await self._stage_and_activate(
+            identifier, bound.source, bound.review.runtime_digest
+        )
         return identifier
