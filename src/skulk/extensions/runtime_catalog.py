@@ -85,6 +85,7 @@ class _CatalogEntryClaims(_Contract):
     runtime_platform: Annotated[str, Field(max_length=64)] | None = None
     artifact_sha256: Digest
     artifact_size: int = Field(ge=1, le=67108864)
+    transfer_bytes: int = Field(ge=1, le=67108864 + 536870912)
     platforms: tuple[Literal["darwin", "linux"], ...] = Field(
         min_length=1, max_length=2
     )
@@ -169,6 +170,10 @@ class CatalogEntryReview(BaseModel):
     )
     artifact_sha256: str = Field(description="Digest of the executable artifact.")
     artifact_bytes: int = Field(description="Signed artifact size in bytes.")
+    transfer_bytes: int = Field(
+        description="Everything an install transfers: the artifact plus, for a "
+        "runtime-bearing release, every wheel it lists."
+    )
     platforms: tuple[str, ...] = Field(description="Operating systems supported.")
     skulk_build_sha256: str = Field(description="Skulk build the release binds to.")
     permissions: tuple[str, ...] = Field(description="Signed permission summaries.")
@@ -262,6 +267,7 @@ class VerifiedCatalog:
                     runtime_platform=entry.runtime_platform,
                     artifact_sha256=entry.artifact_sha256,
                     artifact_bytes=entry.artifact_size,
+                    transfer_bytes=entry.transfer_bytes,
                     platforms=entry.platforms,
                     skulk_build_sha256=entry.skulk_build_sha256,
                     permissions=entry.permissions,
@@ -693,13 +699,10 @@ class HostCatalog:
             ):
                 raise ValueError("catalog revision rollback refused")
             destination = self.directory / (verified.sha256 + ".json")
-            if (
-                not destination.exists()
-                and len(tuple(islice(self.directory.iterdir(), 32))) >= 32
-            ):
-                raise ValueError("catalog history requires local maintenance")
-            write_private(destination, verified.document)
             floors = self._floors()
+            if not destination.exists():
+                self._prune(floors, keep=8)
+            write_private(destination, verified.document)
             floors[verified.claims.publisher] = {
                 "revision": verified.claims.revision,
                 "sha256": verified.sha256,
@@ -715,6 +718,26 @@ class HostCatalog:
                 ).encode(),
             )
             return verified
+
+    def _prune(self, floors: dict[str, JsonValue], *, keep: int) -> None:
+        """Drop retained documents beyond the newest ``keep``, never an accepted floor.
+
+        A catalog that updates regularly would otherwise fill its retention
+        and stop; superseded documents are evidence with a short life.
+        """
+        accepted: set[str] = set()
+        for entry in floors.values():
+            sha256 = entry.get("sha256") if isinstance(entry, dict) else None
+            if isinstance(sha256, str):
+                accepted.add(sha256)
+        retained = sorted(
+            (path for path in islice(self.directory.iterdir(), 256)),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        for path in retained[keep:]:
+            if path.stem not in accepted:
+                path.unlink(missing_ok=True)
 
     def _floors(self) -> dict[str, JsonValue]:
         """Accepted revisions per publisher at the configured catalog address.
@@ -758,16 +781,25 @@ class HostCatalog:
         ):
             return None
         floors = document.get("floors")
-        entry = floors.get(publisher) if isinstance(floors, dict) else None
-        if not isinstance(entry, dict):
+        if not isinstance(floors, dict):
+            raise ValueError(
+                "catalog revision record unreadable; local maintenance required"
+            )
+        if publisher not in floors:
+            # This publisher has no accepted revision here yet: first use.
             return None
-        revision, sha256 = entry.get("revision"), entry.get("sha256")
+        entry = floors[publisher]
+        revision = entry.get("revision") if isinstance(entry, dict) else None
+        sha256 = entry.get("sha256") if isinstance(entry, dict) else None
         if (
             isinstance(revision, int)
             and not isinstance(revision, bool)
+            and revision >= 1
             and isinstance(sha256, str)
+            and len(sha256) == 64
         ):
             return revision, sha256
+        # A present but malformed floor is damaged evidence, not first use.
         raise ValueError(
             "catalog revision record unreadable; local maintenance required"
         )

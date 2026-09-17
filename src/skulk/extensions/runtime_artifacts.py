@@ -315,11 +315,16 @@ def _claimed_publisher(runtime: dict[str, JsonValue]) -> str | None:
 def protocol_refusal_sentence(
     kind: str, offered: int, accepted: tuple[int, ...]
 ) -> str:
-    """The one sentence every surface uses for a release outside the window."""
+    """The one sentence every surface uses for a record outside the window.
+
+    A catalog is named as such: the remedy is a catalog published for this
+    host, not another release.
+    """
     window = " or ".join(str(item) for item in accepted)
+    subject = "catalog" if kind == "catalog" else "release"
     return (
-        f"This host accepts {kind} protocol {window}; the release offers {offered}. "
-        "Update Skulk on this host, or choose a release published for it."
+        f"This host accepts {kind} protocol {window}; the {subject} offers {offered}. "
+        f"Update Skulk on this host, or choose a {subject} published for it."
     )
 
 

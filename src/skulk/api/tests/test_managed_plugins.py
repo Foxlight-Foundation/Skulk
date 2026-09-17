@@ -414,6 +414,7 @@ async def test_http_catalog_routes_read_a_verified_listing_without_disclosure(
                 "release_digest": "2" * 64,
                 "artifact_sha256": "3" * 64,
                 "artifact_size": 4096,
+                "transfer_bytes": 4096,
                 "platforms": ["darwin", "linux"],
                 "skulk_build_sha256": "a" * 64,
                 "permissions": ["local synthetic operation"],

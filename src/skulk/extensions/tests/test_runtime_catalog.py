@@ -8,7 +8,7 @@ from pathlib import Path
 import httpx
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from pydantic import SecretStr
+from pydantic import JsonValue, SecretStr, TypeAdapter
 
 from skulk.extensions.runtime_artifacts import (
     ProtocolUnsupportedError,
@@ -24,6 +24,13 @@ from skulk.extensions.runtime_catalog import (
 from skulk.extensions.runtime_files import private_directory, read_private
 
 PUBLISHER = "fixture"
+_RECORD: TypeAdapter[dict[str, JsonValue]] = TypeAdapter(dict[str, JsonValue])
+
+
+def _floors(raw: bytes) -> dict[str, JsonValue]:
+    floors = _RECORD.validate_json(raw)["floors"]
+    assert isinstance(floors, dict)
+    return floors
 
 
 def _entry(sequence: int, **overrides: object) -> dict[str, object]:
@@ -38,6 +45,7 @@ def _entry(sequence: int, **overrides: object) -> dict[str, object]:
         "release_digest": "2" * 64,
         "artifact_sha256": "3" * 64,
         "artifact_size": 4096,
+        "transfer_bytes": 4096,
         "platforms": ["darwin", "linux"],
         "skulk_build_sha256": "a" * 64,
         "permissions": ["local synthetic operation"],
@@ -284,11 +292,37 @@ async def test_the_host_catalog_configures_fetches_and_retains_without_disclosur
     served[0] = document
     with pytest.raises(ValueError, match="rollback"):
         await catalog.fetch()
-    # A damaged revision record fails closed rather than reading as first use.
+    # A damaged revision record fails closed rather than reading as first use,
+    # whether the file or one publisher's floor is the damaged part.
+    record = (tmp_path / "catalog-revision.json").read_bytes()
     (tmp_path / "catalog-revision.json").write_bytes(b"{not json")
     served[0] = _catalog(key, [_entry(1), _entry(2)], revision=11)
     with pytest.raises(ValueError, match="local maintenance"):
         await catalog.fetch()
+    damaged = _RECORD.validate_json(record)
+    _floors(record)[PUBLISHER] = {"revision": 0, "sha256": "short"}
+    damaged_floors = damaged["floors"]
+    assert isinstance(damaged_floors, dict)
+    damaged_floors[PUBLISHER] = {"revision": 0, "sha256": "short"}
+    (tmp_path / "catalog-revision.json").write_bytes(_RECORD.dump_json(damaged))
+    with pytest.raises(ValueError, match="local maintenance"):
+        await catalog.fetch()
+    (tmp_path / "catalog-revision.json").write_bytes(record)
+    assert (await catalog.fetch()).claims.revision == 11
+    # Retention keeps the newest documents and every accepted floor; a
+    # regularly updated catalog never runs out of room.
+    for revision in range(12, 24):
+        served[0] = _catalog(key, [_entry(1), _entry(2)], revision=revision)
+        await catalog.fetch()
+    floors = _floors((tmp_path / "catalog-revision.json").read_bytes())
+    retained_documents = list((tmp_path / "catalog").iterdir())
+    # The newest eight plus one accepted document per publisher, at most.
+    assert len(retained_documents) <= 8 + len(floors)
+    for entry in floors.values():
+        assert isinstance(entry, dict)
+        sha256 = entry["sha256"]
+        assert isinstance(sha256, str)
+        assert (tmp_path / "catalog" / (sha256 + ".json")).exists()
     await catalog.close()
     with pytest.raises(ValueError, match="closed"):
         await catalog.fetch()

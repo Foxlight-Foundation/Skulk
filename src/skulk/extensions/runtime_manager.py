@@ -16,7 +16,11 @@ from typing import Annotated, Literal, cast, final
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
 
-from skulk.extensions.runtime_artifacts import ProtocolUnsupportedError, measure_host
+from skulk.extensions.runtime_artifacts import (
+    ProtocolUnsupportedError,
+    QualifiedHost,
+    measure_host,
+)
 from skulk.extensions.runtime_attachment import (
     AttachmentJournal,
     AttachmentRequest,
@@ -258,9 +262,12 @@ class RuntimeManager:
         self.controllers: dict[str, RuntimeController] = {}
         self.downloads: dict[str, RuntimeDownloads] = {}
         self.catalog = HostCatalog(root)
-        # One catalog read at a time, measurement included: a second reader
-        # is refused as busy rather than hashing the tree in parallel.
+        # One catalog read at a time: a second reader is refused as busy.
+        # The host is measured once per manager lifetime (its environment
+        # is fixed while it runs), so no read repeats the tree hash and a
+        # cancelled first measurement cannot overlap a later one.
         self.catalog_read = asyncio.Lock()
+        self.host: QualifiedHost | None = None
         self.errors: dict[str, str] = {}
         self.server: asyncio.Server | None = None
         self.lock: RuntimeLock | None = None
@@ -571,7 +578,9 @@ class RuntimeManager:
                 raise ValueError("catalog source is busy")
             async with self.catalog_read:
                 verified = await self.catalog.fetch()
-                host = await asyncio.to_thread(measure_host)
+                if self.host is None:
+                    self.host = await asyncio.to_thread(measure_host)
+                host = self.host
             return verified.review(
                 skulk_build_sha256=host.skulk_build_sha256, platform=host.platform
             ).model_dump(mode="json")
