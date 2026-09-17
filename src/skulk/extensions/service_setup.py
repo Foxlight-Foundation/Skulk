@@ -112,6 +112,23 @@ def _save(root: Path, operation: SetupOperation) -> None:
     write_private(root / "setup.json", raw)
 
 
+def setup_state_names(root: Path, generation: str) -> bool:
+    """Whether the retained setup state already names ``generation``.
+
+    Missing or unreadable setup state counts as named: there is nothing to
+    reconcile without a setup operation to carry the generation.
+    """
+    try:
+        operation = SetupOperation.model_validate_json(
+            read_private(root / "setup.json")
+        )
+    except (OSError, ValueError):
+        return True
+    return (
+        operation.snapshot is not None and operation.snapshot.generation == generation
+    )
+
+
 def record_refreshed_snapshot(
     root: Path, snapshot: ServiceSnapshot, source_sha256: str
 ) -> None:

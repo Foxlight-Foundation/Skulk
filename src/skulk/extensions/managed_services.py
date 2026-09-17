@@ -45,6 +45,7 @@ from skulk.extensions.runtime_service import RuntimeServiceStatus
 from skulk.extensions.service_setup import (
     record_refreshed_snapshot,
     registered_unit_names_base,
+    setup_state_names,
 )
 from skulk.extensions.service_snapshot import (
     ServiceSnapshot,
@@ -335,6 +336,9 @@ class ManagedServices:
         # attempt, so after a staging failure no further attempt is made until
         # the host restarts (which is when its environment changes).
         self.runtime_refresh_exhausted = False
+        # The selected generation the setup state was last reconciled with,
+        # so an attached manager costs no file reads on every poll.
+        self.setup_reconciled: str | None = None
         self.guard = asyncio.Lock()
         self.closed = False
 
@@ -508,16 +512,42 @@ class ManagedServices:
                 f"{type(error).__name__}; the staged generation is retained"
             )
 
-    async def _record_refresh(self, root: Path, snapshot: ServiceSnapshot) -> None:
+    async def _record_refresh(
+        self,
+        root: Path,
+        snapshot: ServiceSnapshot,
+        message: str = (
+            "plugin manager runtime refreshed to this host's Skulk build; "
+            "the service restarts on it"
+        ),
+    ) -> None:
         # Setup state names the generation the service runs on, its build and
         # the source identity it was staged from; status verifies against it
         # and a setup rerun would otherwise stage and restart yet another
         # generation for the same build.
         source = await asyncio.to_thread(service_source_identity)
         record_refreshed_snapshot(root, snapshot, source)
-        logger.info(
-            "plugin manager runtime refreshed to this host's Skulk build; "
-            "the service restarts on it"
+        logger.info(message)
+
+    async def _reconcile_setup_state(self, root: Path, build: str) -> None:
+        """Make the setup state follow a selection the manager attached on.
+
+        A refresh that could not see the manager start (a bootstrap that
+        outlived the wait) recorded nothing; once the manager attaches on the
+        selected generation staged from this build, the setup state is the
+        only thing left behind, and no mismatch would ever schedule it.
+        """
+        selected = selected_generation_for(root, build)
+        if selected is None or self.setup_reconciled == selected.generation:
+            return
+        self.setup_reconciled = selected.generation
+        if setup_state_names(root, selected.generation):
+            return
+        await self._record_refresh(
+            root,
+            selected,
+            "plugin manager attached on the generation staged for this host's "
+            "Skulk build; the setup state now names it",
         )
 
     async def request(self, request: ManagementRequest) -> dict[str, JsonValue]:
@@ -556,6 +586,10 @@ class ManagedServices:
                     raise
                 assert self.connection is not None and self.context is not None
                 assert self.attachment is not None
+                if self.attachment.build is not None:
+                    await self._reconcile_setup_state(
+                        Path(self.connection.manager_root), self.attachment.build
+                    )
                 result = await manager_request(
                     Path(self.connection.manager_root), InventoryRequest()
                 )

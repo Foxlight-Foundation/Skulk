@@ -880,6 +880,76 @@ def test_a_reload_is_not_complete_until_a_manager_runs_the_selection(
     assert snapshot.generation.encode() in read_private(tmp_path / "core-runtime.json")
 
 
+async def test_an_attached_manager_on_a_selection_brings_the_setup_state_along(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A manager that started after the refresh's wait still gets its state recorded."""
+    from skulk.extensions import managed_services
+    from skulk.extensions.service_snapshot import ServiceSnapshot
+
+    selected = ServiceSnapshot(
+        generation="d" * 32,
+        manifest_sha256="e" * 64,
+        skulk_build_sha256="f" * 64,
+        copied_files=1,
+        copied_bytes=1,
+    )
+    generation = tmp_path / "core-runtimes" / selected.generation
+    private_directory(generation)
+    write_private(generation / "staged.json", selected.model_dump_json().encode())
+    write_private(
+        tmp_path / "core-runtime.json",
+        json.dumps(
+            {"generation": selected.generation, "manifest_sha256": "e" * 64}
+        ).encode(),
+    )
+    write_private(
+        tmp_path / "setup.json",
+        SetupOperation(
+            operation_id=PROFILE,
+            profile_id=PROFILE,
+            skulk_build_sha256="a" * 64,
+            source_sha256="c" * 64,
+            configuration_directory=str(tmp_path),
+            phase="ready",
+            snapshot=ServiceSnapshot(
+                generation="0" * 32,
+                manifest_sha256="e" * 64,
+                skulk_build_sha256="a" * 64,
+                copied_files=1,
+                copied_bytes=1,
+            ),
+        )
+        .model_dump_json()
+        .encode(),
+    )
+    identities: list[str] = []
+
+    def identity() -> str:
+        identities.append("9" * 64)
+        return "9" * 64
+
+    monkeypatch.setattr(managed_services, "service_source_identity", identity)
+    services = ManagedServices(tmp_path / "connection.json")
+    await services._reconcile_setup_state(  # pyright: ignore[reportPrivateUsage]
+        tmp_path, "f" * 64
+    )
+    recorded = SetupOperation.model_validate_json(read_private(tmp_path / "setup.json"))
+    assert recorded.snapshot == selected
+    assert recorded.source_sha256 == "9" * 64
+    # A second attach on the same selection reads nothing again.
+    await services._reconcile_setup_state(  # pyright: ignore[reportPrivateUsage]
+        tmp_path, "f" * 64
+    )
+    assert identities == ["9" * 64]
+    # A selection from another build is not this host's to record.
+    services.setup_reconciled = None
+    await services._reconcile_setup_state(  # pyright: ignore[reportPrivateUsage]
+        tmp_path, "b" * 64
+    )
+    assert identities == ["9" * 64]
+
+
 async def test_a_selection_without_a_restarted_manager_is_not_a_completed_refresh(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
