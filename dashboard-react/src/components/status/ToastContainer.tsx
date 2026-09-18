@@ -99,7 +99,7 @@ const Message = styled.p`
 
 const DismissBtn = styled(Button)`
   flex-shrink: 0;
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   &:hover:not(:disabled) { color: ${({ theme }) => theme.colors.textSecondary}; background: transparent; }
 `;
 

@@ -1,7 +1,7 @@
 import { forwardRef } from 'react';
 import styled, { css, keyframes } from 'styled-components';
 
-export type ButtonVariant = 'primary' | 'outline' | 'ghost' | 'danger';
+export type ButtonVariant = 'primary' | 'outline' | 'ghost' | 'danger' | 'solid' | 'approve';
 export type ButtonSize = 'sm' | 'md' | 'lg';
 
 export interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
@@ -32,8 +32,20 @@ const sizeFontMap: Record<ButtonSize, string> = {
 /* ---- variant styles ---- */
 
 const variantStyles: Record<ButtonVariant, ReturnType<typeof css>> = {
+  solid: css`
+    color: ${({ theme }) => theme.colors.textOnAccent};
+    background: ${({ theme }) => theme.colors.actionFill};
+    border: 1px solid ${({ theme }) => theme.colors.actionFill};
+    &:hover:not(:disabled) { filter: brightness(1.08); }
+  `,
+  approve: css`
+    color: ${({ theme }) => theme.colors.onLive};
+    background: ${({ theme }) => theme.colors.approvalFill};
+    border: 1px solid ${({ theme }) => theme.colors.approvalFill};
+    &:hover:not(:disabled) { background: ${({ theme }) => theme.colors.approvalFill}; }
+  `,
   primary: css`
-    color: ${({ theme }) => theme.colors.gold};
+    color: ${({ theme }) => theme.colors.accentText};
     border: 1px solid ${({ theme }) => theme.colors.goldDim};
     background: transparent;
 
@@ -52,7 +64,7 @@ const variantStyles: Record<ButtonVariant, ReturnType<typeof css>> = {
     background: transparent;
 
     &:hover:not(:disabled) {
-      color: ${({ theme }) => theme.colors.gold};
+      color: ${({ theme }) => theme.colors.accentText};
       border-color: ${({ theme }) => theme.colors.goldDim};
     }
 
@@ -61,12 +73,12 @@ const variantStyles: Record<ButtonVariant, ReturnType<typeof css>> = {
     }
   `,
   ghost: css`
-    color: ${({ theme }) => theme.colors.textMuted};
+    color: ${({ theme }) => theme.colors.textSecondary};
     border: 1px solid transparent;
     background: transparent;
 
     &:hover:not(:disabled) {
-      color: ${({ theme }) => theme.colors.gold};
+      color: ${({ theme }) => theme.colors.accentText};
       background: ${({ theme }) => theme.colors.goldBg};
     }
 
@@ -75,7 +87,7 @@ const variantStyles: Record<ButtonVariant, ReturnType<typeof css>> = {
     }
   `,
   danger: css`
-    color: ${({ theme }) => theme.colors.textSecondary};
+    color: ${({ theme }) => theme.colors.body};
     border: 1px solid ${({ theme }) => theme.colors.border};
     background: transparent;
 
@@ -124,7 +136,7 @@ const StyledButton = styled.button<{
   gap: 6px;
   font-family: ${({ theme }) => theme.fonts.body};
   border-radius: ${({ theme }) => theme.radii.md};
-  transition: all 0.15s;
+  transition: color 120ms, background 120ms, border-color 120ms;
   white-space: nowrap;
   user-select: none;
 
@@ -147,16 +159,21 @@ const StyledButton = styled.button<{
   /* Variant */
   ${({ $variant }) => variantStyles[$variant]}
 
+  @media (pointer: coarse) {
+    min-height: 44px;
+    ${({ $icon }) => $icon && css`min-width: 44px;`}
+  }
+
   /* Disabled */
   &:disabled {
-    opacity: 0.88;
+    opacity: 0.45;
     cursor: not-allowed;
   }
 
   /* Keyboard focus — all: unset removes the browser outline. */
   &:focus-visible {
     outline: none;
-    box-shadow: 0 0 0 2px ${({ theme }) => theme.colors.goldDim};
+    box-shadow: ${({ theme }) => theme.colors.focusRing};
   }
 `;
 
@@ -182,10 +199,12 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
       $size={size}
       $icon={icon}
       $block={block}
+      aria-busy={loading || undefined}
       disabled={disabled || loading}
       {...rest}
     >
-      {loading ? <Spinner $size={size} /> : children}
+      {loading ? <Spinner $size={size} aria-hidden="true" /> : null}
+      {children}
     </StyledButton>
   ),
 );

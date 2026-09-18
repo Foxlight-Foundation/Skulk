@@ -1,3 +1,4 @@
+import { createPortal } from 'react-dom';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { QRCodeCanvas } from 'qrcode.react';
 import styled from 'styled-components';
@@ -10,22 +11,23 @@ import {
   PairingInvitationRequestError,
   type CreatedPairingInvitation,
   type PairingInvitationState,
+  type PairingInvitationSummary,
   useGetPairingInvitationsQuery,
   useRevokePairingInvitationMutation,
 } from '../../store/endpoints/pairing';
 import { Button } from '../common/Button';
 
-const pairingCodeDisplayMilliseconds = 5 * 60 * 1_000;
-const defaultInvitationLifetimeSeconds = 5 * 60;
+const pairingCodeDisplayMilliseconds = 300 * 1_000;
+const defaultInvitationLifetimeSeconds = 300;
 const defaultMaximumPairings = 1;
 
 const invitationLifetimeOptions = [
-  5 * 60,
-  60 * 60,
-  24 * 60 * 60,
-  7 * 24 * 60 * 60,
-  30 * 24 * 60 * 60,
-  90 * 24 * 60 * 60,
+  300,
+  3600,
+  86400,
+  604800,
+  2592000,
+  7776000,
 ] as const;
 
 const Fieldset = styled.fieldset`
@@ -41,7 +43,7 @@ const Legend = styled.legend`
   font-size: ${({ theme }) => theme.fontSizes.label};
   font-family: ${({ theme }) => theme.fonts.body};
   font-weight: 600;
-  color: ${({ theme }) => theme.colors.textSecondary};
+  color: ${({ theme }) => theme.colors.body};
   padding: 0 6px;
 `;
 
@@ -49,7 +51,7 @@ const Intro = styled.p`
   margin: 0;
   font-size: ${({ theme }) => theme.fontSizes.sm};
   line-height: 1.5;
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.body};
 `;
 
 const FormGrid = styled.div`
@@ -64,7 +66,7 @@ const Control = styled.label`
   gap: 6px;
   min-width: 0;
   font-size: ${({ theme }) => theme.fontSizes.xs};
-  color: ${({ theme }) => theme.colors.textSecondary};
+  color: ${({ theme }) => theme.colors.body};
 `;
 
 const Select = styled.select`
@@ -101,7 +103,8 @@ const QrFrame = styled.div`
   box-shadow: 0 10px 28px ${({ theme }) => theme.colors.shadow};
 
   canvas {
-    width: min(280px, 68vw) !important;
+    width: 100% !important;
+    max-width: 280px;
     height: auto !important;
   }
 `;
@@ -118,7 +121,7 @@ const QrMeta = styled.div`
   flex-wrap: wrap;
   justify-content: center;
   gap: 6px 12px;
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.body};
   font-size: ${({ theme }) => theme.fontSizes.xs};
   text-align: center;
 `;
@@ -160,7 +163,7 @@ const InvitationList = styled.div`
 const ListTitle = styled.div`
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-weight: 600;
-  color: ${({ theme }) => theme.colors.textSecondary};
+  color: ${({ theme }) => theme.colors.body};
   text-transform: uppercase;
   letter-spacing: 0.08em;
 `;
@@ -187,7 +190,7 @@ const InvitationHeadline = styled.div`
   align-items: center;
   flex-wrap: wrap;
   gap: 6px;
-  color: ${({ theme }) => theme.colors.textSecondary};
+  color: ${({ theme }) => theme.colors.body};
   font-size: ${({ theme }) => theme.fontSizes.sm};
 `;
 
@@ -197,21 +200,21 @@ const StatePill = styled.span<{ $state: PairingInvitationState }>`
   border-radius: 999px;
   padding: 2px 7px;
   background: ${({ $state, theme }) =>
-    $state === 'active' ? theme.colors.infoBg : theme.colors.surfaceElevated};
+    $state === 'active' ? theme.colors.liveBg : theme.colors.surfaceElevated};
   color: ${({ $state, theme }) =>
-    $state === 'active' ? theme.colors.info : theme.colors.textMuted};
+    $state === 'active' ? theme.colors.liveText : theme.colors.subtleText};
   font-family: ${({ theme }) => theme.fonts.mono};
   font-size: 10px;
 `;
 
 const InvitationMeta = styled.div`
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.body};
   font-size: ${({ theme }) => theme.fontSizes.xs};
   line-height: 1.4;
 `;
 
 /** Dashboard pairing invitation creation, display, and revocation controls. */
-export function PairingSettings() {
+export function PairingSettings({ invitationHost }: { invitationHost?: HTMLElement | null }) {
   const { t } = useSkulkTranslation();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [validForSeconds, setValidForSeconds] = useState(defaultInvitationLifetimeSeconds);
@@ -324,9 +327,18 @@ export function PairingSettings() {
       "Skulk could not load pairing invitations. Open Settings on the configured operator gateway through Tailscale using its MagicDNS name or Tailscale IP, or through localhost. Public relay and ordinary LAN access cannot manage pairing invitations.",
     );
 
+  const invitationList = (invitations && invitations.length > 0 ? (
+        <InvitationList>
+          <ListTitle>{t('settings.pairing.recent', 'Recent invitations')}</ListTitle>
+          {[...invitations].reverse().map((invitation) => (
+            <PairingInvitationRow key={invitation.invitationId} invitation={invitation} busy={revokeResult.isLoading} onRevoke={() => void revoke(invitation.invitationId)} />
+          ))}
+        </InvitationList>
+      ) : null);
+
   return (
     <Fieldset>
-      <Legend>{t('settings.pairing.legend', 'Pairing')}</Legend>
+      <Legend>{t('settings.pairing.newDevice', 'Pair a new device')}</Legend>
       {created === null ? (
         <>
           <Intro>
@@ -431,39 +443,7 @@ export function PairingSettings() {
         <ErrorText role="alert">{invitationListErrorMessage}</ErrorText>
       ) : null}
 
-      {invitations && invitations.length > 0 ? (
-        <InvitationList>
-          <ListTitle>{t('settings.pairing.recent', 'Recent invitations')}</ListTitle>
-          {[...invitations].reverse().map((invitation) => (
-            <InvitationRow key={invitation.invitationId}>
-              <InvitationCopy>
-                <InvitationHeadline>
-                  <span>{new Date(invitation.createdAt).toLocaleDateString()}</span>
-                  <StatePill $state={invitation.state}>
-                    {stateLabel(invitation.state, t)}
-                  </StatePill>
-                </InvitationHeadline>
-                <InvitationMeta>
-                  {invitation.successfulPairings}/{invitation.maxPairings}{' '}
-                  {t('settings.pairing.paired', 'paired')} ·{' '}
-                  {t('settings.pairing.expires', 'Expires')}{' '}
-                  {new Date(invitation.expiresAt).toLocaleString()}
-                </InvitationMeta>
-              </InvitationCopy>
-              {invitation.state === 'active' ? (
-                <Button
-                  loading={revokeResult.isLoading}
-                  onClick={() => void revoke(invitation.invitationId)}
-                  size="sm"
-                  variant="danger"
-                >
-                  {t('settings.pairing.revoke', 'Revoke')}
-                </Button>
-              ) : null}
-            </InvitationRow>
-          ))}
-        </InvitationList>
-      ) : null}
+      {invitationHost ? createPortal(invitationList, invitationHost) : invitationList}
     </Fieldset>
   );
 }
@@ -496,17 +476,48 @@ function durationLabel(
   t: (key: string, fallback: string) => string,
 ): string {
   switch (seconds) {
-    case 5 * 60:
+    case 300:
       return t('settings.pairing.durationFiveMinutes', '5 minutes');
-    case 60 * 60:
+    case 3600:
       return t('settings.pairing.durationOneHour', '1 hour');
-    case 24 * 60 * 60:
+    case 86400:
       return t('settings.pairing.durationOneDay', '1 day');
-    case 7 * 24 * 60 * 60:
+    case 604800:
       return t('settings.pairing.durationSevenDays', '7 days');
-    case 30 * 24 * 60 * 60:
+    case 2592000:
       return t('settings.pairing.durationThirtyDays', '30 days');
-    case 90 * 24 * 60 * 60:
+    case 7776000:
       return t('settings.pairing.durationNinetyDays', '90 days');
   }
+}
+
+/** Secret-free invitation evidence and an immediate revoke action. */
+export function PairingInvitationRow({ invitation, busy, onRevoke }: { invitation: PairingInvitationSummary; busy: boolean; onRevoke: () => void }) {
+  const { t } = useSkulkTranslation();
+  return (            <InvitationRow>
+              <InvitationCopy>
+                <InvitationHeadline>
+                  <span>{new Date(invitation.createdAt).toLocaleDateString()}</span>
+                  <StatePill $state={invitation.state}>
+                    {stateLabel(invitation.state, t)}
+                  </StatePill>
+                </InvitationHeadline>
+                <InvitationMeta>
+                  {invitation.successfulPairings}/{invitation.maxPairings}{' '}
+                  {t('settings.pairing.paired', 'paired')} ·{' '}
+                  {t('settings.pairing.expires', 'Expires')}{' '}
+                  {new Date(invitation.expiresAt).toLocaleString()}
+                </InvitationMeta>
+              </InvitationCopy>
+              {invitation.state === 'active' ? (
+                <Button
+                  loading={busy}
+                  onClick={onRevoke}
+                  size="sm"
+                  variant="danger"
+                >
+                  {t('settings.pairing.revoke', 'Revoke')}
+                </Button>
+              ) : null}
+            </InvitationRow>);
 }

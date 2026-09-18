@@ -21,7 +21,7 @@ export const Interactive: Story = {
   render: () => {
     const [src, setSrc] = useState<string | null>(null);
     return (
-      <div style={{ padding: 24, background: '#111', minHeight: '100vh' }}>
+      <div style={{ padding: 24, minHeight: '100vh' }}>
         <button
           style={{ padding: '8px 16px', background: '#333', color: '#FFD700', border: '1px solid rgba(255,215,0,0.3)', borderRadius: 6, cursor: 'pointer', fontFamily: 'monospace' }}
           onClick={() => setSrc(SAMPLE_IMAGE)}

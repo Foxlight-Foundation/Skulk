@@ -4,9 +4,8 @@ import { AcceleratorPanel } from './AcceleratorPanel';
 const Frame = ({ children }: { children: React.ReactNode }) => (
   <div
     style={{
-      width: 260,
+      width: 'min(260px, calc(100vw - 48px))',
       padding: 16,
-      background: '#0b0b0d',
       border: '1px solid #2a2a2e',
       borderRadius: 8,
     }}

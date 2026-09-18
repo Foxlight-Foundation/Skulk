@@ -22,6 +22,7 @@ export interface ImageGenerationParams {
   numSyncSteps: number | null;
 }
 
+// eslint-disable-next-line react-refresh/only-export-components -- The immutable defaults are also used by the image request owner.
 export const DEFAULT_IMAGE_PARAMS: ImageGenerationParams = {
   size: 'auto',
   quality: 'medium',
@@ -68,7 +69,7 @@ const ParamGroup = styled.div`
 
 const Label = styled.span`
   font-size: ${({ theme }) => theme.fontSizes.xs};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
 `;
 
 const Select = styled.select`
@@ -82,7 +83,7 @@ const Select = styled.select`
   cursor: pointer;
 
   &:focus-visible {
-    border-color: ${({ theme }) => theme.colors.gold};
+    border-color: ${({ theme }) => theme.colors.accentText};
     outline: none;
     box-shadow: 0 0 0 2px ${({ theme }) => theme.colors.goldDim};
   }
@@ -105,13 +106,13 @@ const ToggleBtn = styled.button<{ $active: boolean }>`
   ${({ $active }) =>
     $active
       ? css`
-          background: ${({ theme }) => theme.colors.gold};
+          background: ${({ theme }) => theme.colors.actionFill};
           color: ${({ theme }) => theme.colors.textOnAccent};
           font-weight: 600;
         `
       : css`
           background: ${({ theme }) => theme.colors.surfaceSunken};
-          color: ${({ theme }) => theme.colors.textMuted};
+          color: ${({ theme }) => theme.colors.subtleText};
           &:hover { color: ${({ theme }) => theme.colors.text}; }
         `}
 `;
@@ -127,7 +128,7 @@ const Switch = styled.button<{ $on: boolean }>`
 
   ${({ $on }) =>
     $on
-      ? css`background: ${({ theme }) => theme.colors.gold};`
+      ? css`background: ${({ theme }) => theme.colors.actionFill};`
       : css`background: ${({ theme }) => theme.colors.surfaceSunken}; border: 1px solid ${({ theme }) => theme.colors.border};`}
 
   &::after {
@@ -158,7 +159,7 @@ const NumberInput = styled.input`
     -webkit-appearance: none;
     margin: 0;
   }
-  &:focus-visible { border-color: ${({ theme }) => theme.colors.gold}; outline: none; box-shadow: 0 0 0 2px ${({ theme }) => theme.colors.goldDim}; }
+  &:focus-visible { border-color: ${({ theme }) => theme.colors.accentText}; outline: none; box-shadow: 0 0 0 2px ${({ theme }) => theme.colors.goldDim}; }
 `;
 
 const Divider = styled.div`
@@ -177,7 +178,7 @@ const AdvancedToggle = styled(Button)<{ $hasParams: boolean }>`
         width: 6px;
         height: 6px;
         border-radius: 50%;
-        background: ${({ theme }) => theme.colors.gold};
+        background: ${({ theme }) => theme.colors.actionFill};
       }
     `}
 `;
@@ -209,7 +210,7 @@ const RangeInput = styled.input`
     width: 12px;
     height: 12px;
     border-radius: 50%;
-    background: ${({ theme }) => theme.colors.gold};
+    background: ${({ theme }) => theme.colors.actionFill};
     cursor: pointer;
   }
 
@@ -217,7 +218,7 @@ const RangeInput = styled.input`
     width: 12px;
     height: 12px;
     border-radius: 50%;
-    background: ${({ theme }) => theme.colors.gold};
+    background: ${({ theme }) => theme.colors.actionFill};
     cursor: pointer;
     border: none;
   }
@@ -235,8 +236,8 @@ const TextArea = styled.textarea`
   padding: 6px 8px;
   resize: none;
   box-sizing: border-box;
-  &::placeholder { color: ${({ theme }) => theme.colors.textMuted}; }
-  &:focus-visible { border-color: ${({ theme }) => theme.colors.gold}; outline: none; box-shadow: 0 0 0 2px ${({ theme }) => theme.colors.goldDim}; }
+  &::placeholder { color: ${({ theme }) => theme.colors.subtleText}; }
+  &:focus-visible { border-color: ${({ theme }) => theme.colors.accentText}; outline: none; box-shadow: 0 0 0 2px ${({ theme }) => theme.colors.goldDim}; }
 `;
 
 const ResetBtn = styled(Button)`
@@ -265,7 +266,7 @@ export function ImageParamsPanel({ params, onChange, isEditMode = false }: Image
       {/* Size */}
       <ParamGroup>
         <Label>{t('common.size', 'Size')}</Label>
-        <Select value={params.size} onChange={(e) => update({ size: e.target.value })}>
+        <Select aria-label={t('common.size', 'Size')} value={params.size} onChange={(e) => update({ size: e.target.value })}>
           {SIZE_OPTIONS.map((s) => (
             <option key={s} value={s}>{s}</option>
           ))}
@@ -315,7 +316,7 @@ export function ImageParamsPanel({ params, onChange, isEditMode = false }: Image
       ) : (
         <ParamGroup>
           <Label>{t('imageParams.images', 'Images')}</Label>
-          <NumberInput
+          <NumberInput aria-label="Images"
             type="number"
             min={1}
             value={params.numImages}
@@ -328,11 +329,11 @@ export function ImageParamsPanel({ params, onChange, isEditMode = false }: Image
       {!isEditMode && (
         <ParamGroup>
           <Label>{t('imageParams.stream', 'Stream')}</Label>
-          <Switch $on={params.stream} onClick={() => update({ stream: !params.stream })} />
+          <Switch role="switch" aria-label={t('imageParams.stream', 'Stream')} aria-checked={params.stream} $on={params.stream} onClick={() => update({ stream: !params.stream })} />
           {params.stream && (
             <>
               <Label>{t('imageParams.partial', 'Partial')}</Label>
-              <NumberInput
+              <NumberInput aria-label="Partial images"
                 type="number"
                 min={0}
                 value={params.partialImages}
@@ -359,7 +360,7 @@ export function ImageParamsPanel({ params, onChange, isEditMode = false }: Image
           {/* Seed + Steps */}
           <ParamGroup style={{ flexWrap: 'wrap' }}>
             <Label>{t('imageParams.seed', 'Seed')}</Label>
-            <NumberInput
+            <NumberInput aria-label="Seed"
               type="number"
               min={0}
               value={params.seed ?? ''}
@@ -368,7 +369,7 @@ export function ImageParamsPanel({ params, onChange, isEditMode = false }: Image
             />
             <Label>{t('imageParams.steps', 'Steps')}</Label>
             <SliderRow>
-              <RangeInput
+              <RangeInput aria-label="Steps"
                 type="range" min={1} max={100}
                 value={params.numInferenceSteps ?? 50}
                 onChange={(e) => update({ numInferenceSteps: parseInt(e.target.value) })}
@@ -384,7 +385,7 @@ export function ImageParamsPanel({ params, onChange, isEditMode = false }: Image
           <ParamGroup>
             <Label>{t('imageParams.guidance', 'Guidance')}</Label>
             <SliderRow>
-              <RangeInput
+              <RangeInput aria-label="Guidance"
                 type="range" min={1} max={20} step={0.5}
                 value={params.guidance ?? 7.5}
                 onChange={(e) => update({ guidance: parseFloat(e.target.value) })}

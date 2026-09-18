@@ -7,7 +7,7 @@ const meta: Meta<typeof ChatAttachments> = {
   title: 'Chat/ChatAttachments',
   component: ChatAttachments,
   parameters: { layout: 'centered' },
-  decorators: [(Story) => <div style={{ width: 500, padding: 16, background: '#111' }}><Story /></div>],
+  decorators: [(Story) => <div style={{ width: 'min(500px, calc(100vw - 48px))', padding: 16, }}><Story /></div>],
 };
 
 export default meta;

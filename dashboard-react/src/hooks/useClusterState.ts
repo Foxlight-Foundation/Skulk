@@ -504,6 +504,7 @@ export function useClusterState(): ClusterState {
     if (stateQuery.isError) {
       failuresRef.current += 1;
       if (failuresRef.current >= CONNECTION_LOST_THRESHOLD) {
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- Connection health follows the external RTK polling result and failure counter.
         setConnected(false);
       }
     } else if (stateQuery.isSuccess && !stateQuery.isFetching) {

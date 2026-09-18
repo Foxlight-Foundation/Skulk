@@ -14,7 +14,7 @@ const meta: Meta<typeof Field> = {
   parameters: { layout: 'centered' },
   decorators: [
     (Story) => (
-      <div style={{ width: 300, padding: 20, background: '#000' }}>
+      <div style={{ width: 'min(300px, calc(100vw - 48px))', padding: 20, }}>
         <Story />
       </div>
     ),

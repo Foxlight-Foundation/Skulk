@@ -1,4 +1,6 @@
-import { useState } from 'react';
+import { derivePluginHealth, type PluginFilter } from './pluginHealth';
+import type { PluginNodes } from '../../store/endpoints/plugins';
+import { useState, type ReactNode } from 'react';
 import styled from 'styled-components';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 import {
@@ -7,6 +9,8 @@ import {
   useRegisterManagedRuntimeMutation,
   type ManagedRuntime,
 } from '../../store/endpoints/plugins';
+import { RightDrawer } from '../common/RightDrawer';
+import { PluginSummaryCard } from '../common/PluginSummaryCard';
 import { Button } from '../common/Button';
 import { RuntimeReleasePanel } from './RuntimeReleasePanel';
 import { RuntimeSourceForm } from './RuntimeSourceForm';
@@ -19,8 +23,10 @@ const RuntimeCard = styled.article`
 const Actions = styled.div`display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px;`;
 
 /** Read server-retained operation references; reconnect never submits another mutation. */
-function RuntimeControls({ runtime, unavailable }: { runtime: ManagedRuntime; unavailable: boolean }) {
+function RuntimeControls({ runtime, unavailable, nodes, details, nodeEvidence, filter }: { nodeEvidence?: PluginNodes; filter: PluginFilter; runtime: ManagedRuntime; unavailable: boolean; nodes: string[]; details?: ReactNode }) {
   const { t } = useSkulkTranslation();
+  const [expanded, setExpanded] = useState(false);
+  const [width, setWidth] = useState(640);
   const [notice, setNotice] = useState('');
   const [submitted, setSubmitted] = useState<string | null>(null);
   const [releaseOpen, setReleaseOpen] = useState(false);
@@ -64,7 +70,21 @@ function RuntimeControls({ runtime, unavailable }: { runtime: ManagedRuntime; un
       setNotice(t('plugins.runtimeRecoveryFailed', 'Recovery was refused. Check service health and your plugin permissions.'));
     }
   };
-  return <RuntimeCard aria-label={runtime.plugin_id}>
+  const category = derivePluginHealth(runtime, nodeEvidence, unavailable || !!operation.error, state);
+  const health = {
+    healthy: t('plugins.healthy', 'Healthy'), attention: t('plugins.needsAttention', 'Needs attention'),
+    uninstalled: t('plugins.uninstalled', 'Uninstalled'), unknown: t('plugins.healthUnknown', 'Status unavailable'),
+    updating: t('plugins.updating', 'Updating'), disabled: t('plugins.disabled', 'Disabled'),
+  }[category];
+  return <>
+    <div hidden={filter !== 'all' && filter !== category}>
+    <PluginSummaryCard name={runtime.plugin_id} health={health} tone={category === 'healthy' ? 'healthy' : category === 'attention' ? 'danger' : category === 'updating' ? 'live' : 'neutral'}
+      release={runtime.selected_digest?.slice(0, 12) ?? t('plugins.noRelease', 'None selected')} nodes={nodes} onOpen={() => setExpanded(true)} />
+    </div>
+    <RightDrawer open={expanded} onClose={() => setExpanded(false)} title={runtime.plugin_id} ariaLabel={t('plugins.runtimeDetails', 'Runtime details')}
+      width={width} minWidth={360} maxWidth={900} onWidthChange={setWidth} closeLabel={t('common.close', 'Close')} resizeLabel={t('plugins.resize', 'Resize plugin details')}>
+    <div style={{ overflowY: 'auto' }}><RuntimeCard aria-label={runtime.plugin_id}>
+    {details}
     <h3>{runtime.plugin_id}</h3>
     <p>{runtime.uninstalled ? t('plugins.runtimeUninstalled', 'Plugin uninstalled; cleanup state retained') : runtime.enabled ? t('plugins.runtimeEnabled', 'Runtime enabled') : t('plugins.runtimeDisabled', 'Runtime disabled')}</p>
     <p>{t('plugins.selectedRelease', 'Selected release')}: {runtime.selected_digest?.slice(0, 12) ?? t('plugins.noRelease', 'None selected')}</p>
@@ -84,11 +104,20 @@ function RuntimeControls({ runtime, unavailable }: { runtime: ManagedRuntime; un
     {notice && state !== 'complete' ? <p role="status">{notice}</p> : null}
     <Button type="button" onClick={() => setReleaseOpen(!releaseOpen)}>{releaseOpen ? t('plugins.closeReleaseInstallation', 'Close release installation') : t('plugins.openReleaseInstallation', 'Install a release')}</Button>
     {releaseOpen ? <RuntimeReleasePanel runtime={runtime} /> : null}
-  </RuntimeCard>;
+  </RuntimeCard></div></RightDrawer></>;
 }
 
 /** Observe independently supervised runtimes even when no plugin child is available. */
-export function ManagedRuntimesPanel() {
+export function ManagedRuntimesPanel({ nodeNames = () => [], renderDetails, nodeEvidence, filter = 'all' }: {
+  /** Fresh node evidence for derived card health. */
+  nodeEvidence?: (pluginId: string) => PluginNodes | undefined;
+  /** Hide cards while retaining their request ownership. */
+  filter?: PluginFilter;
+  /** Installed node labels associated with one runtime. */
+  nodeNames?: (pluginId: string) => string[];
+  /** Existing fenced node workflows to compose inside runtime details. */
+  renderDetails?: (pluginId: string) => ReactNode;
+} = {}) {
   const { t } = useSkulkTranslation();
   const query = useGetManagedRuntimesQuery(undefined, { pollingInterval: 5000, skipPollingIfUnfocused: true });
   const [register, registering] = useRegisterManagedRuntimeMutation();
@@ -113,6 +142,6 @@ export function ManagedRuntimesPanel() {
     {query.isLoading ? <p>{t('plugins.loadingRuntimes', 'Loading local services…')}</p> : null}
     {query.error ? <p role="status">{t('plugins.managerUnavailable', 'Local runtime management is unavailable. Check local service setup and your plugin permissions.')}</p> : null}
     {query.data?.installations.length === 0 ? <p>{t('plugins.noManagedRuntimes', 'No managed runtimes are installed.')}</p> : null}
-    {query.data?.installations.map((runtime) => <RuntimeControls key={runtime.plugin_id} runtime={runtime} unavailable={!!query.error} />)}
+    {query.data?.installations.map((runtime) => <RuntimeControls key={runtime.plugin_id} runtime={runtime} filter={filter} nodeEvidence={nodeEvidence?.(runtime.plugin_id)} unavailable={!!query.error} nodes={nodeNames(runtime.plugin_id)} details={renderDetails?.(runtime.plugin_id)} />)}
   </section>;
 }

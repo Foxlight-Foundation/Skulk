@@ -1,3 +1,4 @@
+import { FixtureProvider } from './fixtures';
 import type { Preview } from '@storybook/react-vite';
 import { ThemeProvider } from 'styled-components';
 import { TolgeeProvider } from '@tolgee/react';
@@ -9,6 +10,7 @@ type ThemeName = 'light' | 'dark';
 
 /** Hooks must run inside a React component, not directly in a Storybook
  *  decorator function — extract the side effect into a wrapper component. */
+// eslint-disable-next-line react-refresh/only-export-components -- Storybook exports configuration; the local decorator supplies its theme context.
 const ThemeWrapper = ({ themeName, children }: { themeName: ThemeName; children: ReactNode }) => {
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', themeName);
@@ -21,7 +23,7 @@ const ThemeWrapper = ({ themeName, children }: { themeName: ThemeName; children:
           render instead of throwing "no TolgeeProvider". Falls back to the
           bundled English namespace. */}
       <TolgeeProvider tolgee={tolgee} fallback={null}>
-        {children}
+        <div style={{ color: activeTheme.colors.body }}>{children}</div>
       </TolgeeProvider>
     </ThemeProvider>
   );
@@ -37,7 +39,7 @@ const withTheme = (Story: () => ReactNode, context: { globals: { theme?: string 
 };
 
 const preview: Preview = {
-  decorators: [withTheme],
+  decorators: [withTheme, (Story, context) => <FixtureProvider storyId={context.id} theme={context.globals.theme === 'light' ? 'light' : 'dark'}><Story /></FixtureProvider>],
   globalTypes: {
     theme: {
       name: 'Theme',
@@ -46,8 +48,8 @@ const preview: Preview = {
       toolbar: {
         icon: 'circlehollow',
         items: [
-          { value: 'dark', icon: 'circle', title: 'Dark' },
-          { value: 'light', icon: 'circlehollow', title: 'Light' },
+          { value: 'dark', icon: 'circle', title: 'Night' },
+          { value: 'light', icon: 'circlehollow', title: 'Noon Ridge' },
         ],
         dynamicTitle: true,
       },

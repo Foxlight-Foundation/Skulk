@@ -18,7 +18,7 @@ import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { uiActions } from '../../store/slices/uiSlice';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 import { useGetStewardStatusQuery } from '../../store/endpoints/steward';
-import { MOBILE_BREAKPOINT_PX } from '../../hooks/useMediaQuery';
+import { MOBILE_BREAKPOINT_PX, useCompactHeader } from '../../hooks/useMediaQuery';
 
 export type NavRoute =
   | 'cluster'
@@ -52,6 +52,9 @@ export interface HeaderNavProps {
   instancesHealthy?: boolean;
   downloadProgress?: { count: number; percentage: number } | null;
   warnings?: { level: 'error' | 'warning'; items: { level: 'error' | 'warning'; message: string }[] } | null;
+  /** Open the shared Steward drawer without submitting a prompt. */
+  onOpenSteward?: () => void;
+  stewardOpen?: boolean;
   onOpenSettings?: () => void;
   className?: string;
 }
@@ -93,7 +96,7 @@ const ToggleBtn = styled(Button)<{ $active: boolean }>`
   ${({ $active }) =>
     $active &&
     css`
-      color: ${({ theme }) => theme.colors.gold};
+      color: ${({ theme }) => theme.colors.accentText};
       border-color: ${({ theme }) => theme.colors.goldDim};
     `}
 `;
@@ -146,7 +149,7 @@ const NavLink = styled.button<{ $active?: boolean }>`
 
   &:hover {
     border-color: ${({ theme }) => theme.colors.goldDim};
-    color: ${({ theme }) => theme.colors.gold};
+    color: ${({ theme }) => theme.colors.accentText};
   }
 `;
 
@@ -368,11 +371,13 @@ export function HeaderNav({
   onToggleMobileMenu,
   mobileRightOpen = false,
   onToggleMobileRight,
-  compact = false,
+  compact: compactOverride,
   instanceCount = 0,
   instancesHealthy = true,
   downloadProgress = null,
   warnings = null,
+  onOpenSteward,
+  stewardOpen = false,
   onOpenSettings,
   className,
 }: HeaderNavProps) {
@@ -382,6 +387,8 @@ export function HeaderNav({
     pollingInterval: 30000,
   });
   const stewardEnabled = stewardStatus?.enabled ?? false;
+  const compactViewport = useCompactHeader();
+  const compact = compactOverride ?? compactViewport;
   const { t } = useSkulkTranslation();
   const theme = useTheme() as Theme;
   const dispatch = useAppDispatch();
@@ -464,11 +471,7 @@ export function HeaderNav({
           <ChatIcon /> {t('header.nav.chat', 'Chat')}
         </NavLink>
 
-        {stewardEnabled && (
-          <NavLink $active={activeRoute === 'steward'} onClick={() => navigate('steward')}>
-            <StewardIcon /> {t('header.nav.steward', 'Skulk')}
-          </NavLink>
-        )}
+
 
         <NavLink $active={activeRoute === 'integrations'} onClick={() => navigate('integrations')}>
           <IntegrationsIcon /> {t('header.nav.integrations', 'Integrations')}
@@ -500,7 +503,7 @@ export function HeaderNav({
                 dominantBaseline="central"
                 fill={instancesHealthy ? theme.colors.healthy : theme.colors.error}
                 fontSize="13"
-                fontFamily="'Outfit', sans-serif"
+                fontFamily="'Instrument Sans', sans-serif"
                 fontWeight="700"
               >
                 {instanceCount}
@@ -509,6 +512,8 @@ export function HeaderNav({
           </InstanceToggle>
         )}
 
+        {compact && stewardEnabled && <Button variant="ghost" size="lg" icon onClick={onOpenSteward ?? (() => navigate('steward'))} aria-label={t('steward.open', 'Ask Skulk')} aria-pressed={stewardOpen}
+          style={stewardOpen ? { color: theme.colors.live, borderColor: theme.colors.borderLive, background: theme.colors.liveBg } : undefined}><StewardIcon /></Button>}
         {!compact && (<>
         <Button
           variant="ghost"
@@ -525,6 +530,8 @@ export function HeaderNav({
           {themeName === 'dark' ? <FiSun size={16} /> : <FiMoon size={16} />}
         </Button>
 
+        {stewardEnabled && <Button variant="ghost" size="lg" icon onClick={onOpenSteward ?? (() => navigate('steward'))} aria-label={t('steward.open', 'Ask Skulk')} aria-pressed={stewardOpen}
+          style={stewardOpen ? { color: theme.colors.live, borderColor: theme.colors.borderLive, background: theme.colors.liveBg } : undefined}><StewardIcon /></Button>}
         <Button
           variant={observabilityPanelOpen ? 'outline' : 'ghost'}
           size="lg"

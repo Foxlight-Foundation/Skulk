@@ -16,6 +16,13 @@ import {
 import { MAX_REFERENCE_AUDIO_BYTES } from '../../audio/speechSynthesisRequest';
 
 export interface ChatFormProps {
+  /** Fabric conversation uses the reference amber composer treatment. */
+  steward?: boolean;
+  /** Optional owner-controlled draft, preserved across presentation changes. */
+  draft?: string;
+  /** Updates the owner-controlled draft. */
+  onDraftChange?: (value: string) => void;
+
   onSend: (message: string, files: ChatUploadedFile[]) => void;
   onCancel?: () => void;
   isLoading?: boolean;
@@ -102,7 +109,8 @@ export interface ChatFormProps {
 
 /* ---- styles ---- */
 
-const Form = styled.form<{ $dragOver: boolean }>`
+const Form = styled.form<{ $dragOver: boolean; $steward: boolean }>`
+  ${({ $steward, theme }) => $steward && css`border-color: ${theme.colors.borderLive} !important; box-shadow: 0 0 0 3px ${theme.colors.liveBg};`}
   position: relative;
   background: ${({ theme }) => theme.colors.surface};
   border: 1px solid ${({ theme }) => theme.colors.border};
@@ -117,7 +125,7 @@ const Form = styled.form<{ $dragOver: boolean }>`
   ${({ $dragOver }) =>
     $dragOver &&
     css`
-      border-color: ${({ theme }) => theme.colors.gold};
+      border-color: ${({ theme }) => theme.colors.accentText};
       box-shadow: 0 0 12px ${({ theme }) => theme.colors.goldDim};
     `}
 `;
@@ -134,7 +142,7 @@ const HeaderRow = styled.div`
   padding: 8px 12px;
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
 
   @media (max-width: ${MOBILE_BREAKPOINT_PX}px) {
     flex-wrap: wrap;
@@ -150,7 +158,7 @@ const VoiceRow = styled.div`
   padding: 0 12px 8px;
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
 `;
 
 const VoiceGroup = styled.div`
@@ -165,7 +173,7 @@ const ReferenceAudioGroup = styled(VoiceGroup)`
 `;
 
 const VoiceLabel = styled.span`
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   font-size: ${({ theme }) => theme.fontSizes.xs};
 `;
 
@@ -188,7 +196,7 @@ const VoiceSelect = styled.select`
   }
 
   &:disabled {
-    color: ${({ theme }) => theme.colors.textMuted};
+    color: ${({ theme }) => theme.colors.subtleText};
   }
 
   option {
@@ -214,7 +222,7 @@ const VoiceInput = styled.input`
   }
 
   &::placeholder {
-    color: ${({ theme }) => theme.colors.textMuted};
+    color: ${({ theme }) => theme.colors.subtleText};
   }
 `;
 
@@ -242,8 +250,8 @@ const VoiceToggle = styled.button<{ $active: boolean }>`
 
   ${({ $active }) =>
     $active
-      ? css`border-color: ${({ theme }) => theme.colors.gold}; color: ${({ theme }) => theme.colors.gold}; background: ${({ theme }) => theme.colors.goldBg};`
-      : css`border-color: ${({ theme }) => theme.colors.border}; color: ${({ theme }) => theme.colors.textMuted}; &:hover { border-color: ${({ theme }) => theme.colors.goldTextDim}; color: ${({ theme }) => theme.colors.gold}; }`}
+      ? css`border-color: ${({ theme }) => theme.colors.accentText}; color: ${({ theme }) => theme.colors.accentText}; background: ${({ theme }) => theme.colors.goldBg};`
+      : css`border-color: ${({ theme }) => theme.colors.border}; color: ${({ theme }) => theme.colors.subtleText}; &:hover { border-color: ${({ theme }) => theme.colors.accentText}; color: ${({ theme }) => theme.colors.accentText}; }`}
 
   &:disabled {
     opacity: 0.88;
@@ -260,14 +268,14 @@ const VoiceIconBtn = styled(Button)<{ $active?: boolean }>`
   ${({ $active }) =>
     $active &&
     css`
-      color: ${({ theme }) => theme.colors.gold};
+      color: ${({ theme }) => theme.colors.accentText};
       border-color: ${({ theme }) => theme.colors.goldDim};
       background: ${({ theme }) => theme.colors.goldBg};
     `}
 `;
 
 const VoiceStatus = styled.span<{ $error?: boolean }>`
-  color: ${({ $error, theme }) => ($error ? theme.colors.error : theme.colors.goldTextDim)};
+  color: ${({ $error, theme }) => ($error ? theme.colors.error : theme.colors.accentText)};
   font-variant-numeric: tabular-nums;
 `;
 
@@ -292,7 +300,7 @@ const ModelLine = styled.div`
 const ModelBtn = styled.button`
   all: unset;
   cursor: pointer;
-  color: ${({ theme }) => theme.colors.gold};
+  color: ${({ theme }) => theme.colors.accentText};
   font: inherit;
   transition: opacity 0.15s;
   &:hover { opacity: 0.8; }
@@ -309,17 +317,17 @@ const ThinkingBtn = styled.button<{ $active: boolean }>`
 
   ${({ $active }) =>
     $active
-      ? css`border-color: ${({ theme }) => theme.colors.gold}; color: ${({ theme }) => theme.colors.gold}; background: ${({ theme }) => theme.colors.goldBg};`
-      : css`border-color: ${({ theme }) => theme.colors.border}; color: ${({ theme }) => theme.colors.textMuted}; &:hover { border-color: ${({ theme }) => theme.colors.goldTextDim}; color: ${({ theme }) => theme.colors.gold}; }`}
+      ? css`border-color: ${({ theme }) => theme.colors.accentText}; color: ${({ theme }) => theme.colors.accentText}; background: ${({ theme }) => theme.colors.goldBg};`
+      : css`border-color: ${({ theme }) => theme.colors.border}; color: ${({ theme }) => theme.colors.subtleText}; &:hover { border-color: ${({ theme }) => theme.colors.accentText}; color: ${({ theme }) => theme.colors.accentText}; }`}
 `;
 
 const Stat = styled.span`
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   font-variant-numeric: tabular-nums;
 `;
 
 const StatValue = styled.span`
-  color: ${({ theme }) => theme.colors.goldTextDim};
+  color: ${({ theme }) => theme.colors.accentText};
 `;
 
 const Spacer = styled.span`
@@ -342,7 +350,7 @@ const AttachBtn = styled(Button)`
 `;
 
 const Prompt = styled.span`
-  color: ${({ theme }) => theme.colors.gold};
+  color: ${({ theme }) => theme.colors.accentText};
   font-size: ${({ theme }) => theme.fontSizes.lg};
   font-family: ${({ theme }) => theme.fonts.body};
   flex-shrink: 0;
@@ -361,7 +369,7 @@ const TextArea = styled.textarea`
   resize: none;
   line-height: 1.5;
 
-  &::placeholder { color: ${({ theme }) => theme.colors.textMuted}; }
+  &::placeholder { color: ${({ theme }) => theme.colors.subtleText}; }
 `;
 
 const SendBtn = styled(Button)`
@@ -380,14 +388,14 @@ const DragOverlay = styled.div`
   border-radius: ${({ theme }) => theme.radii.lg};
   font-size: ${({ theme }) => theme.fontSizes.md};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.gold};
+  color: ${({ theme }) => theme.colors.accentText};
 `;
 
 const HelperText = styled.div`
   padding: 4px 12px 8px;
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   text-align: center;
 
   /* Keyboard hints (Enter / Shift+Enter / drag & drop) mean nothing on a
@@ -410,6 +418,9 @@ function isLocalBrowserHostname(hostname: string): boolean {
 /* ---- component ---- */
 
 export function ChatForm({
+  steward = false,
+  draft,
+  onDraftChange,
   onSend,
   onCancel,
   isLoading = false,
@@ -459,7 +470,16 @@ export function ChatForm({
   className,
 }: ChatFormProps) {
   const { t } = useSkulkTranslation();
-  const [message, setMessage] = useState('');
+  const [localMessage, setLocalMessage] = useState('');
+  const message = draft ?? localMessage;
+  const messageRef = useRef(message);
+  messageRef.current = message;
+  const setMessage = useCallback((next: string | ((previous: string) => string)) => {
+    const value = typeof next === 'function' ? next(messageRef.current) : next;
+    messageRef.current = value;
+    if (onDraftChange) onDraftChange(value);
+    else setLocalMessage(value);
+  }, [onDraftChange]);
   const [files, setFiles] = useState<ChatUploadedFile[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
   const [isStartingRecording, setIsStartingRecording] = useState(false);
@@ -605,7 +625,7 @@ export function ChatForm({
       if (!current) return trimmed;
       return `${current}\n${trimmed}`;
     });
-  }, []);
+  }, [setMessage]);
 
   const startRecording = useCallback(async () => {
     if (
@@ -859,6 +879,7 @@ export function ChatForm({
       if (componentMountedRef.current) setIsStartingRecording(false);
     }
   }, [
+    setMessage,
     appendTranscript,
     cleanupRecordingResources,
     isLoading,
@@ -1028,7 +1049,7 @@ export function ChatForm({
         textareaRef.current.style.height = 'auto';
       }
     },
-    [isLoading, canSend, message, files, onSend, clearFiles],
+    [isLoading, canSend, message, files, onSend, clearFiles, setMessage],
   );
 
   useEffect(() => {
@@ -1100,6 +1121,7 @@ export function ChatForm({
     <Form
       className={className}
       $dragOver={isDragOver}
+      $steward={steward}
       onSubmit={handleSubmit}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
@@ -1434,7 +1456,7 @@ export function ChatForm({
           </SendBtn>
         ) : (
           <SendBtn
-            variant="primary"
+            variant={steward ? "approve" : "solid"}
             size="sm"
             icon
             type="submit"

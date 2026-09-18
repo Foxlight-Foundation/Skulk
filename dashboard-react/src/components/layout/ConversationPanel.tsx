@@ -74,7 +74,7 @@ const NewChatBtn = styled.button`
   cursor: pointer;
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.gold};
+  color: ${({ theme }) => theme.colors.accentText};
   padding: 2px 8px;
   border: 1px solid ${({ theme }) => theme.colors.goldDim};
   border-radius: ${({ theme }) => theme.radii.sm};
@@ -128,17 +128,17 @@ const CardMeta = styled.div`
   gap: 6px;
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
 `;
 
 const Dot = styled.span`
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
 `;
 
 const CardSummary = styled.div`
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -146,7 +146,7 @@ const CardSummary = styled.div`
 
 const DeleteBtn = styled.span`
   cursor: pointer;
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   font-size: ${({ theme }) => theme.fontSizes.xs};
   margin-left: auto;
   opacity: 0;
@@ -166,7 +166,7 @@ const EmptyText = styled.div`
   text-align: center;
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
 `;
 
 /* ── Component ────────────────────────────────────────── */

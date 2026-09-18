@@ -16,10 +16,24 @@ export const GlobalStyle = createGlobalStyle`
     font-family: ${({ theme }) => theme.fonts.body};
     font-size: ${({ theme }) => theme.fontSizes.md};
     background: ${({ theme }) => theme.colors.bgGradient};
-    color: ${({ theme }) => theme.colors.text};
+    color: ${({ theme }) => theme.colors.body};
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     transition: background 0.2s ease, color 0.2s ease;
+  }
+
+  :focus-visible {
+    outline: 2px solid ${({ theme }) => theme.colors.gold};
+    outline-offset: 3px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
   }
 
   a {

@@ -112,6 +112,7 @@ const Button = styled.button<{ $primary?: boolean }>`
 `;
 
 /** UUID even on non-secure origins (LAN HTTP dashboards lack crypto.randomUUID). */
+// eslint-disable-next-line react-refresh/only-export-components -- Settings shares this stateless identifier generator with the consent dialog.
 export function generateInstallId(): string {
   // Without Web Crypto entirely, return empty: the API backfills an id
   // server-side whenever consent is enabled without one.

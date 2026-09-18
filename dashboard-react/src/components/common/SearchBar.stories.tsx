@@ -8,7 +8,7 @@ const meta: Meta<typeof SearchBar> = {
   parameters: { layout: 'centered' },
   decorators: [
     (Story) => (
-      <div style={{ width: 320, padding: 20, background: '#000' }}>
+      <div style={{ width: 'min(320px, calc(100vw - 48px))', padding: 20, }}>
         <Story />
       </div>
     ),

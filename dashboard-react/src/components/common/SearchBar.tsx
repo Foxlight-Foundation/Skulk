@@ -33,7 +33,7 @@ const ClearButton = styled.button`
   height: 18px;
   border-radius: 50%;
   font-size: ${({ theme }) => theme.fontSizes.label};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   transition: color 0.15s;
 
   &:hover {
@@ -53,7 +53,7 @@ export function SearchBar({
 }: SearchBarProps) {
   const { t } = useSkulkTranslation();
   const [local, setLocal] = useState(value);
-  const timerRef = useRef<ReturnType<typeof setTimeout>>();
+  const timerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   // Sync external value changes
   useEffect(() => {

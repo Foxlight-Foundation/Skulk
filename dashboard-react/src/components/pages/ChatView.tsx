@@ -1,3 +1,5 @@
+import { ReadyModelSelect } from '../chat/ReadyModelSelect';
+import { useGetStewardStatusQuery } from '../../store/endpoints/steward';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import styled from 'styled-components';
@@ -15,7 +17,8 @@ import type { InstanceCardData } from '../layout/InstancePanel';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { uiActions } from '../../store/slices/uiSlice';
 import { chatActions } from '../../store/slices/chatSlice';
-import { store } from '../../store';
+import { useStore } from 'react-redux';
+import type { RootState } from '../../store';
 import { tolgee, useSkulkTranslation } from '../../i18n/tolgee';
 import {
   canUseStreamingSpeechPlayback,
@@ -82,25 +85,8 @@ const NoModels = styled.div`
   height: 100%;
   gap: 12px;
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   font-size: ${({ theme }) => theme.fontSizes.sm};
-`;
-
-const ModelSelect = styled.select`
-  appearance: none;
-  background: transparent;
-  border: none;
-  color: ${({ theme }) => theme.colors.gold};
-  font-family: ${({ theme }) => theme.fonts.body};
-  font-size: ${({ theme }) => theme.fontSizes.xs};
-  cursor: pointer;
-  outline: none;
-  padding-right: 4px;
-
-  option {
-    background: ${({ theme }) => theme.colors.surface};
-    color: ${({ theme }) => theme.colors.text};
-  }
 `;
 
 const EMPTY_MESSAGES: ChatMessage[] = [];
@@ -520,9 +506,11 @@ export function ChatView({
   realtimeTranscriptionAvailable = false,
   className,
 }: ChatViewProps) {
+  const store = useStore<RootState>();
   const { t } = useSkulkTranslation();
   const speechLanguage = speechLanguageForDashboardLocale(tolgee.getLanguage());
   // Store state
+  const { data: stewardStatus } = useGetStewardStatusQuery(undefined, { pollingInterval: 15000 });
   const selectedModelId = useAppSelector((s) => s.chat.selectedModelId);
   const selectedTranscriptionModelId = useAppSelector((s) => s.chat.selectedTranscriptionModelId);
   const selectedSpeechModelId = useAppSelector((s) => s.chat.selectedSpeechModelId);
@@ -1608,7 +1596,7 @@ export function ChatView({
     void handleSend(text.trim(), []);
   }, [autoSubmitVoice, canSendMessages, handleSend]);
 
-  if (readyModels.length === 0 && readyTranscriptionModels.length === 0 && readySpeechModels.length === 0) {
+  if (!stewardStatus?.enabled && readyModels.length === 0 && readyTranscriptionModels.length === 0 && readySpeechModels.length === 0) {
     return (
       <NoModels>
         {t(
@@ -1619,18 +1607,8 @@ export function ChatView({
     );
   }
 
-  const modelSelector = readyModels.length > 1 ? (
-    <ModelSelect
-      value={selectedModelId ?? ''}
-      onChange={(e) => selectModel(e.target.value)}
-      aria-label={t('chat.view.selectModel', 'Select chat model')}
-    >
-      {readyModels.map((m) => (
-        <option key={m.instanceId} value={m.modelId}>
-          {m.modelId.split('/').pop()}
-        </option>
-      ))}
-    </ModelSelect>
+  const modelSelector = (readyModels.length > 1 || stewardStatus?.enabled) ? (
+    <ReadyModelSelect value={selectedModelId} onChange={selectModel} fabricEnabled={stewardStatus?.enabled === true} models={readyModels} />
   ) : undefined;
 
   return (

@@ -27,7 +27,8 @@ function response(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 }
 function button(label: string) {
-  const element = [...host.querySelectorAll('button')].find((candidate) => candidate.textContent === label);
+  const scope = host.querySelector('[role=dialog]') ?? host;
+  const element = [...scope.querySelectorAll('button')].find((candidate) => candidate.textContent === label);
   if (!element) throw new Error(`Missing button: ${label}`);
   return element;
 }
@@ -44,6 +45,7 @@ async function choose(value: string) {
 }
 async function ready() {
   await act(async () => { await vi.waitFor(() => expect(host.textContent).toContain('test.bundle')); });
+  await click('Configure');
   await click('Configure');
   await act(async () => { await vi.waitFor(() => expect(host.querySelector('select')).not.toBeNull()); });
 }

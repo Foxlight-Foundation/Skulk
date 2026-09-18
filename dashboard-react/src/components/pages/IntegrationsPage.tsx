@@ -1,8 +1,11 @@
+import { IntegrationSetupStep } from '../integrations/IntegrationSetupStep';
 import { useEffect, useMemo, useState } from 'react';
 import styled from 'styled-components';
 import { FiCopy, FiCheck } from 'react-icons/fi';
 
 import { SegmentedControl } from '../common/SegmentedControl';
+import { RightDrawer } from '../common/RightDrawer';
+import { IntegrationToolCard } from '../integrations/IntegrationToolCard';
 import { Field } from '../common/Field';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 import { useRemoteAccess } from '../../hooks/useRemoteAccess';
@@ -33,8 +36,9 @@ export interface IntegrationsPageProps {
 }
 
 const Page = styled.div`
-  padding: 16px;
-  max-width: 760px;
+  padding: 32px;
+  max-width: 980px;
+  @media (max-width: 600px) { padding: 16px; }
   margin: 0 auto;
   display: flex;
   flex-direction: column;
@@ -43,24 +47,25 @@ const Page = styled.div`
 
 const PageTitle = styled.h1`
   margin: 0;
-  font-size: ${({ theme }) => theme.fontSizes.xl};
+  font-size: 28px;
   color: ${({ theme }) => theme.colors.text};
 `;
 
 const PageIntro = styled.p`
   margin: 0;
-  font-size: ${({ theme }) => theme.fontSizes.xs};
-  color: ${({ theme }) => theme.colors.textMuted};
+  font-size: 14px;
+  color: ${({ theme }) => theme.colors.textSecondary};
   line-height: 1.5;
 `;
 
 const SectionTitle = styled.h2`
   margin: 0;
-  font-size: ${({ theme }) => theme.fontSizes.sm};
+  font-size: 10px;
+  font-weight: 600;
   font-family: ${({ theme }) => theme.fonts.mono};
   text-transform: uppercase;
   letter-spacing: 1.5px;
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
 `;
 
 const SurfaceRow = styled.div`
@@ -71,10 +76,10 @@ const SurfaceRow = styled.div`
 
 const SurfaceChip = styled.div`
   flex: 1 1 200px;
-  background: ${({ theme }) => theme.colors.surfaceSunken};
+  background: ${({ theme }) => theme.colors.surface};
   border: 1px solid ${({ theme }) => theme.colors.borderLight};
   border-radius: ${({ theme }) => theme.radii.md};
-  padding: 8px 10px;
+  padding: 16px;
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -85,7 +90,7 @@ const SurfaceLabel = styled.span`
   font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 1px;
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
 `;
 
 const SurfaceValue = styled.span`
@@ -95,11 +100,24 @@ const SurfaceValue = styled.span`
   overflow-wrap: anywhere;
 `;
 
-const ChooserScroll = styled.div`
-  overflow-x: auto;
-  max-width: 100%;
-  padding-bottom: 4px;
+/** Copy an endpoint without treating the copy as connection evidence. */
+function EndpointCard({ label, value }: { label: string; value: string }) {
+  const { t } = useSkulkTranslation();
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    try { await copyToClipboard(value); setCopied(true); }
+    catch { addToast({ message: t('integrations.copyFailed', 'Could not copy to the clipboard'), type: 'error' }); }
+  };
+  return <SurfaceChip><SurfaceLabel>{label}</SurfaceLabel><div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}><SurfaceValue style={{ flex: 1, minWidth: 0 }}>{value}</SurfaceValue><CopyButton aria-label={`${t('integrations.copy', 'Copy')} ${label}`} onClick={() => void copy()}>{copied ? <FiCheck /> : <FiCopy />}</CopyButton></div></SurfaceChip>;
+}
+
+const ToolGrid = styled.div`
+  display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px;
+  @media (max-width: 900px) { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  @media (max-width: 600px) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  @media (max-width: 360px) { grid-template-columns: minmax(0, 1fr); }
 `;
+const DrawerBody = styled.div`padding: 24px; overflow-y: auto; display: flex; flex-direction: column; gap: 20px; min-height: 0;`;
 
 const ControlsRow = styled.div`
   display: flex;
@@ -133,7 +151,7 @@ const ControlLabel = styled.span`
   font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 1px;
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
 `;
 
 const Select = styled.select`
@@ -149,7 +167,7 @@ const Select = styled.select`
 
   &:focus-visible {
     outline: none;
-    border-color: ${({ theme }) => theme.colors.gold};
+    border-color: ${({ theme }) => theme.colors.accentText};
   }
 `;
 
@@ -227,7 +245,7 @@ const CopyButton = styled.button`
 
   &:hover {
     color: ${({ theme }) => theme.colors.text};
-    border-color: ${({ theme }) => theme.colors.gold};
+    border-color: ${({ theme }) => theme.colors.accentText};
   }
 
   &:focus-visible {
@@ -258,7 +276,7 @@ const EmptyNotice = styled.div`
   border-radius: ${({ theme }) => theme.radii.md};
   padding: 12px 14px;
   font-size: ${({ theme }) => theme.fontSizes.xs};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   line-height: 1.5;
 `;
 
@@ -321,6 +339,8 @@ export function IntegrationsPage({ readyInstances }: IntegrationsPageProps) {
   const { t } = useSkulkTranslation();
   const remoteAccess = useRemoteAccess();
   const [catalog, setCatalog] = useState<ModelInfo[]>([]);
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const [drawerWidth, setDrawerWidth] = useState(640);
   const [toolId, setToolId] = useState<IntegrationToolId>('claude-code');
   const [addressChoice, setAddressChoice] = useState<'local' | 'tailscale'>('local');
   const [codexFilesystemPath, setCodexFilesystemPath] = useState('/Users/username');
@@ -409,7 +429,6 @@ export function IntegrationsPage({ readyInstances }: IntegrationsPageProps) {
     [tool.id, options, t],
   );
 
-  const toolOptions = INTEGRATION_TOOLS.map(entry => ({ value: entry.id, label: entry.label }));
   const hasModels = models.length > 0;
   const showAddressChooser = Boolean(tailscaleUrl && localUrl && tailscaleUrl !== localUrl);
 
@@ -420,24 +439,15 @@ export function IntegrationsPage({ readyInstances }: IntegrationsPageProps) {
         <PageIntro>
           {t(
             'integrations.intro',
-            'Point external coding agents and apps at this cluster. Every snippet below is filled in with the models you actually have running.',
+            'Point coding agents and apps at this cluster. Snippets are filled in with the models you have running right now.',
           )}
         </PageIntro>
       </div>
 
       <SurfaceRow>
-        <SurfaceChip>
-          <SurfaceLabel>{t('integrations.surface.openai', 'OpenAI-compatible')}</SurfaceLabel>
-          <SurfaceValue>{`${apiUrl}/v1`}</SurfaceValue>
-        </SurfaceChip>
-        <SurfaceChip>
-          <SurfaceLabel>{t('integrations.surface.anthropic', 'Anthropic-compatible')}</SurfaceLabel>
-          <SurfaceValue>{apiUrl}</SurfaceValue>
-        </SurfaceChip>
-        <SurfaceChip>
-          <SurfaceLabel>{t('integrations.surface.ollama', 'Ollama-compatible')}</SurfaceLabel>
-          <SurfaceValue>{`${apiUrl}/ollama`}</SurfaceValue>
-        </SurfaceChip>
+        <EndpointCard label={t('integrations.surface.openai', 'OpenAI-compatible')} value={`${apiUrl}/v1`} />
+        <EndpointCard label={t('integrations.surface.anthropic', 'Anthropic-compatible')} value={apiUrl} />
+        <EndpointCard label={t('integrations.surface.ollama', 'Ollama-compatible')} value={`${apiUrl}/ollama`} />
       </SurfaceRow>
 
       {showAddressChooser && (
@@ -474,19 +484,25 @@ export function IntegrationsPage({ readyInstances }: IntegrationsPageProps) {
       </div>
 
       <div>
-        <SectionTitle>{t('integrations.tool', 'Tool')}</SectionTitle>
-        <ChooserScroll style={{ marginTop: 8 }}>
-          <SegmentedControl
-            size="md"
-            value={tool.id}
-            onChange={setToolId}
-            options={toolOptions}
-          />
-        </ChooserScroll>
+        <h2 style={{ fontSize: 16, fontWeight: 600 }}>{t('integrations.connectTool', 'Connect a tool')}</h2>
+        <ToolGrid style={{ marginTop: 16 }}>
+          {INTEGRATION_TOOLS.map(entry => <IntegrationToolCard key={entry.id} name={entry.label} monogram={({ 'claude-code': 'CC', opencode: 'OC', codex: 'CX', hermes: 'HM', openclaw: 'OW', pi: 'PI', anythingllm: 'AL', 'open-webui': 'WU', n8n: 'N8', firefox: 'FF' })[entry.id]}
+            description={t(`integrations.tools.${entry.id}.description`, {
+              'claude-code': 'Anthropic-compatible coding agent in your terminal.', opencode: 'Open-source terminal agent with provider config.', codex: 'OpenAI Codex CLI pointed at a local model.',
+              hermes: 'Agent harness with tool use and memory.', openclaw: 'Autonomous agent runtime.', pi: 'Minimalist assistant CLI.',
+              anythingllm: 'Desktop RAG workspace: pairs a chat and an embedding model.', 'open-webui': 'Self-hosted chat UI for the whole cluster.', n8n: 'Workflow automation with LLM nodes.', firefox: 'Sidebar AI chat via about:config.',
+            }[entry.id])}
+            method={entry.surface === 'dashboard' ? 'Dashboard' : `${entry.surface} API`}
+            onOpen={() => { setToolId(entry.id); setDetailsOpen(true); }} />)}
+        </ToolGrid>
       </div>
-
+      <RightDrawer open={detailsOpen} onClose={() => setDetailsOpen(false)} title={tool.label} ariaLabel={tool.label}
+        width={drawerWidth} minWidth={360} maxWidth={800} onWidthChange={setDrawerWidth}
+        closeLabel={t('common.close', 'Close')} resizeLabel={t('integrations.resize', 'Resize integration details')}>
+      <DrawerBody>
+      <PageIntro>{t('integrations.setupHint', 'Configure your tool using the endpoint and model choices below. Copying a recipe does not verify a connection.')}</PageIntro>
       {(tool.usesTierChooser || tool.usesSingleModelChooser || tool.usesFilesystemPath) && (
-        <ControlsRow>
+        <IntegrationSetupStep number={1} title={tool.usesTierChooser ? t('integrations.chooseTiers', 'Choose tiers') : t('integrations.chooseOptions', 'Choose options')}><ControlsRow>
           {tool.usesTierChooser && hasModels && (
             <>
               <ControlBlock>
@@ -559,12 +575,19 @@ export function IntegrationsPage({ readyInstances }: IntegrationsPageProps) {
               />
             </ControlBlock>
           )}
-        </ControlsRow>
+        </ControlsRow></IntegrationSetupStep>
       )}
 
+      <IntegrationSetupStep number={tool.usesTierChooser || tool.usesSingleModelChooser || tool.usesFilesystemPath ? 2 : 1} title={t('integrations.apply', 'Apply it')}>
       {snippets.map(snippet => (
         <SnippetCard key={`${tool.id}-${snippet.id}`} snippet={snippet} />
       ))}
+      </IntegrationSetupStep>
+      <IntegrationSetupStep number={tool.usesTierChooser || tool.usesSingleModelChooser || tool.usesFilesystemPath ? 3 : 2} title={t('integrations.checkRequest', 'Check it reached the cluster')}>
+        <PageIntro>{t('integrations.evidenceUnavailable', 'Connection evidence is unavailable in this dashboard. Send a request from the configured tool and check its response. Copying these instructions does not establish a connection.')}</PageIntro>
+      </IntegrationSetupStep>
+      </DrawerBody>
+      </RightDrawer>
     </Page>
   );
 }

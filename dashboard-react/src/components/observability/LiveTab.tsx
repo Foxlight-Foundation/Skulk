@@ -74,7 +74,7 @@ const HeaderField = styled.div`
 const HeaderLabel = styled.span`
   font-family: ${({ theme }) => theme.fonts.body};
   font-size: ${({ theme }) => theme.fontSizes.xs};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   text-transform: uppercase;
   letter-spacing: 0.04em;
 `;
@@ -143,7 +143,7 @@ const SectionTitle = styled.h3`
   margin: 0;
   font-family: ${({ theme }) => theme.fonts.body};
   font-size: ${({ theme }) => theme.fontSizes.md};
-  color: ${({ theme }) => theme.colors.gold};
+  color: ${({ theme }) => theme.colors.accentText};
 `;
 
 const RunnerGrid = styled.div`
@@ -173,7 +173,7 @@ const RunnerLine = styled.div`
 `;
 
 const RunnerLabel = styled.span`
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   flex-shrink: 0;
 `;
 
@@ -221,7 +221,7 @@ const TimelineItem = styled.div`
 `;
 
 const TimelineMeta = styled.span`
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   margin-right: 6px;
 `;
 
@@ -229,7 +229,7 @@ const Notice = styled.div`
   padding: 12px 10px;
   font-family: ${({ theme }) => theme.fonts.body};
   font-size: ${({ theme }) => theme.fontSizes.sm};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
 `;
 
 const ErrorNotice = styled(Notice)`

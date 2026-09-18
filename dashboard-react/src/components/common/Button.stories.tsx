@@ -8,7 +8,7 @@ const meta: Meta<typeof Button> = {
   parameters: { layout: 'centered' },
   decorators: [
     (Story) => (
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 24, padding: 24, background: '#111', minWidth: 400 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 24, padding: 24, maxWidth: '100%', flexWrap: 'wrap' }}>
         <Story />
       </div>
     ),
@@ -77,10 +77,10 @@ export const IconOnly: Story = {
   render: () => (
     <>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-        <Button variant="primary" icon size="sm"><PlusIcon /></Button>
-        <Button variant="outline" icon><RefreshIcon /></Button>
-        <Button variant="ghost" icon><TrashIcon /></Button>
-        <Button variant="danger" icon><TrashIcon /></Button>
+        <Button variant="primary" icon size="sm" aria-label="Add"><PlusIcon /></Button>
+        <Button variant="outline" icon aria-label="Refresh"><RefreshIcon /></Button>
+        <Button variant="ghost" icon aria-label="Delete"><TrashIcon /></Button>
+        <Button variant="danger" icon aria-label="Delete"><TrashIcon /></Button>
       </div>
     </>
   ),
@@ -100,7 +100,7 @@ export const States: Story = {
 
 export const Block: Story = {
   render: () => (
-    <div style={{ width: 300 }}>
+    <div style={{ width: 'min(300px, calc(100vw - 48px))' }}>
       <Button variant="primary" block>▸ Launch Model</Button>
     </div>
   ),

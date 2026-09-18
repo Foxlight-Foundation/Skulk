@@ -1,3 +1,4 @@
+import type { StoreDownloadProgress } from '../layout/StoreRegistryTable';
 import styled, { css, keyframes, useTheme } from 'styled-components';
 import { FiCheck, FiChevronDown, FiDownload, FiStar } from 'react-icons/fi';
 import type { Theme } from '../../theme';
@@ -32,6 +33,12 @@ export interface ModelPickerGroupProps {
   onSelectModel: (modelId: string) => void;
   onToggleFavorite: (groupId: string) => void;
   onShowInfo?: (group: ModelGroup) => void;
+  /** Observed transfers from the existing store poll, never synthetic progress. */
+  activeDownloads?: StoreDownloadProgress[];
+  /** Enter the existing placement workflow for a downloaded variant. */
+  onLaunch?: (modelId: string) => void;
+  /** Cancel a store transfer through the existing download controller. */
+  onCancelDownload?: (modelId: string) => void;
   downloadStatusMap?: Map<string, DownloadAvailability>;
   launchedAt?: number;
   instanceStatuses?: Record<string, InstanceStatus>;
@@ -97,19 +104,19 @@ const glowAnim = keyframes`
   50%      { box-shadow: 0 0 12px rgba(34,197,94,0.7); }
 `;
 
-const GroupContainer = styled.div`
-  border-top: 1px solid ${({ theme }) => theme.colors.borderLight};
-
-  &:first-child {
-    border-top: none;
-  }
+const GroupContainer = styled.div<{ $downloading: boolean }>`
+  margin: 10px 16px; border: 1px solid ${({ theme }) => theme.colors.border}; border-radius: 12px;
+  background: ${({ theme }) => theme.colors.surface}; overflow: hidden;
+  ${({ $downloading, theme }) => $downloading && css`background: ${theme.colors.liveBg}; border-color: ${theme.colors.borderLive};`}
+  @media (max-width: 480px) { margin: 8px; }
 `;
 
-const Row = styled.div<{ $disabled: boolean; $highlighted: boolean; $expandable: boolean }>`
+const Row = styled.div<{ $highlighted: boolean; $expandable: boolean }>`
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 10px 14px;
+  padding: 16px;
+  @media (max-width: 600px) { padding: 12px; gap: 8px; flex-wrap: wrap; }
   cursor: ${({ $expandable }) => ($expandable ? 'pointer' : 'default')};
   transition: background 0.15s;
   user-select: none;
@@ -117,13 +124,6 @@ const Row = styled.div<{ $disabled: boolean; $highlighted: boolean; $expandable:
   &:hover {
     background: ${({ theme }) => theme.colors.surfaceHover};
   }
-
-  ${({ $disabled }) =>
-    $disabled &&
-    css`
-      opacity: 0.5;
-      pointer-events: none;
-    `}
 
   ${({ $highlighted }) =>
     $highlighted &&
@@ -134,6 +134,7 @@ const Row = styled.div<{ $disabled: boolean; $highlighted: boolean; $expandable:
 
 const Identity = styled.div`
   flex: 1;
+  @media (max-width: 600px) { flex: 1 1 calc(100% - 64px); }
   min-width: 0;
   display: flex;
   flex-direction: column;
@@ -141,12 +142,14 @@ const Identity = styled.div`
 `;
 
 const Name = styled.span`
+  button { all: unset; cursor: pointer; font: inherit; color: inherit; }
   font-size: ${({ theme }) => theme.fontSizes.tableBody};
   font-weight: 600;
   color: ${({ theme }) => theme.colors.text};
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  @media (max-width: 600px) { white-space: normal; overflow-wrap: anywhere; }
 `;
 
 const MetaLine = styled.div`
@@ -156,7 +159,7 @@ const MetaLine = styled.div`
   min-width: 0;
   overflow: hidden;
   font-size: ${({ theme }) => theme.fontSizes.xs};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.textSecondary};
   white-space: nowrap;
 `;
 
@@ -216,12 +219,12 @@ const FavStar = styled.button<{ $active: boolean }>`
   width: 26px;
   height: 26px;
   border-radius: ${({ theme }) => theme.radii.sm};
-  color: ${({ $active, theme }) => ($active ? theme.colors.gold : theme.colors.textMuted)};
+  color: ${({ $active, theme }) => ($active ? theme.colors.live : theme.colors.textMuted)};
   transition: color 0.15s, background 0.15s;
 
   &:hover {
-    color: ${({ theme }) => theme.colors.gold};
-    background: ${({ theme }) => theme.colors.goldBg};
+    color: ${({ theme }) => theme.colors.live};
+    background: ${({ theme }) => theme.colors.liveBg};
   }
 
   svg {
@@ -238,7 +241,7 @@ const Chevron = styled.button<{ $open: boolean }>`
   width: 26px;
   height: 26px;
   border-radius: ${({ theme }) => theme.radii.sm};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.textSecondary};
   flex-shrink: 0;
   transition: color 0.15s, background 0.15s;
 
@@ -379,6 +382,9 @@ export function ModelPickerGroup({
   onToggleExpand,
   onSelectModel,
   onToggleFavorite,
+  activeDownloads,
+  onLaunch,
+  onCancelDownload,
   downloadStatusMap,
   launchedAt,
   instanceStatuses,
@@ -449,31 +455,28 @@ export function ModelPickerGroup({
     </InStoreChip>
   );
 
+  const variantAction = (model: ModelInfo) => {
+    const transfer = activeDownloads?.find(item => item.modelId === model.id);
+    if (transfer && !['complete', 'completed', 'failed', 'cancelled'].includes(transfer.status)) {
+      const progress = Math.max(0, Math.min(100, transfer.progress * 100));
+      return <div style={{ minWidth: 100, maxWidth: '100%' }}><progress aria-label={t('modelPickerGroup.downloading', 'Downloading {modelId}', { modelId: model.id })} max={100} value={progress} style={{ width: '100%', accentColor: theme.colors.live }} /><span style={{ fontSize: 11 }}>{Math.round(progress)}%</span>{onCancelDownload && <Button size="sm" onClick={() => onCancelDownload(model.id)}>{t('common.cancel', 'Cancel')}</Button>}</div>;
+    }
+    if (downloadStatusMap?.get(model.id)?.available) return <>{inStoreChip}{onLaunch && <Button variant="solid" size="sm" onClick={() => onLaunch(model.id)}>{t('common.launch', 'Launch')}</Button>}</>;
+    return <><Button variant="primary" size="sm" disabled={disabled} onClick={() => onSelectModel(model.id)} aria-label={t('modelPickerGroup.selectModel', 'Download {modelId}', { modelId: model.id })}><FiDownload size={13} />{t('modelPickerGroup.download', 'Download')}</Button>{transfer?.status === 'failed' && <span role="status" style={{ color: theme.colors.error }}>{transfer.error || t('modelPickerGroup.downloadFailed', 'Download failed')}</span>}</>;
+  };
+
   return (
-    <GroupContainer>
+    <GroupContainer $downloading={variants.some(variant => activeDownloads?.some(item => item.modelId === variant.id && !['completed', 'complete', 'failed', 'cancelled'].includes(item.status)))}>
       <Row
-        $disabled={disabled}
         $highlighted={isHighlighted}
         $expandable={hasMultipleVariants}
         onClick={hasMultipleVariants ? onToggleExpand : undefined}
-        role={hasMultipleVariants ? 'button' : undefined}
-        tabIndex={hasMultipleVariants && !disabled ? 0 : undefined}
-        aria-expanded={hasMultipleVariants ? isExpanded : undefined}
-        aria-label={hasMultipleVariants
-          ? t('modelPickerGroup.expandGroup', 'Expand {groupName}', { groupName: title })
-          : undefined}
-        onKeyDown={(event) => {
-          if (hasMultipleVariants && !disabled && (event.key === 'Enter' || event.key === ' ')) {
-            event.preventDefault();
-            onToggleExpand();
-          }
-        }}
       >
         <FamilyAvatar name={group.family || title} />
 
         {/* Identity: title + meta line */}
         <Identity>
-          <Name title={singleVariant?.id ?? group.name}>{title}</Name>
+          <Name title={singleVariant?.id ?? group.name}>{hasMultipleVariants ? <button type="button" onClick={event => { event.stopPropagation(); onToggleExpand(); }} aria-expanded={isExpanded} aria-label={t('modelPickerGroup.expandGroup', 'Expand {groupName}', { groupName: title })}>{title}</button> : title}</Name>
           <MetaLine>
             {chips.map((c) => {
               const colors = TAG_COLORS[c];
@@ -556,32 +559,18 @@ export function ModelPickerGroup({
           {hasMultipleVariants ? (
             <>
               {groupDownload && inStoreChip}
+              {groupDownload && onLaunch && <Button variant="solid" size="sm" onClick={() => onLaunch(groupDownload.id)}>{t('common.launch', 'Launch')}</Button>}
               <Chevron
                 type="button"
                 $open={isExpanded}
                 onClick={onToggleExpand}
                 aria-expanded={isExpanded}
                 aria-label={t('modelPickerGroup.expandGroup', 'Expand {groupName}', { groupName: title })}
-                tabIndex={-1}
               >
                 <FiChevronDown size={16} />
               </Chevron>
             </>
-          ) : groupDownload ? (
-            inStoreChip
-          ) : (
-            <Button
-              variant="primary"
-              size="sm"
-              onClick={() => singleVariant && onSelectModel(singleVariant.id)}
-              aria-label={t('modelPickerGroup.selectModel', 'Download {modelId}', {
-                modelId: singleVariant?.id ?? title,
-              })}
-            >
-              <FiDownload size={13} />
-              {t('modelPickerGroup.download', 'Download')}
-            </Button>
-          )}
+          ) : singleVariant ? variantAction(singleVariant) : null          }
         </ActionArea>
       </Row>
 
@@ -590,11 +579,11 @@ export function ModelPickerGroup({
         <VariantPanel>
           {variants.map((v) => {
             const vFit = getModelFitStatus(v.id);
-            const vDownload = downloadStatusMap?.get(v.id);
             const vInstance = instanceStatuses?.[v.id];
 
             return (
               <VariantRow key={v.id}>
+                <span style={{ fontFamily: theme.fonts.mono, fontSize: 11, flex: '1 1 160px', overflowWrap: 'anywhere' }}>{v.id.split('/').pop()}</span>
                 {uniformFormat === null && deriveFormatLabel(v.id) && (
                   <QuantBadge>{deriveFormatLabel(v.id)}</QuantBadge>
                 )}
@@ -613,21 +602,8 @@ export function ModelPickerGroup({
                   {sizeText(v.storage_size_megabytes)}
                 </span>
                 {vInstance && <StatusDot $class={vInstance.statusClass} title={vInstance.statusClass} />}
-                {vDownload?.available ? (
-                  inStoreChip
-                ) : (
-                  <Button
-                    variant="primary"
-                    size="sm"
-                    onClick={() => onSelectModel(v.id)}
-                    aria-label={t('modelPickerGroup.selectModel', 'Download {modelId}', {
-                      modelId: v.id,
-                    })}
-                  >
-                    <FiDownload size={13} />
-                    {t('modelPickerGroup.download', 'Download')}
-                  </Button>
-                )}
+                <span style={{ fontSize: 11, color: theme.colors.textMuted }}>{downloadStatusMap?.get(v.id)?.nodeNames.join(' · ') || '—'}</span>
+                {variantAction(v)}
               </VariantRow>
             );
           })}

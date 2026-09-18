@@ -119,14 +119,14 @@ const Title = styled.div`
 `;
 
 const ModelName = styled.span`
-  color: ${({ theme }) => theme.colors.gold};
+  color: ${({ theme }) => theme.colors.accentText};
   font-weight: 500;
 `;
 
 const CloseBtn = styled.button`
   all: unset;
   cursor: pointer;
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   &:hover { color: ${({ theme }) => theme.colors.text}; }
 `;
 
@@ -204,18 +204,18 @@ const NodePill = styled.button<{ $excluded: boolean; $ineligible?: boolean }>`
 const NodePillHint = styled.div`
   font-family: ${({ theme }) => theme.fonts.body};
   font-size: ${({ theme }) => theme.fontSizes.xs};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
 `;
 
 const Slider = styled.input`
   flex: 1;
-  accent-color: ${({ theme }) => theme.colors.gold};
+  accent-color: ${({ theme }) => theme.colors.accentText};
 `;
 
 const SliderValue = styled.span`
   font-size: ${({ theme }) => theme.fontSizes.sm};
   font-family: ${({ theme }) => theme.fonts.mono};
-  color: ${({ theme }) => theme.colors.gold};
+  color: ${({ theme }) => theme.colors.accentText};
   min-width: 60px;
   text-align: right;
 `;
@@ -255,7 +255,7 @@ const OptionLabel = styled.div<{ $selected: boolean }>`
 const OptionSub = styled.div`
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   margin-top: 2px;
 `;
 
@@ -301,7 +301,7 @@ const Loading = styled.div`
   text-align: center;
   font-size: ${({ theme }) => theme.fontSizes.sm};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
 `;
 
 const CardWrapper = styled.div`

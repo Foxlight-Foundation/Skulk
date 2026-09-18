@@ -8,7 +8,7 @@ const meta: Meta<typeof SegmentedControl> = {
   parameters: { layout: 'centered' },
   decorators: [
     (Story) => (
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 24, padding: 24, background: '#111' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 24, padding: 24, }}>
         <Story />
       </div>
     ),

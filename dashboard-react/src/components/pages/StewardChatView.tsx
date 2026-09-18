@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { StewardProposalCard } from '../steward/StewardProposalCard';
+import { createContext, useContext, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import styled from 'styled-components';
 import { MdAutoAwesome } from 'react-icons/md';
 import { ChatMessages } from '../chat/ChatMessages';
@@ -85,7 +86,7 @@ const CenterTitle = styled.div`
   font-size: ${({ theme }) => theme.fontSizes.sm};
   text-transform: uppercase;
   letter-spacing: 1.5px;
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   display: flex;
   align-items: center;
   gap: 8px;
@@ -100,7 +101,7 @@ const CenterBody = styled.div`
 const ModelTag = styled.div`
   font-family: ${({ theme }) => theme.fonts.mono};
   font-size: ${({ theme }) => theme.fontSizes.xs};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   padding: 4px 24px 0;
   text-align: center;
 `;
@@ -114,56 +115,6 @@ const ProposalTray = styled.section`
   padding: 10px 24px;
   border-bottom: 1px solid ${({ theme }) => theme.colors.borderLight};
   background: ${({ theme }) => theme.colors.surfaceSunken};
-`;
-
-const ProposalCard = styled.article`
-  display: grid;
-  gap: 8px;
-  padding: 12px;
-  border: 1px solid ${({ theme }) => theme.colors.warning};
-  border-radius: ${({ theme }) => theme.radii.md};
-  background: ${({ theme }) => theme.colors.surface};
-`;
-
-const ProposalTitle = styled.div`
-  font-family: ${({ theme }) => theme.fonts.mono};
-  font-size: ${({ theme }) => theme.fontSizes.sm};
-  color: ${({ theme }) => theme.colors.text};
-`;
-
-const ProposalCopy = styled.div`
-  font-size: ${({ theme }) => theme.fontSizes.xs};
-  line-height: 1.45;
-  color: ${({ theme }) => theme.colors.textSecondary};
-`;
-
-const ProposalEvidence = styled.ul`
-  margin: 0;
-  padding-left: 18px;
-  font-size: ${({ theme }) => theme.fontSizes.xs};
-  line-height: 1.45;
-  color: ${({ theme }) => theme.colors.textSecondary};
-`;
-
-const ProposalActions = styled.div`
-  display: flex;
-  gap: 8px;
-`;
-
-const ProposalButton = styled.button<{ $reject?: boolean }>`
-  border: 1px solid ${({ $reject, theme }) => $reject ? theme.colors.border : theme.colors.accent};
-  border-radius: ${({ theme }) => theme.radii.sm};
-  background: ${({ $reject, theme }) => $reject ? theme.colors.surface : theme.colors.accent};
-  color: ${({ $reject, theme }) => $reject ? theme.colors.textSecondary : theme.colors.textOnAccent};
-  padding: 6px 10px;
-  font: inherit;
-  font-size: ${({ theme }) => theme.fontSizes.xs};
-  cursor: pointer;
-
-  &:disabled {
-    cursor: wait;
-    opacity: 0.55;
-  }
 `;
 
 interface StreamDelta {
@@ -203,9 +154,11 @@ function parseDelta(payload: string): StreamDelta | null {
   }
 }
 
-export function StewardChatView({ readyInstances = [] }: StewardChatViewProps) {
+const EMPTY_INSTANCES: InstanceCardData[] = [];
+
+function useStewardController({ readyInstances = EMPTY_INSTANCES }: StewardChatViewProps) {
+  const [draft, setDraft] = useState('');
   const { t } = useSkulkTranslation();
-  const dispatch = useAppDispatch();
   const autoSpeakAssistant = useAppSelector((state) => state.chat.autoSpeakAssistant);
   const speechLanguage = speechLanguageForDashboardLocale(tolgee.getLanguage());
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -350,8 +303,8 @@ export function StewardChatView({ readyInstances = [] }: StewardChatViewProps) {
     return queue;
   }, [speechLanguage, speechModel, speechVoice, stopSpeechPlayback, t]);
 
-  // Navigating away must not leave the steward generating for a stream
-  // nobody is reading; the server cancels the turn on disconnect.
+  // The app-level owner survives presentation changes; only its disposal
+  // cancels the active stream and releases speech resources.
   useEffect(() => () => {
     abortRef.current?.abort();
     stopSpeechPlayback();
@@ -496,6 +449,34 @@ export function StewardChatView({ readyInstances = [] }: StewardChatViewProps) {
     queue.finish();
   }, [createSpeechQueue]);
 
+  return { draft, setDraft, status, messages, isLoading, streamingContent, streamingThinking,
+    pendingProposals, isDecidingProposal, handleProposalDecision, handleSend, handleCancel,
+    speechModel, speechVoice, autoSpeakAssistant, stopSpeechPlayback, speakDraft, isSpeaking, speechError };
+}
+
+const StewardContext = createContext<ReturnType<typeof useStewardController> | null>(null);
+
+/** Own a conversation and its active requests independently of its presentation. */
+export function StewardControllerProvider({ children, readyInstances }: StewardChatViewProps & { children: ReactNode }) {
+  const controller = useStewardController({ readyInstances });
+  return <StewardContext.Provider value={controller}>{children}</StewardContext.Provider>;
+}
+
+/** Use the app controller, or an isolated owner for standalone embeds and stories. */
+export function StewardChatView(props: StewardChatViewProps) {
+  const controller = useContext(StewardContext);
+  return controller ? <StewardPresentation controller={controller} /> : <StandaloneSteward {...props} />;
+}
+function StandaloneSteward(props: StewardChatViewProps) {
+  const controller = useStewardController(props);
+  return <StewardPresentation controller={controller} />;
+}
+function StewardPresentation({ controller }: { controller: ReturnType<typeof useStewardController> }) {
+  const { t } = useSkulkTranslation();
+  const dispatch = useAppDispatch();
+  const { draft, setDraft, status, messages, isLoading, streamingContent, streamingThinking,
+    pendingProposals, isDecidingProposal, handleProposalDecision, handleSend, handleCancel,
+    speechModel, speechVoice, autoSpeakAssistant, stopSpeechPlayback, speakDraft, isSpeaking, speechError } = controller;
   if (!status) {
     // Gate on the first status response so the chat surface cannot render
     // (or accept input) before the page knows the steward's state.
@@ -569,48 +550,7 @@ export function StewardChatView({ readyInstances = [] }: StewardChatViewProps) {
       {pendingProposals.length > 0 && (
         <ProposalTray aria-label={t('stewardChat.proposals.label', 'Pending actions')}>
           {pendingProposals.map((proposal) => (
-            <ProposalCard key={proposal.proposal_id}>
-              <ProposalTitle>
-                {t('stewardChat.proposals.title', '{action}: {target}', {
-                  action: proposal.action.replaceAll('_', ' '),
-                  target: proposal.target,
-                })}
-              </ProposalTitle>
-              <ProposalCopy>{proposal.rationale}</ProposalCopy>
-              <ProposalCopy>
-                {t('stewardChat.proposals.evidence', 'Evidence')}
-              </ProposalCopy>
-              <ProposalEvidence>
-                {proposal.evidence.map((item, index) => (
-                  <li key={`${proposal.proposal_id}-${index}`}>{item}</li>
-                ))}
-              </ProposalEvidence>
-              <ProposalCopy>
-                {t('stewardChat.proposals.effect', 'Expected effect: {effect}', {
-                  effect: proposal.expected_effect,
-                })}
-              </ProposalCopy>
-              <ProposalCopy>
-                {t('stewardChat.proposals.expiry', 'Expires: {time}', {
-                  time: new Date(proposal.expires_at).toLocaleTimeString(),
-                })}
-              </ProposalCopy>
-              <ProposalActions>
-                <ProposalButton
-                  disabled={isDecidingProposal}
-                  onClick={() => void handleProposalDecision(proposal.proposal_id, true)}
-                >
-                  {t('stewardChat.proposals.approve', 'Approve')}
-                </ProposalButton>
-                <ProposalButton
-                  $reject
-                  disabled={isDecidingProposal}
-                  onClick={() => void handleProposalDecision(proposal.proposal_id, false)}
-                >
-                  {t('stewardChat.proposals.reject', 'Reject')}
-                </ProposalButton>
-              </ProposalActions>
-            </ProposalCard>
+            <StewardProposalCard key={proposal.proposal_id} proposal={proposal} busy={isDecidingProposal} onDecision={approved => void handleProposalDecision(proposal.proposal_id, approved)} />
           ))}
         </ProposalTray>
       )}
@@ -639,6 +579,9 @@ export function StewardChatView({ readyInstances = [] }: StewardChatViewProps) {
       </MessagesScroll>
       <InputArea>
         <ChatForm
+          steward
+          draft={draft}
+          onDraftChange={setDraft}
           onSend={handleSend}
           onCancel={handleCancel}
           isLoading={isLoading}

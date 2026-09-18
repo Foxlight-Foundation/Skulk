@@ -80,7 +80,7 @@ const Title = styled.div`
 `;
 
 const Meta = styled.div`
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   font-size: 11px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -209,7 +209,7 @@ const ActionText = styled.span`
 
 const Hint = styled.div`
   margin-top: 6px;
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   font-size: 11px;
   line-height: 1.4;
 `;
@@ -278,6 +278,7 @@ export function CapabilityFlyout({
   const callScope = `${hostNodeId}/${selectedKey}`;
   const callKeyRef = useRef<string | null>(null);
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Invalidate observed request state when the external capability identity changes.
     setCallOutcome(null);
     setCallInFlight(null);
     callKeyRef.current = null;

@@ -212,7 +212,7 @@ const MobileLabel = styled.span`
     display: inline;
     margin-right: 4px;
     font-size: ${({ theme }) => theme.fontSizes.xs};
-    color: ${({ theme }) => theme.colors.textMuted};
+    color: ${({ theme }) => theme.colors.subtleText};
   }
 `;
 
@@ -246,7 +246,7 @@ const EmptyBox = styled.div`
   text-align: center;
   font-size: ${({ theme }) => theme.fontSizes.tableBody};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
 `;
 
 const Table = styled.div`
@@ -277,7 +277,7 @@ const THead = styled.div`
   background: ${({ theme }) => theme.colors.surfaceSunken};
   font-size: ${({ theme }) => theme.fontSizes.tableHead};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   flex-shrink: 0;
 `;
 
@@ -390,7 +390,7 @@ const CompanionBadge = styled.span`
   font-size: 10px;
   font-family: ${({ theme }) => theme.fonts.body};
   font-weight: 500;
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   background: ${({ theme }) => theme.colors.surfaceSunken};
   border: 1px solid ${({ theme }) => theme.colors.border};
   border-radius: ${({ theme }) => theme.radii.sm};
@@ -479,7 +479,7 @@ const RefreshBtn = styled.button<{ $spinning: boolean }>`
   transition: color 0.15s, background 0.15s;
 
   &:hover {
-    color: ${({ theme }) => theme.colors.gold};
+    color: ${({ theme }) => theme.colors.accentText};
     background: ${({ theme }) => theme.colors.goldBg};
   }
 
@@ -504,7 +504,7 @@ const PlayBtn = styled.button`
   width: 28px;
   height: 28px;
   border-radius: 50%;
-  color: ${({ theme }) => theme.colors.gold};
+  color: ${({ theme }) => theme.colors.accentText};
   background: ${({ theme }) => theme.colors.goldBg};
   transition: background 0.15s, transform 0.1s;
 
@@ -521,7 +521,7 @@ const DisabledBtn = styled.span`
   width: 28px;
   height: 28px;
   border-radius: 50%;
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   opacity: 0.4;
   cursor: not-allowed;
 `;
@@ -535,11 +535,11 @@ const PlacementBtn = styled.button`
   width: 28px;
   height: 28px;
   border-radius: 50%;
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   transition: all 0.15s;
 
   &:hover {
-    color: ${({ theme }) => theme.colors.gold};
+    color: ${({ theme }) => theme.colors.accentText};
     background: ${({ theme }) => theme.colors.goldBg};
   }
 `;

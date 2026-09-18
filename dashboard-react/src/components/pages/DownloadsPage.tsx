@@ -662,6 +662,8 @@ export function ModelStorePage({ topology, nodeResources = {}, downloads, instan
       <ModelSearchModal
         open={searchOpen}
         onClose={() => setSearchOpen(false)}
+        activeDownloads={storeDownloads}
+        onLaunch={topology ? (modelId) => { setSearchOpen(false); setPlacementModelId(modelId); } : undefined}
         existingModelIds={storeModelIds}
         onDownloadStarted={handleDownloadStarted}
         fleet={fleet}
@@ -739,7 +741,7 @@ const ModalText = styled.p`
 const ModalNote = styled.p`
   font-family: ${({ theme }) => theme.fonts.body};
   font-size: ${({ theme }) => theme.fontSizes.xs};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   margin: 0 0 16px;
 `;
 

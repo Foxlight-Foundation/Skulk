@@ -20,7 +20,7 @@ const TriggerPanel = () => (
       Success toast
     </button>
     <button
-      style={{ padding: '8px 16px', background: '#ef4444', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontFamily: 'monospace' }}
+      style={{ padding: '8px 16px', background: '#b23a44', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontFamily: 'monospace' }}
       onClick={() => addToast({ type: 'error', message: 'Failed to connect to node kite1' })}
     >
       Error toast
@@ -32,7 +32,7 @@ const TriggerPanel = () => (
       Warning toast
     </button>
     <button
-      style={{ padding: '8px 16px', background: '#3b82f6', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontFamily: 'monospace' }}
+      style={{ padding: '8px 16px', background: '#1c2b4a', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontFamily: 'monospace' }}
       onClick={() => addToast({ type: 'info', message: 'Download started for Qwen3-30B-A3B-4bit' })}
     >
       Info toast
@@ -48,7 +48,7 @@ const TriggerPanel = () => (
 
 export const Interactive: Story = {
   render: () => (
-    <div style={{ height: '100vh', background: '#111' }}>
+    <div style={{ height: '100vh', }}>
       <TriggerPanel />
       <ToastContainer />
     </div>

@@ -1,6 +1,7 @@
+import { useModalFocus } from '../../hooks/useModalFocus';
+import type { StoreDownloadProgress } from '../layout/StoreRegistryTable';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import styled from 'styled-components';
-import { FiX } from 'react-icons/fi';
 import { ModelBrowser } from '../models/ModelBrowser';
 import { burstVerdict, hfWeightBytes, type BurstInfo, type FleetServingSummary } from '../models/burst';
 import { deriveFormatLabel, deriveQuantLabel } from '../models/quantBadge';
@@ -22,6 +23,7 @@ const MAX_RECENT_MODELS = 20;
  * that cannot be parsed is treated as accepted to preserve the previous
  * behavior for older responses.
  */
+// eslint-disable-next-line react-refresh/only-export-components -- The store and discovery workflows share this response contract parser.
 export async function readAcceptedDownload(res: Response): Promise<{ rejected: boolean; reason: string | null }> {
   try {
     const body: unknown = await res.json();
@@ -51,6 +53,7 @@ export async function readAcceptedDownload(res: Response): Promise<{ rejected: b
  * drops it leaves the operator with nothing to act on. Returns `null` when
  * the body carries no usable text in either shape.
  */
+// eslint-disable-next-line react-refresh/only-export-components -- The store and discovery workflows share this safe error parser.
 export async function extractErrorDetail(res: Response): Promise<string | null> {
   try {
     const body: unknown = await res.json();
@@ -134,6 +137,8 @@ function loadRecentIds(): string[] {
 }
 
 interface ModelSearchModalProps {
+  activeDownloads?: StoreDownloadProgress[];
+  onLaunch?: (modelId: string) => void;
   open: boolean;
   onClose: () => void;
   existingModelIds: Set<string>;
@@ -147,10 +152,14 @@ export function ModelSearchModal({
   open,
   onClose,
   existingModelIds,
+  activeDownloads,
+  onLaunch,
   onDownloadStarted,
   fleet = null,
 }: ModelSearchModalProps) {
   const { t } = useSkulkTranslation();
+  const modalRef = useRef<HTMLDivElement>(null);
+  useModalFocus(open, modalRef, onClose);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [favorites, setFavorites] = useState<Set<string>>(() => loadFavorites());
   const [recentIds, setRecentIds] = useState<string[]>(() => loadRecentIds());
@@ -392,6 +401,15 @@ export function ModelSearchModal({
     return burstVerdict(fleet, weight?.bytes ?? null, weight?.estimated ?? true, format);
   }, [fleet]);
 
+  const cancelDownload = async (modelId: string) => {
+    try {
+      const response = await fetch(`/store/models/${encodeURIComponent(modelId)}/download`, { method: 'DELETE' });
+      if (!response.ok) throw new Error(await extractErrorDetail(response) ?? t('modelSearch.cancelFailed', 'Could not cancel the download. Refresh its status before retrying.'));
+    } catch (error) {
+      addToast({ type: 'error', message: error instanceof Error ? error.message : t('modelSearch.cancelFailed', 'Could not cancel the download. Refresh its status before retrying.') });
+    }
+  };
+
   // Build a download status map so models already in store show a checkmark
   const storeDownloadMap = useMemo(() => {
     const map = new Map<string, DownloadAvailability>();
@@ -406,20 +424,20 @@ export function ModelSearchModal({
   return (
     <>
       <Backdrop onClick={onClose} />
-      <ModalContainer role="dialog" aria-modal="true" aria-labelledby="model-search-title">
-        <ModalHeader>
-          <ModalTitle id="model-search-title">{t('modelSearch.title', 'Find Models')}</ModalTitle>
-          <CloseButton onClick={onClose} aria-label={t('common.close', 'Close')}>
-            <FiX size={20} />
-          </CloseButton>
-        </ModalHeader>
+      <ModalContainer ref={modalRef} tabIndex={-1} role="dialog" aria-modal="true" aria-label={t('modelSearch.title', 'Find Models')}>
         <ModalBody>
           <ModelBrowser
+            heading={t('modelSearch.title', 'Find Models')}
+            defaultFitsOnly={fleet !== null}
+            onClose={onClose}
             models={models}
             selectedModelId={null}
             favorites={favorites}
             recentModelIds={recentIds}
             existingModelIds={existingModelIds}
+            activeDownloads={activeDownloads}
+            onCancelDownload={modelId => void cancelDownload(modelId)}
+            onLaunch={onLaunch}
             downloadStatusMap={storeDownloadMap}
             canModelFit={() => true}
             getModelFitStatus={() => 'fits_now'}
@@ -461,7 +479,7 @@ const ModalContainer = styled.div`
   z-index: 51;
   display: flex;
   flex-direction: column;
-  width: min(94vw, 900px);
+  width: min(94vw, 1120px);
   height: min(86vh, 760px);
   background: ${({ theme }) => theme.colors.surface};
   border: 1px solid ${({ theme }) => theme.colors.border};
@@ -471,33 +489,8 @@ const ModalContainer = styled.div`
 
   @media (max-width: 640px) {
     width: calc(100vw - 16px);
-    height: calc(100vh - 16px);
+    height: calc(100dvh - 16px);
   }
-`;
-
-const ModalHeader = styled.div`
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 16px 20px;
-  border-bottom: 1px solid ${({ theme }) => theme.colors.border};
-`;
-
-const ModalTitle = styled.h2`
-  font-family: ${({ theme }) => theme.fonts.body};
-  font-size: ${({ theme }) => theme.fontSizes.lg};
-  font-weight: 600;
-  color: ${({ theme }) => theme.colors.gold};
-  margin: 0;
-`;
-
-const CloseButton = styled.button`
-  all: unset;
-  cursor: pointer;
-  color: ${({ theme }) => theme.colors.textMuted};
-  transition: color 0.15s;
-  display: flex;
-  &:hover { color: ${({ theme }) => theme.colors.text}; }
 `;
 
 const ModalBody = styled.div`

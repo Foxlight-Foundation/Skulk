@@ -98,7 +98,7 @@ const TooltipToken = styled.span`
 const LogprobText = styled.div`
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   margin-bottom: 8px;
 `;
 
@@ -114,9 +114,9 @@ const AltRow = styled.div`
 
 const RegenButton = styled(Button)`
   margin-top: 8px;
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   &:hover:not(:disabled) {
-    color: ${({ theme }) => theme.colors.gold};
+    color: ${({ theme }) => theme.colors.accentText};
   }
 `;
 

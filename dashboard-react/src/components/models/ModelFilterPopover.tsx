@@ -5,13 +5,15 @@ import { Button } from '../common/Button';
 import { useSkulkTranslation, type SkulkTranslate } from '../../i18n/tolgee';
 
 export interface ModelFilterPopoverProps {
+  /** Render inside a persistent facet rail instead of a floating popover. */
+  inline?: boolean;
   filters: FilterState;
   onChange: (filters: FilterState) => void;
   onClear: () => void;
   onClose: () => void;
 }
 
-const Panel = styled.div`
+const Panel = styled.div<{ $inline: boolean }>`
   position: absolute;
   right: 0;
   top: 100%;
@@ -21,7 +23,9 @@ const Panel = styled.div`
   border: 1px solid ${({ theme }) => theme.colors.border};
   border-radius: ${({ theme }) => theme.radii.lg};
   padding: ${({ theme }) => theme.spacing.md};
-  min-width: 260px;
+  min-width: 0;
+  width: ${({ $inline }) => $inline ? "auto" : "260px"};
+  ${({ $inline }) => $inline && css`position: static; margin: 0; border: 0; border-radius: 0; padding: 16px; background: transparent;`}
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -30,7 +34,7 @@ const Panel = styled.div`
 const SectionLabel = styled.div`
   font-size: ${({ theme }) => theme.fontSizes.label};
   font-weight: 600;
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.textSecondary};
   margin-bottom: 6px;
 `;
 
@@ -45,8 +49,8 @@ const Chip = styled(Button)<{ $active: boolean }>`
     $active &&
     css`
       background: ${({ theme }) => theme.colors.goldBg};
-      border-color: ${({ theme }) => theme.colors.gold};
-      color: ${({ theme }) => theme.colors.gold};
+      border-color: ${({ theme }) => theme.colors.accentText};
+      color: ${({ theme }) => theme.colors.accentText};
     `}
 `;
 
@@ -76,12 +80,13 @@ function sizeRangeLabel(range: (typeof SIZE_RANGES)[number], t: SkulkTranslate):
   return t('modelFilter.sizeOver200Gb', '> 200 GB');
 }
 
-export function ModelFilterPopover({ filters, onChange, onClear, onClose }: ModelFilterPopoverProps) {
+export function ModelFilterPopover({ inline = false, filters, onChange, onClear, onClose }: ModelFilterPopoverProps) {
   const { t } = useSkulkTranslation();
   const ref = useRef<HTMLDivElement>(null);
 
   // Click-outside handler
   useEffect(() => {
+    if (inline) return;
     const handler = (e: MouseEvent) => {
       if (ref.current && !ref.current.contains(e.target as Node)) {
         onClose();
@@ -89,7 +94,7 @@ export function ModelFilterPopover({ filters, onChange, onClear, onClose }: Mode
     };
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
-  }, [onClose]);
+  }, [onClose, inline]);
 
   const toggleCapability = (cap: string) => {
     const caps = filters.capabilities.includes(cap)
@@ -113,7 +118,7 @@ export function ModelFilterPopover({ filters, onChange, onClear, onClose }: Mode
     filters.readyOnly;
 
   return (
-    <Panel ref={ref}>
+    <Panel ref={ref} $inline={inline}>
       {/* Capabilities */}
       <div>
         <SectionLabel>{t('modelInfo.capabilities', 'Capabilities')}</SectionLabel>

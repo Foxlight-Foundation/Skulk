@@ -57,7 +57,7 @@ const VendorPill = styled.span<{ $vendor?: string }>`
 
 const Name = styled.span`
   font-size: 12px;
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
 `;
 
 const Row = styled.div`
@@ -67,7 +67,7 @@ const Row = styled.div`
 `;
 
 const Key = styled.div`
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
 `;
 
 const Value = styled.div`

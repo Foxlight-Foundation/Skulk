@@ -17,9 +17,9 @@ import type { ModelInfo } from '../../types/models';
 import { discoverSkulkSpeechSelection } from '../../audio/fabricSpeechDiscovery';
 import { buildSkulkSpeechSynthesisRequest } from '../../audio/fabricSpeechRequest';
 import type { InstanceCardData } from '../layout/InstancePanel';
-import { StewardChatView } from './StewardChatView';
+import { StewardControllerProvider, StewardChatView } from './StewardChatView';
 
-globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', { value: true, configurable: true });
 
 const addToastSpy = vi.fn();
 vi.mock('../../hooks/useToast', () => ({
@@ -79,6 +79,7 @@ function delta(delta: Record<string, string>): string {
 function stubFetch(options: {
   status: StewardStatusFixture;
   sseEvents?: string[];
+  openStream?: (signal: AbortSignal | null | undefined) => ReadableStream<Uint8Array>;
   chatStatus?: number;
   models?: ModelInfo[];
   proposals?: StewardActionProposal[];
@@ -96,7 +97,7 @@ function stubFetch(options: {
       if (options.chatStatus && options.chatStatus !== 200) {
         return new Response('chat unavailable', { status: options.chatStatus });
       }
-      return new Response(sseBody(options.sseEvents ?? []), {
+      return new Response(options.openStream?.(init?.signal) ?? sseBody(options.sseEvents ?? []), {
         status: 200,
         headers: { 'Content-Type': 'text/event-stream' },
       });
@@ -421,4 +422,63 @@ describe('StewardChatView stream errors', () => {
       'stream error never surfaced as a toast',
     );
   });
+});
+
+
+it('retains the draft and conversation when the shared controller changes presentation', async () => {
+  const onChat = vi.fn();
+  stubFetch({ status: READY, sseEvents: [delta({ content: 'Fixture reply.' })], onChat });
+  container = document.createElement('div');
+  document.body.append(container);
+  root = createRoot(container);
+  const instances: InstanceCardData[] = [];
+  const present = async (key: string) => {
+    await act(async () => root?.render(<Provider store={store}><ThemeProvider theme={darkTheme}>
+      <StewardControllerProvider readyInstances={instances}><StewardChatView key={key} /></StewardControllerProvider>
+    </ThemeProvider></Provider>));
+    await act(async () => { await vi.waitFor(() => expect(container?.querySelector('textarea')).not.toBeNull()); });
+  };
+  await present('drawer');
+  await act(async () => { await userEvent.fill(container!.querySelector('textarea')!, 'Keep this draft'); });
+  await present('page');
+  expect(container.querySelector('textarea')?.value).toBe('Keep this draft');
+  expect(onChat).not.toHaveBeenCalled();
+  await act(async () => { await userEvent.click(container!.querySelector('button[aria-label="Send message"]')!); });
+  await act(async () => { await vi.waitFor(() => expect(container?.textContent).toContain('Fixture reply.')); });
+  await present('virtual-model');
+  expect(container.textContent).toContain('Keep this draft');
+  expect(container.textContent).toContain('Fixture reply.');
+  expect(onChat).toHaveBeenCalledOnce();
+});
+
+it('keeps an active generation across presentation changes and cancels it from the new view', async () => {
+  let requestSignal: AbortSignal | null | undefined;
+  const onChat = vi.fn();
+  stubFetch({ status: READY, onChat, openStream: signal => {
+    requestSignal = signal;
+    return new ReadableStream({ start(controller) {
+      controller.enqueue(new TextEncoder().encode(`data: ${delta({ content: 'Working on it' })}\n\n`));
+      signal?.addEventListener('abort', () => controller.error(new DOMException('Aborted', 'AbortError')), { once: true });
+    } });
+  } });
+  container = document.createElement('div');
+  document.body.append(container);
+  root = createRoot(container);
+  const instances: InstanceCardData[] = [];
+  const present = async (key: string) => {
+    await act(async () => root?.render(<Provider store={store}><ThemeProvider theme={darkTheme}>
+      <StewardControllerProvider readyInstances={instances}><StewardChatView key={key} /></StewardControllerProvider>
+    </ThemeProvider></Provider>));
+  };
+  await present('drawer');
+  await waitFor(() => container?.querySelector('textarea') !== null, 'composer did not mount');
+  await userEvent.fill(container.querySelector('textarea')!, 'Inspect the cluster');
+  await userEvent.click(container.querySelector('button[aria-label="Send message"]')!);
+  await waitFor(() => container?.textContent?.includes('Working on it') ?? false, 'stream did not start');
+  await present('page');
+  expect(requestSignal?.aborted).toBe(false);
+  expect(container.textContent).toContain('Working on it');
+  await userEvent.click(container.querySelector('button[aria-label="Cancel generation"]')!);
+  await waitFor(() => requestSignal?.aborted === true, 'stream was not aborted');
+  expect(onChat).toHaveBeenCalledOnce();
 });

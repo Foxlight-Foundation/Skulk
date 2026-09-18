@@ -67,12 +67,12 @@ function buildStatusConfig(
     // Loading and warming are work in flight, so they burn the living
     // colour (matching the store table's loading state), not the ordinary
     // interactive accent.
-    loading:       { label: t('instance.status.loading', 'Loading'),       color: theme.colors.live,    glow: theme.colors.liveBg,    defaultMessage: t('instance.status.loadingMessage', 'Downloading model...') },
-    warming_up:    { label: t('instance.status.warmingUp', 'Warming Up'),    color: theme.colors.live,    glow: theme.colors.liveBg,    defaultMessage: t('instance.status.warmingUpMessage', 'Preparing for inference...') },
+    loading:       { label: t('instance.status.loading', 'Loading'),       color: theme.colors.liveText,    glow: theme.colors.liveBg,    defaultMessage: t('instance.status.loadingMessage', 'Downloading model...') },
+    warming_up:    { label: t('instance.status.warmingUp', 'Warming Up'),    color: theme.colors.liveText,    glow: theme.colors.liveBg,    defaultMessage: t('instance.status.warmingUpMessage', 'Preparing for inference...') },
     ready:         { label: t('instance.status.ready', 'Ready'),         color: theme.colors.healthy, glow: theme.colors.accentBg,   defaultMessage: t('instance.status.readyMessage', 'Ready to chat!') },
     running:       { label: t('instance.status.running', 'Running'),       color: theme.colors.healthy, glow: theme.colors.accentBg,   defaultMessage: t('instance.status.runningMessage', 'Processing inference...') },
     failed:        { label: t('instance.status.failed', 'Failed'),        color: theme.colors.error,   glow: theme.colors.errorBg,    defaultMessage: t('instance.status.failedMessage', 'Instance failed') },
-    shutting_down: { label: t('instance.status.shuttingDown', 'Shutting Down'), color: theme.colors.warning, glow: theme.colors.warningBg,  defaultMessage: t('instance.status.shuttingDownMessage', 'Shutting down...') },
+    shutting_down: { label: t('instance.status.shuttingDown', 'Shutting Down'), color: theme.colors.liveText, glow: theme.colors.warningBg,  defaultMessage: t('instance.status.shuttingDownMessage', 'Shutting down...') },
   };
 }
 
@@ -117,7 +117,7 @@ function nodeStateVisual(
     case 'stopping': return { Icon: FiClock, color: theme.colors.warning, spin: false };
     case 'pending': return { Icon: FiClock, color: theme.colors.textMuted, spin: false };
     case 'loading':
-    default: return { Icon: FiLoader, color: theme.colors.live, spin: true };
+    default: return { Icon: FiLoader, color: theme.colors.liveText, spin: true };
   }
 }
 
@@ -275,7 +275,7 @@ const StatusLabel = styled.div<{ $color: string }>`
 
 const StatusMessage = styled.div`
   font-size: ${({ theme }) => theme.fontSizes.xs};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   font-style: italic;
 `;
 

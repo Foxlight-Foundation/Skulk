@@ -19,7 +19,7 @@ const SpinnerEl = styled.div<{ $size: number; $spinning: boolean }>`
   width: ${({ $size }) => $size}px;
   height: ${({ $size }) => $size}px;
   border: 2px solid ${({ theme }) => theme.colors.borderStrong};
-  border-top-color: ${({ theme }) => theme.colors.gold};
+  border-top-color: ${({ theme }) => theme.colors.accentText};
   border-radius: 50%;
   ${({ $spinning }) =>
     $spinning &&
@@ -56,6 +56,7 @@ export function Spinner({ size = 28, spinning = true, className }: SpinnerProps)
  * no surrounding box, text, or dressing — the spinner is enough to
  * communicate that something is in flight.
  */
+// eslint-disable-next-line react-refresh/only-export-components -- This export is a styled React component.
 export const CenteredSpinner = styled.div`
   display: flex;
   align-items: center;

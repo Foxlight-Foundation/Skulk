@@ -49,7 +49,7 @@ describe('transformTopology memory pool selection', () => {
       ram_total: 45 * GIB,
       is_vram: true,
     });
-    expect(node.system_info.memory).toBe(45 * GIB);
+    expect(node.system_info?.memory).toBe(45 * GIB);
   });
 
   it('reassembles the unified pool for an AMD carve-out node', () => {

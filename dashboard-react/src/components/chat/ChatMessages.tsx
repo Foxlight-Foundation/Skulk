@@ -113,18 +113,18 @@ const MsgHeader = styled.div`
 `;
 
 const RoleLabel = styled.span<{ $role: 'user' | 'assistant' }>`
-  color: ${({ $role, theme }) => ($role === 'assistant' ? theme.colors.gold : theme.colors.textSecondary)};
+  color: ${({ $role, theme }) => ($role === 'assistant' ? theme.colors.accentText : theme.colors.textSecondary)};
   font-weight: 600;
 `;
 
 const Timestamp = styled.span`
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
 `;
 
 const StatLabel = styled.span`
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   font-variant-numeric: tabular-nums;
-  & > span { color: ${({ theme }) => theme.colors.goldTextDim}; }
+  & > span { color: ${({ theme }) => theme.colors.accentText}; }
 `;
 
 const Dot = styled.span<{ $color: string }>`
@@ -167,7 +167,7 @@ const ActiveGhostBtn = styled(Button)<{ $active?: boolean }>`
   ${({ $active }) =>
     $active &&
     css`
-      color: ${({ theme }) => theme.colors.gold};
+      color: ${({ theme }) => theme.colors.accentText};
       background: ${({ theme }) => theme.colors.goldBg};
     `}
 `;
@@ -223,7 +223,7 @@ const ThinkingHeader = styled.button`
   padding: 6px 10px;
   font-size: ${({ theme }) => theme.fontSizes.label};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.goldTextDim};
+  color: ${({ theme }) => theme.colors.accentText};
   transition: background 0.15s;
   box-sizing: border-box;
   &:hover { background: ${({ theme }) => theme.colors.goldBg}; }
@@ -237,7 +237,7 @@ const ThinkingChevron = styled.span<{ $open: boolean }>`
 const ThinkingContent = styled.div`
   padding: 8px 10px;
   font-size: ${({ theme }) => theme.fontSizes.tableBody};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   border-top: 1px solid ${({ theme }) => theme.colors.goldBg};
 
   & * {
@@ -249,7 +249,7 @@ const ShowHideBtn = styled.span`
   cursor: pointer;
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   text-transform: uppercase;
   letter-spacing: 0.5px;
   transition: color 0.15s;
@@ -296,7 +296,7 @@ const AttachThumb = styled.img`
 
 const AttachFile = styled.span`
   font-size: ${({ theme }) => theme.fontSizes.sm};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
 `;
 
 const ScrollBtn = styled.button`
@@ -315,7 +315,7 @@ const ScrollBtn = styled.button`
   border-radius: 50%;
   background: ${({ theme }) => theme.colors.surface};
   border: 1px solid ${({ theme }) => theme.colors.goldDim};
-  color: ${({ theme }) => theme.colors.gold};
+  color: ${({ theme }) => theme.colors.accentText};
   box-shadow: 0 4px 12px ${({ theme }) => theme.colors.shadow};
   transition: all 0.15s;
 
@@ -390,6 +390,7 @@ export function ChatMessages({
   const prevStreamingThinking = useRef(streamingThinking);
   useEffect(() => {
     if (streamingThinking && !prevStreamingThinking.current) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- A new external stream resets the disclosure without changing persisted message state.
       setStreamThinkingOpen(false);
     }
     prevStreamingThinking.current = streamingThinking;
@@ -398,6 +399,7 @@ export function ChatMessages({
   // Auto-scroll on new messages
   useEffect(() => {
     if (messages.length > lastCountRef.current) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- Synchronize DOM scrolling after the message list has committed.
       scrollToBottom();
     }
     lastCountRef.current = messages.length;
@@ -423,6 +425,7 @@ export function ChatMessages({
   useEffect(() => {
     const parent = getScrollParent();
     if (!parent) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Read the committed scroll container when subscribing to its external scroll events.
     updateScrollState();
     parent.addEventListener('scroll', updateScrollState, { passive: true });
     return () => parent.removeEventListener('scroll', updateScrollState);

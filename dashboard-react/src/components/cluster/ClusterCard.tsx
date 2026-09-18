@@ -73,7 +73,7 @@ function MiniTopology({ nodes }: { nodes: ClusterCardNode[] }) {
       const angle = -Math.PI / 2 + (2 * Math.PI * i) / count;
       return { x: cx + r * Math.cos(angle), y: cy + r * Math.sin(angle) - 4 };
     });
-  }, [count, cx, cy, r, nodes.length]);
+  }, [count, cx, cy, r, nodes]);
 
   return (
     <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`}>
@@ -111,7 +111,7 @@ function MiniTopology({ nodes }: { nodes: ClusterCardNode[] }) {
               textAnchor="middle"
               fill={theme.colors.textSecondary}
               fontSize={11}
-              fontFamily="'Outfit', sans-serif"
+              fontFamily="'Instrument Sans', sans-serif"
             >
               {node.memoryUsedPercent}%
             </text>
@@ -256,23 +256,23 @@ const ModelName = styled.span`
 `;
 
 const LinkBtn = styled.a`
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   display: flex;
   flex-shrink: 0;
   transition: color 0.15s;
-  &:hover { color: ${({ theme }) => theme.colors.gold}; }
+  &:hover { color: ${({ theme }) => theme.colors.accentText}; }
 `;
 
 const SizeBadge = styled.span`
   font-size: ${({ theme }) => theme.fontSizes.sm};
   font-weight: 500;
-  color: ${({ theme }) => theme.colors.gold};
+  color: ${({ theme }) => theme.colors.accentText};
   flex-shrink: 0;
 `;
 
 const ModelIdText = styled.span`
   font-size: ${({ theme }) => theme.fontSizes.xs};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -318,7 +318,7 @@ const PulseDot = styled.span`
 
 const SectionLabel = styled.div`
   font-size: ${({ theme }) => theme.fontSizes.xs};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   margin-bottom: 4px;
 `;
 
@@ -359,7 +359,7 @@ const DownloadFill = styled.div<{ $pct: number }>`
 
 const DownloadPct = styled.span`
   font-size: ${({ theme }) => theme.fontSizes.xs};
-  color: ${({ theme }) => theme.colors.gold};
+  color: ${({ theme }) => theme.colors.accentText};
   width: 36px;
   text-align: right;
   flex-shrink: 0;
@@ -389,7 +389,7 @@ const LaunchBtn = styled.button`
 
   &:hover {
     border-color: ${({ theme }) => theme.colors.goldDim};
-    color: ${({ theme }) => theme.colors.gold};
+    color: ${({ theme }) => theme.colors.accentText};
     background: ${({ theme }) => theme.colors.goldBg};
   }
 `;

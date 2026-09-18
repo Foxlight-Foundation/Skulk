@@ -109,7 +109,7 @@ export function StepSlider<T extends string | number = number>({
   inactiveDotSize = 14,
   className,
 }: StepSliderProps<T>) {
-  const options = rawOptions.map(normalizeOption);
+  const options = rawOptions.map(option => normalizeOption<T>(option));
   const activeIndex = options.findIndex((o) => o.value === value);
   const pct = options.length <= 1 ? 0 : (activeIndex / (options.length - 1)) * 100;
 

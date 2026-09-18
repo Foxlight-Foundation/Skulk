@@ -7,7 +7,7 @@ const meta: Meta<typeof InfoTooltip> = {
   parameters: { layout: 'centered' },
   decorators: [
     (Story) => (
-      <div style={{ padding: 100, background: '#111', display: 'flex', gap: 40, alignItems: 'center' }}>
+      <div style={{ padding: 100, display: 'flex', gap: 40, alignItems: 'center' }}>
         <Story />
       </div>
     ),

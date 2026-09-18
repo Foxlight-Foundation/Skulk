@@ -45,7 +45,7 @@ const Wrap = styled.div`
 const EmptyState = styled.div`
   padding: 16px 8px;
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
 `;
 
 const Legend = styled.div`
@@ -54,7 +54,7 @@ const Legend = styled.div`
   gap: 10px;
   padding: 6px 4px 8px;
   font-size: ${({ theme }) => theme.fontSizes.xs};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
 `;
 
 const LegendItem = styled.span`

@@ -45,7 +45,7 @@ const Grid = styled.dl`
   margin: 0;
 
   dt {
-    color: ${({ theme }) => theme.colors.textMuted};
+    color: ${({ theme }) => theme.colors.subtleText};
   }
 
   dd {
@@ -98,7 +98,7 @@ const LinkRow = styled.a<{ $muted?: boolean }>`
 
   &:hover,
   &:focus-visible {
-    border-color: ${({ theme }) => theme.colors.gold};
+    border-color: ${({ theme }) => theme.colors.accentText};
     outline: none;
   }
 `;
@@ -115,7 +115,7 @@ const ButtonRow = styled.button`
 
   &:not(:disabled):hover,
   &:not(:disabled):focus-visible {
-    border-color: ${({ theme }) => theme.colors.gold};
+    border-color: ${({ theme }) => theme.colors.accentText};
     outline: none;
   }
 `;
@@ -128,7 +128,7 @@ const RowText = styled.span`
   gap: 2px;
 
   small {
-    color: ${({ theme }) => theme.colors.textMuted};
+    color: ${({ theme }) => theme.colors.subtleText};
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -137,7 +137,7 @@ const RowText = styled.span`
 
 const Empty = styled.p`
   margin: 0;
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
 `;
 
 const Outcome = styled.pre<{ $error: boolean }>`
@@ -184,6 +184,7 @@ export function CapabilityPanel() {
   // for a previous target is dropped instead of landing under the new one.
   const callTargetRef = useRef<string | null>(null);
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Changing the observed capability invalidates the prior request projection.
     setOutcome(null);
     setInFlight(false);
     callTargetRef.current = null;
@@ -248,7 +249,11 @@ export function CapabilityPanel() {
       : tab === 'surfaces'
         ? t('capabilityPanel.tabs.surfaces', 'Surfaces')
         : t('capabilityPanel.tabs.actions', 'Actions');
-  const nowMs = Date.now();
+  const [nowMs, setNowMs] = useState(Date.now);
+  useEffect(() => {
+    const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   return (
     <RightDrawer

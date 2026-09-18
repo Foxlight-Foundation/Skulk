@@ -1,3 +1,4 @@
+import { ReadyModelSelect } from './components/chat/ReadyModelSelect';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import styled from 'styled-components';
 
@@ -16,7 +17,7 @@ import { darkTheme, lightTheme, GlobalStyle } from './theme';
 import { useClusterState, type RawInstances } from './hooks/useClusterState';
 import { HeaderNav } from './components/layout/HeaderNav';
 import { MobileMenuSheet } from './components/layout/MobileMenuSheet';
-import { useIsMobile, MOBILE_BREAKPOINT_PX } from './hooks/useMediaQuery';
+import { useIsMobile, useCompactHeader, MOBILE_BREAKPOINT_PX } from './hooks/useMediaQuery';
 import { TopologyGraph } from './components/topology/TopologyGraph';
 // ClusterWarnings replaced by inline header warning indicator
 import { ConnectionBanner } from './components/status/ConnectionBanner';
@@ -31,7 +32,11 @@ import { TelemetryConsentModal } from './components/layout/TelemetryConsentModal
 import { ModelStorePage } from './components/pages/DownloadsPage';
 import { ChatView } from './components/pages/ChatView';
 import { OperatorPage } from './components/pages/OperatorPage';
-import { StewardChatView } from './components/pages/StewardChatView';
+import { RightDrawer } from './components/common/RightDrawer';
+import { Button } from './components/common/Button';
+import { StewardPrompt } from './components/steward/StewardPrompt';
+import { useGetStewardStatusQuery } from './store/endpoints/steward';
+import { StewardControllerProvider, STEWARD_MODEL_ID, StewardChatView } from './components/pages/StewardChatView';
 import { IntegrationsPage } from './components/pages/IntegrationsPage';
 import { PluginsPage } from './components/pages/PluginsPage';
 import { InstancePanel, type InstanceCardData } from './components/layout/InstancePanel';
@@ -121,6 +126,7 @@ const PanelBackdrop = styled.div`
 `;
 
 const Main = styled.main`
+  position: relative;
   flex: 1;
   min-width: 0;
   min-height: 0;
@@ -230,15 +236,19 @@ export function App() {
   const realtimeTranscriptionAvailable = Boolean(
     localNodeId && nodeCapabilities[localNodeId]?.includes('stt.realtime'),
   );
+  const [stewardOpen, setStewardOpen] = useState(false);
+  const [stewardWidth, setStewardWidth] = useState(440);
+  const { data: stewardStatus } = useGetStewardStatusQuery(undefined, { pollingInterval: 15000 });
   const [settingsOpen, setSettingsOpen] = useState(false);
   // Phone-width header: nav and icon actions collapse into the hamburger
   // sheet. The open flag resets when the viewport grows past the breakpoint
   // so a rotation or window resize never strands an invisible open menu.
   const isMobile = useIsMobile();
+  const compactHeader = useCompactHeader();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   useEffect(() => {
-    if (!isMobile) setMobileMenuOpen(false);
-  }, [isMobile]);
+    if (!compactHeader) setMobileMenuOpen(false);
+  }, [compactHeader]);
   // Drawer exclusivity must also hold for PERSISTED state, not just the
   // toggle handlers: both flags can arrive true from a desktop session, and
   // independent render predicates would stack both drawers over a phone
@@ -266,6 +276,26 @@ export function App() {
   const historyPanelOpen = useAppSelector((s) => s.ui.historyPanelOpen);
   const themeName = useAppSelector((s) => s.ui.theme);
   const activeTheme = themeName === 'light' ? lightTheme : darkTheme;
+  const openSteward = () => {
+    setSettingsOpen(false);
+    dispatch(uiActions.closeObservability());
+    dispatch(uiActions.closeCapabilityPanel());
+    setStewardOpen(true);
+  };
+  useEffect(() => {
+    const shortcut = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault();
+        setSettingsOpen(false);
+        dispatch(uiActions.closeObservability());
+        dispatch(uiActions.closeCapabilityPanel());
+        setStewardOpen(true);
+      }
+    };
+    window.addEventListener('keydown', shortcut);
+    return () => window.removeEventListener('keydown', shortcut);
+  }, [dispatch]);
+
 
   // Reflect theme on the html root so non-styled-components surfaces (highlight.js,
   // scrollbars, etc.) can react via `html[data-theme='light'] …` selectors.
@@ -641,6 +671,7 @@ export function App() {
       {activeTheme.colors.scene === 'none' && (
         <NetworkMesh key={isMobile ? 'mesh-mobile' : 'mesh-desktop'} radius={2.5} count={isMobile ? 14 : 43} linkDistance={430} />
       )}
+      <StewardControllerProvider readyInstances={instanceCards}>
       <Shell>
         <ConnectionBanner connected={connected} />
         <HeaderAnchor>
@@ -648,11 +679,13 @@ export function App() {
           showHome
           activeRoute={activeRoute}
           onNavigate={(route) => setActiveRoute(route)}
-          onOpenSettings={() => setSettingsOpen(true)}
+          onOpenSteward={openSteward}
+          stewardOpen={stewardOpen}
+          onOpenSettings={() => { setStewardOpen(false); dispatch(uiActions.closeObservability()); dispatch(uiActions.closeCapabilityPanel()); setSettingsOpen(true); }}
           downloadProgress={downloadProgress}
           warnings={clusterWarnings}
-          compact={isMobile}
-          showMobileMenuToggle={isMobile}
+          compact={compactHeader}
+          showMobileMenuToggle={compactHeader}
           mobileMenuOpen={mobileMenuOpen}
           onToggleMobileMenu={() => setMobileMenuOpen((v) => !v)}
           showSidebarToggle={activeRoute === 'chat' && allConversations.length > 0}
@@ -670,7 +703,7 @@ export function App() {
             togglePanel();
           }}
         />
-        {isMobile && (
+        {compactHeader && (
           <MobileMenuSheet
             open={mobileMenuOpen}
             activeRoute={activeRoute}
@@ -717,13 +750,15 @@ export function App() {
                 runners={runners}
                 onChat={(modelId) => { dispatch(chatActions.selectModel(modelId)); setActiveRoute('chat'); }}
               />
+            ) : activeRoute === 'chat' && selectedModelId === STEWARD_MODEL_ID ? (
+              <><ReadyModelSelect value={STEWARD_MODEL_ID} onChange={value => dispatch(chatActions.selectModel(value))} fabricEnabled models={instanceCards.filter(instance => (instance.status === 'ready' || instance.status === 'running') && instance.supportsTextChat && !instance.isEmbedding)} />{!stewardOpen && <StewardChatView />}</>
             ) : activeRoute === 'chat' ? (
               <ChatView
                 readyInstances={instanceCards}
                 realtimeTranscriptionAvailable={realtimeTranscriptionAvailable}
               />
             ) : activeRoute === 'steward' ? (
-              <StewardChatView readyInstances={instanceCards} />
+              <>{!stewardOpen && <StewardChatView />}</>
             ) : activeRoute === 'integrations' ? (
               <IntegrationsPage readyInstances={instanceCards} />
             ) : activeRoute === 'operator' ? (
@@ -747,6 +782,7 @@ export function App() {
                   : t('app.empty.connectingBackend', 'Connecting to backend...')}
               </EmptyState>
             )}
+            {activeRoute === 'cluster' && stewardStatus?.enabled && <div style={{ position: 'absolute', bottom: 24, left: 0, right: 0, display: 'flex', justifyContent: 'center' }}><StewardPrompt onOpen={openSteward} /></div>}
           </Main>
           {hasInstances && panelOpen && (
             <PanelOverlay $side="right">
@@ -758,12 +794,19 @@ export function App() {
             </PanelOverlay>
           )}
         </ContentRow>
+        <RightDrawer open={stewardOpen} onClose={() => setStewardOpen(false)} title="Skulk" ariaLabel={t('steward.drawer', 'Skulk Steward')}
+          width={stewardWidth} minWidth={360} maxWidth={800} onWidthChange={setStewardWidth}
+          closeLabel={t('common.close', 'Close')} resizeLabel={t('steward.resize', 'Resize Steward')}>
+          <Button variant="ghost" style={{ alignSelf: 'flex-start', margin: 12 }} onClick={() => { setStewardOpen(false); setActiveRoute('steward'); }}>{t('steward.openPage', 'Open as page')}</Button>
+          <StewardChatView />
+        </RightDrawer>
         <ToastContainer />
         <ObservabilityPanel />
         <CapabilityPanel />
         <SettingsPanel open={settingsOpen} onClose={() => setSettingsOpen(false)} />
         <TelemetryConsentModal />
       </Shell>
+      </StewardControllerProvider>
     </ThemeProvider>
   );
 }

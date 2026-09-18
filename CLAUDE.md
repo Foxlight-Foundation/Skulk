@@ -784,7 +784,7 @@ deadlines and sanitized failures and remain trusted installed Python code.
 ### Dashboard
 React + TypeScript + styled-components frontend in `dashboard-react/`. Build output goes to `dashboard-react/dist/` and is served by the API when present. The installer and supervised launchd/systemd startup wrapper build these assets with Skulk's pinned bundled Node.js runtime, retaining compatible system Node/npm only as a recovery fallback. Only an explicitly headless node (or one with no `SKULK_DASHBOARD_DIR`) sets `DASHBOARD_DIR=None`, skips the mount, and serves the API without the UI.
 
-Styling is theme-token-driven (`dashboard-react/src/theme/theme.ts`): dark mode is the Foxlight operator design system's Den palette, and components must never branch on the theme name; all variation lives in tokens. Building with `VITE_NIGHT_SKY=1` sets the dark palette's `scene` token to the brand valley star field, which enables the `SceneBackdrop` crown layer plus the `ShootingStars` animation and retires the abstract background mesh for that palette; the default build ships a CSS-only night gradient with the mesh.
+Styling is theme-token-driven (`dashboard-react/src/theme/theme.ts`): the palettes are Night (`dark`) and Noon Ridge (`light`), with Instrument Sans and JetBrains Mono, and components must never branch on the theme name; all variation lives in tokens. Building with `VITE_NIGHT_SKY=1` sets the dark palette's `scene` token to the brand valley star field, which enables the `SceneBackdrop` crown layer plus the `ShootingStars` animation and retires the abstract background mesh for that palette; the default build ships a CSS-only night gradient with the mesh.
 
 Dashboard localization uses Tolgee in `dashboard-react/src/i18n/tolgee.ts`.
 All dashboard strings must use the `skulk` namespace through Tolgee's `t()`
@@ -1361,3 +1361,10 @@ non-routing namespace fingerprint. `Router.host_network` reads live libp2p and
 Zenoh listeners, including OS-assigned ports. It does not expose namespace
 secrets, dial peers, select commands or restart inference. Provider-specific
 secure tunnels and bootstrap remain in the private plugin.
+
+Dashboard Steward presentations share an app-scoped `StewardControllerProvider`;
+view changes must not reset drafts, abort streams, or duplicate proposal decisions.
+`useModalFocus` coordinates modal ownership and focus restoration. Settings drafts
+survive Devices navigation; device and invitation operations are immediate and
+pairing secrets remain transient component state. Storybook uses an isolated store
+and an allowlisted asset fetch interceptor; gallery requests never operate a cluster.

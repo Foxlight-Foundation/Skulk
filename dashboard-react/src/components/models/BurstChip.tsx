@@ -15,7 +15,7 @@ const Chip = styled.span`
   height: 22px;
   flex-shrink: 0;
   border-radius: 50%;
-  color: ${({ theme }) => theme.colors.gold};
+  color: ${({ theme }) => theme.colors.accentText};
   background: ${({ theme }) => theme.colors.goldBg};
 `;
 

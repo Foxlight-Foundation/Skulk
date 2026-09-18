@@ -8,7 +8,7 @@ import type { HuggingFaceModel, ModelInfo, PickerMode } from '../../types/models
 import { ModelBrowser } from './ModelBrowser';
 import type { BurstInfo } from './burst';
 
-globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', { value: true, configurable: true });
 
 vi.mock('../../i18n/tolgee', () => ({
   useSkulkTranslation: () => ({
@@ -110,13 +110,13 @@ describe('ModelBrowser store discovery taxonomy', () => {
     await renderBrowser();
 
     expect(container?.querySelector('nav')).toBeNull();
-    expect(container?.textContent).toContain('Supported models');
+    expect(container?.textContent).toContain('Supported');
     expect(container?.textContent).not.toContain('Recommended');
 
     const sourceButtons = container?.querySelectorAll('[role="group"][aria-label="Model source"] button');
     expect(sourceButtons?.length).toBe(2);
-    expect(sourceButtons?.[0]?.textContent).toBe('Supported models');
-    expect(sourceButtons?.[1]?.textContent).toBe('Search Hugging Face');
+    expect(sourceButtons?.[0]?.textContent).toBe('Supported');
+    expect(sourceButtons?.[1]?.textContent).toBe('Hugging Face');
 
     expect(familyChips().map((chip) => chip.textContent)).toEqual([
       'All',
@@ -137,7 +137,7 @@ describe('ModelBrowser store discovery taxonomy', () => {
     expect(container?.textContent).not.toContain('Qwen3 4B');
 
     const hubButton = Array.from(container?.querySelectorAll('button') ?? [])
-      .find((button) => button.textContent === 'Search Hugging Face');
+      .find((button) => button.textContent === 'Hugging Face');
     expect(hubButton).not.toBeUndefined();
     await act(async () => hubButton?.click());
 

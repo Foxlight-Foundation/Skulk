@@ -7,7 +7,7 @@ import { darkTheme } from '../../theme/theme';
 import { IntegrationsPage } from './IntegrationsPage';
 import type { InstanceCardData } from '../layout/InstancePanel';
 
-globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', { value: true, configurable: true });
 
 vi.mock('../../i18n/tolgee', () => ({
   useSkulkTranslation: () => ({
@@ -19,7 +19,7 @@ vi.mock('../../hooks/useToast', () => ({
   addToast: vi.fn(),
 }));
 
-const copyToClipboard = vi.fn(() => Promise.resolve());
+const copyToClipboard = vi.fn<(text: string) => Promise<void>>(() => Promise.resolve());
 vi.mock('../../utils/clipboard', () => ({
   copyToClipboard: (text: string) => copyToClipboard(text),
 }));
@@ -105,13 +105,14 @@ async function render(instances: InstanceCardData[]): Promise<HTMLDivElement> {
   await act(async () => {
     await Promise.resolve();
   });
+  await selectTool(container, 'Claude Code');
   return container;
 }
 
 /** Clicks the tool segment whose label matches exactly. */
 async function selectTool(host: HTMLDivElement, label: string): Promise<void> {
   const button = Array.from(host.querySelectorAll('button')).find(
-    element => element.textContent?.trim() === label,
+    element => element.getAttribute('aria-label') === label,
   );
   expect(button, `expected a segment labelled ${label}`).toBeTruthy();
   await act(async () => {

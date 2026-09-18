@@ -1,10 +1,10 @@
-import type { Meta, StoryObj } from '@storybook/react';
+import type { Meta, StoryObj } from '@storybook/react-vite';
 import { RunningInstanceCard } from './RunningInstanceCard';
 
 const meta: Meta<typeof RunningInstanceCard> = {
   title: 'Cluster/RunningInstanceCard',
   component: RunningInstanceCard,
-  decorators: [(Story) => <div style={{ padding: 32, background: '#000' }}><Story /></div>],
+  decorators: [(Story) => <div style={{ padding: 32, }}><Story /></div>],
 };
 
 export default meta;

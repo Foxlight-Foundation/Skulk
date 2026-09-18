@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { darkTheme } from '../../theme/theme';
 import { PairingSettings } from './PairingSettings';
 
-globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', { value: true, configurable: true });
 
 const createInvitationMock = vi.hoisted(() => vi.fn());
 const getInvitationsQueryMock = vi.hoisted(() => vi.fn());

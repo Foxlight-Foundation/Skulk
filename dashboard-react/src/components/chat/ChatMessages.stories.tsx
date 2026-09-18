@@ -38,7 +38,7 @@ const meta: Meta<typeof ChatMessages> = {
   parameters: { layout: 'fullscreen' },
   decorators: [
     (Story) => (
-      <div style={{ height: '100vh', overflow: 'auto', background: '#000' }}>
+      <div style={{ height: '100vh', overflow: 'auto', }}>
         <Story />
       </div>
     ),

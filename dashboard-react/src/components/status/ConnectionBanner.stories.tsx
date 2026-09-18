@@ -24,11 +24,11 @@ export const Toggle: Story = {
   render: () => {
     const [connected, setConnected] = useState(true);
     return (
-      <div style={{ background: '#111', minHeight: '100vh' }}>
+      <div style={{ minHeight: '100vh' }}>
         <ConnectionBanner connected={connected} />
         <div style={{ padding: 24 }}>
           <button
-            style={{ padding: '8px 16px', background: connected ? '#ef4444' : '#22c55e', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontFamily: 'monospace' }}
+            style={{ padding: '8px 16px', background: connected ? '#b23a44' : '#1c7a54', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontFamily: 'monospace' }}
             onClick={() => setConnected(!connected)}
           >
             {connected ? 'Simulate disconnect' : 'Simulate reconnect'}

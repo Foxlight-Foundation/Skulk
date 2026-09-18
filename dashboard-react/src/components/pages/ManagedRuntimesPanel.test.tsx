@@ -29,6 +29,8 @@ function response(body: unknown, status = 200) {
 async function mount() {
   root = createRoot(host);
   await act(async () => { root.render(<Provider store={store}><ThemeProvider theme={darkTheme}><ManagedRuntimesPanel /></ThemeProvider></Provider>); });
+  await contains('Configure');
+  await click('Configure');
 }
 async function click(label: string) {
   await act(async () => {
