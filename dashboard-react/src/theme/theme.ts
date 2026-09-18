@@ -39,13 +39,13 @@ const sharedRadii = {
   sm: '4px',
   md: '8px',
   lg: '12px',
-  xl: '14px',
+  xl: '16px',
 } as const;
 
 const sharedSpacing = {
   xs: '4px',
   sm: '8px',
-  md: '15px',
+  md: '16px',
   lg: '24px',
   xl: '32px',
 } as const;
@@ -91,7 +91,7 @@ interface ColorTokens {
   text: string;
   textSecondary: string;
   textMuted: string;
-  /** Small secondary text that meets contrast on default surfaces. */
+  /** Muted specimen text; aliases the fourth text level. */
   subtleText: string;
   textOnAccent: string; // text drawn on top of the accent/gold/error fills
 
@@ -99,7 +99,7 @@ interface ColorTokens {
   gold: string;
   goldDim: string;
   goldBg: string;
-  /** Accessible small accent text on tinted surfaces. */
+  /** Everyday accent text; aliases starlight. */
   accentText: string;
   actionFill: string;
   approvalFill: string;
@@ -249,7 +249,7 @@ const darkColors: ColorTokens = {
   text: "#e8edf7",
   textSecondary: "#8a9ab8",
   textMuted: "#6c7ea3",
-  subtleText: "#8a9ab8",
+  subtleText: "#6c7ea3",
   textOnAccent: "#070a14",
   gold: "#93aedf",
   goldDim: "rgba(147,174,223,.30)",
@@ -352,16 +352,16 @@ const lightColors: ColorTokens = {
   text: "#11213c",
   textSecondary: "#5f7086",
   textMuted: "#7a8aa3",
-  subtleText: "#5f7086",
+  subtleText: "#7a8aa3",
   textOnAccent: "#ffffff",
   gold: "#4d7cc4",
   goldDim: "rgba(17,33,60,.30)",
   goldTextDim: "#4d7cc4",
   goldBg: "rgba(77,124,196,.12)",
-  accentText: "#1c2b4a",
-  actionFill: "#1c2b4a",
-  approvalFill: "#8a4406",
-  liveText: "#8a4406",
+  accentText: "#4d7cc4",
+  actionFill: "#4d7cc4",
+  approvalFill: "#b35c0a",
+  liveText: "#b35c0a",
   goldStrong: "#1c2b4a",
   live: "#b35c0a",
   liveBg: "rgba(179,92,10,.08)",
@@ -444,6 +444,11 @@ function buildTheme(colors: ColorTokens) {
   return {
     colors,
     fonts: sharedFonts,
+    // The capability specimens intentionally retain their distinct tints in both palettes.
+    capabilityTints: {
+      optiq: '#a78bfa', embedding: '#f472b6', tts: '#38bdf8', stt: '#34d399',
+      code: '#818cf8', image_gen: '#fb923c', image_edit: '#fb923c',
+    },
     fontSizes: sharedFontSizes,
     radii: sharedRadii,
     spacing: sharedSpacing,

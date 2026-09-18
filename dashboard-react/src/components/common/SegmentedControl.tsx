@@ -18,15 +18,16 @@ export interface SegmentedControlProps<T extends string = string> {
 
 const sizeConfig = {
   sm: { padding: '3px 8px', fontSize: '12px' },
-  md: { padding: '4px 10px', fontSize: '13px' },
+  md: { padding: '7px 12px', fontSize: '12px' },
   lg: { padding: '6px 14px', fontSize: '14px' },
 };
 
 const Group = styled.div<{ $size: SegmentedControlSize }>`
   display: inline-flex;
+  max-width: 100%;
   border: 1px solid ${({ theme }) => theme.colors.borderControl};
   border-radius: ${({ theme }) => theme.radii.md};
-  overflow: hidden;
+  overflow-x: auto;
 `;
 
 const Segment = styled.button<{
@@ -35,6 +36,7 @@ const Segment = styled.button<{
   $disabled?: boolean;
 }>`
   all: unset;
+  flex-shrink: 0;
   cursor: pointer;
   padding: ${({ $size }) => sizeConfig[$size].padding};
   font-size: ${({ $size }) => sizeConfig[$size].fontSize};

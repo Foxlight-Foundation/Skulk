@@ -21,13 +21,13 @@ const sizeStyles: Record<FieldSize, ReturnType<typeof css>> = {
   `,
   md: css`
     height: 36px;
-    font-size: ${({ theme }) => theme.fontSizes.md};
+    font-size: 16px;
     padding: 0 10px;
     gap: 8px;
   `,
   lg: css`
     height: 42px;
-    font-size: ${({ theme }) => theme.fontSizes.md};
+    font-size: 16px;
     padding: 0 12px;
     gap: 10px;
   `,
@@ -45,7 +45,7 @@ const Wrapper = styled.label<{ $size: FieldSize; $disabled?: boolean }>`
   ${({ $size }) => sizeStyles[$size]}
 
   &:focus-within {
-    border-color: ${({ theme }) => theme.colors.accentText};
+    border-color: ${({ theme }) => theme.colors.borderStrong};
     box-shadow: ${({ theme }) => theme.colors.focusRing};
   }
 

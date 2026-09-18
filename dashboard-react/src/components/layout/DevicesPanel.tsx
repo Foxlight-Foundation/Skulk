@@ -17,11 +17,13 @@ const Content = styled.div`
 `;
 const Column = styled.section`min-width: 0; display: flex; flex-direction: column; gap: 16px;`;
 const Row = styled.article`
-  padding: 16px 0; border-bottom: 1px solid ${({ theme }) => theme.colors.border};
+  padding: 12px 0; border-bottom: 1px solid ${({ theme }) => theme.colors.border};
   display: flex; gap: 12px; align-items: flex-start;
+  > svg { flex-shrink: 0; width: 32px; height: 32px; padding: 6px; border-radius: 8px; background: ${({ theme }) => theme.colors.selected}; }
 `;
-const Detail = styled.div`min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 8px; overflow-wrap: anywhere;`;
-const Meta = styled.p`margin: 0; font-size: ${({ theme }) => theme.fontSizes.xs}; color: ${({ theme }) => theme.colors.subtleText}; line-height: 1.5;`;
+const Detail = styled.div`min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 6px; overflow-wrap: anywhere;
+  strong { font-size: 14px; font-weight: 600; }`;
+const Meta = styled.p`margin: 0; font: 11.5px ${({ theme }) => theme.fonts.mono}; color: ${({ theme }) => theme.colors.subtleText}; line-height: 1.5;`;
 const Actions = styled.div`display: flex; gap: 8px; flex-wrap: wrap;`;
 
 /** Safe device inventory row with explicit confirmation before immediate revocation. */
@@ -37,7 +39,7 @@ export function DeviceRow({ device, busy, onRevoke }: { device: OperatorDevice; 
       {device.state === 'active' && (confirming ? <>
         <Meta>{device.current ? t('devices.confirmCurrent', 'Revoking this device ends your current session.') : t('devices.confirmRevoke', 'This device will need a new invitation to reconnect.')}</Meta>
         <Actions><Button variant="danger" size="sm" loading={busy} onClick={onRevoke}>{t('devices.confirm', 'Revoke access')}</Button><Button size="sm" disabled={busy} onClick={() => setConfirming(false)}>{t('common.cancel', 'Cancel')}</Button></Actions>
-      </> : <Button style={{ alignSelf: 'flex-start' }} size="sm" variant="ghost" onClick={() => setConfirming(true)}>{t('devices.revoke', 'Revoke')}</Button>)}
+      </> : <Button style={{ alignSelf: 'flex-start' }} size="sm" variant="danger" onClick={() => setConfirming(true)}>{t('devices.revoke', 'Revoke')}</Button>)}
     </Detail>
   </Row>;
 }

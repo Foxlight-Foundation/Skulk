@@ -6,7 +6,6 @@ const Frame = ({ children }: { children: React.ReactNode }) => (
     style={{
       width: 'min(260px, calc(100vw - 48px))',
       padding: 16,
-      border: '1px solid #2a2a2e',
       borderRadius: 8,
     }}
   >

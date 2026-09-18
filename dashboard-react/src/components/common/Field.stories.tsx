@@ -51,7 +51,7 @@ export const WithRightElement: Story = {
     icon: <SearchIcon />,
     rightElement: (
       <button
-        style={{ all: 'unset', cursor: 'pointer', color: '#999', fontSize: 12 }}
+        style={{ all: 'unset', cursor: 'pointer', color: 'inherit', fontSize: 12 }}
         onClick={() => alert('clear')}
       >
         ✕

@@ -86,7 +86,7 @@ export const ConstrainedPanel: Story = {
   render: () => {
     const [selected, setSelected] = useState<string | null>(null);
     return (
-      <div style={{ width: 'min(500px, calc(100vw - 48px))', height: 450, margin: '40px auto', border: '1px solid #333', borderRadius: 12, overflow: 'hidden' }}>
+      <div style={{ width: 'min(500px, calc(100vw - 48px))', height: 450, margin: '40px auto', borderRadius: 12, overflow: 'hidden' }}>
         <ModelBrowser
           models={SAMPLE_MODELS}
           selectedModelId={selected}

@@ -225,6 +225,7 @@ const Card = styled.div`
   flex-direction: column;
   gap: 12px;
   width: 280px;
+  max-width: 100%;
   transition: border-color 0.2s;
 
   &:hover {

@@ -1,24 +1,27 @@
 import styled from 'styled-components';
+import { Button } from '../common/Button';
 import type { StewardActionProposal } from '../../store/endpoints/steward';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 
 const ProposalCard = styled.article`
   display: grid;
   gap: 8px;
-  padding: 12px;
+  padding: 12px 14px;
   border: 1px solid ${({ theme }) => theme.colors.borderLive};
   border-radius: 12px;
   background: ${({ theme }) => theme.colors.liveBg};
 `;
 
 const ProposalTitle = styled.div`
-  font-family: ${({ theme }) => theme.fonts.mono};
+  font-family: ${({ theme }) => theme.fonts.body};
+  font-weight: 600;
+  overflow-wrap: anywhere;
   font-size: ${({ theme }) => theme.fontSizes.sm};
   color: ${({ theme }) => theme.colors.text};
 `;
 
 const ProposalCopy = styled.div`
-  font-size: ${({ theme }) => theme.fontSizes.xs};
+  font-size: 13px;
   line-height: 1.45;
   color: ${({ theme }) => theme.colors.textSecondary};
 `;
@@ -26,7 +29,7 @@ const ProposalCopy = styled.div`
 const ProposalEvidence = styled.ul`
   margin: 0;
   padding-left: 18px;
-  font-size: ${({ theme }) => theme.fontSizes.xs};
+  font-size: 13px;
   line-height: 1.45;
   color: ${({ theme }) => theme.colors.textSecondary};
 `;
@@ -36,27 +39,20 @@ const ProposalActions = styled.div`
   gap: 8px;
 `;
 
-const ProposalButton = styled.button<{ $reject?: boolean }>`
-  border: 1px solid ${({ $reject, theme }) => $reject ? theme.colors.border : theme.colors.approvalFill};
-  border-radius: ${({ theme }) => theme.radii.sm};
-  background: ${({ $reject, theme }) => $reject ? theme.colors.surface : theme.colors.approvalFill};
-  color: ${({ $reject, theme }) => $reject ? theme.colors.textSecondary : theme.colors.onLive};
-  padding: 6px 10px;
-  font: inherit;
-  font-size: ${({ theme }) => theme.fontSizes.xs};
-  cursor: pointer;
-
-  &:disabled {
-    cursor: wait;
-    opacity: 0.55;
-  }
+const ProposalHeading = styled.div`
+  display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px;
+  font: 11px ${({ theme }) => theme.fonts.mono}; color: ${({ theme }) => theme.colors.textMuted};
+  strong { font-size: 10px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: ${({ theme }) => theme.colors.live}; }
+`;
+const ProposalButton = styled(Button)`
+  height: 32px; font-size: 13px; padding: 0 14px;
 `;
 
 /** Evidence and explicit decision controls for a server-owned pending proposal. */
 export function StewardProposalCard({ proposal, busy, onDecision }: { proposal: StewardActionProposal; busy: boolean; onDecision: (approved: boolean) => void }) {
   const { t } = useSkulkTranslation();
   return (            <ProposalCard>
-              <ProposalCopy>{t('stewardChat.proposals.pending', 'PROPOSED ACTION · needs your approval')}</ProposalCopy>
+              <ProposalHeading><strong>{t('stewardChat.proposals.proposedAction', 'Proposed action')}</strong><span>{t('stewardChat.proposals.approvalRequired', 'needs your approval')}</span></ProposalHeading>
               <ProposalTitle>
                 {t('stewardChat.proposals.title', '{action}: {target}', {
                   action: proposal.action.replaceAll('_', ' '),
@@ -84,13 +80,14 @@ export function StewardProposalCard({ proposal, busy, onDecision }: { proposal: 
               </ProposalCopy>
               <ProposalActions>
                 <ProposalButton
+                  variant="approve"
                   disabled={busy}
                   onClick={() => onDecision(true)}
                 >
                   {t('stewardChat.proposals.approve', 'Approve')}
                 </ProposalButton>
                 <ProposalButton
-                  $reject
+                  variant="outline"
                   disabled={busy}
                   onClick={() => onDecision(false)}
                 >

@@ -47,7 +47,7 @@ export const Debounced: Story = {
           placeholder="Debounced (500ms)…"
           debounceMs={500}
         />
-        <p style={{ color: '#999', fontSize: 12, marginTop: 8 }}>
+        <p style={{ color: 'inherit', fontSize: 12, marginTop: 8 }}>
           Committed: "{committed}"
         </p>
       </div>

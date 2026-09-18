@@ -1,12 +1,19 @@
 import { FixtureProvider } from './fixtures';
 import type { Preview } from '@storybook/react-vite';
-import { ThemeProvider } from 'styled-components';
+import { createGlobalStyle, ThemeProvider } from 'styled-components';
 import { TolgeeProvider } from '@tolgee/react';
 import { darkTheme, lightTheme, GlobalStyle } from '../src/theme';
 import { tolgee } from '../src/i18n/tolgee';
 import { useEffect, type ReactNode } from 'react';
 
 type ThemeName = 'light' | 'dark';
+
+// The specimen canvas uses the reference void, independently of app scene effects.
+const GalleryCanvas = createGlobalStyle`
+  body { background: ${({ theme }) => theme.colors.bg}; }
+  #storybook-root { min-width: 0; max-width: 100%; }
+  .sb-main-centered #storybook-root { width: 100%; box-sizing: border-box; }
+`;
 
 /** Hooks must run inside a React component, not directly in a Storybook
  *  decorator function — extract the side effect into a wrapper component. */
@@ -19,6 +26,7 @@ const ThemeWrapper = ({ themeName, children }: { themeName: ThemeName; children:
   return (
     <ThemeProvider theme={activeTheme}>
       <GlobalStyle />
+      <GalleryCanvas />
       {/* Components use Tolgee's t(); provide the instance so i18n-using stories
           render instead of throwing "no TolgeeProvider". Falls back to the
           bundled English namespace. */}
@@ -56,13 +64,7 @@ const preview: Preview = {
     },
   },
   parameters: {
-    backgrounds: {
-      default: 'dark',
-      values: [
-        { name: 'dark', value: darkTheme.colors.bg },
-        { name: 'light', value: lightTheme.colors.bg },
-      ],
-    },
+    backgrounds: { disable: true },
     controls: {
       matchers: {
         color: /(background|color)$/i,

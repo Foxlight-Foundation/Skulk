@@ -17,12 +17,13 @@ export interface PluginSummaryCardProps {
 const Card = styled.article`
   padding: 16px 18px; margin: 12px 0; border: 1px solid ${({ theme }) => theme.colors.border}; border-radius: 14px;
   background: ${({ theme }) => theme.colors.surface}; display: grid; grid-template-columns: 44px minmax(0, 1fr) auto auto; gap: 14px; align-items: start;
-  h2 { font-size: 16px; margin: 0; overflow-wrap: anywhere; }
+  h2 { font-size: 16px; font-weight: 600; color: ${({ theme }) => theme.colors.text}; margin: 0; overflow-wrap: anywhere; }
   p { margin: 8px 0; color: ${({ theme }) => theme.colors.textSecondary}; font-size: 13px; }
   @media(max-width: 600px) { grid-template-columns: 44px minmax(0, 1fr) auto; > button { grid-column: 2; grid-row: 2; justify-self: start; } > details { grid-column: 3; grid-row: 1; } }
 `;
+const Metadata = styled.p`font: 11.5px ${({ theme }) => theme.fonts.mono};`;
 const Row = styled.div`display: flex; align-items: center; flex-wrap: wrap; gap: 10px;`;
-const Chip = styled.span`padding: 4px 8px; border-radius: 6px; background: ${({ theme }) => theme.colors.selected}; font: 11px ${({ theme }) => theme.fonts.mono}; overflow-wrap: anywhere;`;
+const Chip = styled.span`padding: 4px 8px; border-radius: 6px; background: ${({ theme }) => theme.colors.surfaceHover}; font: 12px ${({ theme }) => theme.fonts.mono}; overflow-wrap: anywhere;`;
 const Menu = styled.details`
   margin-left: auto; position: relative;
   summary { display: flex; padding: 8px; cursor: pointer; list-style: none; }
@@ -36,10 +37,10 @@ export function PluginSummaryCard({ name, description, health, tone, release, no
     <Monogram>{name.slice(0, 2).toUpperCase()}</Monogram>
     <div><Row><h2>{name}</h2><StatusPill tone={tone}>{health}</StatusPill></Row>
       {description && <p>{description}</p>}
-      <p>{t('plugins.release', 'Release')} · {release}</p>
+      <Metadata>{t('plugins.release', 'Release')} · {release}</Metadata>
       <Row>{nodes.map((node, index) => <Chip key={`${node}-${index}`}>{node}</Chip>)}</Row>
     </div>
-    <Button onClick={onOpen}>{t('plugins.configure', 'Configure')}</Button>
+    <Button variant="primary" onClick={onOpen}>{t('plugins.configure', 'Configure')}</Button>
     <Menu><summary aria-label={t('plugins.more', 'More plugin actions')}><FiMoreHorizontal /></summary><div><Button variant="ghost" onClick={onOpen}>{t('plugins.manage', 'Manage plugin')}</Button></div></Menu>
   </Card>;
 }

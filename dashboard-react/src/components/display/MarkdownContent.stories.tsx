@@ -7,7 +7,7 @@ const meta: Meta<typeof MarkdownContent> = {
   parameters: { layout: 'centered' },
   decorators: [
     (Story) => (
-      <div style={{ maxWidth: 700, padding: 24, }}>
+      <div style={{ width: 'min(700px, calc(100vw - 32px))', padding: 24, }}>
         <Story />
       </div>
     ),

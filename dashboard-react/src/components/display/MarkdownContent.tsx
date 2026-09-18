@@ -129,9 +129,11 @@ function processMarkdown(content: string, t: SkulkTranslate): ProcessedMarkdown 
    ================================================================ */
 
 const Container = styled.div`
+  min-width: 0; max-width: 100%;
+  overflow-wrap: anywhere;
   line-height: 1.6;
-  color: ${({ theme }) => theme.colors.text};
-  font-size: ${({ theme }) => theme.fontSizes.md};
+  color: ${({ theme }) => theme.colors.body};
+  font-size: 14px;
 
   /* Headings */
   h1, h2 { color: ${({ theme }) => theme.colors.accentText}; }

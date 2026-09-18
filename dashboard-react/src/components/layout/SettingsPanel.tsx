@@ -1,3 +1,4 @@
+import { Toggle } from '../common/Toggle';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import styled from 'styled-components';
 import { generateInstallId } from './TelemetryConsentModal';
@@ -81,39 +82,6 @@ const SecondaryButton = styled.button`
 
   &:hover {
     border-color: ${({ theme }) => theme.colors.borderStrong};
-  }
-`;
-
-const Toggle = styled.button<{ $on: boolean }>`
-  all: unset;
-  cursor: pointer;
-  width: 36px;
-  height: 20px;
-  border-radius: 10px;
-  position: relative;
-  flex-shrink: 0;
-  transition: background 0.2s;
-
-  background: ${({ $on, theme }) =>
-    $on ? theme.colors.gold : theme.colors.surfaceSunken};
-  border: 1px solid ${({ theme }) => theme.colors.border};
-
-  &:focus-visible {
-    outline: none;
-    box-shadow: 0 0 0 2px ${({ theme }) => theme.colors.goldDim};
-  }
-
-  &::after {
-    content: '';
-    position: absolute;
-    top: 2px;
-    left: ${({ $on }) => ($on ? '18px' : '2px')};
-    width: 16px;
-    height: 16px;
-    border-radius: 50%;
-    background: ${({ theme }) => theme.colors.surface};
-    box-shadow: 0 1px 2px ${({ theme }) => theme.colors.shadow};
-    transition: left 0.2s;
   }
 `;
 
@@ -386,7 +354,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                     )}
                   />
                 </FieldLabel>
-                <Toggle $on={modelStoreDraft.enabled} onClick={() => update({ enabled: !modelStoreDraft.enabled })} />
+                <Toggle aria-label={t('settings.common.enabled', 'Enabled')} $on={modelStoreDraft.enabled} onClick={() => update({ enabled: !modelStoreDraft.enabled })} />
               </Row>
               {modelStoreDraft.enabled && (
                 <>
@@ -444,7 +412,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                     )}
                   />
                 </FieldLabel>
-                <Toggle
+                <Toggle aria-label={t('settings.common.enabled', 'Enabled')}
                   $on={modelStoreDraft.download.allow_hf_fallback}
                   onClick={() => updateDownload({ allow_hf_fallback: !modelStoreDraft.download.allow_hf_fallback })}
                 />
@@ -464,7 +432,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                     )}
                   />
                 </FieldLabel>
-                <Toggle
+                <Toggle aria-label={t('settings.common.enabled', 'Enabled')}
                   $on={modelStoreDraft.staging.enabled}
                   onClick={() => updateStaging({ enabled: !modelStoreDraft.staging.enabled })}
                 />
@@ -491,7 +459,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                         )}
                       />
                     </FieldLabel>
-                    <Toggle
+                    <Toggle aria-label={t('settings.common.enabled', 'Enabled')}
                       $on={modelStoreDraft.staging.cleanup_on_deactivate}
                       onClick={() => updateStaging({ cleanup_on_deactivate: !modelStoreDraft.staging.cleanup_on_deactivate })}
                     />
@@ -584,7 +552,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                   )}
                 />
               </FieldLabel>
-              <Toggle $on={loggingDraft.enabled} onClick={() => setLoggingDraft(prev => ({ ...prev, enabled: !prev.enabled }))} />
+              <Toggle aria-label={t('settings.common.enabled', 'Enabled')} $on={loggingDraft.enabled} onClick={() => setLoggingDraft(prev => ({ ...prev, enabled: !prev.enabled }))} />
             </Row>
             {loggingDraft.enabled && (
               <>
@@ -622,7 +590,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                   )}
                 />
               </FieldLabel>
-              <Toggle $on={fabricDraft.enabled} onClick={() => setFabricDraft(prev => ({ ...prev, enabled: !prev.enabled }))} />
+              <Toggle aria-label={t('settings.common.enabled', 'Enabled')} $on={fabricDraft.enabled} onClick={() => setFabricDraft(prev => ({ ...prev, enabled: !prev.enabled }))} />
             </Row>
             {fabricDraft.enabled && (
               <HintText>
@@ -651,7 +619,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                     )}
                   />
                 </FieldLabel>
-                <Toggle
+                <Toggle aria-label={t('settings.common.enabled', 'Enabled')}
                   $on={telemetryDraft.consent === 'enabled'}
                   onClick={() =>
                     setTelemetryDraft(prev =>
@@ -675,7 +643,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                     )}
                   />
                 </FieldLabel>
-                <Toggle
+                <Toggle aria-label={t('settings.common.enabled', 'Enabled')}
                   $on={telemetryDraft.diagnostics_consent === 'enabled'}
                   onClick={() =>
                     setTelemetryDraft(prev =>

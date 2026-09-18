@@ -9,7 +9,6 @@ import { useSkulkTranslation } from '../../i18n/tolgee';
 interface TypeStyle {
   borderColor: string;
   iconColor: string;
-  iconPath: string;
   progressColor: string;
 }
 
@@ -19,25 +18,21 @@ function buildTypeStyles(theme: Theme): Record<Toast['type'], TypeStyle> {
     success: {
       borderColor: theme.colors.accent,
       iconColor: theme.colors.healthy,
-      iconPath: 'M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z',
       progressColor: theme.colors.accentBg,
     },
     error: {
       borderColor: theme.colors.error,
       iconColor: theme.colors.error,
-      iconPath: 'M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z',
       progressColor: theme.colors.errorBg,
     },
     warning: {
       borderColor: theme.colors.warning,
       iconColor: theme.colors.warning,
-      iconPath: 'M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126z',
       progressColor: theme.colors.warningBg,
     },
     info: {
       borderColor: theme.colors.info,
       iconColor: theme.colors.info,
-      iconPath: 'M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z',
       progressColor: theme.colors.infoBg,
     },
   };
@@ -61,6 +56,8 @@ const Container = styled.div`
   position: fixed;
   bottom: 24px;
   right: 24px;
+  max-width: calc(100vw - 32px);
+  @media (max-width: 480px) { right: 16px; bottom: 16px; }
   z-index: 9999;
   display: flex;
   flex-direction: column;
@@ -70,7 +67,7 @@ const Container = styled.div`
 
 const ToastCard = styled.div<{ $borderColor: string }>`
   pointer-events: auto;
-  max-width: 360px;
+  max-width: 100%;
   width: 320px;
   background: ${({ theme }) => theme.colors.surfaceElevated};
   backdrop-filter: blur(4px);
@@ -90,6 +87,7 @@ const Body = styled.div`
 
 const Message = styled.p`
   flex: 1;
+  min-width: 0; overflow-wrap: anywhere;
   font-size: ${({ theme }) => theme.fontSizes.tableBody};
   font-family: ${({ theme }) => theme.fonts.body};
   color: ${({ theme }) => theme.colors.text};
@@ -118,50 +116,29 @@ const ProgressBar = styled.div<{ $color: string; $duration: number }>`
 
 /* ---- component ---- */
 
+/** Single notification presentation, also used for deterministic gallery specimens. */
+export function ToastNotification({ toast, onDismiss }: { toast: Toast; onDismiss: () => void }) {
+  const { t } = useSkulkTranslation();
+  const theme = useTheme() as Theme;
+  const style = buildTypeStyles(theme)[toast.type];
+  return <ToastCard $borderColor={style.borderColor} role="alert">
+    <Body>
+      <span aria-hidden="true" style={{ width: 8, height: 8, borderRadius: '50%', flexShrink: 0, marginTop: 6, background: style.iconColor }} />
+      <Message>{toast.message}</Message>
+      <DismissBtn variant="ghost" size="sm" icon onClick={onDismiss} aria-label={t('toast.dismissNotification', 'Dismiss notification')}>
+        <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><path d="M6 18L18 6M6 6l12 12" /></svg>
+      </DismissBtn>
+    </Body>
+    {toast.duration > 0 && <ProgressTrack><ProgressBar $color={style.progressColor} $duration={toast.duration} /></ProgressTrack>}
+  </ToastCard>;
+}
+
+/** Subscribes to the existing notification store and preserves its dismissal lifecycle. */
 export function ToastContainer() {
   const { t } = useSkulkTranslation();
   const { toasts, dismissToast } = useToast();
-  const theme = useTheme() as Theme;
-  const TYPE_STYLES = buildTypeStyles(theme);
-
   if (toasts.length === 0) return null;
-
-  return (
-    <Container role="log" aria-live="polite" aria-label={t('toast.notifications', 'Notifications')}>
-      {toasts.map((toast) => {
-        const style = TYPE_STYLES[toast.type];
-        return (
-          <ToastCard key={toast.id} $borderColor={style.borderColor} role="alert">
-            <Body>
-              <svg
-                width={20} height={20} viewBox="0 0 24 24"
-                fill="none" stroke={style.iconColor}
-                strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round"
-                style={{ flexShrink: 0, marginTop: 2 }}
-              >
-                <path d={style.iconPath} />
-              </svg>
-              <Message>{toast.message}</Message>
-              <DismissBtn
-                variant="ghost"
-                size="sm"
-                icon
-                onClick={() => dismissToast(toast.id)}
-                aria-label={t('toast.dismissNotification', 'Dismiss notification')}
-              >
-                <svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </DismissBtn>
-            </Body>
-            {toast.duration > 0 && (
-              <ProgressTrack>
-                <ProgressBar $color={style.progressColor} $duration={toast.duration} />
-              </ProgressTrack>
-            )}
-          </ToastCard>
-        );
-      })}
-    </Container>
-  );
+  return <Container role="log" aria-live="polite" aria-label={t('toast.notifications', 'Notifications')}>
+    {toasts.map(toast => <ToastNotification key={toast.id} toast={toast} onDismiss={() => dismissToast(toast.id)} />)}
+  </Container>;
 }

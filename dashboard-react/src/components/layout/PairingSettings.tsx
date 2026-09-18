@@ -186,6 +186,8 @@ const InvitationCopy = styled.div`
 `;
 
 const InvitationHeadline = styled.div`
+  overflow-wrap: anywhere;
+  font-family: ${({ theme }) => theme.fonts.mono};
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -497,7 +499,7 @@ export function PairingInvitationRow({ invitation, busy, onRevoke }: { invitatio
   return (            <InvitationRow>
               <InvitationCopy>
                 <InvitationHeadline>
-                  <span>{new Date(invitation.createdAt).toLocaleDateString()}</span>
+                  <span title={invitation.invitationId}>{invitation.invitationId}</span>
                   <StatePill $state={invitation.state}>
                     {stateLabel(invitation.state, t)}
                   </StatePill>

@@ -33,16 +33,18 @@ const sizeFontMap: Record<ButtonSize, string> = {
 
 const variantStyles: Record<ButtonVariant, ReturnType<typeof css>> = {
   solid: css`
+    font-weight: 600;
     color: ${({ theme }) => theme.colors.textOnAccent};
     background: ${({ theme }) => theme.colors.actionFill};
-    border: 1px solid ${({ theme }) => theme.colors.actionFill};
+    border: none;
     &:hover:not(:disabled) { filter: brightness(1.08); }
   `,
   approve: css`
+    font-weight: 600;
     color: ${({ theme }) => theme.colors.onLive};
     background: ${({ theme }) => theme.colors.approvalFill};
-    border: 1px solid ${({ theme }) => theme.colors.approvalFill};
-    &:hover:not(:disabled) { background: ${({ theme }) => theme.colors.approvalFill}; }
+    border: none;
+    &:hover:not(:disabled) { background: ${({ theme }) => theme.colors.liveHover}; }
   `,
   primary: css`
     color: ${({ theme }) => theme.colors.accentText};
@@ -73,7 +75,7 @@ const variantStyles: Record<ButtonVariant, ReturnType<typeof css>> = {
     }
   `,
   ghost: css`
-    color: ${({ theme }) => theme.colors.textSecondary};
+    color: ${({ theme }) => theme.colors.textMuted};
     border: 1px solid transparent;
     background: transparent;
 
@@ -87,13 +89,13 @@ const variantStyles: Record<ButtonVariant, ReturnType<typeof css>> = {
     }
   `,
   danger: css`
-    color: ${({ theme }) => theme.colors.body};
+    color: ${({ theme }) => theme.colors.textSecondary};
     border: 1px solid ${({ theme }) => theme.colors.border};
     background: transparent;
 
     &:hover:not(:disabled) {
       color: ${({ theme }) => theme.colors.error};
-      border-color: ${({ theme }) => theme.colors.errorBg};
+      border-color: ${({ theme }) => theme.colors.borderDanger};
       background: ${({ theme }) => theme.colors.errorBg};
     }
 
@@ -143,14 +145,14 @@ const StyledButton = styled.button<{
   /* Size */
   height: ${({ $size }) => sizeTokens[$size].height};
   font-size: ${({ $size, theme }) => theme.fontSizes[sizeFontMap[$size] as keyof typeof theme.fontSizes]};
-  ${({ $icon, $size }) =>
+  ${({ $icon, $size, $variant }) =>
     $icon
       ? css`
           width: ${sizeTokens[$size].iconSize};
           padding: 0;
         `
       : css`
-          padding: ${sizeTokens[$size].padding};
+          padding: ${$size === 'md' && ($variant === 'solid' || $variant === 'approve') ? '0 16px' : sizeTokens[$size].padding};
         `}
 
   /* Block */

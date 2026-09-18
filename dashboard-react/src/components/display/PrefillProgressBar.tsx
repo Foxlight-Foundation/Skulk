@@ -38,34 +38,36 @@ function computeEta(progress: PrefillProgress, t: SkulkTranslate): string | null
 /* ---- styles ---- */
 
 const Container = styled.div`
-  width: 100%;
+  width: 100%; padding: 8px 12px; border-radius: 8px;
+  border: 1px solid ${({ theme }) => theme.colors.borderLive};
+  background: ${({ theme }) => theme.colors.liveBg};
 `;
 
 const LabelRow = styled.div`
   display: flex;
   align-items: center;
   justify-content: space-between;
-  font-size: ${({ theme }) => theme.fontSizes.label};
+  font-size: 12px;
   color: ${({ theme }) => theme.colors.textSecondary};
   margin-bottom: 4px;
 `;
 
 const TokenCount = styled.span`
-  font-family: ${({ theme }) => theme.fonts.body};
+  font-family: ${({ theme }) => theme.fonts.mono};
 `;
 
 const Track = styled.div`
-  height: 6px;
-  background: ${({ theme }) => theme.colors.overlay};
-  border-radius: 3px;
+  height: 3px;
+  background: ${({ theme }) => theme.colors.selected};
+  border-radius: 2px;
   overflow: hidden;
 `;
 
 const Fill = styled.div<{ $pct: number }>`
   height: 100%;
   width: ${({ $pct }) => $pct}%;
-  background: ${({ theme }) => theme.colors.gold};
-  border-radius: 3px;
+  background: linear-gradient(90deg, ${({ theme }) => theme.colors.liveDeep}, ${({ theme }) => theme.colors.live});
+  border-radius: 2px;
   transition: width 150ms ease-out;
 `;
 
@@ -73,8 +75,8 @@ const FooterRow = styled.div`
   display: flex;
   align-items: center;
   justify-content: space-between;
-  font-size: ${({ theme }) => theme.fontSizes.label};
-  font-family: ${({ theme }) => theme.fonts.body};
+  font-size: 12px;
+  font-family: ${({ theme }) => theme.fonts.mono};
   color: ${({ theme }) => theme.colors.subtleText};
   margin-top: 4px;
 `;

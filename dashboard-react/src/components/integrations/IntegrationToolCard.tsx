@@ -3,7 +3,7 @@ import { Monogram } from '../common/Surfaces';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 
 const Card = styled.button`
-  min-width: 0; min-height: 200px; display: flex; flex-direction: column;
+  min-width: 0; min-height: 150px; display: flex; flex-direction: column;
   gap: 10px; padding: 16px; text-align: left; border-radius: 14px;
   border: 1px solid ${({ theme }) => theme.colors.border};
   background: ${({ theme }) => theme.colors.surface};

@@ -1,11 +1,9 @@
-import { useEffect, useRef } from 'react';
 import styled, { useTheme } from 'styled-components';
-import type { Theme } from '../../theme';
 
 export interface NetworkMeshProps {
-  /** Number of particles. Default 60. */
+  /** @deprecated Static reference mesh has a fixed node count. */
   count?: number;
-  /** Max distance for drawing connections. Default 150. */
+  /** @deprecated Static reference mesh has fixed connections. */
   linkDistance?: number;
   /** Particle color. Defaults to `theme.colors.bgMeshNode`. */
   color?: string;
@@ -13,139 +11,42 @@ export interface NetworkMeshProps {
   lineColor?: string;
   /** Particle radius. Default 1.5. */
   radius?: number;
-  /** Max drift speed in px/frame. Default 0.3. */
+  /** @deprecated The reference mesh does not animate. */
   speed?: number;
   className?: string;
 }
 
-const Canvas = styled.canvas`
-  position: fixed;
-  inset: 0;
-  z-index: 0;
-  pointer-events: none;
+const Mesh = styled.svg`
+  position: fixed; inset: 0; width: 100%; height: 100%; z-index: 0; pointer-events: none;
 `;
 
-interface Particle {
-  x: number;
-  y: number;
-  vx: number;
-  vy: number;
-}
-
-export function NetworkMesh({
-  count = 60,
-  linkDistance = 150,
-  color: colorProp,
-  lineColor: lineColorProp,
-  radius = 1.5,
-  speed = 0.3,
-  className,
-}: NetworkMeshProps) {
-  const theme = useTheme() as Theme;
-  const color = colorProp ?? theme.colors.bgMeshNode;
-  const lineColor = lineColorProp ?? theme.colors.bgMeshLine;
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const particlesRef = useRef<Particle[]>([]);
-  const rafRef = useRef<number>(0);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    let w = 0;
-    let h = 0;
-
-    function resize() {
-      w = window.innerWidth;
-      h = window.innerHeight;
-      canvas!.width = w * devicePixelRatio;
-      canvas!.height = h * devicePixelRatio;
-      canvas!.style.width = `${w}px`;
-      canvas!.style.height = `${h}px`;
-      ctx!.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
-
-      // Re-scatter particles that fell outside bounds
-      for (const p of particlesRef.current) {
-        if (p.x > w) p.x = Math.random() * w;
-        if (p.y > h) p.y = Math.random() * h;
-      }
-    }
-
-    function init() {
-      resize();
-      const particles: Particle[] = [];
-      for (let i = 0; i < count; i++) {
-        particles.push({
-          x: Math.random() * w,
-          y: Math.random() * h,
-          vx: (Math.random() - 0.5) * speed * 2,
-          vy: (Math.random() - 0.5) * speed * 2,
-        });
-      }
-      particlesRef.current = particles;
-    }
-
-    function tick() {
-      const particles = particlesRef.current;
-      ctx!.clearRect(0, 0, w, h);
-
-      // Update positions
-      for (const p of particles) {
-        p.x += p.vx;
-        p.y += p.vy;
-
-        // Soft bounce off edges
-        if (p.x < 0 || p.x > w) p.vx *= -1;
-        if (p.y < 0 || p.y > h) p.vy *= -1;
-
-        p.x = Math.max(0, Math.min(w, p.x));
-        p.y = Math.max(0, Math.min(h, p.y));
-      }
-
-      // Draw connections. Use globalAlpha for the distance-fade so we don't need
-      // to parse lineColor — any valid CSS color (hex, rgb, rgba, named) works.
-      const linkDist2 = linkDistance * linkDistance;
-      ctx!.strokeStyle = lineColor;
-
-      for (let i = 0; i < particles.length; i++) {
-        for (let j = i + 1; j < particles.length; j++) {
-          const dx = particles[i].x - particles[j].x;
-          const dy = particles[i].y - particles[j].y;
-          const d2 = dx * dx + dy * dy;
-          if (d2 < linkDist2) {
-            const fade = 1 - Math.sqrt(d2) / linkDistance;
-            ctx!.globalAlpha = fade;
-            ctx!.beginPath();
-            ctx!.moveTo(particles[i].x, particles[i].y);
-            ctx!.lineTo(particles[j].x, particles[j].y);
-            ctx!.stroke();
-          }
-        }
-      }
-      ctx!.globalAlpha = 1;
-
-      // Draw particles
-      ctx!.fillStyle = color;
-      for (const p of particles) {
-        ctx!.beginPath();
-        ctx!.arc(p.x, p.y, radius, 0, Math.PI * 2);
-        ctx!.fill();
-      }
-
-      rafRef.current = requestAnimationFrame(tick);
-    }
-
-    init();
-    rafRef.current = requestAnimationFrame(tick);
-    window.addEventListener('resize', resize);
-
-    return () => {
-      cancelAnimationFrame(rafRef.current);
-      window.removeEventListener('resize', resize);
-    };
-  }, [count, linkDistance, color, lineColor, radius, speed]);
-
-  return <Canvas ref={canvasRef} className={className} />;
+/** Static, token-aware backdrop matching the supplied mesh without continuous canvas work. */
+export function NetworkMesh({ color, lineColor, radius = 2, className }: NetworkMeshProps) {
+  const theme = useTheme();
+  return <Mesh viewBox="0 0 1440 900" preserveAspectRatio="xMidYMid slice" className={className} aria-hidden="true">
+    <g stroke={lineColor ?? theme.colors.bgMeshLine} strokeWidth="1" fill="none">
+      <path d="M0 120L180 40L360 160L520 60L700 180L900 90L1080 200L1260 110L1440 190" />
+      <path d="M0 420L140 300L360 160M180 40L360 160L520 380L700 180L860 420L900 90M520 60L520 380L340 560L140 300M700 180L1080 200L1260 480L1440 380M900 90L1260 110M860 420L1260 480M1080 200L860 420" />
+      <path d="M0 700L240 620L340 560L520 760L700 620L860 420L1000 700L1260 480L1440 620M240 620L140 300M340 560L520 760L700 900M520 760L700 620L1000 700L1080 900M1000 700L1260 800L1440 780M1260 480L1260 800M0 700L120 900M1260 800L1440 620" />
+    </g>
+    <g fill={color ?? theme.colors.bgMeshNode}>
+      <circle cx="180" cy="40" r={radius} />
+      <circle cx="360" cy="160" r={radius} />
+      <circle cx="520" cy="60" r={radius} />
+      <circle cx="700" cy="180" r={radius} />
+      <circle cx="900" cy="90" r={radius} />
+      <circle cx="1080" cy="200" r={radius} />
+      <circle cx="1260" cy="110" r={radius} />
+      <circle cx="140" cy="300" r={radius} />
+      <circle cx="520" cy="380" r={radius} />
+      <circle cx="860" cy="420" r={radius} />
+      <circle cx="1260" cy="480" r={radius} />
+      <circle cx="240" cy="620" r={radius} />
+      <circle cx="340" cy="560" r={radius} />
+      <circle cx="520" cy="760" r={radius} />
+      <circle cx="700" cy="620" r={radius} />
+      <circle cx="1000" cy="700" r={radius} />
+      <circle cx="1260" cy="800" r={radius} />
+    </g>
+  </Mesh>;
 }

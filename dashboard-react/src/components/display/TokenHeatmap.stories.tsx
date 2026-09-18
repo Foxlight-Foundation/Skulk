@@ -7,7 +7,7 @@ const meta: Meta<typeof TokenHeatmap> = {
   parameters: { layout: 'centered' },
   decorators: [
     (Story) => (
-      <div style={{ maxWidth: 600, padding: 24, color: '#e5e5e5', fontFamily: 'monospace', fontSize: 14 }}>
+      <div style={{ maxWidth: 600, padding: 24, color: 'inherit', fontFamily: 'monospace', fontSize: 14 }}>
         <Story />
       </div>
     ),

@@ -4,6 +4,7 @@ import styled from 'styled-components';
 export const DrawerTabBar = styled.div`
   display: flex;
   gap: 4px;
+  overflow-x: auto;
   padding: 8px 12px 0;
   border-bottom: 1px solid ${({ theme }) => theme.colors.border};
 `;
@@ -12,10 +13,11 @@ export const DrawerTabBar = styled.div`
 export const DrawerTabButton = styled.button<{ $active: boolean }>`
   all: unset;
   cursor: pointer;
-  padding: 6px 14px 8px;
+  padding: 8px 12px;
+  flex-shrink: 0;
   border-radius: ${({ theme }) => theme.radii.sm} ${({ theme }) => theme.radii.sm} 0 0;
   font-family: ${({ theme }) => theme.fonts.body};
-  font-size: ${({ theme }) => theme.fontSizes.sm};
+  font-size: 15px;
   color: ${({ $active, theme }) => ($active ? theme.colors.gold : theme.colors.textSecondary)};
   border-bottom: 2px solid
     ${({ $active, theme }) => ($active ? theme.colors.gold : 'transparent')};

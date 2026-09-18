@@ -1,3 +1,4 @@
+import { Button } from '../common/Button';
 import { useState } from 'react';
 import type { Meta, StoryObj } from '@storybook/react-vite';
 import { ConnectionBanner } from './ConnectionBanner';
@@ -27,12 +28,11 @@ export const Toggle: Story = {
       <div style={{ minHeight: '100vh' }}>
         <ConnectionBanner connected={connected} />
         <div style={{ padding: 24 }}>
-          <button
-            style={{ padding: '8px 16px', background: connected ? '#b23a44' : '#1c7a54', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontFamily: 'monospace' }}
+          <Button variant="primary"
             onClick={() => setConnected(!connected)}
           >
             {connected ? 'Simulate disconnect' : 'Simulate reconnect'}
-          </button>
+          </Button>
         </div>
       </div>
     );

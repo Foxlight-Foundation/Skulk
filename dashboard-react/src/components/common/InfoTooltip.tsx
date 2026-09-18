@@ -42,7 +42,7 @@ const Trigger = styled.span`
   align-items: center;
   justify-content: center;
   cursor: help;
-  color: ${({ theme }) => theme.colors.accentText};
+  color: ${({ theme }) => theme.colors.textMuted};
   transition: color 0.15s, opacity 0.15s;
 
   &:hover { opacity: 0.8; }

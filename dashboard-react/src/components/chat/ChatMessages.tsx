@@ -85,36 +85,25 @@ const Circle = styled.div<{ $size: number; $opacity: number }>`
 `;
 
 const MessageCard = styled.div<{ $role: 'user' | 'assistant' }>`
-  padding: 12px 16px;
-  border-radius: ${({ theme }) => theme.radii.lg};
-  background: ${({ theme }) => theme.colors.surface};
-  border: 1px solid ${({ theme }) => theme.colors.border};
-  position: relative;
-
-  ${({ $role }) =>
-    $role === 'user'
-      ? css`
-          align-self: flex-end;
-          max-width: 70%;
-          border-color: ${({ theme }) => theme.colors.border};
-        `
-      : css`
-          border-left: 2px solid ${({ theme }) => theme.colors.goldDim};
-        `}
+  min-width: 0; position: relative;
+  align-self: ${({ $role }) => $role === 'user' ? 'flex-end' : 'flex-start'};
+  max-width: ${({ $role }) => $role === 'user' ? '86%' : '96%'};
 `;
 
 const MsgHeader = styled.div`
+  flex-wrap: wrap;
   display: flex;
   align-items: center;
   gap: 8px;
   margin-bottom: 8px;
-  font-size: ${({ theme }) => theme.fontSizes.xs};
-  font-family: ${({ theme }) => theme.fonts.body};
+  font-size: 10.5px;
+  font-family: ${({ theme }) => theme.fonts.mono};
 `;
 
 const RoleLabel = styled.span<{ $role: 'user' | 'assistant' }>`
   color: ${({ $role, theme }) => ($role === 'assistant' ? theme.colors.accentText : theme.colors.textSecondary)};
   font-weight: 600;
+  font-size: 10px; letter-spacing: .12em; text-transform: uppercase;
 `;
 
 const Timestamp = styled.span`
@@ -137,8 +126,11 @@ const Dot = styled.span<{ $color: string }>`
 const Spacer = styled.span`flex: 1;`;
 
 const UserContent = styled.div`
+  background: ${({ theme }) => theme.colors.selected};
+  border: 1px solid ${({ theme }) => theme.colors.border};
+  border-radius: 12px 12px 4px 12px; padding: 10px 14px;
   font-family: ${({ theme }) => theme.fonts.body};
-  font-size: ${({ theme }) => theme.fontSizes.md};
+  font-size: 14px;
   white-space: pre-wrap;
   line-height: 1.5;
   color: ${({ theme }) => theme.colors.text};
@@ -160,7 +152,8 @@ const Actions = styled.div`
   margin-top: 8px;
   opacity: 0;
   transition: opacity 0.15s;
-  ${MessageCard}:hover & { opacity: 1; }
+  ${MessageCard}:hover &, ${MessageCard}:focus-within & { opacity: 1; }
+  @media (hover: none) { opacity: 1; }
 `;
 
 const ActiveGhostBtn = styled(Button)<{ $active?: boolean }>`

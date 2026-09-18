@@ -23,7 +23,7 @@ export const MinimumDevices: Story = {
     const [value, setValue] = useState(1);
     return (
       <div>
-        <div style={{ fontSize: 12, fontFamily: 'monospace', color: '#999', marginBottom: 8 }}>
+        <div style={{ fontSize: 12, fontFamily: 'monospace', color: 'inherit', marginBottom: 8 }}>
           Minimum Devices:
         </div>
         <StepSlider options={[1, 2, 3]} value={value} onChange={setValue} />

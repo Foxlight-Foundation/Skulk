@@ -14,12 +14,14 @@ export interface CapabilityTagColors {
 
 /** Build the capability-tag tint palette for the active theme. */
 export function buildTagColors(theme: Theme): Record<string, CapabilityTagColors> {
-  const neutral = { color: theme.colors.accentText, bg: theme.colors.goldBg, border: theme.colors.borderStrong };
+  const tinted = Object.fromEntries(Object.entries(theme.capabilityTints).map(([name, color]) => [name, {
+    color, bg: `color-mix(in srgb, ${color} 10%, transparent)`, border: `color-mix(in srgb, ${color} 30%, transparent)`,
+  }]));
   return {
-    optiq: neutral, thinking: neutral, code: neutral, embedding: neutral,
-    tts: neutral, stt: neutral, image_gen: neutral, image_edit: neutral,
+    ...tinted,
+    thinking: { color: theme.colors.gold, bg: theme.colors.goldBg, border: theme.colors.goldBg },
     vision: { color: theme.colors.tagVision, bg: `color-mix(in srgb, ${theme.colors.tagVision} 10%, transparent)`, border: `color-mix(in srgb, ${theme.colors.tagVision} 30%, transparent)` },
-    tensor: { color: theme.colors.healthy, bg: theme.colors.accentBg, border: theme.colors.borderHealthy },
+    tensor: { color: theme.colors.healthy, bg: theme.colors.accentBg, border: theme.colors.accentBg },
   };
 }
 
