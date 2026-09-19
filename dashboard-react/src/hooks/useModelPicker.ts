@@ -112,7 +112,7 @@ export function useModelPicker({
     if (selectedFamily === 'favorites') {
       groups = groups.filter((g) => favorites.has(g.id));
     } else if (selectedFamily === 'recents') {
-      return recentGroups;
+      groups = recentGroups;
     } else if (selectedFamily) {
       groups = groups.filter((g) => g.family === selectedFamily);
     }

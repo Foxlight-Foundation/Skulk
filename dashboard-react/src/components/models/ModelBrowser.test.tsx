@@ -66,6 +66,7 @@ async function renderBrowser(
   getModelFitStatus: () => 'fits_now' | 'fits_cluster_capacity' = () => 'fits_now',
   instanceStatuses?: Record<string, InstanceStatus>,
   canModelFit = () => true,
+  recentModelIds?: string[],
 ): Promise<ReturnType<typeof vi.fn>> {
   container = document.createElement('div');
   document.body.append(container);
@@ -79,6 +80,7 @@ async function renderBrowser(
           favorites={new Set()}
           canModelFit={canModelFit}
           instanceStatuses={instanceStatuses}
+          recentModelIds={recentModelIds}
           getModelFitStatus={getModelFitStatus}
           onSelect={onSelect}
           onToggleFavorite={vi.fn()}
@@ -249,6 +251,32 @@ describe('ModelBrowser store discovery taxonomy', () => {
 
 
 describe('discovery evidence and download independence', () => {
+  it('applies readiness and search filters to recent models', async () => {
+    await renderBrowser(undefined, undefined, 'store-download', MODELS, undefined, {
+      [MODELS[0].id]: { status: 'Ready', statusClass: 'ready' },
+      [MODELS[1].id]: { status: 'Loading', statusClass: 'loading' },
+    }, undefined, MODELS.map(model => model.id));
+    const recent = familyChips().find(chip => chip.textContent === 'Recent')!;
+    await act(async () => recent.click());
+    expect(container!.textContent).toContain('3 model groups');
+
+    const ready = [...container!.querySelectorAll('label')].find(label => label.textContent === 'Ready now')!.querySelector('input')!;
+    await act(async () => ready.click());
+    expect(container!.textContent).toContain('1 model group');
+    expect(container!.textContent).toContain('Qwen3 4B');
+    expect(container!.textContent).not.toContain('LongCat AudioDiT 1B');
+
+    const search = container!.querySelector<HTMLInputElement>('input[aria-label="Search models"]')!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(search, 'Canary');
+      search.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(container!.textContent).toContain('0 model groups');
+    await act(async () => ready.click());
+    expect(container!.textContent).toContain('Canary 1B');
+    expect(container!.textContent).not.toContain('Qwen3 4B');
+  });
+
   it('shows no ready models when readiness evidence is unavailable', async () => {
     await renderBrowser();
     const ready = [...container!.querySelectorAll('label')].find(label => label.textContent === 'Ready now')!.querySelector('input')!;
