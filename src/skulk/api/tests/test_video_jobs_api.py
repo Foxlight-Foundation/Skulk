@@ -386,7 +386,72 @@ def test_content_serves_only_completed_jobs(monkeypatch: pytest.MonkeyPatch) -> 
     )
     body = client.get("/v1/videos/done").json()
     assert body["status"] == "completed" and body["output"]["has_thumbnail"] is False
+    assert body["output"]["thumbnail_sha256"] is None
+    assert body["output"]["thumbnail_size_bytes"] is None
     assert body["output"]["size_bytes"] == len(payload)
+
+
+def test_completed_output_names_the_thumbnail_it_serves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A client verifies the thumbnail it fetches against the digest the job
+    publishes, the way it verifies the clip; without the digest a careful
+    client keeps no thumbnail at all."""
+    api = _make_api(monkeypatch)
+    command_id = CommandId("shown")
+    payload = b"mp4 bytes " * 100
+    digest = hashlib.sha256(payload).hexdigest()
+    thumbnail = b"jpeg bytes " * 20
+    thumbnail_digest = hashlib.sha256(thumbnail).hexdigest()
+    api._video_jobs.create(_job("shown", created_at=1))
+    api._video_store.open_assembly(
+        command_id,
+        "video",
+        content_type="video/mp4",
+        total_bytes=len(payload),
+        total_chunks=1,
+    )
+    api._video_store.append(command_id, "video", 1, payload)
+    stored = api._video_store.commit(command_id, "video", sha256=digest, total_chunks=1)
+    api._video_store.open_assembly(
+        command_id,
+        "thumbnail",
+        content_type="image/jpeg",
+        total_bytes=len(thumbnail),
+        total_chunks=1,
+    )
+    api._video_store.append(command_id, "thumbnail", 1, thumbnail)
+    api._video_store.commit(
+        command_id, "thumbnail", sha256=thumbnail_digest, total_chunks=1
+    )
+    manifest = VideoOutputManifest(
+        sha256=digest,
+        size_bytes=len(payload),
+        width=16,
+        height=16,
+        frame_count=5,
+        fps=1,
+        seconds=5.0,
+        audio_sample_rate=32000,
+        audio_channels=2,
+        thumbnail_sha256=thumbnail_digest,
+        thumbnail_size_bytes=len(thumbnail),
+    )
+    api._video_jobs.update(
+        command_id, render_finished=True, output=manifest, media_delivered=True
+    )
+    api._video_jobs.settle(command_id)
+    api._video_jobs.update(command_id, expires_at=int(stored.expires_at))
+    client = TestClient(api.app)
+    body = client.get("/v1/videos/shown").json()
+    assert body["output"]["has_thumbnail"] is True
+    assert body["output"]["thumbnail_sha256"] == thumbnail_digest
+    assert body["output"]["thumbnail_size_bytes"] == len(thumbnail)
+    served = client.get("/v1/videos/shown/content", params={"variant": "thumbnail"})
+    assert served.status_code == 200 and served.content == thumbnail
+    assert (
+        hashlib.sha256(served.content).hexdigest() == body["output"]["thumbnail_sha256"]
+    )
 
 
 def test_cancel_streaming_job_sends_task_cancelled(

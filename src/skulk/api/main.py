@@ -10741,6 +10741,8 @@ class API:
                 audio_sample_rate=manifest.audio_sample_rate,
                 audio_channels=manifest.audio_channels,
                 has_thumbnail=manifest.thumbnail_sha256 is not None,
+                thumbnail_sha256=manifest.thumbnail_sha256,
+                thumbnail_size_bytes=manifest.thumbnail_size_bytes,
             )
         stats: VideoStatsInfo | None = None
         if job.stats is not None:
