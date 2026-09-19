@@ -65,7 +65,7 @@ describe('ClusterNode interaction surface', () => {
     expect(interactionSurface).toHaveAttribute('x', '-46');
     expect(interactionSurface).toHaveAttribute('y', '-52');
     expect(interactionSurface).toHaveAttribute('width', '92');
-    expect(interactionSurface).toHaveAttribute('height', '220');
+    expect(interactionSurface).toHaveAttribute('height', '206');
     expect(interactionSurface).toHaveAttribute('pointer-events', 'all');
 
     const nodeText = container.querySelectorAll('.topology-node > text');
@@ -109,7 +109,7 @@ describe('ClusterNode interaction surface', () => {
     });
 
     const badge = container.querySelector('[data-hardware-badge-side="right"]');
-    expect(badge).toHaveAttribute('transform', 'translate(56, -20)');
+    expect(badge).toHaveAttribute('transform', 'translate(56, -17)');
   });
 });
 

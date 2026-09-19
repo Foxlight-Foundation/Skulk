@@ -62,7 +62,7 @@ export function DeviceIcon({
   if (model === 'macbook-pro') return <MacBookPro {...common} bodyColor={bodyColor} />;
   if (model === 'amd-strix') return <AmdStrix {...common} bodyColor={bodyColor} labelColor={labelColor} />;
   if (model === 'nvidia-gpu') return <NvidiaGpu {...common} bodyColor={bodyColor} />;
-  return <TowerDefault {...common} fillColor={fillColor} />;
+  return <HexagonDefault {...common} fillColor={fillColor} />;
 }
 
 interface MacStudioProps {
@@ -367,24 +367,39 @@ function MacBookPro({ cx, cy, width, height, ramPercent, wireColor, strokeWidth,
   );
 }
 
-interface TowerDefaultProps {
+interface HexagonDefaultProps {
   cx: number; cy: number; width: number; height: number;
   wireColor: string; strokeWidth: number; fillColor: string;
   ramPercent: number; clipId: string;
   ramColor: string;
 }
 
-function TowerDefault({ cx, cy, width, height, wireColor, strokeWidth, fillColor, ramPercent, clipId, ramColor }: TowerDefaultProps) {
-  const boxWidth = width * .48;
-  const boxHeight = height * .88;
-  const x = cx - boxWidth / 2;
-  const y = cy - boxHeight / 2;
-  const fillHeight = Math.max(0, Math.min(100, ramPercent)) / 100 * boxHeight;
-  return <g>
-    <defs><clipPath id={`${clipId}-tower`}><rect x={x} y={y} width={boxWidth} height={boxHeight} rx={4} /></clipPath></defs>
-    <rect x={x} y={y} width={boxWidth} height={boxHeight} rx={4} fill={fillColor} stroke={wireColor} strokeWidth={strokeWidth} />
-    <rect x={x} y={y + boxHeight - fillHeight} width={boxWidth} height={fillHeight} fill={ramColor} clipPath={`url(#${clipId}-tower)`} />
-    {[.25, .35, .45].map(position => <line key={position} x1={x + boxWidth * .2} x2={x + boxWidth * .8} y1={y + boxHeight * position} y2={y + boxHeight * position} stroke={wireColor} strokeWidth={strokeWidth} />)}
-    <circle cx={cx} cy={y + boxHeight * .8} r={2} fill={wireColor} />
-  </g>;
+function HexagonDefault({ cx, cy, width, height, wireColor, strokeWidth, fillColor, ramPercent, clipId, ramColor }: HexagonDefaultProps) {
+  const hexRadius = Math.min(width, height) * 0.42;
+  const points = Array.from({ length: 6 }, (_, i) => {
+    const angle = ((i * 60 - 30) * Math.PI) / 180;
+    return `${cx + hexRadius * Math.cos(angle)},${cy + hexRadius * Math.sin(angle)}`;
+  }).join(' ');
+
+  // Bounding box of the hexagon for RAM fill clipping
+  const hexTop = cy - hexRadius;
+  const hexH = hexRadius * 2;
+  const hexLeft = cx - hexRadius;
+  const hexW = hexRadius * 2;
+  const memFillH = (ramPercent / 100) * hexH;
+
+  return (
+    <g>
+      <defs>
+        <clipPath id={`${clipId}-hex`}>
+          <polygon points={points} />
+        </clipPath>
+      </defs>
+      <polygon points={points} fill={fillColor} stroke={wireColor} strokeWidth={strokeWidth} />
+      {ramPercent > 0 && (
+        <rect x={hexLeft} y={hexTop + (hexH - memFillH)} width={hexW} height={memFillH}
+          fill={ramColor} clipPath={`url(#${clipId}-hex)`} />
+      )}
+    </g>
+  );
 }

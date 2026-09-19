@@ -1,40 +1,40 @@
 import { describe, expect, it } from 'vitest';
 import { darkTheme, lightTheme } from './theme';
 
-describe('Studio Night topology semantics', () => {
-  it('uses the Night node palette with an opaque route-occluding surface', () => {
+describe('topology theme parity with skulk-app', () => {
+  it('uses the Den node palette with an opaque route-occluding surface', () => {
     expect(darkTheme.colors).toMatchObject({
-      topologyNodeSurface: '#131a33',
-      topologyNodeMemory: '#93aedf',
-      topologyNodeComputeTrack: 'rgba(147,174,223,.18)',
-      topologyNodeCompute: '#54c79a',
-      topologyNodeSelection: '#93aedf',
-      topologyNodeText: '#e8edf7',
-      topologyNodeLabel: '#8a9ab8',
-      topologyNodeDetail: '#6c7ea3',
-      topologyNodeHealthy: '#54c79a',
-      topologyNodeSyncing: '#93aedf',
-      topologyNodeWarning: '#f2a03d',
-      topologyNodeDanger: '#e5655f',
-      topologyNodeDotBorder: '#2b3a63',
+      topologyNodeSurface: '#151D34',
+      topologyNodeMemory: '#93AEDF',
+      topologyNodeComputeTrack: 'rgba(147, 174, 223, 0.22)',
+      topologyNodeCompute: '#F2A03D',
+      topologyNodeSelection: '#92A4C2',
+      topologyNodeText: '#F4F6FB',
+      topologyNodeLabel: 'rgba(147, 174, 223, 0.75)',
+      topologyNodeDetail: 'rgba(232, 237, 247, 0.56)',
+      topologyNodeHealthy: '#54C79A',
+      topologyNodeSyncing: '#93AEDF',
+      topologyNodeWarning: '#F2A03D',
+      topologyNodeDanger: '#F2707E',
+      topologyNodeDotBorder: 'rgba(43, 58, 99, 0.28)',
     });
   });
 
-  it('uses the Noon Ridge node palette in light mode', () => {
+  it('uses the native Noon Ridge node palette in light mode', () => {
     expect(lightTheme.colors).toMatchObject({
-      topologyNodeSurface: '#f5f8fc',
-      topologyNodeMemory: '#4d7cc4',
-      topologyNodeComputeTrack: 'rgba(17,33,60,.16)',
-      topologyNodeCompute: '#1c7a54',
-      topologyNodeSelection: '#4d7cc4',
-      topologyNodeText: '#11213c',
-      topologyNodeLabel: '#5f7086',
-      topologyNodeDetail: '#7a8aa3',
-      topologyNodeHealthy: '#1c7a54',
-      topologyNodeSyncing: '#4d7cc4',
-      topologyNodeWarning: '#b35c0a',
-      topologyNodeDanger: '#b23a44',
-      topologyNodeDotBorder: '#c9d9f0',
+      topologyNodeSurface: '#FFFFFF',
+      topologyNodeMemory: '#456FB0',
+      topologyNodeComputeTrack: 'rgba(17, 33, 60, 0.16)',
+      topologyNodeCompute: '#AC580A',
+      topologyNodeSelection: '#52657F',
+      topologyNodeText: '#11213C',
+      topologyNodeLabel: '#5F7086',
+      topologyNodeDetail: '#65707E',
+      topologyNodeHealthy: '#1C7A54',
+      topologyNodeSyncing: '#456FB0',
+      topologyNodeWarning: '#96601A',
+      topologyNodeDanger: '#B23A44',
+      topologyNodeDotBorder: '#FFFFFF',
     });
   });
 });

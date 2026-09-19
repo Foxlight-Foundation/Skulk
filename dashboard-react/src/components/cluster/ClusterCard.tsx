@@ -53,8 +53,8 @@ function hfUrl(modelId: string): string | null {
 /* ── Mini Topology ────────────────────────────────────── */
 
 function MiniTopology({ nodes }: { nodes: ClusterCardNode[] }) {
-  const theme = useTheme() as Theme;
   const instanceId = useId();
+  const theme = useTheme() as Theme;
   const count = nodes.length;
   const iconW = 48;
   const iconH = 40;
@@ -85,10 +85,9 @@ function MiniTopology({ nodes }: { nodes: ClusterCardNode[] }) {
           <line
             key={`e${i}`}
             x1={p.x} y1={p.y} x2={next.x} y2={next.y}
-            stroke={theme.colors.gold}
-            strokeOpacity={0.7}
-            strokeWidth={1.2}
-            strokeDasharray="5 5"
+            stroke={theme.colors.meshLine}
+            strokeWidth={1}
+            strokeDasharray="4 3"
           />
         );
       })}
@@ -103,7 +102,7 @@ function MiniTopology({ nodes }: { nodes: ClusterCardNode[] }) {
                 ramPercent={node.memoryUsedPercent}
                 width={iconW}
                 height={iconH}
-                wireColor={theme.colors.gold}
+                wireColor={theme.colors.goldDim}
                 clipId={`cc-${instanceId}-${node.nodeId}`}
               />
             </g>
@@ -113,7 +112,7 @@ function MiniTopology({ nodes }: { nodes: ClusterCardNode[] }) {
               textAnchor="middle"
               fill={theme.colors.textSecondary}
               fontSize={11}
-              fontFamily="'Instrument Sans', sans-serif"
+              fontFamily={theme.fonts.body}
             >
               {node.memoryUsedPercent}%
             </text>

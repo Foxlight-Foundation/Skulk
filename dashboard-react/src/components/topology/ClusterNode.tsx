@@ -56,7 +56,7 @@ const NODE_RADIUS = 31;
 const UTILIZATION_RADIUS = 39;
 const UTILIZATION_CIRCUMFERENCE = 2 * Math.PI * UTILIZATION_RADIUS;
 const INTERACTION_SURFACE = {
-  height: 220,
+  height: 206,
   width: 92,
   x: -46,
   y: -52,
@@ -229,8 +229,8 @@ function buildInfoContent(
 }
 
 /**
- * Native-style topology node: memory inside, compute around it, and health in
- * the status dot. Hardware remains identifiable through a compact SVG badge;
+ * Native-style topology node: memory inside, compute around it, and health on
+ * the inner wire. Hardware remains identifiable through a compact SVG badge;
  * hover, focus, or selection reveals the desktop operator action rail.
  */
 export function ClusterNode({
@@ -318,7 +318,7 @@ export function ClusterNode({
     >
       <defs>
         <clipPath id={clipId}>
-          <circle cx={0} cy={0} r={NODE_RADIUS} />
+          <circle cx={0} cy={0} r={NODE_RADIUS - 1} />
         </clipPath>
       </defs>
 
@@ -352,23 +352,23 @@ export function ClusterNode({
         fill="none"
         r={UTILIZATION_RADIUS}
         stroke={theme.colors.topologyNodeComputeTrack}
-        strokeWidth={6}
+        strokeWidth={4}
       />
-      {computeRatio > 0 && !nodeInfo.syncing ? (
+      {computeRatio > 0 ? (
         <circle
           cx={0}
           cy={0}
           fill="none"
           r={UTILIZATION_RADIUS}
-          stroke={healthColor(nodeInfo, theme)}
+          stroke={theme.colors.topologyNodeCompute}
           strokeDasharray={`${UTILIZATION_CIRCUMFERENCE * computeRatio} ${UTILIZATION_CIRCUMFERENCE}`}
           strokeLinecap="round"
-          strokeWidth={3}
+          strokeWidth={4}
           transform="rotate(-90)"
         />
       ) : null}
       <circle cx={0} cy={0} fill={theme.colors.topologyNodeSurface} r={NODE_RADIUS} />
-      {memoryFillHeight > 0 && !nodeInfo.syncing ? (
+      {memoryFillHeight > 0 ? (
         <rect
           clipPath={`url(#${clipId})`}
           fill={theme.colors.topologyNodeMemory}
@@ -384,30 +384,29 @@ export function ClusterNode({
         cy={0}
         fill="none"
         r={NODE_RADIUS}
-        stroke={nodeInfo.syncing ? theme.colors.topologyNodeSyncing : 'none'}
-        strokeDasharray={nodeInfo.syncing ? '4 4' : undefined}
-        strokeWidth={1.5}
+        stroke={healthColor(nodeInfo, theme)}
+        strokeWidth={2.5}
       />
       <text
         dominantBaseline="middle"
         fill={theme.colors.topologyNodeText}
         fontFamily={theme.fonts.body}
-        fontSize={nodeInfo.syncing ? 13 : 17}
-        fontWeight={nodeInfo.syncing ? 600 : 700}
+        fontSize={13}
+        fontWeight={600}
         style={{ fontVariantNumeric: 'tabular-nums' }}
         textAnchor="middle"
         x={0}
         y={1}
       >
-        {nodeInfo.syncing ? t('topology.clusterNode.sync', 'sync') : memoryTotal > 0 ? `${memoryPercent}%` : '—'}
+        {memoryTotal > 0 ? `${memoryPercent}%` : '—'}
       </text>
       <circle
-        cx={26}
+        cx={25}
         cy={-25}
         fill={healthColor(nodeInfo, theme)}
         r={5.5}
         stroke={theme.colors.topologyNodeDotBorder}
-        strokeWidth={1.5}
+        strokeWidth={2}
       />
 
       {satelliteLayout.positions.map((position) => {
@@ -447,7 +446,7 @@ export function ClusterNode({
         aria-label={deviceLabel}
         data-hardware-badge-side={hardwareBadgeSide}
         role="img"
-        transform={`translate(${hardwareBadgeSide === 'right' ? 56 : -102}, -20)`}
+        transform={`translate(${hardwareBadgeSide === 'right' ? 56 : -104}, -17)`}
       >
         <HardwareBadge model={model} />
       </g>
@@ -477,12 +476,12 @@ export function ClusterNode({
         dominantBaseline="middle"
         fill={theme.colors.topologyNodeText}
         fontFamily={theme.fonts.body}
-        fontSize={18}
+        fontSize={15}
         fontWeight={600}
         letterSpacing={0.15}
         textAnchor="middle"
         x={0}
-        y={69}
+        y={61}
       >
         {displayName}
       </text>
@@ -490,11 +489,11 @@ export function ClusterNode({
         dominantBaseline="middle"
         fill={theme.colors.topologyNodeLabel}
         fontFamily={theme.fonts.body}
-        fontSize={14}
+        fontSize={12}
         style={{ fontVariantNumeric: 'tabular-nums' }}
         textAnchor="middle"
         x={0}
-        y={93}
+        y={82}
       >
         {nodeInfo.syncing
           ? t('topology.clusterNode.syncingClusterState', 'Syncing cluster state')
@@ -505,11 +504,11 @@ export function ClusterNode({
           dominantBaseline="middle"
           fill={theme.colors.topologyNodeDetail}
           fontFamily={theme.fonts.body}
-          fontSize={13}
+          fontSize={11}
           style={{ fontVariantNumeric: 'tabular-nums' }}
           textAnchor="middle"
           x={0}
-          y={113}
+          y={101}
         >
           {gpuTemperature !== undefined && Number.isFinite(gpuTemperature)
             ? `${Math.round(gpuTemperature)}°C`
@@ -520,7 +519,7 @@ export function ClusterNode({
       ) : null}
 
       {showActions ? (
-        <foreignObject height={40} width={110} x={-55} y={126}>
+        <foreignObject height={40} width={110} x={-55} y={112}>
           <div onClick={(event) => event.stopPropagation()}>
             <TopologyNodeActions
               infoContent={infoContent}
