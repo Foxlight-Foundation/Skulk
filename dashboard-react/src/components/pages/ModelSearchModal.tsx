@@ -137,6 +137,8 @@ function loadRecentIds(): string[] {
 }
 
 interface ModelSearchModalProps {
+  /** Retain discovery filters while its nested placement view owns the modal. */
+  preserveViewWhileClosed?: boolean;
   /** Live runner-derived readiness; storage availability is a separate fact. */
   instanceStatuses?: Record<string, InstanceStatus>;
   activeDownloads?: StoreDownloadProgress[];
@@ -153,6 +155,7 @@ interface ModelSearchModalProps {
 /** Own discovery requests, favourites and download actions inside the Find Models dialog. */
 export function ModelSearchModal({
   open,
+  preserveViewWhileClosed = false,
   onClose,
   existingModelIds,
   activeDownloads,
@@ -423,12 +426,12 @@ export function ModelSearchModal({
     return map;
   }, [existingModelIds]);
 
-  if (!open) return null;
+  if (!open && !preserveViewWhileClosed) return null;
 
   return (
     <>
-      <Backdrop onClick={onClose} />
-      <ModalContainer ref={modalRef} tabIndex={-1} role="dialog" aria-modal="true" aria-label={t('modelSearch.title', 'Find Models')}>
+      {open && <Backdrop onClick={onClose} />}
+      <ModalContainer ref={modalRef} style={{ display: open ? undefined : 'none' }} aria-hidden={!open} tabIndex={-1} role={open ? 'dialog' : undefined} aria-modal={open ? true : undefined} aria-label={t('modelSearch.title', 'Find Models')}>
         <ModalBody>
           <ModelBrowser
             heading={t('modelSearch.title', 'Find Models')}

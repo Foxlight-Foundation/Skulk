@@ -1,0 +1,2 @@
+/** Deterministic fictional media; gallery previews never depend on remote image services. */
+export const galleryImage = `data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="800"><rect width="1200" height="800" fill="#172644"/><circle cx="600" cy="350" r="160" fill="#93aedf"/><text x="600" y="620" text-anchor="middle" fill="white" font-size="48" font-family="sans-serif">Fictional image preview</text></svg>')}`;

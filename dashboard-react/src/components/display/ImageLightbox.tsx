@@ -1,8 +1,10 @@
-import { useCallback, useEffect } from 'react';
+import { useRef } from 'react';
+import { useModalFocus } from '../../hooks/useModalFocus';
 import styled, { keyframes } from 'styled-components';
 import { Button } from '../common/Button';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 
+/** Image preview with download, dismissal and keyboard focus ownership. */
 export interface ImageLightboxProps {
   src: string | null;
   onClose: () => void;
@@ -79,30 +81,16 @@ const IconButton = styled(Button)`
 
 /* ---- component ---- */
 
+/** Show a full-size image without allowing focus behind the modal. */
 export function ImageLightbox({ src, onClose }: ImageLightboxProps) {
   const { t } = useSkulkTranslation();
-  const handleKeyDown = useCallback(
-    (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    },
-    [onClose],
-  );
-
-  useEffect(() => {
-    if (!src) return;
-    document.addEventListener('keydown', handleKeyDown);
-    const prev = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
-    return () => {
-      document.removeEventListener('keydown', handleKeyDown);
-      document.body.style.overflow = prev;
-    };
-  }, [src, handleKeyDown]);
+  const overlayRef = useRef<HTMLDivElement>(null);
+  useModalFocus(!!src, overlayRef, onClose);
 
   if (!src) return null;
 
   return (
-    <Overlay onClick={onClose}>
+    <Overlay ref={overlayRef} tabIndex={-1} role="dialog" aria-modal="true" aria-label={t('imageLightbox.fullSizePreview', 'Full size preview')} onClick={onClose}>
       <ButtonBar>
         <IconButton
           variant="primary"

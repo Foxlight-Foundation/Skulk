@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useModalFocus } from '../../hooks/useModalFocus';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import styled, { keyframes } from 'styled-components';
 import { useConfig, type FullConfig, type TelemetryConfig } from '../../hooks/useConfig';
 import { useSkulkTranslation } from '../../i18n/tolgee';
@@ -89,7 +90,7 @@ const ToggleRow = styled.label`
 const ToggleHint = styled.span`
   display: block;
   font-size: 0.76rem;
-  opacity: 0.65;
+  color: ${({ theme }) => theme.colors.textSecondary};
   margin-top: 2px;
 `;
 
@@ -106,7 +107,7 @@ const Button = styled.button<{ $primary?: boolean }>`
   font-size: 0.84rem;
   cursor: pointer;
   border: 1px solid ${({ theme }) => theme.colors.border};
-  background: ${({ $primary, theme }) => ($primary ? theme.colors.gold : 'transparent')};
+  background: ${({ $primary, theme }) => ($primary ? theme.colors.actionFill : 'transparent')};
   color: ${({ $primary, theme }) => ($primary ? theme.colors.textOnAccent : 'inherit')};
   font-weight: ${({ $primary }) => ($primary ? 600 : 400)};
 `;
@@ -147,6 +148,7 @@ export function TelemetryConsentModal() {
   const { fullConfig, loading, saving, saveFullConfig } = useConfig(
     t('telemetry.errors.fetchConfigFailed', 'Failed to fetch config'),
   );
+  const modalRef = useRef<HTMLDivElement>(null);
   const [telemetryOn, setTelemetryOn] = useState(false);
   const [diagnosticsOn, setDiagnosticsOn] = useState(false);
   const [dismissed, setDismissed] = useState(false);
@@ -171,6 +173,8 @@ export function TelemetryConsentModal() {
     setDismissed(true);
   }, []);
 
+  useModalFocus(visible, modalRef, close);
+
   const save = useCallback(async () => {
     const telemetry: TelemetryConfig = {
       consent: telemetryOn ? 'enabled' : 'disabled',
@@ -193,7 +197,7 @@ export function TelemetryConsentModal() {
   if (!visible) return null;
 
   return (
-    <Backdrop role="dialog" aria-modal="true" aria-labelledby="telemetry-consent-title">
+    <Backdrop ref={modalRef} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby="telemetry-consent-title">
       <Card>
         <Title id="telemetry-consent-title">{t('telemetry.consent.title', 'Help make Skulk better?')}</Title>
         <Body>

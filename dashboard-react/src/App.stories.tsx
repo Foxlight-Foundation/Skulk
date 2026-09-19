@@ -138,3 +138,21 @@ export const PluginNavigation: Story = {
     await expect(menu).toHaveFocus();
   },
 };
+
+/** Discovery launches into existing placement review and preserves its search on return. */
+export const FindModelsPlacementReturn: Story = {
+  parameters: { screenRoute: 'model-store' },
+  play: async context => {
+    await FindModels.play?.(context);
+    const body = within(document.body);
+    const search = body.getByRole('textbox', { name: 'Search models' });
+    await userEvent.type(search, 'Chat');
+    await userEvent.click((await body.findAllByRole('button', { name: 'Launch', exact: true }))[0]);
+    await expect(await body.findByRole('dialog', { name: 'Placement options' })).toBeVisible();
+    await expect(body.getAllByRole('dialog')).toHaveLength(1);
+    await userEvent.click(body.getByRole('button', { name: 'Back to Find Models' }));
+    await expect(await body.findByRole('dialog', { name: 'Find Models' })).toBeVisible();
+    await expect(body.getByRole('textbox', { name: 'Search models' })).toHaveValue('Chat');
+    await expect(body.getAllByRole('dialog')).toHaveLength(1);
+  },
+};

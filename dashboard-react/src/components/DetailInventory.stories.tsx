@@ -1,3 +1,4 @@
+import { expect, userEvent, within } from 'storybook/test';
 import { useEffect } from 'react';
 import type { Meta, StoryObj } from '@storybook/react-vite';
 import { useAppDispatch } from '../store/hooks';
@@ -9,7 +10,7 @@ import { ShootingStars } from './common/ShootingStars';
 import { ObservabilityPanel } from './observability/ObservabilityPanel';
 import { CapabilityPanel } from './capabilities/CapabilityPanel';
 import { MobileMenuSheet } from './layout/MobileMenuSheet';
-import { TelemetryConsentModal } from './layout/TelemetryConsentModal';
+import { TELEMETRY_CONSENT_SEEN_KEY, TelemetryConsentModal } from './layout/TelemetryConsentModal';
 import { ModelSearchModal } from './pages/ModelSearchModal';
 import { RuntimeReleasePanel } from './pages/RuntimeReleasePanel';
 import { PlacementManager } from './cluster/PlacementManager';
@@ -35,7 +36,27 @@ export const Observability: Story = { render: () => <Panel /> };
 export const Capabilities: Story = { render: () => <Panel capabilityPanel /> };
 export const Background: Story = { render: () => <><NetworkMesh /><SceneBackdrop /><ShootingStars /><Surface style={{ position: 'relative' }}>Background layers use the active palette.</Surface></> };
 export const MobileMenu: Story = { render: () => <div style={{ position: 'relative', height: 60 }}><MobileMenuSheet open activeRoute="cluster" onNavigate={() => {}} onOpenSettings={() => {}} onClose={() => {}} /></div> };
-export const Telemetry: Story = { render: () => <TelemetryConsentModal /> };
+export const Telemetry: Story = {
+  parameters: { telemetryConsent: true },
+  beforeEach: () => {
+    const previous = localStorage.getItem(TELEMETRY_CONSENT_SEEN_KEY);
+    localStorage.removeItem(TELEMETRY_CONSENT_SEEN_KEY);
+    return () => { if (previous === null) localStorage.removeItem(TELEMETRY_CONSENT_SEEN_KEY); else localStorage.setItem(TELEMETRY_CONSENT_SEEN_KEY, previous); };
+  },
+  render: () => <TelemetryConsentModal />,
+};
+export const TelemetryKeyboard: Story = {
+  ...Telemetry,
+  play: async () => {
+    const body = within(document.body);
+    const dialog = await body.findByRole('dialog', { name: 'Help make Skulk better?' });
+    await expect(dialog).toHaveFocus();
+    await userEvent.tab();
+    await expect(dialog.contains(document.activeElement)).toBe(true);
+    await userEvent.keyboard('{Escape}');
+    await expect(body.queryByRole('dialog')).not.toBeInTheDocument();
+  },
+};
 export const FindModelsEmpty: Story = { render: () => <ModelSearchModal open onClose={() => {}} existingModelIds={new Set()} onDownloadStarted={() => {}} /> };
 export const Placement: Story = { render: () => <PlacementManager open modelId="example/model" modelSizeMb={4000} topology={{ nodes: {}, edges: [] }} onClose={() => {}} onLaunch={() => {}} /> };
 export const ReleaseUnavailable: Story = { render: () => <RuntimeReleasePanel runtime={{ plugin_id: 'example', selected_digest: null, selection_revision: 1, enabled: false, stale: true, error_code: null, operation_id: null, operation_state: null, service: null }} /> };

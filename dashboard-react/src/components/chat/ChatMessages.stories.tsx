@@ -1,3 +1,4 @@
+import { galleryImage } from '../../../.storybook/media';
 import type { Meta, StoryObj } from '@storybook/react-vite';
 import { ChatMessages } from './ChatMessages';
 import type { ChatMessage } from '../../types/chat';
@@ -75,7 +76,7 @@ export const WithImages: Story = {
       { id: '1', role: 'user', content: 'Generate a mountain landscape', timestamp: now - 10000 },
       {
         id: '2', role: 'assistant', content: 'Here is your generated image:', timestamp: now - 5000,
-        generatedImages: ['https://picsum.photos/seed/mountain/512/512'],
+        generatedImages: [galleryImage],
       },
     ],
   },

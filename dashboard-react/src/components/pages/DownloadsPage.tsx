@@ -50,6 +50,7 @@ export function ModelStorePage({ topology, nodeResources = {}, downloads, instan
   const [storeDownloads, setStoreDownloads] = useState<StoreDownloadProgress[]>([]);
   const [reconciliation, setReconciliation] = useState<StoreReconciliationStatus | null>(null);
   const [storeLoading, setStoreLoading] = useState(false);
+  const [placementFromSearch, setPlacementFromSearch] = useState(false);
   const [placementModelId, setPlacementModelId] = useState<string | null>(null);
   const [apiModelCards, setApiModelCards] = useState<Record<string, ModelCardInfo>>({});
   // Companion (drafter / MTP-head sidecar) repos, keyed by the companion's own
@@ -669,17 +670,18 @@ export function ModelStorePage({ topology, nodeResources = {}, downloads, instan
           onLaunch={handleLaunch}
           onStop={handleStop}
           onChat={onChat}
-          onPlacement={setPlacementModelId}
+          onPlacement={modelId => { setPlacementFromSearch(false); setPlacementModelId(modelId); }}
           clusterCards={clusterCards}
           totalClusterMemoryBytes={totalClusterMemoryBytes}
           onOptimize={handleOptimize}
         />
       <ModelSearchModal
         open={searchOpen}
+        preserveViewWhileClosed={placementFromSearch && placementModelId !== null}
         onClose={() => setSearchOpen(false)}
         activeDownloads={storeDownloads}
         instanceStatuses={discoveryStatuses}
-        onLaunch={topology ? (modelId) => { setSearchOpen(false); setPlacementModelId(modelId); } : undefined}
+        onLaunch={topology ? (modelId) => { setSearchOpen(false); setPlacementFromSearch(true); setPlacementModelId(modelId); } : undefined}
         existingModelIds={storeModelIds}
         onDownloadStarted={handleDownloadStarted}
         fleet={fleet}
@@ -692,7 +694,8 @@ export function ModelStorePage({ topology, nodeResources = {}, downloads, instan
             : undefined}
           topology={topology}
           open={!!placementModelId}
-          onClose={() => setPlacementModelId(null)}
+          onClose={() => { setPlacementFromSearch(false); setPlacementModelId(null); }}
+          onBack={placementFromSearch ? () => { setPlacementFromSearch(false); setPlacementModelId(null); setSearchOpen(true); } : undefined}
           onLaunch={handleLaunchWithParams}
           isEmbedding={modelCards[placementModelId]?.tags?.includes('embedding')}
         />

@@ -7,8 +7,10 @@ import { apiSlice } from '../src/store/api';
 import { uiActions, uiSliceReducer } from '../src/store/slices/uiSlice';
 import { chatSliceReducer } from '../src/store/slices/chatSlice';
 
+const configFixture = { config: { model_store: { enabled: false }, inference: { kv_cache_backend: 'default' }, logging: { enabled: false, ingest_url: '' }, intelligent_fabric: { enabled: false }, telemetry: { consent: 'disabled', diagnostics_consent: 'disabled', install_id: '', consented_at: '', consented_version: '', ingest_url: '' } }, configPath: 'skulk.yaml', effective: { kv_cache_backend: 'default', hf_token_set: false } };
+
 const fixtures: Record<string, unknown> = {
-  '/config': { config: { model_store: { enabled: false }, inference: { kv_cache_backend: 'default' }, logging: { enabled: false, ingest_url: '' }, intelligent_fabric: { enabled: false }, telemetry: { consent: 'disabled', diagnostics_consent: 'disabled', install_id: '', consented_at: '', consented_version: '', ingest_url: '' } }, configPath: 'skulk.yaml', effective: { kv_cache_backend: 'default', hf_token_set: false } },
+  '/config': configFixture,
   '/state': { topology: { nodes: [], connections: {} }, instances: {}, runners: {}, downloads: {}, tasks: {} },
   '/models': { data: [{ id: 'example/Chat-8B', name: 'Example Chat 8B', capabilities: ['text', 'code'], storage_size_megabytes: 5000 }] },
   '/v1/models': { object: 'list', data: [] },
@@ -22,10 +24,11 @@ const fixtures: Record<string, unknown> = {
 };
 
 let activeScreen = false;
+let showTelemetryConsent = false;
 
 /** Select the offline response set before rendering a story. */
 // eslint-disable-next-line react-refresh/only-export-components -- Storybook loader configuration.
-export function configureFixtureScreen(enabled: boolean) { activeScreen = enabled; }
+export function configureFixtureScreen(enabled: boolean, telemetryConsent = false) { activeScreen = enabled; showTelemetryConsent = telemetryConsent; }
 
 const originalFetch = window.fetch.bind(window);
 // Storybook is an offline component gallery. Every API request is intercepted,
@@ -41,6 +44,7 @@ window.fetch = async (input, init) => {
   }
   if (request.method !== 'GET') return Response.json({ detail: 'This gallery does not execute operations.' }, { status: 403 });
   if (url.origin === location.origin && isStorybookAsset) return originalFetch(input, init);
+  if (showTelemetryConsent && url.pathname === '/config') return Response.json({ ...configFixture, config: { ...configFixture.config, telemetry: { ...configFixture.config.telemetry, consent: 'unasked' } } });
   if (activeScreen && Object.hasOwn(screenFixtures, url.pathname)) return Response.json(screenFixtures[url.pathname]);
   if (Object.hasOwn(fixtures, url.pathname)) return Response.json(fixtures[url.pathname]);
   return Response.json({ detail: 'No fixture for this observation.' }, { status: 503 });
