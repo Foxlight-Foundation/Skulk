@@ -11,9 +11,9 @@ const Card = styled.button`
   &:hover { background: ${({ theme }) => theme.colors.surfaceHover}; border-color: ${({ theme }) => theme.colors.borderStrong}; }
   strong { font-size: 15px; font-weight: 600; color: ${({ theme }) => theme.colors.text}; }
   p { font-size: 12.5px; line-height: 1.45; margin-top: 3px; text-wrap: pretty; color: ${({ theme }) => theme.colors.textSecondary}; }
-  footer { margin-top: auto; font: 11px ${({ theme }) => theme.fonts.mono}; color: ${({ theme }) => theme.colors.subtleText}; }
+  footer { margin-top: auto; font: 11px ${({ theme }) => theme.fonts.mono}; color: ${({ theme }) => theme.colors.metadataText}; }
 `;
-const Top = styled.div`display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; span:last-child { padding: 2px 6px; border: 1px solid ${({ theme }) => theme.colors.border}; border-radius: 999px; font-family: ${({ theme }) => theme.fonts.mono}; font-size: 10px; color: ${({ theme }) => theme.colors.subtleText}; }`;
+const Top = styled.div`display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; span:last-child { padding: 2px 6px; border: 1px solid ${({ theme }) => theme.colors.border}; border-radius: 999px; font-family: ${({ theme }) => theme.fonts.mono}; font-size: 10px; color: ${({ theme }) => theme.colors.metadataText}; }`;
 
 /** Tool discovery card; setup availability is not presented as connection evidence. */
 export function IntegrationToolCard({ name, monogram, description, method, onOpen }: {

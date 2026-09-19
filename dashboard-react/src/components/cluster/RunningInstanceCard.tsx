@@ -227,7 +227,7 @@ const MetaRow = styled.div`
 const StatusBadge = styled.span<{ $color: string }>`
   font-size: 10px;
   font-weight: 600;
-  color: ${({ $color }) => $color};
+  color: ${({ theme, $color }) => $color === theme.colors.liveText ? theme.colors.liveBadgeText : $color};
   background: ${({ $color }) => $color}1a;
   border: 1px solid ${({ $color }) => $color}40;
   border-radius: ${({ theme }) => theme.radii.sm};
@@ -277,7 +277,7 @@ const StatusLabel = styled.div<{ $color: string }>`
 
 const StatusMessage = styled.div`
   font-size: ${({ theme }) => theme.fontSizes.xs};
-  color: ${({ theme }) => theme.colors.subtleText};
+  color: ${({ theme }) => theme.colors.metadataText};
   font-style: italic;
 `;
 

@@ -93,6 +93,12 @@ interface ColorTokens {
   textMuted: string;
   /** Muted specimen text; aliases the fourth text level. */
   subtleText: string;
+  /** Small metadata on solid cards; preserves Night and meets Noon contrast. */
+  metadataText: string;
+  /** Readable text for small amber status chips, independent of their tint. */
+  liveBadgeText: string;
+  /** Readable code-capability label, independent of its decorative tint. */
+  codeTagText: string;
   textOnAccent: string; // text drawn on top of the accent/gold/error fills
 
   // Brand
@@ -102,6 +108,9 @@ interface ColorTokens {
   /** Everyday accent text; aliases starlight. */
   accentText: string;
   actionFill: string;
+  /** Preserve readable solid-action labels during hover. */
+  actionHoverBrightness: number;
+  actionHoverFill: string;
   approvalFill: string;
   liveText: string;
   goldStrong: string; // readable on goldBg
@@ -250,6 +259,9 @@ const darkColors: ColorTokens = {
   textSecondary: "#8a9ab8",
   textMuted: "#6c7ea3",
   subtleText: "#6c7ea3",
+  metadataText: "#6c7ea3",
+  liveBadgeText: "#f2a03d",
+  codeTagText: "#818cf8",
   textOnAccent: "#070a14",
   gold: "#93aedf",
   goldDim: "rgba(147,174,223,.30)",
@@ -257,6 +269,8 @@ const darkColors: ColorTokens = {
   goldBg: "rgba(147,174,223,.12)",
   accentText: "#93aedf",
   actionFill: "#93aedf",
+  actionHoverBrightness: 1.08,
+  actionHoverFill: "#93aedf",
   approvalFill: "#f2a03d",
   liveText: "#f2a03d",
   goldStrong: "#4d7cc4",
@@ -353,13 +367,19 @@ const lightColors: ColorTokens = {
   textSecondary: "#5f7086",
   textMuted: "#7a8aa3",
   subtleText: "#7a8aa3",
+  metadataText: "#5f7086",
+  liveBadgeText: "#5d6e84",
+  codeTagText: "#5f7086",
   textOnAccent: "#ffffff",
   gold: "#4d7cc4",
   goldDim: "rgba(17,33,60,.30)",
   goldTextDim: "#4d7cc4",
   goldBg: "rgba(77,124,196,.12)",
   accentText: "#4d7cc4",
-  actionFill: "#4d7cc4",
+  // Approved contrast adjustment: white 14px labels need at least 4.5:1.
+  actionFill: "#4776be",
+  actionHoverBrightness: 1,
+  actionHoverFill: "#416fb7",
   approvalFill: "#b35c0a",
   liveText: "#b35c0a",
   goldStrong: "#1c2b4a",

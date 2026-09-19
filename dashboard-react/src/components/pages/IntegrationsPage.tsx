@@ -97,7 +97,7 @@ const SurfaceLabel = styled.span`
   font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 1px;
-  color: ${({ theme }) => theme.colors.subtleText};
+  color: ${({ theme }) => theme.colors.metadataText};
 `;
 
 const SurfaceValue = styled.span`

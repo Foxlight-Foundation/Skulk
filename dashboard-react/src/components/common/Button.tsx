@@ -38,7 +38,7 @@ const variantStyles: Record<ButtonVariant, ReturnType<typeof css>> = {
     color: ${({ theme }) => theme.colors.textOnAccent};
     background: ${({ theme }) => theme.colors.actionFill};
     border: none;
-    &:hover:not(:disabled) { filter: brightness(1.08); }
+    &:hover:not(:disabled) { background: ${({ theme }) => theme.colors.actionHoverFill}; filter: brightness(${({ theme }) => theme.colors.actionHoverBrightness}); }
   `,
   approve: css`
     font-weight: 600;

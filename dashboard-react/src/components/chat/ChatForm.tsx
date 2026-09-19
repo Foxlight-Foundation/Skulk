@@ -395,7 +395,7 @@ const HelperText = styled.div`
   padding: 4px 12px 8px;
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.subtleText};
+  color: ${({ theme }) => theme.colors.metadataText};
   text-align: center;
 
   /* Keyboard hints (Enter / Shift+Enter / drag & drop) mean nothing on a
