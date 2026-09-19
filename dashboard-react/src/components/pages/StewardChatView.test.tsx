@@ -175,6 +175,9 @@ afterEach(async () => {
   container?.remove();
   root = null;
   container = null;
+  for (const conversation of Object.values(store.getState().chat.conversations)) {
+    if (conversation.modelId === 'skulk/steward') store.dispatch(chatActions.deleteConversation(conversation.id));
+  }
   store.dispatch(chatActions.setAutoSpeakAssistant(false));
   store.dispatch(apiSlice.util.resetApiState());
   vi.unstubAllGlobals();
@@ -481,4 +484,70 @@ it('keeps an active generation across presentation changes and cancels it from t
   await userEvent.click(container.querySelector('button[aria-label="Cancel generation"]')!);
   await waitFor(() => requestSignal?.aborted === true, 'stream was not aborted');
   expect(onChat).toHaveBeenCalledOnce();
+});
+
+it('saves drawer messages without selecting another chat and restores them after remount', async () => {
+  const ordinary = store.dispatch(chatActions.newConversation('example/ordinary')).payload.id;
+  stubFetch({ status: READY, sseEvents: [delta({ content: 'Saved reply.' })] });
+  await renderPage();
+  await waitFor(() => !!container?.querySelector('textarea'), 'composer did not mount');
+  await userEvent.fill(container!.querySelector('textarea')!, 'Remember this turn');
+  await userEvent.keyboard('{Enter}');
+  await waitFor(() => container?.textContent?.includes('Saved reply.') ?? false, 'reply missing');
+  const id = store.getState().chat.modelToConversationId['skulk/steward'];
+  expect(store.getState().chat.activeConversationId).toBe(ordinary);
+  expect(store.getState().chat.conversations[id].messages).toHaveLength(2);
+  expect(JSON.parse(localStorage.getItem('skulk-chat')!).state.conversations[id].messages).toHaveLength(2);
+  await act(async () => root?.unmount());
+  container?.remove();
+  await renderPage();
+  await waitFor(() => container?.textContent?.includes('Saved reply.') ?? false, 'saved history missing after remount');
+  await act(async () => { store.dispatch(chatActions.selectModel('skulk/steward')); });
+  expect(store.getState().chat.activeConversationId).toBe(id);
+  await act(async () => { store.dispatch(chatActions.renameConversation({ conversationId: id, name: 'Cluster inspection' })); });
+  expect(store.getState().chat.conversations[id].name).toBe('Cluster inspection');
+  store.dispatch(chatActions.deleteConversation(ordinary));
+});
+
+it.each(['new', 'delete'] as const)('cancels the owning request on %s and never redirects its reply', async action => {
+  let signal: AbortSignal | null | undefined;
+  stubFetch({ status: READY, openStream: requestSignal => {
+    signal = requestSignal;
+    return new ReadableStream({ start(controller) {
+      controller.enqueue(new TextEncoder().encode(`data: ${delta({ content: 'Old response' })}\n\n`));
+      signal?.addEventListener('abort', () => controller.error(new DOMException('Aborted', 'AbortError')), { once: true });
+    } });
+  } });
+  await renderPage();
+  await waitFor(() => !!container?.querySelector('textarea'), 'composer missing');
+  await userEvent.fill(container!.querySelector('textarea')!, 'Old question');
+  await userEvent.keyboard('{Enter}');
+  await waitFor(() => container?.textContent?.includes('Old response') ?? false, 'stream missing');
+  const oldId = store.getState().chat.modelToConversationId['skulk/steward'];
+  await act(async () => {
+    if (action === 'new') store.dispatch(chatActions.newConversation('skulk/steward'));
+    else store.dispatch(chatActions.deleteConversation(oldId));
+  });
+  await waitFor(() => signal?.aborted === true, 'request not cancelled');
+  await waitFor(() => !container?.querySelector('button[aria-label="Cancel generation"]'), 'request did not settle');
+  expect(container?.textContent).not.toContain('Old response');
+  if (action === 'new') {
+    const nextId = store.getState().chat.modelToConversationId['skulk/steward'];
+    expect(nextId).not.toBe(oldId);
+    expect(store.getState().chat.conversations[nextId].messages).toEqual([]);
+    expect(store.getState().chat.conversations[oldId].messages).toHaveLength(1);
+    await act(async () => { store.dispatch(chatActions.selectConversation(oldId)); });
+    expect(container?.textContent).toContain('Old question');
+  } else expect(store.getState().chat.conversations[oldId]).toBeUndefined();
+});
+
+it('keeps an unsent drawer draft when selecting the virtual model creates its first conversation', async () => {
+  const onChat = vi.fn();
+  stubFetch({ status: READY, onChat });
+  await renderPage();
+  await waitFor(() => !!container?.querySelector('textarea'), 'composer missing');
+  await userEvent.fill(container!.querySelector('textarea')!, 'Not submitted yet');
+  await act(async () => { store.dispatch(chatActions.selectModel('skulk/steward')); });
+  expect(container!.querySelector('textarea')!.value).toBe('Not submitted yet');
+  expect(onChat).not.toHaveBeenCalled();
 });

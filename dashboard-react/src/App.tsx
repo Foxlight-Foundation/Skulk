@@ -730,6 +730,7 @@ export function App() {
               activeConversationId={activeConversationId}
               onSelect={selectConversation}
               onDelete={deleteConversation}
+              onRename={(conversationId, name) => dispatch(chatActions.renameConversation({ conversationId, name }))}
               onNewChat={() => { if (selectedModelId) newConversation(selectedModelId); }}
             />
             </PanelOverlay>

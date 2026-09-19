@@ -1,6 +1,8 @@
 import { StewardProposalCard } from '../steward/StewardProposalCard';
 import { createContext, useContext, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import styled from 'styled-components';
+import { useStore } from 'react-redux';
+import type { RootState } from '../../store';
 import { MdAutoAwesome } from 'react-icons/md';
 import { ChatMessages } from '../chat/ChatMessages';
 import { ChatForm } from '../chat/ChatForm';
@@ -157,13 +159,20 @@ function parseDelta(payload: string): StreamDelta | null {
 }
 
 const EMPTY_INSTANCES: InstanceCardData[] = [];
+const EMPTY_MESSAGES: ChatMessage[] = [];
 
 function useStewardController({ readyInstances = EMPTY_INSTANCES }: StewardChatViewProps) {
-  const [draft, setDraft] = useState('');
+  const dispatch = useAppDispatch();
+  const store = useStore<RootState>();
+  const conversationId = useAppSelector(state => state.chat.modelToConversationId[STEWARD_MODEL_ID] ?? null);
+  const messages = useAppSelector(state => conversationId ? state.chat.conversations[conversationId]?.messages ?? EMPTY_MESSAGES : EMPTY_MESSAGES);
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const previousConversationRef = useRef(conversationId);
+  const draft = drafts[conversationId ?? 'new'] ?? '';
+  const setDraft = useCallback((value: string) => setDrafts(previous => ({ ...previous, [conversationId ?? 'new']: value })), [conversationId]);
   const { t } = useSkulkTranslation();
   const autoSpeakAssistant = useAppSelector((state) => state.chat.autoSpeakAssistant);
   const speechLanguage = speechLanguageForDashboardLocale(tolgee.getLanguage());
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [streamingContent, setStreamingContent] = useState<string | null>(null);
   const [streamingThinking, setStreamingThinking] = useState<string | null>(null);
@@ -172,6 +181,7 @@ function useStewardController({ readyInstances = EMPTY_INSTANCES }: StewardChatV
   const [speechError, setSpeechError] = useState<string | null>(null);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
+  const requestConversationRef = useRef<string | null>(null);
   const speechQueueRef = useRef<SpeechSentenceQueue | null>(null);
   const speechPlaybackRef = useRef<StreamingSpeechPlayback | null>(null);
   const { data: status, refetch } = useGetStewardStatusQuery(undefined, {
@@ -214,6 +224,25 @@ function useStewardController({ readyInstances = EMPTY_INSTANCES }: StewardChatV
     abortRef.current?.abort();
     stopSpeechPlayback();
   }, [stopSpeechPlayback]);
+
+  useEffect(() => {
+    // Presentation changes keep this model's conversation. Explicit history
+    // navigation or deletion cancels work owned by the previous conversation.
+    const previousId = previousConversationRef.current;
+    previousConversationRef.current = conversationId;
+    if (previousId === null && conversationId) {
+      // Selecting the virtual model can allocate its first empty conversation.
+      // Transfer an unsent drawer draft rather than losing it at that boundary.
+      setDrafts(previous => {
+        if (!previous.new) return previous;
+        const next = { ...previous, [conversationId]: previous[conversationId] ?? previous.new };
+        delete next.new;
+        return next;
+      });
+    }
+    if (previousId !== null && previousId !== conversationId) stopSpeechPlayback();
+    if (requestConversationRef.current && requestConversationRef.current !== conversationId) handleCancel();
+  }, [conversationId, handleCancel, stopSpeechPlayback]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -305,8 +334,8 @@ function useStewardController({ readyInstances = EMPTY_INSTANCES }: StewardChatV
     return queue;
   }, [speechLanguage, speechModel, speechVoice, stopSpeechPlayback, t]);
 
-  // The app-level owner survives presentation changes; only its disposal
-  // cancels the active stream and releases speech resources.
+  // The app-level owner survives presentation changes. Disposing it also
+  // cancels active work, independently of explicit conversation navigation.
   useEffect(() => () => {
     abortRef.current?.abort();
     stopSpeechPlayback();
@@ -319,7 +348,7 @@ function useStewardController({ readyInstances = EMPTY_INSTANCES }: StewardChatV
   const handleSend = useCallback(
     async (content: string) => {
       const trimmed = content.trim();
-      if (!trimmed || isLoading) return;
+      if (!trimmed || abortRef.current) return;
       const userMessage: ChatMessage = {
         id: `steward-u-${Date.now()}`,
         role: 'user',
@@ -327,7 +356,13 @@ function useStewardController({ readyInstances = EMPTY_INSTANCES }: StewardChatV
         timestamp: Date.now(),
       };
       const history = [...messages, userMessage];
-      setMessages(history);
+      const current = store.getState().chat;
+      const savedId = current.modelToConversationId[STEWARD_MODEL_ID];
+      const targetId = savedId && current.conversations[savedId]
+        ? savedId
+        : dispatch(chatActions.createBackgroundConversation(STEWARD_MODEL_ID)).payload.id;
+      requestConversationRef.current = targetId;
+      dispatch(chatActions.appendConversationMessage({ conversationId: targetId, message: userMessage }));
       setIsLoading(true);
       setStreamingContent(null);
       setStreamingThinking(null);
@@ -372,6 +407,7 @@ function useStewardController({ readyInstances = EMPTY_INSTANCES }: StewardChatV
         let buffer = '';
         for (;;) {
           const { done, value } = await reader.read();
+          controller.signal.throwIfAborted();
           if (done) break;
           buffer += decoder.decode(value, { stream: true });
           const lines = buffer.split('\n');
@@ -399,17 +435,14 @@ function useStewardController({ readyInstances = EMPTY_INSTANCES }: StewardChatV
             }
           }
         }
-        if (reply) {
-          setMessages((prev) => [
-            ...prev,
-            {
+        if (reply && !controller.signal.aborted) {
+          dispatch(chatActions.appendConversationMessage({ conversationId: targetId, message: {
               id: `steward-a-${Date.now()}`,
               role: 'assistant',
               content: reply,
               timestamp: Date.now(),
               thinkingContent: thinking || undefined,
-            },
-          ]);
+            } }));
         }
         if (speechQueue) {
           if (speechTail.trim()) speechQueue.enqueue([speechTail.trim()]);
@@ -430,13 +463,15 @@ function useStewardController({ readyInstances = EMPTY_INSTANCES }: StewardChatV
         setStreamingContent(null);
         setStreamingThinking(null);
         abortRef.current = null;
+        requestConversationRef.current = null;
       }
     },
     [
       autoSpeakAssistant,
       createSpeechQueue,
       messages,
-      isLoading,
+      dispatch,
+      store,
       refetch,
       stopSpeechPlayback,
       t,
@@ -451,7 +486,9 @@ function useStewardController({ readyInstances = EMPTY_INSTANCES }: StewardChatV
     queue.finish();
   }, [createSpeechQueue]);
 
-  return { draft, setDraft, status, messages, isLoading, streamingContent, streamingThinking,
+  return { draft, setDraft, status, messages, isLoading,
+    streamingContent: requestConversationRef.current === conversationId ? streamingContent : null,
+    streamingThinking: requestConversationRef.current === conversationId ? streamingThinking : null,
     pendingProposals, isDecidingProposal, handleProposalDecision, handleSend, handleCancel,
     speechModel, speechVoice, autoSpeakAssistant, stopSpeechPlayback, speakDraft, isSpeaking, speechError };
 }
