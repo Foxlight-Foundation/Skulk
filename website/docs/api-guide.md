@@ -1513,7 +1513,7 @@ Every route returns or lists this object. The first block matches OpenAI's
 | `mode` | string | Resolved generation mode: `t2va` (text), `fl2va` (first and/or last frame), or `ref2va` (reference images, clips, audio) |
 | `audio` | boolean | Whether a synchronized audio track was required |
 | `stage` | string or null | Latest render phase: `queued`, `encoding`, `sampling`, `decoding`, `muxing`, `uploading` |
-| `output` | object or null | Container facts once rendered: `sha256`, `size_bytes`, `content_type`, `width`, `height`, `frame_count`, `fps`, `seconds`, `audio_sample_rate`, `audio_channels`, `has_thumbnail` |
+| `output` | object or null | Container facts once rendered: `sha256`, `size_bytes`, `content_type`, `width`, `height`, `frame_count`, `fps`, `seconds`, `audio_sample_rate`, `audio_channels`, `has_thumbnail`, and when a thumbnail exists its `thumbnail_sha256` and `thumbnail_size_bytes` so a client can verify the `variant=thumbnail` bytes it fetches |
 | `stats` | object or null | Runner timing: `steps`, `seconds_per_step`, `total_generation_time`, `peak_memory_bytes` |
 
 ### Create a video job
