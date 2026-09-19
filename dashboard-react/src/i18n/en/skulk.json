@@ -1025,5 +1025,8 @@
   "topology.nodeHealth.errorHeading": "This node has a problem",
   "topology.nodeHealth.fixPrefix": "Fix: {remediation}",
   "topology.nodeHealth.warnAria": "Node warning",
-  "topology.nodeHealth.warnHeading": "This node needs attention"
+  "topology.nodeHealth.warnHeading": "This node needs attention",
+  "integrations.chooseTiers": "Choose which model answers each tier",
+  "integrations.toolCount": "{count} tools · pick one to get its setup",
+  "integrations.tierMapping": "Anthropic-compatible · maps Opus / Sonnet / Haiku onto your models"
 }

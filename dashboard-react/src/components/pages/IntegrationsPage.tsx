@@ -1,3 +1,4 @@
+import { Monogram } from '../common/Surfaces';
 import { Button } from '../common/Button';
 import { IntegrationSetupStep } from '../integrations/IntegrationSetupStep';
 import { useEffect, useMemo, useState } from 'react';
@@ -101,7 +102,7 @@ const SurfaceLabel = styled.span`
 
 const SurfaceValue = styled.span`
   font-family: ${({ theme }) => theme.fonts.mono};
-  font-size: ${({ theme }) => theme.fontSizes.xs};
+  font-size: 13px;
   color: ${({ theme }) => theme.colors.text};
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 `;
@@ -123,12 +124,12 @@ const ToolGrid = styled.div`
   @media (max-width: 600px) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   @media (max-width: 360px) { grid-template-columns: minmax(0, 1fr); }
 `;
-const DrawerBody = styled.div`padding: 24px; overflow-y: auto; display: flex; flex-direction: column; gap: 20px; min-height: 0;`;
+const DrawerBody = styled.div`padding: 22px; overflow-y: auto; display: flex; flex-direction: column; gap: 22px; min-height: 0;`;
 
 const ControlsRow = styled.div`
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-  gap: 12px;
+  gap: 10px;
 `;
 
 /**
@@ -155,6 +156,8 @@ const ControlBlock = styled.label`
 `;
 
 const ControlLabel = styled.span`
+  font-family: ${({ theme }) => theme.fonts.mono};
+  font-weight: 600;
   font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 1px;
@@ -162,13 +165,13 @@ const ControlLabel = styled.span`
 `;
 
 const Select = styled.select`
-  background: ${({ theme }) => theme.colors.surfaceSunken};
-  border: 1px solid ${({ theme }) => theme.colors.border};
-  border-radius: ${({ theme }) => theme.radii.sm};
+  background: ${({ theme }) => theme.colors.surface};
+  border: 1px solid ${({ theme }) => theme.colors.borderControl};
+  border-radius: 8px;
   color: ${({ theme }) => theme.colors.text};
   font-family: ${({ theme }) => theme.fonts.mono};
   font-size: ${({ theme }) => theme.fontSizes.xs};
-  padding: 6px 8px;
+  padding: 9px 10px;
   cursor: pointer;
   min-width: 0;
 
@@ -181,7 +184,7 @@ const Select = styled.select`
 const Card = styled.div`
   background: ${({ theme }) => theme.colors.surface};
   border: 1px solid ${({ theme }) => theme.colors.border};
-  border-radius: ${({ theme }) => theme.radii.lg};
+  border-radius: 12px;
   overflow: hidden;
 `;
 
@@ -201,12 +204,6 @@ const CardHeading = styled.div`
   min-width: 0;
 `;
 
-const CardTitle = styled.span`
-  font-size: ${({ theme }) => theme.fontSizes.label};
-  font-weight: 600;
-  color: ${({ theme }) => theme.colors.text};
-`;
-
 const CardSubtitle = styled.span`
   font-family: ${({ theme }) => theme.fonts.mono};
   font-size: 11px;
@@ -216,21 +213,21 @@ const CardSubtitle = styled.span`
 
 const CardDescription = styled.p`
   margin: 0;
-  padding: 10px 14px 0;
-  font-size: ${({ theme }) => theme.fontSizes.xs};
+  padding: 0;
+  font-size: 13px;
   color: ${({ theme }) => theme.colors.textSecondary};
   line-height: 1.5;
 `;
 
 const CodeBlock = styled.pre`
-  margin: 10px 14px 14px;
-  padding: 10px 12px;
-  background: ${({ theme }) => theme.colors.chatCodeBg};
-  border: 1px solid ${({ theme }) => theme.colors.borderLight};
-  border-radius: ${({ theme }) => theme.radii.md};
+  margin: 0;
+  padding: 14px;
+  background: ${({ theme }) => theme.colors.bg};
+  border: 0;
+  border-radius: 0;
   font-family: ${({ theme }) => theme.fonts.mono};
-  font-size: 11.5px;
-  line-height: 1.55;
+  font-size: 12px;
+  line-height: 1.7;
   color: ${({ theme }) => theme.colors.text};
   overflow-x: auto;
   white-space: pre;
@@ -242,7 +239,9 @@ const CopyButton = styled.button`
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  padding: 4px 9px;
+  padding: 0 10px;
+  min-height: 30px;
+  flex-shrink: 0;
   border: 1px solid ${({ theme }) => theme.colors.goldDim};
   border-radius: ${({ theme }) => theme.radii.sm};
   color: ${({ theme }) => theme.colors.goldTextDim};
@@ -269,12 +268,12 @@ const ModelChips = styled.div`
 
 const ModelChip = styled.span`
   font-family: ${({ theme }) => theme.fonts.mono};
-  font-size: 11px;
-  color: ${({ theme }) => theme.colors.goldTextDim};
-  background: ${({ theme }) => theme.colors.goldBg};
-  border: 1px solid ${({ theme }) => theme.colors.goldDim};
-  border-radius: ${({ theme }) => theme.radii.sm};
-  padding: 2px 7px;
+  font-size: 12px;
+  color: ${({ theme }) => theme.colors.body};
+  background: ${({ theme }) => theme.colors.surface};
+  border: 1px solid ${({ theme }) => theme.colors.border};
+  border-radius: 6px;
+  padding: 3px 8px;
   overflow-wrap: anywhere;
 `;
 
@@ -319,7 +318,7 @@ function SnippetCard({ snippet }: { snippet: IntegrationSnippet }) {
     <Card>
       <CardHeader>
         <CardHeading>
-          <CardTitle>{snippet.title}</CardTitle>
+          <CardDescription>{snippet.description}</CardDescription>
           <CardSubtitle>{snippet.subtitle}</CardSubtitle>
         </CardHeading>
         <CopyButton onClick={handleCopy} aria-label={t('integrations.copy', 'Copy')}>
@@ -327,7 +326,6 @@ function SnippetCard({ snippet }: { snippet: IntegrationSnippet }) {
           {copied ? t('integrations.copied', 'Copied') : t('integrations.copy', 'Copy')}
         </CopyButton>
       </CardHeader>
-      <CardDescription>{snippet.description}</CardDescription>
       <CodeBlock>{snippet.body}</CodeBlock>
     </Card>
   );
@@ -441,6 +439,10 @@ export function IntegrationsPage({ readyInstances }: IntegrationsPageProps) {
   const hasModels = models.length > 0;
   const showAddressChooser = Boolean(tailscaleUrl && localUrl && tailscaleUrl !== localUrl);
 
+  const toolDescription = tool.usesTierChooser
+    ? t('integrations.tierMapping', 'Anthropic-compatible · maps Opus / Sonnet / Haiku onto your models')
+    : t('integrations.setupHint', 'Configure your tool using the endpoint and model choices below. Copying a recipe does not verify a connection.');
+
   return (
     <Page>
       <PageHeading><div>
@@ -495,9 +497,9 @@ export function IntegrationsPage({ readyInstances }: IntegrationsPageProps) {
       </ReadyModels>
 
       <div>
-        <h2 style={{ fontSize: 16, fontWeight: 600 }}>{t('integrations.connectTool', 'Connect a tool')}</h2>
-        <ToolGrid style={{ marginTop: 16 }}>
-          {INTEGRATION_TOOLS.map(entry => <IntegrationToolCard key={entry.id} name={entry.label} monogram={({ 'claude-code': 'CC', opencode: 'OC', codex: 'CX', hermes: 'HM', openclaw: 'OW', pi: 'PI', anythingllm: 'AL', 'open-webui': 'WU', n8n: 'N8', firefox: 'FF' })[entry.id]}
+        <ToolHeading><h2>{t('integrations.connectTool', 'Connect a tool')}</h2><span>{t('integrations.toolCount', '{count} tools · pick one to get its setup', { count: INTEGRATION_TOOLS.length })}</span></ToolHeading>
+        <ToolGrid>
+          {INTEGRATION_TOOLS.map(entry => <IntegrationToolCard key={entry.id} name={entry.label} monogram={TOOL_MONOGRAMS[entry.id]}
             description={t(`integrations.tools.${entry.id}.description`, {
               'claude-code': 'Anthropic-compatible coding agent in your terminal.', opencode: 'Open-source terminal agent with provider config.', codex: 'OpenAI Codex CLI pointed at a local model.',
               hermes: 'Agent harness with tool use and memory.', openclaw: 'Autonomous agent runtime.', pi: 'Minimalist assistant CLI.',
@@ -507,13 +509,14 @@ export function IntegrationsPage({ readyInstances }: IntegrationsPageProps) {
             onOpen={() => { setToolId(entry.id); setSnippetId(null); setDetailsOpen(true); }} />)}
         </ToolGrid>
       </div>
-      <RightDrawer open={detailsOpen} onClose={() => setDetailsOpen(false)} title={tool.label} ariaLabel={tool.label}
+      <RightDrawer open={detailsOpen} onClose={() => setDetailsOpen(false)} title={<ToolIdentity><Monogram as="span" $size={40}>{TOOL_MONOGRAMS[tool.id]}</Monogram><span>{tool.label}<ToolSubtitle>{toolDescription}</ToolSubtitle></span></ToolIdentity>} ariaLabel={tool.label}
         width={drawerWidth} minWidth={360} maxWidth={800} onWidthChange={setDrawerWidth}
         closeLabel={t('common.close', 'Close')} resizeLabel={t('integrations.resize', 'Resize integration details')}>
       <DrawerBody>
-      <PageIntro>{t('integrations.setupHint', 'Configure your tool using the endpoint and model choices below. Copying a recipe does not verify a connection.')}</PageIntro>
       {(tool.usesTierChooser || tool.usesSingleModelChooser || tool.usesFilesystemPath) && (
-        <IntegrationSetupStep number={1} title={tool.usesTierChooser ? t('integrations.chooseTiers', 'Choose tiers') : t('integrations.chooseOptions', 'Choose options')}><ControlsRow>
+        <IntegrationSetupStep number={1} title={tool.usesTierChooser ? t('integrations.chooseTiers', 'Choose which model answers each tier') : t('integrations.chooseOptions', 'Choose options')}>
+          {!hasModels && (tool.usesTierChooser || tool.usesSingleModelChooser) && <EmptyNotice>{t('integrations.noReadyModels', 'No models are running yet. The snippets below still show the right shape, with a placeholder where the model id goes. Mount a model and they will fill themselves in.')}</EmptyNotice>}
+          <ControlsRow>
           {tool.usesTierChooser && hasModels && (
             <>
               <ControlBlock>
@@ -589,12 +592,11 @@ export function IntegrationsPage({ readyInstances }: IntegrationsPageProps) {
         </ControlsRow></IntegrationSetupStep>
       )}
 
-      <IntegrationSetupStep number={tool.usesTierChooser || tool.usesSingleModelChooser || tool.usesFilesystemPath ? 2 : 1} title={t('integrations.apply', 'Apply it')}>
-      {snippets.length > 1 && <SegmentedControl value={activeSnippet.id} onChange={setSnippetId} options={snippets.map(snippet => ({ value: snippet.id, label: snippet.title }))} />}
+      <IntegrationSetupStep number={tool.usesTierChooser || tool.usesSingleModelChooser || tool.usesFilesystemPath ? 2 : 1} title={t('integrations.apply', 'Apply it')} actions={snippets.length > 1 ? <SegmentedControl value={activeSnippet.id} onChange={setSnippetId} options={snippets.map(snippet => ({ value: snippet.id, label: snippet.title }))} /> : undefined}>
       {activeSnippet && <SnippetCard key={`${tool.id}-${activeSnippet.id}`} snippet={activeSnippet} />}
       </IntegrationSetupStep>
       <IntegrationSetupStep number={tool.usesTierChooser || tool.usesSingleModelChooser || tool.usesFilesystemPath ? 3 : 2} title={t('integrations.checkRequest', 'Check it reached the cluster')}>
-        <PageIntro>{t('integrations.evidenceUnavailable', 'Connection evidence is unavailable in this dashboard. Send a request from the configured tool and check its response. Copying these instructions does not establish a connection.')}</PageIntro>
+        <EvidenceNotice>{t('integrations.evidenceUnavailable', 'Connection evidence is unavailable in this dashboard. Send a request from the configured tool and check its response. Copying these instructions does not establish a connection.')}</EvidenceNotice>
       </IntegrationSetupStep>
       </DrawerBody>
       </RightDrawer>
@@ -610,4 +612,23 @@ const PageHeading = styled.div`
 `;
 const ReadyModels = styled.div`
   display: flex; flex-wrap: wrap; align-items: center; gap: 12px;
+`;
+
+const TOOL_MONOGRAMS: Record<IntegrationToolId, string> = { 'claude-code': 'CC', opencode: 'OC', codex: 'CX', hermes: 'HM', openclaw: 'OW', pi: 'PI', anythingllm: 'AL', 'open-webui': 'WU', n8n: 'N8', firefox: 'FF' };
+const ToolHeading = styled.div`
+  display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 12px;
+  h2 { font-size: 16px; font-weight: 600; }
+  > span { font-size: 12px; color: ${({ theme }) => theme.colors.subtleText}; }
+`;
+const ToolIdentity = styled.span`
+  display: flex; align-items: center; gap: 12px; white-space: normal; min-width: 0;
+  > span:last-child { min-width: 0; overflow-wrap: anywhere; }
+`;
+const ToolSubtitle = styled.span`
+  display: block; margin-top: 2px; font-size: 12.5px; font-weight: 400; color: ${({ theme }) => theme.colors.textSecondary}; line-height: 1.5;
+`;
+const EvidenceNotice = styled.p`
+  margin: 0; padding: 12px 14px; background: ${({ theme }) => theme.colors.surface};
+  border: 1px solid ${({ theme }) => theme.colors.border}; border-radius: 12px;
+  font-size: 13px; line-height: 1.5; color: ${({ theme }) => theme.colors.textSecondary};
 `;
