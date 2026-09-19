@@ -1,5 +1,4 @@
 import { derivePluginHealth, type PluginFilter } from './pluginHealth';
-import { SegmentedControl } from '../common/SegmentedControl';
 import { useState, useSyncExternalStore } from 'react';
 import styled from 'styled-components';
 import { useSkulkTranslation } from '../../i18n/tolgee';
@@ -107,17 +106,25 @@ function PluginInventory() {
   const [width, setWidth] = useState(640);
   const { t } = useSkulkTranslation();
   const query = useGetPluginNodesQuery(undefined, { pollingInterval: 5000, skipPollingIfUnfocused: true });
+  const counts: Record<PluginFilter, number> = { all: 0, healthy: 0, attention: 0, uninstalled: 0 };
+  for (const runtime of runtimes.data?.installations ?? []) {
+    counts.all += 1;
+    const category = derivePluginHealth(runtime, query.data?.find(plugin => plugin.pluginId === runtime.plugin_id), !!runtimes.error || !!query.error);
+    if (category === 'healthy' || category === 'attention' || category === 'uninstalled') counts[category] += 1;
+  }
+  counts.all += query.data?.filter(plugin => !runtimes.data?.installations.some(runtime => runtime.plugin_id === plugin.pluginId)).length ?? 0;
   return <>
     <ManagedRuntimesPanel renderHeader={registrationAction => <>
       <PageHeading><div>    <h1>{t('plugins.title', 'Plugins')}</h1>
     <p>{t('plugins.intro', 'Manage the settings of capability nodes installed on this Skulk host.')}</p>
     <p>{t('plugins.inventoryCount', '{count} managed · {healthy} healthy', { count: runtimes.data?.installations.length ?? 0, healthy: runtimes.data?.installations.filter(runtime => derivePluginHealth(runtime, query.data?.find(plugin => plugin.pluginId === runtime.plugin_id), !!runtimes.error || !!query.error) === 'healthy').length ?? 0 })}</p>
 </div><HeaderActions>
-        <Button variant="ghost" size="sm" onClick={() => setAccessOpen(true)}>{session.mode === 'direct' ? t('operator.direct', 'Direct host access') : t('operator.browserAccess', 'Browser access')}</Button>
+        <AccessButton variant="ghost" size="sm" onClick={() => setAccessOpen(true)}><AccessDot $direct={session.mode === 'direct'} aria-hidden />{session.mode === 'direct' ? t('operator.direct', 'Direct host access') : t('operator.browserAccess', 'Browser access')}</AccessButton>
         {registrationAction}
       </HeaderActions></PageHeading>
-      <Filters>    <SegmentedControl value={filter} onChange={setFilter} options={[{ value: 'all' as const, label: t('plugins.all', 'All') }, { value: 'healthy' as const, label: t('plugins.healthy', 'Healthy') }, { value: 'attention' as const, label: t('plugins.needsAttention', 'Needs attention') }, { value: 'uninstalled' as const, label: t('plugins.uninstalled', 'Uninstalled') }]} />
-</Filters>
+      <Filters aria-label={t('plugins.filters', 'Filter plugins')}>
+        {([{ value: 'all', label: t('plugins.all', 'All') }, { value: 'healthy', label: t('plugins.healthy', 'Healthy') }, { value: 'attention', label: t('plugins.needsAttention', 'Needs attention') }, { value: 'uninstalled', label: t('plugins.uninstalled', 'Uninstalled') }] as const).map(option => <FilterButton key={option.value} type="button" $active={filter === option.value} aria-pressed={filter === option.value} onClick={() => setFilter(option.value)}>{option.label} · {counts[option.value]}</FilterButton>)}
+      </Filters>
     </>} filter={filter} nodeEvidence={pluginId => query.error ? undefined : query.data?.find(plugin => plugin.pluginId === pluginId)} nodeNames={pluginId => query.data?.find(plugin => plugin.pluginId === pluginId)?.nodes.map(node => node.bundleId) ?? []}
       renderDetails={pluginId => query.data?.find(plugin => plugin.pluginId === pluginId)?.nodes.map(node => <NodeCard key={node.nodeId} pluginId={pluginId} node={node} />)} />
     <Button type="button" disabled={query.isFetching} onClick={() => void query.refetch()}>{t('plugins.refresh', 'Refresh')}</Button>
@@ -152,4 +159,13 @@ const PageHeading = styled.div`
   p { font-size: 14px; color: ${({ theme }) => theme.colors.textSecondary}; margin-top: 6px; }
 `;
 const HeaderActions = styled.div`display: flex; align-items: center; gap: 10px; flex-wrap: wrap;`;
-const Filters = styled.div`margin: 22px 0 18px;`;
+const Filters = styled.div`display: flex; flex-wrap: wrap; gap: 6px; margin: 22px 0 18px;`;
+const FilterButton = styled.button<{ $active: boolean }>`
+  border: 0; border-radius: 999px; padding: 6px 12px; cursor: pointer;
+  background: ${({ theme, $active }) => $active ? theme.colors.selected : 'transparent'};
+  color: ${({ theme, $active }) => $active ? theme.colors.text : theme.colors.textSecondary};
+  font: ${({ $active }) => $active ? 600 : 400} 12.5px ${({ theme }) => theme.fonts.body};
+  &:hover { background: ${({ theme }) => theme.colors.surfaceHover}; }
+`;
+const AccessButton = styled(Button)`border: 1px solid ${({ theme }) => theme.colors.border}; border-radius: 999px; font-size: 12px; color: ${({ theme }) => theme.colors.textSecondary};`;
+const AccessDot = styled.span<{ $direct: boolean }>`width: 7px; height: 7px; border-radius: 50%; background: ${({ theme, $direct }) => $direct ? theme.colors.healthy : theme.colors.textMuted};`;

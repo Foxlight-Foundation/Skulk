@@ -84,3 +84,27 @@ export const StewardContinuity: Story = {
     await expect(body.getByText(/The example cluster has three nodes/)).toBeVisible();
   },
 };
+
+/** Filter and overflow navigation retain access to the fenced runtime workflow. */
+export const PluginNavigation: Story = {
+  parameters: { screenRoute: 'plugins' },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(await canvas.findByRole('button', { name: 'Healthy · 1' }));
+    await expect(canvas.getByRole('heading', { name: 'managed.example-video' })).toBeVisible();
+    await expect(canvas.getByRole('heading', { name: 'managed.example-stale', hidden: true })).not.toBeVisible();
+    await userEvent.click(canvas.getByRole('button', { name: 'All · 2' }));
+    const menu = canvas.getAllByLabelText('More plugin actions')[0];
+    await userEvent.click(menu);
+    // userEvent's focusable selector omits native summary elements; Chromium
+    // focuses this disclosure on click, so reproduce that before keyboard input.
+    menu.focus();
+    await userEvent.keyboard('{Escape}');
+    await expect(menu).toHaveFocus();
+    await userEvent.click(menu);
+    await userEvent.click(canvas.getAllByRole('button', { name: 'Manage plugin' })[0]);
+    await expect(await within(document.body).findByRole('dialog', { name: 'Runtime details' })).toBeVisible();
+    await userEvent.keyboard('{Escape}');
+    await expect(menu).toHaveFocus();
+  },
+};
