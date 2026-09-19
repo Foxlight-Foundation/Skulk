@@ -147,7 +147,7 @@ export const FindModelsPlacementReturn: Story = {
     const body = within(document.body);
     const search = body.getByRole('textbox', { name: 'Search models' });
     await userEvent.type(search, 'Chat');
-    await userEvent.click((await body.findAllByRole('button', { name: 'Launch', exact: true }))[0]);
+    await userEvent.click((await body.findAllByRole('button', { name: 'Launch' }))[0]);
     await expect(await body.findByRole('dialog', { name: 'Placement options' })).toBeVisible();
     await expect(body.getAllByRole('dialog')).toHaveLength(1);
     await userEvent.click(body.getByRole('button', { name: 'Back to Find Models' }));

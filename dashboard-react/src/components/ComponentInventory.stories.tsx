@@ -1,6 +1,7 @@
 import type { Meta, StoryObj } from '@storybook/react-vite';
 import styled from 'styled-components';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
+import type { Conversation } from '../types/chat';
 import { RightDrawer } from './common/RightDrawer';
 import { Button } from './common/Button';
 import { Spinner, CenteredSpinner } from './common/Spinner';
@@ -73,3 +74,19 @@ export const HistoryEmpty: Story = { render: () => <ConversationPanel conversati
 export const SmallComponents: Story = { render: () => <><div style={{ display: 'flex', gap: 16 }}><FamilyAvatar name="Qwen" /><FamilyAvatar name="Example" /><HuggingFaceLink repoId="example/model" /><svg width="60" height="40"><HardwareBadge model="nvidia-gpu" /></svg><Spinner /></div><CenteredSpinner /></> };
 
 export const IntegrationsReady: Story = { render: () => <IntegrationsPage readyInstances={[{ instanceId: 'fictional-instance', modelId: 'example/Chat-8B', status: 'ready', supportsTextChat: true, sharding: 'Pipeline', instanceType: 'MlxRing', engine: 'mlx', nodeStatuses: [] }]} /> };
+
+/** Local history specimens expose ordinary, Steward and long-title rows without a cluster. */
+function HistoryDemo() {
+  const nextId = useRef(0);
+  const [conversations, setConversations] = useState<Conversation[]>([
+    { id: 'ordinary', name: 'Explain a model comparison', modelId: 'example/Chat-8B', createdAt: 1789819200000, updatedAt: 1789819200000, messages: [] },
+    { id: 'steward', name: 'Inspect the example cluster', modelId: 'skulk/steward', createdAt: 1789819200000, updatedAt: 1789819200000, messages: [] },
+    { id: 'long', name: 'A deliberately long conversation title that still leaves rename and delete controls reachable', modelId: 'example/Reasoning-32B', createdAt: 1789819200000, updatedAt: 1789819200000, messages: [] },
+  ]);
+  const [selected, setSelected] = useState<string | null>('steward');
+  return <ConversationPanel conversations={conversations} activeConversationId={selected} onSelect={setSelected}
+    onDelete={id => { setConversations(previous => previous.filter(conversation => conversation.id !== id)); if (selected === id) setSelected(null); }}
+    onRename={(id, name) => setConversations(previous => previous.map(conversation => conversation.id === id ? { ...conversation, name } : conversation))}
+    onNewChat={() => { const id = `fictional-${nextId.current++}`; setConversations(previous => [...previous, { id, name: 'New conversation', modelId: 'skulk/steward', createdAt: 1789819200000, updatedAt: 1789819200000, messages: [] }]); setSelected(id); }} />;
+}
+export const History: Story = { render: () => <HistoryDemo /> };

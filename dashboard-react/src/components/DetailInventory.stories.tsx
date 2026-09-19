@@ -61,6 +61,11 @@ export const FindModelsEmpty: Story = { render: () => <ModelSearchModal open onC
 export const Placement: Story = { render: () => <PlacementManager open modelId="example/model" modelSizeMb={4000} topology={{ nodes: {}, edges: [] }} onClose={() => {}} onLaunch={() => {}} /> };
 export const ReleaseUnavailable: Story = { render: () => <RuntimeReleasePanel runtime={{ plugin_id: 'example', selected_digest: null, selection_revision: 1, enabled: false, stale: true, error_code: null, operation_id: null, operation_state: null, service: null }} /> };
 export const ModelDetails: Story = { render: () => <><HfModelDossier model={{ id: 'example/model', author: 'example', downloads: 100, likes: 12, last_modified: '2026-09-18', tags: ['text-generation'] }} author="example" /><BurstChip info={{ reason: 'engine', format: 'GGUF' }} /><QuantBadge>Q4_K_M</QuantBadge></> };
+/** Populated legacy warnings remain reviewable even though App uses header warnings. */
+export const Warnings: Story = { render: () => <ClusterWarnings topology={{ nodes: {
+  'example-a': { last_mactop_update: 0, friendly_name: 'Example workstation', skulk_version: '1.0.0', skulk_commit: '1111111', rdma_enabled: true, rdma_interfaces_present: false },
+  'example-b': { last_mactop_update: 0, friendly_name: 'Example server', skulk_version: '1.0.1', skulk_commit: '2222222' },
+}, edges: [] }} /> };
 export const WarningsEmpty: Story = { render: () => <ClusterWarnings topology={null} /> };
 export const Satellites: Story = { render: () => <svg width="240" height="100"><CapabilitySatellite summary={capability} x={40} y={40} onSelect={() => {}} /><CapabilityOverflow count={3} x={110} y={40} onSelect={() => {}} /></svg> };
 export const Flyout: Story = { render: () => <div style={{ position: 'relative', height: 600 }}><CapabilityFlyout summaries={[capability]} selectedKey="example/video" onSelectKey={() => {}} hostNodeId="example" hostName="Example host" localNodeId="example" anchor={{ x: 100, y: 60 }} canvasWidth={800} canvasHeight={600} onClose={() => {}} onOpenPanel={() => {}} /></div> };

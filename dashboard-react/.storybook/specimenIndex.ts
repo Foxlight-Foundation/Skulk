@@ -130,7 +130,7 @@ export const specimenIndex = [
   },
   {
     "source": "layout/ConversationPanel.tsx",
-    "story": "inventory-connected-components--history-empty"
+    "story": "inventory-connected-components--history"
   },
   {
     "source": "layout/DevicesPanel.tsx",
@@ -302,7 +302,7 @@ export const specimenIndex = [
   },
   {
     "source": "status/ClusterWarnings.tsx",
-    "story": "inventory-details-and-overlays--warnings-empty"
+    "story": "inventory-details-and-overlays--warnings"
   },
   {
     "source": "status/ConnectionBanner.tsx",
