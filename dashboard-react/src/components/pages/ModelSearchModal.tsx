@@ -5,7 +5,7 @@ import styled from 'styled-components';
 import { ModelBrowser } from '../models/ModelBrowser';
 import { burstVerdict, hfWeightBytes, type BurstInfo, type FleetServingSummary } from '../models/burst';
 import { deriveFormatLabel, deriveQuantLabel } from '../models/quantBadge';
-import type { ModelInfo, HuggingFaceModel, DownloadAvailability } from '../../types/models';
+import type { ModelInfo, HuggingFaceModel, DownloadAvailability, InstanceStatus } from '../../types/models';
 import { addToast } from '../../hooks/useToast';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 
@@ -137,6 +137,8 @@ function loadRecentIds(): string[] {
 }
 
 interface ModelSearchModalProps {
+  /** Live runner-derived readiness; storage availability is a separate fact. */
+  instanceStatuses?: Record<string, InstanceStatus>;
   activeDownloads?: StoreDownloadProgress[];
   onLaunch?: (modelId: string) => void;
   open: boolean;
@@ -148,11 +150,13 @@ interface ModelSearchModalProps {
   fleet?: FleetServingSummary | null;
 }
 
+/** Own discovery requests, favourites and download actions inside the Find Models dialog. */
 export function ModelSearchModal({
   open,
   onClose,
   existingModelIds,
   activeDownloads,
+  instanceStatuses,
   onLaunch,
   onDownloadStarted,
   fleet = null,
@@ -436,6 +440,7 @@ export function ModelSearchModal({
             recentModelIds={recentIds}
             existingModelIds={existingModelIds}
             activeDownloads={activeDownloads}
+            instanceStatuses={instanceStatuses}
             onCancelDownload={modelId => void cancelDownload(modelId)}
             onLaunch={onLaunch}
             downloadStatusMap={storeDownloadMap}

@@ -1,7 +1,7 @@
 import { specimenIndex } from '../../.storybook/specimenIndex';
 import { useState } from 'react';
 import type { Meta, StoryObj } from '@storybook/react-vite';
-import { expect, userEvent, within } from 'storybook/test';
+import { expect, userEvent, waitFor, within } from 'storybook/test';
 import { Gallery, GalleryHeader, GallerySection, Specimen, SpecimenGrid, SpecimenLabel, SpecimenRow } from '../../.storybook/Gallery';
 import { RunningInstanceCard } from './cluster/RunningInstanceCard';
 import { ToastNotification } from './status/ToastContainer';
@@ -62,12 +62,15 @@ export const ChromeAndComposers: Story = { render: () => <ChromeGallery />, play
   await userEvent.click(chooser);
   const documentCanvas = within(canvasElement.ownerDocument.body);
   await expect(documentCanvas.getByRole('listbox')).toBeVisible();
+  await waitFor(() => expect(documentCanvas.getByRole('option', { name: /Skulk/ })).toHaveFocus());
   await userEvent.keyboard('{ArrowDown}');
   await expect(documentCanvas.getByRole('option', { name: /Chat-8B/ })).toHaveFocus();
   await userEvent.keyboard('{Escape}');
   await expect(canvas.getByRole('dialog', { name: 'Specimen settings' })).toBeVisible();
   await expect(chooser).toHaveTextContent('Skulk');
   await userEvent.click(chooser);
+  // FloatingFocusManager schedules initial focus after mounting its portal.
+  await waitFor(() => expect(documentCanvas.getByRole('option', { name: /Skulk/ })).toHaveFocus());
   await userEvent.keyboard('{ArrowDown}{Enter}');
   await expect(chooser).toHaveTextContent('Chat-8B');
   await expect(documentCanvas.queryByRole('listbox')).not.toBeInTheDocument();

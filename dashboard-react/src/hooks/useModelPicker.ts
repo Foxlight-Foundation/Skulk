@@ -151,16 +151,16 @@ export function useModelPicker({
     }
 
     // Downloaded only
-    if (filters.downloadedOnly && downloadStatusMap) {
+    if (filters.downloadedOnly) {
       groups = groups.filter((g) =>
-        g.variants.some((v) => downloadStatusMap.get(v.id)?.available),
+        g.variants.some((v) => downloadStatusMap?.get(v.id)?.available),
       );
     }
 
     // Ready only
-    if (filters.readyOnly && instanceStatuses) {
+    if (filters.readyOnly) {
       groups = groups.filter((g) =>
-        g.variants.some((v) => instanceStatuses[v.id]?.statusClass === 'ready'),
+        g.variants.some((v) => instanceStatuses?.[v.id]?.statusClass === 'ready'),
       );
     }
 

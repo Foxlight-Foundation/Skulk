@@ -22,7 +22,9 @@ export const GlobalStyle = createGlobalStyle`
     transition: background 0.2s ease, color 0.2s ease;
   }
 
-  :focus-visible {
+  /* Outrank component resets such as all: unset without overriding a
+   * control's explicit focus treatment at the same specificity. */
+  :focus-visible:not(:disabled) {
     outline: 2px solid ${({ theme }) => theme.colors.gold};
     outline-offset: 3px;
   }

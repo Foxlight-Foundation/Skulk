@@ -4,6 +4,7 @@ import styled, { css, keyframes } from 'styled-components';
 export type ButtonVariant = 'primary' | 'outline' | 'ghost' | 'danger' | 'solid' | 'approve';
 export type ButtonSize = 'sm' | 'md' | 'lg';
 
+/** Shared action control with semantic treatments and loading state. */
 export interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: ButtonVariant;
   size?: ButtonSize;
@@ -139,16 +140,21 @@ const StyledButton = styled.button<{
   font-family: ${({ theme }) => theme.fonts.body};
   border-radius: ${({ theme }) => theme.radii.md};
   transition: color 120ms, background 120ms, border-color 120ms;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: center;
+  min-width: 0;
+  max-width: 100%;
   user-select: none;
 
-  /* Size */
-  height: ${({ $size }) => sizeTokens[$size].height};
+  /* Minimum height preserves reference sizing while allowing translated labels to wrap. */
+  min-height: ${({ $size }) => sizeTokens[$size].height};
   font-size: ${({ $size, theme }) => theme.fontSizes[sizeFontMap[$size] as keyof typeof theme.fontSizes]};
   ${({ $icon, $size, $variant }) =>
     $icon
       ? css`
           width: ${sizeTokens[$size].iconSize};
+          flex-shrink: 0;
           padding: 0;
         `
       : css`
@@ -181,6 +187,7 @@ const StyledButton = styled.button<{
 
 /* ---- component ---- */
 
+/** Render an accessible action whose label can wrap without clipping translations. */
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
   (
     {

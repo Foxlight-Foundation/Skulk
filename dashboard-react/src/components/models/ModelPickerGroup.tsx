@@ -21,6 +21,7 @@ import { BurstChip } from './BurstChip';
 import type { BurstInfo } from './burst';
 import { useSkulkTranslation, type SkulkTranslate } from '../../i18n/tolgee';
 
+/** Grouped model metadata, observed availability, and existing variant actions. */
 export interface ModelPickerGroupProps {
   group: ModelGroup;
   isExpanded: boolean;
@@ -105,6 +106,7 @@ const glowAnim = keyframes`
 `;
 
 const GroupContainer = styled.div<{ $downloading: boolean }>`
+  flex-shrink: 0;
   margin: 10px 16px; border: 1px solid ${({ theme }) => theme.colors.border}; border-radius: 12px;
   background: ${({ theme }) => theme.colors.surface}; overflow: hidden;
   ${({ $downloading, theme }) => $downloading && css`background: ${theme.colors.liveBg}; border-color: ${theme.colors.borderLive};`}
@@ -114,8 +116,8 @@ const GroupContainer = styled.div<{ $downloading: boolean }>`
 const Row = styled.div<{ $highlighted: boolean; $expandable: boolean }>`
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 16px;
+  gap: 14px;
+  padding: 12px 14px;
   @media (max-width: 600px) { padding: 12px; gap: 8px; flex-wrap: wrap; }
   cursor: ${({ $expandable }) => ($expandable ? 'pointer' : 'default')};
   transition: background 0.15s;
@@ -257,23 +259,25 @@ const Chevron = styled.button<{ $open: boolean }>`
 `;
 
 const VariantPanel = styled.div`
-  margin: 0 14px 10px 62px;
+  margin: 0 14px 10px 72px;
 
   @media (max-width: 640px) {
     margin-left: 14px;
   }
-  border: 1px solid ${({ theme }) => theme.colors.borderLight};
-  border-radius: ${({ theme }) => theme.radii.md};
-  background: ${({ theme }) => theme.colors.surfaceSunken};
-  overflow: hidden;
+  min-width: 0;
 `;
 
 const VariantRow = styled.div`
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) 68px minmax(0, 1fr) 160px;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 10px;
-  padding: 7px 12px;
+  gap: 12px;
+  padding: 8px 0;
+  > div { min-width: 0; overflow-wrap: anywhere; }
+  @media (max-width: 900px) {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    > div:first-child, > div:last-child { grid-column: 1 / -1; }
+  }
   font-size: ${({ theme }) => theme.fontSizes.sm};
   color: ${({ theme }) => theme.colors.textSecondary};
 
@@ -281,6 +285,12 @@ const VariantRow = styled.div`
     border-top: 1px solid ${({ theme }) => theme.colors.borderLight};
   }
 `;
+const VariantHeader = styled(VariantRow)`
+  font: 600 10px ${({ theme }) => theme.fonts.mono}; text-transform: uppercase; letter-spacing: .08em;
+  @media (max-width: 900px) { display: none; }
+`;
+const VariantTags = styled.div`display: flex; flex-wrap: wrap; gap: 5px; align-items: center;`;
+const VariantActions = styled(VariantTags)`justify-content: flex-end;`;
 
 const ActionArea = styled.div`
   display: flex;
@@ -372,12 +382,12 @@ function ModelGroupInfo({ group, title }: { group: ModelGroup; title: string }) 
   );
 }
 
+/** Render a model group and its expandable, responsive variant details. */
 export function ModelPickerGroup({
   group,
   isExpanded,
   isFavorite,
   isHighlighted = false,
-  canModelFit,
   getModelFitStatus,
   onToggleExpand,
   onSelectModel,
@@ -403,10 +413,6 @@ export function ModelPickerGroup({
   // Truthy fallback: generated custom cards leave base_model at "" and a
   // nullish check would render blank titles for user-added models.
   const title = group.smallestVariant.base_model || group.name;
-
-  const anyFits = variants.some((v) => canModelFit(v.id));
-  const anyHasInstance = variants.some((v) => instanceStatuses?.[v.id]);
-  const disabled = !anyFits && !anyHasInstance;
 
   const groupDownload = variants.find((v) => downloadStatusMap?.get(v.id)?.available);
   const instanceStatus = bestInstanceStatus(variants, instanceStatuses);
@@ -462,7 +468,8 @@ export function ModelPickerGroup({
       return <div style={{ minWidth: 100, maxWidth: '100%' }}><progress aria-label={t('modelPickerGroup.downloading', 'Downloading {modelId}', { modelId: model.id })} max={100} value={progress} style={{ width: '100%', accentColor: theme.colors.live }} /><span style={{ fontSize: 11 }}>{Math.round(progress)}%</span>{onCancelDownload && <Button size="sm" onClick={() => onCancelDownload(model.id)}>{t('common.cancel', 'Cancel')}</Button>}</div>;
     }
     if (downloadStatusMap?.get(model.id)?.available) return <>{inStoreChip}{onLaunch && <Button variant="solid" size="sm" onClick={() => onLaunch(model.id)}>{t('common.launch', 'Launch')}</Button>}</>;
-    return <><Button variant="primary" size="sm" disabled={disabled} onClick={() => onSelectModel(model.id)} aria-label={t('modelPickerGroup.selectModel', 'Download {modelId}', { modelId: model.id })}><FiDownload size={13} />{t('modelPickerGroup.download', 'Download')}</Button>{transfer?.status === 'failed' && <span role="status" style={{ color: theme.colors.error }}>{transfer.error || t('modelPickerGroup.downloadFailed', 'Download failed')}</span>}</>;
+    // Downloading into the store does not require present placement capacity.
+    return <><Button variant="primary" size="sm" onClick={() => onSelectModel(model.id)} aria-label={t('modelPickerGroup.selectModel', 'Download {modelId}', { modelId: model.id })}><FiDownload size={13} />{t('modelPickerGroup.download', 'Download')}</Button>{transfer?.status === 'failed' && <span role="status" style={{ color: theme.colors.error }}>{transfer.error || t('modelPickerGroup.downloadFailed', 'Download failed')}</span>}</>;
   };
 
   return (
@@ -577,14 +584,15 @@ export function ModelPickerGroup({
       {/* Expanded variants */}
       {isExpanded && hasMultipleVariants && (
         <VariantPanel>
+          <VariantHeader aria-hidden="true"><div>{t('modelPickerGroup.variant', 'Variant')}</div><div>{t('modelPickerGroup.formatQuant', 'Format · quant')}</div><div>{t('common.size', 'Size')}</div><div>{t('modelPickerGroup.cachedOn', 'Cached on')}</div><div /></VariantHeader>
           {variants.map((v) => {
             const vFit = getModelFitStatus(v.id);
             const vInstance = instanceStatuses?.[v.id];
 
             return (
               <VariantRow key={v.id}>
-                <span style={{ fontFamily: theme.fonts.mono, fontSize: 11, flex: '1 1 160px', overflowWrap: 'anywhere' }}>{v.id.split('/').pop()}</span>
-                {uniformFormat === null && deriveFormatLabel(v.id) && (
+                <div style={{ fontFamily: theme.fonts.mono, fontSize: 12.5 }}>{v.id.split('/').pop()} <HuggingFaceLink repoId={v.hugging_face_id ?? v.id} /></div>
+                <VariantTags>{deriveFormatLabel(v.id) && (
                   <QuantBadge>{deriveFormatLabel(v.id)}</QuantBadge>
                 )}
                 <QuantBadge>{v.quantization ?? '—'}</QuantBadge>
@@ -597,13 +605,12 @@ export function ModelPickerGroup({
                   const b = getBurstInfo?.(v.id) ?? null;
                   return b ? <BurstChip info={b} fleetMemoryBytes={fleetMemoryBytes} /> : null;
                 })()}
-                <HuggingFaceLink repoId={v.hugging_face_id ?? v.id} />
-                <span style={{ color: fitColor(vFit, theme), fontWeight: 500, flex: 1 }}>
+                </VariantTags>
+                <div style={{ color: fitColor(vFit, theme), fontFamily: theme.fonts.mono, fontSize: 12.5 }}>
                   {sizeText(v.storage_size_megabytes)}
-                </span>
-                {vInstance && <StatusDot $class={vInstance.statusClass} title={vInstance.statusClass} />}
-                <span style={{ fontSize: 11, color: theme.colors.textMuted }}>{downloadStatusMap?.get(v.id)?.nodeNames.join(' · ') || '—'}</span>
-                {variantAction(v)}
+                </div>
+                <VariantTags style={{ fontSize: 11.5, fontFamily: theme.fonts.mono, color: theme.colors.textMuted }}>{vInstance && <StatusDot $class={vInstance.statusClass} title={vInstance.statusClass} />}{downloadStatusMap?.get(v.id)?.nodeNames.join(' · ') || '—'}</VariantTags>
+                <VariantActions>{variantAction(v)}</VariantActions>
               </VariantRow>
             );
           })}

@@ -147,7 +147,7 @@ const Toolbar = styled.div`
   position: relative;
   flex-shrink: 0;
 
-  > :has(input) { flex: 1; min-width: 160px; }
+  > :has(input) { flex: 1; min-width: 160px; height: 40px; }
   @media (max-width: 768px) { flex-wrap: wrap; }
 
 `;
@@ -170,7 +170,7 @@ const FamilyChip = styled.button<{ $active: boolean }>`
   &::after { content: attr(data-count); float: right; margin-left: 12px; font-family: ${({ theme }) => theme.fonts.mono}; }
   appearance: none;
   flex-shrink: 0;
-  border: 1px solid ${({ theme }) => theme.colors.border};
+  border: 1px solid transparent;
   border-radius: 6px;
   text-align: left;
   background: transparent;
@@ -179,9 +179,10 @@ const FamilyChip = styled.button<{ $active: boolean }>`
   font-family: ${({ theme }) => theme.fonts.body};
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-weight: 500;
-  padding: 4px 12px;
+  padding: 6px 8px;
   transition: background 0.15s, border-color 0.15s, color 0.15s;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
 
   &:hover {
     color: ${({ theme }) => theme.colors.text};
@@ -215,7 +216,7 @@ const SectionHeader = styled.div`
   font-size: ${({ theme }) => theme.fontSizes.label};
   font-weight: 600;
   color: ${({ theme }) => theme.colors.textSecondary};
-  padding: 4px 2px 8px;
+  padding: 14px 16px 8px;
 `;
 
 const MoreRow = styled.div`

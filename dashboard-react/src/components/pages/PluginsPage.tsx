@@ -16,7 +16,7 @@ import { NodeProposalsPanel } from './NodeProposalsPanel';
 import { OperatorAccessPanel } from './OperatorAccessPanel';
 import { operatorSession } from '../../auth/operatorSession';
 
-const Page = styled.section`padding: 32px; @media (max-width: 600px) { padding: 16px; } width: 100%; max-width: 1044px; margin: 0 auto; box-sizing: border-box;`;
+const Page = styled.section`padding: 32px; @media (max-width: 600px) { padding: 16px; } width: 100%; max-width: 1044px; margin: 0 auto; box-sizing: border-box; container-type: inline-size;`;
 const Card = styled.article`
   margin: 16px 0; padding: 20px; border: 1px solid ${({ theme }) => theme.colors.border};
   border-radius: ${({ theme }) => theme.radii.md}; background: ${({ theme }) => theme.colors.surface};

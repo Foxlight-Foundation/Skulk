@@ -21,6 +21,7 @@ const Card = styled.article`
   h2 { font-size: 16px; font-weight: 600; color: ${({ theme }) => theme.colors.text}; margin: 0; overflow-wrap: anywhere; }
   p { margin: 8px 0; color: ${({ theme }) => theme.colors.textSecondary}; font-size: 13px; }
   @media(max-width: 600px) { grid-template-columns: 44px minmax(0, 1fr); align-items: start; > div:nth-child(3), > div:nth-child(4) { grid-column: 2; } }
+  @container(max-width: 600px) { grid-template-columns: 44px minmax(0, 1fr); align-items: start; > div:nth-child(3), > div:nth-child(4) { grid-column: 2; } }
 `;
 const Metadata = styled.p`font: 11.5px ${({ theme }) => theme.fonts.mono}; span { color: ${({ theme }) => theme.colors.body}; }`;
 const Row = styled.div`display: flex; align-items: center; flex-wrap: wrap; gap: 10px;`;

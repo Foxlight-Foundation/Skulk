@@ -4,7 +4,7 @@ import { ThemeProvider } from 'styled-components';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { darkTheme } from '../../theme/theme';
-import type { HuggingFaceModel, ModelInfo, PickerMode } from '../../types/models';
+import type { HuggingFaceModel, ModelInfo, PickerMode, InstanceStatus } from '../../types/models';
 import { ModelBrowser } from './ModelBrowser';
 import type { BurstInfo } from './burst';
 
@@ -64,6 +64,8 @@ async function renderBrowser(
   mode: PickerMode = 'store-download',
   models: ModelInfo[] = MODELS,
   getModelFitStatus: () => 'fits_now' | 'fits_cluster_capacity' = () => 'fits_now',
+  instanceStatuses?: Record<string, InstanceStatus>,
+  canModelFit = () => true,
 ): Promise<ReturnType<typeof vi.fn>> {
   container = document.createElement('div');
   document.body.append(container);
@@ -75,7 +77,8 @@ async function renderBrowser(
           models={models}
           selectedModelId={null}
           favorites={new Set()}
-          canModelFit={() => true}
+          canModelFit={canModelFit}
+          instanceStatuses={instanceStatuses}
           getModelFitStatus={getModelFitStatus}
           onSelect={onSelect}
           onToggleFavorite={vi.fn()}
@@ -241,5 +244,37 @@ describe('ModelBrowser store discovery taxonomy', () => {
     expect(downloadButton).not.toBeNull();
     await act(async () => downloadButton?.click());
     expect(onSelect).toHaveBeenCalledWith('mlx-community/Qwen3-4B-4bit');
+  });
+});
+
+
+describe('discovery evidence and download independence', () => {
+  it('shows no ready models when readiness evidence is unavailable', async () => {
+    await renderBrowser();
+    const ready = [...container!.querySelectorAll('label')].find(label => label.textContent === 'Ready now')!.querySelector('input')!;
+    await act(async () => ready.click());
+    expect(container!.textContent).toContain('0 model groups');
+    expect(container!.textContent).not.toContain('Qwen3 4B');
+  });
+
+  it('filters readiness independently of catalog and storage status', async () => {
+    await renderBrowser(undefined, undefined, 'store-download', MODELS, undefined, {
+      [MODELS[0].id]: { status: 'Ready', statusClass: 'ready' },
+      [MODELS[1].id]: { status: 'Loading', statusClass: 'loading' },
+    });
+    const ready = [...container!.querySelectorAll('label')].find(label => label.textContent === 'Ready now')!.querySelector('input')!;
+    await act(async () => ready.click());
+    expect(container!.textContent).toContain('Qwen3 4B');
+    expect(container!.textContent).not.toContain('LongCat AudioDiT 1B');
+    expect(container!.textContent).not.toContain('Canary 1B');
+  });
+
+  it('allows a store download when no current placement capacity exists', async () => {
+    const select = vi.fn();
+    await renderBrowser(select, undefined, 'store-download', MODELS, undefined, undefined, () => false);
+    const download = container!.querySelector<HTMLButtonElement>(`button[aria-label="Download ${MODELS[0].id}"]`)!;
+    expect(download.disabled).toBe(false);
+    await act(async () => download.click());
+    expect(select).toHaveBeenCalledWith(MODELS[0].id);
   });
 });

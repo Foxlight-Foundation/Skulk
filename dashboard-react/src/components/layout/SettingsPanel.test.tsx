@@ -200,11 +200,11 @@ it('preserves an unsaved draft across Devices and commits it only with Save', as
   if (!section.parentElement?.hasAttribute('open')) await userEvent.click(section);
   const token = container.querySelector<HTMLInputElement>('input[type="password"]')!;
   await userEvent.fill(token, 'fixture-unsaved-token');
-  const devices = [...container.querySelectorAll('button')].find(button => button.textContent === 'Devices & pairing')!;
+  const devices = [...container.querySelectorAll('button')].find(button => button.getAttribute('aria-label') === 'Devices & pairing')!;
   await userEvent.click(devices);
   expect(container.textContent).toContain('Device actions fixture');
   expect(saveFullConfig).not.toHaveBeenCalled();
-  const back = [...container.querySelectorAll('button')].find(button => button.textContent === 'Settings')!;
+  const back = [...container.querySelectorAll('button')].find(button => button.getAttribute('aria-label') === 'Back to Settings')!;
   await userEvent.click(back);
   expect(token.value).toBe('fixture-unsaved-token');
   expect(saveFullConfig).not.toHaveBeenCalled();

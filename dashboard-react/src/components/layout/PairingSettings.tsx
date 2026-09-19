@@ -30,10 +30,11 @@ const invitationLifetimeOptions = [
   7776000,
 ] as const;
 
-const Fieldset = styled.fieldset`
-  border: 1px solid ${({ theme }) => theme.colors.border};
+const Fieldset = styled.fieldset<{ $embedded: boolean }>`
+  border: ${({ $embedded, theme }) => $embedded ? 'none' : `1px solid ${theme.colors.border}`};
   border-radius: ${({ theme }) => theme.radii.md};
-  padding: 14px;
+  padding: ${({ $embedded }) => $embedded ? '0' : '14px'};
+  margin: 0; min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -71,9 +72,9 @@ const Control = styled.label`
 
 const Select = styled.select`
   box-sizing: border-box;
-  height: 36px;
+  height: 34px;
   width: 100%;
-  border: 1px solid ${({ theme }) => theme.colors.border};
+  border: 1px solid ${({ theme }) => theme.colors.borderControl};
   border-radius: ${({ theme }) => theme.radii.md};
   background: ${({ theme }) => theme.colors.bg};
   color: ${({ theme }) => theme.colors.text};
@@ -339,7 +340,7 @@ export function PairingSettings({ invitationHost }: { invitationHost?: HTMLEleme
       ) : null);
 
   return (
-    <Fieldset>
+    <Fieldset $embedded={!!invitationHost}>
       <Legend>{t('settings.pairing.newDevice', 'Pair a new device')}</Legend>
       {created === null ? (
         <>

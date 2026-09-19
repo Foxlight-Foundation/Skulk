@@ -70,9 +70,10 @@ const Disclosure = styled.details`
   > summary > svg { flex-shrink: 0; transition: transform 120ms; }
   &[open] > summary > svg { transform: rotate(90deg); }
 `;
-const SummaryValue = styled.span`
+const SummaryValue = styled.span<{ $mono: boolean }>`
   margin-left: auto; text-align: right; color: ${({ theme }) => theme.colors.textSecondary};
   font-size: 12.5px; font-weight: 400; overflow-wrap: anywhere;
+  font-family: ${({ theme, $mono }) => $mono ? theme.fonts.mono : theme.fonts.body};
 `;
 const DisclosureBody = styled.div`
   padding: 0 14px 14px 36px; min-width: 0; display: flex; flex-direction: column; gap: 12px;
@@ -86,7 +87,7 @@ export function CollapsibleSection({ title, summary, open, onOpenChange, childre
   return <Disclosure open={open} onToggle={event => {
     if (event.currentTarget.open !== open) onOpenChange(event.currentTarget.open);
   }}>
-    <summary><FiChevronRight aria-hidden="true" />{title}<SummaryValue>{summary}</SummaryValue></summary>
+    <summary><FiChevronRight aria-hidden="true" />{title}<SummaryValue $mono={typeof summary === 'string' && /[.:~]/.test(summary)}>{summary}</SummaryValue></summary>
     <DisclosureBody>{children}</DisclosureBody>
   </Disclosure>;
 }

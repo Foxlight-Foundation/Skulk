@@ -4,6 +4,7 @@ import { CAPABILITIES, SIZE_RANGES, type FilterState } from '../../types/models'
 import { Button } from '../common/Button';
 import { useSkulkTranslation, type SkulkTranslate } from '../../i18n/tolgee';
 
+/** Controlled discovery facets, shown in a rail or standalone popover. */
 export interface ModelFilterPopoverProps {
   /** Render inside a persistent facet rail instead of a floating popover. */
   inline?: boolean;
@@ -57,6 +58,10 @@ const Chip = styled(Button)<{ $active: boolean }>`
 const ClearBtn = styled(Button)`
   align-self: flex-end;
 `;
+const Availability = styled.div`
+  display: flex; flex-direction: column; gap: 10px;
+  label { display: flex; align-items: center; gap: 8px; font-size: 13px; color: ${({ theme }) => theme.colors.textSecondary}; cursor: pointer; }
+`;
 
 function capabilityLabel(capability: string, t: SkulkTranslate): string {
   const labels: Record<string, string> = {
@@ -80,6 +85,7 @@ function sizeRangeLabel(range: (typeof SIZE_RANGES)[number], t: SkulkTranslate):
   return t('modelFilter.sizeOver200Gb', '> 200 GB');
 }
 
+/** Edit capability, size and evidence-based availability filters. */
 export function ModelFilterPopover({ inline = false, filters, onChange, onClear, onClose }: ModelFilterPopoverProps) {
   const { t } = useSkulkTranslation();
   const ref = useRef<HTMLDivElement>(null);
@@ -129,6 +135,7 @@ export function ModelFilterPopover({ inline = false, filters, onChange, onClear,
               variant="outline"
               size="sm"
               $active={filters.capabilities.includes(cap)}
+              aria-pressed={filters.capabilities.includes(cap)}
               onClick={() => toggleCapability(cap)}
             >
               {capabilityLabel(cap, t)}
@@ -147,6 +154,7 @@ export function ModelFilterPopover({ inline = false, filters, onChange, onClear,
               variant="outline"
               size="sm"
               $active={filters.sizeRange?.min === r.min && filters.sizeRange?.max === r.max}
+              aria-pressed={filters.sizeRange?.min === r.min && filters.sizeRange?.max === r.max}
               onClick={() => toggleSizeRange(r.min, r.max)}
             >
               {sizeRangeLabel(r, t)}
@@ -158,7 +166,10 @@ export function ModelFilterPopover({ inline = false, filters, onChange, onClear,
       {/* Availability */}
       <div>
         <SectionLabel>{t('modelFilter.availability', 'Availability')}</SectionLabel>
-        <ChipRow>
+        {inline ? <Availability>
+          <label><input type="checkbox" checked={filters.downloadedOnly} onChange={event => onChange({ ...filters, downloadedOnly: event.target.checked })} />{t('modelPickerGroup.inStore', 'In store')}</label>
+          <label><input type="checkbox" checked={filters.readyOnly} onChange={event => onChange({ ...filters, readyOnly: event.target.checked })} />{t('modelBrowser.readyNow', 'Ready now')}</label>
+        </Availability> : <ChipRow>
           <Chip
             variant="outline"
             size="sm"
@@ -175,7 +186,7 @@ export function ModelFilterPopover({ inline = false, filters, onChange, onClear,
           >
             {t('common.ready', 'Ready')}
           </Chip>
-        </ChipRow>
+        </ChipRow>}
       </div>
 
       {hasActiveFilters && <ClearBtn variant="ghost" size="sm" onClick={onClear}>{t('modelFilter.clearAll', 'Clear all')}</ClearBtn>}

@@ -5,6 +5,7 @@ import { detectDeviceModel } from '../../types/topology';
 import type { RawDownloads, RawInstances, RawRunners } from '../../hooks/useClusterState';
 import type { RawNodeResources } from '../../store/endpoints/cluster';
 import type { FleetServingSummary } from '../models/burst';
+import type { InstanceStatus } from '../../types/models';
 import { StoreRegistryTable, type StoreRegistryEntry, type StoreDownloadProgress, type ModelCardInfo, type CompanionInfo, type StoreReconciliationStatus } from '../layout/StoreRegistryTable';
 import type { ClusterCardProps, ClusterCardNode } from '../cluster/ClusterCard';
 import { ModelSearchModal } from './ModelSearchModal';
@@ -42,6 +43,7 @@ const SearchIcon = () => <FiSearch size={14} />;
 
 /* ── Component ────────────────────────────────────────── */
 
+/** Present store inventory and retain the existing download, placement and runtime controls. */
 export function ModelStorePage({ topology, nodeResources = {}, downloads, instances, runners, onChat }: ModelStorePageProps) {
   const { t } = useSkulkTranslation();
   const [storeEntries, setStoreEntries] = useState<StoreRegistryEntry[]>([]);
@@ -451,6 +453,19 @@ export function ModelStorePage({ topology, nodeResources = {}, downloads, instan
     return cards;
   }, [instances, runners, topology, storeEntries]);
 
+  const discoveryStatuses = useMemo(() => {
+    const statuses: Record<string, InstanceStatus> = {};
+    for (const instance of Object.values(instances)) {
+      const assignments = (instance.MlxRingInstance ?? instance.MlxJacclInstance ?? instance.LlamaRpcInstance)?.shardAssignments;
+      if (!assignments?.modelId) continue;
+      const runnerIds = Object.values(assignments.nodeToRunner ?? {});
+      const ready = runnerIds.length > 0 && runnerIds.every(id => runners[id] && ('RunnerReady' in runners[id] || 'RunnerRunning' in runners[id]));
+      // Any ready instance qualifies; another loading replica cannot erase it.
+      if (ready) statuses[assignments.modelId] = { status: 'Ready', statusClass: 'ready' };
+    }
+    return statuses;
+  }, [instances, runners]);
+
   const handleLaunchWithParams = useCallback(async (params: { modelId: string; sharding: string; instanceMeta: string; minNodes: number; excludedNodes?: string[] }) => {
     try {
       const res = await fetch('/place_instance', {
@@ -663,6 +678,7 @@ export function ModelStorePage({ topology, nodeResources = {}, downloads, instan
         open={searchOpen}
         onClose={() => setSearchOpen(false)}
         activeDownloads={storeDownloads}
+        instanceStatuses={discoveryStatuses}
         onLaunch={topology ? (modelId) => { setSearchOpen(false); setPlacementModelId(modelId); } : undefined}
         existingModelIds={storeModelIds}
         onDownloadStarted={handleDownloadStarted}

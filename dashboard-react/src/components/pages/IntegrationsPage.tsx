@@ -141,6 +141,9 @@ const ControlsRow = styled.div`
  */
 const StandaloneControl = styled.div`
   flex-shrink: 0;
+  max-width: 100%;
+  min-width: 0;
+  flex-wrap: wrap;
   display: flex;
   flex-direction: column;
   align-items: flex-start;

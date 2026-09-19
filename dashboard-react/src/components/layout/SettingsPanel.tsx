@@ -27,6 +27,7 @@ import { RightDrawer } from '../common/RightDrawer';
 import { CollapsibleSection } from '../common/Surfaces';
 import { FiArrowLeft, FiChevronRight, FiSmartphone } from 'react-icons/fi';
 
+/** Visibility and dismissal for the draft-owning Settings drawer. */
 export interface SettingsPanelProps {
   open: boolean;
   onClose: () => void;
@@ -37,7 +38,7 @@ export interface SettingsPanelProps {
 const Body = styled.div`
   flex: 1;
   overflow-y: auto;
-  padding: 20px;
+  padding: 16px 20px;
   display: flex;
   flex-direction: column;
   gap: 0;
@@ -45,12 +46,24 @@ const Body = styled.div`
 
 const Sections = styled.div`
   border: 1px solid ${({ theme }) => theme.colors.border}; border-radius: 12px;
+  background: ${({ theme }) => theme.colors.surface};
+`;
+const DevicesEntry = styled.button`
+  display: flex; align-items: center; gap: 12px; padding: 12px 14px; margin-bottom: 14px;
+  width: 100%; border-radius: 12px; border: 1px solid ${({ theme }) => theme.colors.borderControl};
+  background: ${({ theme }) => theme.colors.surface}; color: ${({ theme }) => theme.colors.text};
+  cursor: pointer; text-align: left; font: 600 14px ${({ theme }) => theme.fonts.body};
+  > svg:first-child { width: 36px; height: 36px; padding: 10px; border-radius: 10px; flex-shrink: 0; background: ${({ theme }) => theme.colors.selected}; }
+  > svg:last-child { flex-shrink: 0; margin-left: auto; }
+  span { min-width: 0; overflow-wrap: anywhere; }
+  small { display: block; margin-top: 2px; font-size: 12.5px; font-weight: 400; color: ${({ theme }) => theme.colors.textSecondary}; }
+  &:hover { border-color: ${({ theme }) => theme.colors.borderStrong}; }
 `;
 const Footer = styled.div`
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 16px 20px;
+  padding: 14px 20px;
   border-top: 1px solid ${({ theme }) => theme.colors.border};
 `;
 
@@ -121,8 +134,8 @@ const HintText = styled.div`
 `;
 
 const ConfigPath = styled.div`
-  font-size: ${({ theme }) => theme.fontSizes.xs};
-  font-family: ${({ theme }) => theme.fonts.body};
+  font-size: 11px;
+  font-family: ${({ theme }) => theme.fonts.mono};
   color: ${({ theme }) => theme.colors.subtleText};
 `;
 
@@ -148,6 +161,7 @@ const Spacer = styled.span`
 
 /* ---- component ---- */
 
+/** Retain an unsaved configuration draft while visiting immediate device actions. */
 export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
   const { t } = useSkulkTranslation();
   const { fullConfig, effective, configPath, loading, saving, error, fetchConfig, saveFullConfig } = useConfig(
@@ -159,6 +173,13 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
   const seeded = useRef(false);
   const [devicesOpen, setDevicesOpen] = useState(false);
   const [width, setWidth] = useState(420);
+  const [devicesWidth, setDevicesWidth] = useState(720);
+  const devicesEntry = useRef<HTMLButtonElement>(null);
+  const devicesBack = useRef<HTMLButtonElement>(null);
+  const returnToSettings = () => {
+    setDevicesOpen(false);
+    requestAnimationFrame(() => devicesEntry.current?.focus());
+  };
   const [expanded, setExpanded] = useState<Record<string, boolean>>(() => {
     try {
       const value: unknown = JSON.parse(localStorage.getItem('skulk-settings-sections') ?? '{}');
@@ -306,16 +327,17 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
   if (!open) return null;
 
   return (
-    <RightDrawer open={open} onClose={onClose} width={devicesOpen ? 720 : width} minWidth={360} maxWidth={720} onWidthChange={setWidth}
+    <RightDrawer open={open} onClose={onClose} width={devicesOpen ? devicesWidth : width} minWidth={360} maxWidth={720} onWidthChange={devicesOpen ? setDevicesWidth : setWidth}
       ariaLabel={devicesOpen ? t('devices.title', 'Devices & pairing') : t('settings.title', 'Settings')}
       title={devicesOpen ? t('devices.title', 'Devices & pairing') : t('settings.title', 'Settings')}
+      headerLeading={devicesOpen ? <Button ref={devicesBack} variant="ghost" size="sm" aria-label={t('devices.backToSettings', 'Back to Settings')} onClick={returnToSettings}><FiArrowLeft /></Button> : undefined}
       closeLabel={t('settings.close', 'Close settings')} resizeLabel={t('settings.resize', 'Resize settings')}>
-      {devicesOpen ? <><Button style={{ margin: '12px 20px', alignSelf: 'flex-start' }} onClick={() => setDevicesOpen(false)}><FiArrowLeft />{t('settings.title', 'Settings')}</Button><DevicesPanel /></> : null}
+      {devicesOpen ? <DevicesPanel /> : null}
         <Body style={{ display: devicesOpen ? 'none' : undefined }}>
           {loading && <LoadingText>{t('settings.loadingConfig', 'Loading config...')}</LoadingText>}
           {error && <ErrorText>{error}</ErrorText>}
 
-          <Button block style={{ minHeight: 68, marginBottom: 16, justifyContent: 'flex-start' }} onClick={() => setDevicesOpen(true)}><FiSmartphone size={24} />{t('devices.title', 'Devices & pairing')}<FiChevronRight style={{ marginLeft: 'auto' }} /></Button>
+          <DevicesEntry ref={devicesEntry} aria-label={t('devices.title', 'Devices & pairing')} onClick={() => { setDevicesOpen(true); requestAnimationFrame(() => devicesBack.current?.focus()); }}><FiSmartphone aria-hidden /><span>{t('devices.title', 'Devices & pairing')}<small>{t('devices.manageHint', 'Manage paired devices and invitations')}</small></span><FiChevronRight size={14} aria-hidden /></DevicesEntry>
 
           <Sections>
           {/* Appearance */}

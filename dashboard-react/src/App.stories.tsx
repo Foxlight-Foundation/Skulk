@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/react-vite';
-import { expect, userEvent, within } from 'storybook/test';
+import { expect, userEvent, waitFor, within } from 'storybook/test';
 import { App } from './App';
 
 const meta = {
@@ -45,11 +45,41 @@ export const FindModels: Story = {
     await expect(await within(document.body).findByRole('dialog')).toBeVisible();
   },
 };
+/** Discovery uses live runner readiness, separately from models being in store. */
+export const FindReadyModels: Story = {
+  parameters: { screenRoute: 'model-store' },
+  play: async context => {
+    await FindModels.play?.(context);
+    const dialog = within(within(document.body).getByRole('dialog'));
+    const ready = await dialog.findByRole('checkbox', { name: 'Ready now', hidden: true });
+    if (!ready.getClientRects().length) await userEvent.click(dialog.getByRole('button', { name: 'Filters' }));
+    await userEvent.click(ready);
+    await expect(await dialog.findByText('1 model groups')).toBeVisible();
+    await expect(dialog.getByText('example/Chat-32B', { exact: true })).toBeVisible();
+    await expect(dialog.queryByText('example/Reasoning-8B', { exact: true })).not.toBeInTheDocument();
+  },
+};
 export const Devices: Story = {
   play: async context => {
     await Settings.play?.(context);
     await userEvent.click(await within(document.body).findByRole('button', { name: 'Devices & pairing' }));
     await expect(within(document.body).getByRole('dialog', { name: 'Devices & pairing' })).toBeVisible();
+  },
+};
+/** Nested device navigation keeps the Settings draft and returns keyboard focus. */
+export const SettingsContinuity: Story = {
+  play: async context => {
+    await Settings.play?.(context);
+    const body = within(document.body);
+    const section = body.getByText('HuggingFace').closest('details')!;
+    if (!section.open) await userEvent.click(section.querySelector('summary')!);
+    const token = section.querySelector<HTMLInputElement>('input[type="password"]')!;
+    await userEvent.type(token, 'fictional-unsaved-draft');
+    await userEvent.click(body.getByRole('button', { name: 'Devices & pairing' }));
+    await expect(body.getAllByRole('dialog')).toHaveLength(1);
+    await userEvent.click(body.getByRole('button', { name: 'Back to Settings' }));
+    await expect(token).toHaveValue('fictional-unsaved-draft');
+    await waitFor(() => expect(body.getByRole('button', { name: 'Devices & pairing' })).toHaveFocus());
   },
 };
 export const IntegrationSetup: Story = {

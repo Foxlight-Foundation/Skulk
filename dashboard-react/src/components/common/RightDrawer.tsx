@@ -16,6 +16,8 @@ export interface RightDrawerProps {
   title: ReactNode;
   /** Optional actions next to the shared close button. */
   headerActions?: ReactNode;
+  /** Optional back control before the title for nested workflows. */
+  headerLeading?: ReactNode;
   /** Live fabric surfaces use the reference amber edge. */
   tone?: 'neutral' | 'live';
   /** Accessible name of the drawer landmark. */
@@ -149,6 +151,7 @@ export function RightDrawer({
   onClose,
   title,
   headerActions,
+  headerLeading,
   tone = 'neutral',
   ariaLabel,
   id,
@@ -232,6 +235,7 @@ export function RightDrawer({
           aria-label={resizeLabel}
         />
         <Header>
+          {headerLeading}
           <Title>{title}</Title>
           {headerActions}
           <Button variant="ghost" size="sm" onClick={onClose} aria-label={closeLabel || t('common.close', 'Close')}>
