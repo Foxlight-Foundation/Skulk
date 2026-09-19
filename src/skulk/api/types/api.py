@@ -2302,6 +2302,10 @@ class VideoOutputInfo(BaseModel, frozen=True):
     """Audio channel count when a track is present."""
     has_thumbnail: bool
     """Whether ``variant=thumbnail`` content is available."""
+    thumbnail_sha256: str | None = None
+    """Digest of the JPEG thumbnail, so a client can verify what it fetches."""
+    thumbnail_size_bytes: int | None = None
+    """Size of the thumbnail in bytes when one is available."""
 
 
 class VideoStatsInfo(BaseModel, frozen=True):
