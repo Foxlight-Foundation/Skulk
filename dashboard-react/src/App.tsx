@@ -1,3 +1,5 @@
+import { FiMaximize2 } from 'react-icons/fi';
+import { MdAutoAwesome } from 'react-icons/md';
 import { ReadyModelSelect } from './components/chat/ReadyModelSelect';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import styled from 'styled-components';
@@ -658,18 +660,10 @@ export function App() {
   return (
     <ThemeProvider theme={activeTheme}>
       <GlobalStyle />
-      {/* Phone width: a third of the mesh particles; the busy full-density
-          field reads as visual noise over content on a small screen. The key
-          remounts the canvas when the breakpoint flips so the particle field
-          re-seeds at the new density. */}
-      {/* The night palette replaces the abstract mesh with the star field
-          crowning the viewport and fading out on the way down, so every
-          screen opens under the brand sky without a painting competing
-          with content. Palettes without a scene keep the mesh. */}
       <SceneBackdrop />
       <ShootingStars />
       {activeTheme.colors.scene === 'none' && (
-        <NetworkMesh key={isMobile ? 'mesh-mobile' : 'mesh-desktop'} radius={2.5} count={isMobile ? 14 : 43} linkDistance={430} />
+        <NetworkMesh />
       )}
       <StewardControllerProvider readyInstances={instanceCards}>
       <Shell>
@@ -794,11 +788,12 @@ export function App() {
             </PanelOverlay>
           )}
         </ContentRow>
-        <RightDrawer open={stewardOpen} onClose={() => setStewardOpen(false)} title="Skulk" ariaLabel={t('steward.drawer', 'Skulk Steward')}
+        <RightDrawer open={stewardOpen} onClose={() => setStewardOpen(false)} tone="live"
+          title={<StewardHeading><MdAutoAwesome aria-hidden /><span>Skulk</span>{stewardStatus?.steward_model && <StewardModel title={stewardStatus.steward_model}>{stewardStatus.steward_model.split('/').pop()}</StewardModel>}</StewardHeading>}
+          headerActions={<Button variant="ghost" size="sm" aria-label={t('steward.openPage', 'Open as page')} onClick={() => { setStewardOpen(false); setActiveRoute('steward'); }}><FiMaximize2 aria-hidden /></Button>} ariaLabel={t('steward.drawer', 'Skulk Steward')}
           width={stewardWidth} minWidth={360} maxWidth={800} onWidthChange={setStewardWidth}
           closeLabel={t('common.close', 'Close')} resizeLabel={t('steward.resize', 'Resize Steward')}>
-          <Button variant="ghost" style={{ alignSelf: 'flex-start', margin: 12 }} onClick={() => { setStewardOpen(false); setActiveRoute('steward'); }}>{t('steward.openPage', 'Open as page')}</Button>
-          <StewardChatView />
+          <StewardChatView presentation="drawer" />
         </RightDrawer>
         <ToastContainer />
         <ObservabilityPanel />
@@ -821,4 +816,14 @@ const EmptyState = styled.div`
   color: ${({ theme }) => theme.colors.textMuted};
   text-transform: uppercase;
   letter-spacing: 2px;
+`;
+
+const StewardHeading = styled.span`
+  display: flex; align-items: center; gap: 10px; min-width: 0;
+  > svg { flex-shrink: 0; color: ${({ theme }) => theme.colors.live}; }
+`;
+const StewardModel = styled.span`
+  min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  font: 10.5px ${({ theme }) => theme.fonts.mono}; color: ${({ theme }) => theme.colors.textMuted};
+  padding: 2px 7px; border: 1px solid ${({ theme }) => theme.colors.border}; border-radius: 5px;
 `;

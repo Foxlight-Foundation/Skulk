@@ -481,11 +481,11 @@ const ModalContainer = styled.div`
   flex-direction: column;
   width: min(94vw, 1120px);
   height: min(86vh, 760px);
-  background: ${({ theme }) => theme.colors.surface};
-  border: 1px solid ${({ theme }) => theme.colors.border};
-  border-radius: ${({ theme }) => theme.radii.lg};
+  background: ${({ theme }) => theme.colors.surfaceElevated};
+  border: 1px solid ${({ theme }) => theme.colors.borderControl};
+  border-radius: 14px;
   overflow: hidden;
-  box-shadow: 0 0 43px ${({ theme }) => theme.colors.shadowStrong}, 0 0 88px ${({ theme }) => theme.colors.shadow};
+  box-shadow: ${({ theme }) => theme.colors.shadowPop};
 
   @media (max-width: 640px) {
     width: calc(100vw - 16px);

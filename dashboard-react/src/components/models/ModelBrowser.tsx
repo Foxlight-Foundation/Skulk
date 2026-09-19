@@ -80,16 +80,16 @@ const Container = styled.div`
   display: flex;
   flex-direction: column;
   height: 100%;
-  background: ${({ theme }) => theme.colors.bg};
+  background: transparent;
   color: ${({ theme }) => theme.colors.text};
   overflow: hidden;
 `;
 
 const SourceSwitcher = styled.div`
   display: flex;
-  gap: 4px;
+  gap: 0;
   margin: 0;
-  padding: 4px;
+  padding: 0;
   border: 1px solid ${({ theme }) => theme.colors.borderLight};
   border-radius: ${({ theme }) => theme.radii.md};
   background: ${({ theme }) => theme.colors.surfaceSunken};
@@ -106,7 +106,7 @@ const SourceButton = styled.button<{ $active: boolean }>`
   color: ${({ theme }) => theme.colors.body};
   cursor: pointer;
   font-family: ${({ theme }) => theme.fonts.body};
-  font-size: ${({ theme }) => theme.fontSizes.nav};
+  font-size: 12.5px;
   font-weight: 600;
   padding: 7px 12px;
   transition: background 0.15s, border-color 0.15s, color 0.15s;
@@ -116,9 +116,9 @@ const SourceButton = styled.button<{ $active: boolean }>`
   }
 
   ${({ $active }) => $active && css`
-    background: ${({ theme }) => theme.colors.surface};
-    border-color: ${({ theme }) => theme.colors.goldDim};
-    color: ${({ theme }) => theme.colors.accentText};
+    background: ${({ theme }) => theme.colors.selected};
+    border-color: transparent;
+    color: ${({ theme }) => theme.colors.text};
   `}
 `;
 
@@ -141,12 +141,13 @@ const Main = styled.div`
 const Toolbar = styled.div`
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 12px 16px 8px;
+  gap: 14px;
+  padding: 14px 18px;
+  border-bottom: 1px solid ${({ theme }) => theme.colors.border};
   position: relative;
   flex-shrink: 0;
 
-  > div:has(input) { flex: 1; min-width: 160px; }
+  > :has(input) { flex: 1; min-width: 160px; }
   @media (max-width: 768px) { flex-wrap: wrap; }
 
 `;
@@ -489,16 +490,17 @@ export function ModelBrowser({
               {t('modelBrowser.mlxOnly', 'MLX only')}
             </FilterBtn>
           )}
-          {!isHf && (
-            <FilterBtn
+          {(
+            <FacetToggle
               variant="outline"
               size="sm"
               $active={hasActiveFilters}
+              aria-expanded={picker.showFilters}
               onClick={() => picker.setShowFilters(!picker.showFilters)}
             >
               <FilterIcon />
               {t('modelBrowser.filters', 'Filters')}
-            </FilterBtn>
+            </FacetToggle>
           )}
         </Toolbar>
 
@@ -677,3 +679,7 @@ export function ModelBrowser({
     </Container>
   );
 }
+
+const FacetToggle = styled(FilterBtn)`
+  @media (min-width: 769px) { display: none; }
+`;

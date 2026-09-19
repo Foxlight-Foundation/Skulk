@@ -108,7 +108,9 @@ function RuntimeControls({ runtime, unavailable, nodes, details, nodeEvidence, f
 }
 
 /** Observe independently supervised runtimes even when no plugin child is available. */
-export function ManagedRuntimesPanel({ nodeNames = () => [], renderDetails, nodeEvidence, filter = 'all' }: {
+export function ManagedRuntimesPanel({ nodeNames = () => [], renderDetails, nodeEvidence, renderHeader, filter = 'all' }: {
+  /** Page composition may place the existing registration action in its header. */
+  renderHeader?: (registrationAction: ReactNode) => ReactNode;
   /** Fresh node evidence for derived card health. */
   nodeEvidence?: (pluginId: string) => PluginNodes | undefined;
   /** Hide cards while retaining their request ownership. */
@@ -130,9 +132,9 @@ export function ManagedRuntimesPanel({ nodeNames = () => [], renderDetails, node
     try { await register(id).unwrap(); }
     catch { setRegistrationUncertain(true); }
   };
+  const registrationAction = <Button type="button" disabled={registering.isLoading || !!query.error || query.isLoading || !!setupId} onClick={() => void addPlugin()}>{t('plugins.addManagedPlugin', 'Add plugin')}</Button>;
   return <section aria-label={t('plugins.managedRuntimes', 'Managed runtimes')}>
-    <h2>{t('plugins.managedRuntimes', 'Managed runtimes')}</h2>
-    <Button type="button" disabled={registering.isLoading || !!query.error || query.isLoading || !!setupId} onClick={() => void addPlugin()}>{t('plugins.addManagedPlugin', 'Add plugin')}</Button>
+    {renderHeader ? renderHeader(registrationAction) : <><h2>{t('plugins.managedRuntimes', 'Managed runtimes')}</h2>{registrationAction}</>}
     {registrationUncertain ? <p role="status">{t('plugins.registrationUncertain', 'Registration was not confirmed. Refresh source status to check the retained installation before continuing.')}</p> : null}
     {registrationUncertain ? <Button type="button" disabled={registering.isLoading} onClick={() => void addPlugin()}>{t('plugins.retryRegistration', 'Retry the same registration')}</Button> : null}
     {setupId && !registering.isLoading ? <>

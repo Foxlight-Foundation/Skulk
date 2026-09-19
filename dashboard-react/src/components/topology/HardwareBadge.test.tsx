@@ -42,8 +42,8 @@ describe('HardwareBadge', () => {
     const badge = await renderBadge(model);
     const text = badge.querySelector('text');
     expect(text?.textContent).toBe(mark);
-    expect(text?.getAttribute('x')).toBe('24');
-    expect(text?.getAttribute('y')).toBe('17');
+    expect(text?.getAttribute('x')).toBe('26');
+    expect(text?.getAttribute('y')).toBe('18');
     expect(text?.getAttribute('text-anchor')).toBe('middle');
     expect(text?.getAttribute('dominant-baseline')).toBe('middle');
   });

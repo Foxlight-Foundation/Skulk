@@ -16,7 +16,7 @@ describe('Studio Night topology semantics', () => {
       topologyNodeSyncing: '#93aedf',
       topologyNodeWarning: '#f2a03d',
       topologyNodeDanger: '#e5655f',
-      topologyNodeDotBorder: '#0d1226',
+      topologyNodeDotBorder: '#2b3a63',
     });
   });
 
@@ -34,7 +34,7 @@ describe('Studio Night topology semantics', () => {
       topologyNodeSyncing: '#4d7cc4',
       topologyNodeWarning: '#b35c0a',
       topologyNodeDanger: '#b23a44',
-      topologyNodeDotBorder: '#ffffff',
+      topologyNodeDotBorder: '#c9d9f0',
     });
   });
 });

@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useId, useMemo } from 'react';
 import styled, { keyframes, useTheme } from 'styled-components';
 import { FiExternalLink } from 'react-icons/fi';
 import { MdPlayArrow } from 'react-icons/md';
@@ -54,6 +54,7 @@ function hfUrl(modelId: string): string | null {
 
 function MiniTopology({ nodes }: { nodes: ClusterCardNode[] }) {
   const theme = useTheme() as Theme;
+  const instanceId = useId();
   const count = nodes.length;
   const iconW = 48;
   const iconH = 40;
@@ -76,7 +77,7 @@ function MiniTopology({ nodes }: { nodes: ClusterCardNode[] }) {
   }, [count, cx, cy, r, nodes]);
 
   return (
-    <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`}>
+    <svg style={{ maxWidth: '100%' }} width={w} height={h} viewBox={`0 0 ${w} ${h}`}>
       {/* Edges */}
       {count > 1 && positions.map((p, i) => {
         const next = positions[(i + 1) % count];
@@ -84,9 +85,10 @@ function MiniTopology({ nodes }: { nodes: ClusterCardNode[] }) {
           <line
             key={`e${i}`}
             x1={p.x} y1={p.y} x2={next.x} y2={next.y}
-            stroke={theme.colors.meshLine}
-            strokeWidth={1}
-            strokeDasharray="4 3"
+            stroke={theme.colors.gold}
+            strokeOpacity={0.7}
+            strokeWidth={1.2}
+            strokeDasharray="5 5"
           />
         );
       })}
@@ -101,8 +103,8 @@ function MiniTopology({ nodes }: { nodes: ClusterCardNode[] }) {
                 ramPercent={node.memoryUsedPercent}
                 width={iconW}
                 height={iconH}
-                wireColor={theme.colors.goldDim}
-                clipId={`cc-${node.nodeId}`}
+                wireColor={theme.colors.gold}
+                clipId={`cc-${instanceId}-${node.nodeId}`}
               />
             </g>
             {/* Memory percent + name */}

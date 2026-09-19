@@ -14,6 +14,10 @@ export interface RightDrawerProps {
   onClose: () => void;
   /** Heading shown in the drawer header. */
   title: ReactNode;
+  /** Optional actions next to the shared close button. */
+  headerActions?: ReactNode;
+  /** Live fabric surfaces use the reference amber edge. */
+  tone?: 'neutral' | 'live';
   /** Accessible name of the drawer landmark. */
   ariaLabel: string;
   /** DOM id for the drawer element, when other components target it. */
@@ -57,7 +61,7 @@ const Backdrop = styled.div`
   animation: ${fadeIn} 0.2s ease-out;
 `;
 
-const Aside = styled.aside<{ $width: number }>`
+const Aside = styled.aside<{ $width: number; $tone: 'neutral' | 'live' }>`
   position: fixed;
   top: 0;
   right: 0;
@@ -70,7 +74,7 @@ const Aside = styled.aside<{ $width: number }>`
   width: ${({ $width }) => $width}px;
   max-width: 100vw;
   background: ${({ theme }) => theme.colors.surfaceElevated};
-  border-left: 1px solid ${({ theme }) => theme.colors.borderStrong};
+  border-left: 1px solid ${({ theme, $tone }) => $tone === 'live' ? theme.colors.borderLive : theme.colors.borderStrong};
   box-shadow: -18px 0 48px ${({ theme }) => theme.colors.shadowStrong};
   display: flex;
   flex-direction: column;
@@ -144,6 +148,8 @@ export function RightDrawer({
   open,
   onClose,
   title,
+  headerActions,
+  tone = 'neutral',
   ariaLabel,
   id,
   width,
@@ -208,7 +214,7 @@ export function RightDrawer({
   return (
     <>
       <Backdrop data-testid="right-drawer-backdrop" onClick={onClose} />
-      <Aside $width={width} ref={asideRef} id={id} aria-label={ariaLabel} role="dialog" aria-modal="true" tabIndex={-1}>
+      <Aside $width={width} $tone={tone} ref={asideRef} id={id} aria-label={ariaLabel} role="dialog" aria-modal="true" tabIndex={-1}>
         <ResizeHandle
           onPointerDown={onResizeStart}
           role="separator"
@@ -227,6 +233,7 @@ export function RightDrawer({
         />
         <Header>
           <Title>{title}</Title>
+          {headerActions}
           <Button variant="ghost" size="sm" onClick={onClose} aria-label={closeLabel || t('common.close', 'Close')}>
             <FiX size={16} />
           </Button>

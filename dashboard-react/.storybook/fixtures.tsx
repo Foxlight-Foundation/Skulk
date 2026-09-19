@@ -1,3 +1,5 @@
+import { screenFixtures } from './screenFixtures';
+import type { NavRoute } from '../src/components/layout/HeaderNav';
 import { useMemo, type ReactNode } from 'react';
 import { Provider } from 'react-redux';
 import { configureStore } from '@reduxjs/toolkit';
@@ -19,6 +21,12 @@ const fixtures: Record<string, unknown> = {
   '/v1/tracing': { enabled: false },
 };
 
+let activeScreen = false;
+
+/** Select the offline response set before rendering a story. */
+// eslint-disable-next-line react-refresh/only-export-components -- Storybook loader configuration.
+export function configureFixtureScreen(enabled: boolean) { activeScreen = enabled; }
+
 const originalFetch = window.fetch.bind(window);
 // Storybook is an offline component gallery. Every API request is intercepted,
 // including unknown routes and mutations, so stories cannot operate a cluster.
@@ -26,17 +34,25 @@ window.fetch = async (input, init) => {
   const request = new Request(input, init);
   const url = new URL(request.url);
   const isStorybookAsset = /\.(?:[cm]?js|tsx?|jsx|css|map)$/.test(url.pathname) || /^\/(@|src\/|node_modules\/|sb-|__vitest)/.test(url.pathname) || ['/index.json', '/project.json'].includes(url.pathname);
+  // A deterministic synthetic conversation; no mutation leaves the gallery.
+  if (activeScreen && request.method === 'POST' && url.pathname === '/v1/chat/completions') {
+    const content = 'The example cluster has three nodes. Workstation has a ready chat model; GPU server is loading a model; Compact has a failed runner. Inspect that runner before deciding whether to retry.';
+    return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content }, finish_reason: null }] })}\n\ndata: [DONE]\n\n`, { headers: { 'Content-Type': 'text/event-stream' } });
+  }
   if (request.method !== 'GET') return Response.json({ detail: 'This gallery does not execute operations.' }, { status: 403 });
   if (url.origin === location.origin && isStorybookAsset) return originalFetch(input, init);
+  if (activeScreen && Object.hasOwn(screenFixtures, url.pathname)) return Response.json(screenFixtures[url.pathname]);
   if (Object.hasOwn(fixtures, url.pathname)) return Response.json(fixtures[url.pathname]);
   return Response.json({ detail: 'No fixture for this observation.' }, { status: 503 });
 };
 
 /** Isolated store without browser persistence or production subscriptions. */
-export function FixtureProvider({ children, storyId, theme }: { children: ReactNode; storyId: string; theme: 'dark' | 'light' }) {
+export function FixtureProvider({ children, storyId, theme, screenRoute }: { children: ReactNode; storyId: string; screenRoute?: NavRoute; theme: 'dark' | 'light' }) {
   const store = useMemo(() => { const fixtureStore = configureStore({
     reducer: { ui: uiSliceReducer, chat: chatSliceReducer, [apiSlice.reducerPath]: apiSlice.reducer },
     middleware: getDefault => getDefault().concat(apiSlice.middleware),
-  }); fixtureStore.dispatch(uiActions.setTheme(theme)); return fixtureStore; }, [storyId, theme]);
+  }); fixtureStore.dispatch(uiActions.setTheme(theme));
+  if (screenRoute) { fixtureStore.dispatch(uiActions.setActiveRoute(screenRoute)); if (!fixtureStore.getState().ui.panelOpen) fixtureStore.dispatch(uiActions.togglePanel()); }
+  return fixtureStore; }, [storyId, theme, screenRoute]);
   return <Provider store={store}>{children}</Provider>;
 }

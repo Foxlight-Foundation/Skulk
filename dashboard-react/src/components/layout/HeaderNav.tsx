@@ -78,6 +78,11 @@ const Nav = styled.header`
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+
+  @media (max-width: 360px) {
+    padding: 12px 8px;
+    gap: 6px;
+  }
 `;
 
 const LeftGroup = styled.div`
@@ -120,6 +125,7 @@ const LogoText = styled.span`
   font-family: ${({ theme }) => theme.fonts.body};
   color: ${({ theme }) => theme.colors.text};
   filter: drop-shadow(0 0 4px ${({ theme }) => theme.colors.border});
+  @media (max-width: 360px) { font-size: 24px; }
 `;
 
 const VersionTag = styled.sup`

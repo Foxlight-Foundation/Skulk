@@ -1,3 +1,4 @@
+import { Button } from '../common/Button';
 import { IntegrationSetupStep } from '../integrations/IntegrationSetupStep';
 import { useEffect, useMemo, useState } from 'react';
 import styled from 'styled-components';
@@ -37,22 +38,25 @@ export interface IntegrationsPageProps {
 
 const Page = styled.div`
   padding: 32px;
-  max-width: 980px;
+  width: 100%;
+  max-width: 1044px;
   @media (max-width: 600px) { padding: 16px; }
   margin: 0 auto;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 28px;
 `;
 
 const PageTitle = styled.h1`
   margin: 0;
   font-size: 28px;
+  letter-spacing: -.02em;
   color: ${({ theme }) => theme.colors.text};
 `;
 
 const PageIntro = styled.p`
-  margin: 0;
+  margin: 6px 0 0;
+  max-width: 560px;
   font-size: 14px;
   color: ${({ theme }) => theme.colors.textSecondary};
   line-height: 1.5;
@@ -71,15 +75,15 @@ const SectionTitle = styled.h2`
 const SurfaceRow = styled.div`
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 12px;
 `;
 
 const SurfaceChip = styled.div`
   flex: 1 1 200px;
   background: ${({ theme }) => theme.colors.surface};
-  border: 1px solid ${({ theme }) => theme.colors.borderLight};
-  border-radius: ${({ theme }) => theme.radii.md};
-  padding: 16px;
+  border: 1px solid ${({ theme }) => theme.colors.border};
+  border-radius: 12px;
+  padding: 12px 14px;
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -87,6 +91,8 @@ const SurfaceChip = styled.div`
 `;
 
 const SurfaceLabel = styled.span`
+  font-family: ${({ theme }) => theme.fonts.mono};
+  font-weight: 600;
   font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 1px;
@@ -97,7 +103,7 @@ const SurfaceValue = styled.span`
   font-family: ${({ theme }) => theme.fonts.mono};
   font-size: ${({ theme }) => theme.fontSizes.xs};
   color: ${({ theme }) => theme.colors.text};
-  overflow-wrap: anywhere;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 `;
 
 /** Copy an endpoint without treating the copy as connection evidence. */
@@ -108,7 +114,7 @@ function EndpointCard({ label, value }: { label: string; value: string }) {
     try { await copyToClipboard(value); setCopied(true); }
     catch { addToast({ message: t('integrations.copyFailed', 'Could not copy to the clipboard'), type: 'error' }); }
   };
-  return <SurfaceChip><SurfaceLabel>{label}</SurfaceLabel><div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}><SurfaceValue style={{ flex: 1, minWidth: 0 }}>{value}</SurfaceValue><CopyButton aria-label={`${t('integrations.copy', 'Copy')} ${label}`} onClick={() => void copy()}>{copied ? <FiCheck /> : <FiCopy />}</CopyButton></div></SurfaceChip>;
+  return <SurfaceChip style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}><div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 5 }}><SurfaceLabel>{label}</SurfaceLabel><SurfaceValue title={value}>{value}</SurfaceValue></div><Button variant="outline" size="sm" icon aria-label={`${t('integrations.copy', 'Copy')} ${label}`} onClick={() => void copy()}>{copied ? <FiCheck size={13} /> : <FiCopy size={13} />}</Button></SurfaceChip>;
 }
 
 const ToolGrid = styled.div`
@@ -120,8 +126,8 @@ const ToolGrid = styled.div`
 const DrawerBody = styled.div`padding: 24px; overflow-y: auto; display: flex; flex-direction: column; gap: 20px; min-height: 0;`;
 
 const ControlsRow = styled.div`
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
   gap: 12px;
 `;
 
@@ -133,6 +139,7 @@ const ControlsRow = styled.div`
  * page width.
  */
 const StandaloneControl = styled.div`
+  flex-shrink: 0;
   display: flex;
   flex-direction: column;
   align-items: flex-start;
@@ -339,6 +346,7 @@ export function IntegrationsPage({ readyInstances }: IntegrationsPageProps) {
   const { t } = useSkulkTranslation();
   const remoteAccess = useRemoteAccess();
   const [catalog, setCatalog] = useState<ModelInfo[]>([]);
+  const [snippetId, setSnippetId] = useState<string | null>(null);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [drawerWidth, setDrawerWidth] = useState(640);
   const [toolId, setToolId] = useState<IntegrationToolId>('claude-code');
@@ -429,12 +437,13 @@ export function IntegrationsPage({ readyInstances }: IntegrationsPageProps) {
     [tool.id, options, t],
   );
 
+  const activeSnippet = snippets.find(snippet => snippet.id === snippetId) ?? snippets[0];
   const hasModels = models.length > 0;
   const showAddressChooser = Boolean(tailscaleUrl && localUrl && tailscaleUrl !== localUrl);
 
   return (
     <Page>
-      <div>
+      <PageHeading><div>
         <PageTitle>{t('integrations.title', 'Integrations')}</PageTitle>
         <PageIntro>
           {t(
@@ -443,18 +452,11 @@ export function IntegrationsPage({ readyInstances }: IntegrationsPageProps) {
           )}
         </PageIntro>
       </div>
-
-      <SurfaceRow>
-        <EndpointCard label={t('integrations.surface.openai', 'OpenAI-compatible')} value={`${apiUrl}/v1`} />
-        <EndpointCard label={t('integrations.surface.anthropic', 'Anthropic-compatible')} value={apiUrl} />
-        <EndpointCard label={t('integrations.surface.ollama', 'Ollama-compatible')} value={`${apiUrl}/ollama`} />
-      </SurfaceRow>
-
       {showAddressChooser && (
-        <StandaloneControl>
+        <StandaloneControl style={{ flexDirection: 'row', alignItems: 'center' }}>
           <ControlLabel>{t('integrations.address', 'Address to use')}</ControlLabel>
           <SegmentedControl
-            size="sm"
+            size="md"
             value={addressChoice}
             onChange={setAddressChoice}
             options={[
@@ -464,11 +466,20 @@ export function IntegrationsPage({ readyInstances }: IntegrationsPageProps) {
           />
         </StandaloneControl>
       )}
+      </PageHeading>
 
-      <div>
+      <SurfaceRow>
+        <EndpointCard label={t('integrations.surface.openai', 'OpenAI-compatible')} value={`${apiUrl}/v1`} />
+        <EndpointCard label={t('integrations.surface.anthropic', 'Anthropic-compatible')} value={apiUrl} />
+        <EndpointCard label={t('integrations.surface.ollama', 'Ollama-compatible')} value={`${apiUrl}/ollama`} />
+      </SurfaceRow>
+
+
+
+      <ReadyModels>
         <SectionTitle>{t('integrations.readyModels', 'Ready models')}</SectionTitle>
         {hasModels ? (
-          <ModelChips style={{ marginTop: 8 }}>
+          <ModelChips>
             {models.map(model => (
               <ModelChip key={model.id}>{model.id}</ModelChip>
             ))}
@@ -481,7 +492,7 @@ export function IntegrationsPage({ readyInstances }: IntegrationsPageProps) {
             )}
           </EmptyNotice>
         )}
-      </div>
+      </ReadyModels>
 
       <div>
         <h2 style={{ fontSize: 16, fontWeight: 600 }}>{t('integrations.connectTool', 'Connect a tool')}</h2>
@@ -493,7 +504,7 @@ export function IntegrationsPage({ readyInstances }: IntegrationsPageProps) {
               anythingllm: 'Desktop RAG workspace: pairs a chat and an embedding model.', 'open-webui': 'Self-hosted chat UI for the whole cluster.', n8n: 'Workflow automation with LLM nodes.', firefox: 'Sidebar AI chat via about:config.',
             }[entry.id])}
             method={entry.surface === 'dashboard' ? 'Dashboard' : `${entry.surface} API`}
-            onOpen={() => { setToolId(entry.id); setDetailsOpen(true); }} />)}
+            onOpen={() => { setToolId(entry.id); setSnippetId(null); setDetailsOpen(true); }} />)}
         </ToolGrid>
       </div>
       <RightDrawer open={detailsOpen} onClose={() => setDetailsOpen(false)} title={tool.label} ariaLabel={tool.label}
@@ -579,9 +590,8 @@ export function IntegrationsPage({ readyInstances }: IntegrationsPageProps) {
       )}
 
       <IntegrationSetupStep number={tool.usesTierChooser || tool.usesSingleModelChooser || tool.usesFilesystemPath ? 2 : 1} title={t('integrations.apply', 'Apply it')}>
-      {snippets.map(snippet => (
-        <SnippetCard key={`${tool.id}-${snippet.id}`} snippet={snippet} />
-      ))}
+      {snippets.length > 1 && <SegmentedControl value={activeSnippet.id} onChange={setSnippetId} options={snippets.map(snippet => ({ value: snippet.id, label: snippet.title }))} />}
+      {activeSnippet && <SnippetCard key={`${tool.id}-${activeSnippet.id}`} snippet={activeSnippet} />}
       </IntegrationSetupStep>
       <IntegrationSetupStep number={tool.usesTierChooser || tool.usesSingleModelChooser || tool.usesFilesystemPath ? 3 : 2} title={t('integrations.checkRequest', 'Check it reached the cluster')}>
         <PageIntro>{t('integrations.evidenceUnavailable', 'Connection evidence is unavailable in this dashboard. Send a request from the configured tool and check its response. Copying these instructions does not establish a connection.')}</PageIntro>
@@ -593,3 +603,11 @@ export function IntegrationsPage({ readyInstances }: IntegrationsPageProps) {
 }
 
 export default IntegrationsPage;
+
+const PageHeading = styled.div`
+  display: flex; align-items: flex-end; justify-content: space-between; gap: 24px;
+  @media (max-width: 1100px) { flex-wrap: wrap; gap: 12px; }
+`;
+const ReadyModels = styled.div`
+  display: flex; flex-wrap: wrap; align-items: center; gap: 12px;
+`;

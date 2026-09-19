@@ -21,7 +21,7 @@ function AppleMark({ color }: { color: string }) {
     <path
       d={APPLE_LOGO_PATH}
       fill={color}
-      transform={`translate(${(48 - width) / 2}, ${(34 - height) / 2}) scale(${scale})`}
+      transform={`translate(${(46 - width) / 2}, ${(36 - height) / 2}) scale(${scale})`}
     />
   );
 }
@@ -41,10 +41,10 @@ export function HardwareBadge({ model }: HardwareBadgeProps) {
     <g data-hardware-badge data-hardware-model={model}>
       <rect
         fill={theme.colors.topologyNodeSurface}
-        height={34}
+        height={36}
         rx={8}
-        stroke={theme.colors.topologyNodeComputeTrack}
-        width={48}
+        stroke={theme.colors.border}
+        width={isApple ? 46 : 52}
       />
       {isApple ? <AppleMark color={theme.colors.topologyNodeText} /> : null}
       {model === 'amd-strix' ? (
@@ -55,8 +55,8 @@ export function HardwareBadge({ model }: HardwareBadgeProps) {
           fontSize={11}
           fontWeight={700}
           textAnchor="middle"
-          x={24}
-          y={17}
+          x={26}
+          y={18}
         >
           AMD
         </text>
@@ -66,12 +66,12 @@ export function HardwareBadge({ model }: HardwareBadgeProps) {
           dominantBaseline="middle"
           fill="#76B900"
           fontFamily="Arial, Helvetica, sans-serif"
-          fontSize={8}
+          fontSize={9}
           fontWeight={700}
-          letterSpacing={0.2}
+          letterSpacing={0.5}
           textAnchor="middle"
-          x={24}
-          y={17}
+          x={26}
+          y={18}
         >
           NVIDIA
         </text>
@@ -84,8 +84,8 @@ export function HardwareBadge({ model }: HardwareBadgeProps) {
           fontSize={12}
           fontWeight={600}
           textAnchor="middle"
-          x={24}
-          y={17}
+          x={26}
+          y={18}
         >
           ?
         </text>

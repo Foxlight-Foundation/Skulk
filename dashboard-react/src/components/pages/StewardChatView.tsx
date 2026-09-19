@@ -48,6 +48,8 @@ export const STEWARD_MODEL_ID = 'skulk/steward';
 /** Inputs from current runtime truth needed to expose fabric speech safely. */
 export interface StewardChatViewProps {
   readyInstances?: InstanceCardData[];
+  /** Drawer chrome already carries the serving-model identity. */
+  presentation?: 'page' | 'drawer';
 }
 
 const Container = styled.div`
@@ -465,13 +467,13 @@ export function StewardControllerProvider({ children, readyInstances }: StewardC
 /** Use the app controller, or an isolated owner for standalone embeds and stories. */
 export function StewardChatView(props: StewardChatViewProps) {
   const controller = useContext(StewardContext);
-  return controller ? <StewardPresentation controller={controller} /> : <StandaloneSteward {...props} />;
+  return controller ? <StewardPresentation controller={controller} presentation={props.presentation} /> : <StandaloneSteward {...props} />;
 }
 function StandaloneSteward(props: StewardChatViewProps) {
   const controller = useStewardController(props);
-  return <StewardPresentation controller={controller} />;
+  return <StewardPresentation controller={controller} presentation={props.presentation} />;
 }
-function StewardPresentation({ controller }: { controller: ReturnType<typeof useStewardController> }) {
+function StewardPresentation({ controller, presentation = 'page' }: { controller: ReturnType<typeof useStewardController>; presentation?: 'page' | 'drawer' }) {
   const { t } = useSkulkTranslation();
   const dispatch = useAppDispatch();
   const { draft, setDraft, status, messages, isLoading, streamingContent, streamingThinking,
@@ -529,7 +531,7 @@ function StewardPresentation({ controller }: { controller: ReturnType<typeof use
 
   return (
     <Container>
-      {status.steward_model && (
+      {status.steward_model && presentation !== 'drawer' && (
         <ModelTag>
           {t('stewardChat.servedBy', 'fabric cognition: {model}', {
             model: status.steward_model,

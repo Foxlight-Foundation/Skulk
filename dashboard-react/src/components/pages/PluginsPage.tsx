@@ -17,7 +17,7 @@ import { NodeProposalsPanel } from './NodeProposalsPanel';
 import { OperatorAccessPanel } from './OperatorAccessPanel';
 import { operatorSession } from '../../auth/operatorSession';
 
-const Page = styled.section`padding: 24px; width: 100%; max-width: 980px; margin: 0 auto; box-sizing: border-box;`;
+const Page = styled.section`padding: 32px; @media (max-width: 600px) { padding: 16px; } width: 100%; max-width: 1044px; margin: 0 auto; box-sizing: border-box;`;
 const Card = styled.article`
   margin: 16px 0; padding: 20px; border: 1px solid ${({ theme }) => theme.colors.border};
   border-radius: ${({ theme }) => theme.radii.md}; background: ${({ theme }) => theme.colors.surface};
@@ -100,17 +100,25 @@ function NodeCard({ pluginId, node }: { pluginId: string; node: ConfigurableNode
 /** Render configuration declared by installed plugins, without provider-specific UI. */
 function PluginInventory() {
   const runtimes = useGetManagedRuntimesQuery();
+  const session = useSyncExternalStore(operatorSession.subscribe, operatorSession.snapshot);
+  const [accessOpen, setAccessOpen] = useState(false);
   const [filter, setFilter] = useState<PluginFilter>('all');
   const [selected, setSelected] = useState<string | null>(null);
   const [width, setWidth] = useState(640);
   const { t } = useSkulkTranslation();
   const query = useGetPluginNodesQuery(undefined, { pollingInterval: 5000, skipPollingIfUnfocused: true });
   return <>
-    <h1>{t('plugins.title', 'Plugins')}</h1>
+    <ManagedRuntimesPanel renderHeader={registrationAction => <>
+      <PageHeading><div>    <h1>{t('plugins.title', 'Plugins')}</h1>
     <p>{t('plugins.intro', 'Manage the settings of capability nodes installed on this Skulk host.')}</p>
     <p>{t('plugins.inventoryCount', '{count} managed · {healthy} healthy', { count: runtimes.data?.installations.length ?? 0, healthy: runtimes.data?.installations.filter(runtime => derivePluginHealth(runtime, query.data?.find(plugin => plugin.pluginId === runtime.plugin_id), !!runtimes.error || !!query.error) === 'healthy').length ?? 0 })}</p>
-    <SegmentedControl value={filter} onChange={setFilter} options={[{ value: 'all' as const, label: t('plugins.all', 'All') }, { value: 'healthy' as const, label: t('plugins.healthy', 'Healthy') }, { value: 'attention' as const, label: t('plugins.needsAttention', 'Needs attention') }, { value: 'uninstalled' as const, label: t('plugins.uninstalled', 'Uninstalled') }]} />
-    <ManagedRuntimesPanel filter={filter} nodeEvidence={pluginId => query.error ? undefined : query.data?.find(plugin => plugin.pluginId === pluginId)} nodeNames={pluginId => query.data?.find(plugin => plugin.pluginId === pluginId)?.nodes.map(node => node.bundleId) ?? []}
+</div><HeaderActions>
+        <Button variant="ghost" size="sm" onClick={() => setAccessOpen(true)}>{session.mode === 'direct' ? t('operator.direct', 'Direct host access') : t('operator.browserAccess', 'Browser access')}</Button>
+        {registrationAction}
+      </HeaderActions></PageHeading>
+      <Filters>    <SegmentedControl value={filter} onChange={setFilter} options={[{ value: 'all' as const, label: t('plugins.all', 'All') }, { value: 'healthy' as const, label: t('plugins.healthy', 'Healthy') }, { value: 'attention' as const, label: t('plugins.needsAttention', 'Needs attention') }, { value: 'uninstalled' as const, label: t('plugins.uninstalled', 'Uninstalled') }]} />
+</Filters>
+    </>} filter={filter} nodeEvidence={pluginId => query.error ? undefined : query.data?.find(plugin => plugin.pluginId === pluginId)} nodeNames={pluginId => query.data?.find(plugin => plugin.pluginId === pluginId)?.nodes.map(node => node.bundleId) ?? []}
       renderDetails={pluginId => query.data?.find(plugin => plugin.pluginId === pluginId)?.nodes.map(node => <NodeCard key={node.nodeId} pluginId={pluginId} node={node} />)} />
     <Button type="button" disabled={query.isFetching} onClick={() => void query.refetch()}>{t('plugins.refresh', 'Refresh')}</Button>
     {query.isLoading ? <p>{t('plugins.loading', 'Loading plugins…')}</p> : null}
@@ -122,6 +130,7 @@ function PluginInventory() {
       tone="neutral" release={Array.from(new Set(plugin.nodes.map(node => node.version))).join(' · ') || t('plugins.noRelease', 'None selected')}
       nodes={plugin.nodes.map(node => node.bundleId)} onOpen={() => setSelected(plugin.pluginId)} />)}
     </div>
+    <RightDrawer open={accessOpen} onClose={() => setAccessOpen(false)} title={t('operator.browserAccess', 'Browser access')} ariaLabel={t('operator.browserAccess', 'Browser access')} width={width} minWidth={360} maxWidth={900} onWidthChange={setWidth} closeLabel={t('common.close', 'Close')} resizeLabel={t('plugins.resize', 'Resize plugin details')}><OperatorAccessPanel /></RightDrawer>
     <RightDrawer open={selected !== null} onClose={() => setSelected(null)} title={selected ?? ''} ariaLabel={t('plugins.details', 'Plugin details')}
       width={width} minWidth={360} maxWidth={900} onWidthChange={setWidth} closeLabel={t('common.close', 'Close')} resizeLabel={t('plugins.resize', 'Resize plugin details')}>
       <div style={{ padding: 24, overflowY: 'auto' }}>
@@ -134,5 +143,13 @@ function PluginInventory() {
 /** Remount sensitive drafts when the browser changes its authorization identity. */
 export function PluginsPage() {
   const session = useSyncExternalStore(operatorSession.subscribe, operatorSession.snapshot);
-  return <Page><OperatorAccessPanel /><PluginInventory key={`${session.mode}:${session.deviceId ?? ''}`} /></Page>;
+  return <Page><PluginInventory key={`${session.mode}:${session.deviceId ?? ''}`} /></Page>;
 }
+
+const PageHeading = styled.div`
+  display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; flex-wrap: wrap;
+  h1 { font-size: 28px; color: ${({ theme }) => theme.colors.text}; letter-spacing: -.02em; }
+  p { font-size: 14px; color: ${({ theme }) => theme.colors.textSecondary}; margin-top: 6px; }
+`;
+const HeaderActions = styled.div`display: flex; align-items: center; gap: 10px; flex-wrap: wrap;`;
+const Filters = styled.div`margin: 22px 0 18px;`;
