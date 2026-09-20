@@ -1,3 +1,4 @@
+import { Select as DesignedSelect } from '../common/Select';
 import { useId } from 'react';
 import styled from 'styled-components';
 import { useSkulkTranslation } from '../../i18n/tolgee';
@@ -9,7 +10,7 @@ const Input = styled.input`
   border: 1px solid ${({ theme }) => theme.colors.border};
   background: ${({ theme }) => theme.colors.surface}; color: ${({ theme }) => theme.colors.text};
 `;
-const Select = styled.select`
+const Select = styled(DesignedSelect)`
   padding: 9px; border-radius: ${({ theme }) => theme.radii.sm};
   border: 1px solid ${({ theme }) => theme.colors.border};
   background: ${({ theme }) => theme.colors.surface}; color: ${({ theme }) => theme.colors.text};
@@ -75,10 +76,10 @@ export function PluginConfigurationFields({ schema, rootSchema = schema, values,
     </fieldset>;
     return <Field key={name} htmlFor={fieldId}>
       <span>{label}{required.includes(name) ? ' *' : ''}</span>
-      {Array.isArray(field.enum) ? <Select id={fieldId} value={value === undefined ? '' : JSON.stringify(value)} disabled={disabled} required={required.includes(name)} onChange={(event) => update(event.target.value === '' ? undefined : JSON.parse(event.target.value))}>
+      {Array.isArray(field.enum) ? <Select id={fieldId} value={value === undefined ? '' : JSON.stringify(value)} disabled={disabled} required={required.includes(name)} onValueChange={(selectedValue) => update(selectedValue === '' ? undefined : JSON.parse(selectedValue))}>
         <option value="">{t('plugins.unset', 'Not set')}</option>
         {field.enum.map((option) => <option key={JSON.stringify(option)} value={JSON.stringify(option)}>{String(option)}</option>)}
-      </Select> : type === 'boolean' ? <Select id={fieldId} value={value === undefined ? '' : String(value)} disabled={disabled} required={required.includes(name)} onChange={(event) => update(event.target.value === '' ? undefined : event.target.value === 'true')}>
+      </Select> : type === 'boolean' ? <Select id={fieldId} value={value === undefined ? '' : String(value)} disabled={disabled} required={required.includes(name)} onValueChange={(selectedValue) => update(selectedValue === '' ? undefined : selectedValue === 'true')}>
         <option value="">{t('plugins.unset', 'Not set')}</option><option value="true">{t('plugins.yes', 'Yes')}</option><option value="false">{t('plugins.no', 'No')}</option>
       </Select> : <Input id={fieldId} type={type === 'string' ? 'text' : 'number'} value={typeof value === 'string' || typeof value === 'number' ? value : ''} disabled={disabled}
         required={required.includes(name)} step={type === 'integer' ? 1 : 'any'}

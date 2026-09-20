@@ -1,3 +1,4 @@
+import { Select as DesignedSelect } from '../common/Select';
 import { useMemo, useState } from 'react';
 import styled from 'styled-components';
 import { FiChevronRight } from 'react-icons/fi';
@@ -62,7 +63,7 @@ const FilterBar = styled.div`
   padding: 0 2px;
 `;
 
-const FilterSelect = styled.select`
+const FilterSelect = styled(DesignedSelect)`
   background: ${({ theme }) => theme.colors.surfaceHover};
   color: ${({ theme }) => theme.colors.text};
   border: 1px solid ${({ theme }) => theme.colors.border};
@@ -482,7 +483,7 @@ export function TracesTab() {
       <FilterBar>
         <FilterSelect
           value={taskKindFilter}
-          onChange={(e) => setTaskKindFilter(e.target.value)}
+          onValueChange={(selectedValue) => setTaskKindFilter(selectedValue)}
           aria-label={t('observability.traces.filterByTaskKind', 'Filter by task kind')}
         >
           <option value="all">{t('observability.traces.allKinds', 'All kinds')}</option>
@@ -492,7 +493,7 @@ export function TracesTab() {
         </FilterSelect>
         <FilterSelect
           value={modelFilter}
-          onChange={(e) => setModelFilter(e.target.value)}
+          onValueChange={(selectedValue) => setModelFilter(selectedValue)}
           aria-label={t('observability.traces.filterByModel', 'Filter by model')}
           disabled={availableModels.length === 0}
         >
@@ -503,7 +504,7 @@ export function TracesTab() {
         </FilterSelect>
         <FilterSelect
           value={sourceNodeFilter}
-          onChange={(e) => setSourceNodeFilter(e.target.value)}
+          onValueChange={(selectedValue) => setSourceNodeFilter(selectedValue)}
           aria-label={t('observability.traces.filterBySourceNode', 'Filter by source node')}
           disabled={availableSourceNodes.length === 0}
         >

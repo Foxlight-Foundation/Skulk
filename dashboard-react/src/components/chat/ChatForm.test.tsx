@@ -434,17 +434,14 @@ describe('ChatForm speech controls', () => {
       onSelectedVoiceChange,
     });
 
-    const voiceSelect = container?.querySelector<HTMLSelectElement>('[aria-label="Voice"]');
-    expect(voiceSelect?.value).toBe('');
-    expect([...voiceSelect!.options].map((option) => option.textContent)).toEqual([
-      'Auto (match language)',
-      'Serena (zh)',
-      'Ryan (en)',
+    const voiceSelect = container!.querySelector<HTMLButtonElement>('[aria-label="Voice"]')!;
+    expect(voiceSelect.textContent).toContain('Auto (match language)');
+    await act(async () => { await userEvent.click(voiceSelect); });
+    const options = [...document.querySelectorAll<HTMLElement>('[role="option"]')];
+    expect(options.map(option => option.textContent)).toEqual([
+      'Auto (match language)', 'Serena (zh)', 'Ryan (en)',
     ]);
-
-    await act(async () => {
-      await userEvent.selectOptions(voiceSelect!, 'ryan');
-    });
+    await act(async () => { await userEvent.click(options[2]); });
     expect(onSelectedVoiceChange).toHaveBeenCalledWith('ryan');
   });
 

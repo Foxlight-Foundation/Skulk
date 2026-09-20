@@ -1,3 +1,4 @@
+import { Select as DesignedSelect } from '../common/Select';
 import { createPortal } from 'react-dom';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { QRCodeCanvas } from 'qrcode.react';
@@ -71,7 +72,7 @@ const Control = styled.label`
   color: ${({ theme }) => theme.colors.body};
 `;
 
-const Select = styled.select`
+const Select = styled(DesignedSelect)`
   box-sizing: border-box;
   height: 34px;
   width: 100%;
@@ -372,7 +373,7 @@ export function PairingSettings({ invitationHost }: { invitationHost?: HTMLEleme
               <Select
                 aria-label={t('settings.pairing.validFor', 'Valid for')}
                 value={validForSeconds}
-                onChange={(event) => setValidForSeconds(Number(event.target.value))}
+                onValueChange={(selectedValue) => setValidForSeconds(Number(selectedValue))}
               >
                 {invitationLifetimeOptions.map((seconds) => (
                   <option key={seconds} value={seconds}>
@@ -386,7 +387,7 @@ export function PairingSettings({ invitationHost }: { invitationHost?: HTMLEleme
               <Select
                 aria-label={t('settings.pairing.devicesAllowed', 'Devices')}
                 value={maxPairings}
-                onChange={(event) => setMaxPairings(Number(event.target.value))}
+                onValueChange={(selectedValue) => setMaxPairings(Number(selectedValue))}
               >
                 {Array.from({ length: 20 }, (_, index) => index + 1).map((count) => (
                   <option key={count} value={count}>

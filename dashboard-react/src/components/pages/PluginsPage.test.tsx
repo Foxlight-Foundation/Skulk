@@ -36,18 +36,18 @@ async function click(label: string) {
   await act(async () => { button(label).click(); });
 }
 async function choose(value: string) {
+  await act(async () => { host.querySelector<HTMLButtonElement>('[aria-haspopup="listbox"]')!.click(); });
   await act(async () => {
-    const select = host.querySelector('select');
-    if (!select) throw new Error('Missing region field');
-    select.value = JSON.stringify(value);
-    select.dispatchEvent(new Event('change', { bubbles: true }));
+    const option = [...document.querySelectorAll<HTMLButtonElement>('[role="option"]')].find(option => option.textContent === value);
+    if (!option) throw new Error('Missing region option');
+    option.click();
   });
 }
 async function ready() {
   await act(async () => { await vi.waitFor(() => expect(host.textContent).toContain('test.bundle')); });
   await click('Configure');
   await click('Configure');
-  await act(async () => { await vi.waitFor(() => expect(host.querySelector('select')).not.toBeNull()); });
+  await act(async () => { await vi.waitFor(() => expect(host.querySelector('[aria-haspopup="listbox"]')).not.toBeNull()); });
 }
 
 beforeEach(async () => {
@@ -103,10 +103,10 @@ it('preserves a rejected draft and fetches a fresh revision before subsequent ed
   configuration = { ...configuration, revision: 1, values: { region: 'north' } };
   await click('Save settings');
   await act(async () => { await vi.waitFor(() => expect(host.textContent).toContain('The change was refused')); });
-  expect(host.querySelector('select')?.value).toBe('"west"');
+  expect(host.querySelector('[aria-haspopup="listbox"]')?.textContent).toBe('west');
   const previousReads = reads;
   await click('Reload settings');
-  await act(async () => { await vi.waitFor(() => expect(host.querySelector('select')?.value).toBe('"north"')); });
+  await act(async () => { await vi.waitFor(() => expect(host.querySelector('[aria-haspopup="listbox"]')?.textContent).toBe('north')); });
   expect(reads).toBeGreaterThan(previousReads);
   await choose('east');
   await click('Save settings');
@@ -119,6 +119,6 @@ it('preserves unsaved values when reloading fails', async () => {
   failRead = true;
   await click('Reload settings');
   await act(async () => { await vi.waitFor(() => expect(host.textContent).toContain('Your draft is preserved')); });
-  expect(host.querySelector('select')?.value).toBe('"west"');
+  expect(host.querySelector('[aria-haspopup="listbox"]')?.textContent).toBe('west');
   expect(mutations).toEqual([]);
 });

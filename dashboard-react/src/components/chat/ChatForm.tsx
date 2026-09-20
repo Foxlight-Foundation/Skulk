@@ -1,3 +1,4 @@
+import { Select as DesignedSelect } from '../common/Select';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { MOBILE_BREAKPOINT_PX } from '../../hooks/useMediaQuery';
 import styled, { css } from 'styled-components';
@@ -174,7 +175,7 @@ const VoiceLabel = styled.span`
   font-size: ${({ theme }) => theme.fontSizes.xs};
 `;
 
-const VoiceSelect = styled.select`
+const VoiceSelect = styled(DesignedSelect)`
   appearance: none;
   min-width: 96px;
   max-width: 180px;
@@ -1162,7 +1163,7 @@ export function ChatForm({
             <VoiceSelect
               value={selectedTranscriptionId ?? ''}
               disabled={transcriptionModels.length === 0 || isStartingRecording || isRecording || isTranscribing}
-              onChange={(event) => onSelectTranscriptionModel?.(event.target.value || null)}
+              onValueChange={(selectedValue) => onSelectTranscriptionModel?.(selectedValue || null)}
               aria-label={t('chat.form.selectTranscriptionModel', 'Select transcription model')}
             >
               {transcriptionModels.length === 0 ? (
@@ -1249,7 +1250,7 @@ export function ChatForm({
               <VoiceSelect
                 value={selectedSpeechId ?? ''}
                 disabled={speechModels.length === 0}
-                onChange={(event) => onSelectSpeechModel?.(event.target.value || null)}
+                onValueChange={(selectedValue) => onSelectSpeechModel?.(selectedValue || null)}
                 aria-label={t('chat.form.selectSpeechModel', 'Select speech model')}
               >
                 {speechModels.length === 0 ? (
@@ -1269,7 +1270,7 @@ export function ChatForm({
                 <VoiceSelect
                   value={voiceOptions.some((voice) => voice.id === selectedVoice) ? selectedVoice ?? '' : ''}
                   disabled={isVoiceCatalogLoading}
-                  onChange={(event) => onSelectedVoiceChange?.(event.target.value || null)}
+                  onValueChange={(selectedValue) => onSelectedVoiceChange?.(selectedValue || null)}
                   aria-label={t('chat.form.voiceName', 'Voice')}
                 >
                   <option value="">

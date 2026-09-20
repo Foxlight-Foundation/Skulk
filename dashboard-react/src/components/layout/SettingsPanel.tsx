@@ -1,3 +1,4 @@
+import { Select as DesignedSelect } from '../common/Select';
 import { Toggle } from '../common/Toggle';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import styled from 'styled-components';
@@ -103,7 +104,7 @@ const StyledField = styled(Field)`
   min-width: 0;
 `;
 
-const Select = styled.select`
+const Select = styled(DesignedSelect)`
   width: 100%;
   box-sizing: border-box;
   background: ${({ theme }) => theme.colors.surfaceHover};
@@ -508,7 +509,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                 }
               />
             </FieldLabel>
-            <Select value={kvBackend} onChange={(e) => setKvBackend(e.target.value)} disabled={!!envOverride}>
+            <Select aria-label={t('settings.inference.kvCacheBackend', 'KV Cache Backend')} value={kvBackend} onValueChange={(selectedValue) => setKvBackend(selectedValue)} disabled={!!envOverride}>
               <option value="default">{t('settings.inference.defaultOption', 'Default (no quantization)')}</option>
               <option value="optiq">{t('settings.inference.optiqOption', 'OptiQ (rotation-based)')}</option>
               <option value="turboquant_adaptive">{t('settings.inference.turboquantAdaptiveOption', 'TurboQuant Adaptive')}</option>

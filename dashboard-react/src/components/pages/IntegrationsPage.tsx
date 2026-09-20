@@ -1,3 +1,4 @@
+import { ReadyModelSelect } from '../chat/ReadyModelSelect';
 import { Monogram } from '../common/Surfaces';
 import { Button } from '../common/Button';
 import { IntegrationSetupStep } from '../integrations/IntegrationSetupStep';
@@ -167,7 +168,7 @@ const ControlLabel = styled.span`
   color: ${({ theme }) => theme.colors.subtleText};
 `;
 
-const Select = styled.select`
+const ModelSelect = styled(ReadyModelSelect)`
   background: ${({ theme }) => theme.colors.surface};
   border: 1px solid ${({ theme }) => theme.colors.borderControl};
   border-radius: 8px;
@@ -288,12 +289,6 @@ const EmptyNotice = styled.div`
   color: ${({ theme }) => theme.colors.subtleText};
   line-height: 1.5;
 `;
-
-/** Shortens a long model id for a dropdown option without losing the tail. */
-function shortModelLabel(modelId: string): string {
-  const tail = modelId.split('/').pop() ?? modelId;
-  return tail.length > 46 ? `${tail.slice(0, 43)}...` : tail;
-}
 
 /** One snippet card with its own copy affordance. */
 function SnippetCard({ snippet }: { snippet: IntegrationSnippet }) {
@@ -524,42 +519,21 @@ export function IntegrationsPage({ readyInstances }: IntegrationsPageProps) {
             <>
               <ControlBlock>
                 <ControlLabel>{t('integrations.tier.opus', 'Opus')}</ControlLabel>
-                <Select
-                  value={options.opusModelId}
-                  onChange={event => setOpusOverride(event.target.value)}
-                >
-                  {models.map(model => (
-                    <option key={model.id} value={model.id}>
-                      {shortModelLabel(model.id)}
-                    </option>
-                  ))}
-                </Select>
+                <ModelSelect placement="bottom-start" value={options.opusModelId} onChange={setOpusOverride}
+                  ariaLabel={t('integrations.tier.opus', 'Opus')}
+                  models={models.map(model => ({ modelId: model.id }))} fabricEnabled={false} />
               </ControlBlock>
               <ControlBlock>
                 <ControlLabel>{t('integrations.tier.sonnet', 'Sonnet')}</ControlLabel>
-                <Select
-                  value={options.sonnetModelId}
-                  onChange={event => setSonnetOverride(event.target.value)}
-                >
-                  {models.map(model => (
-                    <option key={model.id} value={model.id}>
-                      {shortModelLabel(model.id)}
-                    </option>
-                  ))}
-                </Select>
+                <ModelSelect placement="bottom-start" value={options.sonnetModelId} onChange={setSonnetOverride}
+                  ariaLabel={t('integrations.tier.sonnet', 'Sonnet')}
+                  models={models.map(model => ({ modelId: model.id }))} fabricEnabled={false} />
               </ControlBlock>
               <ControlBlock>
                 <ControlLabel>{t('integrations.tier.haiku', 'Haiku')}</ControlLabel>
-                <Select
-                  value={options.haikuModelId}
-                  onChange={event => setHaikuOverride(event.target.value)}
-                >
-                  {models.map(model => (
-                    <option key={model.id} value={model.id}>
-                      {shortModelLabel(model.id)}
-                    </option>
-                  ))}
-                </Select>
+                <ModelSelect placement="bottom-start" value={options.haikuModelId} onChange={setHaikuOverride}
+                  ariaLabel={t('integrations.tier.haiku', 'Haiku')}
+                  models={models.map(model => ({ modelId: model.id }))} fabricEnabled={false} />
               </ControlBlock>
             </>
           )}
@@ -567,16 +541,9 @@ export function IntegrationsPage({ readyInstances }: IntegrationsPageProps) {
           {tool.usesSingleModelChooser && hasModels && (
             <ControlBlock>
               <ControlLabel>{t('integrations.model', 'Model')}</ControlLabel>
-              <Select
-                value={options.selectedModelId}
-                onChange={event => setSelectedOverride(event.target.value)}
-              >
-                {models.map(model => (
-                  <option key={model.id} value={model.id}>
-                    {shortModelLabel(model.id)}
-                  </option>
-                ))}
-              </Select>
+              <ModelSelect placement="bottom-start" value={options.selectedModelId} onChange={setSelectedOverride}
+                  ariaLabel={t('integrations.model', 'Model')}
+                  models={models.map(model => ({ modelId: model.id }))} fabricEnabled={false} />
             </ControlBlock>
           )}
 
