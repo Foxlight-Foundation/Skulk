@@ -18,6 +18,8 @@ import { MAX_REFERENCE_AUDIO_BYTES } from '../../audio/speechSynthesisRequest';
 export interface ChatFormProps {
   /** Fabric conversation uses the reference amber composer treatment. */
   steward?: boolean;
+  /** Compact drawer composer omits decorative chrome and unavailable attachments. */
+  compact?: boolean;
   /** Optional owner-controlled draft, preserved across presentation changes. */
   draft?: string;
   /** Updates the owner-controlled draft. */
@@ -192,6 +194,7 @@ const VoiceSelect = styled.select`
   padding: 0 8px;
 
   &:focus {
+    outline: none;
     border-color: ${({ theme }) => theme.colors.goldDim};
   }
 
@@ -218,6 +221,7 @@ const VoiceInput = styled.input`
   padding: 0 8px;
 
   &:focus {
+    outline: none;
     border-color: ${({ theme }) => theme.colors.goldDim};
   }
 
@@ -369,6 +373,9 @@ const TextArea = styled.textarea`
   resize: none;
   line-height: 1.5;
 
+  /* The composer frame supplies the focus indication around the whole control. */
+  &:focus-visible { outline: none; }
+
   &::placeholder { color: ${({ theme }) => theme.colors.subtleText}; }
 `;
 
@@ -419,6 +426,7 @@ function isLocalBrowserHostname(hostname: string): boolean {
 
 export function ChatForm({
   steward = false,
+  compact = false,
   draft,
   onDraftChange,
   onSend,
@@ -1127,7 +1135,7 @@ export function ChatForm({
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
-      <AccentLine />
+      {!compact && <AccentLine />}
 
       {isDragOver && <DragOverlay>{t('chat.form.dropFilesHere', 'Drop files here')}</DragOverlay>}
 
@@ -1418,7 +1426,7 @@ export function ChatForm({
 
       {/* Input row */}
       <InputRow>
-        <AttachBtn
+        {(!compact || supportsImageAttachments) && <AttachBtn
           variant="ghost"
           size="sm"
           icon
@@ -1428,8 +1436,8 @@ export function ChatForm({
           aria-label={t('chat.form.attachFile', 'Attach file')}
         >
           <FiPaperclip size={17} />
-        </AttachBtn>
-        <Prompt>▶</Prompt>
+        </AttachBtn>}
+        {!compact && <Prompt>▶</Prompt>}
         <TextArea
           ref={textareaRef}
           value={message}
@@ -1468,15 +1476,15 @@ export function ChatForm({
         )}
       </InputRow>
 
-      <BottomAccentLine />
-      <HelperText>
+      {!compact && <BottomAccentLine />}
+      {!compact && <HelperText>
         {supportsImageAttachments
           ? t(
               'chat.form.helperWithImages',
               'Enter to send - Shift+Enter for new line - Drag & drop images',
             )
           : t('chat.form.helper', 'Enter to send - Shift+Enter for new line')}
-      </HelperText>
+      </HelperText>}
 
       {/* Hidden file input */}
       <input

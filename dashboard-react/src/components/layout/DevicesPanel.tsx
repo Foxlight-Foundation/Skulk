@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import styled from 'styled-components';
-import { FiSmartphone } from 'react-icons/fi';
+import { FiSearch, FiSmartphone } from 'react-icons/fi';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 import { useGetOperatorDevicesQuery, useRevokeOperatorDeviceMutation, type OperatorDevice } from '../../store/endpoints/devices';
 import { pairingInvitationQueryErrorDetail } from '../../store/endpoints/pairing';
@@ -15,7 +15,7 @@ const Content = styled.div`
 `;
 const Columns = styled.div`
   display: grid; grid-template-columns: minmax(0, 1fr) 280px; min-height: 100%;
-  @container (max-width: 620px) { grid-template-columns: minmax(0, 1fr); }
+  @container (max-width: 620px) { grid-template-columns: minmax(0, 1fr); min-height: 0; }
 `;
 const Column = styled.section`
   min-width: 0; padding: 20px; display: flex; flex-direction: column; gap: 16px;
@@ -24,13 +24,24 @@ const Column = styled.section`
   @container (max-width: 620px) { padding: 16px; &:first-child { border-right: 0; border-bottom: 1px solid ${({ theme }) => theme.colors.border}; } }
 `;
 const Row = styled.article`
-  padding: 11px 0; border-bottom: 1px solid ${({ theme }) => theme.colors.borderLight};
+  padding: 11px 14px;
+  & + & { border-top: 1px solid ${({ theme }) => theme.colors.borderLight}; }
   display: grid; grid-template-columns: 32px minmax(0, 1fr) auto; gap: 12px; align-items: center;
   > svg { flex-shrink: 0; width: 32px; height: 32px; padding: 6px; border-radius: 8px; background: ${({ theme }) => theme.colors.selected}; }
 `;
-const Detail = styled.div`min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 6px; overflow-wrap: anywhere;
+const Detail = styled.div`min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 4px; overflow-wrap: anywhere;
   strong { font-size: 14px; font-weight: 600; }`;
-const Meta = styled.p`margin: 0; font: 11.5px ${({ theme }) => theme.fonts.mono}; color: ${({ theme }) => theme.colors.subtleText}; line-height: 1.5;`;
+const Meta = styled.p`margin: 0; font: 11.5px ${({ theme }) => theme.fonts.mono}; color: ${({ theme }) => theme.colors.metadataText}; line-height: 1.5;`;
+const DeviceList = styled.div`
+  border: 1px solid ${({ theme }) => theme.colors.border}; border-radius: 12px;
+  background: ${({ theme }) => theme.colors.surface}; overflow: hidden;
+`;
+const DeviceHeading = styled.div`
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+  > span { font-size: 10px; padding: 1px 6px; }
+`;
+const DeviceMetadata = styled(Meta)`overflow: hidden; text-overflow: ellipsis; white-space: nowrap;`;
+const SearchField = styled(Field)`background: ${({ theme }) => theme.colors.surface};`;
 const Actions = styled.div`display: flex; gap: 8px; flex-wrap: wrap;`;
 
 /** Safe device inventory row with explicit confirmation before immediate revocation. */
@@ -40,9 +51,9 @@ export function DeviceRow({ device, busy, onRevoke }: { device: OperatorDevice; 
   return <Row>
     <FiSmartphone size={24} aria-hidden="true" />
     <Detail>
-      <strong>{device.name}</strong>
-      <StatusPill tone={device.state === 'revoked' ? 'danger' : 'neutral'}>{device.state === 'revoked' ? t('devices.revoked', 'Revoked') : t('devices.paired', 'Paired')}{device.current ? ` · ${t('devices.thisDevice', 'This device')}` : ''}</StatusPill>
-      <Meta>{device.deviceId}</Meta>
+      <DeviceHeading><strong>{device.name}</strong>
+      <StatusPill tone={device.state === 'revoked' ? 'danger' : 'neutral'}>{device.state === 'revoked' ? t('devices.revoked', 'Revoked') : t('devices.paired', 'Paired')}{device.current ? ` · ${t('devices.thisDevice', 'This device')}` : ''}</StatusPill></DeviceHeading>
+      <DeviceMetadata title={device.deviceId}>{device.deviceId}</DeviceMetadata>
       <Meta>{t('devices.pairedAt', 'Paired {date}', { date: new Date(device.pairedAt).toLocaleDateString() })}</Meta>
       {device.state === 'active' && confirming && <>
         <Meta>{device.current ? t('devices.confirmCurrent', 'Revoking this device ends your current session.') : t('devices.confirmRevoke', 'This device will need a new invitation to reconnect.')}</Meta>
@@ -71,14 +82,14 @@ export function DevicesPanel() {
   const filtered = devices.data?.devices.filter(device => `${device.name} ${device.deviceId}`.toLocaleLowerCase().includes(search.toLocaleLowerCase())) ?? [];
   return <Content><Columns>
     <Column aria-label={t('devices.pairedDevices', 'Paired devices')}>
+      <SearchField icon={<FiSearch size={14} />} aria-label={t('devices.search', 'Search devices')} placeholder={t('devices.search', 'Search devices')} value={search} onChange={event => setSearch(event.target.value)} />
+      <Meta style={{ fontFamily: 'inherit', fontSize: 12 }}>{t('devices.stateHint', 'Pairing grants access; it does not indicate whether a device is online.')}</Meta>
       <SectionLabel>{t('devices.pairedDevices', 'Paired devices')}</SectionLabel>
-      <Field aria-label={t('devices.search', 'Search devices')} placeholder={t('devices.search', 'Search devices')} value={search} onChange={event => setSearch(event.target.value)} />
-      <Meta>{t('devices.stateHint', 'Pairing grants access; it does not indicate whether a device is online.')}</Meta>
       {devices.isLoading && <Meta role="status">{t('devices.loading', 'Loading devices…')}</Meta>}
       {devices.isError && <><Meta role="alert">{pairingInvitationQueryErrorDetail(devices.error) ?? t('devices.unavailable', 'Device inventory is unavailable.')}</Meta><Button onClick={() => devices.refetch()}>{t('common.retry', 'Retry')}</Button></>}
       {failure && <Meta role="alert">{failure}</Meta>}
       {!devices.isLoading && !devices.isError && filtered.length === 0 && <Meta>{t('devices.empty', 'No devices found.')}</Meta>}
-      {filtered.map(device => <DeviceRow key={device.deviceId} device={device} busy={revocation.isLoading} onRevoke={() => void onRevoke(device)} />)}
+      {filtered.length > 0 && <DeviceList>{filtered.map(device => <DeviceRow key={device.deviceId} device={device} busy={revocation.isLoading} onRevoke={() => void onRevoke(device)} />)}</DeviceList>}
       <div ref={setInvitationHost} />
     </Column>
     <Column><PairingSettings invitationHost={invitationHost} /></Column>

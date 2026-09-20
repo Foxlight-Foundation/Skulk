@@ -16,12 +16,13 @@ const Narrow = styled.div`max-width: 412px; width: 100%;`;
 
 /** Domain specimens use inert callbacks, never cluster operations. */
 function DomainGallery() {
+  const [draft, setDraft] = useState('');
   const [model, setModel] = useState('skulk/steward');
   return <Gallery>
     <GalleryHeader title="Domain components">Steward, integrations, plugins and devices. These are the production components with fictional evidence; requests cannot reach a real cluster.</GalleryHeader>
-    <GallerySection title="Steward"><SpecimenGrid><Specimen style={{ gridColumn: '1 / -1' }}><SpecimenLabel>Cluster entry · 640×48 · opens without submitting</SpecimenLabel>
+    <GallerySection title="Steward"><SpecimenGrid><Specimen style={{ gridColumn: '1 / -1' }}><SpecimenLabel>Cluster entry · 640×48 · type in place · send opens Steward</SpecimenLabel>
 
-    <StewardPrompt onOpen={() => {}} />
+    <StewardPrompt draft={draft} onDraftChange={setDraft} onSubmit={() => setDraft('')} />
     <SpecimenLabel>Chat · fabric / ready models</SpecimenLabel><ReadyModelSelect value={model} onChange={setModel} fabricEnabled models={[{ modelId: 'example/Local-chat-model' }]} /></Specimen>
     <Specimen><SpecimenLabel>Proposal · pending approval · drawer width</SpecimenLabel><Narrow>
     <StewardProposalCard busy={false} onDecision={() => {}} proposal={{ proposal_id: 'fixture-proposal', action: 'restart_model', target: 'example/model', rationale: 'The model stopped responding to health probes.', evidence: ['Three unsuccessful health probes were observed.'], expected_effect: 'Restart the selected instance.', created_at: '2026-01-01T12:00:00Z', expires_at: '2026-01-01T12:05:00Z', status: 'pending', decided_at: null, decided_by: null, outcome: null }} />

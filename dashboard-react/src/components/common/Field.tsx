@@ -71,6 +71,9 @@ const Input = styled.input`
   color: inherit;
   font: inherit;
 
+  /* The wrapper owns the focus ring; an input outline would cut through it. */
+  &:focus-visible { outline: none; }
+
   &::placeholder {
     color: ${({ theme }) => theme.colors.subtleText};
   }

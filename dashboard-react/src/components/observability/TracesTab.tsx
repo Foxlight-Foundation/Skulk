@@ -75,6 +75,7 @@ const FilterSelect = styled.select`
   max-width: 180px;
 
   &:focus {
+    outline: none;
     border-color: ${({ theme }) => theme.colors.goldDim};
   }
 `;
@@ -92,6 +93,7 @@ const FilterInput = styled.input`
   min-width: 100px;
 
   &:focus {
+    outline: none;
     border-color: ${({ theme }) => theme.colors.goldDim};
   }
 `;

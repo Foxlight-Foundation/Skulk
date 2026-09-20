@@ -32,27 +32,28 @@ const Panel = styled.div`
 const Header = styled.div`
   display: flex;
   align-items: baseline;
+  flex-wrap: wrap;
   gap: 8px;
 `;
 
+// Vendor badges are the design system's explicit brand-color exception.
+// NVIDIA uses the existing darker green so its small white label stays legible.
 const VENDOR_COLORS: Record<string, string> = {
-  amd: '#d32f2f',
   nvidia: '#5a8a00',
-  apple: '#6e6e73',
+  amd: '#ed1c24',
   intel: '#0068b5',
 };
 
-const VendorPill = styled.span<{ $vendor?: string }>`
+const VendorPill = styled.span<{ $vendor: string }>`
   font-size: 10px;
-  font-weight: 700;
+  font-weight: 600;
+  font-family: ${({ theme }) => theme.fonts.mono};
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  padding: 1px 6px;
-  border-radius: 4px;
-  /* Self-contained palette (not theme tokens) so the badge stays legible on
-     any background and never collapses to one-color-on-itself. */
-  color: #fff;
-  background: ${({ $vendor }) => VENDOR_COLORS[$vendor ?? ''] ?? '#555'};
+  padding: 2px 6px;
+  border-radius: ${({ theme }) => theme.radii.sm};
+  color: ${({ theme, $vendor }) => VENDOR_COLORS[$vendor] ? '#fff' : theme.colors.bg};
+  background: ${({ theme, $vendor }) => VENDOR_COLORS[$vendor] ?? theme.colors.text};
 `;
 
 const Name = styled.span`
@@ -63,6 +64,8 @@ const Name = styled.span`
 const Row = styled.div`
   display: flex;
   justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
   font-size: 12px;
 `;
 
@@ -71,7 +74,7 @@ const Key = styled.div`
 `;
 
 const Value = styled.div`
-  font-family: 'SF Mono', Monaco, monospace;
+  font-family: ${({ theme }) => theme.fonts.mono};
   color: ${({ theme }) => theme.colors.text};
 `;
 

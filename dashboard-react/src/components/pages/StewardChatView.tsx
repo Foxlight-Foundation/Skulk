@@ -1,3 +1,4 @@
+import { StewardPrompt } from '../steward/StewardPrompt';
 import { StewardProposalCard } from '../steward/StewardProposalCard';
 import { createContext, useContext, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import styled from 'styled-components';
@@ -68,9 +69,18 @@ const MessagesScroll = styled.div`
   min-height: 0;
 `;
 
-const InputArea = styled.div`
+const InputArea = styled.div<{ $drawer: boolean }>`
   flex-shrink: 0;
-  padding: 12px 24px 16px;
+  padding: ${({ $drawer }) => $drawer ? '12px 18px 14px' : '12px 24px 16px'};
+  border-top: 1px solid ${({ theme, $drawer }) => $drawer ? theme.colors.borderLight : 'transparent'};
+`;
+
+const ApprovalNote = styled.p`
+  margin: 8px 0 0;
+  font-size: 11px;
+  line-height: 1.4;
+  text-align: center;
+  color: ${({ theme }) => theme.colors.metadataText};
 `;
 
 const CenterState = styled.div`
@@ -486,7 +496,14 @@ function useStewardController({ readyInstances = EMPTY_INSTANCES }: StewardChatV
     queue.finish();
   }, [createSpeechQueue]);
 
-  return { draft, setDraft, status, messages, isLoading,
+  const submitDraft = () => {
+    if (!draft.trim() || !status?.enabled || !status.present || !status.ready || abortRef.current) return false;
+    void handleSend(draft);
+    setDraft('');
+    return true;
+  };
+
+  return { draft, setDraft, submitDraft, status, messages, isLoading,
     streamingContent: requestConversationRef.current === conversationId ? streamingContent : null,
     streamingThinking: requestConversationRef.current === conversationId ? streamingThinking : null,
     pendingProposals, isDecidingProposal, handleProposalDecision, handleSend, handleCancel,
@@ -499,6 +516,16 @@ const StewardContext = createContext<ReturnType<typeof useStewardController> | n
 export function StewardControllerProvider({ children, readyInstances }: StewardChatViewProps & { children: ReactNode }) {
   const controller = useStewardController({ readyInstances });
   return <StewardContext.Provider value={controller}>{children}</StewardContext.Provider>;
+}
+
+/** Send the cluster prompt through the existing conversation owner before opening its drawer. */
+export function StewardClusterPrompt({ onOpen }: { onOpen: () => void }) {
+  const controller = useContext(StewardContext);
+  if (!controller) return null;
+  const { draft, setDraft, submitDraft, status, isLoading } = controller;
+  return <StewardPrompt draft={draft} onDraftChange={setDraft}
+    disabled={!status?.enabled || !status.present || !status.ready || isLoading}
+    onSubmit={() => { if (submitDraft()) onOpen(); }} />;
 }
 
 /** Use the app controller, or an isolated owner for standalone embeds and stories. */
@@ -616,8 +643,11 @@ function StewardPresentation({ controller, presentation = 'page' }: { controller
           />
         )}
       </MessagesScroll>
-      <InputArea>
+      <InputArea $drawer={presentation === 'drawer'}>
+        {/* The drawer owns initial focus so it can capture and restore the opener. */}
         <ChatForm
+          autoFocus={presentation !== 'drawer'}
+          compact={presentation === 'drawer'}
           steward
           draft={draft}
           onDraftChange={setDraft}
@@ -641,6 +671,7 @@ function StewardPresentation({ controller, presentation = 'page' }: { controller
           voiceError={speechError}
           placeholder={t('stewardChat.placeholder', 'Ask about the cluster...')}
         />
+        {presentation === 'drawer' && <ApprovalNote>{t('stewardChat.approvalNote', 'Review proposed actions before approving them.')}</ApprovalNote>}
       </InputArea>
     </Container>
   );

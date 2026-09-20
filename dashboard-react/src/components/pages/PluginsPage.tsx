@@ -113,29 +113,32 @@ function PluginInventory() {
     if (category === 'healthy' || category === 'attention' || category === 'uninstalled') counts[category] += 1;
   }
   counts.all += query.data?.filter(plugin => !runtimes.data?.installations.some(runtime => runtime.plugin_id === plugin.pluginId)).length ?? 0;
+  const inventoryKnown = !!runtimes.data && !runtimes.error && !!query.data && !query.error;
   return <>
     <ManagedRuntimesPanel renderHeader={registrationAction => <>
       <PageHeading><div>    <h1>{t('plugins.title', 'Plugins')}</h1>
-    <p>{t('plugins.intro', 'Manage the settings of capability nodes installed on this Skulk host.')}</p>
-    <p>{t('plugins.inventoryCount', '{count} managed · {healthy} healthy', { count: runtimes.data?.installations.length ?? 0, healthy: runtimes.data?.installations.filter(runtime => derivePluginHealth(runtime, query.data?.find(plugin => plugin.pluginId === runtime.plugin_id), !!runtimes.error || !!query.error) === 'healthy').length ?? 0 })}</p>
+    <p>{t('plugins.introReference', 'Capability runtimes installed on this host.')} {' '}
+      {inventoryKnown ? t('plugins.inventorySummary', '{count} installed · {healthy} healthy.', { count: counts.all - counts.uninstalled, healthy: counts.healthy })
+        : runtimes.isLoading || query.isLoading ? t('plugins.loadingInventory', 'Loading inventory…') : t('plugins.inventoryUnknown', 'Inventory unavailable.')}
+    </p>
 </div><HeaderActions>
         <AccessButton variant="ghost" size="sm" onClick={() => setAccessOpen(true)}><AccessDot $direct={session.mode === 'direct'} aria-hidden />{session.mode === 'direct' ? t('operator.direct', 'Direct host access') : t('operator.browserAccess', 'Browser access')}</AccessButton>
         {registrationAction}
       </HeaderActions></PageHeading>
       <Filters aria-label={t('plugins.filters', 'Filter plugins')}>
-        {([{ value: 'all', label: t('plugins.all', 'All') }, { value: 'healthy', label: t('plugins.healthy', 'Healthy') }, { value: 'attention', label: t('plugins.needsAttention', 'Needs attention') }, { value: 'uninstalled', label: t('plugins.uninstalled', 'Uninstalled') }] as const).map(option => <FilterButton key={option.value} type="button" $active={filter === option.value} aria-pressed={filter === option.value} onClick={() => setFilter(option.value)}>{option.label} · {counts[option.value]}</FilterButton>)}
+        {([{ value: 'all', label: t('plugins.all', 'All') }, { value: 'healthy', label: t('plugins.healthy', 'Healthy') }, { value: 'attention', label: t('plugins.needsAttention', 'Needs attention') }, { value: 'uninstalled', label: t('plugins.uninstalled', 'Uninstalled') }] as const).map(option => <FilterButton key={option.value} type="button" $active={filter === option.value} aria-pressed={filter === option.value} disabled={!inventoryKnown} onClick={() => setFilter(option.value)}>{option.label}{inventoryKnown ? ` · ${counts[option.value]}` : ''}</FilterButton>)}
       </Filters>
-    </>} filter={filter} nodeEvidence={pluginId => query.error ? undefined : query.data?.find(plugin => plugin.pluginId === pluginId)} nodeNames={pluginId => query.data?.find(plugin => plugin.pluginId === pluginId)?.nodes.map(node => node.bundleId) ?? []}
+    </>} filter={filter} nodeEvidence={pluginId => query.error ? undefined : query.data?.find(plugin => plugin.pluginId === pluginId)} nodeNames={pluginId => query.data?.find(plugin => plugin.pluginId === pluginId)?.nodes.map(node => node.nodeId) ?? []}
       renderDetails={pluginId => query.data?.find(plugin => plugin.pluginId === pluginId)?.nodes.map(node => <NodeCard key={node.nodeId} pluginId={pluginId} node={node} />)} />
-    <Button type="button" disabled={query.isFetching} onClick={() => void query.refetch()}>{t('plugins.refresh', 'Refresh')}</Button>
+    <Button type="button" variant="ghost" size="sm" disabled={query.isFetching || runtimes.isFetching} onClick={() => { void query.refetch(); void runtimes.refetch(); }}>{t('plugins.refresh', 'Refresh')}</Button>
     {query.isLoading ? <p>{t('plugins.loading', 'Loading plugins…')}</p> : null}
     {query.error ? <p role="alert">{t('plugins.accessRequired', 'Plugin management is unavailable. Open the host dashboard through localhost or Tailscale, or use a paired operator with plugin access.')}</p> : null}
-    {query.data?.length === 0 ? <p>{t('plugins.empty', 'No installed plugins expose node settings.')}</p> : null}
+
     <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gap: 16, marginTop: 20 }}>
-    {query.data?.filter(plugin => filter === 'all' && !runtimes.data?.installations.some(runtime => runtime.plugin_id === plugin.pluginId)).map(plugin => <PluginSummaryCard key={plugin.pluginId} name={plugin.pluginId}
+    {query.data?.filter(plugin => filter === 'all' && !runtimes.data?.installations.some(runtime => runtime.plugin_id === plugin.pluginId)).map(plugin => <PluginSummaryCard key={plugin.pluginId} name={plugin.nodes.length === 1 ? plugin.nodes[0].bundleId : plugin.pluginId} pluginId={plugin.pluginId}
       health={query.error || !plugin.available ? t('plugins.unavailable', 'Unavailable') : t('plugins.nodesObserved', 'Nodes observed')}
       tone="neutral" release={Array.from(new Set(plugin.nodes.map(node => node.version))).join(' · ') || t('plugins.noRelease', 'None selected')}
-      nodes={plugin.nodes.map(node => node.bundleId)} onOpen={() => setSelected(plugin.pluginId)} />)}
+      nodes={plugin.nodes.map(node => node.nodeId)} onOpen={() => setSelected(plugin.pluginId)} />)}
     </div>
     <RightDrawer open={accessOpen} onClose={() => setAccessOpen(false)} title={t('operator.browserAccess', 'Browser access')} ariaLabel={t('operator.browserAccess', 'Browser access')} width={width} minWidth={360} maxWidth={900} onWidthChange={setWidth} closeLabel={t('common.close', 'Close')} resizeLabel={t('plugins.resize', 'Resize plugin details')}><OperatorAccessPanel /></RightDrawer>
     <RightDrawer open={selected !== null} onClose={() => setSelected(null)} title={selected ?? ''} ariaLabel={t('plugins.details', 'Plugin details')}
@@ -159,13 +162,14 @@ const PageHeading = styled.div`
   p { font-size: 14px; color: ${({ theme }) => theme.colors.textSecondary}; margin-top: 6px; }
 `;
 const HeaderActions = styled.div`display: flex; align-items: center; gap: 10px; flex-wrap: wrap;`;
-const Filters = styled.div`display: flex; flex-wrap: wrap; gap: 6px; margin: 22px 0 18px;`;
+const Filters = styled.div`display: flex; flex-wrap: wrap; gap: 6px; margin: 22px 0;`;
 const FilterButton = styled.button<{ $active: boolean }>`
   border: 0; border-radius: 999px; padding: 6px 12px; cursor: pointer;
   background: ${({ theme, $active }) => $active ? theme.colors.selected : 'transparent'};
   color: ${({ theme, $active }) => $active ? theme.colors.text : theme.colors.textSecondary};
   font: ${({ $active }) => $active ? 600 : 400} 12.5px ${({ theme }) => theme.fonts.body};
-  &:hover { background: ${({ theme }) => theme.colors.surfaceHover}; }
+  &:disabled { cursor: default; opacity: .6; }
+  &:hover:not(:disabled) { background: ${({ theme }) => theme.colors.surfaceHover}; }
 `;
 const AccessButton = styled(Button)`border: 1px solid ${({ theme }) => theme.colors.border}; border-radius: 999px; font-size: 12px; color: ${({ theme }) => theme.colors.textSecondary};`;
 const AccessDot = styled.span<{ $direct: boolean }>`width: 7px; height: 7px; border-radius: 50%; background: ${({ theme, $direct }) => $direct ? theme.colors.healthy : theme.colors.textMuted};`;

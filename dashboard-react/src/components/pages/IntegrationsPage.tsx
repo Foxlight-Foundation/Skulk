@@ -508,11 +508,11 @@ export function IntegrationsPage({ readyInstances }: IntegrationsPageProps) {
               hermes: 'Agent harness with tool use and memory.', openclaw: 'Autonomous agent runtime.', pi: 'Minimalist assistant CLI.',
               anythingllm: 'Desktop RAG workspace: pairs a chat and an embedding model.', 'open-webui': 'Self-hosted chat UI for the whole cluster.', n8n: 'Workflow automation with LLM nodes.', firefox: 'Sidebar AI chat via about:config.',
             }[entry.id])}
-            method={entry.surface === 'dashboard' ? 'Dashboard' : `${entry.surface} API`}
+            method={`${entry.surface} · ${TOOL_METHODS[entry.id]}`}
             onOpen={() => { setToolId(entry.id); setSnippetId(null); setDetailsOpen(true); }} />)}
         </ToolGrid>
       </div>
-      <RightDrawer open={detailsOpen} onClose={() => setDetailsOpen(false)} title={<ToolIdentity><Monogram as="span" $size={40}>{TOOL_MONOGRAMS[tool.id]}</Monogram><span>{tool.label}<ToolSubtitle>{toolDescription}</ToolSubtitle></span></ToolIdentity>} ariaLabel={tool.label}
+      <RightDrawer open={detailsOpen} onClose={() => setDetailsOpen(false)} title={<ToolIdentity><ToolMark as="span" $size={40}>{TOOL_MONOGRAMS[tool.id]}</ToolMark><span>{tool.label}<ToolSubtitle>{toolDescription}</ToolSubtitle></span></ToolIdentity>} ariaLabel={tool.label}
         width={drawerWidth} minWidth={360} maxWidth={800} onWidthChange={setDrawerWidth}
         closeLabel={t('common.close', 'Close')} resizeLabel={t('integrations.resize', 'Resize integration details')}>
       <DrawerBody>
@@ -617,12 +617,15 @@ const ReadyModels = styled.div`
   display: flex; flex-wrap: wrap; align-items: center; gap: 12px;
 `;
 
+const TOOL_METHODS: Record<IntegrationToolId, string> = { 'claude-code': 'shell or settings.json', opencode: '~/.config/opencode', codex: 'config.toml', hermes: 'env', openclaw: 'config', pi: 'interactive setup', anythingllm: 'docker or app', 'open-webui': 'docker', n8n: 'credential', firefox: 'about:config' };
+
 const TOOL_MONOGRAMS: Record<IntegrationToolId, string> = { 'claude-code': 'CC', opencode: 'OC', codex: 'CX', hermes: 'HM', openclaw: 'OW', pi: 'PI', anythingllm: 'AL', 'open-webui': 'WU', n8n: 'N8', firefox: 'FF' };
 const ToolHeading = styled.div`
   display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 12px;
   h2 { font-size: 16px; font-weight: 600; }
   > span { font-size: 12px; color: ${({ theme }) => theme.colors.subtleText}; }
 `;
+const ToolMark = styled(Monogram)`border: 1px solid ${({ theme }) => theme.colors.border};`;
 const ToolIdentity = styled.span`
   display: flex; align-items: center; gap: 12px; white-space: normal; min-width: 0;
   > span:last-child { min-width: 0; overflow-wrap: anywhere; }

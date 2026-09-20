@@ -1,6 +1,6 @@
 import type { StoreDownloadProgress } from '../layout/StoreRegistryTable';
 import styled, { css, keyframes, useTheme } from 'styled-components';
-import { FiCheck, FiChevronDown, FiDownload, FiStar } from 'react-icons/fi';
+import { FiCheck, FiChevronDown, FiDownload, FiStar, FiShield } from 'react-icons/fi';
 import type { Theme } from '../../theme';
 import type {
   ModelGroup,
@@ -107,7 +107,7 @@ const glowAnim = keyframes`
 
 const GroupContainer = styled.div<{ $downloading: boolean }>`
   flex-shrink: 0;
-  margin: 10px 16px; border: 1px solid ${({ theme }) => theme.colors.border}; border-radius: 12px;
+  margin: 6px 18px; border: 1px solid ${({ theme }) => theme.colors.border}; border-radius: 12px;
   background: ${({ theme }) => theme.colors.surface}; overflow: hidden;
   ${({ $downloading, theme }) => $downloading && css`background: ${theme.colors.liveBg}; border-color: ${theme.colors.borderLive};`}
   @media (max-width: 480px) { margin: 8px; }
@@ -140,12 +140,12 @@ const Identity = styled.div`
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 5px;
 `;
 
 const Name = styled.span`
   button { all: unset; cursor: pointer; font: inherit; color: inherit; }
-  font-size: ${({ theme }) => theme.fontSizes.tableBody};
+  font-size: 15px;
   font-weight: 600;
   color: ${({ theme }) => theme.colors.text};
   white-space: nowrap;
@@ -162,15 +162,17 @@ const MetaLine = styled.div`
   overflow: hidden;
   font-size: ${({ theme }) => theme.fontSizes.xs};
   color: ${({ theme }) => theme.colors.textSecondary};
-  white-space: nowrap;
+  flex-wrap: wrap;
 `;
 
 const MetaText = styled.span`
+  font: 12px ${({ theme }) => theme.fonts.mono};
   overflow: hidden;
   text-overflow: ellipsis;
 `;
 
 const InStoreChip = styled.span`
+  min-height: 30px; box-sizing: border-box;
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -293,6 +295,7 @@ const VariantTags = styled.div`display: flex; flex-wrap: wrap; gap: 5px; align-i
 const VariantActions = styled(VariantTags)`justify-content: flex-end;`;
 
 const ActionArea = styled.div`
+  > button:not([aria-expanded]) { min-width: 96px; }
   display: flex;
   align-items: center;
   gap: 6px;
@@ -483,7 +486,7 @@ export function ModelPickerGroup({
 
         {/* Identity: title + meta line */}
         <Identity>
-          <Name title={singleVariant?.id ?? group.name}>{hasMultipleVariants ? <button type="button" onClick={event => { event.stopPropagation(); onToggleExpand(); }} aria-expanded={isExpanded} aria-label={t('modelPickerGroup.expandGroup', 'Expand {groupName}', { groupName: title })}>{title}</button> : title}</Name>
+          <Name title={singleVariant?.id ?? group.name}>{hasMultipleVariants ? <button type="button" onClick={event => { event.stopPropagation(); onToggleExpand(); }} aria-expanded={isExpanded} aria-label={t('modelPickerGroup.expandGroup', 'Expand {groupName}', { groupName: title })}>{title}</button> : title}{variants.every(variant => variant.catalog_source === 'registry') && <FiShield size={13} color={theme.colors.healthy} aria-label={t('modelInfo.signedRegistry', 'Signed registry')} />}</Name>
           <MetaLine>
             {chips.map((c) => {
               const colors = TAG_COLORS[c];
@@ -497,9 +500,6 @@ export function ModelPickerGroup({
             {uniformFormat && <QuantBadge>{uniformFormat}</QuantBadge>}
             {singleVariant?.quantization && (
               <QuantBadge>{singleVariant.quantization}</QuantBadge>
-            )}
-            {variants.every((variant) => variant.catalog_source === 'registry') && (
-              <RegistryChip>{t('modelInfo.signedRegistry', 'Signed registry')}</RegistryChip>
             )}
             {uniformProvenance && (
               <ProvenanceChip title={t('modelInfo.provenance', 'Provenance')}>
@@ -545,9 +545,7 @@ export function ModelPickerGroup({
           <FiStar size={15} />
         </FavStar>
 
-        {singleVariant && (
-          <HuggingFaceLink repoId={singleVariant.hugging_face_id ?? singleVariant.id} />
-        )}
+        <HuggingFaceLink repoId={group.smallestVariant.hugging_face_id ?? group.smallestVariant.id} />
 
         {/* Info */}
         <span onClick={(e) => e.stopPropagation()} style={{ display: 'flex' }}>
@@ -565,6 +563,7 @@ export function ModelPickerGroup({
           {groupBurst && <BurstChip info={groupBurst} fleetMemoryBytes={fleetMemoryBytes} />}
           {hasMultipleVariants ? (
             <>
+              {!groupDownload && <Button variant="primary" size="sm" onClick={onToggleExpand}><FiDownload size={13} />{t('modelPickerGroup.download', 'Download')}</Button>}
               {groupDownload && inStoreChip}
               {groupDownload && onLaunch && <Button variant="solid" size="sm" onClick={() => onLaunch(groupDownload.id)}>{t('common.launch', 'Launch')}</Button>}
               <Chevron

@@ -1,3 +1,4 @@
+import { FiPlus } from 'react-icons/fi';
 import { derivePluginHealth, type PluginFilter } from './pluginHealth';
 import type { PluginNodes } from '../../store/endpoints/plugins';
 import { useState, type ReactNode } from 'react';
@@ -16,10 +17,17 @@ import { RuntimeReleasePanel } from './RuntimeReleasePanel';
 import { RuntimeSourceForm } from './RuntimeSourceForm';
 
 const RuntimeCard = styled.article`
-  margin: 12px 0; padding: 16px; border: 1px solid ${({ theme }) => theme.colors.border};
+  margin: 0; padding: 24px; border: 1px solid ${({ theme }) => theme.colors.border};
   border-radius: ${({ theme }) => theme.radii.md}; background: ${({ theme }) => theme.colors.surface};
   overflow-wrap: anywhere;
+  border: 0; background: transparent;
+  > h3 { font-size: 16px; margin-bottom: 8px; }
+  > p { font-size: 13px; line-height: 1.55; color: ${({ theme }) => theme.colors.textSecondary}; margin: 8px 0; }
+  > button { margin-top: 16px; }
+  > article { margin: 20px 0; }
+  @media(max-width: 600px) { padding: 20px 16px; }
 `;
+const RuntimeIdentity = styled.p`font-family: ${({ theme }) => theme.fonts.mono};`;
 const Actions = styled.div`display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px;`;
 
 /** Read server-retained operation references; reconnect never submits another mutation. */
@@ -78,6 +86,16 @@ function RuntimeControls({ runtime, unavailable, nodes, details, nodeEvidence, f
       setNotice(t('plugins.runtimeRecoveryFailed', 'Recovery was refused. Check service health and your plugin permissions.'));
     }
   };
+  const disableBlocked = runtime.uninstalled || (!runtime.enabled && !withdrawable) || unavailable || busy || pending || (state === 'recovery_required' && !withdrawable) || (!!submitted && !confirmed);
+  const uninstallBlocked = (runtime.uninstalled && !withdrawable) || (!runtime.selected_digest && !withdrawable) || unavailable || busy || pending || (state === 'recovery_required' && !withdrawable) || (!!submitted && !confirmed);
+  const bundleNames = [...new Set(nodeEvidence?.nodes.map(node => node.bundleId) ?? [])];
+  const name = bundleNames.length === 1 ? bundleNames[0] : runtime.plugin_id;
+  const releaseNote = runtime.stale || unavailable ? t('plugins.releaseUnavailable', 'Release status unavailable') : runtime.uninstalled ? t('plugins.cleanupRetained', 'Cleanup state retained')
+    : runtime.service?.active_digest && runtime.service.active_digest === runtime.selected_digest ? t('plugins.releaseActive', 'Active')
+    : runtime.service?.active_digest ? t('plugins.differentActiveRelease', 'Different release active')
+    : t('plugins.noActiveRelease', 'None active');
+  const openDetails = () => setExpanded(true);
+  const openRelease = () => { setReleaseOpen(true); setExpanded(true); };
   const category = derivePluginHealth(runtime, nodeEvidence, unavailable || !!operation.error, state);
   const health = {
     healthy: t('plugins.healthy', 'Healthy'), attention: t('plugins.needsAttention', 'Needs attention'),
@@ -86,14 +104,23 @@ function RuntimeControls({ runtime, unavailable, nodes, details, nodeEvidence, f
   }[category];
   return <>
     <div hidden={filter !== 'all' && filter !== category}>
-    <PluginSummaryCard name={runtime.plugin_id} health={health} tone={category === 'healthy' ? 'healthy' : category === 'attention' ? 'danger' : category === 'updating' ? 'live' : 'neutral'}
-      release={runtime.selected_digest?.slice(0, 12) ?? t('plugins.noRelease', 'None selected')} nodes={nodes} onOpen={() => setExpanded(true)} />
+    <PluginSummaryCard name={name} pluginId={runtime.plugin_id}
+      description={nodeEvidence?.nodes.length ? t('plugins.nodeCount', 'Installed capability nodes: {count}', { count: nodeEvidence.nodes.length }) : undefined}
+      health={health} tone={category === 'healthy' ? 'healthy' : category === 'attention' ? 'live' : category === 'updating' ? 'live' : 'neutral'}
+      release={runtime.selected_digest?.slice(0, 12) ?? t('plugins.noRelease', 'None selected')} releaseNote={releaseNote} nodes={nodes}
+      muted={runtime.uninstalled} onOpen={openDetails} actions={[
+        { id: 'configure', label: t('plugins.configureSettings', 'Configure settings'), onSelect: openDetails },
+        { id: 'release', label: t('plugins.installReleaseMenu', 'Install a release…'), onSelect: openRelease },
+        { id: 'refresh', label: t('plugins.refreshOperation', 'Refresh operation status'), disabled: !operationId || operation.isFetching || busy, onSelect: () => { void operation.refetch(); } },
+        { id: 'disable', label: t('plugins.disableRuntime', 'Disable runtime'), separatorBefore: true, disabled: disableBlocked, onSelect: () => { setExpanded(true); void withdrawRuntime('disable'); } },
+        { id: 'uninstall', label: t('plugins.uninstallMenu', 'Uninstall plugin…'), danger: true, disabled: uninstallBlocked, onSelect: () => { setExpanded(true); void withdrawRuntime('uninstall'); } },
+      ]} />
     </div>
-    <RightDrawer open={expanded} onClose={() => setExpanded(false)} title={runtime.plugin_id} ariaLabel={t('plugins.runtimeDetails', 'Runtime details')}
+    <RightDrawer open={expanded} onClose={() => setExpanded(false)} title={name} ariaLabel={t('plugins.runtimeDetails', 'Runtime details')}
       width={width} minWidth={360} maxWidth={900} onWidthChange={setWidth} closeLabel={t('common.close', 'Close')} resizeLabel={t('plugins.resize', 'Resize plugin details')}>
     <div style={{ overflowY: 'auto' }}><RuntimeCard aria-label={runtime.plugin_id}>
-    {details}
-    <h3>{runtime.plugin_id}</h3>
+    <h3>{t('plugins.runtimeOverview', 'Runtime overview')}</h3>
+    <RuntimeIdentity>{runtime.plugin_id}</RuntimeIdentity>
     <p>{runtime.uninstalled ? t('plugins.runtimeUninstalled', 'Plugin uninstalled; cleanup state retained') : runtime.enabled ? t('plugins.runtimeEnabled', 'Runtime enabled') : t('plugins.runtimeDisabled', 'Runtime disabled')}</p>
     <p>{t('plugins.selectedRelease', 'Selected release')}: {runtime.selected_digest?.slice(0, 12) ?? t('plugins.noRelease', 'None selected')}</p>
     <p>{t('plugins.activeRelease', 'Active release')}: {runtime.service?.active_digest?.slice(0, 12) ?? t('plugins.noActiveRelease', 'None active')}</p>
@@ -102,8 +129,8 @@ function RuntimeControls({ runtime, unavailable, nodes, details, nodeEvidence, f
     {operationId ? <p role="status">{t('plugins.runtimeOperation', 'Local operation')}: {stateLabel}</p> : null}
     {operation.error ? <p role="status">{t('plugins.runtimeReadFailed', 'Operation status could not be read. The original request has not been resubmitted.')}</p> : null}
     <Actions>
-      <Button type="button" disabled={runtime.uninstalled || (!runtime.enabled && !withdrawable) || unavailable || busy || pending || (state === 'recovery_required' && !withdrawable) || (!!submitted && !confirmed)} onClick={() => void withdrawRuntime('disable')}>{t('plugins.disableRuntime', 'Disable runtime')}</Button>
-      <Button type="button" disabled={(runtime.uninstalled && !withdrawable) || (!runtime.selected_digest && !withdrawable) || unavailable || busy || pending || (state === 'recovery_required' && !withdrawable) || (!!submitted && !confirmed)} onClick={() => void withdrawRuntime('uninstall')}>{t('plugins.uninstallRuntime', 'Uninstall plugin')}</Button>
+      <Button type="button" disabled={disableBlocked} onClick={() => void withdrawRuntime('disable')}>{t('plugins.disableRuntime', 'Disable runtime')}</Button>
+      <Button type="button" disabled={uninstallBlocked} onClick={() => void withdrawRuntime('uninstall')}>{t('plugins.uninstallRuntime', 'Uninstall plugin')}</Button>
       {state === 'recovery_required' ? <Button type="button" disabled={unavailable || busy} onClick={() => void recoverOperation()}>{t('plugins.recoverRuntime', 'Recover local operation')}</Button> : null}
       {operationId ? <Button type="button" disabled={operation.isFetching || busy} onClick={() => void operation.refetch()}>{t('plugins.refreshOperation', 'Refresh operation status')}</Button> : null}
     </Actions>
@@ -112,6 +139,7 @@ function RuntimeControls({ runtime, unavailable, nodes, details, nodeEvidence, f
     {notice && state !== 'complete' ? <p role="status">{notice}</p> : null}
     <Button type="button" onClick={() => setReleaseOpen(!releaseOpen)}>{releaseOpen ? t('plugins.closeReleaseInstallation', 'Close release installation') : t('plugins.openReleaseInstallation', 'Install a release')}</Button>
     {releaseOpen ? <RuntimeReleasePanel runtime={runtime} ownership={{ submitted: releaseSubmitted, setSubmitted: setReleaseSubmitted, activationSubmitted, setActivationSubmitted }} /> : null}
+    {details && <section style={{ marginTop: 28 }}><h3>{t('plugins.capabilityNodes', 'Capability nodes')}</h3>{details}</section>}
   </RuntimeCard></div></RightDrawer></>;
 }
 
@@ -140,7 +168,7 @@ export function ManagedRuntimesPanel({ nodeNames = () => [], renderDetails, node
     try { await register(id).unwrap(); }
     catch { setRegistrationUncertain(true); }
   };
-  const registrationAction = <Button type="button" disabled={registering.isLoading || !!query.error || query.isLoading || !!setupId} onClick={() => void addPlugin()}>{t('plugins.addManagedPlugin', 'Add plugin')}</Button>;
+  const registrationAction = <Button type="button" disabled={registering.isLoading || !!query.error || query.isLoading || !!setupId} onClick={() => void addPlugin()}><FiPlus aria-hidden />{t('plugins.addManagedPlugin', 'Add plugin')}</Button>;
   return <section aria-label={t('plugins.managedRuntimes', 'Managed runtimes')}>
     {renderHeader ? renderHeader(registrationAction) : <><h2>{t('plugins.managedRuntimes', 'Managed runtimes')}</h2>{registrationAction}</>}
     {registrationUncertain ? <p role="status">{t('plugins.registrationUncertain', 'Registration was not confirmed. Refresh source status to check the retained installation before continuing.')}</p> : null}
@@ -150,8 +178,13 @@ export function ManagedRuntimesPanel({ nodeNames = () => [], renderDetails, node
       <Button type="button" onClick={() => { setSetupId(null); setRegistrationUncertain(false); }}>{t('plugins.closeSourceSetup', 'Close source setup')}</Button>
     </> : null}
     {query.isLoading ? <p>{t('plugins.loadingRuntimes', 'Loading local services…')}</p> : null}
-    {query.error ? <p role="status">{t('plugins.managerUnavailable', 'Local runtime management is unavailable. Check local service setup and your plugin permissions.')}</p> : null}
-    {query.data?.installations.length === 0 ? <p>{t('plugins.noManagedRuntimes', 'No managed runtimes are installed.')}</p> : null}
+    {query.error ? <InventoryNotice role="status"><h2>{t('plugins.inventoryUnavailable', 'Plugin inventory unavailable')}</h2><p>{t('plugins.managerUnavailable', 'Local runtime management is unavailable. Check local service setup and your plugin permissions.')}</p><Button disabled={query.isFetching} onClick={() => void query.refetch()}>{t('plugins.retryInventory', 'Retry inventory')}</Button></InventoryNotice> : null}
+    {!query.error && query.data?.installations.length === 0 ? <p>{t('plugins.noManagedRuntimes', 'No managed runtimes are installed.')}</p> : null}
     {query.data?.installations.map((runtime) => <RuntimeControls key={runtime.plugin_id} runtime={runtime} filter={filter} nodeEvidence={nodeEvidence?.(runtime.plugin_id)} unavailable={!!query.error} nodes={nodeNames(runtime.plugin_id)} details={renderDetails?.(runtime.plugin_id)} />)}
   </section>;
 }
+
+const InventoryNotice = styled.div`
+  padding: 24px; margin: 10px 0 20px; border: 1px solid ${({ theme }) => theme.colors.border}; border-radius: 14px; background: ${({ theme }) => theme.colors.surface};
+  h2 { font-size: 16px; margin-bottom: 8px; } p { font-size: 14px; line-height: 1.6; color: ${({ theme }) => theme.colors.textSecondary}; margin-bottom: 16px; }
+`;

@@ -489,7 +489,9 @@ const ModalContainer = styled.div`
   flex-direction: column;
   width: min(94vw, 1120px);
   height: min(86vh, 760px);
-  background: ${({ theme }) => theme.colors.surfaceElevated};
+  /* Composite the elevated tint over the base so background content cannot bleed through. */
+  background: linear-gradient(${({ theme }) => theme.colors.surfaceElevated}, ${({ theme }) => theme.colors.surfaceElevated}), ${({ theme }) => theme.colors.bg};
+  &:focus-visible { outline: none; }
   border: 1px solid ${({ theme }) => theme.colors.borderControl};
   border-radius: 14px;
   overflow: hidden;

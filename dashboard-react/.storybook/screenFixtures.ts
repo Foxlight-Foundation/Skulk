@@ -26,6 +26,10 @@ const state: RawStateResponse = {
     } },
   ])),
   runners: { 'runner-0': { RunnerReady: {} }, 'runner-1': { RunnerLoading: { layersLoaded: 12, totalLayers: 40 } }, 'runner-2': { RunnerFailed: { errorMessage: 'Fixture runner could not initialize.' } } },
+  capabilityNodes: { workstation: [{ pluginId: 'example', nodeId: 'video', bundleId: 'example.video', title: 'Video Studio', version: '1.0.0', status: 'ready', ownerAvailable: true, observedAt: '2026-09-20T06:00:00Z', operationsActive: 0,
+    surfaces: [{ surfaceId: 'studio', title: 'Video Studio', kind: 'link', url: '/studio', ready: true }],
+    actions: [{ actionId: 'open', title: 'Open Video Studio', kind: 'open_surface', surfaceId: 'studio' }],
+  }] },
   downloads: {},
 };
 

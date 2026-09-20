@@ -45,7 +45,7 @@ const Grid = styled.dl`
   margin: 0;
 
   dt {
-    color: ${({ theme }) => theme.colors.subtleText};
+    color: ${({ theme }) => theme.colors.metadataText};
   }
 
   dd {
@@ -128,7 +128,7 @@ const RowText = styled.span`
   gap: 2px;
 
   small {
-    color: ${({ theme }) => theme.colors.subtleText};
+    color: ${({ theme }) => theme.colors.metadataText};
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -137,7 +137,7 @@ const RowText = styled.span`
 
 const Empty = styled.p`
   margin: 0;
-  color: ${({ theme }) => theme.colors.subtleText};
+  color: ${({ theme }) => theme.colors.metadataText};
 `;
 
 const Outcome = styled.pre<{ $error: boolean }>`

@@ -21,6 +21,9 @@ interface NodeSummary {
 /* ── Styled components ─────────────────────────────────────── */
 
 const Page = styled.div`
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
   padding: 16px;
   max-width: 600px;
   margin: 0 auto;
@@ -35,7 +38,7 @@ const SectionTitle = styled.h2`
   font-family: ${({ theme }) => theme.fonts.mono};
   text-transform: uppercase;
   letter-spacing: 1.5px;
-  color: ${({ theme }) => theme.colors.subtleText};
+  color: ${({ theme }) => theme.colors.metadataText};
 `;
 
 const SummaryRow = styled.div`
@@ -46,6 +49,7 @@ const SummaryRow = styled.div`
 
 const Stat = styled.div`
   flex: 1;
+  box-sizing: border-box;
   min-width: 100px;
   background: ${({ theme }) => theme.colors.surface};
   border: 1px solid ${({ theme }) => theme.colors.border};
@@ -61,7 +65,7 @@ const StatLabel = styled.span`
   font-family: ${({ theme }) => theme.fonts.mono};
   text-transform: uppercase;
   letter-spacing: 1px;
-  color: ${({ theme }) => theme.colors.subtleText};
+  color: ${({ theme }) => theme.colors.metadataText};
 `;
 
 const StatValue = styled.span<{ $ok?: boolean; $warn?: boolean }>`
@@ -80,6 +84,7 @@ const NodeCard = styled.div`
 `;
 
 const NodeCardHeader = styled.div`
+  flex-wrap: wrap;
   padding: 14px 16px 10px;
   display: flex;
   align-items: center;
@@ -107,6 +112,7 @@ const NodeCardBody = styled.div`
 
 const MetricRow = styled.div`
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
@@ -117,7 +123,7 @@ const MetricLabel = styled.span`
   font-family: ${({ theme }) => theme.fonts.mono};
   text-transform: uppercase;
   letter-spacing: 1px;
-  color: ${({ theme }) => theme.colors.subtleText};
+  color: ${({ theme }) => theme.colors.metadataText};
 `;
 
 const MetricValue = styled.span`
@@ -176,7 +182,7 @@ const EmptyState = styled.div`
   text-align: center;
   font-size: ${({ theme }) => theme.fontSizes.sm};
   font-family: ${({ theme }) => theme.fonts.mono};
-  color: ${({ theme }) => theme.colors.subtleText};
+  color: ${({ theme }) => theme.colors.metadataText};
   text-transform: uppercase;
   letter-spacing: 2px;
 `;
@@ -197,6 +203,7 @@ const AccessCardBody = styled.div`
 
 const AccessRow = styled.div`
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
@@ -207,11 +214,13 @@ const AccessLabel = styled.span`
   font-family: ${({ theme }) => theme.fonts.mono};
   text-transform: uppercase;
   letter-spacing: 1px;
-  color: ${({ theme }) => theme.colors.subtleText};
+  color: ${({ theme }) => theme.colors.metadataText};
   flex-shrink: 0;
 `;
 
 const AccessUrl = styled.a`
+  min-width: 0;
+  flex: 1 1 160px;
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.mono};
   color: ${({ theme }) => theme.colors.text};
@@ -231,7 +240,7 @@ const QRWrap = styled.div`
 const QRLabel = styled.span`
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.mono};
-  color: ${({ theme }) => theme.colors.subtleText};
+  color: ${({ theme }) => theme.colors.metadataText};
   text-transform: uppercase;
   letter-spacing: 1px;
 `;
@@ -247,7 +256,7 @@ const CopyButton = styled.button`
   color: ${({ theme }) => theme.colors.textSecondary};
   white-space: nowrap;
   flex-shrink: 0;
-  &:hover { border-color: ${({ theme }) => theme.colors.subtleText}; }
+  &:hover { border-color: ${({ theme }) => theme.colors.metadataText}; }
 `;
 
 /* ── Helpers ───────────────────────────────────────────────── */

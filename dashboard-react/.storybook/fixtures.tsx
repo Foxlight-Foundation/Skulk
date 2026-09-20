@@ -23,12 +23,13 @@ const fixtures: Record<string, unknown> = {
   '/v1/tracing': { enabled: false },
 };
 
+let pluginInventoryUnavailable = false;
 let activeScreen = false;
 let showTelemetryConsent = false;
 
 /** Select the offline response set before rendering a story. */
 // eslint-disable-next-line react-refresh/only-export-components -- Storybook loader configuration.
-export function configureFixtureScreen(enabled: boolean, telemetryConsent = false) { activeScreen = enabled; showTelemetryConsent = telemetryConsent; }
+export function configureFixtureScreen(enabled: boolean, telemetryConsent = false, unavailablePlugins = false) { activeScreen = enabled; showTelemetryConsent = telemetryConsent; pluginInventoryUnavailable = unavailablePlugins; }
 
 const originalFetch = window.fetch.bind(window);
 // Storybook is an offline component gallery. Every API request is intercepted,
@@ -45,6 +46,8 @@ window.fetch = async (input, init) => {
   if (request.method !== 'GET') return Response.json({ detail: 'This gallery does not execute operations.' }, { status: 403 });
   if (url.origin === location.origin && isStorybookAsset) return originalFetch(input, init);
   if (showTelemetryConsent && url.pathname === '/config') return Response.json({ ...configFixture, config: { ...configFixture.config, telemetry: { ...configFixture.config.telemetry, consent: 'unasked' } } });
+  if (pluginInventoryUnavailable && url.pathname === '/v1/plugins/managed') return Response.json({ detail: 'Runtime manager unavailable.' }, { status: 503 });
+  if (pluginInventoryUnavailable && url.pathname === '/v1/plugins') return Response.json([]);
   if (activeScreen && Object.hasOwn(screenFixtures, url.pathname)) return Response.json(screenFixtures[url.pathname]);
   if (Object.hasOwn(fixtures, url.pathname)) return Response.json(fixtures[url.pathname]);
   return Response.json({ detail: 'No fixture for this observation.' }, { status: 503 });

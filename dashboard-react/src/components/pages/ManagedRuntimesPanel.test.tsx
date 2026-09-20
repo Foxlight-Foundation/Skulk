@@ -174,3 +174,19 @@ it('allows uninstall to withdraw a stalled reinstallation while retaining uninst
   expect(posts).toHaveLength(1);
   expect(posts[0].body).toMatchObject({ action: 'uninstall', expected_revision: 7 });
 });
+
+it('routes menu withdrawals through the existing operation fence and refuses duplicate submissions', async () => {
+  await act(async () => {
+    [...host.querySelectorAll('button')].find(item => item.getAttribute('aria-label') === 'Close')?.click();
+  });
+  const menu = host.querySelector('details')!;
+  await act(async () => { menu.open = true; });
+  await click('Uninstall plugin…');
+  await contains('The request did not return a confirmed result.');
+  expect(posts).toHaveLength(1);
+  expect(posts[0].body).toMatchObject({ expected_revision: 7 });
+  const action = [...host.querySelectorAll<HTMLButtonElement>('button')].find(item => item.textContent === 'Uninstall plugin…')!;
+  expect(action.disabled).toBe(true);
+  await act(async () => action.click());
+  expect(posts).toHaveLength(1);
+});

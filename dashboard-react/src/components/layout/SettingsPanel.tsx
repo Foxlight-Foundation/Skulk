@@ -117,6 +117,7 @@ const Select = styled.select`
   cursor: pointer;
 
   &:focus {
+    outline: none;
     border-color: ${({ theme }) => theme.colors.goldDim};
   }
 

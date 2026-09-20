@@ -8,6 +8,9 @@ import { useSkulkTranslation, type SkulkTranslate } from '../../i18n/tolgee';
 export interface ModelFilterPopoverProps {
   /** Render inside a persistent facet rail instead of a floating popover. */
   inline?: boolean;
+  /** Capacity belongs with availability rather than above capability filters. */
+  fitsOnly?: boolean;
+  onFitsOnlyChange?: (value: boolean) => void;
   filters: FilterState;
   onChange: (filters: FilterState) => void;
   onClear: () => void;
@@ -33,8 +36,9 @@ const Panel = styled.div<{ $inline: boolean }>`
 `;
 
 const SectionLabel = styled.div`
-  font-size: ${({ theme }) => theme.fontSizes.label};
-  font-weight: 600;
+  font: 600 10px ${({ theme }) => theme.fonts.mono};
+  text-transform: uppercase;
+  letter-spacing: .1em;
   color: ${({ theme }) => theme.colors.textSecondary};
   margin-bottom: 6px;
 `;
@@ -46,6 +50,7 @@ const ChipRow = styled.div`
 `;
 
 const Chip = styled(Button)<{ $active: boolean }>`
+  border-radius: 999px; min-height: 24px; padding: 3px 8px; font-size: 11.5px;
   ${({ $active }) =>
     $active &&
     css`
@@ -86,7 +91,7 @@ function sizeRangeLabel(range: (typeof SIZE_RANGES)[number], t: SkulkTranslate):
 }
 
 /** Edit capability, size and evidence-based availability filters. */
-export function ModelFilterPopover({ inline = false, filters, onChange, onClear, onClose }: ModelFilterPopoverProps) {
+export function ModelFilterPopover({ inline = false, fitsOnly, onFitsOnlyChange, filters, onChange, onClear, onClose }: ModelFilterPopoverProps) {
   const { t } = useSkulkTranslation();
   const ref = useRef<HTMLDivElement>(null);
 
@@ -167,6 +172,7 @@ export function ModelFilterPopover({ inline = false, filters, onChange, onClear,
       <div>
         <SectionLabel>{t('modelFilter.availability', 'Availability')}</SectionLabel>
         {inline ? <Availability>
+          {onFitsOnlyChange && <label><input type="checkbox" checked={fitsOnly ?? false} onChange={event => onFitsOnlyChange(event.target.checked)} />{t('modelBrowser.fitsOnly', 'Fits this cluster')}</label>}
           <label><input type="checkbox" checked={filters.downloadedOnly} onChange={event => onChange({ ...filters, downloadedOnly: event.target.checked })} />{t('modelPickerGroup.inStore', 'In store')}</label>
           <label><input type="checkbox" checked={filters.readyOnly} onChange={event => onChange({ ...filters, readyOnly: event.target.checked })} />{t('modelBrowser.readyNow', 'Ready now')}</label>
         </Availability> : <ChipRow>

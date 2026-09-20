@@ -36,9 +36,8 @@ import { ChatView } from './components/pages/ChatView';
 import { OperatorPage } from './components/pages/OperatorPage';
 import { RightDrawer } from './components/common/RightDrawer';
 import { Button } from './components/common/Button';
-import { StewardPrompt } from './components/steward/StewardPrompt';
 import { useGetStewardStatusQuery } from './store/endpoints/steward';
-import { StewardControllerProvider, STEWARD_MODEL_ID, StewardChatView } from './components/pages/StewardChatView';
+import { StewardClusterPrompt, StewardControllerProvider, STEWARD_MODEL_ID, StewardChatView } from './components/pages/StewardChatView';
 import { IntegrationsPage } from './components/pages/IntegrationsPage';
 import { PluginsPage } from './components/pages/PluginsPage';
 import { InstancePanel, type InstanceCardData } from './components/layout/InstancePanel';
@@ -777,7 +776,7 @@ export function App() {
                   : t('app.empty.connectingBackend', 'Connecting to backend...')}
               </EmptyState>
             )}
-            {activeRoute === 'cluster' && stewardStatus?.enabled && <div style={{ position: 'absolute', bottom: 24, left: 0, right: 0, display: 'flex', justifyContent: 'center' }}><StewardPrompt onOpen={openSteward} /></div>}
+            {activeRoute === 'cluster' && stewardStatus?.enabled && <div style={{ position: 'absolute', bottom: 24, left: 0, right: 0, display: 'flex', justifyContent: 'center' }}><StewardClusterPrompt onOpen={openSteward} /></div>}
           </Main>
           {hasInstances && panelOpen && (
             <PanelOverlay $side="right">
