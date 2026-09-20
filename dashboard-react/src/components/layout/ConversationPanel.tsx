@@ -52,7 +52,7 @@ function conversationDisplayName(name: string, t: SkulkTranslate): string {
 /* ── Styles ───────────────────────────────────────────── */
 
 const Panel = styled.aside`
-  width: 340px;
+  width: 330px;
   max-width: 100%;
   flex-shrink: 0;
   border-right: 1px solid ${({ theme }) => theme.colors.border};
@@ -63,11 +63,11 @@ const Panel = styled.aside`
 `;
 
 const PanelHeader = styled.div`
-  padding: 12px 16px;
-  font-size: ${({ theme }) => theme.fontSizes.sm};
+  padding: 14px 16px;
+  font-size: 16px;
   font-family: ${({ theme }) => theme.fonts.body};
   font-weight: 600;
-  color: ${({ theme }) => theme.colors.textSecondary};
+  color: ${({ theme }) => theme.colors.text};
   border-bottom: 1px solid ${({ theme }) => theme.colors.border};
   display: flex;
   align-items: center;
@@ -76,24 +76,22 @@ const PanelHeader = styled.div`
 
 const NewChatBtn = styled.button`
   all: unset;
+  box-sizing: border-box;
   cursor: pointer;
-  font-size: ${({ theme }) => theme.fontSizes.xs};
-  font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.accentText};
-  padding: 2px 8px;
-  border: 1px solid ${({ theme }) => theme.colors.goldDim};
-  border-radius: ${({ theme }) => theme.radii.sm};
-  transition: all 0.15s;
-
-  &:hover {
-    background: ${({ theme }) => theme.colors.goldBg};
-  }
+  min-height: 30px;
+  padding: 0 10px;
+  font: 600 13px ${({ theme }) => theme.fonts.body};
+  color: ${({ theme }) => theme.colors.textSecondary};
+  border: 1px solid ${({ theme }) => theme.colors.border};
+  border-radius: 8px;
+  &:hover { background: ${({ theme }) => theme.colors.surfaceHover}; }
+  @media (pointer: coarse) { min-height: 44px; }
 `;
 
 const CardList = styled.div`
   flex: 1;
   overflow-y: auto;
-  padding: 8px;
+  padding: 12px;
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -105,24 +103,24 @@ const Card = styled.div<{ $active: boolean }>`
   display: flex;
   flex-direction: column;
   gap: 3px;
-  padding: 10px 12px;
+  padding: 12px;
   border-radius: ${({ theme }) => theme.radii.md};
-  border: 1px solid ${({ $active, theme }) => $active ? theme.colors.goldDim : 'transparent'};
-  background: ${({ $active, theme }) => $active ? theme.colors.goldBg : 'transparent'};
+  border: 1px solid ${({ $active, theme }) => $active ? theme.colors.borderLive : 'transparent'};
+  background: ${({ $active, theme }) => $active ? theme.colors.liveBg : 'transparent'};
   transition: all 0.15s;
 
   &:hover {
-    background: ${({ theme }) => theme.colors.surfaceHover};
-    border-color: ${({ theme }) => theme.colors.border};
+    background: ${({ $active, theme }) => $active ? theme.colors.liveBg : theme.colors.surfaceHover};
+    border-color: ${({ $active, theme }) => $active ? theme.colors.borderLive : theme.colors.border};
   }
 `;
 
 const CardTitle = styled.button<{ $active: boolean }>`
   text-align: left; min-width: 0; width: 100%;
-  font-size: ${({ theme }) => theme.fontSizes.sm};
+  font-size: 15px;
   font-family: ${({ theme }) => theme.fonts.body};
-  font-weight: 500;
-  color: ${({ $active, theme }) => $active ? theme.colors.gold : theme.colors.text};
+  font-weight: 600;
+  color: ${({ theme }) => theme.colors.text};
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -132,7 +130,7 @@ const CardMeta = styled.div`
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: ${({ theme }) => theme.fontSizes.xs};
+  font-size: 13px;
   font-family: ${({ theme }) => theme.fonts.body};
   color: ${({ theme }) => theme.colors.subtleText};
 `;
@@ -142,7 +140,7 @@ const Dot = styled.span`
 `;
 
 const CardSummary = styled.div`
-  font-size: ${({ theme }) => theme.fontSizes.xs};
+  font-size: 13px;
   font-family: ${({ theme }) => theme.fonts.body};
   color: ${({ theme }) => theme.colors.subtleText};
   overflow: hidden;
@@ -153,7 +151,7 @@ const CardSummary = styled.div`
 const DeleteBtn = styled.button`
   cursor: pointer;
   color: ${({ theme }) => theme.colors.subtleText};
-  font-size: ${({ theme }) => theme.fontSizes.xs};
+  font-size: 13px;
   margin-left: auto;
   opacity: 0.7;
   transition: all 0.15s;
@@ -170,7 +168,7 @@ const DeleteBtn = styled.button`
 const EmptyText = styled.div`
   padding: 24px 16px;
   text-align: center;
-  font-size: ${({ theme }) => theme.fontSizes.xs};
+  font-size: 13px;
   font-family: ${({ theme }) => theme.fonts.body};
   color: ${({ theme }) => theme.colors.subtleText};
 `;

@@ -120,11 +120,12 @@ const LogoBtn = styled.button<{ $disabled: boolean }>`
 `;
 
 const LogoText = styled.span`
-  font-size: ${({ theme }) => theme.fontSizes.xxl};
+  font-size: 30px;
+  line-height: 1;
+  letter-spacing: -.02em;
   font-weight: 700;
   font-family: ${({ theme }) => theme.fonts.body};
   color: ${({ theme }) => theme.colors.text};
-  filter: drop-shadow(0 0 4px ${({ theme }) => theme.colors.border});
   @media (max-width: 360px) { font-size: 24px; }
 `;
 

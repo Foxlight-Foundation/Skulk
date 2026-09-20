@@ -1,3 +1,4 @@
+import { observabilityFixtures } from './observabilityFixtures';
 import { screenFixtures } from './screenFixtures';
 import type { NavRoute } from '../src/components/layout/HeaderNav';
 import { useMemo, type ReactNode } from 'react';
@@ -10,6 +11,7 @@ import { chatSliceReducer } from '../src/store/slices/chatSlice';
 const configFixture = { config: { model_store: { enabled: false }, inference: { kv_cache_backend: 'default' }, logging: { enabled: false, ingest_url: '' }, intelligent_fabric: { enabled: false }, telemetry: { consent: 'disabled', diagnostics_consent: 'disabled', install_id: '', consented_at: '', consented_version: '', ingest_url: '' } }, configPath: 'skulk.yaml', effective: { kv_cache_backend: 'default', hf_token_set: false } };
 
 const fixtures: Record<string, unknown> = {
+  ...observabilityFixtures,
   '/config': configFixture,
   '/state': { topology: { nodes: [], connections: {} }, instances: {}, runners: {}, downloads: {}, tasks: {} },
   '/models': { data: [{ id: 'example/Chat-8B', name: 'Example Chat 8B', capabilities: ['text', 'code'], storage_size_megabytes: 5000 }] },

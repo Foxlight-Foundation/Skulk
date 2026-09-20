@@ -53,6 +53,8 @@ export interface StewardChatViewProps {
   readyInstances?: InstanceCardData[];
   /** Drawer chrome already carries the serving-model identity. */
   presentation?: 'page' | 'drawer';
+  /** Chat's model chooser belongs in the composer, sharing its current controller. */
+  modelSelector?: ReactNode;
 }
 
 const Container = styled.div`
@@ -116,7 +118,7 @@ const ModelTag = styled.div`
   font-family: ${({ theme }) => theme.fonts.mono};
   font-size: ${({ theme }) => theme.fontSizes.xs};
   color: ${({ theme }) => theme.colors.subtleText};
-  padding: 4px 24px 0;
+  padding: 16px 24px 0;
   text-align: center;
 `;
 
@@ -531,13 +533,13 @@ export function StewardClusterPrompt({ onOpen }: { onOpen: () => void }) {
 /** Use the app controller, or an isolated owner for standalone embeds and stories. */
 export function StewardChatView(props: StewardChatViewProps) {
   const controller = useContext(StewardContext);
-  return controller ? <StewardPresentation controller={controller} presentation={props.presentation} /> : <StandaloneSteward {...props} />;
+  return controller ? <StewardPresentation controller={controller} presentation={props.presentation} modelSelector={props.modelSelector} /> : <StandaloneSteward {...props} />;
 }
 function StandaloneSteward(props: StewardChatViewProps) {
   const controller = useStewardController(props);
-  return <StewardPresentation controller={controller} presentation={props.presentation} />;
+  return <StewardPresentation controller={controller} presentation={props.presentation} modelSelector={props.modelSelector} />;
 }
-function StewardPresentation({ controller, presentation = 'page' }: { controller: ReturnType<typeof useStewardController>; presentation?: 'page' | 'drawer' }) {
+function StewardPresentation({ controller, presentation = 'page', modelSelector }: { controller: ReturnType<typeof useStewardController>; presentation?: 'page' | 'drawer'; modelSelector?: ReactNode }) {
   const { t } = useSkulkTranslation();
   const dispatch = useAppDispatch();
   const { draft, setDraft, status, messages, isLoading, streamingContent, streamingThinking,
@@ -548,6 +550,7 @@ function StewardPresentation({ controller, presentation = 'page' }: { controller
     // (or accept input) before the page knows the steward's state.
     return (
       <CenterState>
+        {modelSelector}
         <CenterTitle>
           <MdAutoAwesome size={16} />
           {t('stewardChat.loading.title', 'Connecting to Skulk')}
@@ -559,6 +562,7 @@ function StewardPresentation({ controller, presentation = 'page' }: { controller
   if (!status.enabled) {
     return (
       <CenterState>
+        {modelSelector}
         <CenterTitle>
           <MdAutoAwesome size={16} />
           {t('stewardChat.disabled.title', 'Intelligent Fabric is off')}
@@ -576,6 +580,7 @@ function StewardPresentation({ controller, presentation = 'page' }: { controller
   if (!status.present || !status.ready) {
     return (
       <CenterState>
+        {modelSelector}
         <CenterTitle>
           <MdAutoAwesome size={16} />
           {t('stewardChat.placing.title', 'Skulk is getting ready')}
@@ -648,6 +653,7 @@ function StewardPresentation({ controller, presentation = 'page' }: { controller
         <ChatForm
           autoFocus={presentation !== 'drawer'}
           compact={presentation === 'drawer'}
+          modelSelector={modelSelector}
           steward
           draft={draft}
           onDraftChange={setDraft}

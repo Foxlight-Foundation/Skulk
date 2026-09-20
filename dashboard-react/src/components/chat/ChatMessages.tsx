@@ -56,8 +56,8 @@ const blink = keyframes`
 const Container = styled.div`
   display: flex;
   flex-direction: column;
-  gap: 16px;
-  padding: 16px;
+  gap: 14px;
+  padding: 16px 24px;
   position: relative;
 `;
 
@@ -95,7 +95,7 @@ const MsgHeader = styled.div`
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 8px;
+  margin-bottom: 4px;
   font-size: 10.5px;
   font-family: ${({ theme }) => theme.fonts.mono};
 `;

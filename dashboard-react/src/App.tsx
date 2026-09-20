@@ -745,7 +745,7 @@ export function App() {
                 onChat={(modelId) => { dispatch(chatActions.selectModel(modelId)); setActiveRoute('chat'); }}
               />
             ) : activeRoute === 'chat' && selectedModelId === STEWARD_MODEL_ID ? (
-              <><ReadyModelSelect value={STEWARD_MODEL_ID} onChange={value => dispatch(chatActions.selectModel(value))} fabricEnabled models={instanceCards.filter(instance => (instance.status === 'ready' || instance.status === 'running') && instance.supportsTextChat && !instance.isEmbedding)} />{!stewardOpen && <StewardChatView />}</>
+              stewardOpen ? <ReadyModelSelect value={STEWARD_MODEL_ID} onChange={value => dispatch(chatActions.selectModel(value))} fabricEnabled models={instanceCards.filter(instance => (instance.status === 'ready' || instance.status === 'running') && instance.supportsTextChat && !instance.isEmbedding)} /> : <StewardChatView modelSelector={<ReadyModelSelect value={STEWARD_MODEL_ID} onChange={value => dispatch(chatActions.selectModel(value))} fabricEnabled models={instanceCards.filter(instance => (instance.status === 'ready' || instance.status === 'running') && instance.supportsTextChat && !instance.isEmbedding)} />} />
             ) : activeRoute === 'chat' ? (
               <ChatView
                 readyInstances={instanceCards}

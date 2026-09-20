@@ -108,9 +108,10 @@ const Select = styled.select`
   box-sizing: border-box;
   background: ${({ theme }) => theme.colors.surfaceHover};
   color: ${({ theme }) => theme.colors.text};
-  border: 1px solid ${({ theme }) => theme.colors.border};
-  border-radius: ${({ theme }) => theme.radii.sm};
-  padding: 9px 10px;
+  border: 1px solid ${({ theme }) => theme.colors.borderControl};
+  border-radius: ${({ theme }) => theme.radii.md};
+  min-height: 36px;
+  padding: 6px 10px;
   font-size: ${({ theme }) => theme.fontSizes.sm};
   font-family: ${({ theme }) => theme.fonts.body};
   outline: none;
