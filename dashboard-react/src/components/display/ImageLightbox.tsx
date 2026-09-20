@@ -73,9 +73,9 @@ const ButtonBar = styled.div`
 `;
 
 const IconButton = styled(Button)`
-  background: rgba(30, 30, 30, 0.8);
+  background: ${({ theme }) => theme.colors.surfaceElevated};
   &:hover:not(:disabled) {
-    background: rgba(40, 40, 40, 0.9);
+    background: ${({ theme }) => theme.colors.surfaceHover};
   }
 `;
 

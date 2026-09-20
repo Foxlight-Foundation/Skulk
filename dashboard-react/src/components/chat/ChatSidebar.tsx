@@ -71,7 +71,7 @@ const SearchInput = styled.input`
   box-sizing: border-box;
 
   &::placeholder { color: ${({ theme }) => theme.colors.body}; }
-  &:focus { border-color: ${({ theme }) => theme.colors.goldDim}; }
+  &:focus { outline: none; border-color: ${({ theme }) => theme.colors.goldDim}; }
 `;
 
 const SectionLabel = styled.div`

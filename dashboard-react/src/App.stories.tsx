@@ -22,6 +22,7 @@ export const Cluster: Story = {};
 export const Integrations: Story = { parameters: { screenRoute: 'integrations' } };
 export const Plugins: Story = { parameters: { screenRoute: 'plugins' } };
 export const Chat: Story = { parameters: { screenRoute: 'chat' } };
+export const Operator: Story = { parameters: { screenRoute: 'operator' } };
 export const ModelStore: Story = { parameters: { screenRoute: 'model-store' } };
 export const Settings: Story = {
   play: async ({ canvasElement }) => {
@@ -121,7 +122,7 @@ export const PluginNavigation: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     await userEvent.click(await canvas.findByRole('button', { name: 'Healthy · 1' }));
-    await expect(canvas.getByRole('heading', { name: 'managed.example-video' })).toBeVisible();
+    await expect(canvas.getByRole('heading', { name: 'Example video capability' })).toBeVisible();
     await expect(canvas.getByRole('heading', { name: 'managed.example-stale', hidden: true })).not.toBeVisible();
     await userEvent.click(canvas.getByRole('button', { name: 'All · 2' }));
     const menu = canvas.getAllByLabelText('More plugin actions')[0];
@@ -132,7 +133,7 @@ export const PluginNavigation: Story = {
     await userEvent.keyboard('{Escape}');
     await expect(menu).toHaveFocus();
     await userEvent.click(menu);
-    await userEvent.click(canvas.getAllByRole('button', { name: 'Manage plugin' })[0]);
+    await userEvent.click(canvas.getAllByRole('button', { name: 'Configure settings' })[0]);
     await expect(await within(document.body).findByRole('dialog', { name: 'Runtime details' })).toBeVisible();
     await userEvent.keyboard('{Escape}');
     await expect(menu).toHaveFocus();
@@ -154,5 +155,32 @@ export const FindModelsPlacementReturn: Story = {
     await expect(await body.findByRole('dialog', { name: 'Find Models' })).toBeVisible();
     await expect(body.getByRole('textbox', { name: 'Search models' })).toHaveValue('Chat');
     await expect(body.getAllByRole('dialog')).toHaveLength(1);
+  },
+};
+
+/** Typing is local; explicit submission opens the shared Steward conversation. */
+export const ClusterPrompt: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const prompt = await canvas.findByRole('textbox', { name: 'Ask Skulk about the cluster…' });
+    await userEvent.type(prompt, 'How is this cluster doing?');
+    await expect(within(document.body).queryByRole('dialog')).not.toBeInTheDocument();
+    await userEvent.keyboard('{Enter}');
+    const dialog = await within(document.body).findByRole('dialog', { name: 'Skulk Steward' });
+    await expect(within(dialog).getByText('How is this cluster doing?')).toBeVisible();
+    await expect(await within(dialog).findByText(/The example cluster has three nodes/)).toBeVisible();
+  },
+};
+
+
+/** A failed inventory read must not be presented as zero installed plugins. */
+export const PluginsUnavailable: Story = {
+  parameters: { screenRoute: 'plugins', pluginInventoryUnavailable: true },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(await canvas.findByRole('heading', { name: 'Plugin inventory unavailable' })).toBeVisible();
+    await expect(canvas.getByRole('button', { name: 'All' })).toBeDisabled();
+    await expect(canvas.queryByText('No managed runtimes are installed.')).not.toBeInTheDocument();
+    await expect(canvas.getByRole('button', { name: 'Retry inventory' })).toBeEnabled();
   },
 };

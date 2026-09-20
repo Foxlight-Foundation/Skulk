@@ -1,6 +1,6 @@
 import type { StoreDownloadProgress } from '../layout/StoreRegistryTable';
 import { FiX } from 'react-icons/fi';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { groupModels } from '../../types/models';
 import styled, { css } from 'styled-components';
 import { Button } from '../common/Button';
@@ -152,6 +152,13 @@ const Toolbar = styled.div`
 
 `;
 
+const SearchContainer = styled.div`
+  position: relative; flex: 1; min-width: 160px;
+  > div { height: 40px; }
+  input { padding-right: 28px; }
+  kbd { position: absolute; right: 12px; top: 11px; pointer-events: none; padding: 0 5px; border: 1px solid ${({ theme }) => theme.colors.border}; border-radius: 4px; color: ${({ theme }) => theme.colors.textSecondary}; font: 11px ${({ theme }) => theme.fonts.mono}; }
+`;
+
 const FilterBtn = styled(Button)<{ $active: boolean }>`
   ${({ $active, theme }) =>
     $active &&
@@ -163,8 +170,10 @@ const FilterBtn = styled(Button)<{ $active: boolean }>`
 
 /* Horizontally scrollable rail of family scope chips. */
 const FamilyRail = styled.div`
-  display: flex; flex-direction: column; align-items: stretch; gap: 4px; padding: 16px;
+  display: flex; flex-direction: column; align-items: stretch; gap: 0; padding: 16px;
 `;
+
+const FacetHeading = styled.div`font: 600 10px ${({ theme }) => theme.fonts.mono}; letter-spacing: .1em; text-transform: uppercase; color: ${({ theme }) => theme.colors.textSecondary}; padding: 0 4px 8px;`;
 
 const FamilyChip = styled.button<{ $active: boolean }>`
   &::after { content: attr(data-count); float: right; margin-left: 12px; font-family: ${({ theme }) => theme.fonts.mono}; }
@@ -177,7 +186,7 @@ const FamilyChip = styled.button<{ $active: boolean }>`
   color: ${({ theme }) => theme.colors.body};
   cursor: pointer;
   font-family: ${({ theme }) => theme.fonts.body};
-  font-size: ${({ theme }) => theme.fontSizes.xs};
+  font-size: 13px;
   font-weight: 500;
   padding: 6px 8px;
   transition: background 0.15s, border-color 0.15s, color 0.15s;
@@ -303,6 +312,21 @@ export function ModelBrowser({
   onHfTaskChange,
 }: ModelBrowserProps) {
   const { t } = useSkulkTranslation();
+  const searchContainer = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const focusSearch = (event: KeyboardEvent) => {
+      if (event.key !== '/' || event.ctrlKey || event.metaKey || event.altKey || event.defaultPrevented || event.isComposing) return;
+      const target = event.target;
+      if (target instanceof HTMLElement && (target.closest('input, textarea, select') || target.isContentEditable)) return;
+      const input = searchContainer.current?.querySelector('input');
+      // Nested placement can retain this browser hidden; it must not steal focus.
+      if (!input?.getClientRects().length) return;
+      event.preventDefault();
+      input.focus();
+    };
+    window.addEventListener('keydown', focusSearch);
+    return () => window.removeEventListener('keydown', focusSearch);
+  }, []);
   const [fitsOnly, setFitsOnly] = useState(defaultFitsOnly);
   const [source, setSource] = useState<'catalog' | 'huggingface'>('catalog');
   const picker = useModelPicker({
@@ -433,6 +457,7 @@ export function ModelBrowser({
         {/* Toolbar */}
         <Toolbar>
           {heading && <h2 style={{ flex: '0 0 auto', fontSize: 18 }}>{heading}</h2>}
+          <SearchContainer ref={searchContainer}>
           <SearchBar
             value={picker.searchQuery}
             onChange={(q) => {
@@ -443,10 +468,12 @@ export function ModelBrowser({
               ? (mlxOnly
                   ? t('modelBrowser.searchMlxCommunity', 'Search mlx-community...')
                   : t('modelBrowser.searchHuggingFace', 'Search all of Hugging Face...'))
-              : t('modelBrowser.searchModels', 'Search models...')}
+              : t('modelBrowser.searchModels', 'Search supported models...')}
             autoFocus
             ariaLabel={t('modelBrowser.searchAriaLabel', 'Search models')}
           />
+          {!picker.searchQuery && <kbd aria-hidden="true">/</kbd>}
+          </SearchContainer>
       <SourceSwitcher role="group" aria-label={t('modelBrowser.source', 'Model source')}>
         <SourceButton
           type="button"
@@ -535,6 +562,7 @@ export function ModelBrowser({
         {/* Catalog family scope */}
         {!isHf && (
           <FamilyRail role="group" aria-label={t('modelBrowser.catalogScope', 'Filter supported models by family')}>
+            <FacetHeading>{t('modelInfo.family', 'Family')}</FacetHeading>
             <FamilyChip
               type="button"
               data-count={catalogGroups.length}
@@ -579,13 +607,14 @@ export function ModelBrowser({
           </FamilyRail>
         )}
 
-        {!isHf && <label style={{ display: 'flex', gap: 8, padding: '12px 16px', alignItems: 'center' }}><input type="checkbox" checked={fitsOnly} onChange={event => setFitsOnly(event.target.checked)} />{t('modelBrowser.fitsOnly', 'Fits this cluster')}</label>}
-        {!isHf && <ModelFilterPopover inline filters={picker.filters} onChange={picker.setFilters} onClear={picker.clearFilters} onClose={() => picker.setShowFilters(false)} />}
+
+        {!isHf && <ModelFilterPopover inline fitsOnly={fitsOnly} onFitsOnlyChange={setFitsOnly} filters={picker.filters} onChange={picker.setFilters} onClear={picker.clearFilters} onClose={() => picker.setShowFilters(false)} />}
         </Facets>
         {/* List */}
         <ListArea>
           {!isHf && <SectionHeader>{t('modelBrowser.resultCount', '{count} model groups', { count: visibleGroups.length })}</SectionHeader>}
           {!isHf && <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', padding: '0 16px 8px' }}>
+            {fitsOnly && <Button size="sm" onClick={() => setFitsOnly(false)}>{t('modelBrowser.fitsOnly', 'Fits this cluster')} <FiX aria-hidden="true" /></Button>}
             {picker.selectedFamily && <Button size="sm" onClick={() => picker.setSelectedFamily(null)}>{familyLabel(picker.selectedFamily)} <FiX aria-hidden="true" /></Button>}
             {picker.filters.capabilities.map(capability => <Button key={capability} size="sm" onClick={() => picker.setFilters({ ...picker.filters, capabilities: picker.filters.capabilities.filter(value => value !== capability) })}>{capability.replaceAll('_', ' ')} <FiX aria-hidden="true" /></Button>)}
             {picker.filters.sizeRange && <Button size="sm" onClick={() => picker.setFilters({ ...picker.filters, sizeRange: null })}>{t('common.size', 'Size')} <FiX aria-hidden="true" /></Button>}

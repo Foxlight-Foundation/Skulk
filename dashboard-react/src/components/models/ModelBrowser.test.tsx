@@ -204,6 +204,21 @@ describe('ModelBrowser store discovery taxonomy', () => {
     expect(container?.textContent).not.toContain('Other');
   });
 
+  it('offers grouped downloads without silently choosing a variant', async () => {
+    const onSelect = vi.fn();
+    await renderBrowser(onSelect, undefined, 'store-download', [
+      MODELS[0],
+      { ...MODELS[0], id: 'local/Qwen3-4B-8bit', quantization: '8bit' },
+    ]);
+    const download = Array.from(container?.querySelectorAll('button') ?? [])
+      .find(button => button.textContent === 'Download');
+    expect(download).toBeDefined();
+    await act(async () => download?.click());
+    expect(container?.textContent).toContain('local/Qwen3-4B-8bit'.split('/').pop());
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(container?.querySelector('[aria-label="Download local/Qwen3-4B-8bit"]')).not.toBeNull();
+  });
+
   it('does not apply registry provenance to an unprovenanced grouped variant', async () => {
     const mixedModels = [
       MODELS[0],

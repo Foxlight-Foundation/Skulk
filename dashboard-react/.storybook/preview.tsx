@@ -51,7 +51,7 @@ const withTheme = (Story: () => ReactNode, context: { globals: { theme?: string 
 };
 
 const preview: Preview = {
-  loaders: [context => { configureFixtureScreen(!!context.parameters.screenRoute, !!context.parameters.telemetryConsent); return {}; }],
+  loaders: [context => { configureFixtureScreen(!!context.parameters.screenRoute, !!context.parameters.telemetryConsent, !!context.parameters.pluginInventoryUnavailable); return {}; }],
   decorators: [withTheme, (Story, context) => <FixtureProvider screenRoute={context.parameters.screenRoute} storyId={context.id} theme={context.globals.theme === 'light' ? 'light' : 'dark'}><Story /></FixtureProvider>],
   globalTypes: {
     theme: {

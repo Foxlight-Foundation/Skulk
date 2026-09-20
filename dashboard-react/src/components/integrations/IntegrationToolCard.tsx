@@ -13,6 +13,7 @@ const Card = styled.button`
   p { font-size: 12.5px; line-height: 1.45; margin-top: 3px; text-wrap: pretty; color: ${({ theme }) => theme.colors.textSecondary}; }
   footer { margin-top: auto; font: 11px ${({ theme }) => theme.fonts.mono}; color: ${({ theme }) => theme.colors.metadataText}; }
 `;
+const ToolMark = styled(Monogram)`border: 1px solid ${({ theme }) => theme.colors.border};`;
 const Top = styled.div`display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; span:last-child { padding: 2px 6px; border: 1px solid ${({ theme }) => theme.colors.border}; border-radius: 999px; font-family: ${({ theme }) => theme.fonts.mono}; font-size: 10px; color: ${({ theme }) => theme.colors.metadataText}; }`;
 
 /** Tool discovery card; setup availability is not presented as connection evidence. */
@@ -21,7 +22,7 @@ export function IntegrationToolCard({ name, monogram, description, method, onOpe
 }) {
   const { t } = useSkulkTranslation();
   return <Card type="button" onClick={onOpen} aria-label={name}>
-    <Top><Monogram $size={36}>{monogram}</Monogram><span>{t('integrations.setUp', 'set up')}</span></Top>
+    <Top><ToolMark $size={36}>{monogram}</ToolMark><span>{t('integrations.setUp', 'set up')}</span></Top>
     <div><strong>{name}</strong><p>{description}</p></div><footer>{method}</footer>
   </Card>;
 }

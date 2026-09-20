@@ -27,13 +27,15 @@ const capability: CapabilityNodeSummary = { pluginId: 'example', nodeId: 'video'
 const meta = { title: 'Inventory/Details and overlays', parameters: { layout: 'fullscreen' }, decorators: [(Story) => <div style={{ minHeight: '100vh', padding: 24 }}><Story /></div>] } satisfies Meta;
 export default meta;
 type Story = StoryObj<typeof meta>;
-function Panel({ capabilityPanel = false }: { capabilityPanel?: boolean }) {
+function Panel({ capabilityPanel = false, populated = false }: { capabilityPanel?: boolean; populated?: boolean }) {
   const dispatch = useAppDispatch();
-  useEffect(() => { if (capabilityPanel) dispatch(uiActions.openCapabilityPanel({ target: { hostNodeId: 'example', key: 'example/video' } })); else dispatch(uiActions.openObservability({})); }, [dispatch, capabilityPanel]);
+  useEffect(() => { if (capabilityPanel) dispatch(uiActions.openCapabilityPanel({ target: { hostNodeId: populated ? 'workstation' : 'example', key: 'example/video' } })); else dispatch(uiActions.openObservability({})); }, [dispatch, capabilityPanel, populated]);
   return capabilityPanel ? <CapabilityPanel /> : <ObservabilityPanel />;
 }
 export const Observability: Story = { render: () => <Panel /> };
 export const Capabilities: Story = { render: () => <Panel capabilityPanel /> };
+/** An observed capability, including its existing surfaces and actions. */
+export const CapabilityDetails: Story = { parameters: { screenRoute: 'cluster' }, render: () => <Panel capabilityPanel populated /> };
 export const Background: Story = { render: () => <><NetworkMesh /><SceneBackdrop /><ShootingStars /><Surface style={{ position: 'relative' }}>Background layers use the active palette.</Surface></> };
 export const MobileMenu: Story = { render: () => <div style={{ position: 'relative', height: 60 }}><MobileMenuSheet open activeRoute="cluster" onNavigate={() => {}} onOpenSettings={() => {}} onClose={() => {}} /></div> };
 export const Telemetry: Story = {

@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { QRCodeCanvas } from 'qrcode.react';
 import styled from 'styled-components';
 
+import { copyToClipboard } from '../../utils/clipboard';
 import { addToast } from '../../hooks/useToast';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 import {
@@ -45,19 +46,19 @@ const Legend = styled.legend`
   font-family: ${({ theme }) => theme.fonts.body};
   font-weight: 600;
   color: ${({ theme }) => theme.colors.body};
-  padding: 0 6px;
+  padding: 0 0 12px;
 `;
 
 const Intro = styled.p`
   margin: 0;
-  font-size: ${({ theme }) => theme.fontSizes.sm};
+  font-size: 13px;
   line-height: 1.5;
-  color: ${({ theme }) => theme.colors.body};
+  color: ${({ theme }) => theme.colors.textSecondary};
 `;
 
 const FormGrid = styled.div`
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 96px;
+  grid-template-columns: minmax(0, 1fr) 78px;
   gap: 10px;
 `;
 
@@ -82,8 +83,9 @@ const Select = styled.select`
   font: inherit;
 
   &:focus-visible {
-    outline: 2px solid ${({ theme }) => theme.colors.goldDim};
-    outline-offset: 1px;
+    outline: none;
+    border-color: ${({ theme }) => theme.colors.accentText};
+    box-shadow: ${({ theme }) => theme.colors.focusRing};
   }
 `;
 
@@ -156,27 +158,29 @@ const ErrorText = styled.div`
 const InvitationList = styled.div`
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  border-top: 1px solid ${({ theme }) => theme.colors.borderLight};
-  padding-top: 12px;
+  gap: 10px;
 `;
 
 const ListTitle = styled.div`
-  font-size: ${({ theme }) => theme.fontSizes.xs};
+  font-family: ${({ theme }) => theme.fonts.mono};
+  font-size: 10px;
   font-weight: 600;
   color: ${({ theme }) => theme.colors.body};
   text-transform: uppercase;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.16em;
 `;
 
+const InvitationRows = styled.div`
+  border: 1px solid ${({ theme }) => theme.colors.border}; border-radius: 12px;
+  background: ${({ theme }) => theme.colors.surface}; overflow: hidden;
+`;
 const InvitationRow = styled.div`
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
-  border-radius: ${({ theme }) => theme.radii.md};
-  background: ${({ theme }) => theme.colors.surfaceSunken};
-  padding: 10px;
+  padding: 11px 14px;
+  & + & { border-top: 1px solid ${({ theme }) => theme.colors.borderLight}; }
 `;
 
 const InvitationCopy = styled.div`
@@ -187,25 +191,27 @@ const InvitationCopy = styled.div`
 `;
 
 const InvitationHeadline = styled.div`
-  overflow-wrap: anywhere;
+  > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   font-family: ${({ theme }) => theme.fonts.mono};
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  > span:last-child { flex-shrink: 0; }
   gap: 6px;
   color: ${({ theme }) => theme.colors.body};
-  font-size: ${({ theme }) => theme.fontSizes.sm};
+  font-size: 12px;
 `;
 
 const StatePill = styled.span<{ $state: PairingInvitationState }>`
   display: inline-flex;
   align-items: center;
   border-radius: 999px;
-  padding: 2px 7px;
+  padding: 1px 7px;
+  border: 1px solid ${({ $state, theme }) => $state === 'active' ? theme.colors.borderLive : theme.colors.border};
   background: ${({ $state, theme }) =>
-    $state === 'active' ? theme.colors.liveBg : theme.colors.surfaceElevated};
+    $state === 'active' ? theme.colors.surface : theme.colors.surfaceElevated};
   color: ${({ $state, theme }) =>
-    $state === 'active' ? theme.colors.liveText : theme.colors.subtleText};
+    $state === 'active' ? theme.colors.liveText : theme.colors.metadataText};
   font-family: ${({ theme }) => theme.fonts.mono};
   font-size: 10px;
 `;
@@ -313,6 +319,16 @@ export function PairingSettings({ invitationHost }: { invitationHost?: HTMLEleme
     [created?.invitation.invitationId, resetPairingDisplay, revokeInvitation, t],
   );
 
+  const copyCode = async () => {
+    if (!created) return;
+    try {
+      await copyToClipboard(created.pairingCode);
+      addToast({ type: 'success', message: t('settings.pairing.codeCopied', 'Pairing code copied') });
+    } catch {
+      addToast({ type: 'error', message: t('settings.pairing.copyFailed', 'Could not copy the pairing code') });
+    }
+  };
+
   const downloadQr = useCallback(() => {
     if (created === null || canvasRef.current === null) return;
     const link = document.createElement('a');
@@ -333,9 +349,9 @@ export function PairingSettings({ invitationHost }: { invitationHost?: HTMLEleme
   const invitationList = (invitations && invitations.length > 0 ? (
         <InvitationList>
           <ListTitle>{t('settings.pairing.recent', 'Recent invitations')}</ListTitle>
-          {[...invitations].reverse().map((invitation) => (
+          <InvitationRows>{[...invitations].reverse().map((invitation) => (
             <PairingInvitationRow key={invitation.invitationId} invitation={invitation} busy={revokeResult.isLoading} onRevoke={() => void revoke(invitation.invitationId)} />
-          ))}
+          ))}</InvitationRows>
         </InvitationList>
       ) : null);
 
@@ -347,7 +363,7 @@ export function PairingSettings({ invitationHost }: { invitationHost?: HTMLEleme
           <Intro>
             {t(
               'settings.pairing.intro',
-              'Generate a protected code for the Skulk Operator app. Open this dashboard on the operator gateway through Tailscale or localhost. The code is a bearer secret and is shown here for five minutes.',
+              'A protected code for the Skulk Operator app. It is a bearer secret and stays visible here for five minutes.',
             )}
           </Intro>
           <FormGrid>
@@ -427,9 +443,14 @@ export function PairingSettings({ invitationHost }: { invitationHost?: HTMLEleme
             )}
           </SecretWarning>
           <ButtonRow>
-            <Button onClick={downloadQr} variant="outline">
-              {t('settings.pairing.download', 'Download PNG')}
+            <Button onClick={() => void copyCode()} variant="outline">
+              {t('settings.pairing.copyCode', 'Copy code')}
             </Button>
+            <Button onClick={downloadQr} variant="outline">
+              {t('settings.pairing.download', 'Save QR')}
+            </Button>
+          </ButtonRow>
+          <ButtonRow>
             <Button
               loading={revokeResult.isLoading}
               onClick={() => void revoke(created.invitation.invitationId)}

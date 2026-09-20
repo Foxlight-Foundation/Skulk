@@ -8,6 +8,9 @@ import { PairingSettings } from './PairingSettings';
 
 Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', { value: true, configurable: true });
 
+const copyCodeMock = vi.hoisted(() => vi.fn());
+vi.mock('../../utils/clipboard', () => ({ copyToClipboard: copyCodeMock }));
+
 const createInvitationMock = vi.hoisted(() => vi.fn());
 const getInvitationsQueryMock = vi.hoisted(() => vi.fn());
 const refetchMock = vi.hoisted(() => vi.fn());
@@ -121,6 +124,10 @@ describe('PairingSettings', () => {
       '/skulk-qr-mark.svg',
     );
     expect(container?.querySelector('canvas')?.getAttribute('data-logo-excavated')).toBe('false');
+    expect(copyCodeMock).not.toHaveBeenCalled();
+    const copyCode = [...(container?.querySelectorAll('button') ?? [])].find(button => button.textContent === 'Copy code');
+    await act(async () => copyCode?.click());
+    expect(copyCodeMock).toHaveBeenCalledExactlyOnceWith('skulk://pair?z=secret-bearing-code');
     expect(container?.textContent).not.toContain('secret-bearing-code');
     expect(container?.textContent).toContain('Visible here for · 5:00');
     expect(getInvitationsQueryMock).toHaveBeenCalledWith(undefined, {

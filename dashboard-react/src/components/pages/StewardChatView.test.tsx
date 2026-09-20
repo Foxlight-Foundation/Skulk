@@ -17,7 +17,7 @@ import type { ModelInfo } from '../../types/models';
 import { discoverSkulkSpeechSelection } from '../../audio/fabricSpeechDiscovery';
 import { buildSkulkSpeechSynthesisRequest } from '../../audio/fabricSpeechRequest';
 import type { InstanceCardData } from '../layout/InstancePanel';
-import { StewardControllerProvider, StewardChatView } from './StewardChatView';
+import { StewardClusterPrompt, StewardControllerProvider, StewardChatView } from './StewardChatView';
 
 Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', { value: true, configurable: true });
 
@@ -550,4 +550,53 @@ it('keeps an unsent drawer draft when selecting the virtual model creates its fi
   await act(async () => { store.dispatch(chatActions.selectModel('skulk/steward')); });
   expect(container!.querySelector('textarea')!.value).toBe('Not submitted yet');
   expect(onChat).not.toHaveBeenCalled();
+});
+
+it.each(['enter', 'button'])('submits the cluster draft once with %s and retains it across presentations', async method => {
+  const onChat = vi.fn();
+  const onOpen = vi.fn();
+  stubFetch({ status: READY, onChat, openStream: signal => new ReadableStream({ start(controller) {
+    controller.enqueue(new TextEncoder().encode(`data: ${delta({ content: 'Working on it' })}\n\n`));
+    signal?.addEventListener('abort', () => controller.error(new DOMException('Aborted', 'AbortError')), { once: true });
+  } }) });
+  container = document.createElement('div');
+  document.body.append(container);
+  root = createRoot(container);
+  const present = async (chat = false) => {
+    await act(async () => root?.render(<Provider store={store}><ThemeProvider theme={darkTheme}>
+      <StewardControllerProvider><StewardClusterPrompt onOpen={onOpen} />{chat && <StewardChatView />}</StewardControllerProvider>
+    </ThemeProvider></Provider>));
+  };
+  await present();
+  const input = container.querySelector('input')!;
+  await userEvent.fill(input, 'How is the cluster?');
+  await waitFor(() => !container!.querySelector<HTMLButtonElement>('button')!.disabled, 'Steward did not become ready');
+  expect(onOpen).not.toHaveBeenCalled();
+  expect(onChat).not.toHaveBeenCalled();
+  const composition = new KeyboardEvent('keydown', { key: 'Enter', isComposing: true, bubbles: true, cancelable: true });
+  input.dispatchEvent(composition);
+  expect(composition.defaultPrevented).toBe(true);
+  expect(onChat).not.toHaveBeenCalled();
+  await present(true);
+  expect(container.querySelector('textarea')?.value).toBe('How is the cluster?');
+  await present();
+  await userEvent.fill(input, '  ');
+  await userEvent.keyboard('{Enter}');
+  expect(onChat).not.toHaveBeenCalled();
+  await userEvent.fill(input, 'How is the cluster?');
+  await act(async () => {
+    if (method === 'enter') await userEvent.keyboard('{Enter}');
+    else await userEvent.click(container!.querySelector('button')!);
+  });
+  await waitFor(() => onChat.mock.calls.length === 1, 'cluster prompt did not send');
+  expect(onOpen).toHaveBeenCalledOnce();
+  expect(input.value).toBe('');
+  expect(JSON.parse(String(onChat.mock.calls[0][0].body)).messages.at(-1).content).toBe('How is the cluster?');
+  await userEvent.fill(input, 'A follow-up draft');
+  await userEvent.keyboard('{Enter}');
+  expect(onChat).toHaveBeenCalledOnce();
+  expect(input.value).toBe('A follow-up draft');
+  await present(true);
+  expect(container.textContent).toContain('How is the cluster?');
+  expect(container.querySelector('textarea')?.value).toBe('A follow-up draft');
 });

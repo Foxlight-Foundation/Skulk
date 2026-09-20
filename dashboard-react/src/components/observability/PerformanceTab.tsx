@@ -45,11 +45,14 @@ const NodeHeading = styled.div`
   color: ${({ theme }) => theme.colors.subtleText};
   text-transform: uppercase;
   letter-spacing: 0.04em;
+  overflow-wrap: anywhere;
 `;
 
 const Card = styled.div`
-  border: 1px solid rgba(128, 128, 128, 0.25);
-  border-radius: 6px;
+  border: 1px solid ${({ theme }) => theme.colors.border};
+  border-radius: ${({ theme }) => theme.radii.md};
+  background: ${({ theme }) => theme.colors.surface};
+  min-width: 0;
   padding: 8px 10px;
   display: flex;
   flex-direction: column;
@@ -65,6 +68,7 @@ const CardHeader = styled.div`
 `;
 
 const Model = styled.span`
+  overflow-wrap: anywhere;
   font-weight: 600;
 `;
 
@@ -74,13 +78,21 @@ const Tag = styled.span`
   text-transform: uppercase;
   letter-spacing: 0.03em;
   padding: 1px 6px;
-  border-radius: 4px;
-  color: #fff;
-  background: #557;
+  border-radius: ${({ theme }) => theme.radii.sm};
+  font-family: ${({ theme }) => theme.fonts.mono};
+  color: ${({ theme }) => theme.colors.textSecondary};
+  background: ${({ theme }) => theme.colors.surfaceSunken};
+  border: 1px solid ${({ theme }) => theme.colors.border};
 `;
 
 const Muted = styled.span`
   color: ${({ theme }) => theme.colors.subtleText};
+`;
+
+// Keep every metric available on narrow sheets without widening the drawer.
+const TableScroll = styled.div`
+  min-width: 0;
+  overflow-x: auto;
 `;
 
 const Table = styled.table`
@@ -94,7 +106,7 @@ const Th = styled.th`
   padding: 2px 6px;
   color: ${({ theme }) => theme.colors.subtleText};
   font-weight: 600;
-  border-bottom: 1px solid rgba(128, 128, 128, 0.25);
+  border-bottom: 1px solid ${({ theme }) => theme.colors.border};
   white-space: nowrap;
   &:first-child {
     text-align: left;
@@ -140,36 +152,38 @@ function EnvelopeCard({
           · {envelope.observationCount} {t('performance.observationsUnit', 'obs')}
         </Muted>
       </CardHeader>
-      <Table>
-        <thead>
-          <tr>
-            <Th>{t('performance.col.concurrency', 'Concurrency')}</Th>
-            <Th>{t('performance.col.requests', 'Reqs')}</Th>
-            <Th>{t('performance.col.decodeTps', 'Decode tok/s')}</Th>
-            <Th>{t('performance.col.aggregateTps', 'Aggregate tok/s')}</Th>
-            <Th>{t('performance.col.ttftP50', 'TTFT p50 (s)')}</Th>
-            <Th>{t('performance.col.ttftP90', 'TTFT p90 (s)')}</Th>
-          </tr>
-        </thead>
-        <tbody>
-          {envelope.buckets.map((bucket: ConcurrencyBucketSummary) => {
-            const isKnee = bucket.concurrency === envelope.kneeConcurrency;
-            return (
-              <tr key={bucket.concurrency}>
-                <Td $knee={isKnee}>
-                  {bucket.concurrency}
-                  {isKnee ? ` ${t('performance.kneeMark', '(knee)')}` : ''}
-                </Td>
-                <Td $knee={isKnee}>{bucket.requestCount}</Td>
-                <Td $knee={isKnee}>{fmt(bucket.decodeTpsMean)}</Td>
-                <Td $knee={isKnee}>{fmt(bucket.aggregateDecodeTps)}</Td>
-                <Td $knee={isKnee}>{fmt(bucket.ttftSecondsP50, 2)}</Td>
-                <Td $knee={isKnee}>{fmt(bucket.ttftSecondsP90, 2)}</Td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </Table>
+      <TableScroll tabIndex={0} role="region" aria-label={t('performance.metrics', 'Performance measurements')}>
+        <Table>
+          <thead>
+            <tr>
+              <Th>{t('performance.col.concurrency', 'Concurrency')}</Th>
+              <Th>{t('performance.col.requests', 'Reqs')}</Th>
+              <Th>{t('performance.col.decodeTps', 'Decode tok/s')}</Th>
+              <Th>{t('performance.col.aggregateTps', 'Aggregate tok/s')}</Th>
+              <Th>{t('performance.col.ttftP50', 'TTFT p50 (s)')}</Th>
+              <Th>{t('performance.col.ttftP90', 'TTFT p90 (s)')}</Th>
+            </tr>
+          </thead>
+          <tbody>
+            {envelope.buckets.map((bucket: ConcurrencyBucketSummary) => {
+              const isKnee = bucket.concurrency === envelope.kneeConcurrency;
+              return (
+                <tr key={bucket.concurrency}>
+                  <Td $knee={isKnee}>
+                    {bucket.concurrency}
+                    {isKnee ? ` ${t('performance.kneeMark', '(knee)')}` : ''}
+                  </Td>
+                  <Td $knee={isKnee}>{bucket.requestCount}</Td>
+                  <Td $knee={isKnee}>{fmt(bucket.decodeTpsMean)}</Td>
+                  <Td $knee={isKnee}>{fmt(bucket.aggregateDecodeTps)}</Td>
+                  <Td $knee={isKnee}>{fmt(bucket.ttftSecondsP50, 2)}</Td>
+                  <Td $knee={isKnee}>{fmt(bucket.ttftSecondsP90, 2)}</Td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </Table>
+      </TableScroll>
     </Card>
   );
 }
