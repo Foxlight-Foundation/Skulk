@@ -663,7 +663,7 @@ export function App() {
       <SceneBackdrop />
       <ShootingStars />
       {activeTheme.colors.scene === 'none' && (
-        <NetworkMesh />
+        <NetworkMesh key={isMobile ? 'mesh-mobile' : 'mesh-desktop'} radius={2.5} count={isMobile ? 14 : 43} linkDistance={430} />
       )}
       <StewardControllerProvider readyInstances={instanceCards}>
       <Shell>
