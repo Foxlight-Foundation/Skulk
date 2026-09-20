@@ -114,8 +114,8 @@ export interface ChatFormProps {
 const Form = styled.form<{ $dragOver: boolean; $steward: boolean }>`
   ${({ $steward, theme }) => $steward && css`border-color: ${theme.colors.borderLive} !important; box-shadow: 0 0 0 3px ${theme.colors.liveBg};`}
   position: relative;
-  background: ${({ theme }) => theme.colors.surface};
-  border: 1px solid ${({ theme }) => theme.colors.border};
+  background: ${({ theme }) => theme.colors.surfaceElevated};
+  border: 1px solid ${({ theme }) => theme.colors.borderControl};
   border-radius: ${({ theme }) => theme.radii.lg};
   overflow: hidden;
   transition: border-color 0.15s;
@@ -132,17 +132,12 @@ const Form = styled.form<{ $dragOver: boolean; $steward: boolean }>`
     `}
 `;
 
-const AccentLine = styled.div`
-  height: 1px;
-  background: linear-gradient(90deg, transparent, ${({ theme }) => theme.colors.goldDim}, transparent);
-`;
-
 const HeaderRow = styled.div`
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 12px;
-  font-size: ${({ theme }) => theme.fontSizes.xs};
+  padding: 12px 14px 0;
+  font-size: 13px;
   font-family: ${({ theme }) => theme.fonts.body};
   color: ${({ theme }) => theme.colors.subtleText};
 
@@ -157,7 +152,7 @@ const VoiceRow = styled.div`
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-  padding: 0 12px 8px;
+  padding: 10px 14px 0;
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
   color: ${({ theme }) => theme.colors.subtleText};
@@ -341,8 +336,8 @@ const Spacer = styled.span`
 const InputRow = styled.div`
   display: flex;
   align-items: flex-end;
-  gap: 8px;
-  padding: 8px 12px;
+  gap: 12px;
+  padding: 10px 14px;
 
   @media (max-width: ${MOBILE_BREAKPOINT_PX}px) {
     gap: 6px;
@@ -353,22 +348,14 @@ const AttachBtn = styled(Button)`
   flex-shrink: 0;
 `;
 
-const Prompt = styled.span`
-  color: ${({ theme }) => theme.colors.accentText};
-  font-size: ${({ theme }) => theme.fontSizes.lg};
-  font-family: ${({ theme }) => theme.fonts.body};
-  flex-shrink: 0;
-  line-height: 28px;
-`;
-
-const TextArea = styled.textarea`
+const TextArea = styled.textarea<{ $steward: boolean }>`
   all: unset;
   flex: 1;
   min-width: 0;
-  font-size: ${({ theme }) => theme.fontSizes.md};
+  font-size: ${({ $steward }) => $steward ? '18px' : '16px'};
   font-family: ${({ theme }) => theme.fonts.body};
   color: ${({ theme }) => theme.colors.text};
-  min-height: 28px;
+  min-height: 30px;
   max-height: 150px;
   resize: none;
   line-height: 1.5;
@@ -399,7 +386,9 @@ const DragOverlay = styled.div`
 `;
 
 const HelperText = styled.div`
-  padding: 4px 12px 8px;
+  margin: 0 14px;
+  padding: 8px 0 10px;
+  border-top: 1px solid ${({ theme }) => theme.colors.borderLight};
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
   color: ${({ theme }) => theme.colors.metadataText};
@@ -407,12 +396,6 @@ const HelperText = styled.div`
 
   /* Keyboard hints (Enter / Shift+Enter / drag & drop) mean nothing on a
    * phone; they and their rule hide below the breakpoint. */
-  @media (max-width: ${MOBILE_BREAKPOINT_PX}px) {
-    display: none;
-  }
-`;
-
-const BottomAccentLine = styled(AccentLine)`
   @media (max-width: ${MOBILE_BREAKPOINT_PX}px) {
     display: none;
   }
@@ -1135,7 +1118,6 @@ export function ChatForm({
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
-      {!compact && <AccentLine />}
 
       {isDragOver && <DragOverlay>{t('chat.form.dropFilesHere', 'Drop files here')}</DragOverlay>}
 
@@ -1437,8 +1419,8 @@ export function ChatForm({
         >
           <FiPaperclip size={17} />
         </AttachBtn>}
-        {!compact && <Prompt>▶</Prompt>}
         <TextArea
+          $steward={steward}
           ref={textareaRef}
           value={message}
           onChange={(e) => {
@@ -1476,7 +1458,6 @@ export function ChatForm({
         )}
       </InputRow>
 
-      {!compact && <BottomAccentLine />}
       {!compact && <HelperText>
         {supportsImageAttachments
           ? t(

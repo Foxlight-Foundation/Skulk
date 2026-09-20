@@ -37,7 +37,7 @@ const Wrapper = styled.label<{ $size: FieldSize; $disabled?: boolean }>`
   display: flex;
   align-items: center;
   background: ${({ theme }) => theme.colors.surfaceHover};
-  border: 1px solid ${({ theme }) => theme.colors.borderControl};
+  border: 1px solid ${({ theme }) => theme.colors.border};
   border-radius: ${({ theme }) => theme.radii.md};
   color: ${({ theme }) => theme.colors.text};
   transition: border-color 0.15s;

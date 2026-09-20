@@ -33,7 +33,7 @@ const Backdrop = styled.div`
   inset: 0;
   z-index: 60;
   background: ${({ theme }) => theme.colors.overlay};
-  backdrop-filter: blur(4px);
+  backdrop-filter: blur(2px);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -44,21 +44,23 @@ const Card = styled.div`
   width: min(560px, calc(100vw - 32px));
   max-height: calc(100vh - 64px);
   overflow-y: auto;
-  background: ${({ theme }) => theme.colors.surface};
-  border: 1px solid ${({ theme }) => theme.colors.border};
-  border-radius: 14px;
-  padding: 24px;
+  background: ${({ theme }) => theme.colors.surfaceElevated};
+  border: 1px solid ${({ theme }) => theme.colors.borderControl};
+  border-radius: 12px;
+  box-shadow: ${({ theme }) => theme.colors.shadowPop};
+  padding: 20px;
   animation: ${riseIn} 200ms ease;
 `;
 
 const Title = styled.h2`
   margin: 0 0 6px;
-  font-size: 1.05rem;
+  font-size: 18px;
+  color: ${({ theme }) => theme.colors.text};
 `;
 
 const Body = styled.p`
   margin: 0 0 14px;
-  font-size: 0.86rem;
+  font-size: 14px;
   line-height: 1.55;
   opacity: 0.85;
 `;
@@ -66,7 +68,7 @@ const Body = styled.p`
 const FactList = styled.ul`
   margin: 0 0 14px;
   padding-left: 18px;
-  font-size: 0.82rem;
+  font-size: 13px;
   line-height: 1.5;
   opacity: 0.8;
 `;
@@ -80,7 +82,7 @@ const ToggleRow = styled.label`
   border-radius: 10px;
   margin-bottom: 10px;
   cursor: pointer;
-  font-size: 0.85rem;
+  font-size: 14px;
 
   input {
     margin-top: 3px;
@@ -89,7 +91,7 @@ const ToggleRow = styled.label`
 
 const ToggleHint = styled.span`
   display: block;
-  font-size: 0.76rem;
+  font-size: 12px;
   color: ${({ theme }) => theme.colors.textSecondary};
   margin-top: 2px;
 `;
@@ -102,9 +104,10 @@ const Actions = styled.div`
 `;
 
 const Button = styled.button<{ $primary?: boolean }>`
-  padding: 8px 16px;
+  min-height: 36px;
+  padding: 0 16px;
   border-radius: 8px;
-  font-size: 0.84rem;
+  font-size: 14px;
   cursor: pointer;
   border: 1px solid ${({ theme }) => theme.colors.border};
   background: ${({ $primary, theme }) => ($primary ? theme.colors.actionFill : 'transparent')};

@@ -96,9 +96,10 @@ const Overlay = styled.div`
 `;
 
 const Modal = styled.div`
-  background: ${({ theme }) => theme.colors.surface};
-  border: 1px solid ${({ theme }) => theme.colors.border};
+  background: ${({ theme }) => theme.colors.surfaceElevated};
+  border: 1px solid ${({ theme }) => theme.colors.borderControl};
   border-radius: ${({ theme }) => theme.radii.lg};
+  box-shadow: ${({ theme }) => theme.colors.shadowPop};
   width: 560px;
   max-width: calc(100vw - 24px);
   max-height: 85vh;
@@ -112,13 +113,13 @@ const Header = styled.div`
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 16px 20px;
+  padding: 14px 18px;
   border-bottom: 1px solid ${({ theme }) => theme.colors.border};
 `;
 
 const Title = styled.div`
   flex: 1; min-width: 0; overflow-wrap: anywhere;
-  font-size: ${({ theme }) => theme.fontSizes.md};
+  font-size: 17px;
   font-family: ${({ theme }) => theme.fonts.body};
   font-weight: 600;
   color: ${({ theme }) => theme.colors.text};
@@ -138,7 +139,7 @@ const CloseBtn = styled.button`
 `;
 
 const Body = styled.div`
-  padding: 20px;
+  padding: 16px 18px;
   display: flex;
   flex-direction: column;
   gap: 20px;
@@ -272,11 +273,11 @@ const Callout = styled.div`
   gap: 6px;
   padding: 8px 10px;
   border-radius: ${({ theme }) => theme.radii.sm};
-  background: rgba(245, 158, 11, 0.08);
-  border: 1px solid rgba(245, 158, 11, 0.2);
+  background: ${({ theme }) => theme.colors.warningBg};
+  border: 1px solid ${({ theme }) => theme.colors.borderLive};
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: rgba(245, 158, 11, 0.9);
+  color: ${({ theme }) => theme.colors.warningText};
 `;
 
 const ErrorCallout = styled.div`
@@ -286,16 +287,16 @@ const ErrorCallout = styled.div`
   padding: 10px 12px;
   border-radius: ${({ theme }) => theme.radii.md};
   background: ${({ theme }) => theme.colors.errorBg};
-  border: 1px solid rgba(239, 68, 68, 0.25);
+  border: 1px solid ${({ theme }) => theme.colors.borderDanger};
   font-size: ${({ theme }) => theme.fontSizes.sm};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: rgba(248, 113, 113, 1);
+  color: ${({ theme }) => theme.colors.errorText};
 `;
 
 const Footer = styled.div`
   display: flex;
   justify-content: flex-end;
-  padding: 16px 20px;
+  padding: 12px 18px;
   border-top: 1px solid ${({ theme }) => theme.colors.border};
 `;
 

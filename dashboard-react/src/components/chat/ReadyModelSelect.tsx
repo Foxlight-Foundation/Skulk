@@ -6,11 +6,11 @@ import { MdAutoAwesome } from 'react-icons/md';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 
 const Trigger = styled.button<{ $fabric: boolean }>`
-  min-width: 0; max-width: 100%; padding: 8px 12px; display: inline-flex; align-items: center; gap: 8px;
-  border: 1px solid ${({ theme, $fabric }) => $fabric ? theme.colors.borderLive : theme.colors.borderControl};
-  border-radius: 8px; background: ${({ theme, $fabric }) => $fabric ? theme.colors.liveBg : theme.colors.surface};
+  min-width: 0; max-width: 100%; padding: 0; display: inline-flex; align-items: center; gap: 5px;
+  border: 0;
+  border-radius: 4px; background: transparent;
   color: ${({ theme, $fabric }) => $fabric ? theme.colors.live : theme.colors.text};
-  font: 14px ${({ theme }) => theme.fonts.body}; text-align: left;
+  font: 600 13px ${({ theme }) => theme.fonts.body}; text-align: left;
   span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   svg { flex-shrink: 0; }
 `;
@@ -20,19 +20,19 @@ const Menu = styled.div`
   border-radius: 12px; padding: 6px; box-shadow: ${({ theme }) => theme.colors.shadowPop};
 `;
 const GroupLabel = styled.div`
-  padding: 8px 10px 6px; font: 600 10px ${({ theme }) => theme.fonts.mono};
+  padding: 8px 10px 4px; font: 600 10px ${({ theme }) => theme.fonts.mono};
   letter-spacing: .14em; color: ${({ theme }) => theme.colors.textMuted}; text-transform: uppercase;
 `;
 const Option = styled.button<{ $fabric: boolean; $selected: boolean }>`
-  display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px;
-  border: 1px solid ${({ theme, $fabric, $selected }) => $selected ? ($fabric ? theme.colors.borderLive : theme.colors.borderStrong) : 'transparent'};
-  background: ${({ theme, $fabric, $selected }) => $selected ? ($fabric ? theme.colors.liveBg : theme.colors.goldBg) : 'transparent'};
+  display: flex; align-items: center; gap: 10px; width: 100%; padding: 9px 10px;
+  border: 1px solid ${({ theme, $selected }) => $selected ? theme.colors.borderLive : 'transparent'};
+  background: ${({ theme, $selected }) => $selected ? theme.colors.liveBg : 'transparent'};
   border-radius: 8px; text-align: left; color: ${({ theme }) => theme.colors.text};
   font: 14px ${({ theme }) => theme.fonts.body};
   > svg { flex-shrink: 0; color: ${({ theme, $fabric }) => $fabric ? theme.colors.live : theme.colors.gold}; }
   > span { min-width: 0; flex: 1; overflow-wrap: anywhere; }
-  strong { font-weight: 600; } small { display: block; margin-top: 3px; font-size: 11.5px; line-height: 1.4; color: ${({ theme }) => theme.colors.textSecondary}; }
-  &:hover { background: ${({ theme }) => theme.colors.surfaceSunken}; }
+  strong { font-weight: 600; } small { display: block; margin-top: 3px; font-size: 12px; line-height: 1.4; color: ${({ theme }) => theme.colors.textSecondary}; }
+  &:hover { background: ${({ theme, $selected }) => $selected ? theme.colors.liveBg : theme.colors.surfaceHover}; }
   &:focus-visible { outline: none; box-shadow: inset 0 0 0 2px ${({ theme }) => theme.colors.gold}; }
 `;
 const ReadyDot = styled.i`width: 6px; height: 6px; border-radius: 50%; background: ${({ theme }) => theme.colors.healthy}; flex-shrink: 0;`;

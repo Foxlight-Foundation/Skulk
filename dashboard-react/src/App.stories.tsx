@@ -22,6 +22,25 @@ export const Cluster: Story = {};
 export const Integrations: Story = { parameters: { screenRoute: 'integrations' } };
 export const Plugins: Story = { parameters: { screenRoute: 'plugins' } };
 export const Chat: Story = { parameters: { screenRoute: 'chat' } };
+/** Switching Chat presentations preserves the fabric draft and composer ownership. */
+export const ChatFabricComposer: Story = {
+  parameters: { screenRoute: 'chat' },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(document.body);
+    await userEvent.click(await canvas.findByRole('button', { name: 'Select chat model' }));
+    await userEvent.click(await body.findByRole('option', { name: /Skulk/ }));
+    const input = await canvas.findByRole('textbox', { name: 'Chat message' });
+    await expect(input.closest('form')).toContainElement(canvas.getByRole('button', { name: 'Select chat model' }));
+    await userEvent.type(input, 'A draft kept across model changes');
+    await userEvent.click(canvas.getByRole('button', { name: 'Select chat model' }));
+    await userEvent.click(await body.findByRole('option', { name: /Chat-32B/ }));
+    await userEvent.click(canvas.getByRole('button', { name: 'Select chat model' }));
+    await userEvent.click(await body.findByRole('option', { name: /Skulk/ }));
+    await expect(await canvas.findByRole('textbox', { name: 'Chat message' })).toHaveValue('A draft kept across model changes');
+    await expect(canvas.queryByText(/The example cluster has three nodes/)).not.toBeInTheDocument();
+  },
+};
 export const Operator: Story = { parameters: { screenRoute: 'operator' } };
 export const ModelStore: Story = { parameters: { screenRoute: 'model-store' } };
 export const Settings: Story = {

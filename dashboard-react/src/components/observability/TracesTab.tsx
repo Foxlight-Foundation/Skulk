@@ -63,11 +63,12 @@ const FilterBar = styled.div`
 `;
 
 const FilterSelect = styled.select`
-  background: ${({ theme }) => theme.colors.bg};
+  background: ${({ theme }) => theme.colors.surfaceHover};
   color: ${({ theme }) => theme.colors.text};
   border: 1px solid ${({ theme }) => theme.colors.border};
-  border-radius: ${({ theme }) => theme.radii.sm};
-  padding: 3px 6px;
+  border-radius: 6px;
+  min-height: 30px;
+  padding: 0 8px;
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
   outline: none;
@@ -81,11 +82,12 @@ const FilterSelect = styled.select`
 `;
 
 const FilterInput = styled.input`
-  background: ${({ theme }) => theme.colors.bg};
+  background: ${({ theme }) => theme.colors.surfaceHover};
   color: ${({ theme }) => theme.colors.text};
   border: 1px solid ${({ theme }) => theme.colors.border};
-  border-radius: ${({ theme }) => theme.radii.sm};
-  padding: 3px 6px;
+  border-radius: 6px;
+  min-height: 30px;
+  padding: 0 8px;
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
   outline: none;

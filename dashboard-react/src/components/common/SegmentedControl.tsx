@@ -17,7 +17,7 @@ export interface SegmentedControlProps<T extends string = string> {
 }
 
 const sizeConfig = {
-  sm: { padding: '3px 8px', fontSize: '12px' },
+  sm: { padding: '4px 10px', fontSize: '11px' },
   md: { padding: '7px 12px', fontSize: '12px' },
   lg: { padding: '6px 14px', fontSize: '14px' },
 };
@@ -25,8 +25,8 @@ const sizeConfig = {
 const Group = styled.div<{ $size: SegmentedControlSize }>`
   display: inline-flex;
   max-width: 100%;
-  border: 1px solid ${({ theme }) => theme.colors.borderControl};
-  border-radius: ${({ theme }) => theme.radii.md};
+  border: 1px solid ${({ theme, $size }) => $size === 'sm' ? theme.colors.borderStrong : theme.colors.borderControl};
+  border-radius: ${({ theme, $size }) => $size === 'sm' ? theme.radii.sm : theme.radii.md};
   overflow-x: auto;
 `;
 
@@ -49,15 +49,15 @@ const Segment = styled.button<{
     box-shadow: inset 0 0 0 2px ${({ theme }) => theme.colors.gold};
   }
 
-  ${({ $active }) =>
+  ${({ $active, $size }) =>
     $active
       ? css`
-          background: ${({ theme }) => theme.colors.selected};
-          color: ${({ theme }) => theme.colors.text};
+          background: ${({ theme }) => $size === 'sm' ? theme.colors.actionFill : theme.colors.selected};
+          color: ${({ theme }) => $size === 'sm' ? theme.colors.textOnAccent : theme.colors.text};
           font-weight: 600;
         `
       : css`
-          background: ${({ theme }) => theme.colors.surfaceSunken};
+          background: ${({ theme }) => $size === 'sm' ? theme.colors.surfaceSunken : theme.colors.surface};
           color: ${({ theme }) => theme.colors.textSecondary};
           &:hover {
             color: ${({ theme }) => theme.colors.text};
@@ -74,7 +74,7 @@ const Segment = styled.button<{
 
   /* Subtle divider between inactive segments */
   &:not(:first-child) {
-    border-left: 1px solid ${({ theme }) => theme.colors.goldBg};
+    border-left: 1px solid ${({ theme }) => theme.colors.borderLight};
   }
 `;
 

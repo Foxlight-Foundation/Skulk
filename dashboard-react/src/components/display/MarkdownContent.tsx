@@ -212,11 +212,11 @@ const Container = styled.div`
 
   pre {
     margin: 0;
-    padding: 12px;
+    padding: 10px 12px;
     overflow-x: auto;
     font-family: ${({ theme }) => theme.fonts.mono};
-    font-size: ${({ theme }) => theme.fontSizes.tableBody};
-    line-height: 1.5;
+    font-size: 12px;
+    line-height: 1.6;
   }
 
   code.hljs { background: transparent; }
