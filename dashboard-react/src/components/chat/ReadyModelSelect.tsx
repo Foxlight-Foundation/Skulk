@@ -1,6 +1,7 @@
 import { useId, useRef, useState, type KeyboardEvent } from 'react';
-import { autoUpdate, flip, offset, shift, useDismiss, useFloating, useInteractions, FloatingFocusManager, FloatingPortal } from '@floating-ui/react';
+import { autoUpdate, flip, offset, shift, useDismiss, useFloating, useInteractions, FloatingFocusManager, FloatingPortal, type Placement } from '@floating-ui/react';
 import styled from 'styled-components';
+import { ChoiceMenu as Menu, ChoiceOption as Option } from '../common/ChoiceMenu.styles';
 import { FiCheck, FiChevronDown } from 'react-icons/fi';
 import { MdAutoAwesome } from 'react-icons/md';
 import { useSkulkTranslation } from '../../i18n/tolgee';
@@ -14,35 +15,24 @@ const Trigger = styled.button<{ $fabric: boolean }>`
   span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   svg { flex-shrink: 0; }
 `;
-const Menu = styled.div`
-  z-index: 100; width: min(360px, calc(100vw - 24px)); max-height: min(420px, calc(100dvh - 80px)); overflow-y: auto;
-  background: ${({ theme }) => theme.colors.surfaceElevated}; border: 1px solid ${({ theme }) => theme.colors.borderControl};
-  border-radius: 12px; padding: 6px; box-shadow: ${({ theme }) => theme.colors.shadowPop};
-`;
 const GroupLabel = styled.div`
   padding: 8px 10px 4px; font: 600 10px ${({ theme }) => theme.fonts.mono};
   letter-spacing: .14em; color: ${({ theme }) => theme.colors.textMuted}; text-transform: uppercase;
 `;
-const Option = styled.button<{ $fabric: boolean; $selected: boolean }>`
-  display: flex; align-items: center; gap: 10px; width: 100%; padding: 9px 10px;
-  border: 1px solid ${({ theme, $selected }) => $selected ? theme.colors.borderLive : 'transparent'};
-  background: ${({ theme, $selected }) => $selected ? theme.colors.liveBg : 'transparent'};
-  border-radius: 8px; text-align: left; color: ${({ theme }) => theme.colors.text};
-  font: 14px ${({ theme }) => theme.fonts.body};
-  > svg { flex-shrink: 0; color: ${({ theme, $fabric }) => $fabric ? theme.colors.live : theme.colors.gold}; }
-  > span { min-width: 0; flex: 1; overflow-wrap: anywhere; }
-  strong { font-weight: 600; } small { display: block; margin-top: 3px; font-size: 12px; line-height: 1.4; color: ${({ theme }) => theme.colors.textSecondary}; }
-  &:hover { background: ${({ theme, $selected }) => $selected ? theme.colors.liveBg : theme.colors.surfaceHover}; }
-  &:focus-visible { outline: none; box-shadow: inset 0 0 0 2px ${({ theme }) => theme.colors.gold}; }
-`;
 const ReadyDot = styled.i`width: 6px; height: 6px; border-radius: 50%; background: ${({ theme }) => theme.colors.healthy}; flex-shrink: 0;`;
 
 /** Shared controlled model chooser. Opening and keyboard focus never change or submit the selection. */
-export function ReadyModelSelect({ value, onChange, models, fabricEnabled }: {
+export function ReadyModelSelect({ value, onChange, models, fabricEnabled, ariaLabel, className, placement = 'top-start' }: {
   value: string | null;
   onChange: (id: string) => void;
   models: { modelId: string }[];
   fabricEnabled: boolean;
+  /** Context-specific accessible name; Chat remains the default. */
+  ariaLabel?: string;
+  /** Allows the trigger to fit a containing form without changing menu behavior. */
+  className?: string;
+  /** Prefer opening below form fields; Chat opens above its composer. */
+  placement?: Placement;
 }) {
   const { t } = useSkulkTranslation();
   const [open, setOpen] = useState(false);
@@ -56,11 +46,11 @@ export function ReadyModelSelect({ value, onChange, models, fabricEnabled }: {
   };
   const ids = Array.from(new Set(models.map(model => model.modelId))).filter(id => id !== 'skulk/steward');
   const options = fabricEnabled ? ['skulk/steward', ...ids] : ids;
-  const { refs, floatingStyles, context } = useFloating({ open, onOpenChange: changeOpen, placement: 'top-start', strategy: 'fixed', whileElementsMounted: autoUpdate, middleware: [offset(8), flip(), shift({ padding: 12 })] });
+  const { refs, floatingStyles, context } = useFloating({ open, onOpenChange: changeOpen, placement, strategy: 'fixed', whileElementsMounted: autoUpdate, middleware: [offset(8), flip(), shift({ padding: 12 })] });
   const dismiss = useDismiss(context);
   const { getReferenceProps, getFloatingProps } = useInteractions([dismiss]);
   const selectedIndex = Math.max(0, options.indexOf(value ?? ''));
-  const label = t('chat.view.selectModel', 'Select chat model');
+  const label = ariaLabel ?? t('chat.view.selectModel', 'Select chat model');
   const choose = (id: string) => { onChange(id); setOpen(false); triggerRef.current?.focus(); };
   const navigate = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
     let next: number;
@@ -89,7 +79,7 @@ export function ReadyModelSelect({ value, onChange, models, fabricEnabled }: {
     </Option>;
   };
   return <>
-    <Trigger {...getReferenceProps()} onClick={() => changeOpen(!open)} onKeyDown={(event: KeyboardEvent) => { if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); changeOpen(true); } }}
+    <Trigger className={className} {...getReferenceProps()} onClick={() => changeOpen(!open)} onKeyDown={(event: KeyboardEvent) => { if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); changeOpen(true); } }}
       ref={element => { triggerRef.current = element; refs.setReference(element); }} type="button" $fabric={value === 'skulk/steward'} aria-label={label} aria-haspopup="listbox" aria-expanded={open} aria-controls={open ? menuId : undefined}>
       {value === 'skulk/steward' && <MdAutoAwesome aria-hidden />}<span>{value === 'skulk/steward' ? 'Skulk' : value?.split('/').pop() ?? label}</span><FiChevronDown aria-hidden />
     </Trigger>

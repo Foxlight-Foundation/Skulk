@@ -1,3 +1,4 @@
+import { Select as DesignedSelect } from '../common/Select';
 import { useEffect, useMemo, useState } from 'react';
 import { copyToClipboard } from '../../utils/clipboard';
 import styled from 'styled-components';
@@ -69,7 +70,7 @@ const SelectorLabel = styled.label`
   flex-shrink: 0;
 `;
 
-const NodeSelect = styled.select`
+const NodeSelect = styled(DesignedSelect)`
   flex: 1;
   min-width: 0;
   background: ${({ theme }) => theme.colors.bg};
@@ -435,7 +436,7 @@ export function NodeTab({ nodeId }: NodeTabProps) {
       <NodeSelect
         id="observability-node-select"
         value={effectiveNodeId ?? ''}
-        onChange={(event) => setSelectedNodeId(event.target.value || null)}
+        onValueChange={(selectedValue) => setSelectedNodeId(selectedValue || null)}
       >
         <option value="">{t('observability.node.selectNode', 'Select node...')}</option>
         {nodeOptions.map((option) => (

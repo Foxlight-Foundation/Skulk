@@ -1,3 +1,4 @@
+import { Select as DesignedSelect } from '../common/Select';
 import { useState } from 'react';
 import styled, { css } from 'styled-components';
 import { Button } from '../common/Button';
@@ -72,7 +73,7 @@ const Label = styled.span`
   color: ${({ theme }) => theme.colors.subtleText};
 `;
 
-const Select = styled.select`
+const Select = styled(DesignedSelect)`
   all: unset;
   background: ${({ theme }) => theme.colors.surfaceSunken};
   border: 1px solid ${({ theme }) => theme.colors.goldDim};
@@ -266,7 +267,7 @@ export function ImageParamsPanel({ params, onChange, isEditMode = false }: Image
       {/* Size */}
       <ParamGroup>
         <Label>{t('common.size', 'Size')}</Label>
-        <Select aria-label={t('common.size', 'Size')} value={params.size} onChange={(e) => update({ size: e.target.value })}>
+        <Select aria-label={t('common.size', 'Size')} value={params.size} onValueChange={(selectedValue) => update({ size: selectedValue })}>
           {SIZE_OPTIONS.map((s) => (
             <option key={s} value={s}>{s}</option>
           ))}

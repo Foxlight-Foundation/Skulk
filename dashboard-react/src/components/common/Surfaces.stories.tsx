@@ -1,3 +1,4 @@
+import { Select as DesignedSelect } from './Select';
 import { expect, userEvent, within } from 'storybook/test';
 import { useState } from 'react';
 import type { Meta, StoryObj } from '@storybook/react-vite';
@@ -31,7 +32,7 @@ const TypeRow = styled.div`
 `;
 const Hint = styled.p`font-size: 12px; line-height: 1.5; color: ${({ theme }) => theme.colors.textMuted};`;
 const Fields = styled.div`display: grid; gap: 12px; width: min(100%, 280px);`;
-const Select = styled.select`
+const Select = styled(DesignedSelect)`
   width: 100%; height: 36px; padding: 0 10px; font: 14px ${({ theme }) => theme.fonts.body};
   border: 1px solid ${({ theme }) => theme.colors.borderControl}; border-radius: 8px;
   background: ${({ theme }) => theme.colors.surfaceHover}; color: ${({ theme }) => theme.colors.text};
