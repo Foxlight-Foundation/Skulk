@@ -540,7 +540,6 @@ export function ChatView({
     dispatch(chatActions.setRealtimeVoiceEnabled(enabled));
   const setAutoSubmitVoice = (enabled: boolean) =>
     dispatch(chatActions.setAutoSubmitVoice(enabled));
-  const addMessage = (msg: ChatMessage) => dispatch(chatActions.addMessage(msg));
   const deleteMessageAction = (id: string) => dispatch(chatActions.deleteMessage(id));
   const editMessageAction = (messageId: string, content: string) =>
     dispatch(chatActions.editMessage({ messageId, content }));
@@ -1086,6 +1085,10 @@ export function ChatView({
   const handleSend = useCallback(async (text: string, files: ChatUploadedFile[]) => {
     if (!selectedModelId || !canSendMessages || isLoading) return;
     stopSpeechPlayback();
+    // Async conversion and streaming may outlive the selected model or this view.
+    // Pin both messages to their origin; deleted conversations stay deleted.
+    const conversationId = store.getState().chat.activeConversationId;
+    if (!conversationId) return;
 
     // Convert image files to base64 data URLs for the API and message history
     const imageAttachments: { dataUrl: string; file: ChatUploadedFile }[] = [];
@@ -1112,7 +1115,7 @@ export function ChatView({
         : undefined,
     };
 
-    addMessage(userMsg);
+    dispatch(chatActions.appendConversationMessage({ conversationId, message: userMsg }));
     setIsLoading(true);
     setStreamingContent('');
     setStreamingThinking(null);
@@ -1121,9 +1124,7 @@ export function ChatView({
 
     // Read messages from store (includes the user message we just added)
     const chatState = store.getState().chat;
-    const activeConvo = chatState.activeConversationId
-      ? chatState.conversations[chatState.activeConversationId]
-      : undefined;
+    const activeConvo = chatState.conversations[conversationId];
     if (!activeConvo) {
       setIsLoading(false);
       setStreamingContent(null);
@@ -1484,7 +1485,7 @@ export function ChatView({
         thinkingContent: fullThinking || undefined,
       };
 
-      addMessage(assistantMsg);
+      dispatch(chatActions.appendConversationMessage({ conversationId, message: assistantMsg }));
       if (sentenceQueue) {
         // Settle any pending code closer ahead of the trailing prose so the
         // acknowledgement precedes the final explanation.
@@ -1513,7 +1514,7 @@ export function ChatView({
     activeCommandIdRef.current = null;
 
   }, [
-    addMessage,
+    dispatch,
     autoSpeakAssistant,
     canSendMessages,
     createSpeechSentenceQueue,

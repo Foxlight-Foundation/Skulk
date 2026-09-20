@@ -30,6 +30,9 @@ function RuntimeControls({ runtime, unavailable, nodes, details, nodeEvidence, f
   const [notice, setNotice] = useState('');
   const [submitted, setSubmitted] = useState<string | null>(null);
   const [releaseOpen, setReleaseOpen] = useState(false);
+  // Drawer dismissal must not erase a request fence before server observation.
+  const [releaseSubmitted, setReleaseSubmitted] = useState<string | null>(null);
+  const [activationSubmitted, setActivationSubmitted] = useState<string | null>(null);
   const [withdraw, withdrawing] = useWithdrawManagedRuntimeMutation();
   const [recover, recovering] = useRecoverManagedOperationMutation();
   const operationId = submitted ?? runtime.operation_id;
@@ -103,7 +106,7 @@ function RuntimeControls({ runtime, unavailable, nodes, details, nodeEvidence, f
     <p>{t('plugins.runtimeCleanup', 'Disable and uninstall stop future capability work. Cleanup supervision, credentials, records and recovery artifacts are retained. Uninstall is not a data purge. Select or activate a verified release to reinstall.')}</p>
     {notice && state !== 'complete' ? <p role="status">{notice}</p> : null}
     <Button type="button" onClick={() => setReleaseOpen(!releaseOpen)}>{releaseOpen ? t('plugins.closeReleaseInstallation', 'Close release installation') : t('plugins.openReleaseInstallation', 'Install a release')}</Button>
-    {releaseOpen ? <RuntimeReleasePanel runtime={runtime} /> : null}
+    {releaseOpen ? <RuntimeReleasePanel runtime={runtime} ownership={{ submitted: releaseSubmitted, setSubmitted: setReleaseSubmitted, activationSubmitted, setActivationSubmitted }} /> : null}
   </RuntimeCard></div></RightDrawer></>;
 }
 

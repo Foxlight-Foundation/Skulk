@@ -1363,6 +1363,8 @@ secrets, dial peers, select commands or restart inference. Provider-specific
 secure tunnels and bootstrap remain in the private plugin.
 
 Dashboard Steward presentations share an app-scoped `StewardControllerProvider`; Steward messages use existing browser-saved Chat history; per-conversation drafts remain transient. Replies are pinned to their originating conversation, and changing/deleting that Steward conversation cancels generation.
+
+Ordinary Chat also pins asynchronous user and assistant writes to their originating history. Managed runtime cards retain release-installation and activation submission IDs outside the detail drawer, so dismissing or reopening it cannot erase an uncertain-operation fence.
 view changes must not reset drafts, abort streams, or duplicate proposal decisions.
 `useModalFocus` coordinates modal ownership and focus restoration. Settings drafts
 survive Devices navigation; device and invitation operations are immediate and

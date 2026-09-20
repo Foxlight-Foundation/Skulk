@@ -1597,6 +1597,8 @@ independent cleanup continues. A verified `select` or `activate` reinstalls expl
 
 ### Dashboard presentation ownership
 
+Ordinary Chat also pins asynchronous user and assistant writes to their originating history. Managed runtime cards retain release-installation and activation submission IDs outside the detail drawer, so dismissing or reopening it cannot erase an uncertain-operation fence.
+
 - `dashboard-react/src/theme/theme.ts`: Night (`dark`) / Noon Ridge (`light`); Instrument Sans and JetBrains Mono. Components consume semantic tokens without theme-name branches.
 - `dashboard-react/src/components/pages/StewardChatView.tsx`: app-scoped `StewardControllerProvider` owns per-conversation transient drafts, generation cancellation, speech and proposals across drawer/page/virtual-model presentations. Messages use the existing Redux Chat history and `skulk-chat` persistence key. Async replies target the originating conversation; changing/deleting its Steward history selection cancels generation. Drawer sends preserve ordinary Chat selection.
 - `dashboard-react/src/hooks/useModalFocus.ts`: one modal owner, Tab containment, Escape dismissal and focus return.
