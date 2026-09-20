@@ -9,16 +9,28 @@ import {
 import { Button } from '../common/Button';
 import { RuntimeSourceForm } from './RuntimeSourceForm';
 
+/** Submission fences retained by a parent when release details can unmount. */
+export interface RuntimeReleaseOwnership {
+  submitted: string | null;
+  activationSubmitted: string | null;
+  setSubmitted: (id: string | null) => void;
+  setActivationSubmitted: (id: string | null) => void;
+}
+
 /** Review, stage and select or activate a trusted release without replaying a lost request. */
-export function RuntimeReleasePanel({ runtime }: { runtime: ManagedRuntime }) {
+export function RuntimeReleasePanel({ runtime, ownership }: { runtime: ManagedRuntime; ownership?: RuntimeReleaseOwnership }) {
   const { t } = useSkulkTranslation();
   const [inspect, inspection] = useLazyGetRuntimeReleaseQuery();
   const installation = useGetRuntimeInstallationQuery(runtime.plugin_id, { pollingInterval: 3000, skipPollingIfUnfocused: true });
   const [install, installing] = useInstallRuntimeReleaseMutation();
   const [activate, activating] = useActivateRuntimeReleaseMutation();
   const [recover, recovering] = useRecoverRuntimeInstallationMutation();
-  const [submitted, setSubmitted] = useState<string | null>(null);
-  const [activationSubmitted, setActivationSubmitted] = useState<string | null>(null);
+  const [localSubmitted, setLocalSubmitted] = useState<string | null>(null);
+  const [localActivationSubmitted, setLocalActivationSubmitted] = useState<string | null>(null);
+  const { submitted, setSubmitted, activationSubmitted, setActivationSubmitted } = ownership ?? {
+    submitted: localSubmitted, setSubmitted: setLocalSubmitted,
+    activationSubmitted: localActivationSubmitted, setActivationSubmitted: setLocalActivationSubmitted,
+  };
   const [acceptedDigest, setAcceptedDigest] = useState<string | null>(null);
   const [rollback, setRollback] = useState(false);
   const [notice, setNotice] = useState('');

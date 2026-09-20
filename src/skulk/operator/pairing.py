@@ -1582,6 +1582,21 @@ class OperatorPairingService:
             access_token,
             required_scopes=("devices:manage",),
         )
+        return self._device_inventory(context.device_id)
+
+    def owner_devices(self) -> OperatorDevicesResponse:
+        """Return secret-free device rows after the API verifies direct owner authority.
+
+        Returns the existing inventory without marking any device as the caller.
+        This method performs no transport authorization; the trusted dashboard
+        route must verify the request before invoking it.
+        """
+
+        return self._device_inventory(None)
+
+    def _device_inventory(self, current_device_id: UUID | None) -> OperatorDevicesResponse:
+        """Project the credential journal without exposing credential material."""
+
         devices: list[OperatorDevice] = []
         for _, _, session, _ in self._latest_device_sessions():
             if session.device_id is None or session.device_name is None:
@@ -1593,7 +1608,7 @@ class OperatorPairingService:
                     paired_at=session.created_at,
                     refresh_expires_at=session.refresh_token_expires_at,
                     state="revoked" if session.state == "revoked" else "active",
-                    current=session.device_id == context.device_id,
+                    current=session.device_id == current_device_id,
                 )
             )
         devices.sort(key=lambda device: (device.paired_at, str(device.device_id)))
@@ -1616,6 +1631,18 @@ class OperatorPairingService:
             access_token,
             required_scopes=("devices:manage",),
         )
+        self.owner_revoke_device(device_id)
+
+    def owner_revoke_device(self, device_id: UUID) -> None:
+        """Revoke a device after the API verifies direct owner authority.
+
+        Args:
+            device_id: Stable paired-device identity to revoke idempotently.
+
+        Side effects:
+            Appends the existing fenced credential-revocation transition.
+        """
+
         record_type, record_id, session, session_commit_index = (
             self._load_device_session(device_id)
         )

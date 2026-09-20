@@ -27,7 +27,7 @@ const Wrap = styled.div`
 `;
 
 const Empty = styled.div`
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   font-size: 13px;
   padding: 16px;
   text-align: center;
@@ -42,7 +42,7 @@ const NodeGroup = styled.div`
 const NodeHeading = styled.div`
   font-size: 12px;
   font-weight: 700;
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   text-transform: uppercase;
   letter-spacing: 0.04em;
 `;
@@ -80,7 +80,7 @@ const Tag = styled.span`
 `;
 
 const Muted = styled.span`
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
 `;
 
 const Table = styled.table`
@@ -92,7 +92,7 @@ const Table = styled.table`
 const Th = styled.th`
   text-align: right;
   padding: 2px 6px;
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   font-weight: 600;
   border-bottom: 1px solid rgba(128, 128, 128, 0.25);
   white-space: nowrap;
@@ -113,7 +113,7 @@ const Td = styled.td<{ $knee?: boolean }>`
 `;
 
 const Failure = styled.div`
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   font-size: 12px;
   font-style: italic;
 `;

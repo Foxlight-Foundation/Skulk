@@ -112,7 +112,7 @@ export function useModelPicker({
     if (selectedFamily === 'favorites') {
       groups = groups.filter((g) => favorites.has(g.id));
     } else if (selectedFamily === 'recents') {
-      return recentGroups;
+      groups = recentGroups;
     } else if (selectedFamily) {
       groups = groups.filter((g) => g.family === selectedFamily);
     }
@@ -151,16 +151,16 @@ export function useModelPicker({
     }
 
     // Downloaded only
-    if (filters.downloadedOnly && downloadStatusMap) {
+    if (filters.downloadedOnly) {
       groups = groups.filter((g) =>
-        g.variants.some((v) => downloadStatusMap.get(v.id)?.available),
+        g.variants.some((v) => downloadStatusMap?.get(v.id)?.available),
       );
     }
 
     // Ready only
-    if (filters.readyOnly && instanceStatuses) {
+    if (filters.readyOnly) {
       groups = groups.filter((g) =>
-        g.variants.some((v) => instanceStatuses[v.id]?.statusClass === 'ready'),
+        g.variants.some((v) => instanceStatuses?.[v.id]?.statusClass === 'ready'),
       );
     }
 

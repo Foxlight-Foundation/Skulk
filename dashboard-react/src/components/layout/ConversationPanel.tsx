@@ -1,15 +1,18 @@
+import { useState } from 'react';
 import styled from 'styled-components';
 import { DEFAULT_CONVERSATION_NAME, type Conversation } from '../../types/chat';
 import { useSkulkTranslation, type SkulkTranslate } from '../../i18n/tolgee';
 
 /* ── Types ────────────────────────────────────────────── */
 
+/** Saved conversation selection and management shared by model and Steward chats. */
 export interface ConversationPanelProps {
   conversations: Conversation[];
   activeConversationId: string | null;
   onSelect: (conversationId: string) => void;
   onDelete: (conversationId: string) => void;
   onNewChat: () => void;
+  onRename?: (conversationId: string, name: string) => void;
   className?: string;
 }
 
@@ -30,6 +33,7 @@ function formatDate(ts: number, t: SkulkTranslate): string {
 }
 
 function modelLabel(modelId: string): string {
+  if (modelId === 'skulk/steward') return '✦ Skulk';
   const parts = modelId.split('/');
   return parts[parts.length - 1];
 }
@@ -49,6 +53,7 @@ function conversationDisplayName(name: string, t: SkulkTranslate): string {
 
 const Panel = styled.aside`
   width: 340px;
+  max-width: 100%;
   flex-shrink: 0;
   border-right: 1px solid ${({ theme }) => theme.colors.border};
   background: transparent;
@@ -74,7 +79,7 @@ const NewChatBtn = styled.button`
   cursor: pointer;
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.gold};
+  color: ${({ theme }) => theme.colors.accentText};
   padding: 2px 8px;
   border: 1px solid ${({ theme }) => theme.colors.goldDim};
   border-radius: ${({ theme }) => theme.radii.sm};
@@ -94,7 +99,7 @@ const CardList = styled.div`
   gap: 4px;
 `;
 
-const Card = styled.button<{ $active: boolean }>`
+const Card = styled.div<{ $active: boolean }>`
   all: unset;
   cursor: pointer;
   display: flex;
@@ -112,7 +117,8 @@ const Card = styled.button<{ $active: boolean }>`
   }
 `;
 
-const CardTitle = styled.div<{ $active: boolean }>`
+const CardTitle = styled.button<{ $active: boolean }>`
+  text-align: left; min-width: 0; width: 100%;
   font-size: ${({ theme }) => theme.fontSizes.sm};
   font-family: ${({ theme }) => theme.fonts.body};
   font-weight: 500;
@@ -128,28 +134,28 @@ const CardMeta = styled.div`
   gap: 6px;
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
 `;
 
 const Dot = styled.span`
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
 `;
 
 const CardSummary = styled.div`
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 `;
 
-const DeleteBtn = styled.span`
+const DeleteBtn = styled.button`
   cursor: pointer;
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   font-size: ${({ theme }) => theme.fontSizes.xs};
   margin-left: auto;
-  opacity: 0;
+  opacity: 0.7;
   transition: all 0.15s;
 
   ${Card}:hover & {
@@ -166,20 +172,30 @@ const EmptyText = styled.div`
   text-align: center;
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
+`;
+
+const RenameForm = styled.form`
+  display: flex; flex-wrap: wrap; gap: 8px;
+  input { width: 100%; min-width: 0; padding: 6px 8px; border: 1px solid ${({ theme }) => theme.colors.borderControl}; border-radius: ${({ theme }) => theme.radii.sm}; background: ${({ theme }) => theme.colors.surface}; color: ${({ theme }) => theme.colors.text}; font: inherit; }
+  button { padding: 4px 8px; border: 1px solid ${({ theme }) => theme.colors.borderControl}; border-radius: ${({ theme }) => theme.radii.sm}; }
 `;
 
 /* ── Component ────────────────────────────────────────── */
 
+/** Render history with keyboard-accessible selection, rename and deletion. */
 export function ConversationPanel({
   conversations,
   activeConversationId,
   onSelect,
   onDelete,
   onNewChat,
+  onRename,
   className,
 }: ConversationPanelProps) {
   const { t } = useSkulkTranslation();
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [name, setName] = useState('');
 
   return (
     <Panel className={className}>
@@ -202,17 +218,23 @@ export function ConversationPanel({
                 $active={active}
                 onClick={() => onSelect(convo.id)}
               >
-                <CardTitle $active={active}>
+                <CardTitle type="button" $active={active} onClick={event => { event.stopPropagation(); onSelect(convo.id); }}>
                   {truncate(conversationDisplayName(convo.name, t), 40)}
                 </CardTitle>
                 <CardMeta>
                   <span>{formatDate(convo.updatedAt, t)}</span>
                   <Dot>&middot;</Dot>
                   <span>{modelLabel(convo.modelId)}</span>
-                  <DeleteBtn onClick={(e) => { e.stopPropagation(); onDelete(convo.id); }}>
+                  {onRename && <DeleteBtn type="button" aria-label={t('conversationPanel.rename', 'Rename conversation')} onClick={event => { event.stopPropagation(); setEditingId(convo.id); setName(convo.name); }}>✎</DeleteBtn>}
+                  <DeleteBtn type="button" aria-label={t('conversationPanel.delete', 'Delete conversation')} onClick={(e) => { e.stopPropagation(); onDelete(convo.id); }}>
                     &times;
                   </DeleteBtn>
                 </CardMeta>
+                {editingId === convo.id && <RenameForm onClick={event => event.stopPropagation()} onSubmit={event => { event.preventDefault(); if (name.trim()) { onRename?.(convo.id, name.trim()); setEditingId(null); } }}>
+                  <input aria-label={t('conversationPanel.name', 'Conversation name')} value={name} onChange={event => setName(event.target.value)} autoFocus onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); setEditingId(null); } }} />
+                  <button type="submit" disabled={!name.trim()}>{t('common.save', 'Save')}</button>
+                  <button type="button" onClick={() => setEditingId(null)}>{t('common.cancel', 'Cancel')}</button>
+                </RenameForm>}
                 {description && (
                   <CardSummary>{truncate(description, 60)}</CardSummary>
                 )}

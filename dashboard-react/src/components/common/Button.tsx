@@ -1,9 +1,10 @@
 import { forwardRef } from 'react';
 import styled, { css, keyframes } from 'styled-components';
 
-export type ButtonVariant = 'primary' | 'outline' | 'ghost' | 'danger';
+export type ButtonVariant = 'primary' | 'outline' | 'ghost' | 'danger' | 'solid' | 'approve';
 export type ButtonSize = 'sm' | 'md' | 'lg';
 
+/** Shared action control with semantic treatments and loading state. */
 export interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: ButtonVariant;
   size?: ButtonSize;
@@ -32,8 +33,22 @@ const sizeFontMap: Record<ButtonSize, string> = {
 /* ---- variant styles ---- */
 
 const variantStyles: Record<ButtonVariant, ReturnType<typeof css>> = {
+  solid: css`
+    font-weight: 600;
+    color: ${({ theme }) => theme.colors.textOnAccent};
+    background: ${({ theme }) => theme.colors.actionFill};
+    border: none;
+    &:hover:not(:disabled) { background: ${({ theme }) => theme.colors.actionHoverFill}; filter: brightness(${({ theme }) => theme.colors.actionHoverBrightness}); }
+  `,
+  approve: css`
+    font-weight: 600;
+    color: ${({ theme }) => theme.colors.onLive};
+    background: ${({ theme }) => theme.colors.approvalFill};
+    border: none;
+    &:hover:not(:disabled) { background: ${({ theme }) => theme.colors.liveHover}; }
+  `,
   primary: css`
-    color: ${({ theme }) => theme.colors.gold};
+    color: ${({ theme }) => theme.colors.accentText};
     border: 1px solid ${({ theme }) => theme.colors.goldDim};
     background: transparent;
 
@@ -52,7 +67,7 @@ const variantStyles: Record<ButtonVariant, ReturnType<typeof css>> = {
     background: transparent;
 
     &:hover:not(:disabled) {
-      color: ${({ theme }) => theme.colors.gold};
+      color: ${({ theme }) => theme.colors.accentText};
       border-color: ${({ theme }) => theme.colors.goldDim};
     }
 
@@ -66,7 +81,7 @@ const variantStyles: Record<ButtonVariant, ReturnType<typeof css>> = {
     background: transparent;
 
     &:hover:not(:disabled) {
-      color: ${({ theme }) => theme.colors.gold};
+      color: ${({ theme }) => theme.colors.accentText};
       background: ${({ theme }) => theme.colors.goldBg};
     }
 
@@ -81,7 +96,7 @@ const variantStyles: Record<ButtonVariant, ReturnType<typeof css>> = {
 
     &:hover:not(:disabled) {
       color: ${({ theme }) => theme.colors.error};
-      border-color: ${({ theme }) => theme.colors.errorBg};
+      border-color: ${({ theme }) => theme.colors.borderDanger};
       background: ${({ theme }) => theme.colors.errorBg};
     }
 
@@ -124,21 +139,26 @@ const StyledButton = styled.button<{
   gap: 6px;
   font-family: ${({ theme }) => theme.fonts.body};
   border-radius: ${({ theme }) => theme.radii.md};
-  transition: all 0.15s;
-  white-space: nowrap;
+  transition: color 120ms, background 120ms, border-color 120ms;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: center;
+  min-width: 0;
+  max-width: 100%;
   user-select: none;
 
-  /* Size */
-  height: ${({ $size }) => sizeTokens[$size].height};
+  /* Minimum height preserves reference sizing while allowing translated labels to wrap. */
+  min-height: ${({ $size }) => sizeTokens[$size].height};
   font-size: ${({ $size, theme }) => theme.fontSizes[sizeFontMap[$size] as keyof typeof theme.fontSizes]};
-  ${({ $icon, $size }) =>
+  ${({ $icon, $size, $variant }) =>
     $icon
       ? css`
           width: ${sizeTokens[$size].iconSize};
+          flex-shrink: 0;
           padding: 0;
         `
       : css`
-          padding: ${sizeTokens[$size].padding};
+          padding: ${$size === 'md' && ($variant === 'solid' || $variant === 'approve') ? '0 16px' : sizeTokens[$size].padding};
         `}
 
   /* Block */
@@ -147,21 +167,27 @@ const StyledButton = styled.button<{
   /* Variant */
   ${({ $variant }) => variantStyles[$variant]}
 
+  @media (pointer: coarse) {
+    min-height: 44px;
+    ${({ $icon }) => $icon && css`min-width: 44px;`}
+  }
+
   /* Disabled */
   &:disabled {
-    opacity: 0.88;
+    opacity: 0.45;
     cursor: not-allowed;
   }
 
   /* Keyboard focus — all: unset removes the browser outline. */
   &:focus-visible {
     outline: none;
-    box-shadow: 0 0 0 2px ${({ theme }) => theme.colors.goldDim};
+    box-shadow: ${({ theme }) => theme.colors.focusRing};
   }
 `;
 
 /* ---- component ---- */
 
+/** Render an accessible action whose label can wrap without clipping translations. */
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
   (
     {
@@ -182,10 +208,12 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
       $size={size}
       $icon={icon}
       $block={block}
+      aria-busy={loading || undefined}
       disabled={disabled || loading}
       {...rest}
     >
-      {loading ? <Spinner $size={size} /> : children}
+      {loading ? <Spinner $size={size} aria-hidden="true" /> : null}
+      {children}
     </StyledButton>
   ),
 );

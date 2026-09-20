@@ -21,13 +21,13 @@ const sizeStyles: Record<FieldSize, ReturnType<typeof css>> = {
   `,
   md: css`
     height: 36px;
-    font-size: ${({ theme }) => theme.fontSizes.md};
+    font-size: 16px;
     padding: 0 10px;
     gap: 8px;
   `,
   lg: css`
     height: 42px;
-    font-size: ${({ theme }) => theme.fontSizes.md};
+    font-size: 16px;
     padding: 0 12px;
     gap: 10px;
   `,
@@ -36,8 +36,8 @@ const sizeStyles: Record<FieldSize, ReturnType<typeof css>> = {
 const Wrapper = styled.label<{ $size: FieldSize; $disabled?: boolean }>`
   display: flex;
   align-items: center;
-  background: ${({ theme }) => theme.colors.surface};
-  border: 1px solid ${({ theme }) => theme.colors.border};
+  background: ${({ theme }) => theme.colors.surfaceHover};
+  border: 1px solid ${({ theme }) => theme.colors.borderControl};
   border-radius: ${({ theme }) => theme.radii.md};
   color: ${({ theme }) => theme.colors.text};
   transition: border-color 0.15s;
@@ -45,7 +45,8 @@ const Wrapper = styled.label<{ $size: FieldSize; $disabled?: boolean }>`
   ${({ $size }) => sizeStyles[$size]}
 
   &:focus-within {
-    border-color: ${({ theme }) => theme.colors.borderLight};
+    border-color: ${({ theme }) => theme.colors.borderStrong};
+    box-shadow: ${({ theme }) => theme.colors.focusRing};
   }
 
   ${({ $disabled }) =>
@@ -60,7 +61,7 @@ const IconSlot = styled.span`
   display: flex;
   align-items: center;
   flex-shrink: 0;
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
 `;
 
 const Input = styled.input`
@@ -71,7 +72,7 @@ const Input = styled.input`
   font: inherit;
 
   &::placeholder {
-    color: ${({ theme }) => theme.colors.textMuted};
+    color: ${({ theme }) => theme.colors.subtleText};
   }
 
   &:disabled {

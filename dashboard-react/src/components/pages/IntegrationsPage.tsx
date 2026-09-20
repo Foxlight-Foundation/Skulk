@@ -1,8 +1,13 @@
+import { Monogram } from '../common/Surfaces';
+import { Button } from '../common/Button';
+import { IntegrationSetupStep } from '../integrations/IntegrationSetupStep';
 import { useEffect, useMemo, useState } from 'react';
 import styled from 'styled-components';
 import { FiCopy, FiCheck } from 'react-icons/fi';
 
 import { SegmentedControl } from '../common/SegmentedControl';
+import { RightDrawer } from '../common/RightDrawer';
+import { IntegrationToolCard } from '../integrations/IntegrationToolCard';
 import { Field } from '../common/Field';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 import { useRemoteAccess } from '../../hooks/useRemoteAccess';
@@ -33,48 +38,53 @@ export interface IntegrationsPageProps {
 }
 
 const Page = styled.div`
-  padding: 16px;
-  max-width: 760px;
+  padding: 32px;
+  width: 100%;
+  max-width: 1044px;
+  @media (max-width: 600px) { padding: 16px; }
   margin: 0 auto;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 28px;
 `;
 
 const PageTitle = styled.h1`
   margin: 0;
-  font-size: ${({ theme }) => theme.fontSizes.xl};
+  font-size: 28px;
+  letter-spacing: -.02em;
   color: ${({ theme }) => theme.colors.text};
 `;
 
 const PageIntro = styled.p`
-  margin: 0;
-  font-size: ${({ theme }) => theme.fontSizes.xs};
-  color: ${({ theme }) => theme.colors.textMuted};
+  margin: 6px 0 0;
+  max-width: 560px;
+  font-size: 14px;
+  color: ${({ theme }) => theme.colors.textSecondary};
   line-height: 1.5;
 `;
 
 const SectionTitle = styled.h2`
   margin: 0;
-  font-size: ${({ theme }) => theme.fontSizes.sm};
+  font-size: 10px;
+  font-weight: 600;
   font-family: ${({ theme }) => theme.fonts.mono};
   text-transform: uppercase;
   letter-spacing: 1.5px;
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
 `;
 
 const SurfaceRow = styled.div`
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 12px;
 `;
 
 const SurfaceChip = styled.div`
   flex: 1 1 200px;
-  background: ${({ theme }) => theme.colors.surfaceSunken};
-  border: 1px solid ${({ theme }) => theme.colors.borderLight};
-  border-radius: ${({ theme }) => theme.radii.md};
-  padding: 8px 10px;
+  background: ${({ theme }) => theme.colors.surface};
+  border: 1px solid ${({ theme }) => theme.colors.border};
+  border-radius: 12px;
+  padding: 12px 14px;
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -82,29 +92,44 @@ const SurfaceChip = styled.div`
 `;
 
 const SurfaceLabel = styled.span`
+  font-family: ${({ theme }) => theme.fonts.mono};
+  font-weight: 600;
   font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 1px;
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.metadataText};
 `;
 
 const SurfaceValue = styled.span`
   font-family: ${({ theme }) => theme.fonts.mono};
-  font-size: ${({ theme }) => theme.fontSizes.xs};
+  font-size: 13px;
   color: ${({ theme }) => theme.colors.text};
-  overflow-wrap: anywhere;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 `;
 
-const ChooserScroll = styled.div`
-  overflow-x: auto;
-  max-width: 100%;
-  padding-bottom: 4px;
+/** Copy an endpoint without treating the copy as connection evidence. */
+function EndpointCard({ label, value }: { label: string; value: string }) {
+  const { t } = useSkulkTranslation();
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    try { await copyToClipboard(value); setCopied(true); }
+    catch { addToast({ message: t('integrations.copyFailed', 'Could not copy to the clipboard'), type: 'error' }); }
+  };
+  return <SurfaceChip style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}><div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 5 }}><SurfaceLabel>{label}</SurfaceLabel><SurfaceValue title={value}>{value}</SurfaceValue></div><Button variant="outline" size="sm" icon aria-label={`${t('integrations.copy', 'Copy')} ${label}`} onClick={() => void copy()}>{copied ? <FiCheck size={13} /> : <FiCopy size={13} />}</Button></SurfaceChip>;
+}
+
+const ToolGrid = styled.div`
+  display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px;
+  @media (max-width: 900px) { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  @media (max-width: 600px) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  @media (max-width: 360px) { grid-template-columns: minmax(0, 1fr); }
 `;
+const DrawerBody = styled.div`padding: 22px; overflow-y: auto; display: flex; flex-direction: column; gap: 22px; min-height: 0;`;
 
 const ControlsRow = styled.div`
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px;
 `;
 
 /**
@@ -115,6 +140,10 @@ const ControlsRow = styled.div`
  * page width.
  */
 const StandaloneControl = styled.div`
+  flex-shrink: 0;
+  max-width: 100%;
+  min-width: 0;
+  flex-wrap: wrap;
   display: flex;
   flex-direction: column;
   align-items: flex-start;
@@ -130,33 +159,35 @@ const ControlBlock = styled.label`
 `;
 
 const ControlLabel = styled.span`
+  font-family: ${({ theme }) => theme.fonts.mono};
+  font-weight: 600;
   font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 1px;
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
 `;
 
 const Select = styled.select`
-  background: ${({ theme }) => theme.colors.surfaceSunken};
-  border: 1px solid ${({ theme }) => theme.colors.border};
-  border-radius: ${({ theme }) => theme.radii.sm};
+  background: ${({ theme }) => theme.colors.surface};
+  border: 1px solid ${({ theme }) => theme.colors.borderControl};
+  border-radius: 8px;
   color: ${({ theme }) => theme.colors.text};
   font-family: ${({ theme }) => theme.fonts.mono};
   font-size: ${({ theme }) => theme.fontSizes.xs};
-  padding: 6px 8px;
+  padding: 9px 10px;
   cursor: pointer;
   min-width: 0;
 
   &:focus-visible {
     outline: none;
-    border-color: ${({ theme }) => theme.colors.gold};
+    border-color: ${({ theme }) => theme.colors.accentText};
   }
 `;
 
 const Card = styled.div`
   background: ${({ theme }) => theme.colors.surface};
   border: 1px solid ${({ theme }) => theme.colors.border};
-  border-radius: ${({ theme }) => theme.radii.lg};
+  border-radius: 12px;
   overflow: hidden;
 `;
 
@@ -176,12 +207,6 @@ const CardHeading = styled.div`
   min-width: 0;
 `;
 
-const CardTitle = styled.span`
-  font-size: ${({ theme }) => theme.fontSizes.label};
-  font-weight: 600;
-  color: ${({ theme }) => theme.colors.text};
-`;
-
 const CardSubtitle = styled.span`
   font-family: ${({ theme }) => theme.fonts.mono};
   font-size: 11px;
@@ -191,21 +216,21 @@ const CardSubtitle = styled.span`
 
 const CardDescription = styled.p`
   margin: 0;
-  padding: 10px 14px 0;
-  font-size: ${({ theme }) => theme.fontSizes.xs};
+  padding: 0;
+  font-size: 13px;
   color: ${({ theme }) => theme.colors.textSecondary};
   line-height: 1.5;
 `;
 
 const CodeBlock = styled.pre`
-  margin: 10px 14px 14px;
-  padding: 10px 12px;
-  background: ${({ theme }) => theme.colors.chatCodeBg};
-  border: 1px solid ${({ theme }) => theme.colors.borderLight};
-  border-radius: ${({ theme }) => theme.radii.md};
+  margin: 0;
+  padding: 14px;
+  background: ${({ theme }) => theme.colors.bg};
+  border: 0;
+  border-radius: 0;
   font-family: ${({ theme }) => theme.fonts.mono};
-  font-size: 11.5px;
-  line-height: 1.55;
+  font-size: 12px;
+  line-height: 1.7;
   color: ${({ theme }) => theme.colors.text};
   overflow-x: auto;
   white-space: pre;
@@ -217,7 +242,9 @@ const CopyButton = styled.button`
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  padding: 4px 9px;
+  padding: 0 10px;
+  min-height: 30px;
+  flex-shrink: 0;
   border: 1px solid ${({ theme }) => theme.colors.goldDim};
   border-radius: ${({ theme }) => theme.radii.sm};
   color: ${({ theme }) => theme.colors.goldTextDim};
@@ -227,7 +254,7 @@ const CopyButton = styled.button`
 
   &:hover {
     color: ${({ theme }) => theme.colors.text};
-    border-color: ${({ theme }) => theme.colors.gold};
+    border-color: ${({ theme }) => theme.colors.accentText};
   }
 
   &:focus-visible {
@@ -244,12 +271,12 @@ const ModelChips = styled.div`
 
 const ModelChip = styled.span`
   font-family: ${({ theme }) => theme.fonts.mono};
-  font-size: 11px;
-  color: ${({ theme }) => theme.colors.goldTextDim};
-  background: ${({ theme }) => theme.colors.goldBg};
-  border: 1px solid ${({ theme }) => theme.colors.goldDim};
-  border-radius: ${({ theme }) => theme.radii.sm};
-  padding: 2px 7px;
+  font-size: 12px;
+  color: ${({ theme }) => theme.colors.body};
+  background: ${({ theme }) => theme.colors.surface};
+  border: 1px solid ${({ theme }) => theme.colors.border};
+  border-radius: 6px;
+  padding: 3px 8px;
   overflow-wrap: anywhere;
 `;
 
@@ -258,7 +285,7 @@ const EmptyNotice = styled.div`
   border-radius: ${({ theme }) => theme.radii.md};
   padding: 12px 14px;
   font-size: ${({ theme }) => theme.fontSizes.xs};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   line-height: 1.5;
 `;
 
@@ -294,7 +321,7 @@ function SnippetCard({ snippet }: { snippet: IntegrationSnippet }) {
     <Card>
       <CardHeader>
         <CardHeading>
-          <CardTitle>{snippet.title}</CardTitle>
+          <CardDescription>{snippet.description}</CardDescription>
           <CardSubtitle>{snippet.subtitle}</CardSubtitle>
         </CardHeading>
         <CopyButton onClick={handleCopy} aria-label={t('integrations.copy', 'Copy')}>
@@ -302,7 +329,6 @@ function SnippetCard({ snippet }: { snippet: IntegrationSnippet }) {
           {copied ? t('integrations.copied', 'Copied') : t('integrations.copy', 'Copy')}
         </CopyButton>
       </CardHeader>
-      <CardDescription>{snippet.description}</CardDescription>
       <CodeBlock>{snippet.body}</CodeBlock>
     </Card>
   );
@@ -321,6 +347,9 @@ export function IntegrationsPage({ readyInstances }: IntegrationsPageProps) {
   const { t } = useSkulkTranslation();
   const remoteAccess = useRemoteAccess();
   const [catalog, setCatalog] = useState<ModelInfo[]>([]);
+  const [snippetId, setSnippetId] = useState<string | null>(null);
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const [drawerWidth, setDrawerWidth] = useState(640);
   const [toolId, setToolId] = useState<IntegrationToolId>('claude-code');
   const [addressChoice, setAddressChoice] = useState<'local' | 'tailscale'>('local');
   const [codexFilesystemPath, setCodexFilesystemPath] = useState('/Users/username');
@@ -409,42 +438,30 @@ export function IntegrationsPage({ readyInstances }: IntegrationsPageProps) {
     [tool.id, options, t],
   );
 
-  const toolOptions = INTEGRATION_TOOLS.map(entry => ({ value: entry.id, label: entry.label }));
+  const activeSnippet = snippets.find(snippet => snippet.id === snippetId) ?? snippets[0];
   const hasModels = models.length > 0;
   const showAddressChooser = Boolean(tailscaleUrl && localUrl && tailscaleUrl !== localUrl);
 
+  const toolDescription = tool.usesTierChooser
+    ? t('integrations.tierMapping', 'Anthropic-compatible · maps Opus / Sonnet / Haiku onto your models')
+    : t('integrations.setupHint', 'Configure your tool using the endpoint and model choices below. Copying a recipe does not verify a connection.');
+
   return (
     <Page>
-      <div>
+      <PageHeading><div>
         <PageTitle>{t('integrations.title', 'Integrations')}</PageTitle>
         <PageIntro>
           {t(
             'integrations.intro',
-            'Point external coding agents and apps at this cluster. Every snippet below is filled in with the models you actually have running.',
+            'Point coding agents and apps at this cluster. Snippets are filled in with the models you have running right now.',
           )}
         </PageIntro>
       </div>
-
-      <SurfaceRow>
-        <SurfaceChip>
-          <SurfaceLabel>{t('integrations.surface.openai', 'OpenAI-compatible')}</SurfaceLabel>
-          <SurfaceValue>{`${apiUrl}/v1`}</SurfaceValue>
-        </SurfaceChip>
-        <SurfaceChip>
-          <SurfaceLabel>{t('integrations.surface.anthropic', 'Anthropic-compatible')}</SurfaceLabel>
-          <SurfaceValue>{apiUrl}</SurfaceValue>
-        </SurfaceChip>
-        <SurfaceChip>
-          <SurfaceLabel>{t('integrations.surface.ollama', 'Ollama-compatible')}</SurfaceLabel>
-          <SurfaceValue>{`${apiUrl}/ollama`}</SurfaceValue>
-        </SurfaceChip>
-      </SurfaceRow>
-
       {showAddressChooser && (
-        <StandaloneControl>
+        <StandaloneControl style={{ flexDirection: 'row', alignItems: 'center' }}>
           <ControlLabel>{t('integrations.address', 'Address to use')}</ControlLabel>
           <SegmentedControl
-            size="sm"
+            size="md"
             value={addressChoice}
             onChange={setAddressChoice}
             options={[
@@ -454,11 +471,20 @@ export function IntegrationsPage({ readyInstances }: IntegrationsPageProps) {
           />
         </StandaloneControl>
       )}
+      </PageHeading>
 
-      <div>
+      <SurfaceRow>
+        <EndpointCard label={t('integrations.surface.openai', 'OpenAI-compatible')} value={`${apiUrl}/v1`} />
+        <EndpointCard label={t('integrations.surface.anthropic', 'Anthropic-compatible')} value={apiUrl} />
+        <EndpointCard label={t('integrations.surface.ollama', 'Ollama-compatible')} value={`${apiUrl}/ollama`} />
+      </SurfaceRow>
+
+
+
+      <ReadyModels>
         <SectionTitle>{t('integrations.readyModels', 'Ready models')}</SectionTitle>
         {hasModels ? (
-          <ModelChips style={{ marginTop: 8 }}>
+          <ModelChips>
             {models.map(model => (
               <ModelChip key={model.id}>{model.id}</ModelChip>
             ))}
@@ -471,22 +497,29 @@ export function IntegrationsPage({ readyInstances }: IntegrationsPageProps) {
             )}
           </EmptyNotice>
         )}
-      </div>
+      </ReadyModels>
 
       <div>
-        <SectionTitle>{t('integrations.tool', 'Tool')}</SectionTitle>
-        <ChooserScroll style={{ marginTop: 8 }}>
-          <SegmentedControl
-            size="md"
-            value={tool.id}
-            onChange={setToolId}
-            options={toolOptions}
-          />
-        </ChooserScroll>
+        <ToolHeading><h2>{t('integrations.connectTool', 'Connect a tool')}</h2><span>{t('integrations.toolCount', '{count} tools · pick one to get its setup', { count: INTEGRATION_TOOLS.length })}</span></ToolHeading>
+        <ToolGrid>
+          {INTEGRATION_TOOLS.map(entry => <IntegrationToolCard key={entry.id} name={entry.label} monogram={TOOL_MONOGRAMS[entry.id]}
+            description={t(`integrations.tools.${entry.id}.description`, {
+              'claude-code': 'Anthropic-compatible coding agent in your terminal.', opencode: 'Open-source terminal agent with provider config.', codex: 'OpenAI Codex CLI pointed at a local model.',
+              hermes: 'Agent harness with tool use and memory.', openclaw: 'Autonomous agent runtime.', pi: 'Minimalist assistant CLI.',
+              anythingllm: 'Desktop RAG workspace: pairs a chat and an embedding model.', 'open-webui': 'Self-hosted chat UI for the whole cluster.', n8n: 'Workflow automation with LLM nodes.', firefox: 'Sidebar AI chat via about:config.',
+            }[entry.id])}
+            method={entry.surface === 'dashboard' ? 'Dashboard' : `${entry.surface} API`}
+            onOpen={() => { setToolId(entry.id); setSnippetId(null); setDetailsOpen(true); }} />)}
+        </ToolGrid>
       </div>
-
+      <RightDrawer open={detailsOpen} onClose={() => setDetailsOpen(false)} title={<ToolIdentity><Monogram as="span" $size={40}>{TOOL_MONOGRAMS[tool.id]}</Monogram><span>{tool.label}<ToolSubtitle>{toolDescription}</ToolSubtitle></span></ToolIdentity>} ariaLabel={tool.label}
+        width={drawerWidth} minWidth={360} maxWidth={800} onWidthChange={setDrawerWidth}
+        closeLabel={t('common.close', 'Close')} resizeLabel={t('integrations.resize', 'Resize integration details')}>
+      <DrawerBody>
       {(tool.usesTierChooser || tool.usesSingleModelChooser || tool.usesFilesystemPath) && (
-        <ControlsRow>
+        <IntegrationSetupStep number={1} title={tool.usesTierChooser ? t('integrations.chooseTiers', 'Choose which model answers each tier') : t('integrations.chooseOptions', 'Choose options')}>
+          {!hasModels && (tool.usesTierChooser || tool.usesSingleModelChooser) && <EmptyNotice>{t('integrations.noReadyModels', 'No models are running yet. The snippets below still show the right shape, with a placeholder where the model id goes. Mount a model and they will fill themselves in.')}</EmptyNotice>}
+          <ControlsRow>
           {tool.usesTierChooser && hasModels && (
             <>
               <ControlBlock>
@@ -559,14 +592,46 @@ export function IntegrationsPage({ readyInstances }: IntegrationsPageProps) {
               />
             </ControlBlock>
           )}
-        </ControlsRow>
+        </ControlsRow></IntegrationSetupStep>
       )}
 
-      {snippets.map(snippet => (
-        <SnippetCard key={`${tool.id}-${snippet.id}`} snippet={snippet} />
-      ))}
+      <IntegrationSetupStep number={tool.usesTierChooser || tool.usesSingleModelChooser || tool.usesFilesystemPath ? 2 : 1} title={t('integrations.apply', 'Apply it')} actions={snippets.length > 1 ? <SegmentedControl value={activeSnippet.id} onChange={setSnippetId} options={snippets.map(snippet => ({ value: snippet.id, label: snippet.title }))} /> : undefined}>
+      {activeSnippet && <SnippetCard key={`${tool.id}-${activeSnippet.id}`} snippet={activeSnippet} />}
+      </IntegrationSetupStep>
+      <IntegrationSetupStep number={tool.usesTierChooser || tool.usesSingleModelChooser || tool.usesFilesystemPath ? 3 : 2} title={t('integrations.checkRequest', 'Check it reached the cluster')}>
+        <EvidenceNotice>{t('integrations.evidenceUnavailable', 'Connection evidence is unavailable in this dashboard. Send a request from the configured tool and check its response. Copying these instructions does not establish a connection.')}</EvidenceNotice>
+      </IntegrationSetupStep>
+      </DrawerBody>
+      </RightDrawer>
     </Page>
   );
 }
 
 export default IntegrationsPage;
+
+const PageHeading = styled.div`
+  display: flex; align-items: flex-end; justify-content: space-between; gap: 24px;
+  @media (max-width: 1100px) { flex-wrap: wrap; gap: 12px; }
+`;
+const ReadyModels = styled.div`
+  display: flex; flex-wrap: wrap; align-items: center; gap: 12px;
+`;
+
+const TOOL_MONOGRAMS: Record<IntegrationToolId, string> = { 'claude-code': 'CC', opencode: 'OC', codex: 'CX', hermes: 'HM', openclaw: 'OW', pi: 'PI', anythingllm: 'AL', 'open-webui': 'WU', n8n: 'N8', firefox: 'FF' };
+const ToolHeading = styled.div`
+  display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 12px;
+  h2 { font-size: 16px; font-weight: 600; }
+  > span { font-size: 12px; color: ${({ theme }) => theme.colors.subtleText}; }
+`;
+const ToolIdentity = styled.span`
+  display: flex; align-items: center; gap: 12px; white-space: normal; min-width: 0;
+  > span:last-child { min-width: 0; overflow-wrap: anywhere; }
+`;
+const ToolSubtitle = styled.span`
+  display: block; margin-top: 2px; font-size: 12.5px; font-weight: 400; color: ${({ theme }) => theme.colors.textSecondary}; line-height: 1.5;
+`;
+const EvidenceNotice = styled.p`
+  margin: 0; padding: 12px 14px; background: ${({ theme }) => theme.colors.surface};
+  border: 1px solid ${({ theme }) => theme.colors.border}; border-radius: 12px;
+  font-size: 13px; line-height: 1.5; color: ${({ theme }) => theme.colors.textSecondary};
+`;

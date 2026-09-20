@@ -8,7 +8,7 @@ const meta: Meta<typeof SegmentedControl> = {
   parameters: { layout: 'centered' },
   decorators: [
     (Story) => (
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 24, padding: 24, background: '#111' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 24, padding: 24, }}>
         <Story />
       </div>
     ),
@@ -68,15 +68,15 @@ export const Sizes: Story = {
     return (
       <>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <span style={{ color: '#666', fontSize: 11, fontFamily: 'monospace', width: 24 }}>sm</span>
+          <span style={{ color: 'inherit', fontSize: 11, fontFamily: 'monospace', width: 24 }}>sm</span>
           <SegmentedControl options={opts} value={v1} onChange={setV1} size="sm" />
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <span style={{ color: '#666', fontSize: 11, fontFamily: 'monospace', width: 24 }}>md</span>
+          <span style={{ color: 'inherit', fontSize: 11, fontFamily: 'monospace', width: 24 }}>md</span>
           <SegmentedControl options={opts} value={v2} onChange={setV2} size="md" />
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <span style={{ color: '#666', fontSize: 11, fontFamily: 'monospace', width: 24 }}>lg</span>
+          <span style={{ color: 'inherit', fontSize: 11, fontFamily: 'monospace', width: 24 }}>lg</span>
           <SegmentedControl options={opts} value={v3} onChange={setV3} size="lg" />
         </div>
       </>

@@ -6,7 +6,7 @@ import { darkTheme, lightTheme } from '../../theme/theme';
 import type { DeviceModel } from '../../types/topology';
 import { HardwareBadge } from './HardwareBadge';
 
-globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', { value: true, configurable: true });
 
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;

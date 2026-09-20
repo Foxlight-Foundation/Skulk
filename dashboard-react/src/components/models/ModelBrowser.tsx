@@ -1,4 +1,7 @@
-import { useState } from 'react';
+import type { StoreDownloadProgress } from '../layout/StoreRegistryTable';
+import { FiX } from 'react-icons/fi';
+import { useMemo, useState } from 'react';
+import { groupModels } from '../../types/models';
 import styled, { css } from 'styled-components';
 import { Button } from '../common/Button';
 import { Spinner } from '../common/Spinner';
@@ -22,6 +25,12 @@ import type { BurstInfo } from './burst';
 
 /** Data and actions used to browse Skulk-supported models or search Hugging Face. */
 export interface ModelBrowserProps {
+  /** Optional modal heading composed alongside search and source selection. */
+  heading?: string;
+  /** Apply the capacity facet on initial discovery; callers without fleet evidence leave it off. */
+  defaultFitsOnly?: boolean;
+  /** Close the containing discovery modal. */
+  onClose?: () => void;
   models: ModelInfo[];
   selectedModelId: string | null;
   favorites: Set<string>;
@@ -33,6 +42,12 @@ export interface ModelBrowserProps {
   onToggleFavorite: (groupId: string) => void;
   onShowInfo?: (group: ModelGroup) => void;
   onAddModel?: (modelId: string, ggufFile?: string | null) => Promise<boolean>;
+  /** Observed transfers from the existing store poll, never synthetic progress. */
+  activeDownloads?: StoreDownloadProgress[];
+  /** Enter the existing placement workflow for a downloaded variant. */
+  onLaunch?: (modelId: string) => void;
+  /** Cancel a store transfer through the existing download controller. */
+  onCancelDownload?: (modelId: string) => void;
   downloadStatusMap?: Map<string, DownloadAvailability>;
   instanceStatuses?: Record<string, InstanceStatus>;
   mode?: PickerMode;
@@ -65,16 +80,16 @@ const Container = styled.div`
   display: flex;
   flex-direction: column;
   height: 100%;
-  background: ${({ theme }) => theme.colors.bg};
+  background: transparent;
   color: ${({ theme }) => theme.colors.text};
   overflow: hidden;
 `;
 
 const SourceSwitcher = styled.div`
   display: flex;
-  gap: 4px;
-  margin: 14px 16px 0;
-  padding: 4px;
+  gap: 0;
+  margin: 0;
+  padding: 0;
   border: 1px solid ${({ theme }) => theme.colors.borderLight};
   border-radius: ${({ theme }) => theme.radii.md};
   background: ${({ theme }) => theme.colors.surfaceSunken};
@@ -84,13 +99,14 @@ const SourceSwitcher = styled.div`
 const SourceButton = styled.button<{ $active: boolean }>`
   appearance: none;
   flex: 1;
+  white-space: nowrap;
   border: 1px solid transparent;
   border-radius: ${({ theme }) => theme.radii.sm};
   background: transparent;
-  color: ${({ theme }) => theme.colors.textSecondary};
+  color: ${({ theme }) => theme.colors.body};
   cursor: pointer;
   font-family: ${({ theme }) => theme.fonts.body};
-  font-size: ${({ theme }) => theme.fontSizes.nav};
+  font-size: 12.5px;
   font-weight: 600;
   padding: 7px 12px;
   transition: background 0.15s, border-color 0.15s, color 0.15s;
@@ -100,12 +116,20 @@ const SourceButton = styled.button<{ $active: boolean }>`
   }
 
   ${({ $active }) => $active && css`
-    background: ${({ theme }) => theme.colors.surface};
-    border-color: ${({ theme }) => theme.colors.goldDim};
-    color: ${({ theme }) => theme.colors.gold};
+    background: ${({ theme }) => theme.colors.selected};
+    border-color: transparent;
+    color: ${({ theme }) => theme.colors.text};
   `}
 `;
 
+const FacetLayout = styled.div`
+  display: flex; min-height: 0; flex: 1;
+  @media (max-width: 768px) { flex-direction: column; }
+`;
+const Facets = styled.aside<{ $open: boolean }>`
+  width: 220px; flex-shrink: 0; overflow-y: auto; border-right: 1px solid ${({ theme }) => theme.colors.border};
+  @media (max-width: 768px) { width: auto; max-height: 45vh; border-right: none; border-bottom: 1px solid ${({ theme }) => theme.colors.border}; display: ${({ $open }) => $open ? 'block' : 'none'}; }
+`;
 const Main = styled.div`
   flex: 1;
   display: flex;
@@ -117,15 +141,15 @@ const Main = styled.div`
 const Toolbar = styled.div`
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 12px 16px 8px;
+  gap: 14px;
+  padding: 14px 18px;
+  border-bottom: 1px solid ${({ theme }) => theme.colors.border};
   position: relative;
   flex-shrink: 0;
 
-  & > *:first-child {
-    flex: 1;
-    min-width: 0;
-  }
+  > :has(input) { flex: 1; min-width: 160px; height: 40px; }
+  @media (max-width: 768px) { flex-wrap: wrap; }
+
 `;
 
 const FilterBtn = styled(Button)<{ $active: boolean }>`
@@ -139,33 +163,26 @@ const FilterBtn = styled(Button)<{ $active: boolean }>`
 
 /* Horizontally scrollable rail of family scope chips. */
 const FamilyRail = styled.div`
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 0 16px 10px;
-  overflow-x: auto;
-  flex-shrink: 0;
-  scrollbar-width: none;
-
-  &::-webkit-scrollbar {
-    display: none;
-  }
+  display: flex; flex-direction: column; align-items: stretch; gap: 4px; padding: 16px;
 `;
 
 const FamilyChip = styled.button<{ $active: boolean }>`
+  &::after { content: attr(data-count); float: right; margin-left: 12px; font-family: ${({ theme }) => theme.fonts.mono}; }
   appearance: none;
   flex-shrink: 0;
-  border: 1px solid ${({ theme }) => theme.colors.border};
-  border-radius: 999px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  text-align: left;
   background: transparent;
-  color: ${({ theme }) => theme.colors.textSecondary};
+  color: ${({ theme }) => theme.colors.body};
   cursor: pointer;
   font-family: ${({ theme }) => theme.fonts.body};
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-weight: 500;
-  padding: 4px 12px;
+  padding: 6px 8px;
   transition: background 0.15s, border-color 0.15s, color 0.15s;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
 
   &:hover {
     color: ${({ theme }) => theme.colors.text};
@@ -175,35 +192,31 @@ const FamilyChip = styled.button<{ $active: boolean }>`
   ${({ $active }) => $active && css`
     background: ${({ theme }) => theme.colors.goldBg};
     border-color: ${({ theme }) => theme.colors.goldDim};
-    color: ${({ theme }) => theme.colors.gold};
+    color: ${({ theme }) => theme.colors.accentText};
 
     &:hover {
       background: ${({ theme }) => theme.colors.goldBg};
-      color: ${({ theme }) => theme.colors.gold};
+      color: ${({ theme }) => theme.colors.accentText};
     }
   `}
 `;
 
 const ListArea = styled.div`
   flex: 1;
+  min-width: 0;
   overflow-y: auto;
-  padding: 0 16px 16px;
+  padding: 0 0 16px;
 `;
 
 /* Card wrapping result rows so the list reads as one surface, matching the
  * store table's bordered-card dialect. */
-const ListCard = styled.div`
-  border: 1px solid ${({ theme }) => theme.colors.border};
-  border-radius: ${({ theme }) => theme.radii.md};
-  background: ${({ theme }) => theme.colors.surface};
-  overflow: hidden;
-`;
+const ListCard = styled.div`min-width: 0;`;
 
 const SectionHeader = styled.div`
   font-size: ${({ theme }) => theme.fontSizes.label};
   font-weight: 600;
-  color: ${({ theme }) => theme.colors.textMuted};
-  padding: 4px 2px 8px;
+  color: ${({ theme }) => theme.colors.textSecondary};
+  padding: 14px 16px 8px;
 `;
 
 const MoreRow = styled.div`
@@ -219,7 +232,7 @@ const EmptyMsg = styled.div`
   gap: 8px;
   padding: 40px 24px;
   text-align: center;
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.textSecondary};
   font-size: ${({ theme }) => theme.fontSizes.tableBody};
 `;
 
@@ -256,6 +269,9 @@ function familyLabel(family: string): string {
 
 /** Render model discovery with separate source selection and catalog filtering. */
 export function ModelBrowser({
+  heading,
+  defaultFitsOnly = false,
+  onClose,
   models,
   selectedModelId,
   favorites,
@@ -267,6 +283,9 @@ export function ModelBrowser({
   onToggleFavorite,
   onShowInfo,
   onAddModel,
+  activeDownloads,
+  onLaunch,
+  onCancelDownload,
   downloadStatusMap,
   instanceStatuses,
   mode = 'launch',
@@ -284,6 +303,7 @@ export function ModelBrowser({
   onHfTaskChange,
 }: ModelBrowserProps) {
   const { t } = useSkulkTranslation();
+  const [fitsOnly, setFitsOnly] = useState(defaultFitsOnly);
   const [source, setSource] = useState<'catalog' | 'huggingface'>('catalog');
   const picker = useModelPicker({
     models,
@@ -295,6 +315,7 @@ export function ModelBrowser({
     instanceStatuses,
   });
 
+  const catalogGroups = useMemo(() => groupModels(models), [models]);
   const isHf = source === 'huggingface';
 
   const hasActiveFilters =
@@ -324,8 +345,10 @@ export function ModelBrowser({
   // placeable half rather than being demoted on a guess.
   const groupIsBurst = (g: ModelGroup) =>
     getBurstInfo !== undefined && g.variants.every((v) => getBurstInfo(v.id) !== null);
-  const localGroups = picker.filteredGroups.filter((g) => !groupIsBurst(g));
-  const burstGroups = picker.filteredGroups.filter(groupIsBurst);
+  const fitsGroup = (group: ModelGroup) => group.variants.some(variant => getModelFitStatus(variant.id) === 'fits_now' || getModelFitStatus(variant.id) === 'fits_cluster_capacity') && !groupIsBurst(group);
+  const visibleGroups = fitsOnly ? picker.filteredGroups.filter(fitsGroup) : picker.filteredGroups;
+  const localGroups = visibleGroups.filter((g) => !groupIsBurst(g));
+  const burstGroups = visibleGroups.filter(groupIsBurst);
 
   const hfIsBurst = (m: HuggingFaceModel) =>
     getHfBurstInfo !== undefined && getHfBurstInfo(m) !== null;
@@ -392,6 +415,9 @@ export function ModelBrowser({
       onSelectModel={onSelect}
       onToggleFavorite={onToggleFavorite}
       onShowInfo={onShowInfo}
+      activeDownloads={activeDownloads}
+      onLaunch={onLaunch}
+      onCancelDownload={onCancelDownload}
       downloadStatusMap={downloadStatusMap}
       instanceStatuses={instanceStatuses}
       mode={mode}
@@ -402,37 +428,11 @@ export function ModelBrowser({
 
   return (
     <Container>
-      <SourceSwitcher role="group" aria-label={t('modelBrowser.source', 'Model source')}>
-        <SourceButton
-          type="button"
-          aria-pressed={!isHf}
-          $active={!isHf}
-          onClick={() => {
-            setSource('catalog');
-            picker.setSelectedFamily(null);
-          }}
-        >
-          {t('modelBrowser.supportedCatalog', 'Supported models')}
-        </SourceButton>
-        <SourceButton
-          type="button"
-          aria-pressed={isHf}
-          $active={isHf}
-          onClick={() => {
-            setSource('huggingface');
-            if (picker.searchQuery.trim() && onHfSearch) {
-              onHfSearch(picker.searchQuery);
-            }
-          }}
-        >
-          {t('modelBrowser.huggingFaceSearch', 'Search Hugging Face')}
-        </SourceButton>
-      </SourceSwitcher>
-
       {/* Main content */}
       <Main>
         {/* Toolbar */}
         <Toolbar>
+          {heading && <h2 style={{ flex: '0 0 auto', fontSize: 18 }}>{heading}</h2>}
           <SearchBar
             value={picker.searchQuery}
             onChange={(q) => {
@@ -447,6 +447,34 @@ export function ModelBrowser({
             autoFocus
             ariaLabel={t('modelBrowser.searchAriaLabel', 'Search models')}
           />
+      <SourceSwitcher role="group" aria-label={t('modelBrowser.source', 'Model source')}>
+        <SourceButton
+          type="button"
+          aria-pressed={!isHf}
+          $active={!isHf}
+          onClick={() => {
+            setSource('catalog');
+            picker.setSelectedFamily(null);
+          }}
+        >
+          {t('modelBrowser.supported', 'Supported')}
+        </SourceButton>
+        <SourceButton
+          type="button"
+          aria-pressed={isHf}
+          $active={isHf}
+          onClick={() => {
+            setSource('huggingface');
+            if (picker.searchQuery.trim() && onHfSearch) {
+              onHfSearch(picker.searchQuery);
+            }
+          }}
+        >
+          {t('modelBrowser.huggingFace', 'Hugging Face')}
+        </SourceButton>
+      </SourceSwitcher>
+
+          {onClose && <Button variant="ghost" icon aria-label={t('common.close', 'Close')} onClick={onClose}><FiX /></Button>}
           {isHf && onToggleMlxOnly && (
             <FilterBtn
               variant="outline"
@@ -463,27 +491,22 @@ export function ModelBrowser({
               {t('modelBrowser.mlxOnly', 'MLX only')}
             </FilterBtn>
           )}
-          {!isHf && (
-            <FilterBtn
+          {(
+            <FacetToggle
               variant="outline"
               size="sm"
               $active={hasActiveFilters}
+              aria-expanded={picker.showFilters}
               onClick={() => picker.setShowFilters(!picker.showFilters)}
             >
               <FilterIcon />
               {t('modelBrowser.filters', 'Filters')}
-            </FilterBtn>
-          )}
-          {picker.showFilters && !isHf && (
-            <ModelFilterPopover
-              filters={picker.filters}
-              onChange={picker.setFilters}
-              onClear={picker.clearFilters}
-              onClose={() => picker.setShowFilters(false)}
-            />
+            </FacetToggle>
           )}
         </Toolbar>
 
+        <FacetLayout>
+        <Facets $open={picker.showFilters} aria-label={t('modelBrowser.facets', 'Model filters')}>
         {/* Hugging Face task scope */}
         {isHf && onHfTaskChange && (
           <FamilyRail role="group" aria-label={t('modelBrowser.taskScope', 'Filter Hugging Face results by task')}>
@@ -514,6 +537,7 @@ export function ModelBrowser({
           <FamilyRail role="group" aria-label={t('modelBrowser.catalogScope', 'Filter supported models by family')}>
             <FamilyChip
               type="button"
+              data-count={catalogGroups.length}
               $active={picker.selectedFamily === null}
               aria-pressed={picker.selectedFamily === null}
               onClick={() => picker.setSelectedFamily(null)}
@@ -543,6 +567,7 @@ export function ModelBrowser({
             {picker.uniqueFamilies.map((family) => (
               <FamilyChip
                 key={family}
+                data-count={catalogGroups.filter(group => group.family === family).length}
                 type="button"
                 $active={picker.selectedFamily === family}
                 aria-pressed={picker.selectedFamily === family}
@@ -554,8 +579,20 @@ export function ModelBrowser({
           </FamilyRail>
         )}
 
+        {!isHf && <label style={{ display: 'flex', gap: 8, padding: '12px 16px', alignItems: 'center' }}><input type="checkbox" checked={fitsOnly} onChange={event => setFitsOnly(event.target.checked)} />{t('modelBrowser.fitsOnly', 'Fits this cluster')}</label>}
+        {!isHf && <ModelFilterPopover inline filters={picker.filters} onChange={picker.setFilters} onClear={picker.clearFilters} onClose={() => picker.setShowFilters(false)} />}
+        </Facets>
         {/* List */}
         <ListArea>
+          {!isHf && <SectionHeader>{t('modelBrowser.resultCount', '{count} model groups', { count: visibleGroups.length })}</SectionHeader>}
+          {!isHf && <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', padding: '0 16px 8px' }}>
+            {picker.selectedFamily && <Button size="sm" onClick={() => picker.setSelectedFamily(null)}>{familyLabel(picker.selectedFamily)} <FiX aria-hidden="true" /></Button>}
+            {picker.filters.capabilities.map(capability => <Button key={capability} size="sm" onClick={() => picker.setFilters({ ...picker.filters, capabilities: picker.filters.capabilities.filter(value => value !== capability) })}>{capability.replaceAll('_', ' ')} <FiX aria-hidden="true" /></Button>)}
+            {picker.filters.sizeRange && <Button size="sm" onClick={() => picker.setFilters({ ...picker.filters, sizeRange: null })}>{t('common.size', 'Size')} <FiX aria-hidden="true" /></Button>}
+            {picker.filters.downloadedOnly && <Button size="sm" onClick={() => picker.setFilters({ ...picker.filters, downloadedOnly: false })}>{t('modelPickerGroup.inStore', 'In store')} <FiX aria-hidden="true" /></Button>}
+            {picker.filters.readyOnly && <Button size="sm" onClick={() => picker.setFilters({ ...picker.filters, readyOnly: false })}>{t('modelBrowser.readyNow', 'Ready now')} <FiX aria-hidden="true" /></Button>}
+          </div>}
+
           {isHf ? (
             /* HuggingFace results */
             <>
@@ -618,7 +655,7 @@ export function ModelBrowser({
                   </ListCard>
                 </>
               )}
-              {mode !== 'store-download' && picker.otherGroups.length > 0 && (
+              {mode !== 'store-download' && !fitsOnly && picker.otherGroups.length > 0 && (
                 <>
                   {picker.recommendedGroups.length > 0 && (
                     <SectionHeader style={{ paddingTop: 12 }}>{t('modelBrowser.other', 'Other')}</SectionHeader>
@@ -628,7 +665,7 @@ export function ModelBrowser({
                   </ListCard>
                 </>
               )}
-              {picker.filteredGroups.length === 0 && (
+              {visibleGroups.length === 0 && (
                 <EmptyMsg>
                   {picker.searchQuery
                     ? t('modelBrowser.noModelsMatch', 'No models match your search')
@@ -638,7 +675,12 @@ export function ModelBrowser({
             </>
           )}
         </ListArea>
+        </FacetLayout>
       </Main>
     </Container>
   );
 }
+
+const FacetToggle = styled(FilterBtn)`
+  @media (min-width: 769px) { display: none; }
+`;

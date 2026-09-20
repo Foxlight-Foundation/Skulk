@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import styled from 'styled-components';
+import styled, { useTheme } from 'styled-components';
+import type { Theme } from '../../theme';
 import type { TraceEventLike } from '../../types/observabilityEvents';
 import { useSkulkTranslation, type SkulkTranslate } from '../../i18n/tolgee';
 
@@ -45,7 +46,7 @@ const Wrap = styled.div`
 const EmptyState = styled.div`
   padding: 16px 8px;
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
 `;
 
 const Legend = styled.div`
@@ -54,7 +55,7 @@ const Legend = styled.div`
   gap: 10px;
   padding: 6px 4px 8px;
   font-size: ${({ theme }) => theme.fontSizes.xs};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
 `;
 
 const LegendItem = styled.span`
@@ -83,26 +84,14 @@ const TINY_BAR_PX = 3;
 /** Two adjacent tiny events merge into one cluster when their gap ≤ this. */
 const CLUSTER_GAP_PX = 2;
 
-/**
- * Stable color-per-category map. Hand-tuned medium-sat / medium-light HSL hexes
- * so the same swatches read on both light and dark themes; bars carry a thin
- * outline (`barStroke`) drawn from the theme so they don't fade into the
- * surface fill on either palette.
- */
-const CATEGORY_COLORS: Record<string, string> = {
-  compute: '#e6b34a', // gold
-  decode: '#4ec48c', // green
-  comms: '#5e8de8', // blue
-  sync: '#e89358', // orange
-  lifecycle: '#b88de0', // purple
-  tooling: '#5cc4c4', // cyan
-  async: '#e082b5', // pink
-};
-
-const FALLBACK_COLOR = '#9aa0a6';
-
-function colorForCategory(category: string): string {
-  return CATEGORY_COLORS[category] ?? FALLBACK_COLOR;
+/** Trace categories follow the same work/health/accent vocabulary as the specimens. */
+function colorForCategory(category: string, theme: Theme): string {
+  const colors: Record<string, string> = {
+    compute: theme.colors.gold, decode: theme.colors.live, comms: theme.colors.deepAccent,
+    sync: theme.colors.gold, lifecycle: theme.colors.textSecondary, tooling: theme.colors.healthy,
+    async: theme.colors.live,
+  };
+  return colors[category] ?? theme.colors.textMuted;
 }
 
 function formatDuration(microseconds: number): string {
@@ -179,6 +168,7 @@ interface ResolvedLane {
 }
 
 export function TraceWaterfall({ events, selectedId, onSelect }: TraceWaterfallProps) {
+  const theme = useTheme();
   const { t } = useSkulkTranslation();
   const containerRef = useRef<HTMLDivElement | null>(null);
   // Live pixel width of the lane area; recomputed on resize via ResizeObserver
@@ -248,7 +238,7 @@ export function TraceWaterfall({ events, selectedId, onSelect }: TraceWaterfallP
       <Legend>
         {presentCategories.map((category) => (
           <LegendItem key={category}>
-            <Swatch $color={colorForCategory(category)} />
+            <Swatch $color={colorForCategory(category, theme)} />
             {category}
           </LegendItem>
         ))}
@@ -301,7 +291,7 @@ export function TraceWaterfall({ events, selectedId, onSelect }: TraceWaterfallP
                     y={y}
                     width={unit.widthPx}
                     height={h}
-                    color={colorForCategory(unit.event.category)}
+                    color={colorForCategory(unit.event.category, theme)}
                     selected={isSelected}
                     event={unit.event}
                     onSelect={onSelect}
@@ -356,8 +346,9 @@ function TimeAxis({
 
   return (
     <g>
-      {ticks.map((tick) => (
-        <g key={tick.px}>
+      {/* Before measurement, ticks share an x coordinate; their ordered positions remain distinct. */}
+      {ticks.map((tick, index) => (
+        <g key={index}>
           <line
             x1={tick.px}
             x2={tick.px}
@@ -498,6 +489,7 @@ function ClusterBar({
   events: TraceEventLike[];
   t: SkulkTranslate;
 }) {
+  const theme = useTheme();
   const totalDurationUs = events.reduce((sum, e) => sum + Math.max(0, e.durationUs), 0);
   const categoryCount = new Set(events.map((e) => e.category)).size;
   const categories = [...new Set(events.map((e) => e.category))].join(', ');
@@ -508,7 +500,7 @@ function ClusterBar({
         y={y}
         width={width}
         height={height}
-        fill={FALLBACK_COLOR}
+        fill={theme.colors.textMuted}
         fillOpacity={0.45}
         stroke="rgba(0, 0, 0, 0.35)"
         strokeWidth={0.5}

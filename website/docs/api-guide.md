@@ -572,13 +572,19 @@ secure storage until it disconnects or pairs again.
 
 Parameters:
 
-- `Authorization: Bearer <access-token>` (required): a valid credential with
-  `devices:manage` scope.
+- `Authorization: Bearer <access-token>`: a valid credential with
+  `devices:manage` scope; or, without Authorization, `X-Skulk-Dashboard: pairing-v1`
+  from the trusted direct dashboard. The latter uses the same localhost or
+  verified Tailscale peer, Host/Origin, and forwarding-header checks as invitation
+  management. Relay access does not gain direct dashboard authority. A supplied
+  invalid bearer never falls back to direct authority.
 
 Behavior:
 
 - returns stable device IDs, display names, pairing times, refresh expiries,
   active/revoked state, and which row represents the caller;
+- active describes credential state, not device presence or recent activity;
+- direct dashboard responses mark no device as the caller;
 - never returns device public keys, token digests, raw credentials, or pairing
   nonces;
 - returns `401` for a missing, malformed, unknown, revoked, or expired bearer
@@ -591,8 +597,12 @@ Behavior:
 Parameters:
 
 - path `device_id` (required): stable paired-device UUID to revoke;
-- `Authorization: Bearer <access-token>` (required): a valid credential with
-  `devices:manage` scope.
+- `Authorization: Bearer <access-token>`: a valid credential with
+  `devices:manage` scope; or, without Authorization, `X-Skulk-Dashboard: pairing-v1`
+  from the trusted direct dashboard. The latter uses the same localhost or
+  verified Tailscale peer, Host/Origin, and forwarding-header checks as invitation
+  management. Relay access does not gain direct dashboard authority. A supplied
+  invalid bearer never falls back to direct authority.
 
 Behavior:
 

@@ -1594,3 +1594,14 @@ The selected lifecycle operation determines inventory's `uninstalled` flag, sepa
 from pending-operation progress. No extra supervisor, provider call or purge is added.
 Configuration, credentials, receipts and runtime generations remain available;
 independent cleanup continues. A verified `select` or `activate` reinstalls explicitly.
+
+### Dashboard presentation ownership
+
+Ordinary Chat also pins asynchronous user and assistant writes to their originating history. Managed runtime cards retain release-installation and activation submission IDs outside the detail drawer, so dismissing or reopening it cannot erase an uncertain-operation fence.
+
+- `dashboard-react/src/theme/theme.ts`: Night (`dark`) / Noon Ridge (`light`); Instrument Sans and JetBrains Mono. Components consume semantic tokens without theme-name branches.
+- `dashboard-react/src/components/pages/StewardChatView.tsx`: app-scoped `StewardControllerProvider` owns per-conversation transient drafts, generation cancellation, speech and proposals across drawer/page/virtual-model presentations. Messages use the existing Redux Chat history and `skulk-chat` persistence key. Async replies target the originating conversation; changing/deleting its Steward history selection cancels generation. Drawer sends preserve ordinary Chat selection.
+- `dashboard-react/src/hooks/useModalFocus.ts`: one modal owner, Tab containment, Escape dismissal and focus return.
+- `dashboard-react/src/components/layout/SettingsPanel.tsx`: unsaved configuration and theme drafts survive Devices navigation; Save is the commit boundary. `DevicesPanel` invokes immediate independent inventory/revocation and invitation operations. QR secrets stay in `PairingSettings` component state.
+- `src/skulk/api/operator_auth.py`: device GET/DELETE retain scoped bearer access and additionally accept the existing trusted direct-dashboard authority check with the dashboard pairing header. Invalid bearer credentials never fall back to direct authority. Relay restrictions remain in force.
+- Integration setup remains configuration guidance, not observed connectivity. Runtime health uses existing runtime/node/operation evidence. No device-presence or request-observation service is introduced.

@@ -29,6 +29,8 @@ function response(body: unknown, status = 200) {
 async function mount() {
   root = createRoot(host);
   await act(async () => { root.render(<Provider store={store}><ThemeProvider theme={darkTheme}><ManagedRuntimesPanel /></ThemeProvider></Provider>); });
+  await contains('Configure');
+  await click('Configure');
 }
 async function click(label: string) {
   await act(async () => {
@@ -134,6 +136,14 @@ it('retains an uncertain uninstall across reconnect without another submission',
   expect(posts[0].body).toMatchObject({ action: 'uninstall', expected_revision: 7 });
   await click('Uninstall plugin');
   expect(posts).toHaveLength(1);
+  const originalOperationId = posts[0].body?.operation_id;
+  await act(async () => { host.querySelector<HTMLButtonElement>('button[aria-label="Close"]')!.click(); });
+  expect(host.querySelector('[role="dialog"]')).toBeNull();
+  await click('Configure');
+  await contains('Applying');
+  await click('Refresh operation status');
+  expect(posts).toHaveLength(1);
+  expect(operationReads.some(path => path.endsWith(`/${originalOperationId}`))).toBe(true);
   await act(async () => { root.unmount(); store.dispatch(apiSlice.util.resetApiState()); });
   await mount();
   await contains('Applying');

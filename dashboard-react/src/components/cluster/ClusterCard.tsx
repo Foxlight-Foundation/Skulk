@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useId, useMemo } from 'react';
 import styled, { keyframes, useTheme } from 'styled-components';
 import { FiExternalLink } from 'react-icons/fi';
 import { MdPlayArrow } from 'react-icons/md';
@@ -53,6 +53,7 @@ function hfUrl(modelId: string): string | null {
 /* ── Mini Topology ────────────────────────────────────── */
 
 function MiniTopology({ nodes }: { nodes: ClusterCardNode[] }) {
+  const instanceId = useId();
   const theme = useTheme() as Theme;
   const count = nodes.length;
   const iconW = 48;
@@ -73,10 +74,10 @@ function MiniTopology({ nodes }: { nodes: ClusterCardNode[] }) {
       const angle = -Math.PI / 2 + (2 * Math.PI * i) / count;
       return { x: cx + r * Math.cos(angle), y: cy + r * Math.sin(angle) - 4 };
     });
-  }, [count, cx, cy, r, nodes.length]);
+  }, [count, cx, cy, r, nodes]);
 
   return (
-    <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`}>
+    <svg style={{ maxWidth: '100%' }} width={w} height={h} viewBox={`0 0 ${w} ${h}`}>
       {/* Edges */}
       {count > 1 && positions.map((p, i) => {
         const next = positions[(i + 1) % count];
@@ -102,7 +103,7 @@ function MiniTopology({ nodes }: { nodes: ClusterCardNode[] }) {
                 width={iconW}
                 height={iconH}
                 wireColor={theme.colors.goldDim}
-                clipId={`cc-${node.nodeId}`}
+                clipId={`cc-${instanceId}-${node.nodeId}`}
               />
             </g>
             {/* Memory percent + name */}
@@ -111,7 +112,7 @@ function MiniTopology({ nodes }: { nodes: ClusterCardNode[] }) {
               textAnchor="middle"
               fill={theme.colors.textSecondary}
               fontSize={11}
-              fontFamily="'Outfit', sans-serif"
+              fontFamily={theme.fonts.body}
             >
               {node.memoryUsedPercent}%
             </text>
@@ -225,6 +226,7 @@ const Card = styled.div`
   flex-direction: column;
   gap: 12px;
   width: 280px;
+  max-width: 100%;
   transition: border-color 0.2s;
 
   &:hover {
@@ -256,23 +258,23 @@ const ModelName = styled.span`
 `;
 
 const LinkBtn = styled.a`
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   display: flex;
   flex-shrink: 0;
   transition: color 0.15s;
-  &:hover { color: ${({ theme }) => theme.colors.gold}; }
+  &:hover { color: ${({ theme }) => theme.colors.accentText}; }
 `;
 
 const SizeBadge = styled.span`
   font-size: ${({ theme }) => theme.fontSizes.sm};
   font-weight: 500;
-  color: ${({ theme }) => theme.colors.gold};
+  color: ${({ theme }) => theme.colors.accentText};
   flex-shrink: 0;
 `;
 
 const ModelIdText = styled.span`
   font-size: ${({ theme }) => theme.fontSizes.xs};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -318,7 +320,7 @@ const PulseDot = styled.span`
 
 const SectionLabel = styled.div`
   font-size: ${({ theme }) => theme.fontSizes.xs};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   margin-bottom: 4px;
 `;
 
@@ -359,7 +361,7 @@ const DownloadFill = styled.div<{ $pct: number }>`
 
 const DownloadPct = styled.span`
   font-size: ${({ theme }) => theme.fontSizes.xs};
-  color: ${({ theme }) => theme.colors.gold};
+  color: ${({ theme }) => theme.colors.accentText};
   width: 36px;
   text-align: right;
   flex-shrink: 0;
@@ -389,7 +391,7 @@ const LaunchBtn = styled.button`
 
   &:hover {
     border-color: ${({ theme }) => theme.colors.goldDim};
-    color: ${({ theme }) => theme.colors.gold};
+    color: ${({ theme }) => theme.colors.accentText};
     background: ${({ theme }) => theme.colors.goldBg};
   }
 `;

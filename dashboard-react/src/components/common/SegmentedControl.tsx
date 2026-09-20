@@ -17,16 +17,17 @@ export interface SegmentedControlProps<T extends string = string> {
 }
 
 const sizeConfig = {
-  sm: { padding: '3px 8px', fontSize: '10px' },
-  md: { padding: '4px 10px', fontSize: '11px' },
-  lg: { padding: '6px 14px', fontSize: '12px' },
+  sm: { padding: '3px 8px', fontSize: '12px' },
+  md: { padding: '7px 12px', fontSize: '12px' },
+  lg: { padding: '6px 14px', fontSize: '14px' },
 };
 
 const Group = styled.div<{ $size: SegmentedControlSize }>`
   display: inline-flex;
-  border: 1px solid ${({ theme }) => theme.colors.goldDim};
-  border-radius: ${({ theme }) => theme.radii.sm};
-  overflow: hidden;
+  max-width: 100%;
+  border: 1px solid ${({ theme }) => theme.colors.borderControl};
+  border-radius: ${({ theme }) => theme.radii.md};
+  overflow-x: auto;
 `;
 
 const Segment = styled.button<{
@@ -35,6 +36,7 @@ const Segment = styled.button<{
   $disabled?: boolean;
 }>`
   all: unset;
+  flex-shrink: 0;
   cursor: pointer;
   padding: ${({ $size }) => sizeConfig[$size].padding};
   font-size: ${({ $size }) => sizeConfig[$size].fontSize};
@@ -50,13 +52,13 @@ const Segment = styled.button<{
   ${({ $active }) =>
     $active
       ? css`
-          background: ${({ theme }) => theme.colors.gold};
-          color: ${({ theme }) => theme.colors.textOnAccent};
+          background: ${({ theme }) => theme.colors.selected};
+          color: ${({ theme }) => theme.colors.text};
           font-weight: 600;
         `
       : css`
           background: ${({ theme }) => theme.colors.surfaceSunken};
-          color: ${({ theme }) => theme.colors.textMuted};
+          color: ${({ theme }) => theme.colors.textSecondary};
           &:hover {
             color: ${({ theme }) => theme.colors.text};
           }
@@ -96,6 +98,8 @@ export function SegmentedControl<T extends string = string>({
         const opt = normalizeOption(raw);
         return (
           <Segment
+            type="button"
+            disabled={opt.disabled}
             key={opt.value}
             $active={value === opt.value}
             $size={size}

@@ -7,7 +7,7 @@ import { darkTheme } from '../../theme/theme';
 import { ClusterNode } from './ClusterNode';
 import type { CapabilityNodeSummary } from '../../types/capabilityNodes';
 
-globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', { value: true, configurable: true });
 
 vi.mock('../../i18n/tolgee', () => ({
   useSkulkTranslation: () => ({

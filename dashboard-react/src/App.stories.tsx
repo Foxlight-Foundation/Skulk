@@ -1,0 +1,158 @@
+import type { Meta, StoryObj } from '@storybook/react-vite';
+import { expect, userEvent, waitFor, within } from 'storybook/test';
+import { App } from './App';
+
+const meta = {
+  title: 'Screens/Dashboard',
+  component: App,
+  beforeEach: () => {
+    // The component test runner uses `/`; prevent App's real bookmark loader
+    // from overriding the story's route with Cluster.
+    const previous = location.href;
+    history.replaceState(null, '', `/iframe.html${location.search}`);
+    return () => history.replaceState(null, '', previous);
+  },
+  parameters: { layout: 'fullscreen', screenRoute: 'cluster' },
+  decorators: [(Story) => <div style={{ height: '100dvh', isolation: 'isolate' }}><Story /></div>],
+} satisfies Meta<typeof App>;
+export default meta;
+type Story = StoryObj<typeof meta>;
+
+export const Cluster: Story = {};
+export const Integrations: Story = { parameters: { screenRoute: 'integrations' } };
+export const Plugins: Story = { parameters: { screenRoute: 'plugins' } };
+export const Chat: Story = { parameters: { screenRoute: 'chat' } };
+export const ModelStore: Story = { parameters: { screenRoute: 'model-store' } };
+export const Settings: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    if (!canvas.queryByRole('button', { name: 'Settings' })) await userEvent.click(await canvas.findByRole('button', { name: 'Toggle mobile menu' }));
+    await userEvent.click(await canvas.findByRole('button', { name: 'Settings' }));
+    await expect(within(document.body).getByRole('dialog')).toBeVisible();
+  },
+};
+export const Steward: Story = {
+  play: async () => {
+    await userEvent.keyboard('{Control>}k{/Control}');
+    await expect(await within(document.body).findByRole('dialog', { name: 'Skulk Steward' })).toBeVisible();
+  },
+};
+
+export const FindModels: Story = {
+  parameters: { screenRoute: 'model-store' },
+  play: async ({ canvasElement }) => {
+    await userEvent.click(await within(canvasElement).findByRole('button', { name: 'Find Models' }));
+    await expect(await within(document.body).findByRole('dialog')).toBeVisible();
+  },
+};
+/** Discovery uses live runner readiness, separately from models being in store. */
+export const FindReadyModels: Story = {
+  parameters: { screenRoute: 'model-store' },
+  play: async context => {
+    await FindModels.play?.(context);
+    const dialog = within(within(document.body).getByRole('dialog'));
+    const ready = await dialog.findByRole('checkbox', { name: 'Ready now', hidden: true });
+    if (!ready.getClientRects().length) await userEvent.click(dialog.getByRole('button', { name: 'Filters' }));
+    await userEvent.click(ready);
+    await expect(await dialog.findByText('1 model groups')).toBeVisible();
+    await expect(dialog.getByText('example/Chat-32B', { exact: true })).toBeVisible();
+    await expect(dialog.queryByText('example/Reasoning-8B', { exact: true })).not.toBeInTheDocument();
+  },
+};
+export const Devices: Story = {
+  play: async context => {
+    await Settings.play?.(context);
+    await userEvent.click(await within(document.body).findByRole('button', { name: 'Devices & pairing' }));
+    await expect(within(document.body).getByRole('dialog', { name: 'Devices & pairing' })).toBeVisible();
+  },
+};
+/** Nested device navigation keeps the Settings draft and returns keyboard focus. */
+export const SettingsContinuity: Story = {
+  play: async context => {
+    await Settings.play?.(context);
+    const body = within(document.body);
+    const section = body.getByText('HuggingFace').closest('details')!;
+    if (!section.open) await userEvent.click(section.querySelector('summary')!);
+    const token = section.querySelector<HTMLInputElement>('input[type="password"]')!;
+    await userEvent.type(token, 'fictional-unsaved-draft');
+    await userEvent.click(body.getByRole('button', { name: 'Devices & pairing' }));
+    await expect(body.getAllByRole('dialog')).toHaveLength(1);
+    await userEvent.click(body.getByRole('button', { name: 'Back to Settings' }));
+    await expect(token).toHaveValue('fictional-unsaved-draft');
+    await waitFor(() => expect(body.getByRole('button', { name: 'Devices & pairing' })).toHaveFocus());
+  },
+};
+export const IntegrationSetup: Story = {
+  parameters: { screenRoute: 'integrations' },
+  play: async ({ canvasElement }) => {
+    await userEvent.click(await within(canvasElement).findByRole('button', { name: 'Claude Code' }));
+    await expect(await within(document.body).findByRole('dialog')).toBeVisible();
+  },
+};
+export const StewardConversation: Story = {
+  play: async context => {
+    await Steward.play?.(context);
+    const body = within(document.body);
+    await userEvent.type(await body.findByPlaceholderText('Ask about the cluster...'), 'How is this cluster doing?');
+    await userEvent.keyboard('{Enter}');
+    await expect(await body.findByText(/The example cluster has three nodes/)).toBeVisible();
+  },
+};
+
+export const StewardContinuity: Story = {
+  play: async context => {
+    await StewardConversation.play?.(context);
+    const body = within(document.body);
+    const draft = 'Keep this draft while changing views';
+    await userEvent.type(body.getByPlaceholderText('Ask about the cluster...'), draft);
+    await userEvent.click(body.getByRole('button', { name: 'Open as page' }));
+    await expect(body.queryByRole('dialog')).not.toBeInTheDocument();
+    await expect(body.getByPlaceholderText('Ask about the cluster...')).toHaveValue(draft);
+    await userEvent.keyboard('{Control>}k{/Control}');
+    await expect(body.getByRole('dialog', { name: 'Skulk Steward' })).toBeVisible();
+    await expect(body.getByPlaceholderText('Ask about the cluster...')).toHaveValue(draft);
+    await expect(body.getByText(/The example cluster has three nodes/)).toBeVisible();
+  },
+};
+
+/** Filter and overflow navigation retain access to the fenced runtime workflow. */
+export const PluginNavigation: Story = {
+  parameters: { screenRoute: 'plugins' },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(await canvas.findByRole('button', { name: 'Healthy · 1' }));
+    await expect(canvas.getByRole('heading', { name: 'managed.example-video' })).toBeVisible();
+    await expect(canvas.getByRole('heading', { name: 'managed.example-stale', hidden: true })).not.toBeVisible();
+    await userEvent.click(canvas.getByRole('button', { name: 'All · 2' }));
+    const menu = canvas.getAllByLabelText('More plugin actions')[0];
+    await userEvent.click(menu);
+    // userEvent's focusable selector omits native summary elements; Chromium
+    // focuses this disclosure on click, so reproduce that before keyboard input.
+    menu.focus();
+    await userEvent.keyboard('{Escape}');
+    await expect(menu).toHaveFocus();
+    await userEvent.click(menu);
+    await userEvent.click(canvas.getAllByRole('button', { name: 'Manage plugin' })[0]);
+    await expect(await within(document.body).findByRole('dialog', { name: 'Runtime details' })).toBeVisible();
+    await userEvent.keyboard('{Escape}');
+    await expect(menu).toHaveFocus();
+  },
+};
+
+/** Discovery launches into existing placement review and preserves its search on return. */
+export const FindModelsPlacementReturn: Story = {
+  parameters: { screenRoute: 'model-store' },
+  play: async context => {
+    await FindModels.play?.(context);
+    const body = within(document.body);
+    const search = body.getByRole('textbox', { name: 'Search models' });
+    await userEvent.type(search, 'Chat');
+    await userEvent.click((await body.findAllByRole('button', { name: 'Launch' }))[0]);
+    await expect(await body.findByRole('dialog', { name: 'Placement options' })).toBeVisible();
+    await expect(body.getAllByRole('dialog')).toHaveLength(1);
+    await userEvent.click(body.getByRole('button', { name: 'Back to Find Models' }));
+    await expect(await body.findByRole('dialog', { name: 'Find Models' })).toBeVisible();
+    await expect(body.getByRole('textbox', { name: 'Search models' })).toHaveValue('Chat');
+    await expect(body.getAllByRole('dialog')).toHaveLength(1);
+  },
+};

@@ -11,7 +11,7 @@ import { chatActions } from '../../store/slices/chatSlice';
 import { darkTheme } from '../../theme/theme';
 import { ChatView } from './ChatView';
 
-globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', { value: true, configurable: true });
 
 type RealtimeTranscriptHandler = (text: string, final: boolean) => void;
 
@@ -153,7 +153,8 @@ describe('ChatView realtime voice auto-send', () => {
     });
     await waitFor(() => capturedBody !== null, 'voice transcript was not sent to chat');
 
-    const request = capturedBody as Record<string, unknown>;
+    const request = capturedBody as Record<string, unknown> | null;
+    if (!request) throw new Error('No chat request');
     expect(request).not.toHaveProperty('max_tokens');
     expect(request.messages).toEqual([
       { role: 'user', content: 'Earlier context.' },

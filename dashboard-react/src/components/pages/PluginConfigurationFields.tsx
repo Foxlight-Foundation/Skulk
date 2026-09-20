@@ -33,6 +33,7 @@ function resolve(schema: Record<string, unknown>, root: Record<string, unknown>)
 }
 
 /** Refuse unsupported contracts instead of silently dropping settings constraints. */
+// eslint-disable-next-line react-refresh/only-export-components -- Callers must use the same schema support guard before enabling mutations.
 export function supportedConfigurationSchema(schema: Record<string, unknown>, root = schema, depth = 0): boolean {
   if (depth > 8) return false;
   const resolved = resolve(schema, root);

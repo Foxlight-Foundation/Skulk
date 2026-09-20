@@ -4,14 +4,17 @@ import { CAPABILITIES, SIZE_RANGES, type FilterState } from '../../types/models'
 import { Button } from '../common/Button';
 import { useSkulkTranslation, type SkulkTranslate } from '../../i18n/tolgee';
 
+/** Controlled discovery facets, shown in a rail or standalone popover. */
 export interface ModelFilterPopoverProps {
+  /** Render inside a persistent facet rail instead of a floating popover. */
+  inline?: boolean;
   filters: FilterState;
   onChange: (filters: FilterState) => void;
   onClear: () => void;
   onClose: () => void;
 }
 
-const Panel = styled.div`
+const Panel = styled.div<{ $inline: boolean }>`
   position: absolute;
   right: 0;
   top: 100%;
@@ -21,7 +24,9 @@ const Panel = styled.div`
   border: 1px solid ${({ theme }) => theme.colors.border};
   border-radius: ${({ theme }) => theme.radii.lg};
   padding: ${({ theme }) => theme.spacing.md};
-  min-width: 260px;
+  min-width: 0;
+  width: ${({ $inline }) => $inline ? "auto" : "260px"};
+  ${({ $inline }) => $inline && css`position: static; margin: 0; border: 0; border-radius: 0; padding: 16px; background: transparent;`}
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -30,7 +35,7 @@ const Panel = styled.div`
 const SectionLabel = styled.div`
   font-size: ${({ theme }) => theme.fontSizes.label};
   font-weight: 600;
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.textSecondary};
   margin-bottom: 6px;
 `;
 
@@ -45,13 +50,17 @@ const Chip = styled(Button)<{ $active: boolean }>`
     $active &&
     css`
       background: ${({ theme }) => theme.colors.goldBg};
-      border-color: ${({ theme }) => theme.colors.gold};
-      color: ${({ theme }) => theme.colors.gold};
+      border-color: ${({ theme }) => theme.colors.accentText};
+      color: ${({ theme }) => theme.colors.accentText};
     `}
 `;
 
 const ClearBtn = styled(Button)`
   align-self: flex-end;
+`;
+const Availability = styled.div`
+  display: flex; flex-direction: column; gap: 10px;
+  label { display: flex; align-items: center; gap: 8px; font-size: 13px; color: ${({ theme }) => theme.colors.textSecondary}; cursor: pointer; }
 `;
 
 function capabilityLabel(capability: string, t: SkulkTranslate): string {
@@ -76,12 +85,14 @@ function sizeRangeLabel(range: (typeof SIZE_RANGES)[number], t: SkulkTranslate):
   return t('modelFilter.sizeOver200Gb', '> 200 GB');
 }
 
-export function ModelFilterPopover({ filters, onChange, onClear, onClose }: ModelFilterPopoverProps) {
+/** Edit capability, size and evidence-based availability filters. */
+export function ModelFilterPopover({ inline = false, filters, onChange, onClear, onClose }: ModelFilterPopoverProps) {
   const { t } = useSkulkTranslation();
   const ref = useRef<HTMLDivElement>(null);
 
   // Click-outside handler
   useEffect(() => {
+    if (inline) return;
     const handler = (e: MouseEvent) => {
       if (ref.current && !ref.current.contains(e.target as Node)) {
         onClose();
@@ -89,7 +100,7 @@ export function ModelFilterPopover({ filters, onChange, onClear, onClose }: Mode
     };
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
-  }, [onClose]);
+  }, [onClose, inline]);
 
   const toggleCapability = (cap: string) => {
     const caps = filters.capabilities.includes(cap)
@@ -113,7 +124,7 @@ export function ModelFilterPopover({ filters, onChange, onClear, onClose }: Mode
     filters.readyOnly;
 
   return (
-    <Panel ref={ref}>
+    <Panel ref={ref} $inline={inline}>
       {/* Capabilities */}
       <div>
         <SectionLabel>{t('modelInfo.capabilities', 'Capabilities')}</SectionLabel>
@@ -124,6 +135,7 @@ export function ModelFilterPopover({ filters, onChange, onClear, onClose }: Mode
               variant="outline"
               size="sm"
               $active={filters.capabilities.includes(cap)}
+              aria-pressed={filters.capabilities.includes(cap)}
               onClick={() => toggleCapability(cap)}
             >
               {capabilityLabel(cap, t)}
@@ -142,6 +154,7 @@ export function ModelFilterPopover({ filters, onChange, onClear, onClose }: Mode
               variant="outline"
               size="sm"
               $active={filters.sizeRange?.min === r.min && filters.sizeRange?.max === r.max}
+              aria-pressed={filters.sizeRange?.min === r.min && filters.sizeRange?.max === r.max}
               onClick={() => toggleSizeRange(r.min, r.max)}
             >
               {sizeRangeLabel(r, t)}
@@ -153,7 +166,10 @@ export function ModelFilterPopover({ filters, onChange, onClear, onClose }: Mode
       {/* Availability */}
       <div>
         <SectionLabel>{t('modelFilter.availability', 'Availability')}</SectionLabel>
-        <ChipRow>
+        {inline ? <Availability>
+          <label><input type="checkbox" checked={filters.downloadedOnly} onChange={event => onChange({ ...filters, downloadedOnly: event.target.checked })} />{t('modelPickerGroup.inStore', 'In store')}</label>
+          <label><input type="checkbox" checked={filters.readyOnly} onChange={event => onChange({ ...filters, readyOnly: event.target.checked })} />{t('modelBrowser.readyNow', 'Ready now')}</label>
+        </Availability> : <ChipRow>
           <Chip
             variant="outline"
             size="sm"
@@ -170,7 +186,7 @@ export function ModelFilterPopover({ filters, onChange, onClear, onClose }: Mode
           >
             {t('common.ready', 'Ready')}
           </Chip>
-        </ChipRow>
+        </ChipRow>}
       </div>
 
       {hasActiveFilters && <ClearBtn variant="ghost" size="sm" onClick={onClear}>{t('modelFilter.clearAll', 'Clear all')}</ClearBtn>}

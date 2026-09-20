@@ -4,11 +4,11 @@ import { ThemeProvider } from 'styled-components';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { darkTheme } from '../../theme/theme';
-import type { HuggingFaceModel, ModelInfo, PickerMode } from '../../types/models';
+import type { HuggingFaceModel, ModelInfo, PickerMode, InstanceStatus } from '../../types/models';
 import { ModelBrowser } from './ModelBrowser';
 import type { BurstInfo } from './burst';
 
-globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', { value: true, configurable: true });
 
 vi.mock('../../i18n/tolgee', () => ({
   useSkulkTranslation: () => ({
@@ -64,6 +64,9 @@ async function renderBrowser(
   mode: PickerMode = 'store-download',
   models: ModelInfo[] = MODELS,
   getModelFitStatus: () => 'fits_now' | 'fits_cluster_capacity' = () => 'fits_now',
+  instanceStatuses?: Record<string, InstanceStatus>,
+  canModelFit = () => true,
+  recentModelIds?: string[],
 ): Promise<ReturnType<typeof vi.fn>> {
   container = document.createElement('div');
   document.body.append(container);
@@ -75,7 +78,9 @@ async function renderBrowser(
           models={models}
           selectedModelId={null}
           favorites={new Set()}
-          canModelFit={() => true}
+          canModelFit={canModelFit}
+          instanceStatuses={instanceStatuses}
+          recentModelIds={recentModelIds}
           getModelFitStatus={getModelFitStatus}
           onSelect={onSelect}
           onToggleFavorite={vi.fn()}
@@ -110,13 +115,13 @@ describe('ModelBrowser store discovery taxonomy', () => {
     await renderBrowser();
 
     expect(container?.querySelector('nav')).toBeNull();
-    expect(container?.textContent).toContain('Supported models');
+    expect(container?.textContent).toContain('Supported');
     expect(container?.textContent).not.toContain('Recommended');
 
     const sourceButtons = container?.querySelectorAll('[role="group"][aria-label="Model source"] button');
     expect(sourceButtons?.length).toBe(2);
-    expect(sourceButtons?.[0]?.textContent).toBe('Supported models');
-    expect(sourceButtons?.[1]?.textContent).toBe('Search Hugging Face');
+    expect(sourceButtons?.[0]?.textContent).toBe('Supported');
+    expect(sourceButtons?.[1]?.textContent).toBe('Hugging Face');
 
     expect(familyChips().map((chip) => chip.textContent)).toEqual([
       'All',
@@ -137,7 +142,7 @@ describe('ModelBrowser store discovery taxonomy', () => {
     expect(container?.textContent).not.toContain('Qwen3 4B');
 
     const hubButton = Array.from(container?.querySelectorAll('button') ?? [])
-      .find((button) => button.textContent === 'Search Hugging Face');
+      .find((button) => button.textContent === 'Hugging Face');
     expect(hubButton).not.toBeUndefined();
     await act(async () => hubButton?.click());
 
@@ -241,5 +246,63 @@ describe('ModelBrowser store discovery taxonomy', () => {
     expect(downloadButton).not.toBeNull();
     await act(async () => downloadButton?.click());
     expect(onSelect).toHaveBeenCalledWith('mlx-community/Qwen3-4B-4bit');
+  });
+});
+
+
+describe('discovery evidence and download independence', () => {
+  it('applies readiness and search filters to recent models', async () => {
+    await renderBrowser(undefined, undefined, 'store-download', MODELS, undefined, {
+      [MODELS[0].id]: { status: 'Ready', statusClass: 'ready' },
+      [MODELS[1].id]: { status: 'Loading', statusClass: 'loading' },
+    }, undefined, MODELS.map(model => model.id));
+    const recent = familyChips().find(chip => chip.textContent === 'Recent')!;
+    await act(async () => recent.click());
+    expect(container!.textContent).toContain('3 model groups');
+
+    const ready = [...container!.querySelectorAll('label')].find(label => label.textContent === 'Ready now')!.querySelector('input')!;
+    await act(async () => ready.click());
+    expect(container!.textContent).toContain('1 model group');
+    expect(container!.textContent).toContain('Qwen3 4B');
+    expect(container!.textContent).not.toContain('LongCat AudioDiT 1B');
+
+    const search = container!.querySelector<HTMLInputElement>('input[aria-label="Search models"]')!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(search, 'Canary');
+      search.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(container!.textContent).toContain('0 model groups');
+    await act(async () => ready.click());
+    expect(container!.textContent).toContain('Canary 1B');
+    expect(container!.textContent).not.toContain('Qwen3 4B');
+  });
+
+  it('shows no ready models when readiness evidence is unavailable', async () => {
+    await renderBrowser();
+    const ready = [...container!.querySelectorAll('label')].find(label => label.textContent === 'Ready now')!.querySelector('input')!;
+    await act(async () => ready.click());
+    expect(container!.textContent).toContain('0 model groups');
+    expect(container!.textContent).not.toContain('Qwen3 4B');
+  });
+
+  it('filters readiness independently of catalog and storage status', async () => {
+    await renderBrowser(undefined, undefined, 'store-download', MODELS, undefined, {
+      [MODELS[0].id]: { status: 'Ready', statusClass: 'ready' },
+      [MODELS[1].id]: { status: 'Loading', statusClass: 'loading' },
+    });
+    const ready = [...container!.querySelectorAll('label')].find(label => label.textContent === 'Ready now')!.querySelector('input')!;
+    await act(async () => ready.click());
+    expect(container!.textContent).toContain('Qwen3 4B');
+    expect(container!.textContent).not.toContain('LongCat AudioDiT 1B');
+    expect(container!.textContent).not.toContain('Canary 1B');
+  });
+
+  it('allows a store download when no current placement capacity exists', async () => {
+    const select = vi.fn();
+    await renderBrowser(select, undefined, 'store-download', MODELS, undefined, undefined, () => false);
+    const download = container!.querySelector<HTMLButtonElement>(`button[aria-label="Download ${MODELS[0].id}"]`)!;
+    expect(download.disabled).toBe(false);
+    await act(async () => download.click());
+    expect(select).toHaveBeenCalledWith(MODELS[0].id);
   });
 });

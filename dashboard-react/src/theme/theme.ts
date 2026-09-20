@@ -18,17 +18,17 @@ import valleyNight from '../assets/scene/valley-night.webp';
 const nightSkyEnabled = import.meta.env.VITE_NIGHT_SKY === '1';
 
 const sharedFonts = {
-  body: "'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+  body: "'Instrument Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
   mono: "'JetBrains Mono', 'Fira Code', monospace",
 } as const;
 
 const sharedFontSizes = {
   xs: '12px',
   sm: '14px',
-  md: '16px',
+  md: '15px',
   lg: '18px',
   xl: '22px',
-  xxl: '30px',
+  xxl: '34px',
   label: '13px',
   tableHead: '13px',
   tableBody: '15px',
@@ -52,6 +52,23 @@ const sharedSpacing = {
 
 /** Color tokens. Both palettes must define every key. */
 interface ColorTokens {
+  /** Studio Night semantic surfaces and interaction states. */
+  body: string;
+  borderControl: string;
+  borderDanger: string;
+  borderHealthy: string;
+  borderLive: string;
+  deepAccent: string;
+  focusRing: string;
+  idle: string;
+  liveDeep: string;
+  liveHover: string;
+  liveStrong: string;
+  pressed: string;
+  selected: string;
+  shadowCard: string;
+  shadowPop: string;
+
   // Surfaces
   bg: string;
   bgGradient: string; // full `background:` value for body
@@ -74,12 +91,28 @@ interface ColorTokens {
   text: string;
   textSecondary: string;
   textMuted: string;
+  /** Muted specimen text; aliases the fourth text level. */
+  subtleText: string;
+  /** Small metadata on solid cards; preserves Night and meets Noon contrast. */
+  metadataText: string;
+  /** Readable text for small amber status chips, independent of their tint. */
+  liveBadgeText: string;
+  /** Readable code-capability label, independent of its decorative tint. */
+  codeTagText: string;
   textOnAccent: string; // text drawn on top of the accent/gold/error fills
 
   // Brand
   gold: string;
   goldDim: string;
   goldBg: string;
+  /** Everyday accent text; aliases starlight. */
+  accentText: string;
+  actionFill: string;
+  /** Preserve readable solid-action labels during hover. */
+  actionHoverBrightness: number;
+  actionHoverFill: string;
+  approvalFill: string;
+  liveText: string;
   goldStrong: string; // readable on goldBg
   /**
    * De-emphasized accent-family FOREGROUND text (metric values, thinking
@@ -211,92 +244,71 @@ interface ColorTokens {
 }
 
 const darkColors: ColorTokens = {
-  // Den (night on the ridge), from the operator app design system: indigo
-  // surfaces over a deep night canvas, starlight for hairlines and the
-  // everyday accent, amber strictly for whatever is alive. Values track
-  // skulk-app/src/theme/tokens.ts (the 1a Den palette).
-  bg: '#080C1A',
-  // A CSS-only night: den glow crowning the header, and the fire's warmth
-  // (the palette's horizon amber) breathing up from just below the frame,
-  // so the canvas carries the valley's atmosphere without the painting.
-  bgGradient: `
-    radial-gradient(ellipse 90% 55% at 50% -12%, rgba(43, 58, 99, 0.55) 0%, transparent 62%),
-    radial-gradient(ellipse 68% 38% at 82% 108%, rgba(168, 86, 12, 0.28) 0%, transparent 66%),
-    radial-gradient(ellipse 90% 30% at 12% 112%, rgba(43, 58, 99, 0.38) 0%, transparent 58%),
-    #080C1A
-  `,
-  surface: '#12192E',
-  surfaceHover: '#1B2540',
-  surfaceElevated: 'rgba(16, 22, 42, 0.96)',
-  surfaceSunken: 'rgba(43, 58, 99, 0.16)',
-  header: 'rgba(8, 12, 26, 0.78)',
-  headerBorder: 'linear-gradient(to right, rgba(147, 174, 223, 0.22), rgba(147, 174, 223, 0.03))',
-  overlay: 'rgba(5, 7, 15, 0.65)',
-  shadow: 'rgba(0, 0, 0, 0.5)',
-  shadowStrong: 'rgba(0, 0, 0, 0.7)',
-
-  border: 'rgba(147, 174, 223, 0.13)',
-  borderLight: 'rgba(147, 174, 223, 0.10)',
-  borderStrong: 'rgba(147, 174, 223, 0.22)',
-
-  text: '#F4F6FB',
-  textSecondary: 'rgba(147, 174, 223, 0.78)',
-  textMuted: 'rgba(232, 237, 247, 0.52)',
-  textOnAccent: '#07101E',
-
-  // The night accent is starlight, not gold: interactive emphasis borrows the
-  // Den's secondary accent so amber (see `live`) stays scarce and alive.
-  gold: '#93AEDF',
-  goldDim: 'rgba(147, 174, 223, 0.45)',
-  goldTextDim: 'rgba(147, 174, 223, 0.72)',
-  goldBg: 'rgba(147, 174, 223, 0.12)',
-  goldStrong: '#B9CBEC',
-
-  live: '#F2A03D',
-  liveBg: 'rgba(242, 160, 61, 0.14)',
-  onLive: '#1C1206',
-
-  accent: '#54C79A',
-  accentHover: '#3FB287',
-  accentBg: 'rgba(84, 199, 154, 0.14)',
-  error: '#F2707E',
-  errorBg: 'rgba(242, 112, 126, 0.14)',
-  errorText: '#F8A9B1',
-  errorFill: '#dc2626',
-  errorOnFill: '#ffffff',
-  errorOnSurface: '#F8A9B1',
-  warning: '#F2A03D',
-  warningBg: 'rgba(242, 160, 61, 0.13)',
-  warningText: '#FFD79A',
-  // Solid attention badging is one of the few places amber earns a fill:
-  // it marks something the operator must act on, not decoration.
-  warningFill: '#F2A03D',
-  warningOnFill: '#1C1206',
-  warningOnSurface: '#F2A03D',
-  info: '#93AEDF',
-  infoBg: 'rgba(147, 174, 223, 0.14)',
-
-  chatBubbleUser: 'rgba(43, 58, 99, 0.36)',
-  chatBubbleAssistant: 'rgba(43, 58, 99, 0.14)',
-  chatBubbleBorder: 'rgba(147, 174, 223, 0.13)',
-  chatCodeBg: 'rgba(5, 7, 15, 0.55)',
-
-  heatmapLow: '#16203F',
-  heatmapMid: '#93AEDF',
-  heatmapHigh: '#F2A03D',
-
-  deviceIconStroke: '#E8EDF7',
-  deviceIconFill: 'rgba(147, 174, 223, 0.08)',
+  bg: "#070a14",
+  bgGradient: "radial-gradient(ellipse 90% 55% at 50% -12%,rgba(43,58,99,.55) 0%,transparent 62%),radial-gradient(ellipse 68% 38% at 82% 108%,rgba(168,86,12,.28) 0%,transparent 66%),#070a14",
+  surface: "#0d1226",
+  surfaceHover: "#131a33",
+  surfaceElevated: "rgba(13,18,38,.96)",
+  surfaceSunken: "rgba(147,174,223,.08)",
+  header: "rgba(7,10,20,.78)",
+  overlay: "rgba(5,7,15,.65)",
+  border: "rgba(147,174,223,.14)",
+  borderLight: "rgba(147,174,223,.10)",
+  borderStrong: "rgba(147,174,223,.30)",
+  text: "#e8edf7",
+  textSecondary: "#8a9ab8",
+  textMuted: "#6c7ea3",
+  subtleText: "#6c7ea3",
+  metadataText: "#6c7ea3",
+  liveBadgeText: "#f2a03d",
+  codeTagText: "#818cf8",
+  textOnAccent: "#070a14",
+  gold: "#93aedf",
+  goldDim: "rgba(147,174,223,.30)",
+  goldTextDim: "#93aedf",
+  goldBg: "rgba(147,174,223,.12)",
+  accentText: "#93aedf",
+  actionFill: "#93aedf",
+  actionHoverBrightness: 1.08,
+  actionHoverFill: "#93aedf",
+  approvalFill: "#f2a03d",
+  liveText: "#f2a03d",
+  goldStrong: "#4d7cc4",
+  live: "#f2a03d",
+  liveBg: "rgba(242,160,61,.08)",
+  onLive: "#1b1200",
+  accent: "#54c79a",
+  accentHover: "#54c79a",
+  accentBg: "rgba(84,199,154,.12)",
+  error: "#e5655f",
+  errorBg: "rgba(229,101,95,.10)",
+  errorText: "#e5655f",
+  errorFill: "#e5655f",
+  errorOnFill: "#fff",
+  errorOnSurface: "#e5655f",
+  warning: "#f2a03d",
+  warningBg: "rgba(242,160,61,.08)",
+  warningText: "#f2a03d",
+  warningFill: "#f2a03d",
+  warningOnFill: "#1b1200",
+  warningOnSurface: "#f2a03d",
+  info: "#93aedf",
+  infoBg: "rgba(147,174,223,.12)",
+  chatBubbleUser: "#16203f",
+  chatBubbleAssistant: "rgba(147,174,223,.08)",
+  chatBubbleBorder: "rgba(147,174,223,.14)",
+  chatCodeBg: "#070a14",
+  heatmapLow: "#16203f",
+  heatmapMid: "#93aedf",
+  heatmapHigh: "#f2a03d",
+  deviceIconStroke: "#e8edf7",
+  deviceIconFill: "rgba(147,174,223,.08)",
   deviceBody: '#131B30',
-  // RAM a model is holding is work in flight: the one place the topology
-  // legitimately burns amber (the Den's "node actually holding work").
   ramFill: 'rgba(242, 160, 61, 0.75)',
-  deviceLabel: '#E8EDF7',
-  gpuBarBg: 'rgba(43, 58, 99, 0.65)',
-  meshLine: 'rgba(147, 174, 223, 0.30)',
-  meshNode: 'rgba(147, 174, 223, 0.55)',
-  // Precomposed Den surfaceRaised over the canvas. SVG topology edges are
-  // painted behind nodes, so this surface must stay opaque to occlude them.
+  deviceLabel: "#e8edf7",
+  gpuBarBg: "#2b3a63",
+  meshLine: "rgba(147,174,223,.30)",
+  meshNode: "#93aedf",
   topologyNodeSurface: '#151D34',
   topologyNodeMemory: '#93AEDF',
   topologyNodeComputeTrack: 'rgba(147, 174, 223, 0.22)',
@@ -311,107 +323,101 @@ const darkColors: ColorTokens = {
   topologyNodeDanger: '#F2707E',
   topologyNodeDotBorder: 'rgba(43, 58, 99, 0.28)',
   topologyConnectionLine: 'rgba(147, 174, 223, 0.78)',
-  bgMeshLine: 'rgba(147, 174, 223, 0.10)',
-  bgMeshNode: 'rgba(147, 174, 223, 0.08)',
-
-  // With the flag, the star field crowns the viewport and dissolves on the
-  // way down; without it, the CSS night gradient carries the atmosphere
-  // alone and the mesh returns.
+  bgMeshLine: "rgba(147,174,223,.10)",
+  bgMeshNode: "rgba(147,174,223,.10)",
+  tagVision: "#22d3ee",
+  healthy: "#54c79a",
+  unhealthy: "#e5655f",
+  body: "#c9d3e8",
+  idle: "#4c5a7a",
+  selected: "#16203f",
+  deepAccent: "#2b3a63",
+  borderControl: "rgba(147,174,223,.18)",
+  borderLive: "rgba(242,160,61,.35)",
+  borderDanger: "rgba(229,101,95,.40)",
+  borderHealthy: "rgba(84,199,154,.40)",
+  pressed: "rgba(147,174,223,.14)",
+  liveStrong: "rgba(242,160,61,.14)",
+  liveHover: "#f7b04f",
+  liveDeep: "#a8560c",
+  shadowCard: "0 14px 34px rgba(0,0,0,.35)",
+  shadowPop: "0 22px 50px rgba(0,0,0,.55)",
+  focusRing: "0 0 0 3px rgba(147,174,223,.22)",
+  headerBorder: "linear-gradient(to right, rgba(147,174,223,.30), rgba(147,174,223,.10))",
+  shadow: "rgba(0,0,0,.35)",
+  shadowStrong: "rgba(0,0,0,.55)",
+  sceneScrim: "none",
+  svgGlow: "on",
   scene: nightSkyEnabled ? `url(${valleyNight})` : 'none',
-  sceneScrim: 'none',
-  svgGlow: 'on',
-  tagVision: '#22d3ee',
-
-  healthy: '#54C79A',
-  unhealthy: '#F2707E',
 };
 
 const lightColors: ColorTokens = {
-  bg: '#eef3fb',
-  bgGradient: `
-    radial-gradient(ellipse at 0% 0%, #dbeafe 0%, transparent 50%),
-    radial-gradient(ellipse at 100% 100%, #e0e7ff 0%, transparent 50%),
-    #eef3fb
-  `,
-  surface: '#ffffff',
-  surfaceHover: '#e6edf8',
-  surfaceElevated: 'rgba(255, 255, 255, 0.96)',
-  surfaceSunken: 'rgba(15, 23, 42, 0.04)',
-  header: 'rgba(255, 255, 255, 0.78)',
-  headerBorder: 'linear-gradient(to right, rgba(30, 64, 175, 0.18), rgba(30, 64, 175, 0.03))',
-  overlay: 'rgba(15, 23, 42, 0.42)',
-  shadow: 'rgba(15, 23, 42, 0.10)',
-  shadowStrong: 'rgba(15, 23, 42, 0.18)',
-
-  border: 'rgba(30, 64, 175, 0.16)',
-  borderLight: 'rgba(30, 64, 175, 0.10)',
-  borderStrong: 'rgba(30, 64, 175, 0.32)',
-
-  text: '#0f172a',
-  textSecondary: 'rgba(15, 23, 42, 0.72)',
-  textMuted: 'rgba(15, 23, 42, 0.5)',
-  textOnAccent: '#ffffff',
-
-  // The dark palette uses gold as the brand accent. Light mode reuses the same
-  // token names but maps them to a dominant blue so the rest of the codebase
-  // doesn't need to know which palette is active.
-  gold: '#1d4ed8',
-  goldDim: 'rgba(29, 78, 216, 0.55)',
-  // Same value as goldDim: the light palette's dim blue is already readable
-  // as text, so the split only changes dark mode.
-  goldTextDim: 'rgba(29, 78, 216, 0.55)',
-  goldBg: 'rgba(29, 78, 216, 0.10)',
-  goldStrong: '#1e3a8a',
-
-  // Noon identity amber (the deeper value that reads on white).
-  live: '#AC580A',
-  liveBg: '#FCF2E6',
-  onLive: '#FFF6EA',
-
-  accent: '#0ea5e9',
-  accentHover: '#0284c7',
-  accentBg: 'rgba(14, 165, 233, 0.12)',
-  error: '#dc2626',
-  errorBg: 'rgba(220, 38, 38, 0.10)',
-  errorText: '#991b1b',
-  // Same solid-callout pair as the dark palette — palette-independent so
-  // the on-fill contrast (white-on-red) is guaranteed regardless of mode.
-  errorFill: '#dc2626',
-  errorOnFill: '#ffffff',
-  errorOnSurface: '#b91c1c',                 // red-700, readable on white
-  // Light-theme warnings stay greyscale rather than borrowing the amber
-  // palette the dark theme uses — amber clashed with the cool blue accents
-  // and read as a stain on the surface. The semantic ("this is a warning")
-  // is carried by the section heading and the surrounding context; the body
-  // just needs to be legible and not draw the eye away from the brand.
-  warning: '#475569',                       // slate-600 (border/accent)
-  warningBg: 'rgba(71, 85, 105, 0.08)',     // slate-600 at 8%
-  warningText: '#1e293b',                   // slate-800
-  // Solid-callout pair: high-attention badging, not subtle tinting. Light
-  // mode keeps the legacy yellow; the night palette badges in its amber.
-  warningFill: '#ffcc33',
-  warningOnFill: '#000000',
-  warningOnSurface: '#b45309',               // amber-700, readable on white
-  info: '#1d4ed8',
-  infoBg: 'rgba(29, 78, 216, 0.10)',
-
-  chatBubbleUser: 'rgba(29, 78, 216, 0.10)',
-  chatBubbleAssistant: '#ffffff',
-  chatBubbleBorder: 'rgba(30, 64, 175, 0.16)',
-  chatCodeBg: 'rgba(15, 23, 42, 0.06)',
-
-  heatmapLow: '#dbeafe',
-  heatmapMid: '#3b82f6',
-  heatmapHigh: '#1e3a8a',
-
-  deviceIconStroke: '#1e3a8a',
-  deviceIconFill: 'rgba(29, 78, 216, 0.08)',
-  deviceBody: '#dbeafe',          // light-blue "empty RAM" case background
-  ramFill: 'rgba(29, 78, 216, 0.75)', // darker blue RAM fullness
-  deviceLabel: '#475569',         // slate-grey wordmark, readable on the light case
-  gpuBarBg: '#bccfe8',             // a touch darker than the device case so the bar reads as a separate element
-  meshLine: 'rgba(29, 78, 216, 0.30)',
-  meshNode: 'rgba(29, 78, 216, 0.55)',
+  bg: "#eef4fb",
+  bgGradient: "radial-gradient(120% 52% at 74% 0%,rgba(120,168,228,.42) 0%,rgba(238,244,251,0) 64%),#eef4fb",
+  surface: "#ffffff",
+  surfaceHover: "#f5f8fc",
+  surfaceElevated: "rgba(255,255,255,.96)",
+  surfaceSunken: "rgba(17,33,60,.05)",
+  header: "rgba(255,255,255,.78)",
+  overlay: "rgba(17,33,60,.42)",
+  border: "rgba(17,33,60,.12)",
+  borderLight: "rgba(17,33,60,.08)",
+  borderStrong: "rgba(17,33,60,.30)",
+  text: "#11213c",
+  textSecondary: "#5f7086",
+  textMuted: "#7a8aa3",
+  subtleText: "#7a8aa3",
+  metadataText: "#5f7086",
+  liveBadgeText: "#5d6e84",
+  codeTagText: "#5f7086",
+  textOnAccent: "#ffffff",
+  gold: "#4d7cc4",
+  goldDim: "rgba(17,33,60,.30)",
+  goldTextDim: "#4d7cc4",
+  goldBg: "rgba(77,124,196,.12)",
+  accentText: "#4d7cc4",
+  // Approved contrast adjustment: white 14px labels need at least 4.5:1.
+  actionFill: "#4776be",
+  actionHoverBrightness: 1,
+  actionHoverFill: "#416fb7",
+  approvalFill: "#b35c0a",
+  liveText: "#b35c0a",
+  goldStrong: "#1c2b4a",
+  live: "#b35c0a",
+  liveBg: "rgba(179,92,10,.08)",
+  onLive: "#fff6ea",
+  accent: "#1c7a54",
+  accentHover: "#1c7a54",
+  accentBg: "rgba(28,122,84,.10)",
+  error: "#b23a44",
+  errorBg: "rgba(178,58,68,.10)",
+  errorText: "#b23a44",
+  errorFill: "#b23a44",
+  errorOnFill: "#fff",
+  errorOnSurface: "#b23a44",
+  warning: "#b35c0a",
+  warningBg: "rgba(179,92,10,.08)",
+  warningText: "#b35c0a",
+  warningFill: "#b35c0a",
+  warningOnFill: "#fff6ea",
+  warningOnSurface: "#b35c0a",
+  info: "#4d7cc4",
+  infoBg: "rgba(77,124,196,.12)",
+  chatBubbleUser: "#e6eef9",
+  chatBubbleAssistant: "rgba(17,33,60,.05)",
+  chatBubbleBorder: "rgba(17,33,60,.12)",
+  chatCodeBg: "#eef4fb",
+  heatmapLow: "#e6eef9",
+  heatmapMid: "#4d7cc4",
+  heatmapHigh: "#b35c0a",
+  deviceIconStroke: "#11213c",
+  deviceIconFill: "rgba(17,33,60,.05)",
+  deviceBody: '#dbeafe',
+  ramFill: 'rgba(29, 78, 216, 0.75)',
+  deviceLabel: "#11213c",
+  gpuBarBg: "#c9d9f0",
+  meshLine: "rgba(17,33,60,.30)",
+  meshNode: "#4d7cc4",
   topologyNodeSurface: '#FFFFFF',
   topologyNodeMemory: '#456FB0',
   topologyNodeComputeTrack: 'rgba(17, 33, 60, 0.16)',
@@ -426,25 +432,47 @@ const lightColors: ColorTokens = {
   topologyNodeDanger: '#B23A44',
   topologyNodeDotBorder: '#FFFFFF',
   topologyConnectionLine: 'rgba(17, 33, 60, 0.78)',
-  bgMeshLine: 'rgba(29, 78, 216, 0.16)',
-  bgMeshNode: 'rgba(29, 78, 216, 0.12)',
-
+  bgMeshLine: "rgba(77,124,196,.16)",
+  bgMeshNode: "rgba(77,124,196,.16)",
+  tagVision: "#0e7490",
+  healthy: "#1c7a54",
+  unhealthy: "#b23a44",
+  body: "#2c3b52",
+  idle: "#a2afc4",
+  selected: "#e6eef9",
+  deepAccent: "#c9d9f0",
+  borderControl: "rgba(17,33,60,.16)",
+  borderLive: "rgba(179,92,10,.40)",
+  borderDanger: "rgba(178,58,68,.40)",
+  borderHealthy: "rgba(28,122,84,.40)",
+  pressed: "rgba(17,33,60,.09)",
+  liveStrong: "rgba(179,92,10,.14)",
+  liveHover: "#c9700f",
+  liveDeep: "#8a4406",
+  shadowCard: "0 10px 26px rgba(28,43,74,.12)",
+  shadowPop: "0 22px 50px rgba(28,43,74,.22)",
+  focusRing: "0 0 0 3px rgba(77,124,196,.25)",
+  headerBorder: "linear-gradient(to right, rgba(17,33,60,.30), rgba(17,33,60,.08))",
+  shadow: "rgba(28,43,74,.12)",
+  shadowStrong: "rgba(28,43,74,.22)",
+  sceneScrim: "none",
+  svgGlow: "none",
   scene: 'none',
-  sceneScrim: 'none',
-  svgGlow: 'none',
-  tagVision: '#0E7490',
-
-  healthy: '#0ea5e9',
-  unhealthy: '#dc2626',
 };
 
 function buildTheme(colors: ColorTokens) {
   return {
     colors,
     fonts: sharedFonts,
+    // The capability specimens intentionally retain their distinct tints in both palettes.
+    capabilityTints: {
+      optiq: '#a78bfa', embedding: '#f472b6', tts: '#38bdf8', stt: '#34d399',
+      code: '#818cf8', image_gen: '#fb923c', image_edit: '#fb923c',
+    },
     fontSizes: sharedFontSizes,
     radii: sharedRadii,
     spacing: sharedSpacing,
+    motion: { fast: '120ms', normal: '200ms', slow: '320ms', easing: 'cubic-bezier(.2,.7,.2,1)' },
   } as const;
 }
 

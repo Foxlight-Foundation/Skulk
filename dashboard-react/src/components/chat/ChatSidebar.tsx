@@ -70,14 +70,14 @@ const SearchInput = styled.input`
   color: ${({ theme }) => theme.colors.text};
   box-sizing: border-box;
 
-  &::placeholder { color: ${({ theme }) => theme.colors.textMuted}; }
+  &::placeholder { color: ${({ theme }) => theme.colors.body}; }
   &:focus { border-color: ${({ theme }) => theme.colors.goldDim}; }
 `;
 
 const SectionLabel = styled.div`
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.body};
   padding: 8px 16px 4px;
 `;
 
@@ -105,7 +105,7 @@ const ConvItem = styled.div<{ $active: boolean }>`
 const ConvName = styled.div<{ $active: boolean }>`
   font-size: ${({ theme }) => theme.fontSizes.tableBody};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ $active, theme }) => ($active ? theme.colors.gold : theme.colors.text)};
+  color: ${({ $active, theme }) => ($active ? theme.colors.accentText : theme.colors.text)};
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -113,7 +113,7 @@ const ConvName = styled.div<{ $active: boolean }>`
 
 const ConvDate = styled.div`
   font-size: ${({ theme }) => theme.fontSizes.xs};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.body};
   margin-top: 2px;
 `;
 
@@ -169,7 +169,7 @@ const Footer = styled.div`
 const ConvCount = styled.div`
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.body};
   margin-top: 8px;
 `;
 
@@ -179,7 +179,7 @@ const EmptyState = styled.div`
   align-items: center;
   justify-content: center;
   padding: 32px 16px;
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.body};
   font-size: ${({ theme }) => theme.fontSizes.sm};
   font-family: ${({ theme }) => theme.fonts.body};
 `;

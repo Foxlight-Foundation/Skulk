@@ -4,6 +4,7 @@ import { FiAlertTriangle, FiX } from 'react-icons/fi';
 import type { TopologyData } from '../../types/topology';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 
+/** Observed topology used to derive compatibility and transport warnings. */
 interface ClusterWarningsProps {
   topology: TopologyData | null;
 }
@@ -16,6 +17,7 @@ interface VersionEntry {
 
 // Icons now from react-icons
 
+/** Render dismissible warnings without changing cluster configuration. */
 export function ClusterWarnings({ topology }: ClusterWarningsProps) {
   const { t } = useSkulkTranslation();
   const nodes = topology?.nodes;
@@ -121,21 +123,6 @@ export function ClusterWarnings({ topology }: ClusterWarningsProps) {
 
 type ColorKey = 'error' | 'warning';
 
-const colorMap: Record<ColorKey, { border: string; bg: string; text: string; emphasis: string }> = {
-  error: {
-    border: 'rgba(239,68,68,0.5)',
-    bg: 'rgba(239,68,68,0.1)',
-    text: 'rgba(254,202,202,1)',
-    emphasis: 'rgb(252,165,165)',
-  },
-  warning: {
-    border: 'rgba(249,115,22,0.5)',
-    bg: 'rgba(249,115,22,0.1)',
-    text: 'rgba(253,186,116,1)',
-    emphasis: 'rgb(251,146,60)',
-  },
-};
-
 const WarningsBar = styled.div`
   position: relative;
   z-index: 10;
@@ -152,12 +139,15 @@ const WarningPill = styled.div<{ $color: ColorKey }>`
   gap: 8px;
   padding: 6px 12px;
   border-radius: 6px;
-  border: 1px solid ${({ $color }) => colorMap[$color].border};
-  background: ${({ $color }) => colorMap[$color].bg};
+  border: 1px solid ${({ theme, $color }) => $color === 'error' ? theme.colors.borderDanger : theme.colors.borderLive};
+  background: ${({ theme, $color }) => $color === 'error' ? theme.colors.errorBg : theme.colors.liveBg};
   backdrop-filter: blur(8px);
   cursor: help;
 
+  &:hover, &:focus-within { z-index: 1; }
+
   &:hover > .warning-tooltip,
+  &:focus-within > .warning-tooltip,
   & > .warning-tooltip:hover {
     opacity: 1;
     visibility: visible;
@@ -167,14 +157,13 @@ const WarningPill = styled.div<{ $color: ColorKey }>`
 const WarningLabel = styled.span<{ $color: ColorKey }>`
   font-family: ${({ theme }) => theme.fonts.body};
   font-size: ${({ theme }) => theme.fontSizes.sm};
-  color: ${({ $color }) => colorMap[$color].text};
+  color: ${({ theme, $color }) => $color === 'error' ? theme.colors.error : theme.colors.body};
 `;
 
-function WarningIcon({ $color }: { d?: string; $color: ColorKey }) {
-  return (
-    <FiAlertTriangle size={18} color={colorMap[$color].emphasis} style={{ flexShrink: 0 }} />
-  );
-}
+const WarningIcon = styled(FiAlertTriangle).attrs({ size: 18, 'aria-hidden': true })<{ $color: ColorKey }>`
+  flex-shrink: 0;
+  color: ${({ theme, $color }) => $color === 'error' ? theme.colors.error : theme.colors.warningOnSurface};
+`;
 
 const DismissButton = styled.button<{ $color: ColorKey }>`
   display: flex;
@@ -185,8 +174,9 @@ const DismissButton = styled.button<{ $color: ColorKey }>`
   padding: 2px;
   margin-left: 4px;
   cursor: pointer;
-  color: ${({ $color }) => colorMap[$color].text};
-  opacity: 0.6;
+  color: ${({ theme, $color }) => $color === 'error' ? theme.colors.error : theme.colors.body};
+  min-width: 24px;
+  min-height: 24px;
   transition: opacity 0.15s;
   flex-shrink: 0;
 
@@ -201,7 +191,7 @@ const Tooltip = styled.div<{ $color: ColorKey }>`
   left: 0;
   /* padding-top creates an invisible hover bridge between trigger and content */
   padding-top: 6px;
-  width: 320px;
+  width: min(320px, calc(100vw - 80px));
   opacity: 0;
   visibility: hidden;
   transition: opacity 0.2s ease, visibility 0.2s ease;
@@ -211,7 +201,7 @@ const Tooltip = styled.div<{ $color: ColorKey }>`
 const TooltipInner = styled.div<{ $color: ColorKey }>`
   padding: 12px;
   border-radius: 8px;
-  border: 1px solid ${({ $color }) => colorMap[$color].border};
+  border: 1px solid ${({ theme, $color }) => $color === 'error' ? theme.colors.borderDanger : theme.colors.borderLive};
   background: ${({ theme }) => theme.colors.surfaceElevated};
   backdrop-filter: blur(8px);
   box-shadow: 0 8px 32px ${({ theme }) => theme.colors.shadow};
@@ -241,7 +231,7 @@ const NodeList = styled.ul`
 `;
 
 const Emphasis = styled.span<{ $color: ColorKey }>`
-  color: ${({ $color }) => colorMap[$color].emphasis};
+  color: ${({ theme, $color }) => $color === 'error' ? theme.colors.error : theme.colors.warningOnSurface};
 `;
 
 const Code = styled.code`

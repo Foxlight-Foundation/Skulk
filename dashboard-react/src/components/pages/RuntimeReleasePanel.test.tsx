@@ -8,6 +8,7 @@ import { apiSlice } from '../../store/api';
 import type { ManagedRuntime, RuntimeInstallation, RuntimeRelease } from '../../store/endpoints/plugins';
 import { darkTheme } from '../../theme/theme';
 import { RuntimeReleasePanel } from './RuntimeReleasePanel';
+import { ManagedRuntimesPanel } from './ManagedRuntimesPanel';
 
 Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', { value: true, configurable: true });
 vi.mock('../../i18n/tolgee', () => ({ useSkulkTranslation: () => ({ t: (_key: string, fallback: string) => fallback }) }));
@@ -167,4 +168,72 @@ it('selects a stopped runtime after permission review and permits later explicit
   await click('Activate release');
   await act(async () => { await vi.waitFor(() => expect(posts).toHaveLength(3)); });
   expect(posts[2]).toMatchObject({ action: 'activate', expected_revision: 1 });
+});
+
+it.each(['Download and install', 'Select with owner stopped', 'Activate release'])('retains an uncertain %s across drawer dismissal before server observation', async action => {
+  await act(async () => { root.unmount(); store.dispatch(apiSlice.util.resetApiState()); });
+  if (action !== 'Download and install') operation = { request: { operation_id: 'c'.repeat(32), runtime_digest: review.runtime_digest, expected_source_revision: 1 }, review, state: 'staged', downloaded_bytes: 100, error_code: null };
+  const originalFetch = globalThis.fetch;
+  vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    const request = new Request(input, init);
+    const path = new URL(request.url).pathname;
+    if (path === '/v1/plugins/managed') return response({ installations: [runtime] });
+    if (request.method === 'GET' && path.endsWith('/install')) return response({ operation: action === 'Download and install' ? null : operation });
+    const result = await originalFetch(request);
+    return request.method === 'POST' ? response({}, 503) : result;
+  });
+  root = createRoot(host);
+  await act(async () => root.render(<Provider store={store}><ThemeProvider theme={darkTheme}><ManagedRuntimesPanel /></ThemeProvider></Provider>));
+  await contains('Configure'); await click('Configure'); await click('Install a release');
+  await click('Inspect configured release'); await contains('example.plugin 1.2.3');
+  if (action !== 'Download and install') await act(async () => host.querySelector<HTMLInputElement>('input[type=checkbox]')!.click());
+  await click(action);
+  await contains('not confirmed');
+  expect(posts).toHaveLength(1);
+  await act(async () => host.querySelector<HTMLButtonElement>('button[aria-label="Close"]')!.click());
+  await click('Configure');
+  if (action !== 'Download and install') await act(async () => host.querySelector<HTMLInputElement>('input[type=checkbox]')!.click());
+  if (action === 'Download and install') {
+    await click('Inspect configured release');
+    await contains('example.plugin 1.2.3');
+    await act(async () => { await vi.waitFor(() => expect([...host.querySelectorAll('button')].find(button => button.textContent === 'Inspect configured release')?.disabled).toBe(false)); });
+  }
+  const retry = [...host.querySelectorAll('button')].find(button => button.textContent === action);
+  expect(retry).toBeDefined();
+  expect(retry!.disabled).toBe(true);
+  await click('Refresh installation status');
+  expect(posts).toHaveLength(1);
+});
+
+
+it('releases a confirmed activation fence while the drawer is closed before later lifecycle work', async () => {
+  await act(async () => { root.unmount(); store.dispatch(apiSlice.util.resetApiState()); });
+  operation = { request: { operation_id: 'c'.repeat(32), runtime_digest: review.runtime_digest, expected_source_revision: 1 }, review, state: 'staged', downloaded_bytes: 100, error_code: null };
+  let observedRuntime = runtime;
+  const originalFetch = globalThis.fetch;
+  vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    const request = new Request(input, init);
+    if (new URL(request.url).pathname === '/v1/plugins/managed') return response({ installations: [observedRuntime] });
+    return originalFetch(request);
+  });
+  root = createRoot(host);
+  await act(async () => root.render(<Provider store={store}><ThemeProvider theme={darkTheme}><ManagedRuntimesPanel /></ThemeProvider></Provider>));
+  await contains('Configure'); await click('Configure'); await click('Install a release');
+  await contains('example.plugin 1.2.3');
+  await act(async () => host.querySelector<HTMLInputElement>('input[type=checkbox]')!.click());
+  await click('Activate release');
+  await act(async () => { await vi.waitFor(() => expect(posts).toHaveLength(1)); });
+  await act(async () => host.querySelector<HTMLButtonElement>('button[aria-label="Close"]')!.click());
+  const refreshRuntime = async (next: ManagedRuntime) => {
+    observedRuntime = next;
+    await act(async () => { store.dispatch(apiSlice.util.invalidateTags(['Plugins']));
+      await vi.waitFor(() => expect(store.getState()[apiSlice.reducerPath].queries['getManagedRuntimes(undefined)']?.data).toEqual({ installations: [next] }));
+    });
+  };
+  await refreshRuntime({ ...runtime, selected_digest: review.runtime_digest, enabled: true, operation_id: String(posts[0].operation_id), operation_state: 'complete' });
+  await refreshRuntime({ ...runtime, selected_digest: review.runtime_digest, operation_id: 'later-disable', operation_state: 'complete' });
+  await click('Configure'); await contains('example.plugin 1.2.3');
+  await act(async () => host.querySelector<HTMLInputElement>('input[type=checkbox]')!.click());
+  await click('Activate release');
+  await act(async () => { await vi.waitFor(() => expect(posts).toHaveLength(2)); });
 });

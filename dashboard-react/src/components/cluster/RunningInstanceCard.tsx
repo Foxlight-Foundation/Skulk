@@ -67,12 +67,12 @@ function buildStatusConfig(
     // Loading and warming are work in flight, so they burn the living
     // colour (matching the store table's loading state), not the ordinary
     // interactive accent.
-    loading:       { label: t('instance.status.loading', 'Loading'),       color: theme.colors.live,    glow: theme.colors.liveBg,    defaultMessage: t('instance.status.loadingMessage', 'Downloading model...') },
-    warming_up:    { label: t('instance.status.warmingUp', 'Warming Up'),    color: theme.colors.live,    glow: theme.colors.liveBg,    defaultMessage: t('instance.status.warmingUpMessage', 'Preparing for inference...') },
+    loading:       { label: t('instance.status.loading', 'Loading'),       color: theme.colors.liveText,    glow: theme.colors.liveBg,    defaultMessage: t('instance.status.loadingMessage', 'Downloading model...') },
+    warming_up:    { label: t('instance.status.warmingUp', 'Warming Up'),    color: theme.colors.liveText,    glow: theme.colors.liveBg,    defaultMessage: t('instance.status.warmingUpMessage', 'Preparing for inference...') },
     ready:         { label: t('instance.status.ready', 'Ready'),         color: theme.colors.healthy, glow: theme.colors.accentBg,   defaultMessage: t('instance.status.readyMessage', 'Ready to chat!') },
     running:       { label: t('instance.status.running', 'Running'),       color: theme.colors.healthy, glow: theme.colors.accentBg,   defaultMessage: t('instance.status.runningMessage', 'Processing inference...') },
     failed:        { label: t('instance.status.failed', 'Failed'),        color: theme.colors.error,   glow: theme.colors.errorBg,    defaultMessage: t('instance.status.failedMessage', 'Instance failed') },
-    shutting_down: { label: t('instance.status.shuttingDown', 'Shutting Down'), color: theme.colors.warning, glow: theme.colors.warningBg,  defaultMessage: t('instance.status.shuttingDownMessage', 'Shutting down...') },
+    shutting_down: { label: t('instance.status.shuttingDown', 'Shutting Down'), color: theme.colors.liveText, glow: theme.colors.warningBg,  defaultMessage: t('instance.status.shuttingDownMessage', 'Shutting down...') },
   };
 }
 
@@ -117,7 +117,7 @@ function nodeStateVisual(
     case 'stopping': return { Icon: FiClock, color: theme.colors.warning, spin: false };
     case 'pending': return { Icon: FiClock, color: theme.colors.textMuted, spin: false };
     case 'loading':
-    default: return { Icon: FiLoader, color: theme.colors.live, spin: true };
+    default: return { Icon: FiLoader, color: theme.colors.liveText, spin: true };
   }
 }
 
@@ -159,7 +159,8 @@ const Card = styled.div<{ $color: string; $glow: string }>`
   display: flex;
   flex-direction: column;
   gap: 6px;
-  min-width: 280px;
+  min-width: 0;
+  width: 100%;
   max-width: 380px;
   font-family: ${({ theme }) => theme.fonts.body};
 `;
@@ -226,7 +227,7 @@ const MetaRow = styled.div`
 const StatusBadge = styled.span<{ $color: string }>`
   font-size: 10px;
   font-weight: 600;
-  color: ${({ $color }) => $color};
+  color: ${({ theme, $color }) => $color === theme.colors.liveText ? theme.colors.liveBadgeText : $color};
   background: ${({ $color }) => $color}1a;
   border: 1px solid ${({ $color }) => $color}40;
   border-radius: ${({ theme }) => theme.radii.sm};
@@ -268,14 +269,15 @@ const NodeChip = styled.span`
 `;
 
 const StatusLabel = styled.div<{ $color: string }>`
-  font-size: ${({ theme }) => theme.fontSizes.sm};
+  font-size: 15px;
+  letter-spacing: .02em;
   font-weight: 700;
   color: ${({ $color }) => $color};
 `;
 
 const StatusMessage = styled.div`
   font-size: ${({ theme }) => theme.fontSizes.xs};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.metadataText};
   font-style: italic;
 `;
 
@@ -294,9 +296,10 @@ const ChatBtn = styled.button`
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
   color: ${({ theme }) => theme.colors.healthy};
-  border: 1px solid ${({ theme }) => theme.colors.accentBg};
-  border-radius: ${({ theme }) => theme.radii.sm};
-  padding: 3px 10px;
+  border: 1px solid ${({ theme }) => theme.colors.borderHealthy};
+  border-radius: 8px;
+  box-sizing: border-box; height: 30px;
+  padding: 0 10px;
   transition: all 0.15s;
 
   &:hover {

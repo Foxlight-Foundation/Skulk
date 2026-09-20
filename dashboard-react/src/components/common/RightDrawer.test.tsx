@@ -1,11 +1,12 @@
 import { act } from 'react';
+import { userEvent } from 'vitest/browser';
 import { createRoot, type Root } from 'react-dom/client';
 import { ThemeProvider } from 'styled-components';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { darkTheme } from '../../theme/theme';
 import { RightDrawer } from './RightDrawer';
 
-globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', { value: true, configurable: true });
 
 vi.mock('../../i18n/tolgee', () => ({
   useSkulkTranslation: () => ({
@@ -44,7 +45,7 @@ async function render(open: boolean, title: string = 'Drawer') {
           title={title}
           width={480}
         >
-          <p>drawer body</p>
+          <p>drawer body</p><button>First action</button><button>Last action</button>
         </RightDrawer>
       </ThemeProvider>,
     );
@@ -86,4 +87,38 @@ describe('RightDrawer header', () => {
     expect(closeRect.right).toBeLessThanOrEqual(asideRect.right + 1);
     expect(closeRect.width).toBeGreaterThan(0);
   });
+});
+
+it('contains focus and restores the original opener when another drawer replaces it', async () => {
+  const opener = document.createElement('button'); opener.textContent = 'Open'; document.body.append(opener); opener.focus();
+  container = document.createElement('div'); document.body.append(container); root = createRoot(container);
+  const closeFirst = vi.fn();
+  const drawer = (id: string, close: () => void) => <RightDrawer key={id} open onClose={close} title={id} ariaLabel={id} width={440} minWidth={320} maxWidth={720} onWidthChange={() => {}} closeLabel={`Close ${id}`} resizeLabel="Resize"><button>Inside {id}</button></RightDrawer>;
+  await act(async () => root?.render(<ThemeProvider theme={darkTheme}>{drawer('first', closeFirst)}</ThemeProvider>));
+  expect(document.activeElement?.getAttribute('aria-label')).toBe('first');
+  opener.focus();
+  expect(document.activeElement?.getAttribute('aria-label')).toBe('first');
+  await act(async () => root?.render(<ThemeProvider theme={darkTheme}>{drawer('first', closeFirst)}{drawer('second', () => {})}</ThemeProvider>));
+  expect(closeFirst).toHaveBeenCalledOnce();
+  expect(document.activeElement?.getAttribute('aria-label')).toBe('second');
+  await act(async () => root?.render(<ThemeProvider theme={darkTheme}>{drawer('second', () => {})}</ThemeProvider>));
+  await act(async () => root?.unmount()); root = null;
+  expect(document.activeElement).toBe(opener);
+  expect(document.body.style.overflow).not.toBe('hidden');
+  opener.remove();
+});
+
+it('loops keyboard focus within the drawer', async () => {
+  await render(true);
+  const controls = [...container!.querySelectorAll<HTMLElement>('button, [role="separator"]')].filter(element => element.getClientRects().length > 0);
+  await userEvent.tab();
+  expect(document.activeElement).toBe(controls[0]);
+  for (const control of controls.slice(1)) {
+    await userEvent.tab();
+    expect(document.activeElement).toBe(control);
+  }
+  await userEvent.tab();
+  expect(document.activeElement).toBe(controls[0]);
+  await userEvent.tab({ shift: true });
+  expect(document.activeElement).toBe(controls.at(-1));
 });

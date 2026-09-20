@@ -198,7 +198,7 @@ const ModelName = styled.div<{ $canFit: boolean }>`
 const ModelId = styled.div`
   font-size: ${({ theme }) => theme.fontSizes.label};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -216,7 +216,7 @@ const HfLink = styled.a`
   color: ${({ theme }) => theme.colors.textSecondary};
   flex-shrink: 0;
   transition: color 0.15s;
-  &:hover { color: ${({ theme }) => theme.colors.gold}; }
+  &:hover { color: ${({ theme }) => theme.colors.accentText}; }
 `;
 
 const BadgeRow = styled.div`
@@ -305,7 +305,7 @@ const LaunchBtn = styled(Button)<{ $canFit: boolean; $launching: boolean }>`
   ${({ $launching }) =>
     $launching &&
     css`
-      color: ${({ theme }) => theme.colors.gold};
+      color: ${({ theme }) => theme.colors.accentText};
       border-color: ${({ theme }) => theme.colors.goldDim};
       cursor: wait;
     `}

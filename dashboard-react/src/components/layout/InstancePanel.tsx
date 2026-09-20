@@ -59,7 +59,7 @@ const PanelHeader = styled.div`
 
 const Count = styled.span`
   font-size: ${({ theme }) => theme.fontSizes.xs};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   font-weight: 400;
 `;
 

@@ -1,3 +1,4 @@
+import { useModalFocus } from '../../hooks/useModalFocus';
 import { useCallback, useEffect, useRef, type ReactNode } from 'react';
 import styled, { keyframes } from 'styled-components';
 import { FiX } from 'react-icons/fi';
@@ -13,6 +14,12 @@ export interface RightDrawerProps {
   onClose: () => void;
   /** Heading shown in the drawer header. */
   title: ReactNode;
+  /** Optional actions next to the shared close button. */
+  headerActions?: ReactNode;
+  /** Optional back control before the title for nested workflows. */
+  headerLeading?: ReactNode;
+  /** Live fabric surfaces use the reference amber edge. */
+  tone?: 'neutral' | 'live';
   /** Accessible name of the drawer landmark. */
   ariaLabel: string;
   /** DOM id for the drawer element, when other components target it. */
@@ -51,12 +58,12 @@ const Backdrop = styled.div`
   position: fixed;
   inset: 0;
   z-index: 40;
-  background: ${({ theme }) => theme.colors.shadowStrong};
+  background: ${({ theme }) => theme.colors.overlay};
   backdrop-filter: blur(2px);
   animation: ${fadeIn} 0.2s ease-out;
 `;
 
-const Aside = styled.aside<{ $width: number }>`
+const Aside = styled.aside<{ $width: number; $tone: 'neutral' | 'live' }>`
   position: fixed;
   top: 0;
   right: 0;
@@ -67,8 +74,9 @@ const Aside = styled.aside<{ $width: number }>`
   height: 100vh;
   height: 100dvh;
   width: ${({ $width }) => $width}px;
+  max-width: 100vw;
   background: ${({ theme }) => theme.colors.surfaceElevated};
-  border-left: 1px solid ${({ theme }) => theme.colors.borderStrong};
+  border-left: 1px solid ${({ theme, $tone }) => $tone === 'live' ? theme.colors.borderLive : theme.colors.borderStrong};
   box-shadow: -18px 0 48px ${({ theme }) => theme.colors.shadowStrong};
   display: flex;
   flex-direction: column;
@@ -142,6 +150,9 @@ export function RightDrawer({
   open,
   onClose,
   title,
+  headerActions,
+  headerLeading,
+  tone = 'neutral',
   ariaLabel,
   id,
   width,
@@ -157,6 +168,7 @@ export function RightDrawer({
   // from the cursor's distance to the right edge of the viewport. The aside
   // ref keeps the hot path free of DOM lookups and the contract local.
   const asideRef = useRef<HTMLElement | null>(null);
+  useModalFocus(open, asideRef, onClose);
   const draggingRef = useRef(false);
   const dragWidthRef = useRef<number>(width);
 
@@ -200,30 +212,32 @@ export function RightDrawer({
     };
   }, [open, minWidth, maxWidth, onWidthChange]);
 
-  // Esc closes the drawer; operators expect this for any modal-like surface.
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [open, onClose]);
-
   if (!open) return null;
 
   return (
     <>
       <Backdrop data-testid="right-drawer-backdrop" onClick={onClose} />
-      <Aside $width={width} ref={asideRef} id={id} aria-label={ariaLabel}>
+      <Aside $width={width} $tone={tone} ref={asideRef} id={id} aria-label={ariaLabel} role="dialog" aria-modal="true" tabIndex={-1}>
         <ResizeHandle
           onPointerDown={onResizeStart}
           role="separator"
+          tabIndex={0}
+          aria-valuemin={minWidth}
+          aria-valuemax={maxWidth}
+          aria-valuenow={width}
+          onKeyDown={event => {
+            if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+            event.preventDefault();
+            const next = event.key === 'Home' ? minWidth : event.key === 'End' ? maxWidth : width + (event.key === 'ArrowLeft' ? 20 : -20);
+            onWidthChange(Math.min(maxWidth, Math.max(minWidth, next)));
+          }}
           aria-orientation="vertical"
           aria-label={resizeLabel}
         />
         <Header>
+          {headerLeading}
           <Title>{title}</Title>
+          {headerActions}
           <Button variant="ghost" size="sm" onClick={onClose} aria-label={closeLabel || t('common.close', 'Close')}>
             <FiX size={16} />
           </Button>

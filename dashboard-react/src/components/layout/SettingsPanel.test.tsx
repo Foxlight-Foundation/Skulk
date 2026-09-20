@@ -1,6 +1,7 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { ThemeProvider } from 'styled-components';
+import { userEvent } from 'vitest/browser';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { PersistedStoreConfig } from '../../hooks/useConfig';
@@ -8,7 +9,7 @@ import { darkTheme } from '../../theme/theme';
 import { normalizeStoreConfig } from './modelStoreConfig';
 import { SettingsPanel } from './SettingsPanel';
 
-globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', { value: true, configurable: true });
 
 const useConfigMock = vi.hoisted(() => vi.fn());
 const dispatchMock = vi.hoisted(() => vi.fn());
@@ -31,6 +32,8 @@ vi.mock('../../i18n/tolgee', () => ({
 vi.mock('../../hooks/useToast', () => ({
   addToast: vi.fn(),
 }));
+
+vi.mock('./DevicesPanel', () => ({ DevicesPanel: () => <div>Device actions fixture</div> }));
 
 vi.mock('./PairingSettings', () => ({
   PairingSettings: () => <div>Pairing</div>,
@@ -100,7 +103,7 @@ describe('SettingsPanel persisted config handling', () => {
       saving: false,
       error: null,
       fetchConfig: vi.fn(async () => undefined),
-      saveFullConfig: vi.fn(async () => true),
+      saveFullConfig: vi.fn<(config: unknown) => Promise<boolean>>(async () => true),
     });
     container = document.createElement('div');
     document.body.append(container);
@@ -140,7 +143,7 @@ describe('SettingsPanel persisted config handling', () => {
   });
 
   it('does not expose or persist the retired model-trust ceremony', async () => {
-    const saveFullConfig = vi.fn(async () => true);
+    const saveFullConfig = vi.fn<(config: unknown) => Promise<boolean>>(async () => true);
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
     useConfigMock.mockReturnValue({
@@ -175,7 +178,7 @@ describe('SettingsPanel persisted config handling', () => {
 
     expect(container.textContent).not.toContain('Model trust');
     const saveButton = [...container.querySelectorAll<HTMLButtonElement>('button')]
-      .find((button) => button.textContent === 'Save');
+      .find((button) => button.textContent === 'Save changes');
     expect(saveButton).toBeDefined();
     await act(async () => {
       saveButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
@@ -186,4 +189,25 @@ describe('SettingsPanel persisted config handling', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+});
+
+it('preserves an unsaved draft across Devices and commits it only with Save', async () => {
+  const saveFullConfig = vi.fn<(config: unknown) => Promise<boolean>>(async () => true);
+  useConfigMock.mockReturnValue({ fullConfig: { hf_token: '' }, effective: { kv_cache_backend: 'default', has_hf_token: false }, loading: false, saving: false, error: null, fetchConfig: vi.fn(), saveFullConfig });
+  container = document.createElement('div'); document.body.append(container); root = createRoot(container);
+  await act(async () => root?.render(<ThemeProvider theme={darkTheme}><SettingsPanel open onClose={vi.fn()} /></ThemeProvider>));
+  const section = [...container.querySelectorAll('summary')].find(summary => summary.textContent?.includes('HuggingFace'))!;
+  if (!section.parentElement?.hasAttribute('open')) await userEvent.click(section);
+  const token = container.querySelector<HTMLInputElement>('input[type="password"]')!;
+  await userEvent.fill(token, 'fixture-unsaved-token');
+  const devices = [...container.querySelectorAll('button')].find(button => button.getAttribute('aria-label') === 'Devices & pairing')!;
+  await userEvent.click(devices);
+  expect(container.textContent).toContain('Device actions fixture');
+  expect(saveFullConfig).not.toHaveBeenCalled();
+  const back = [...container.querySelectorAll('button')].find(button => button.getAttribute('aria-label') === 'Back to Settings')!;
+  await userEvent.click(back);
+  expect(token.value).toBe('fixture-unsaved-token');
+  expect(saveFullConfig).not.toHaveBeenCalled();
+  await userEvent.click([...container.querySelectorAll('button')].find(button => button.textContent === 'Save changes')!);
+  expect(saveFullConfig).toHaveBeenCalledWith(expect.objectContaining({ hf_token: 'fixture-unsaved-token' }));
 });

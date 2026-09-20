@@ -25,7 +25,7 @@ beforeEach(async () => {
     const request = input instanceof Request ? input : new Request(new URL(String(input), location.href), init);
     calls.push(request.method);
     return new Response(JSON.stringify(failure ? {} : { nodeId: 'node', revision: 4, credentialRevision: 2, schemaDigest: 'a'.repeat(64), artifacts: [
-      { name: 'owner.json', title: 'Owner identity', mediaType: 'application/json', content: '{\"owner\":\"public\"}' },
+      { name: 'owner.json', title: 'Owner identity', mediaType: 'application/json', content: '{"owner":"public"}' },
     ] }), { status: failure ? 503 : 200, headers: { 'Content-Type': 'application/json' } });
   });
   store = makeStore();

@@ -17,9 +17,9 @@ import type { ModelInfo } from '../../types/models';
 import { discoverSkulkSpeechSelection } from '../../audio/fabricSpeechDiscovery';
 import { buildSkulkSpeechSynthesisRequest } from '../../audio/fabricSpeechRequest';
 import type { InstanceCardData } from '../layout/InstancePanel';
-import { StewardChatView } from './StewardChatView';
+import { StewardControllerProvider, StewardChatView } from './StewardChatView';
 
-globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', { value: true, configurable: true });
 
 const addToastSpy = vi.fn();
 vi.mock('../../hooks/useToast', () => ({
@@ -79,6 +79,7 @@ function delta(delta: Record<string, string>): string {
 function stubFetch(options: {
   status: StewardStatusFixture;
   sseEvents?: string[];
+  openStream?: (signal: AbortSignal | null | undefined) => ReadableStream<Uint8Array>;
   chatStatus?: number;
   models?: ModelInfo[];
   proposals?: StewardActionProposal[];
@@ -96,7 +97,7 @@ function stubFetch(options: {
       if (options.chatStatus && options.chatStatus !== 200) {
         return new Response('chat unavailable', { status: options.chatStatus });
       }
-      return new Response(sseBody(options.sseEvents ?? []), {
+      return new Response(options.openStream?.(init?.signal) ?? sseBody(options.sseEvents ?? []), {
         status: 200,
         headers: { 'Content-Type': 'text/event-stream' },
       });
@@ -174,6 +175,9 @@ afterEach(async () => {
   container?.remove();
   root = null;
   container = null;
+  for (const conversation of Object.values(store.getState().chat.conversations)) {
+    if (conversation.modelId === 'skulk/steward') store.dispatch(chatActions.deleteConversation(conversation.id));
+  }
   store.dispatch(chatActions.setAutoSpeakAssistant(false));
   store.dispatch(apiSlice.util.resetApiState());
   vi.unstubAllGlobals();
@@ -421,4 +425,129 @@ describe('StewardChatView stream errors', () => {
       'stream error never surfaced as a toast',
     );
   });
+});
+
+
+it('retains the draft and conversation when the shared controller changes presentation', async () => {
+  const onChat = vi.fn();
+  stubFetch({ status: READY, sseEvents: [delta({ content: 'Fixture reply.' })], onChat });
+  container = document.createElement('div');
+  document.body.append(container);
+  root = createRoot(container);
+  const instances: InstanceCardData[] = [];
+  const present = async (key: string) => {
+    await act(async () => root?.render(<Provider store={store}><ThemeProvider theme={darkTheme}>
+      <StewardControllerProvider readyInstances={instances}><StewardChatView key={key} /></StewardControllerProvider>
+    </ThemeProvider></Provider>));
+    await act(async () => { await vi.waitFor(() => expect(container?.querySelector('textarea')).not.toBeNull()); });
+  };
+  await present('drawer');
+  await act(async () => { await userEvent.fill(container!.querySelector('textarea')!, 'Keep this draft'); });
+  await present('page');
+  expect(container.querySelector('textarea')?.value).toBe('Keep this draft');
+  expect(onChat).not.toHaveBeenCalled();
+  await act(async () => { await userEvent.click(container!.querySelector('button[aria-label="Send message"]')!); });
+  await act(async () => { await vi.waitFor(() => expect(container?.textContent).toContain('Fixture reply.')); });
+  await present('virtual-model');
+  expect(container.textContent).toContain('Keep this draft');
+  expect(container.textContent).toContain('Fixture reply.');
+  expect(onChat).toHaveBeenCalledOnce();
+});
+
+it('keeps an active generation across presentation changes and cancels it from the new view', async () => {
+  let requestSignal: AbortSignal | null | undefined;
+  const onChat = vi.fn();
+  stubFetch({ status: READY, onChat, openStream: signal => {
+    requestSignal = signal;
+    return new ReadableStream({ start(controller) {
+      controller.enqueue(new TextEncoder().encode(`data: ${delta({ content: 'Working on it' })}\n\n`));
+      signal?.addEventListener('abort', () => controller.error(new DOMException('Aborted', 'AbortError')), { once: true });
+    } });
+  } });
+  container = document.createElement('div');
+  document.body.append(container);
+  root = createRoot(container);
+  const instances: InstanceCardData[] = [];
+  const present = async (key: string) => {
+    await act(async () => root?.render(<Provider store={store}><ThemeProvider theme={darkTheme}>
+      <StewardControllerProvider readyInstances={instances}><StewardChatView key={key} /></StewardControllerProvider>
+    </ThemeProvider></Provider>));
+  };
+  await present('drawer');
+  await waitFor(() => container?.querySelector('textarea') !== null, 'composer did not mount');
+  await userEvent.fill(container.querySelector('textarea')!, 'Inspect the cluster');
+  await userEvent.click(container.querySelector('button[aria-label="Send message"]')!);
+  await waitFor(() => container?.textContent?.includes('Working on it') ?? false, 'stream did not start');
+  await present('page');
+  expect(requestSignal?.aborted).toBe(false);
+  expect(container.textContent).toContain('Working on it');
+  await userEvent.click(container.querySelector('button[aria-label="Cancel generation"]')!);
+  await waitFor(() => requestSignal?.aborted === true, 'stream was not aborted');
+  expect(onChat).toHaveBeenCalledOnce();
+});
+
+it('saves drawer messages without selecting another chat and restores them after remount', async () => {
+  const ordinary = store.dispatch(chatActions.newConversation('example/ordinary')).payload.id;
+  stubFetch({ status: READY, sseEvents: [delta({ content: 'Saved reply.' })] });
+  await renderPage();
+  await waitFor(() => !!container?.querySelector('textarea'), 'composer did not mount');
+  await userEvent.fill(container!.querySelector('textarea')!, 'Remember this turn');
+  await userEvent.keyboard('{Enter}');
+  await waitFor(() => container?.textContent?.includes('Saved reply.') ?? false, 'reply missing');
+  const id = store.getState().chat.modelToConversationId['skulk/steward'];
+  expect(store.getState().chat.activeConversationId).toBe(ordinary);
+  expect(store.getState().chat.conversations[id].messages).toHaveLength(2);
+  expect(JSON.parse(localStorage.getItem('skulk-chat')!).state.conversations[id].messages).toHaveLength(2);
+  await act(async () => root?.unmount());
+  container?.remove();
+  await renderPage();
+  await waitFor(() => container?.textContent?.includes('Saved reply.') ?? false, 'saved history missing after remount');
+  await act(async () => { store.dispatch(chatActions.selectModel('skulk/steward')); });
+  expect(store.getState().chat.activeConversationId).toBe(id);
+  await act(async () => { store.dispatch(chatActions.renameConversation({ conversationId: id, name: 'Cluster inspection' })); });
+  expect(store.getState().chat.conversations[id].name).toBe('Cluster inspection');
+  store.dispatch(chatActions.deleteConversation(ordinary));
+});
+
+it.each(['new', 'delete'] as const)('cancels the owning request on %s and never redirects its reply', async action => {
+  let signal: AbortSignal | null | undefined;
+  stubFetch({ status: READY, openStream: requestSignal => {
+    signal = requestSignal;
+    return new ReadableStream({ start(controller) {
+      controller.enqueue(new TextEncoder().encode(`data: ${delta({ content: 'Old response' })}\n\n`));
+      signal?.addEventListener('abort', () => controller.error(new DOMException('Aborted', 'AbortError')), { once: true });
+    } });
+  } });
+  await renderPage();
+  await waitFor(() => !!container?.querySelector('textarea'), 'composer missing');
+  await userEvent.fill(container!.querySelector('textarea')!, 'Old question');
+  await userEvent.keyboard('{Enter}');
+  await waitFor(() => container?.textContent?.includes('Old response') ?? false, 'stream missing');
+  const oldId = store.getState().chat.modelToConversationId['skulk/steward'];
+  await act(async () => {
+    if (action === 'new') store.dispatch(chatActions.newConversation('skulk/steward'));
+    else store.dispatch(chatActions.deleteConversation(oldId));
+  });
+  await waitFor(() => signal?.aborted === true, 'request not cancelled');
+  await waitFor(() => !container?.querySelector('button[aria-label="Cancel generation"]'), 'request did not settle');
+  expect(container?.textContent).not.toContain('Old response');
+  if (action === 'new') {
+    const nextId = store.getState().chat.modelToConversationId['skulk/steward'];
+    expect(nextId).not.toBe(oldId);
+    expect(store.getState().chat.conversations[nextId].messages).toEqual([]);
+    expect(store.getState().chat.conversations[oldId].messages).toHaveLength(1);
+    await act(async () => { store.dispatch(chatActions.selectConversation(oldId)); });
+    expect(container?.textContent).toContain('Old question');
+  } else expect(store.getState().chat.conversations[oldId]).toBeUndefined();
+});
+
+it('keeps an unsent drawer draft when selecting the virtual model creates its first conversation', async () => {
+  const onChat = vi.fn();
+  stubFetch({ status: READY, onChat });
+  await renderPage();
+  await waitFor(() => !!container?.querySelector('textarea'), 'composer missing');
+  await userEvent.fill(container!.querySelector('textarea')!, 'Not submitted yet');
+  await act(async () => { store.dispatch(chatActions.selectModel('skulk/steward')); });
+  expect(container!.querySelector('textarea')!.value).toBe('Not submitted yet');
+  expect(onChat).not.toHaveBeenCalled();
 });

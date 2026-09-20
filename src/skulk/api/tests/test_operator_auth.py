@@ -626,3 +626,29 @@ def test_lifecycle_routes_fail_closed_on_an_uninitialized_gateway(
     )
     assert listed.status_code == 503
     assert listed.json() == {"detail": "operator gateway is not initialized"}
+
+
+def test_direct_dashboard_device_inventory_and_revocation(tmp_path: Path) -> None:
+    """Owner authority reuses the inventory without weakening bearer checks."""
+    service = _dashboard_invitation_service(tmp_path)
+    app = FastAPI()
+    app.include_router(create_operator_auth_router(service))
+    client = TestClient(app, base_url="http://127.0.0.1:52415", client=("127.0.0.1", 50000))
+    paired = _pair_device(client, service)
+    headers = {"Origin": "http://127.0.0.1:52415", "X-Skulk-Dashboard": "pairing-v1"}
+    listed = client.get("/v1/auth/devices", headers=headers)
+    assert listed.status_code == 200
+    assert listed.json()["devices"][0]["current"] is False
+    assert listed.json()["devices"][0]["deviceId"] == paired["deviceId"]
+    assert "accessToken" not in listed.text
+    assert client.get("/v1/auth/devices", headers={**headers, "Authorization": "Bearer invalid"}).status_code == 401
+    for spoof in ({"Origin": "https://example.invalid"}, {"X-Forwarded-For": "127.0.0.1"}):
+        assert client.get("/v1/auth/devices", headers={**headers, **spoof}).status_code == 403
+        assert client.delete(f"/v1/auth/devices/{paired['deviceId']}", headers={**headers, **spoof}).status_code == 403
+    revoked = client.delete(f"/v1/auth/devices/{paired['deviceId']}", headers=headers)
+    assert revoked.status_code == 204
+    assert client.get("/v1/auth/devices", headers=headers).json()["devices"][0]["state"] == "revoked"
+    assert client.get("/v1/auth/devices", headers={"Authorization": f"Bearer {paired['accessToken']}"}).status_code == 401
+    assert client.delete(f"/v1/auth/devices/{paired['deviceId']}", headers=headers).status_code == 204
+    remote = TestClient(app, base_url="http://127.0.0.1:52415", client=("192.0.2.1", 50000))
+    assert remote.get("/v1/auth/devices", headers=headers).status_code == 403

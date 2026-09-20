@@ -114,7 +114,7 @@ function processMarkdown(content: string, t: SkulkTranslate): ProcessedMarkdown 
     }
 
     if (displayMode) {
-      rendered = `<div class="mc-math-display">${rendered}</div>`;
+      rendered = `<div class="mc-math-display" tabindex="0">${rendered}</div>`;
     } else {
       rendered = `<span class="mc-math-inline">${rendered}</span>`;
     }
@@ -129,12 +129,14 @@ function processMarkdown(content: string, t: SkulkTranslate): ProcessedMarkdown 
    ================================================================ */
 
 const Container = styled.div`
+  min-width: 0; max-width: 100%;
+  overflow-wrap: anywhere;
   line-height: 1.6;
-  color: ${({ theme }) => theme.colors.text};
-  font-size: ${({ theme }) => theme.fontSizes.md};
+  color: ${({ theme }) => theme.colors.body};
+  font-size: 14px;
 
   /* Headings */
-  h1, h2 { color: ${({ theme }) => theme.colors.gold}; }
+  h1, h2 { color: ${({ theme }) => theme.colors.accentText}; }
   h1 { font-size: 1.5em; margin: 16px 0 8px; }
   h2 { font-size: 1.3em; margin: 14px 0 6px; }
   h3, h4, h5, h6 { margin: 12px 0 4px; }
@@ -143,7 +145,7 @@ const Container = styled.div`
   p { margin: 8px 0; }
 
   /* Links */
-  a { color: #60a5fa; text-decoration: underline; }
+  a { color: ${({ theme }) => theme.colors.accentText}; text-decoration: underline; }
 
   /* Lists */
   ul, ol { padding-left: 20px; margin: 8px 0; }
@@ -155,7 +157,7 @@ const Container = styled.div`
     background: ${({ theme }) => theme.colors.goldBg};
     padding: 8px 12px;
     margin: 8px 0;
-    color: ${({ theme }) => theme.colors.textSecondary};
+    color: ${({ theme }) => theme.colors.body};
   }
 
   /* Tables */
@@ -171,7 +173,7 @@ const Container = styled.div`
     padding: 1px 5px;
     font-family: ${({ theme }) => theme.fonts.mono};
     font-size: 0.9em;
-    color: ${({ theme }) => theme.colors.gold};
+    color: ${({ theme }) => theme.colors.accentText};
   }
 
   /* Code blocks */
@@ -195,7 +197,7 @@ const Container = styled.div`
   .mc-code-lang {
     font-size: ${({ theme }) => theme.fontSizes.label};
     font-family: ${({ theme }) => theme.fonts.mono};
-    color: ${({ theme }) => theme.colors.goldTextDim};
+    color: ${({ theme }) => theme.colors.accentText};
   }
 
   .mc-copy-btn {
@@ -203,9 +205,9 @@ const Container = styled.div`
     cursor: pointer;
     font-size: ${({ theme }) => theme.fontSizes.label};
     font-family: ${({ theme }) => theme.fonts.mono};
-    color: ${({ theme }) => theme.colors.textMuted};
+    color: ${({ theme }) => theme.colors.body};
     transition: color 0.15s;
-    &:hover { color: ${({ theme }) => theme.colors.gold}; }
+    &:hover { color: ${({ theme }) => theme.colors.accentText}; }
   }
 
   pre {
@@ -220,13 +222,13 @@ const Container = styled.div`
   code.hljs { background: transparent; }
 
   /* Highlight.js dark theme overrides */
-  .hljs-keyword, .hljs-selector-tag { color: #c084fc; }
-  .hljs-string, .hljs-attr { color: #fbbf24; }
+  .hljs-keyword, .hljs-selector-tag { color: ${({ theme }) => theme.colors.accentText}; }
+  .hljs-string, .hljs-attr { color: ${({ theme }) => theme.colors.accentText}; }
   .hljs-number, .hljs-literal { color: ${({ theme }) => theme.colors.healthy}; }
-  .hljs-built_in, .hljs-function { color: #60a5fa; }
-  .hljs-comment { color: #6b7280; font-style: italic; }
-  .hljs-title { color: #f472b6; }
-  .hljs-type { color: #2dd4bf; }
+  .hljs-built_in, .hljs-function { color: ${({ theme }) => theme.colors.accentText}; }
+  .hljs-comment { color: ${({ theme }) => theme.colors.accentText}; font-style: italic; }
+  .hljs-title { color: ${({ theme }) => theme.colors.accentText}; }
+  .hljs-type { color: ${({ theme }) => theme.colors.accentText}; }
   .hljs-params { color: ${({ theme }) => theme.colors.text}; }
 
   /* Math */
@@ -253,7 +255,7 @@ const Container = styled.div`
 
   /* KaTeX color overrides */
   .katex { color: ${({ theme }) => theme.colors.text}; }
-  .katex .delimsizing, .katex .mord { color: ${({ theme }) => theme.colors.textSecondary}; }
+  .katex .delimsizing, .katex .mord { color: ${({ theme }) => theme.colors.body}; }
 `;
 
 /* ================================================================

@@ -14,7 +14,7 @@ const meta: Meta<typeof Field> = {
   parameters: { layout: 'centered' },
   decorators: [
     (Story) => (
-      <div style={{ width: 300, padding: 20, background: '#000' }}>
+      <div style={{ width: 'min(300px, calc(100vw - 48px))', padding: 20, }}>
         <Story />
       </div>
     ),
@@ -51,7 +51,7 @@ export const WithRightElement: Story = {
     icon: <SearchIcon />,
     rightElement: (
       <button
-        style={{ all: 'unset', cursor: 'pointer', color: '#999', fontSize: 12 }}
+        style={{ all: 'unset', cursor: 'pointer', color: 'inherit', fontSize: 12 }}
         onClick={() => alert('clear')}
       >
         ✕

@@ -20,11 +20,10 @@ export interface TokenHeatmapProps {
 
 /* ---- confidence helpers ---- */
 
-function getConfidenceStyle(prob: number): { bg: string; color: string; border: string } {
-  if (prob > 0.8) return { bg: 'transparent', color: 'inherit', border: 'transparent' };
-  if (prob > 0.5) return { bg: 'rgba(107,114,128,0.1)', color: 'inherit', border: 'rgba(107,114,128,0.2)' };
-  if (prob > 0.2) return { bg: 'rgba(245,158,11,0.15)', color: 'rgba(253,230,138,0.9)', border: 'rgba(245,158,11,0.3)' };
-  return { bg: 'rgba(239,68,68,0.2)', color: 'rgba(254,202,202,0.9)', border: 'rgba(239,68,68,0.4)' };
+function getConfidenceStyle(prob: number, theme: Theme): { bg: string; color: string; border: string } {
+  const bg = prob > .66 ? `color-mix(in srgb, ${theme.colors.live} 55%, transparent)`
+    : prob > .33 ? `color-mix(in srgb, ${theme.colors.gold} 45%, transparent)` : theme.colors.selected;
+  return { bg, color: theme.colors.text, border: 'transparent' };
 }
 
 function probColor(prob: number, theme: Theme): string {
@@ -37,13 +36,14 @@ function probColor(prob: number, theme: Theme): string {
 /* ---- styles ---- */
 
 const Container = styled.div`
+  font: 12px ${({ theme }) => theme.fonts.mono};
   line-height: 1.6;
   white-space: pre-wrap;
   word-wrap: break-word;
 `;
 
 const Token = styled.span<{ $bg: string; $color: string; $border: string }>`
-  padding: 2px;
+  padding: 0 3px;
   border-radius: 3px;
   border: 1px solid ${({ $border }) => $border};
   background: ${({ $bg }) => $bg};
@@ -91,14 +91,14 @@ const TooltipHeader = styled.div`
 `;
 
 const TooltipToken = styled.span`
-  font-family: ${({ theme }) => theme.fonts.body};
+  font-family: ${({ theme }) => theme.fonts.mono};
   color: ${({ theme }) => theme.colors.text};
 `;
 
 const LogprobText = styled.div`
   font-size: ${({ theme }) => theme.fontSizes.xs};
-  font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.textMuted};
+  font-family: ${({ theme }) => theme.fonts.mono};
+  color: ${({ theme }) => theme.colors.subtleText};
   margin-bottom: 8px;
 `;
 
@@ -106,7 +106,7 @@ const AltRow = styled.div`
   display: flex;
   align-items: center;
   justify-content: space-between;
-  font-family: ${({ theme }) => theme.fonts.body};
+  font-family: ${({ theme }) => theme.fonts.mono};
   font-size: ${({ theme }) => theme.fontSizes.label};
   padding: 2px 0;
   color: ${({ theme }) => theme.colors.textSecondary};
@@ -114,9 +114,9 @@ const AltRow = styled.div`
 
 const RegenButton = styled(Button)`
   margin-top: 8px;
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   &:hover:not(:disabled) {
-    color: ${({ theme }) => theme.colors.gold};
+    color: ${({ theme }) => theme.colors.accentText};
   }
 `;
 
@@ -169,7 +169,7 @@ export function TokenHeatmap({
   return (
     <Container className={className}>
       {tokens.map((t, i) => {
-        const style = getConfidenceStyle(t.probability);
+        const style = getConfidenceStyle(t.probability, theme);
         return (
           <Token
             key={i}

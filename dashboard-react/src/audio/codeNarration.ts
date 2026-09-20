@@ -142,10 +142,13 @@ export class CodeNarrator {
   private pendingCloseSince: number | null = null;
   private lastPhrase = '';
 
+  private readonly phrases: CodeNarrationPhrases;
+
   constructor(
-    private readonly phrases: CodeNarrationPhrases,
+    phrases: CodeNarrationPhrases,
     options: CodeNarratorOptions = {},
   ) {
+    this.phrases = phrases;
     this.minimumGapMs = options.minimumGapMs ?? 7000;
     this.reopenDebounceMs = options.reopenDebounceMs ?? 2500;
     this.maximumFillersPerFence = options.maximumFillersPerFence ?? 3;

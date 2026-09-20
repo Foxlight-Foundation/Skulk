@@ -98,7 +98,7 @@ registerProcessor('skulk-pcm-queue', SkulkPcmQueueProcessor);
 `;
 
 /** Convert little-endian signed 16-bit PCM bytes into browser-native floats. */
-export function pcm16LeToFloat32(bytes: Uint8Array): Float32Array {
+export function pcm16LeToFloat32(bytes: Uint8Array): Float32Array<ArrayBuffer> {
   if (bytes.byteLength % 2 !== 0) {
     throw new Error('Streaming PCM response ended on an incomplete sample.');
   }
@@ -133,11 +133,11 @@ export function completePcm16Samples(
 export function splitPlaybackSamples(
   samples: Float32Array,
   maximumSamples: number,
-): Float32Array[] {
+): Float32Array<ArrayBuffer>[] {
   if (!Number.isInteger(maximumSamples) || maximumSamples <= 0) {
     throw new Error('Playback frame limit must be a positive integer.');
   }
-  const frames: Float32Array[] = [];
+  const frames: Float32Array<ArrayBuffer>[] = [];
   for (let offset = 0; offset < samples.length; offset += maximumSamples) {
     frames.push(samples.slice(offset, Math.min(offset + maximumSamples, samples.length)));
   }
@@ -148,19 +148,21 @@ class PlaybackFrameAccumulator {
   private readonly chunks: Float32Array[] = [];
   private sampleCount = 0;
 
-  constructor(private readonly frameSamples: number) {
+  private readonly frameSamples: number;
+  constructor(frameSamples: number) {
+    this.frameSamples = frameSamples;
     if (!Number.isInteger(frameSamples) || frameSamples <= 0) {
       throw new Error('Scheduled playback frame size must be a positive integer.');
     }
   }
 
   /** Add decoded samples and return every complete fixed-size playback frame. */
-  push(samples: Float32Array): Float32Array[] {
+  push(samples: Float32Array): Float32Array<ArrayBuffer>[] {
     if (samples.length > 0) {
       this.chunks.push(samples);
       this.sampleCount += samples.length;
     }
-    const frames: Float32Array[] = [];
+    const frames: Float32Array<ArrayBuffer>[] = [];
     while (this.sampleCount >= this.frameSamples) {
       frames.push(this.take(this.frameSamples));
     }
@@ -168,11 +170,11 @@ class PlaybackFrameAccumulator {
   }
 
   /** Return the final partial frame after the network stream ends. */
-  flush(): Float32Array | null {
+  flush(): Float32Array<ArrayBuffer> | null {
     return this.sampleCount > 0 ? this.take(this.sampleCount) : null;
   }
 
-  private take(length: number): Float32Array {
+  private take(length: number): Float32Array<ArrayBuffer> {
     const frame = new Float32Array(length);
     let written = 0;
     while (written < length) {
@@ -479,11 +481,18 @@ export class StreamingSpeechPlayback {
   private bufferedSamples = 0;
   private readonly waiters = new Set<() => void>();
 
+  private readonly maximumBufferedSeconds: number;
+  private readonly resumeBufferedSeconds: number;
+  private readonly playbackMode: StreamingSpeechPlaybackMode;
   constructor(
-    private readonly maximumBufferedSeconds = DEFAULT_MAX_BUFFERED_SECONDS,
-    private readonly resumeBufferedSeconds = DEFAULT_RESUME_BUFFERED_SECONDS,
-    private readonly playbackMode = streamingSpeechPlaybackMode(),
-  ) {}
+    maximumBufferedSeconds = DEFAULT_MAX_BUFFERED_SECONDS,
+    resumeBufferedSeconds = DEFAULT_RESUME_BUFFERED_SECONDS,
+    playbackMode = streamingSpeechPlaybackMode(),
+  ) {
+    this.maximumBufferedSeconds = maximumBufferedSeconds;
+    this.resumeBufferedSeconds = resumeBufferedSeconds;
+    this.playbackMode = playbackMode;
+  }
 
   /** Play one response and close its browser audio session after playback drains. */
   async play(response: Response, signal?: AbortSignal): Promise<void> {
@@ -688,7 +697,7 @@ export class StreamingSpeechPlayback {
   }
 
   private async enqueueWorkletFrame(
-    frame: Float32Array,
+    frame: Float32Array<ArrayBuffer>,
     playbackSampleRate: number,
     signal?: AbortSignal,
   ): Promise<void> {
@@ -700,7 +709,7 @@ export class StreamingSpeechPlayback {
 
   private async enqueueScheduledFrame(
     context: AudioContext,
-    frame: Float32Array,
+    frame: Float32Array<ArrayBuffer>,
     playbackSampleRate: number,
     signal?: AbortSignal,
   ): Promise<void> {
@@ -822,13 +831,24 @@ export class SpeechSentenceQueue {
   private stopped = false;
   private inputFinished = false;
 
+  private readonly playSentence: (text: string, signal: AbortSignal) => Promise<void>;
+  private readonly onError: (error: unknown) => void;
+  private readonly onIdle: () => void;
+  private readonly finishPlayback: () => Promise<void>;
+  private readonly stopPlayback: () => void;
   constructor(
-    private readonly playSentence: (text: string, signal: AbortSignal) => Promise<void>,
-    private readonly onError: (error: unknown) => void,
-    private readonly onIdle: () => void = () => undefined,
-    private readonly finishPlayback: () => Promise<void> = async () => undefined,
-    private readonly stopPlayback: () => void = () => undefined,
-  ) {}
+    playSentence: (text: string, signal: AbortSignal) => Promise<void>,
+    onError: (error: unknown) => void,
+    onIdle: () => void = () => undefined,
+    finishPlayback: () => Promise<void> = async () => undefined,
+    stopPlayback: () => void = () => undefined,
+  ) {
+    this.playSentence = playSentence;
+    this.onError = onError;
+    this.onIdle = onIdle;
+    this.finishPlayback = finishPlayback;
+    this.stopPlayback = stopPlayback;
+  }
 
   /** Add complete visible sentences without starting overlapping synthesis calls. */
   enqueue(sentences: readonly string[]): void {

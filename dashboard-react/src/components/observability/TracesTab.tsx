@@ -186,7 +186,7 @@ const ListRow = styled.button<{ $selected: boolean }>`
 const Chevron = styled(FiChevronRight)<{ $expanded: boolean }>`
   transition: transform 0.15s ease-out;
   transform: rotate(${({ $expanded }) => ($expanded ? '90deg' : '0deg')});
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
 `;
 
 const RowMain = styled.span`
@@ -199,11 +199,11 @@ const RowSecondary = styled.span`
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
 `;
 
 const RowTime = styled.span`
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   white-space: nowrap;
 `;
 
@@ -211,7 +211,7 @@ const Notice = styled.div`
   padding: 12px 10px;
   font-family: ${({ theme }) => theme.fonts.body};
   font-size: ${({ theme }) => theme.fontSizes.sm};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
 `;
 
 const ErrorNotice = styled(Notice)`
@@ -261,7 +261,7 @@ const SelectedRow = styled.div`
 `;
 
 const SelectedKey = styled.span`
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
 `;
 
 const SelectedValue = styled.span`

@@ -17,7 +17,7 @@ import { StreamingSpeechPlayback } from '../../audio/streamingSpeechPlayback';
 import { darkTheme } from '../../theme/theme';
 import { ChatView } from './ChatView';
 
-globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', { value: true, configurable: true });
 
 vi.mock('../../i18n/tolgee', () => {
   const translate = (_key: string, fallback: string) => fallback;
@@ -164,7 +164,7 @@ describe('ChatView multimodal requests', () => {
     });
     await waitFor(() => capturedBody !== null, 'chat request was not sent');
 
-    const messages = capturedBody?.messages as Array<Record<string, unknown>>;
+    const messages = (capturedBody as Record<string, unknown> | null)?.messages as Array<Record<string, unknown>>;
     const content = messages.at(-1)?.content as Array<Record<string, unknown>>;
     expect(content[0]).toMatchObject({
       type: 'image_url',
@@ -365,7 +365,7 @@ describe('ChatView completed-message speech', () => {
               modelId: 'org/batch-speech-model',
               sharding: 'Pipeline',
               instanceType: 'MlxRing',
-              engine: 'mlx_audio',
+              engine: 'mlx',
               nodeStatuses: [],
               status: 'ready',
             }]} />
@@ -400,4 +400,32 @@ describe('ChatView completed-message speech', () => {
     expect(requestedMaxTokens).toEqual([batchSpeechMaxTokens(spokenTurn)]);
     expect(requestedMaxTokens[0]).toBeGreaterThan(4096);
   });
+});
+
+it('keeps an ordinary streamed reply in its originating history after switching to Steward', async () => {
+  let finishStream: () => void = () => { throw new Error('Stream was not opened'); };
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url === '/models') return new Response(JSON.stringify({ data: [{ id: 'org/vision-model', resolved_capabilities: { supports_text_chat: true } }] }));
+    if (url === '/v1/chat/completions') return new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      controller.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"content":"Original reply"}}]}\n\n'));
+      finishStream = () => { controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n')); controller.close(); };
+    } }), { headers: { 'Content-Type': 'text/event-stream' } });
+    return new Response(JSON.stringify({ enabled: false }));
+  }));
+  store.dispatch(chatActions.setAutoSpeakAssistant(false));
+  await renderVisionChat();
+  const origin = store.getState().chat.activeConversationId!;
+  await userEvent.fill(container!.querySelector('textarea')!, 'Keep this reply here');
+  await userEvent.click(container!.querySelector('button[aria-label="Send message"]')!);
+  await waitForReact(() => container!.textContent!.includes('Original reply'), 'stream did not start');
+  await act(async () => {
+    store.dispatch(chatActions.selectModel('skulk/steward'));
+    root!.render(<div>Steward presentation</div>);
+  });
+  const steward = store.getState().chat.activeConversationId!;
+  await act(async () => finishStream());
+  await waitForReact(() => Object.values(store.getState().chat.conversations).some(conversation => conversation.messages.some(message => message.role === 'assistant')), 'reply did not finish');
+  expect(store.getState().chat.conversations[origin].messages.at(-1)?.content).toBe('Original reply');
+  expect(store.getState().chat.conversations[steward].messages).toEqual([]);
 });

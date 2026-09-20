@@ -18,7 +18,7 @@ const meta: Meta<typeof StoreRegistryTable> = {
   title: 'Layout/StoreRegistryTable',
   component: StoreRegistryTable,
   parameters: { layout: 'centered' },
-  decorators: [(Story) => <div style={{ width: 700, padding: 24, background: '#111' }}><Story /></div>],
+  decorators: [(Story) => <div style={{ width: 'min(700px, calc(100vw - 48px))', padding: 24, }}><Story /></div>],
 };
 
 export default meta;

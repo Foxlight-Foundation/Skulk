@@ -8,7 +8,7 @@ const meta: Meta<typeof StepSlider> = {
   parameters: { layout: 'centered' },
   decorators: [
     (Story) => (
-      <div style={{ width: 300, padding: 24, background: '#111' }}>
+      <div style={{ width: 'min(300px, calc(100vw - 48px))', padding: 24, }}>
         <Story />
       </div>
     ),
@@ -23,7 +23,7 @@ export const MinimumDevices: Story = {
     const [value, setValue] = useState(1);
     return (
       <div>
-        <div style={{ fontSize: 12, fontFamily: 'monospace', color: '#999', marginBottom: 8 }}>
+        <div style={{ fontSize: 12, fontFamily: 'monospace', color: 'inherit', marginBottom: 8 }}>
           Minimum Devices:
         </div>
         <StepSlider options={[1, 2, 3]} value={value} onChange={setValue} />
@@ -68,7 +68,7 @@ export const ManyOptions: Story = {
   render: () => {
     const [value, setValue] = useState(4);
     return (
-      <div style={{ width: 400 }}>
+      <div style={{ width: 'min(400px, calc(100vw - 48px))' }}>
         <StepSlider
           options={[1, 2, 3, 4, 5, 6, 7, 8]}
           value={value}

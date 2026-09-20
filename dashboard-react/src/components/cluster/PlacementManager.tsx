@@ -1,6 +1,7 @@
+import { useModalFocus } from '../../hooks/useModalFocus';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import styled, { css } from 'styled-components';
-import { FiX, FiInfo } from 'react-icons/fi';
+import { FiX, FiInfo, FiArrowLeft } from 'react-icons/fi';
 import { MdPlayArrow } from 'react-icons/md';
 import type { TopologyData } from '../../types/topology';
 import { detectDeviceModel } from '../../types/topology';
@@ -11,7 +12,9 @@ import { useSkulkTranslation } from '../../i18n/tolgee';
 
 /* ── Types ────────────────────────────────────────────── */
 
+/** Existing placement options, with optional return to the discovery dialog. */
 export interface PlacementManagerProps {
+  onBack?: () => void;
   modelId: string;
   modelSizeMb?: number;
   topology: TopologyData;
@@ -97,6 +100,7 @@ const Modal = styled.div`
   border: 1px solid ${({ theme }) => theme.colors.border};
   border-radius: ${({ theme }) => theme.radii.lg};
   width: 560px;
+  max-width: calc(100vw - 24px);
   max-height: 85vh;
   overflow-y: auto;
   display: flex;
@@ -107,11 +111,13 @@ const Header = styled.div`
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
   padding: 16px 20px;
   border-bottom: 1px solid ${({ theme }) => theme.colors.border};
 `;
 
 const Title = styled.div`
+  flex: 1; min-width: 0; overflow-wrap: anywhere;
   font-size: ${({ theme }) => theme.fontSizes.md};
   font-family: ${({ theme }) => theme.fonts.body};
   font-weight: 600;
@@ -119,14 +125,15 @@ const Title = styled.div`
 `;
 
 const ModelName = styled.span`
-  color: ${({ theme }) => theme.colors.gold};
+  color: ${({ theme }) => theme.colors.accentText};
   font-weight: 500;
 `;
 
 const CloseBtn = styled.button`
+  flex-shrink: 0;
   all: unset;
   cursor: pointer;
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   &:hover { color: ${({ theme }) => theme.colors.text}; }
 `;
 
@@ -204,18 +211,18 @@ const NodePill = styled.button<{ $excluded: boolean; $ineligible?: boolean }>`
 const NodePillHint = styled.div`
   font-family: ${({ theme }) => theme.fonts.body};
   font-size: ${({ theme }) => theme.fontSizes.xs};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
 `;
 
 const Slider = styled.input`
   flex: 1;
-  accent-color: ${({ theme }) => theme.colors.gold};
+  accent-color: ${({ theme }) => theme.colors.accentText};
 `;
 
 const SliderValue = styled.span`
   font-size: ${({ theme }) => theme.fontSizes.sm};
   font-family: ${({ theme }) => theme.fonts.mono};
-  color: ${({ theme }) => theme.colors.gold};
+  color: ${({ theme }) => theme.colors.accentText};
   min-width: 60px;
   text-align: right;
 `;
@@ -255,7 +262,7 @@ const OptionLabel = styled.div<{ $selected: boolean }>`
 const OptionSub = styled.div`
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   margin-top: 2px;
 `;
 
@@ -301,7 +308,7 @@ const Loading = styled.div`
   text-align: center;
   font-size: ${({ theme }) => theme.fontSizes.sm};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
 `;
 
 const CardWrapper = styled.div`
@@ -310,8 +317,11 @@ const CardWrapper = styled.div`
 
 /* ── Component ────────────────────────────────────────── */
 
-export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose, onLaunch, isEmbedding }: PlacementManagerProps) {
+/** Review placements in a keyboard-contained modal without launching on entry. */
+export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose, onLaunch, onBack, isEmbedding }: PlacementManagerProps) {
   const { t } = useSkulkTranslation();
+  const modalRef = useRef<HTMLDivElement>(null);
+  useModalFocus(open, modalRef, onClose);
   const [previews, setPreviews] = useState<PlacementPreview[]>([]);
   const [loading, setLoading] = useState(false);
   const [minNodes, setMinNodes] = useState(1);
@@ -594,8 +604,9 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
 
   return (
     <Overlay onClick={onClose}>
-      <Modal onClick={(e) => e.stopPropagation()}>
+      <Modal ref={modalRef} tabIndex={-1} role="dialog" aria-modal="true" aria-label={t('placement.dialog', 'Placement options')} onClick={(e) => e.stopPropagation()}>
         <Header>
+          {onBack && <Button variant="ghost" size="sm" icon onClick={onBack} aria-label={t('placement.backToDiscovery', 'Back to Find Models')}><FiArrowLeft aria-hidden /></Button>}
           <Title>{t('placement.title', 'Place')} <ModelName>{modelLabel(modelId)}</ModelName></Title>
           <CloseBtn onClick={onClose} aria-label={t('placement.close', 'Close placement manager')}><FiX size={18} /></CloseBtn>
         </Header>

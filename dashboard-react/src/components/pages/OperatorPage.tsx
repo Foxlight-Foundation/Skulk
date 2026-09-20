@@ -35,7 +35,7 @@ const SectionTitle = styled.h2`
   font-family: ${({ theme }) => theme.fonts.mono};
   text-transform: uppercase;
   letter-spacing: 1.5px;
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
 `;
 
 const SummaryRow = styled.div`
@@ -61,7 +61,7 @@ const StatLabel = styled.span`
   font-family: ${({ theme }) => theme.fonts.mono};
   text-transform: uppercase;
   letter-spacing: 1px;
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
 `;
 
 const StatValue = styled.span<{ $ok?: boolean; $warn?: boolean }>`
@@ -117,7 +117,7 @@ const MetricLabel = styled.span`
   font-family: ${({ theme }) => theme.fonts.mono};
   text-transform: uppercase;
   letter-spacing: 1px;
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
 `;
 
 const MetricValue = styled.span`
@@ -176,7 +176,7 @@ const EmptyState = styled.div`
   text-align: center;
   font-size: ${({ theme }) => theme.fontSizes.sm};
   font-family: ${({ theme }) => theme.fonts.mono};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   text-transform: uppercase;
   letter-spacing: 2px;
 `;
@@ -207,7 +207,7 @@ const AccessLabel = styled.span`
   font-family: ${({ theme }) => theme.fonts.mono};
   text-transform: uppercase;
   letter-spacing: 1px;
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   flex-shrink: 0;
 `;
 
@@ -231,7 +231,7 @@ const QRWrap = styled.div`
 const QRLabel = styled.span`
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.mono};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   text-transform: uppercase;
   letter-spacing: 1px;
 `;
@@ -247,7 +247,7 @@ const CopyButton = styled.button`
   color: ${({ theme }) => theme.colors.textSecondary};
   white-space: nowrap;
   flex-shrink: 0;
-  &:hover { border-color: ${({ theme }) => theme.colors.textMuted}; }
+  &:hover { border-color: ${({ theme }) => theme.colors.subtleText}; }
 `;
 
 /* ── Helpers ───────────────────────────────────────────────── */
@@ -275,6 +275,7 @@ function RemoteAccessCard() {
     access.status === 'ok' ? access.data.tailscale.running : false;
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Clear an obsolete externally-derived QR image as its source URL disappears.
     if (!operatorUrl) { setQrDataUrl(null); return; }
     QRCode.toDataURL(operatorUrl, { width: 180, margin: 1 })
       .then(setQrDataUrl)
@@ -464,9 +465,11 @@ export function OperatorPage() {
   // matching every other instance surface.
   const instanceCount = data?.instances
     ? Object.values(data.instances).filter((inst) => {
-        const inner =
-          inst.MlxRingInstance ?? inst.MlxJacclInstance ?? inst.LlamaRpcInstance;
-        return !inner?.systemRole;
+        if (!inst || typeof inst !== 'object') return false;
+        const inner = 'MlxRingInstance' in inst ? inst.MlxRingInstance
+          : 'MlxJacclInstance' in inst ? inst.MlxJacclInstance
+          : 'LlamaRpcInstance' in inst ? inst.LlamaRpcInstance : null;
+        return !!inner && typeof inner === 'object' && !('systemRole' in inner && inner.systemRole);
       }).length
     : 0;
   const runnerCount = data?.runners ? Object.keys(data.runners).length : 0;

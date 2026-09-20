@@ -6,7 +6,7 @@ import type { CapabilityNodeSummary } from '../../types/capabilityNodes';
 import { darkTheme } from '../../theme/theme';
 import { CapabilityFlyout } from './CapabilityFlyout';
 
-globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', { value: true, configurable: true });
 
 vi.mock('../../i18n/tolgee', () => ({
   useSkulkTranslation: () => ({
@@ -118,7 +118,7 @@ describe('CapabilityFlyout', () => {
     const disabled = [...(container?.querySelectorAll('button:disabled') ?? [])].find((button) =>
       button.textContent?.includes('Open Studio'),
     );
-    expect(disabled?.title).toContain('Reachable only from a browser running on kite6');
+    expect(disabled?.getAttribute('title')).toContain('Reachable only from a browser running on kite6');
   });
 
   it('caps its height to the canvas so a maximal card scrolls instead of overflowing', async () => {

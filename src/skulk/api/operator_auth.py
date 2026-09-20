@@ -577,17 +577,21 @@ def create_operator_auth_router(
         summary="List paired operator devices",
         description=(
             "Return safe active and revoked device projections for a bearer "
-            "credential with device-management scope. Credential material is "
+            "credential with device-management scope or a verified direct dashboard. Credential material is "
             "never included."
         ),
     )
-    def list_operator_devices(
+    async def list_operator_devices(
+        request: Request,
         authorization: Annotated[str | None, Header()] = None,
     ) -> OperatorDevicesResponse:
         """List devices visible to an authorized operator."""
 
         try:
-            return service.devices(_require_bearer(authorization))
+            if authorization is None and request.headers.get("x-skulk-dashboard") == "pairing-v1":
+                await _require_direct_dashboard_authority(request, tailnet_peer_verifier)
+                return await run_in_threadpool(service.owner_devices)
+            return await run_in_threadpool(service.devices, _require_bearer(authorization))
         except (
             OperatorCredentialInvalidError,
             OperatorCredentialExpiredError,
@@ -603,17 +607,22 @@ def create_operator_auth_router(
         description=(
             "Immediately invalidate the target device's access and refresh "
             "credentials. Repeating revocation for an already revoked device "
-            "is idempotent."
+            "is idempotent. Requires device-management bearer scope or verified direct dashboard authority."
         ),
     )
-    def revoke_operator_device(
+    async def revoke_operator_device(
+        request: Request,
         device_id: UUID,
         authorization: Annotated[str | None, Header()] = None,
     ) -> Response:
         """Revoke one stable paired-device identity."""
 
         try:
-            service.revoke_device(_require_bearer(authorization), device_id)
+            if authorization is None and request.headers.get("x-skulk-dashboard") == "pairing-v1":
+                await _require_direct_dashboard_authority(request, tailnet_peer_verifier)
+                await run_in_threadpool(service.owner_revoke_device, device_id)
+            else:
+                await run_in_threadpool(service.revoke_device, _require_bearer(authorization), device_id)
         except OperatorDeviceNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except (

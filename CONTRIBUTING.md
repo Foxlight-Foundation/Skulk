@@ -516,3 +516,14 @@ Generic path discovery, runtime verification and inherited installation fencing
 live in `extensions/local_setup.py`; provider-specific prompts stay in the plugin.
 Tests cover actual offline runtime execution and terminal/fence inheritance without
 performing privileged OS registration.
+
+### Dashboard component gallery
+
+Shared presentation primitives live under `dashboard-react/src/components/common/`;
+Steward proposal/prompt surfaces and integration cards live under `components/steward/`
+and `components/integrations/`. Select Night or Noon Ridge in the existing Storybook
+toolbar. `Inventory` stories cover connected components with fictional responses.
+`.storybook/fixtures.tsx` isolates Redux and intercepts API traffic, rejecting mutations
+and unprovided observations. Do not replace these fixtures with a real cluster URL.
+Run `npm run lint`, `npx tsc -b`, `npm test`, `npm run build`, and
+`npx vitest run --project storybook` from `dashboard-react` when changing the gallery.

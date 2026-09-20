@@ -42,7 +42,7 @@ const Trigger = styled.span`
   align-items: center;
   justify-content: center;
   cursor: help;
-  color: ${({ theme }) => theme.colors.gold};
+  color: ${({ theme }) => theme.colors.textMuted};
   transition: color 0.15s, opacity 0.15s;
 
   &:hover { opacity: 0.8; }
@@ -109,6 +109,7 @@ export function InfoTooltip({
       offset(ARROW_SIZE + 4),
       flip(),
       shift({ padding: 8 }),
+      // eslint-disable-next-line react-hooks/refs -- Floating UI consumes the ref in layout, not while rendering this component.
       arrow({ element: arrowRef }),
     ],
   });
@@ -144,6 +145,7 @@ export function InfoTooltip({
       {isOpen && (
         <FloatingPortal>
           <TooltipBox
+            // eslint-disable-next-line react-hooks/refs -- Floating UI provides a callback ref, not a mutable ref value.
             ref={refs.setFloating}
             style={floatingStyles}
             {...getFloatingProps()}
