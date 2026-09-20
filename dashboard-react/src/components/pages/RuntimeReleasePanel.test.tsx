@@ -204,3 +204,36 @@ it.each(['Download and install', 'Select with owner stopped', 'Activate release'
   await click('Refresh installation status');
   expect(posts).toHaveLength(1);
 });
+
+
+it('releases a confirmed activation fence while the drawer is closed before later lifecycle work', async () => {
+  await act(async () => { root.unmount(); store.dispatch(apiSlice.util.resetApiState()); });
+  operation = { request: { operation_id: 'c'.repeat(32), runtime_digest: review.runtime_digest, expected_source_revision: 1 }, review, state: 'staged', downloaded_bytes: 100, error_code: null };
+  let observedRuntime = runtime;
+  const originalFetch = globalThis.fetch;
+  vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    const request = new Request(input, init);
+    if (new URL(request.url).pathname === '/v1/plugins/managed') return response({ installations: [observedRuntime] });
+    return originalFetch(request);
+  });
+  root = createRoot(host);
+  await act(async () => root.render(<Provider store={store}><ThemeProvider theme={darkTheme}><ManagedRuntimesPanel /></ThemeProvider></Provider>));
+  await contains('Configure'); await click('Configure'); await click('Install a release');
+  await contains('example.plugin 1.2.3');
+  await act(async () => host.querySelector<HTMLInputElement>('input[type=checkbox]')!.click());
+  await click('Activate release');
+  await act(async () => { await vi.waitFor(() => expect(posts).toHaveLength(1)); });
+  await act(async () => host.querySelector<HTMLButtonElement>('button[aria-label="Close"]')!.click());
+  const refreshRuntime = async (next: ManagedRuntime) => {
+    observedRuntime = next;
+    await act(async () => { store.dispatch(apiSlice.util.invalidateTags(['Plugins']));
+      await vi.waitFor(() => expect(store.getState()[apiSlice.reducerPath].queries['getManagedRuntimes(undefined)']?.data).toEqual({ installations: [next] }));
+    });
+  };
+  await refreshRuntime({ ...runtime, selected_digest: review.runtime_digest, enabled: true, operation_id: String(posts[0].operation_id), operation_state: 'complete' });
+  await refreshRuntime({ ...runtime, selected_digest: review.runtime_digest, operation_id: 'later-disable', operation_state: 'complete' });
+  await click('Configure'); await contains('example.plugin 1.2.3');
+  await act(async () => host.querySelector<HTMLInputElement>('input[type=checkbox]')!.click());
+  await click('Activate release');
+  await act(async () => { await vi.waitFor(() => expect(posts).toHaveLength(2)); });
+});

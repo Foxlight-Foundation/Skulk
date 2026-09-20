@@ -33,6 +33,11 @@ function RuntimeControls({ runtime, unavailable, nodes, details, nodeEvidence, f
   // Drawer dismissal must not erase a request fence before server observation.
   const [releaseSubmitted, setReleaseSubmitted] = useState<string | null>(null);
   const [activationSubmitted, setActivationSubmitted] = useState<string | null>(null);
+  // Terminal confirmation releases the fence even when the drawer is closed.
+  if (activationSubmitted && runtime.operation_id === activationSubmitted &&
+    ['complete', 'failed', 'superseded'].includes(runtime.operation_state ?? '')) {
+    setActivationSubmitted(null);
+  }
   const [withdraw, withdrawing] = useWithdrawManagedRuntimeMutation();
   const [recover, recovering] = useRecoverManagedOperationMutation();
   const operationId = submitted ?? runtime.operation_id;
