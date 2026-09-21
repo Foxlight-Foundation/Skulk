@@ -14,13 +14,13 @@ Skulk includes several opt-in KV cache backends for MLX text generation. These b
 - `mlx_quantized`: MLX LM built-in `QuantizedKVCache`
 - `turboquant`: correctness-first TurboQuant-inspired KV cache for standard `KVCache` layers
 - `turboquant_adaptive`: keeps outer KV layers in FP16 and applies TurboQuant to middle KV layers
-- `optiq`: rotation-based KV cache via [mlx-optiq](https://mlx-optiq.pages.dev/); uses randomized orthogonal rotations with Lloyd-Max quantization and rotated-space attention for superior long-context quality
+- `optiq`: rotation-based KV cache via [mlx-optiq](https://mlx-optiq.pages.dev/); uses randomized orthogonal rotations with Lloyd-Max quantization and rotated-space attention for compatible attention layouts
 
 If `SKULK_KV_CACHE_BACKEND` is unset, or is set to `default`, Skulk behaves as before.
 
-## Recommended Settings
+## Configuration examples
 
-### mlx-optiq (best quality)
+### mlx-optiq
 
 ```bash
 SKULK_KV_CACHE_BACKEND=optiq \
@@ -31,7 +31,7 @@ uv run skulk
 
 The optiq backend uses mlx-optiq's rotation-based vector quantization, which eliminates per-key rotation overhead at inference time via rotated-space attention. It keeps the first and last N KV layers in FP16 for adaptive quality.
 
-### TurboQuant Adaptive (proven stable)
+### TurboQuant Adaptive
 
 ```bash
 SKULK_KV_CACHE_BACKEND=turboquant_adaptive \
@@ -41,7 +41,7 @@ SKULK_TQ_FP16_LAYERS=4 \
 uv run skulk
 ```
 
-This mode keeps the first and last 4 KV layers in normal FP16-style cache and applies TurboQuant only to the middle KV layers. Proven stable across most models.
+This mode keeps the first and last 4 KV layers in normal FP16-style cache and applies TurboQuant only to the middle KV layers. Validate output quality and memory use with the exact model and context length you intend to serve.
 
 ## Available Environment Variables
 
@@ -83,13 +83,12 @@ SKULK_KV_CACHE_BACKEND=turboquant_adaptive SKULK_TQ_K_BITS=3 SKULK_TQ_V_BITS=4 S
 
 ## Practical Expectations
 
-| Backend | Memory | Quality | Speed | Notes |
-|---------|--------|---------|-------|-------|
-| `default` | Highest | Baseline | Fastest | No quantization |
-| `optiq` | Low | Best quantized | Near-baseline | Rotation-based, best long-context |
-| `turboquant_adaptive` | Low | Good | Moderate | Proven stable, Hadamard-based |
-| `turboquant` | Lowest | Variable | Moderate | Most aggressive compression |
-| `mlx_quantized` | Low | Good | Moderate | MLX built-in quantization |
+Quantization can reduce the memory used by standard KV layers, with additional
+compute and possible output-quality changes. Bit width, retained edge layers,
+attention layout and context length determine the trade-off; there is no universal
+quality or speed ranking. Compare a representative workload against `default`
+before choosing a setting. Model weights and unchanged recurrent or rotating
+caches are not compressed by these switches.
 
 ## Supported Cache Layouts
 
@@ -107,15 +106,17 @@ Mixed cache layouts are supported:
 ## Current Limitations
 
 - All quantized KV cache backends force sequential generation (no batch/history mode)
+- Optiq checks the observed attention geometry before patching: non-power-of-two
+  head dimensions or detected grouped-query attention (different query/KV head
+  counts) log a warning and fall back to the default cache. Check logs to confirm
+  whether quantization actually engaged.
 - The optiq backend requires `mlx-optiq` to be installed (`pip install mlx-optiq`)
 - The optiq backend's `patch_attention()` monkey-patches MLX's SDPA, so avoid switching between optiq and other backends within the same process lifetime without a restart
 
-## About mlx-optiq
+## Implementation reference
 
-The `optiq` backend is powered by [mlx-optiq](https://mlx-optiq.pages.dev/), which provides:
-
-- **Rotation-based vector quantization**: Random orthogonal rotations + Lloyd-Max centroids
-- **Rotated-space attention**: Eliminates per-key rotation overhead (O(d²) fixed cost vs O(seq_len × d²))
-- **Superior long-context quality**: Claims 100% needle retrieval at 4-bit vs 73% FP16
-
-mlx-optiq also provides mixed-precision weight quantization (per-layer sensitivity analysis via KL divergence), which Skulk plans to integrate as a model store feature in a future release.
+The accepted backend names and defaults live in
+`src/skulk/worker/engines/mlx/constants.py`. Cache conversion, compatibility
+checks and Optiq attention patching live in
+`src/skulk/worker/engines/mlx/cache.py`. These settings affect MLX runners;
+they do not configure llama.cpp, vLLM, speech or video engines.

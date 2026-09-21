@@ -636,7 +636,7 @@ when `node_cache_path` equals `store_path`.
 
 ## Related Docs
 
-- [README](https://github.com/Foxlight-Foundation/Skulk/blob/main/README.md)
+- [README](https://github.com/Foxlight-Foundation/Skulk/blob/dev/README.md)
 - [API guide](api-guide)
 - [Architecture overview](architecture)
-- [skulk.yaml example](https://github.com/Foxlight-Foundation/Skulk/blob/main/skulk.yaml.example)
+- [skulk.yaml example](https://github.com/Foxlight-Foundation/Skulk/blob/dev/skulk.yaml.example)

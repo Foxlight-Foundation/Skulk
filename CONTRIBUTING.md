@@ -527,3 +527,23 @@ toolbar. `Inventory` stories cover connected components with fictional responses
 and unprovided observations. Do not replace these fixtures with a real cluster URL.
 Run `npm run lint`, `npx tsc -b`, `npm test`, `npm run build`, and
 `npx vitest run --project storybook` from `dashboard-react` when changing the gallery.
+
+### Documentation screenshots
+
+Capture the current dashboard with the offline Storybook fixtures, which intercept
+API requests and do not operate a live cluster:
+
+```bash
+# Terminal 1, from the repository root (dashboard dependencies installed)
+npm --prefix dashboard-react run storybook -- --ci --host 127.0.0.1 --port 6017
+
+# Terminal 2, from the repository root
+node scripts/capture_docs_screenshots.mjs
+```
+
+The script refreshes desktop and phone captures under `website/docs/imgs/`,
+exercises the visible navigation and chat controls, and fails on page errors.
+Inspect every image for clipping, overlays, and incomplete loading before
+committing. Preserve captions identifying the data as fictional; these images
+are UI examples, not performance or deployment evidence. Native-app images have
+a separate capture source and are not produced by this dashboard script.

@@ -2309,6 +2309,7 @@ class API:
             "/node_id",
             tags=["State & Tracing"],
             summary="Get this API node's ID",
+            description="Return the current session-scoped node ID as a JSON string. No parameters are required.",
         )(lambda: self.node_id)
         self.app.post(
             "/instance",
@@ -2402,11 +2403,13 @@ class API:
             "/instance/{instance_id}",
             tags=["Instances"],
             summary="Get one running instance",
+            description="Return the current instance object for the exact instance ID. Unknown instances return 404; presence does not imply runner readiness.",
         )(self.get_instance)
         self.app.delete(
             "/instance/{instance_id}",
             tags=["Instances"],
             summary="Delete a running instance",
+            description="Send a deletion command for the exact instance ID and return its acknowledgement. Unknown instances return 404; the maintained Steward placement returns 409 while intelligent fabric is enabled.",
         )(self.delete_instance)
         self.app.get(
             "/models/requirements",
@@ -2646,6 +2649,7 @@ class API:
             "/bench/images/generations",
             tags=["Images"],
             summary="Benchmark image generation",
+            description="Generate images with a placed image model and return output with timing statistics. Streaming and partial images are disabled for this benchmark.",
         )(self.bench_image_generations)
         self.app.post(
             "/v1/images/edits",
@@ -2662,7 +2666,10 @@ class API:
             self.list_images
         )
         self.app.get(
-            "/images/{image_id}", tags=["Images"], summary="Fetch one stored image"
+            "/images/{image_id}",
+            tags=["Images"],
+            summary="Fetch one stored image",
+            description="Return cached image bytes with their stored content type. Missing or expired image IDs return 404; images are local to this API node.",
         )(self.get_image)
         self.app.post(
             "/v1/videos",
@@ -2821,12 +2828,14 @@ class API:
             response_model=None,
             tags=["Compatibility APIs"],
             summary="Ollama chat alias",
+            openapi_extra=_json_request_body(OllamaChatRequest.model_json_schema()),
         )(self.ollama_chat)
         self.app.post(
             "/ollama/api/v1/chat",
             response_model=None,
             tags=["Compatibility APIs"],
             summary="Ollama chat alias",
+            openapi_extra=_json_request_body(OllamaChatRequest.model_json_schema()),
         )(self.ollama_chat)
         self.app.post(
             "/ollama/api/generate",
@@ -2858,6 +2867,7 @@ class API:
             "/ollama/api/show",
             tags=["Compatibility APIs"],
             summary="Show Ollama model details",
+            openapi_extra=_json_request_body(OllamaShowRequest.model_json_schema()),
         )(self.ollama_show)
         self.app.get(
             "/ollama/api/ps",
@@ -3228,6 +3238,18 @@ class API:
                 "while model-store location changes still require a restart. The deprecated "
                 "model_trust compatibility field is preserved but cannot be replaced."
             ),
+            openapi_extra=_json_request_body(
+                {
+                    "anyOf": [
+                        SkulkConfig.model_json_schema(),
+                        {
+                            "type": "object",
+                            "required": ["config"],
+                            "properties": {"config": SkulkConfig.model_json_schema()},
+                        },
+                    ]
+                }
+            ),
         )(self.update_config)
         self.app.get(
             "/store/health",
@@ -3353,6 +3375,26 @@ class API:
                 "Start an optimization job for a model already present in the shared store. "
                 "Use this for workflows such as OptiQ conversion or alternate artifact generation."
             ),
+            openapi_extra={
+                "requestBody": {
+                    "required": False,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "target_bpw": {"type": "number", "default": 4.5},
+                                    "candidate_bits": {
+                                        "type": "array",
+                                        "items": {"type": "integer"},
+                                        "default": [4, 8],
+                                    },
+                                },
+                            }
+                        }
+                    },
+                }
+            },
         )(self.optimize_model)
         self.app.post(
             "/admin/restart",

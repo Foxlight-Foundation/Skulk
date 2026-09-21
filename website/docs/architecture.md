@@ -10,15 +10,15 @@ This is the long-form mental model for how Skulk is put together end to end. Rea
 
 ## What Skulk is
 
-Skulk is an interconnect fabric for multi-node AI compute: it connects multiple Apple Silicon (and increasingly Linux/CUDA) nodes into one cluster and moves work across them. Its headline use is distributed inference, where models are sharded across nodes, any node's API can serve cluster-wide requests, and the cluster keeps running through node arrivals, departures, and master failures. One Python binary (`uv run skulk`) is everything you need on each node: the same process is router, worker, master-eligible coordinator, election participant, API server, and, when its built assets are present, dashboard host. A headless node (for example a Linux worker with no built dashboard) runs as a full node and serves the API without the UI.
+Skulk is an interconnect fabric for multi-node AI compute: it connects Apple Silicon and Linux GPU or CPU nodes into one cluster and moves work across them. Its headline use is distributed inference, where models are sharded across nodes, any node's API can serve cluster-wide requests, and the cluster keeps running through node arrivals, departures, and master failures. One Python binary (`uv run skulk`) is everything you need on each node: the same process is router, worker, master-eligible coordinator, election participant, API server, and, when its built assets are present, dashboard host. A headless node (for example a Linux worker with no built dashboard) runs as a full node and serves the API without the UI.
 
 The design choices that shape almost everything else:
 
 - **Event-sourced decisions.** Correctness-critical cluster facts (instances, runners, terminal download outcomes, tracing toggles) flow through an ordered event log. Observational latest-value readings stay outside it. State is the result of `apply()`-ing events to a Pydantic model that is treated as immutable by convention (replaced wholesale by `apply()` rather than mutated in place).
 - **One master at a time.** A bully election picks the master; only the master indexes events. Failover is automatic, and the promoted node seeds the new session from its replicated state, so placed instances and bounded steward-action recovery truth survive a master restart: workers rebuild their runners and serving resumes after a model-reload-sized gap, while the new master resumes actionable approved or dispatched proposals. Instances with a rank on the dead master are cleaned up once live topology confirms the node is gone.
 - **libp2p pub/sub for transport.** Topics carry commands, events, telemetry, and connection updates between nodes. Election and telemetry each use dedicated Python egress plus their own gossipsub behavior, protocol, and per-peer handler queues on the same libp2p swarm, so telemetry pressure cannot consume control or election capacity. Election alone retains its temporary legacy-protocol compatibility copy.
-- **MLX as the inference backend.** Pipeline-parallel and tensor-parallel sharding strategies sit on top of `mlx.distributed`'s ring or jaccl/RDMA backends.
-- **Subprocess isolation for runners.** Each model instance runs in its own `mp.Process` with its own MLX/Metal context, so a crash or hang in one runner can't bring down the rest of the node. The shipped systemd unit sets `OOMPolicy=continue` for the same boundary: if Linux OOM-kills a runner child, systemd leaves the Skulk parent, API, and co-hosted model store alive while the supervisor and crash breaker handle the failed runner.
+- **Capability-aware inference engines.** MLX supports Apple Silicon text, vision, embeddings and image workloads, with pipeline and tensor parallelism on `mlx.distributed` ring or jaccl/RDMA. GGUF text uses in-process llama.cpp or managed llama-server; GPU text can use vLLM. Dedicated MLX Audio and ComfyUI runners serve speech and video. Model cards, exact engine support, live node evidence and runner limitations jointly determine admission. See [Inference and media](inference.md).
+- **Subprocess isolation for runners.** Each model instance runs in its own `mp.Process` with its own engine context, so a crash or hang in one runner can't bring down the rest of the node. The shipped systemd unit sets `OOMPolicy=continue` for the same boundary: if Linux OOM-kills a runner child, systemd leaves the Skulk parent, API, and co-hosted model store alive while the supervisor and crash breaker handle the failed runner.
 
 ## The shape of a node
 
@@ -713,18 +713,6 @@ serves at full context without it. Whether a given GGUF emits a structured tool
 call (versus describing one in prose) depends on the model and its embedded chat
 template, which the runner uses as-is.
 
-## Speech serving
-
-Speech models are ordinary model cards with an `[audio]` section, served by a
-dedicated `mlx_audio` engine. A macOS node advertises the `mlx_audio` /
-`mlx_audio-metal` backend tags whenever the upstream `mlx_audio` package
-imports, and the platform capability table keeps TTS and STT cards off the
-text engines, so a speech card lands only on a node whose probed package can
-actually serve it. Speech runners are single-node. The card's `audio` section
-declares what the model truthfully supports (streaming, realtime, reference
-audio, translation, fixed voices), and every serving surface below gates on
-those declarations rather than assuming them per family.
-
 ## Video generation cards
 
 Audio-video generation models are ordinary model cards with a `[video]`
@@ -852,8 +840,7 @@ Skulk's user directory.
 
 ### Test video engine
 
-Before any served video engine exists, and on nodes that will never run
-one, `SKULK_TEST_VIDEO_ENGINE=1` advertises the deterministic test engine
+For testing without a production video engine, `SKULK_TEST_VIDEO_ENGINE=1` advertises the deterministic test engine
 (`test_video`, `test_video-cpu`). It serves only the bundled
 `foxlight/test-video` card; the worker writes a stand-in model directory at
 startup so the card places without a download. A render walks every real
@@ -868,6 +855,40 @@ render so cancel and progress paths can be exercised at human speed. It is
 a test instrument, not a product engine. The card is registered as a
 custom card on the node advertising the engine; a multi-node fleet needs it
 on any node that may be elected master too.
+
+### Advisory model requirements
+
+`GET /models/requirements` reads the same effective catalog and installed-card
+precedence as `/models`. It binds complete card contents with
+`authorized_model_card_digest` (all JSON-mode fields except the publication
+snapshot) and uses `estimate_shard_footprint` for whole-model text memory at the
+requested context. Unknown KV geometry produces a null estimate. The response
+also exposes declared storage, backend evidence and core working-set fractions;
+it performs no placement, download, reservation or external-provider action.
+External controllers must revalidate identity and live admission before execution.
+See [API contract](./api-guide.md#read-model-capacity-requirements).
+
+
+The requirements response exports `required_capabilities` from the same pure
+`get_model_required_capabilities` resolver used by signed engine admission.
+External planners must cover its entire nonempty set, exact engine build and
+hardware restrictions. Launchable placement previews expose the same complete
+`card_digest` for binding approved requirements to the submitted instance;
+the API/master card checks and resource-derived context ceiling still apply.
+Exact-instance creation does not atomically revalidate topology or backend/build
+support, so controllers must check live node support before and after submission.
+
+## Speech serving
+
+Speech models are ordinary model cards with an `[audio]` section, served by a
+dedicated `mlx_audio` engine. A macOS node advertises the `mlx_audio` /
+`mlx_audio-metal` backend tags whenever the upstream `mlx_audio` package
+imports, and the platform capability table keeps TTS and STT cards off the
+text engines, so a speech card lands only on a node whose probed package can
+actually serve it. Speech runners are single-node. The card's `audio` section
+declares what the model truthfully supports (streaming, realtime, reference
+audio, translation, fixed voices), and every serving surface below gates on
+those declarations rather than assuming them per family.
 
 ### Text to speech
 
@@ -993,10 +1014,10 @@ input chunks into exact classifier windows, and emits typed
 minimum-speech, silence-hangover, preroll, and maximum-utterance state. Media
 is processed per call and never retained.
 
-### Intelligent fabric (internal steward role)
+## Intelligent fabric (internal steward role)
 
-Skulk can keep a small resident model, the steward, always available to
-answer operator questions about the cluster. The mode is configured by the
+Skulk can maintain a resident model, the steward, to
+answer operator questions about the cluster. For setup, examples and the approval workflow, see [Talk to Skulk](steward.md). The mode is configured by the
 `intelligent_fabric` section of the cluster configuration and is off by
 default.
 
@@ -1366,7 +1387,7 @@ Skulk supports multiple KV cache backends, selectable per-cluster via config:
 - `turboquant` / `turboquant_adaptive`: random-orthogonal-rotation + scalar quant
 - `optiq`: rotated-space attention trick, decode-time perf benefit
 
-(RotorQuant is a research backend not yet in the merged backend set; check `src/skulk/worker/engines/mlx/constants.py` for the current valid values.)
+See [KV cache backends](kv-cache-backends.md) for the supported choices and their model constraints.
 
 The choice affects memory footprint and decode throughput. See [KV Cache Backends](kv-cache-backends) for the operator-facing trade-offs.
 
@@ -1423,11 +1444,9 @@ When a model appears stalled during warmup, prefill, or distributed generation, 
 
 The wider observability story (cluster timeline, hang-rate SLO, per-node panel) is being consolidated. The user-facing operator workflow is documented in [Tracing and debugging](tracing) and the [API guide](api-guide).
 
-## Storage
-
 Four on-disk responsibilities:
 
-### Operator identity and authority foundation
+## Operator identity and authority foundation
 
 Remote operator identity is deliberately separate from runtime libp2p identity
 and from the event-sourced inference state. `src/skulk/operator/identity.py`
@@ -1594,6 +1613,8 @@ Version two is source-integrated but remains opt-in and is not a production
 capacity claim: mixed-version upgrade/rollback, released-app regression, relay
 authority persistence/revocation, and measured 1,000–10,000-device qualification
 must pass before a production route is migrated.
+
+## Storage
 
 ### Event log
 
@@ -1826,7 +1847,7 @@ checks the current revision, signed artifacts, permissions and migration compati
 before interrupting a healthy owner. Accepted intent survives client disconnect;
 restart reconciles the exact local selection across its atomic publication boundary.
 `runtime_manager.py` exposes a fixed protected Unix socket shared by terminal and
-future HTTP management integration. It registers up to sixteen installations,
+HTTP management integration. It registers up to sixteen installations,
 provisions their existing transport binding, supervises controllers and keeps broken
 installations visible. It accepts no executable/path overrides or paid approvals.
 `service_snapshot.py` prepares a separate copy of the existing qualified Skulk
@@ -1857,8 +1878,7 @@ runtime as the owner, generates the profile connection, and invokes the standalo
 standard-library-only `service_registration.py` helper for fixed system definitions.
 Only that local helper runs elevated; LaunchDaemons/systemd run the manager as the
 existing nonroot account from durable system storage. Retained setup phase is
-separate from current runtime integrity and manager availability. HTTP lifecycle,
-dynamic registration and physical service/reboot qualification remain open.
+separate from current runtime integrity and manager availability. HTTP lifecycle and dynamic installation registration use this manager; setup progress, runtime integrity and live management availability remain separate observations.
 
 `terminal_install.py` composes the manager's existing operations for the interactive
 `skulk-plugin-service install-plugin` command. It generates installation/operation
@@ -1970,6 +1990,118 @@ The contract is deliberately small (`src/skulk/extensions/`):
   embedding serving (the in-process equivalent of `POST /v1/embeddings`), and
   the telemetry-plane and capability surfaces described in the subsections
   below.
+
+The trusted steward extension facet reads the current intelligent-fabric mode and global
+`SKULK_FABRIC_CAPABILITIES_DISABLE` kill switch through `ExtensionContext.steward_actions_allowed`. Proposal
+collection and dispatch recheck it; private approved-action adapters must also
+recheck it on every dispatch or retry. The callback supplies no approval evidence
+or signing authority, and omitted callbacks fail closed.
+
+
+### Managed setup, authority and lifecycle
+
+Managed capability nodes may expose the optional `NodePreflightProvider` facet.
+The generic `/v1/plugins/{plugin_id}/nodes/{node_id}/preflight` read returns
+bounded prerequisite results and observed revision metadata independently of
+child readiness. Skulk owns authorization and response bounds; the plugin owns
+provider-specific checks and fresh enable/restart enforcement. Dashboard setup
+checks do not grant acquisition or spending authority.
+
+
+Public setup files use the optional `NodeSetupProvider` facet in
+`extensions/setup.py` and the read-scoped
+`/v1/plugins/{plugin_id}/nodes/{node_id}/setup` route. The management provider owns
+initial identity generation; the read returns only bounded public text artifacts
+and observed revisions. Disabled children retain this facet. The dashboard uses
+explicit downloads without changing credentials or granting lifecycle/spending
+authority. Private values remain in the write-only credential path.
+
+
+`extensions/local_setup.py` implements the explicit local
+`skulk-plugin-service setup-plugin` path. It discovers one installed plugin by ID
+through the protected service connection, validates retained authority and the full
+selected runtime, and replaces the terminal process with the setup launcher:
+the signed archive's fixed optional `__setup__` entrypoint, or the `setup` entry a
+signed wheel declares under `skulk.capability_runtime`. Its installer lock survives exec until setup
+exits. This is provider-neutral local dispatch; private prompts, credentials and
+any local registration policy stay in the plugin. Remote HTTP management never
+executes this entrypoint or accepts a module/executable path.
+
+
+
+`extensions/proposal_actions.py` adds the distinct `NodeProposalActionsProvider`
+facet: exact reviewed reference/revision approval, durable status, and explicit
+interrupted-approval recovery. Both action routes require `plugins:approve` on
+direct and relay paths; observations require `plugins:read`. Authenticated actors
+come from the API, never request bodies. The Plugins dashboard renders safe terms
+and retains only operation IDs across reconnect; it never replays submissions.
+Provider policy, signatures, journals and cleanup remain outside core.
+
+Nonbillable setup actions use the optional `NodeSetupActionsProvider` facet in
+`extensions/setup_actions.py`. Installed nodes advertise `setup_actions_available`;
+core exposes fixed form/start/observation/resume routes under `/v1/plugins` with
+separate read/manage authorization. Actions declaring `requires_approval` also
+require `plugins:approve`; resume preserves the original requirement even if the
+current action changes. This permits protected setup, never paid proposal approval.
+The managed adapter dispatches to the private
+owner, which owns durable intent, reconciliation and background execution outside
+the unary child slot. Dashboard reconnect only observes retained progress. Ordinary
+forms cannot contain credential fields, and setup completion does not imply
+preflight, enablement or paid approval. Public setup-file reads remain separate.
+
+
+Installed plugin terminal management uses `skulk-plugin-service manage-plugin`
+and either the archive's optional `__manage__.py` or the `manage` launcher a signed
+wheel declares under `skulk.capability_runtime`. `extensions/local_setup.py`
+shares verification and inherited generation ownership with `setup-plugin`, while
+keeping entrypoints distinct. The plugin derives durable coordinates and owns its
+fixed CLI verbs; core accepts no executable/module selector and adds no HTTP exec
+route. Terminal commands run as the existing nonroot owner and cannot self-approve
+paid effects. The independent manager remains available for owner/runtime recovery.
+
+
+The dashboard's `auth/operatorSession.ts` implements the existing Ed25519 pairing
+and rotating-token protocol for a browser on a protected gateway URL. Its access
+panel reviews cluster identity, retains credentials only in module memory, serializes
+refresh and injects bearer headers below RTK Query request metadata. It never replays
+an API mutation after authentication failure. Session changes clear caches and plugin
+drafts; explicit direct-host selection is required after a paired session ends.
+Plugin grant administration refuses a presented paired bearer even on the direct
+listener. Native relay inner TLS remains a separate transport, not a browser shim.
+
+Managed owner proposal observations may include separate receipt reconciliation
+(`ProposalReconciliation`): lifecycle state, journal read time, stale health/access
+and a safe code. The provider owns exact receipt correlation; core only authorizes
+read access and transports bounded metadata. Later confirmed absence never rewrites
+submission uncertainty. Dashboard and terminal show the same facts without retrying
+an effect or claiming inference readiness from resource state.
+
+
+Managed proposal phase `acknowledged` records durable asynchronous controller
+acceptance, before any claim of provider completion. The private owner validates
+request correlation, preserves acknowledgement across restart and reconciles later
+receipt state without replay. Core and dashboard transport/display this bounded
+phase alongside independent cleanup observations.
+
+
+Managed-plugin `uninstall` is a retained-state withdrawal through the existing
+`RuntimeController`, using the same owner stop and selection journal as disable.
+The selected lifecycle operation determines inventory's `uninstalled` flag, separately
+from pending-operation progress. No extra supervisor, provider call or purge is added.
+Configuration, credentials, receipts and runtime generations remain available;
+independent cleanup continues. A verified `select` or `activate` reinstalls explicitly.
+
+### Plugin-owned fabric attachment
+
+An installed capacity plugin can read `GET /v1/plugins/host-network` through the
+existing owner or explicit plugin-read authorization. The router queries native
+listeners for actual control and data ports rather than guessing startup defaults.
+The response identifies this process and its data transport, with a separate
+namespace comparison fingerprint that cannot be used as the routing namespace.
+No namespace secret enters the response or replicated state. The plugin owns its
+secure transport and remote bootstrap; the core read never connects peers or
+restarts existing inference. Missing TCP listeners fail closed, and observations
+are bounded, uncached and refreshed after process restart.
 
 ### Steward adapter tools
 
@@ -2309,135 +2441,3 @@ delivery. Queue overflow and incomplete flows invalidate the observation.
 - [Model Store](model-store): shared model artifact hosting
 
 Maintenance discipline for this doc and the [Architecture Reference](architecture-reference) lives in [AGENTS.md](https://github.com/Foxlight-Foundation/Skulk/blob/main/AGENTS.md). Architectural shape changes (new component, new event, new pubsub topic, new state field, new major API endpoint, new family adapter) update these docs in the same commit as the code.
-
-The trusted steward extension facet reads the current intelligent-fabric mode and global
-`SKULK_FABRIC_CAPABILITIES_DISABLE` kill switch through `ExtensionContext.steward_actions_allowed`. Proposal
-collection and dispatch recheck it; private approved-action adapters must also
-recheck it on every dispatch or retry. The callback supplies no approval evidence
-or signing authority, and omitted callbacks fail closed.
-
-
-### Advisory model requirements
-
-`GET /models/requirements` reads the same effective catalog and installed-card
-precedence as `/models`. It binds complete card contents with
-`authorized_model_card_digest` (all JSON-mode fields except the publication
-snapshot) and uses `estimate_shard_footprint` for whole-model text memory at the
-requested context. Unknown KV geometry produces a null estimate. The response
-also exposes declared storage, backend evidence and core working-set fractions;
-it performs no placement, download, reservation or external-provider action.
-External controllers must revalidate identity and live admission before execution.
-See [API contract](./api-guide.md#read-model-capacity-requirements).
-
-
-The requirements response exports `required_capabilities` from the same pure
-`get_model_required_capabilities` resolver used by signed engine admission.
-External planners must cover its entire nonempty set, exact engine build and
-hardware restrictions. Launchable placement previews expose the same complete
-`card_digest` for binding approved requirements to the submitted instance;
-the API/master card checks and resource-derived context ceiling still apply.
-Exact-instance creation does not atomically revalidate topology or backend/build
-support, so controllers must check live node support before and after submission.
-
-Managed capability nodes may expose the optional `NodePreflightProvider` facet.
-The generic `/v1/plugins/{plugin_id}/nodes/{node_id}/preflight` read returns
-bounded prerequisite results and observed revision metadata independently of
-child readiness. Skulk owns authorization and response bounds; the plugin owns
-provider-specific checks and fresh enable/restart enforcement. Dashboard setup
-checks do not grant acquisition or spending authority.
-
-
-Public setup files use the optional `NodeSetupProvider` facet in
-`extensions/setup.py` and the read-scoped
-`/v1/plugins/{plugin_id}/nodes/{node_id}/setup` route. The management provider owns
-initial identity generation; the read returns only bounded public text artifacts
-and observed revisions. Disabled children retain this facet. The dashboard uses
-explicit downloads without changing credentials or granting lifecycle/spending
-authority. Private values remain in the write-only credential path.
-
-
-`extensions/local_setup.py` implements the explicit local
-`skulk-plugin-service setup-plugin` path. It discovers one installed plugin by ID
-through the protected service connection, validates retained authority and the full
-selected runtime, and replaces the terminal process with the setup launcher:
-the signed archive's fixed optional `__setup__` entrypoint, or the `setup` entry a
-signed wheel declares under `skulk.capability_runtime`. Its installer lock survives exec until setup
-exits. This is provider-neutral local dispatch; private prompts, credentials and
-any local registration policy stay in the plugin. Remote HTTP management never
-executes this entrypoint or accepts a module/executable path.
-
-
-
-`extensions/proposal_actions.py` adds the distinct `NodeProposalActionsProvider`
-facet: exact reviewed reference/revision approval, durable status, and explicit
-interrupted-approval recovery. Both action routes require `plugins:approve` on
-direct and relay paths; observations require `plugins:read`. Authenticated actors
-come from the API, never request bodies. The Plugins dashboard renders safe terms
-and retains only operation IDs across reconnect; it never replays submissions.
-Provider policy, signatures, journals and cleanup remain outside core.
-
-Nonbillable setup actions use the optional `NodeSetupActionsProvider` facet in
-`extensions/setup_actions.py`. Installed nodes advertise `setup_actions_available`;
-core exposes fixed form/start/observation/resume routes under `/v1/plugins` with
-separate read/manage authorization. Actions declaring `requires_approval` also
-require `plugins:approve`; resume preserves the original requirement even if the
-current action changes. This permits protected setup, never paid proposal approval.
-The managed adapter dispatches to the private
-owner, which owns durable intent, reconciliation and background execution outside
-the unary child slot. Dashboard reconnect only observes retained progress. Ordinary
-forms cannot contain credential fields, and setup completion does not imply
-preflight, enablement or paid approval. Public setup-file reads remain separate.
-
-
-Installed plugin terminal management uses `skulk-plugin-service manage-plugin`
-and either the archive's optional `__manage__.py` or the `manage` launcher a signed
-wheel declares under `skulk.capability_runtime`. `extensions/local_setup.py`
-shares verification and inherited generation ownership with `setup-plugin`, while
-keeping entrypoints distinct. The plugin derives durable coordinates and owns its
-fixed CLI verbs; core accepts no executable/module selector and adds no HTTP exec
-route. Terminal commands run as the existing nonroot owner and cannot self-approve
-paid effects. The independent manager remains available for owner/runtime recovery.
-
-
-The dashboard's `auth/operatorSession.ts` implements the existing Ed25519 pairing
-and rotating-token protocol for a browser on a protected gateway URL. Its access
-panel reviews cluster identity, retains credentials only in module memory, serializes
-refresh and injects bearer headers below RTK Query request metadata. It never replays
-an API mutation after authentication failure. Session changes clear caches and plugin
-drafts; explicit direct-host selection is required after a paired session ends.
-Plugin grant administration refuses a presented paired bearer even on the direct
-listener. Native relay inner TLS remains a separate transport, not a browser shim.
-
-Managed owner proposal observations may include separate receipt reconciliation
-(`ProposalReconciliation`): lifecycle state, journal read time, stale health/access
-and a safe code. The provider owns exact receipt correlation; core only authorizes
-read access and transports bounded metadata. Later confirmed absence never rewrites
-submission uncertainty. Dashboard and terminal show the same facts without retrying
-an effect or claiming inference readiness from resource state.
-
-
-Managed proposal phase `acknowledged` records durable asynchronous controller
-acceptance, before any claim of provider completion. The private owner validates
-request correlation, preserves acknowledgement across restart and reconciles later
-receipt state without replay. Core and dashboard transport/display this bounded
-phase alongside independent cleanup observations.
-
-
-Managed-plugin `uninstall` is a retained-state withdrawal through the existing
-`RuntimeController`, using the same owner stop and selection journal as disable.
-The selected lifecycle operation determines inventory's `uninstalled` flag, separately
-from pending-operation progress. No extra supervisor, provider call or purge is added.
-Configuration, credentials, receipts and runtime generations remain available;
-independent cleanup continues. A verified `select` or `activate` reinstalls explicitly.
-
-### Plugin-owned fabric attachment
-
-An installed capacity plugin can read `GET /v1/plugins/host-network` through the
-existing owner or explicit plugin-read authorization. The router queries native
-listeners for actual control and data ports rather than guessing startup defaults.
-The response identifies this process and its data transport, with a separate
-namespace comparison fingerprint that cannot be used as the routing namespace.
-No namespace secret enters the response or replicated state. The plugin owns its
-secure transport and remote bootstrap; the core read never connects peers or
-restarts existing inference. Missing TCP listeners fail closed, and observations
-are bounded, uncached and refreshed after process restart.

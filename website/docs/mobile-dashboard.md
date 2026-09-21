@@ -10,7 +10,12 @@ description: The Skulk dashboard works from a phone browser, so you can monitor 
 
 # Manage Your Cluster from a Phone
 
-The Skulk dashboard is fully responsive. At phone widths every view adapts to
+This guide describes the **web dashboard in a phone browser**. For the separate
+iOS and Android operator application, see [Native app](native-app). Both use
+Skulk's canonical APIs, but the native app has its own pairing, encrypted local
+history, and remote carrier.
+
+The Skulk dashboard is responsive. At phone widths every view adapts to
 a single-column layout: the header collapses into a menu, side panels become
 slide-in drawers, and observability takes over the full screen. Nothing is
 cut down; topology, the model store, chat, placement, and live runner
@@ -40,8 +45,10 @@ address (or MagicDNS name):
 http://<node-name>.<tailnet>.ts.net:52415
 ```
 
-This is the recommended remote shape: no ports exposed to the internet, and
-the phone joins the same private overlay the nodes already use. The
+This is one private-network browser access option: the phone joins the same
+overlay as the nodes. The native app instead uses paired encrypted relay access
+and does not require a VPN app. See [Remote access](remote-access) for the
+connection and authorization boundaries. The
 observability Node tab shows each node's own Tailscale state, which helps
 confirm the overlay is up when you are away from the cluster.
 
@@ -53,14 +60,17 @@ full-screen, which makes it feel like an app rather than a browser tab.
 
 ## The mobile layout
 
+These captures show the current dashboard with fictional nodes, models, and
+measurements. They demonstrate layout and controls rather than a live deployment.
+
 <div style={{display: 'flex', gap: '12px', flexWrap: 'wrap'}}>
   <img src={require('./imgs/mobile-topology.png').default} alt="Cluster topology on a phone" width="260" />
   <img src={require('./imgs/mobile-menu.png').default} alt="The mobile navigation menu" width="260" />
 </div>
 
 The hamburger button opens a menu carrying everything the desktop header
-shows inline: the Cluster, Model Store, and Chat views, plus Observability,
-Settings, and the theme toggle. The cluster view renders the same live
+shows inline: Cluster, Model Store, Chat, Integrations, and Plugins, plus
+Observability, Settings, and the theme toggle. The cluster view renders the same live
 topology as desktop, with node cards sized for the smaller canvas.
 
 <div style={{display: 'flex', gap: '12px', flexWrap: 'wrap'}}>
@@ -73,10 +83,11 @@ time-to-first-token and throughput stats as desktop. The conversation
 history and active-instances panels open as drawers over the content and
 close by tapping the dimmed area behind them.
 
-Observability opens as a full-screen sheet with the same three tabs as
+Observability opens as a full-screen sheet with the same tabs as
 desktop: **Live** (runner phases and the cross-rank timeline), **Node**
 (per-node hardware, memory, and connectivity details, including Tailscale
-state), and **Traces** (saved generation traces). Watching a placement load
+state), **Traces** (saved generation traces), and **Performance** (observed request
+performance envelopes). Watching a placement load
 layer by layer from a phone is a good way to keep an eye on a long model
 load without sitting at a desk.
 

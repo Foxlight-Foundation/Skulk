@@ -26,7 +26,8 @@ Skulk now treats capability handling as two related layers:
 
 The model card stores broad static metadata plus optional advanced capability sections.
 
-This is the durable, syncable, editable source of truth.
+This is the durable, syncable source of truth. Signed registry cards are
+immutable; operators can add custom cards through the explicit model-add flow.
 
 ### 2. Resolved runtime profile
 
@@ -73,6 +74,29 @@ The decisions it drives today are:
 - prompt renderer selection
 - output parser selection
 - speech model discovery and TTS/STT dashboard affordances
+
+## Model behavior and engine compatibility
+
+A model's intrinsic capability and the ability to serve it on this cluster are
+separate facts. The ecosystem combines four layers:
+
+1. The signed model card and capability claims describe the exact artifact.
+2. The signed engine-support matrix can add compatibility for an exact engine
+   build, artifact format, architecture, capability, and hardware class.
+3. Live node resources advertise the installed engine builds and hardware.
+4. Skulk's runner support applies the final platform limitations.
+
+Declared card backends remain valid alongside exact supported matrix matches.
+Experimental, unsupported, stale-build, and hardware-mismatched claims do not
+expand placement. An explicit incomplete-artifact claim blocks matrix admission
+for that capability. A capability badge therefore does not guarantee that every
+node, engine, or placement can execute it.
+
+See [Model cards](model-cards.md) for the metadata contract and
+[The Skulk ecosystem](ecosystem.md) for how publication, downloading, and runtime
+readiness fit together. Model capabilities on this page describe model behavior;
+[capability nodes](capability-nodes.md) are fabric services with a separate
+provider lifecycle.
 
 ## Thinking contract
 

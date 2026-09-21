@@ -10,8 +10,7 @@ This is the day-two runbook for running a Skulk cluster: what to check and
 what to do when storage fills up, a placement is refused, a node dies
 mid-generation, the disk gets tight, or you need to trace a bad request.
 
-It is written around the live control-plane endpoints and the behaviors that
-shipped for launch. Every action here is something you can do against a
+It is written around the live control-plane endpoints and the runtime behaviors. Every action here is something you can do against a
 running cluster with `curl` and the dashboard. There is nothing to recompile.
 Packaged users can start or stop the local node and open its dashboard or logs
 from the Skulk app; the operational behavior below is the same once it runs.
@@ -150,7 +149,7 @@ single node's picture before and after, use that node's `GET /store/storage`.
 
 ## Placement Failures
 
-Impossible placements now fail loudly at the API **before** the command
+Impossible placements fail at the API **before** the command
 reaches the master, with a specific typed reason, instead of returning
 "Command received" and leaving the client with an unexplained `404`. Here is
 how to read each one.
@@ -187,8 +186,8 @@ memory": it is reported as info-pending. The request internally waits up to
 **15 seconds** for the info to arrive before returning `503`.
 
 What to do: **wait a few seconds and retry.** The 15-second internal grace
-covers most cases; a `503` means the info still had not arrived, so a second
-attempt shortly after almost always succeeds.
+covers most cases; a `503` means the info still had not arrived, so retry after checking that the expected peers and their resource observations
+are present.
 
 ### Node IDs are per-session
 
@@ -209,8 +208,8 @@ curl "http://localhost:52415/instance/previews?model_id=mlx-community/Qwen3.5-9B
 ### A node dies mid-generation
 
 When an instance is lost (node disconnect, crash, or deletion with a
-request in flight), open requests now **error within seconds with a
-retryable message** instead of hanging until the client's own timeout.
+request in flight), open requests **terminate with a
+retryable error** instead of hanging until the client's own timeout.
 
 - For a lost **worker**: the master emits `TaskFailed` for in-flight API
   tasks whose instance is gone; streaming responses close with an error
@@ -220,9 +219,11 @@ retryable message** instead of hanging until the client's own timeout.
   at the session boundary with an error explaining the session changed and
   asking the client to retry.
 
-End-to-end, clients receive the error within **~4 to 6 seconds** of a node kill
-(master or worker rank). The correct client behavior in both cases is the
-same: **retry the request.**
+Detection time depends on the failed path, heartbeat freshness, election and
+transport deadlines. Keep a client timeout and handle the terminal error. After
+checking readiness, retry inference only when repeating the request is acceptable
+to your application; never replay external tool effects solely because inference
+was interrupted.
 
 Node liveness itself is decided from a **dedicated telemetry heartbeat** each
 node publishes every two seconds; ordinary telemetry readings and the node's
@@ -362,8 +363,9 @@ pruned by an hourly janitor after `tracing.retention_days` (default 3).
 
 A fast pass to confirm a cluster is healthy and ready to serve:
 
-1. **Cluster formed.** `GET /state` and confirm the `node_identities` count
-   matches the machines you expect to be in the cluster.
+1. **Cluster formed.** `GET /state` and confirm the `topology.nodes` transport peers and `nodeIdentities`
+   match the members you expect. Transport peers and capability nodes are distinct;
+   neither count is necessarily a count of physical machines.
 
    ```bash
    curl -s http://localhost:52415/state
@@ -394,3 +396,43 @@ A fast pass to confirm a cluster is healthy and ready to serve:
    rather than plain decode. See
    [Speculative Decoding (MTP)](speculative-decoding.md) for what to expect
    and how to read it.
+
+## Diagnose a feature that is missing
+
+A running API does not imply that every workload is available. Check the complete
+chain: catalog card, node backend, placement, runner readiness, then an ordinary
+request. `GET /v1/models` exposes model capabilities; placement previews explain
+admission, and `/state` shows the assigned instance and runner lifecycle.
+
+| Symptom | What to inspect |
+| --- | --- |
+| Image or video models absent | Image/video enablement on the relevant nodes, catalog cards and engine availability; see [Inference and media](inference.md). |
+| Microphone uses uploaded clips | Realtime requires a ready realtime-capable STT card and live provider advertisement; see [Speech](speech-fabric-realtime.md). |
+| Skulk conversation unavailable | `GET /v1/steward` reports disabled, downloading, starting, ready or degraded state; see [Talk to Skulk](steward.md). |
+| Plugin listed but unavailable | Read manager integrity, selected/active generation, owner availability, preflight and child readiness separately. Installation is not provider readiness. |
+| Remote reads succeed but an action fails | Inspect the paired device and explicit grants. Plugin read, management and approval are separate authorities. |
+| Video job disappeared or media URL fails on another node | Jobs and stored output belong to the accepting API node. Use that origin and download output before retention expires. |
+
+## Plugin lifecycle and external resources
+
+The Plugins dashboard and `skulk-plugin-service` share durable manager operations.
+After reconnecting, read the retained operation before attempting recovery. Disable
+stops the selected owner; uninstall additionally records the installation as
+uninstalled while retaining configuration, credentials, artifacts and receipts.
+Neither action proves that an external resource has been deleted. Independently
+supervised provider cleanup must reconcile its own receipts. A plugin proposal
+marked `acknowledged` means its controller accepted the request, not that capacity
+is running or that model inference is ready. See [Extensions](extensions.md) and
+[Controller integration](controller-integration.md).
+
+## Telemetry and access boundaries
+
+Cluster telemetry is an operational transport for current resource observations.
+Opt-in field telemetry is a separate collection feature, controlled by consent and
+`SKULK_TELEMETRY_DISABLE=1`. Centralized logging is a third, separately configured
+facility. Disabling field telemetry does not disable cluster liveness observations.
+
+Use the [API guide](api-guide.md) for direct-host, paired-device and relay
+authorization. Preserve the distinction between the elected runtime master and
+the operator authority: a reachable API or a capability advertisement grants no
+permission to mutate a cluster, manage a plugin or approve provider spending.

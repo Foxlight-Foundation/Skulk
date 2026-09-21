@@ -14,7 +14,7 @@ The happy path is deliberately small:
 3. Confirm every node appears in the dashboard.
 
 Skulk discovers peers automatically over mDNS on your local network, and the
-inference data plane automatically prefers Thunderbolt links when present.
+MLX compute interconnect automatically prefers Thunderbolt links when present.
 
 ## 1. Prerequisites
 
@@ -36,7 +36,7 @@ brew install --cask Foxlight-Foundation/skulk/skulk
 The source-development alternative is:
 
 ```bash
-git clone https://github.com/Foxlight-Foundation/Skulk.git
+git clone --branch dev https://github.com/Foxlight-Foundation/Skulk.git
 cd Skulk
 npm --prefix dashboard-react install
 npm --prefix dashboard-react run build
@@ -153,7 +153,7 @@ node appears in the cluster topology.
 
 Skulk does not require any Thunderbolt-specific configuration to *cluster*: the
 control plane (peer discovery, coordination) runs over whatever local network
-your Macs share. Thunderbolt matters for the **data plane**: when a model is
+your Macs share. Thunderbolt matters for the **compute plane**: when a model is
 placed across nodes, Skulk's placement automatically prefers Thunderbolt links
 for the high-bandwidth tensor exchange (ranked above Ethernet, Wi-Fi, and any
 overlay such as Tailscale).

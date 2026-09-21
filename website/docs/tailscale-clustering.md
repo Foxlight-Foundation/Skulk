@@ -8,7 +8,7 @@ sidebar_label: Multi-network clustering
 
 By default, Skulk discovers cluster peers using mDNS, which only works on the same local network segment. If you want cluster nodes in different locations (a Mac at home, a Linux box at a colo, a cloud VM), mDNS won't reach them.
 
-Tailscale solves this by giving every node a stable `100.x.x.x` address that works across any network. You configure Skulk to use those addresses as bootstrap peers, and the cluster forms over the Tailscale overlay.
+Tailscale solves this by giving every node a stable `100.x.x.x` address that works across any network. Use those addresses for Skulk's control-plane bootstrap and its data-plane connections. Both paths must be reachable.
 
 :::info Tailscale must be installed on every cluster node
 Unlike the [remote access](tailscale) scenario (where only the node you want to reach needs Tailscale), multi-network clustering requires **every node** to have Tailscale installed and running. This is because Skulk dials each peer directly by its `100.x.x.x` address; there's no gateway or proxy. If a node doesn't have a Tailscale IP, the other nodes have no address to dial it on.
@@ -67,7 +67,21 @@ connectivity:
 
 Port `52416` is Skulk's default libp2p port. If you changed it with `--libp2p-port`, use that port instead.
 
-### 3. Restart Skulk on every node
+### 3. Connect the data plane
+
+mDNS and Zenoh multicast discovery do not cross routed networks. Control-plane
+bootstrap alone does not establish the data path used for inference output and
+media. Configure `SKULK_ZENOH_LISTEN` with a reachable listener on each node and
+`SKULK_ZENOH_CONNECT` with the peers' explicit `tcp/HOST:PORT` endpoints. Use the
+actual listener ports rather than assuming they are the API or libp2p port. Allow
+those ports in your tailnet policy as well as the control port.
+
+All nodes must use the same data transport and `SKULK_LIBP2P_NAMESPACE`. After
+startup, check `/state` and data-plane diagnostics for transport mismatch or
+isolation before starting a multi-node workload. See
+[cluster communication](cluster-communication.md) for defaults and constraints.
+
+### 4. Restart Skulk on every node
 
 ```bash
 # Running manually:
@@ -95,16 +109,17 @@ INFO  Tailscale: running | IP 100.101.102.101 | my-node.tailnet-abc.ts.net
 **Check via the API:**
 
 ```bash
-curl http://localhost:52415/v1/state | python3 -m json.tool
+curl http://localhost:52415/state | python3 -m json.tool
 ```
 
-Look for all expected nodes in the `nodes` map.
+Look for all expected peers in `topology.nodes`, their identities in
+`nodeIdentities`, and fresh backend/resource observations in `nodeResources`.
 
 ## How peer discovery works
 
 Skulk's cluster uses gossipsub for state propagation. You only need to list **some** of the other nodes in `bootstrap_peers`, not all of them. Once Node A connects to Node B, and Node B already knows about Node C, Node A will learn about Node C indirectly within a few seconds. A single well-connected bootstrap node is enough to bring a new node into the cluster.
 
-Tailscale IPs are stable; they don't change unless you reinstall Tailscale. You set `bootstrap_peers` once and leave it.
+Use `tailscale status` and `tailscale ip -4` to verify current addresses when diagnosing connectivity. Explicit peer endpoints must be updated if an address or listener changes.
 
 ## Troubleshooting
 
@@ -117,7 +132,7 @@ ping 100.101.102.102
 If ping fails between nodes, check:
 - Both nodes are on the same tailnet (same Tailscale account or Headscale server)
 - `tailscale status` on each node shows the other as a peer
-- Your tailnet ACL policy allows TCP on port 52416 between nodes (the default "allow all" policy works; a custom ACL might block it)
+- Your tailnet policy allows the configured libp2p and Zenoh TCP ports between nodes
 
 ### Only some nodes are visible in the dashboard
 

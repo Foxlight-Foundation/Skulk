@@ -1370,3 +1370,10 @@ view changes must not reset drafts, abort streams, or duplicate proposal decisio
 survive Devices navigation; device and invitation operations are immediate and
 pairing secrets remain transient component state. Storybook uses an isolated store
 and an allowlisted asset fetch interceptor; gallery requests never operate a cluster.
+
+## Documentation screenshot refresh
+
+Use the offline Storybook workflow in `CONTRIBUTING.md` and
+`node scripts/capture_docs_screenshots.mjs` to refresh dashboard documentation
+images. Fixtures intercept API calls; retain fictional-data captions and inspect
+both desktop and phone captures before committing.

@@ -172,6 +172,8 @@ The dashboard first shows every connected node and its available memory. Start
 with one node, then add machines one at a time so a discovery or permission
 problem is easy to isolate.
 
+*The following dashboard captures use fictional example data.*
+
 ![Skulk dashboard topology showing connected nodes and ready model placements](./imgs/dash-1.png)
 
 After a model reports ready, open Chat and send a short prompt. The response is
