@@ -162,6 +162,13 @@ async def test_purge_removes_an_installation_that_never_selected_a_release(
             tmp_path, InstallationRequest(action="register", plugin_id=identifier)
         )
         assert (tmp_path / "installations" / identifier).is_dir()
+        # Release work under way holds the removal off: the source's guard is
+        # what an inspection or a download holds outside the manager guard.
+        async with manager.downloads[identifier].guard:
+            assert "error" in await manager_request(
+                tmp_path, InstallationRequest(action="purge", plugin_id=identifier)
+            )
+        assert (tmp_path / "installations" / identifier).is_dir()
         assert await manager_request(
             tmp_path, InstallationRequest(action="purge", plugin_id=identifier)
         ) == {"result": {"plugin_id": identifier, "purged": True}}

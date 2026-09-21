@@ -859,21 +859,35 @@ class RuntimeManager:
         ):
             raise ValueError("installation has work under way")
         downloads = self.downloads.get(identifier)
-        if downloads is not None and downloads.work is not None and not downloads.work.done():
-            raise ValueError("installation has a release download under way")
-        await controller.close()
-        if downloads is not None:
-            await downloads.close()
-        self.controllers.pop(identifier, None)
-        self.downloads.pop(identifier, None)
-        self.errors.pop(identifier, None)
+        if downloads is not None and (
+            downloads.guard.locked()
+            or (downloads.work is not None and not downloads.work.done())
+        ):
+            # A release inspection or download runs outside the manager guard
+            # and writes under this installation; purge waits its turn.
+            raise ValueError("installation has release work under way")
         root = self.installations / identifier
-        await asyncio.to_thread(shutil.rmtree, root)
-        descriptor = os.open(self.installations, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+
+        async def remove() -> None:
+            # Held for the whole removal: an inspection that arrives now finds
+            # the source busy, then closed, and never recreates the directory.
+            async with downloads.guard if downloads is not None else contextlib.nullcontext():
+                await controller.close()
+                if downloads is not None:
+                    await downloads.close()
+                self.controllers.pop(identifier, None)
+                self.downloads.pop(identifier, None)
+                self.errors.pop(identifier, None)
+                await asyncio.to_thread(shutil.rmtree, root)
+                descriptor = os.open(self.installations, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+
+        # Owned to the end: a caller that gives up mid-removal must not leave a
+        # deleting thread racing the next registration of the same identity.
+        await finish_runtime_work(asyncio.create_task(remove()))
 
     def _attachment_settled(self) -> None:
         try:

@@ -21,6 +21,7 @@ let deletes: string[];
 let operationReads: string[];
 let store: ReturnType<typeof makeStore>;
 let purged: boolean;
+let refusePurge: boolean;
 
 function makeStore() {
   return configureStore({ reducer: { [apiSlice.reducerPath]: apiSlice.reducer }, middleware: (defaults) => defaults().concat(apiSlice.middleware) });
@@ -53,6 +54,7 @@ beforeEach(async () => {
   deletes = [];
   operationReads = [];
   purged = false;
+  refusePurge = false;
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
     const request = new Request(input, init);
     const path = new URL(request.url).pathname;
@@ -74,7 +76,7 @@ beforeEach(async () => {
     }
     if (request.method === 'DELETE') {
       deletes.push(path);
-      if (!runtime.uninstalled) return response({ detail: 'refused' }, 409);
+      if (!runtime.uninstalled || refusePurge) return response({ detail: 'refused' }, 409);
       purged = true;
       return response({ plugin_id: runtime.plugin_id, purged: true });
     }
@@ -185,6 +187,19 @@ it('removes an uninstalled plugin only after a second, explicit confirmation', a
   await act(async () => { await vi.waitFor(() => expect(deletes).toHaveLength(1)); });
   expect(deletes[0]).toBe('/v1/plugins/managed/installations/managed.fixture');
   await act(async () => { await vi.waitFor(() => expect(host.textContent).not.toContain('managed.fixture')); });
+});
+
+it('says a refused removal even though the uninstall before it is complete', async () => {
+  operation = { request: { operation_id: 'e'.repeat(32), action: 'uninstall' }, state: 'complete', error_code: null };
+  runtime = { ...runtime, uninstalled: true, enabled: false, stale: true, service: null, operation_id: operation.request.operation_id, operation_state: 'complete' };
+  refusePurge = true;
+  await act(async () => { store.dispatch(apiSlice.util.invalidateTags(['Plugins'])); });
+  await contains('Uninstalled');
+  await click('Remove uninstalled plugin');
+  await click('Remove now');
+  await contains('Removal was refused');
+  expect(deletes).toHaveLength(1);
+  expect(host.textContent).toContain('managed.fixture');
 });
 
 it('allows uninstall to withdraw a stalled reinstallation while retaining uninstalled status', async () => {

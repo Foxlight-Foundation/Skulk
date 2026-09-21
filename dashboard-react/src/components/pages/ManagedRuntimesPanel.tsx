@@ -52,6 +52,9 @@ function RuntimeControls({ runtime, unavailable, nodes, details, nodeEvidence, f
   // Removal is armed from the menu and confirmed in the drawer: it is the
   // explicit end of an uninstall, and the retained state does not come back.
   const [removalArmed, setRemovalArmed] = useState(false);
+  // A refused removal is said on its own: the uninstall it follows is complete,
+  // and the lifecycle notice is hidden once an operation completes.
+  const [purgeNotice, setPurgeNotice] = useState('');
   const operationId = submitted ?? runtime.operation_id;
   const operation = useGetManagedOperationQuery({ pluginId: runtime.plugin_id, operationId: operationId ?? '' }, {
     skip: !operationId,
@@ -72,11 +75,11 @@ function RuntimeControls({ runtime, unavailable, nodes, details, nodeEvidence, f
   const confirmed = state === 'complete' || state === 'failed' || state === 'superseded' || withdrawable;
   const busy = withdrawing.isLoading || recovering.isLoading || purging.isLoading;
   const purgeRuntime = async () => {
-    setNotice('');
+    setPurgeNotice('');
     try {
       await purge(runtime.plugin_id).unwrap();
     } catch {
-      setNotice(t('plugins.purgeRefused', 'Removal was refused. The plugin must be uninstalled, with no operation or release download under way.'));
+      setPurgeNotice(t('plugins.purgeRefused', 'Removal was refused. The plugin must be uninstalled, with no operation or release work under way.'));
     } finally {
       setRemovalArmed(false);
     }
@@ -153,6 +156,7 @@ function RuntimeControls({ runtime, unavailable, nodes, details, nodeEvidence, f
     <p>{t('plugins.runtimeCleanup', 'Disable and uninstall stop future capability work. Cleanup supervision, credentials, records and recovery artifacts are retained. Uninstall is not a data purge. Select or activate a verified release to reinstall, or remove the uninstalled plugin to purge what it retained.')}</p>
     {runtime.uninstalled && removalArmed ? <p role="status">{t('plugins.purgeWarning', 'Removing deletes everything this uninstalled plugin retained: records, staged releases, credentials and cleanup state. It cannot be reinstalled from this installation afterwards.')}</p> : null}
     {runtime.uninstalled ? <Button type="button" disabled={pending || busy || unavailable} onClick={() => { if (removalArmed) { void purgeRuntime(); } else { setRemovalArmed(true); } }}>{removalArmed ? t('plugins.purgeConfirm', 'Remove now') : t('plugins.purgeRuntime', 'Remove uninstalled plugin')}</Button> : null}
+    {purgeNotice ? <p role="status">{purgeNotice}</p> : null}
     {notice && state !== 'complete' ? <p role="status">{notice}</p> : null}
     <Button type="button" onClick={() => setReleaseOpen(!releaseOpen)}>{releaseOpen ? t('plugins.closeReleaseInstallation', 'Close release installation') : t('plugins.openReleaseInstallation', 'Install a release')}</Button>
     {releaseOpen ? <RuntimeReleasePanel runtime={runtime} ownership={{ submitted: releaseSubmitted, setSubmitted: setReleaseSubmitted, activationSubmitted, setActivationSubmitted }} /> : null}
