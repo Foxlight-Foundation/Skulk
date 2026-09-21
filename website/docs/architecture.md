@@ -830,9 +830,23 @@ WebSocket delivers only this render's `executing`, `progress_state`, and
 terminal events; a queue entry from someone using the ComfyUI frontend on
 the same server just shows as `queued` until Skulk's prompt runs. Cancel
 goes through the jobs API and is checked on every event, not only when the
-socket is quiet. A rejected graph or a failed execution fails that task and
-leaves the server up; a server that dies fails the runner so the supervisor
-restarts it. Output is the container ComfyUI saved under the command's
+socket is quiet.
+
+Renders are dispatched through the same loop the served text engines use,
+at width one: the server renders one prompt at a time, but every render is
+acknowledged the moment the loop reads it, and the ones behind the running
+render wait in a queue the loop itself holds, oldest first and without a
+bound of its own (the API already bounds the jobs a node may hold). The
+worker therefore keeps planning while a render waits or runs, so a cancel
+reaches the runner at once: a render cancelled while it waits is reported
+cancelled without ever reaching the server, and one cancelled while it
+runs is interrupted at its next sampling step. Before a queued render is
+sent the loop checks that the server is still alive, the same check it
+makes for a newly received task and on its idle poll; a server that died
+under the last render ends the runner there, with the renders still queued
+failed by the runner itself, so the supervisor restarts it rather than the
+queue draining into errors. A rejected graph or a failed execution fails
+that task and leaves the server up. Output is the container ComfyUI saved under the command's
 directory, renamed onto the worker's expected name, plus a first frame
 converted to a JPEG thumbnail. Teardown signals the whole process group,
 and worker startup reaps any init-parented server that was launched with
