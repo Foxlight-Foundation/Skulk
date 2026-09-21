@@ -7,7 +7,7 @@ import { useSkulkTranslation } from '../../i18n/tolgee';
 import {
   useGetManagedRuntimesQuery, useGetManagedOperationQuery,
   useWithdrawManagedRuntimeMutation, useRecoverManagedOperationMutation,
-  useRegisterManagedRuntimeMutation,
+  useRegisterManagedRuntimeMutation, usePurgeManagedRuntimeMutation,
   type ManagedRuntime,
 } from '../../store/endpoints/plugins';
 import { RightDrawer } from '../common/RightDrawer';
@@ -48,6 +48,15 @@ function RuntimeControls({ runtime, unavailable, nodes, details, nodeEvidence, f
   }
   const [withdraw, withdrawing] = useWithdrawManagedRuntimeMutation();
   const [recover, recovering] = useRecoverManagedOperationMutation();
+  const [purge, purging] = usePurgeManagedRuntimeMutation();
+  // Removal is armed from the menu and confirmed in the drawer: it is the
+  // explicit end of an uninstall, and the retained state does not come back.
+  const [removalArmed, setRemovalArmed] = useState(false);
+  // Dismissing the drawer disarms it: the next opening asks again.
+  const closeDrawer = () => { setExpanded(false); setRemovalArmed(false); };
+  // A refused removal is said on its own: the uninstall it follows is complete,
+  // and the lifecycle notice is hidden once an operation completes.
+  const [purgeNotice, setPurgeNotice] = useState('');
   const operationId = submitted ?? runtime.operation_id;
   const operation = useGetManagedOperationQuery({ pluginId: runtime.plugin_id, operationId: operationId ?? '' }, {
     skip: !operationId,
@@ -66,7 +75,17 @@ function RuntimeControls({ runtime, unavailable, nodes, details, nodeEvidence, f
   const pending = state === 'accepted' || state === 'applying';
   const withdrawable = state === 'recovery_required' && !!operation.currentData && !['disable', 'uninstall'].includes(operation.currentData.request.action);
   const confirmed = state === 'complete' || state === 'failed' || state === 'superseded' || withdrawable;
-  const busy = withdrawing.isLoading || recovering.isLoading;
+  const busy = withdrawing.isLoading || recovering.isLoading || purging.isLoading;
+  const purgeRuntime = async () => {
+    setPurgeNotice('');
+    try {
+      await purge(runtime.plugin_id).unwrap();
+    } catch {
+      setPurgeNotice(t('plugins.purgeRefused', 'Removal was refused. The plugin must be uninstalled, with no operation or release work under way.'));
+    } finally {
+      setRemovalArmed(false);
+    }
+  };
   const withdrawRuntime = async (action: 'disable' | 'uninstall') => {
     const id = crypto.randomUUID().replaceAll('-', '');
     setSubmitted(id);
@@ -90,7 +109,7 @@ function RuntimeControls({ runtime, unavailable, nodes, details, nodeEvidence, f
   const uninstallBlocked = (runtime.uninstalled && !withdrawable) || (!runtime.selected_digest && !withdrawable) || unavailable || busy || pending || (state === 'recovery_required' && !withdrawable) || (!!submitted && !confirmed);
   const bundleNames = [...new Set(nodeEvidence?.nodes.map(node => node.bundleId) ?? [])];
   const name = bundleNames.length === 1 ? bundleNames[0] : runtime.plugin_id;
-  const releaseNote = runtime.stale || unavailable ? t('plugins.releaseUnavailable', 'Release status unavailable') : runtime.uninstalled ? t('plugins.cleanupRetained', 'Cleanup state retained')
+  const releaseNote = runtime.uninstalled ? t('plugins.cleanupRetained', 'Cleanup state retained') : runtime.stale || unavailable ? t('plugins.releaseUnavailable', 'Release status unavailable')
     : runtime.service?.active_digest && runtime.service.active_digest === runtime.selected_digest ? t('plugins.releaseActive', 'Active')
     : runtime.service?.active_digest ? t('plugins.differentActiveRelease', 'Different release active')
     : t('plugins.noActiveRelease', 'None active');
@@ -114,9 +133,10 @@ function RuntimeControls({ runtime, unavailable, nodes, details, nodeEvidence, f
         { id: 'refresh', label: t('plugins.refreshOperation', 'Refresh operation status'), disabled: !operationId || operation.isFetching || busy, onSelect: () => { void operation.refetch(); } },
         { id: 'disable', label: t('plugins.disableRuntime', 'Disable runtime'), separatorBefore: true, disabled: disableBlocked, onSelect: () => { setExpanded(true); void withdrawRuntime('disable'); } },
         { id: 'uninstall', label: t('plugins.uninstallMenu', 'Uninstall plugin…'), danger: true, disabled: uninstallBlocked, onSelect: () => { setExpanded(true); void withdrawRuntime('uninstall'); } },
+        { id: 'purge', label: t('plugins.purgeMenu', 'Remove uninstalled plugin…'), danger: true, disabled: !runtime.uninstalled || pending || busy || unavailable, onSelect: () => { setRemovalArmed(true); setExpanded(true); } },
       ]} />
     </div>
-    <RightDrawer open={expanded} onClose={() => setExpanded(false)} title={name} ariaLabel={t('plugins.runtimeDetails', 'Runtime details')}
+    <RightDrawer open={expanded} onClose={closeDrawer} title={name} ariaLabel={t('plugins.runtimeDetails', 'Runtime details')}
       width={width} minWidth={360} maxWidth={900} onWidthChange={setWidth} closeLabel={t('common.close', 'Close')} resizeLabel={t('plugins.resize', 'Resize plugin details')}>
     <div style={{ overflowY: 'auto' }}><RuntimeCard aria-label={runtime.plugin_id}>
     <h3>{t('plugins.runtimeOverview', 'Runtime overview')}</h3>
@@ -135,7 +155,10 @@ function RuntimeControls({ runtime, unavailable, nodes, details, nodeEvidence, f
       {operationId ? <Button type="button" disabled={operation.isFetching || busy} onClick={() => void operation.refetch()}>{t('plugins.refreshOperation', 'Refresh operation status')}</Button> : null}
     </Actions>
     {withdrawable ? <p>{t('plugins.withdrawInterruptedRuntime', 'Disable or uninstall withdraws this pending local change without running its release. Installation history and cleanup records are retained.')}</p> : null}
-    <p>{t('plugins.runtimeCleanup', 'Disable and uninstall stop future capability work. Cleanup supervision, credentials, records and recovery artifacts are retained. Uninstall is not a data purge. Select or activate a verified release to reinstall.')}</p>
+    <p>{t('plugins.runtimeCleanup', 'Disable and uninstall stop future capability work. Cleanup supervision, credentials, records and recovery artifacts are retained. Uninstall is not a data purge. Select or activate a verified release to reinstall, or remove the uninstalled plugin to purge what it retained.')}</p>
+    {runtime.uninstalled && removalArmed ? <p role="status">{t('plugins.purgeWarning', 'Removing deletes everything this uninstalled plugin retained: records, staged releases, credentials and cleanup state. It cannot be reinstalled from this installation afterwards.')}</p> : null}
+    {runtime.uninstalled ? <Button type="button" disabled={pending || busy || unavailable} onClick={() => { if (removalArmed) { void purgeRuntime(); } else { setRemovalArmed(true); } }}>{removalArmed ? t('plugins.purgeConfirm', 'Remove now') : t('plugins.purgeRuntime', 'Remove uninstalled plugin')}</Button> : null}
+    {purgeNotice ? <p role="status">{purgeNotice}</p> : null}
     {notice && state !== 'complete' ? <p role="status">{notice}</p> : null}
     <Button type="button" onClick={() => setReleaseOpen(!releaseOpen)}>{releaseOpen ? t('plugins.closeReleaseInstallation', 'Close release installation') : t('plugins.openReleaseInstallation', 'Install a release')}</Button>
     {releaseOpen ? <RuntimeReleasePanel runtime={runtime} ownership={{ submitted: releaseSubmitted, setSubmitted: setReleaseSubmitted, activationSubmitted, setActivationSubmitted }} /> : null}

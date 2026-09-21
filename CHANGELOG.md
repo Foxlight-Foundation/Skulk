@@ -9,6 +9,13 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- Uninstalled managed plugins can be removed. `DELETE
+  /v1/plugins/managed/installations/{plugin_id}`, `skulk-plugin-service
+  purge-plugin <plugin_id>` and the plugin card's "Remove uninstalled plugin"
+  purge an installation that is uninstalled, or that never selected a
+  release, with everything it retained; a live installation is refused. The
+  Plugins page now lists an uninstalled installation under Uninstalled
+  instead of "Status unavailable".
 - Capability nodes in the dashboard topology. A plugin that runs a managed
   child with its own user interface publishes a bounded, credential-free
   `CapabilityNodeSummary` (status, link surfaces, manifest actions) through

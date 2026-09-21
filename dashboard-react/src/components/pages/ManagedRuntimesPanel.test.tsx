@@ -17,8 +17,11 @@ let host: HTMLDivElement;
 let runtime: ManagedRuntime;
 let operation: ManagedOperation | null;
 let posts: { path: string; body: Record<string, unknown> | null }[];
+let deletes: string[];
 let operationReads: string[];
 let store: ReturnType<typeof makeStore>;
+let purged: boolean;
+let refusePurge: boolean;
 
 function makeStore() {
   return configureStore({ reducer: { [apiSlice.reducerPath]: apiSlice.reducer }, middleware: (defaults) => defaults().concat(apiSlice.middleware) });
@@ -48,7 +51,10 @@ beforeEach(async () => {
     service: { state: 'running', active_digest: 'a'.repeat(64), observed_at: 1 } };
   operation = null;
   posts = [];
+  deletes = [];
   operationReads = [];
+  purged = false;
+  refusePurge = false;
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
     const request = new Request(input, init);
     const path = new URL(request.url).pathname;
@@ -68,7 +74,13 @@ beforeEach(async () => {
       // The manager accepted the original request but the browser lost its response.
       return response({}, 503);
     }
-    if (path === '/v1/plugins/managed') return response({ installations: [runtime] });
+    if (request.method === 'DELETE') {
+      deletes.push(path);
+      if (!runtime.uninstalled || refusePurge) return response({ detail: 'refused' }, 409);
+      purged = true;
+      return response({ plugin_id: runtime.plugin_id, purged: true });
+    }
+    if (path === '/v1/plugins/managed') return response({ installations: purged ? [] : [runtime] });
     operationReads.push(path);
     return operation ? response(operation) : response({}, 404);
   });
@@ -161,6 +173,47 @@ it('shows retained uninstall status and offers explicit release reinstallation',
   expect([...host.querySelectorAll('button')].find((item) => item.textContent === 'Install a release')?.disabled).toBe(false);
 });
 
+
+it('removes an uninstalled plugin only after a second, explicit confirmation', async () => {
+  runtime = { ...runtime, uninstalled: true, enabled: false, stale: true, service: null };
+  await act(async () => { store.dispatch(apiSlice.util.invalidateTags(['Plugins'])); });
+  // An uninstalled installation reads as uninstalled even though nothing runs to be observed.
+  await contains('Uninstalled');
+  await contains('Cleanup state retained');
+  await click('Remove uninstalled plugin');
+  await contains('Removing deletes everything this uninstalled plugin retained');
+  expect(deletes).toHaveLength(0);
+  await click('Remove now');
+  await act(async () => { await vi.waitFor(() => expect(deletes).toHaveLength(1)); });
+  expect(deletes[0]).toBe('/v1/plugins/managed/installations/managed.fixture');
+  await act(async () => { await vi.waitFor(() => expect(host.textContent).not.toContain('managed.fixture')); });
+});
+
+it('disarms removal when the drawer is dismissed, so reopening asks again', async () => {
+  runtime = { ...runtime, uninstalled: true, enabled: false, stale: true, service: null };
+  await act(async () => { store.dispatch(apiSlice.util.invalidateTags(['Plugins'])); });
+  await contains('Uninstalled');
+  await click('Remove uninstalled plugin');
+  await contains('Remove now');
+  await act(async () => { host.querySelector<HTMLButtonElement>('button[aria-label="Close"]')!.click(); });
+  await click('Configure');
+  await contains('Remove uninstalled plugin');
+  expect([...host.querySelectorAll('button')].some((item) => item.textContent === 'Remove now')).toBe(false);
+  expect(deletes).toHaveLength(0);
+});
+
+it('says a refused removal even though the uninstall before it is complete', async () => {
+  operation = { request: { operation_id: 'e'.repeat(32), action: 'uninstall' }, state: 'complete', error_code: null };
+  runtime = { ...runtime, uninstalled: true, enabled: false, stale: true, service: null, operation_id: operation.request.operation_id, operation_state: 'complete' };
+  refusePurge = true;
+  await act(async () => { store.dispatch(apiSlice.util.invalidateTags(['Plugins'])); });
+  await contains('Uninstalled');
+  await click('Remove uninstalled plugin');
+  await click('Remove now');
+  await contains('Removal was refused');
+  expect(deletes).toHaveLength(1);
+  expect(host.textContent).toContain('managed.fixture');
+});
 
 it('allows uninstall to withdraw a stalled reinstallation while retaining uninstalled status', async () => {
   operation = { request: { operation_id: 'd'.repeat(32), action: 'select' }, state: 'recovery_required', error_code: 'validation_failed' };

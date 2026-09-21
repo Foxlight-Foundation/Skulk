@@ -535,3 +535,73 @@ async def test_http_catalog_routes_read_a_verified_listing_without_disclosure(
     finally:
         await extensions.run_shutdown_hooks()
         await manager.close()
+
+
+async def test_http_purge_removes_an_uninstalled_or_empty_installation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Removal needs the manage scope, and is refused for a live installation."""
+    manager = manager_fixture(tmp_path / "manager", monkeypatch)
+    await manager.start()
+    path = tmp_path / "config/managed-service/connection.json"
+    connect(path, manager.root)
+    services = ManagedServices(path)
+    extensions = LoadedExtensions([], managed_services=services)
+    extensions.run_startup_hooks(replace(context(), skulk_version="1.5.2"))
+    pairing, exchange = paired_service(tmp_path / "pairing")
+    app = FastAPI()
+    app.include_router(create_plugins_router(extensions, pairing))
+    transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 52000))
+    bearer = {"Authorization": f"Bearer {exchange.access_token}"}
+    prefix = "/v1/plugins/managed"
+    try:
+        async with httpx.AsyncClient(
+            transport=transport, base_url="https://localhost"
+        ) as client:
+            pairing.set_plugin_grant(
+                exchange.device_id,
+                PluginGrantUpdate(expected_revision=0, scopes=("plugins:read",)),
+            )
+            assert (
+                await client.delete(
+                    prefix + "/installations/managed.fixture", headers=bearer
+                )
+            ).status_code == 403
+            pairing.set_plugin_grant(
+                exchange.device_id,
+                PluginGrantUpdate(
+                    expected_revision=1, scopes=("plugins:read", "plugins:manage")
+                ),
+            )
+            # Nothing registered yet: refused, not invented.
+            assert (
+                await client.delete(
+                    prefix + "/installations/managed.fixture", headers=bearer
+                )
+            ).status_code == 409
+            assert (
+                await client.post(
+                    prefix + "/installations",
+                    headers=bearer,
+                    json={"plugin_id": "managed.fixture"},
+                )
+            ).status_code == 200
+            assert "managed.fixture" in manager.controllers
+            removed = await client.delete(
+                prefix + "/installations/managed.fixture", headers=bearer
+            )
+            assert removed.status_code == 200
+            assert removed.headers["Cache-Control"] == "no-store"
+            assert json.loads(removed.content) == {
+                "plugin_id": "managed.fixture",
+                "purged": True,
+            }
+            assert "managed.fixture" not in manager.controllers
+            inventory = await client.get(prefix, headers=bearer)
+            assert (
+                ManagedInventory.model_validate_json(inventory.content).installations
+                == ()
+            )
+    finally:
+        await manager.close()
+

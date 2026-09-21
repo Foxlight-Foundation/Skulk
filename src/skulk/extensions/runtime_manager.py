@@ -6,6 +6,7 @@ import contextlib
 import hashlib
 import json
 import os
+import shutil
 import signal
 import stat
 import sys
@@ -98,9 +99,15 @@ class InventoryRequest(_Request):
 
 
 class InstallationRequest(_Request):
-    """Register an empty installation or inspect its current desired state."""
+    """Register an empty installation, inspect its desired state, or purge it.
 
-    action: Literal["register", "get"]
+    ``purge`` removes an installation that is uninstalled, or that never
+    selected a release, together with everything it retained: records,
+    staged generations, feed credentials and cleanup state. It is refused
+    for a live installation and for one with work under way.
+    """
+
+    action: Literal["register", "get", "purge"]
     plugin_id: PluginIdentifier = Field(
         description="Stable local installation ID; never a path."
     )
@@ -818,6 +825,9 @@ class RuntimeManager:
             return (
                 await self.downloads[identifier].submit(request.request)
             ).model_dump(mode="json")
+        if isinstance(request, InstallationRequest) and request.action == "purge":
+            await self._purge(identifier, controller)
+            return {"plugin_id": identifier, "purged": True}
         if isinstance(request, InstallationRequest):
             selection = controller.selector.current()
             return {
@@ -832,6 +842,55 @@ class RuntimeManager:
             else controller.operation(request.operation_id)
         )
         return operation.model_dump(mode="json")
+
+    async def _purge(self, identifier: str, controller: RuntimeController) -> None:
+        """Remove an uninstalled installation and its retained state; held under the guard.
+
+        Uninstall keeps records, generations, credentials and cleanup state so
+        a verified select or activate can reinstall. Purge is the explicit end
+        of that: the installation leaves the inventory and its directory goes.
+        A live installation, or one with work under way, is refused unchanged.
+        """
+        selection = controller.selector.current()
+        if selection is not None and not controller.is_uninstalled(selection):
+            raise ValueError("installation is not uninstalled; uninstall it first")
+        if controller.pending.exists() or (
+            controller.work is not None and not controller.work.done()
+        ):
+            raise ValueError("installation has work under way")
+        downloads = self.downloads.get(identifier)
+        if downloads is not None and (
+            downloads.guard.locked()
+            or (downloads.work is not None and not downloads.work.done())
+        ):
+            # A release inspection or download runs outside the manager guard
+            # and writes under this installation; purge waits its turn.
+            raise ValueError("installation has release work under way")
+        root = self.installations / identifier
+
+        async def remove() -> None:
+            # Held for the whole removal: an inspection that arrives now finds
+            # the source busy, then closed, and never recreates the directory.
+            async with downloads.guard if downloads is not None else contextlib.nullcontext():
+                await controller.close()
+                if downloads is not None:
+                    await downloads.close()
+                # The directory goes before the manager forgets the installation:
+                # a removal that fails on disk leaves a closed, still-listed
+                # installation that the same purge can be asked for again.
+                await asyncio.to_thread(shutil.rmtree, root)
+                descriptor = os.open(self.installations, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+                self.controllers.pop(identifier, None)
+                self.downloads.pop(identifier, None)
+                self.errors.pop(identifier, None)
+
+        # Owned to the end: a caller that gives up mid-removal must not leave a
+        # deleting thread racing the next registration of the same identity.
+        await finish_runtime_work(asyncio.create_task(remove()))
 
     def _attachment_settled(self) -> None:
         try:

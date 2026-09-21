@@ -40,6 +40,7 @@ from skulk.extensions.runtime_install import finish_runtime_work
 from skulk.extensions.runtime_manager import (
     MANAGER_REQUEST,
     CatalogRequest,
+    InstallationRequest,
     InventoryRequest,
     ManagerRequest,
     ReloadRuntimeRequest,
@@ -608,6 +609,7 @@ def main() -> None:
             "setup-plugin",
             "manage-plugin",
             "install-plugin",
+            "purge-plugin",
             "catalog",
         ),
     )
@@ -669,6 +671,33 @@ def main() -> None:
                 else manage_installed_plugin
             )
             asyncio.run(command(remaining[0], tuple(fields)))
+            return
+        if action == "purge-plugin":
+            # The explicit end of an uninstall: the installation leaves the
+            # inventory with everything it retained. Refused for a live one.
+            if os.geteuid() == 0:
+                raise ValueError("plugin management requires the nonroot service owner")
+            if len(remaining) != 1:
+                raise ValueError("purge-plugin takes exactly one installed plugin ID")
+            connection = ServiceConnection.model_validate_json(
+                read_private(
+                    SKULK_CONFIG_HOME / "managed-service" / "connection.json", 8192
+                )
+            )
+            reply = asyncio.run(
+                manager_request(
+                    Path(connection.manager_root),
+                    InstallationRequest(action="purge", plugin_id=remaining[0]),
+                )
+            )
+            if set(reply) != {"result"}:
+                print(
+                    "Purge refused: the installation must be uninstalled, with no "
+                    "operation or release download under way.",
+                    file=sys.stderr,
+                )
+                raise SystemExit(1)
+            print(json.dumps(reply["result"]))
             return
         if remaining:
             raise ValueError("this service action accepts no additional arguments")

@@ -4,6 +4,7 @@
 import asyncio
 import json
 from collections.abc import Awaitable, Callable, Coroutine
+from typing import Literal
 
 import anyio
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -60,6 +61,16 @@ from skulk.extensions.runtime_manager import (
 from skulk.extensions.runtime_selection import RuntimeSelection
 from skulk.operator.pairing import OperatorPairingService
 from skulk.operator.plugin_scopes import PluginScope
+
+
+class PurgedInstallation(BaseModel):
+    """The installation an explicit purge removed from the inventory."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+    plugin_id: InstallationIdentifier = Field(
+        description="The installation that was removed."
+    )
+    purged: Literal[True] = Field(description="The retained state is gone.")
 
 
 class ProtectedManagementRoute(APIRoute):
@@ -232,6 +243,26 @@ def create_managed_plugins_router(
                 InstallationRequest(action="get", plugin_id=plugin_id)
             )
             return ManagedSelection.model_validate_json(json.dumps(result))
+
+        return await invoke(action)
+
+    @router.delete(
+        "/installations/{plugin_id}",
+        response_model=PurgedInstallation,
+        summary="Remove an uninstalled managed plugin installation",
+        description="Purge one installation that is uninstalled, or that never selected a release, together with everything it retained: lifecycle records, staged generations, feed credentials and cleanup state. The installation leaves the inventory. A live installation, or one with an operation or a release download under way, is refused with 409 and left unchanged; uninstall it first. Requires plugins:manage or direct owner authority. This never approves spending.",
+    )
+    async def purge(
+        plugin_id: InstallationIdentifier, request: Request, response: Response
+    ) -> PurgedInstallation:
+        """Remove an uninstalled installation through the same terminal operation."""
+        services = await authorized(request, response, "plugins:manage")
+
+        async def action() -> PurgedInstallation:
+            result = await services.request(
+                InstallationRequest(action="purge", plugin_id=plugin_id)
+            )
+            return PurgedInstallation.model_validate_json(json.dumps(result))
 
         return await invoke(action)
 
