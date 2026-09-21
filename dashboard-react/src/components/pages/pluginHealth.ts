@@ -7,7 +7,9 @@ export type PluginFilter = 'all' | 'healthy' | 'attention' | 'uninstalled';
 
 /** Combine current runtime, operation and node observations conservatively. */
 export function derivePluginHealth(runtime: ManagedRuntime, nodes: PluginNodes | undefined, unavailable: boolean, operationState: ManagedOperation['state'] | null = runtime.operation_state): PluginHealth {
-  if (unavailable || runtime.stale) return 'unknown';
+  // An uninstalled installation has no running service to observe, so it is
+  // always stale; that does not make its state unknown.
+  if (unavailable || (runtime.stale && !runtime.uninstalled)) return 'unknown';
   if (operationState === 'failed' || operationState === 'recovery_required' || runtime.error_code) return 'attention';
   if (operationState === 'accepted' || operationState === 'applying') return 'updating';
   if (runtime.uninstalled) return 'uninstalled';

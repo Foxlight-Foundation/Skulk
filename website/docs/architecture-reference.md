@@ -1598,9 +1598,16 @@ phase alongside independent cleanup observations.
 Managed-plugin `uninstall` is a retained-state withdrawal through the existing
 `RuntimeController`, using the same owner stop and selection journal as disable.
 The selected lifecycle operation determines inventory's `uninstalled` flag, separately
-from pending-operation progress. No extra supervisor, provider call or purge is added.
+from pending-operation progress. No extra supervisor or provider call is added.
 Configuration, credentials, receipts and runtime generations remain available;
 independent cleanup continues. A verified `select` or `activate` reinstalls explicitly.
+An explicit purge (`InstallationRequest(action="purge")`, `DELETE
+/v1/plugins/managed/installations/{plugin_id}`, `skulk-plugin-service purge-plugin`,
+the card's "Remove uninstalled plugin") is the end of that retention: an
+installation that is uninstalled, or that never selected a release, leaves the
+inventory and its directory goes; a live installation or one with work under way
+is refused unchanged. The dashboard classes an uninstalled installation as
+uninstalled even though its stopped service is never observed and so reads stale.
 
 ### Dashboard presentation ownership
 

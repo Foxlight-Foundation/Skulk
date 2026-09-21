@@ -121,9 +121,61 @@ async def test_socket_registration_activation_disconnect_and_reconnect(
         )
         encoded = json.dumps(inspection)
         assert str(tmp_path) not in encoded and "sensitive fixture" not in encoded
+        # Purge ends the retention of an uninstall and nothing else: a disabled
+        # installation is refused unchanged, an uninstalled one leaves with its
+        # directory, and a second purge finds nothing.
+        purge = InstallationRequest(action="purge", plugin_id=identifier)
+        reply = await manager_request(tmp_path, purge)
+        if action == "uninstall":
+            assert reply == {"result": {"plugin_id": identifier, "purged": True}}
+            assert not (tmp_path / "installations" / identifier).exists()
+            assert identifier not in manager.controllers
+            assert identifier not in manager.downloads
+            assert await manager_request(tmp_path, InventoryRequest()) == {
+                "result": {"installations": [], "reload_runtime": True}
+            }
+            assert "error" in await manager_request(tmp_path, purge)
+        else:
+            assert "error" in reply
+            assert (tmp_path / "installations" / identifier).exists()
+            assert manager.controllers[identifier] is controller
     finally:
         await manager.close()
     assert not manager.path.exists()
+    RuntimeLock(tmp_path, "manager.lock").close()
+
+
+async def test_purge_removes_an_installation_that_never_selected_a_release(
+    tmp_path: Path,
+) -> None:
+    """A registration that went nowhere can be removed without an uninstall first."""
+    private_directory(tmp_path)
+    write_private(
+        tmp_path / "host.json",
+        HostSettings(transport_node_id="fixture-peer").model_dump_json().encode(),
+    )
+    manager = RuntimeManager(tmp_path)
+    await manager.start()
+    identifier = "managed.fixture"
+    try:
+        await manager_request(
+            tmp_path, InstallationRequest(action="register", plugin_id=identifier)
+        )
+        assert (tmp_path / "installations" / identifier).is_dir()
+        assert await manager_request(
+            tmp_path, InstallationRequest(action="purge", plugin_id=identifier)
+        ) == {"result": {"plugin_id": identifier, "purged": True}}
+        assert not (tmp_path / "installations" / identifier).exists()
+        assert await manager_request(tmp_path, InventoryRequest()) == {
+            "result": {"installations": [], "reload_runtime": True}
+        }
+        # Registering the same identity again starts clean.
+        await manager_request(
+            tmp_path, InstallationRequest(action="register", plugin_id=identifier)
+        )
+        assert identifier in manager.controllers
+    finally:
+        await manager.close()
     RuntimeLock(tmp_path, "manager.lock").close()
 
 

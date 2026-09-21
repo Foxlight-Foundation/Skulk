@@ -6,6 +6,7 @@ import contextlib
 import hashlib
 import json
 import os
+import shutil
 import signal
 import stat
 import sys
@@ -98,9 +99,15 @@ class InventoryRequest(_Request):
 
 
 class InstallationRequest(_Request):
-    """Register an empty installation or inspect its current desired state."""
+    """Register an empty installation, inspect its desired state, or purge it.
 
-    action: Literal["register", "get"]
+    ``purge`` removes an installation that is uninstalled, or that never
+    selected a release, together with everything it retained: records,
+    staged generations, feed credentials and cleanup state. It is refused
+    for a live installation and for one with work under way.
+    """
+
+    action: Literal["register", "get", "purge"]
     plugin_id: PluginIdentifier = Field(
         description="Stable local installation ID; never a path."
     )
@@ -818,6 +825,9 @@ class RuntimeManager:
             return (
                 await self.downloads[identifier].submit(request.request)
             ).model_dump(mode="json")
+        if isinstance(request, InstallationRequest) and request.action == "purge":
+            await self._purge(identifier, controller)
+            return {"plugin_id": identifier, "purged": True}
         if isinstance(request, InstallationRequest):
             selection = controller.selector.current()
             return {
@@ -832,6 +842,38 @@ class RuntimeManager:
             else controller.operation(request.operation_id)
         )
         return operation.model_dump(mode="json")
+
+    async def _purge(self, identifier: str, controller: RuntimeController) -> None:
+        """Remove an uninstalled installation and its retained state; held under the guard.
+
+        Uninstall keeps records, generations, credentials and cleanup state so
+        a verified select or activate can reinstall. Purge is the explicit end
+        of that: the installation leaves the inventory and its directory goes.
+        A live installation, or one with work under way, is refused unchanged.
+        """
+        selection = controller.selector.current()
+        if selection is not None and not controller.is_uninstalled(selection):
+            raise ValueError("installation is not uninstalled; uninstall it first")
+        if controller.pending.exists() or (
+            controller.work is not None and not controller.work.done()
+        ):
+            raise ValueError("installation has work under way")
+        downloads = self.downloads.get(identifier)
+        if downloads is not None and downloads.work is not None and not downloads.work.done():
+            raise ValueError("installation has a release download under way")
+        await controller.close()
+        if downloads is not None:
+            await downloads.close()
+        self.controllers.pop(identifier, None)
+        self.downloads.pop(identifier, None)
+        self.errors.pop(identifier, None)
+        root = self.installations / identifier
+        await asyncio.to_thread(shutil.rmtree, root)
+        descriptor = os.open(self.installations, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
 
     def _attachment_settled(self) -> None:
         try:
