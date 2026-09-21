@@ -349,8 +349,12 @@ A model card's `placement.compatible_backends` selects which engine serves it
   Vision plus served MTP is serial until concurrent multimodal serving is
   qualified. Multi-node RPC vision requires one homogeneous CUDA, ROCm, or
   Vulkan served tag, reserves the projector on the driver, and sends image
-  media only to that driver. The engine coexists with `llama_cpp`; the
-  managed-server-plus-proxy shape is shared with `vllm`.
+  media only to that driver. A request the server refuses (a prompt past
+  the context window) is raised with the server's own message
+  (`raise_for_server_status`), a context-size refusal prefixed with the
+  API's context sentinel so it answers 400 rather than 500. The engine
+  coexists with `llama_cpp`; the managed-server-plus-proxy shape is shared
+  with `vllm`.
 - **`vllm`** (`worker/runner/vllm/`): second served-backend engine; the worker
   launches an external `vllm serve` process and proxies its OpenAI HTTP API. The
   GPU-serving fast path: continuous batching + paged attention hold latency flat

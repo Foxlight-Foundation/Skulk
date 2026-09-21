@@ -7,6 +7,16 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Fixed
+
+- A request llama-server refuses reaches the caller with the server's own
+  reason. The served engine raised httpx's status error, which names only
+  the status and the URL, so a prompt past the context window came back as
+  "Client error '400 Bad Request'" with the reason left in the body. The
+  runner now reads the body's message into the error, and a context-size
+  refusal is answered by the API as a 400 `context_length_exceeded`, as its
+  own admission check is, rather than as an internal error.
+
 ### Added
 
 - Uninstalled managed plugins can be removed. `DELETE

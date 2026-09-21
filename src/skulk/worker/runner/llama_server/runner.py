@@ -42,7 +42,10 @@ import httpx
 
 from skulk.api.types import GenerationStats
 from skulk.shared.backends import LLAMA_SERVER_BIN_ENV
-from skulk.shared.constants import MAX_OUTPUT_TOKENS
+from skulk.shared.constants import (
+    CONTEXT_LENGTH_EXCEEDED_PREFIX,
+    MAX_OUTPUT_TOKENS,
+)
 from skulk.shared.models.capabilities import resolve_model_capability_profile
 from skulk.shared.models.llama_server_settings import (
     LLAMA_SERVER_DEFAULT_DRAFT_DEPTH,
@@ -105,6 +108,65 @@ from skulk.worker.runner.llm_inference.scaffolding_scrub import (
     StreamingScaffoldingScrub,
 )
 from skulk.worker.runner.served_concurrency import ServedConcurrentDispatch
+
+# llama-server's error body, when it sends one: ``{"error": {"message", "type",
+# "code"}}``; a request past the context window carries this ``type``.
+_SERVER_CONTEXT_ERROR_TYPE: Final = "exceed_context_size_error"
+_SERVER_MESSAGE_CHARS: Final = 300
+
+
+class ServerRefusalError(RuntimeError):
+    """llama-server answered a request with an error status, in its own words."""
+
+
+def server_refusal_message(response: httpx.Response) -> str:
+    """The refusal as the caller should read it: status plus the server's reason.
+
+    httpx's own status error names only the status and the URL, so a prompt
+    past the context window reached callers as ``Client error '400 Bad
+    Request'`` with the reason left behind in the body. The body's message is
+    read (a streamed response is read to its end first), bounded, and a
+    context-size refusal is prefixed with the API's context sentinel so the
+    API answers it as a 400 ``context_length_exceeded``, the way it answers
+    its own admission check, rather than as an internal error.
+    """
+    with contextlib.suppress(Exception):
+        response.read()
+    message = ""
+    kind = ""
+    try:
+        body = response.json()
+    except Exception:  # noqa: BLE001 - a non-JSON body is still a message
+        with contextlib.suppress(Exception):
+            message = response.text
+    else:
+        error = body.get("error") if isinstance(body, dict) else None
+        if isinstance(error, dict):
+            message = str(error.get("message") or "")
+            kind = str(error.get("type") or "")
+        elif isinstance(error, str):
+            message = error
+    message = " ".join(message.split())[:_SERVER_MESSAGE_CHARS]
+    head = f"llama-server answered {response.status_code}"
+    text = (
+        f"{head}: {message}" if message else f"{head} {response.reason_phrase}".strip()
+    )
+    if kind == _SERVER_CONTEXT_ERROR_TYPE or "context size" in message.lower():
+        return f"{CONTEXT_LENGTH_EXCEEDED_PREFIX} {text}"
+    return text
+
+
+def raise_for_server_status(response: httpx.Response) -> None:
+    """``raise_for_status`` with the server's reason in the error.
+
+    Raises :class:`ServerRefusalError` (a ``RuntimeError``, so every caller that
+    surfaces a failed generation as an ``ErrorChunk`` carries the message)
+    from the underlying ``HTTPStatusError``.
+    """
+    try:
+        response.raise_for_status()
+    except httpx.HTTPStatusError as error:
+        raise ServerRefusalError(server_refusal_message(error.response)) from error
 
 
 def _effective_server_parallel(card: Any) -> int:
@@ -1115,7 +1177,7 @@ class Runner(ServedConcurrentDispatch):
                 json=body,
                 timeout=30.0,
             )
-            response.raise_for_status()
+            raise_for_server_status(response)
             raw_count = response.json().get("input_tokens")
             if isinstance(raw_count, int) and not isinstance(raw_count, bool):
                 return max(0, raw_count)
@@ -1352,7 +1414,7 @@ class Runner(ServedConcurrentDispatch):
                 "POST", f"{self.base_url}/v1/chat/completions", json=body
             ) as resp,
         ):
-            resp.raise_for_status()
+            raise_for_server_status(resp)
             for line in resp.iter_lines():
                 if self._is_cancelled(task.task_id):
                     logger.info(f"llama-server generation cancelled: {task.task_id}")
@@ -1443,7 +1505,7 @@ class Runner(ServedConcurrentDispatch):
         request_started = time.perf_counter()
         with httpx.Client(timeout=timeout) as client:
             resp = client.post(f"{self.base_url}/v1/chat/completions", json=body)
-            resp.raise_for_status()
+            raise_for_server_status(resp)
             result = resp.json()
         request_seconds = time.perf_counter() - request_started
         # A cancel that arrived while the (non-streamed) request was in flight:
