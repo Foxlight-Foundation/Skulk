@@ -60,8 +60,8 @@ full-screen, which makes it feel like an app rather than a browser tab.
 
 ## The mobile layout
 
-These captures show the current dashboard with fictional nodes, models, and
-measurements. They demonstrate layout and controls rather than a live deployment.
+These captures show the actual dashboard connected to a live cluster at phone
+dimensions. Model availability and resource readings reflect the capture time.
 
 <div style={{display: 'flex', gap: '12px', flexWrap: 'wrap'}}>
   <img src={require('./imgs/mobile-topology.png').default} alt="Cluster topology on a phone" width="260" />
@@ -74,7 +74,7 @@ Observability, Settings, and the theme toggle. The cluster view renders the same
 topology as desktop, with node cards sized for the smaller canvas.
 
 <div style={{display: 'flex', gap: '12px', flexWrap: 'wrap'}}>
-  <img src={require('./imgs/mobile-chat.png').default} alt="Chat with a placed model on a phone" width="260" />
+  <img src={require('./imgs/mobile-chat.png').default} alt="Chat ready for a new conversation at phone dimensions" width="260" />
   <img src={require('./imgs/mobile-observability.png').default} alt="Observability sheet showing live runner phases" width="260" />
 </div>
 

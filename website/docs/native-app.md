@@ -14,18 +14,15 @@ configured operator gateway and relay. This guide does not assume that a public
 App Store or Google Play listing is available. For browser access without a
 native app, see [Mobile dashboard](mobile-dashboard.md).
 
-## Interface preview
+## Open the app
 
-These captures show the current app's **web preview at phone dimensions**, using
-sanitized fictional fixture data. They illustrate the shared Cluster, Models,
-and Activity screens; they are not iOS or Android device screenshots, a live
-cluster, or evidence of native-platform qualification. Native controls and
-system chrome differ on a device.
+The welcome screen opens into your paired cluster. The captures in this guide
+come from the iOS app connected to a live cluster. They show actual state at
+capture time; available models and resource readings can change.
 
-<div style={{display: 'flex', gap: '12px', flexWrap: 'wrap'}}>
-  <img src={require('./imgs/native-app-web-cluster.png').default} alt="Web preview of the operator app Cluster screen with fictional nodes and memory values" width="240" />
-  <img src={require('./imgs/native-app-web-models.png').default} alt="Web preview of the operator app Models screen showing example ready and failed instances" width="240" />
-  <img src={require('./imgs/native-app-web-activity.png').default} alt="Web preview of the operator app Activity screen showing simulated model operations" width="240" />
+<div style={{display: 'flex', gap: '16px', flexWrap: 'wrap'}}>
+  <img src={require('./imgs/native-app-welcome.jpg').default} alt="Skulk native app welcome screen with Open Skulk button" width="260" />
+  <img src={require('./imgs/native-app-cluster.jpg').default} alt="Native app showing a healthy three-node cluster connected through the encrypted relay" width="260" />
 </div>
 
 ## Pair with your cluster
@@ -58,6 +55,12 @@ a remembered cluster name is not proof of a live connection.
 
 ## Manage models
 
+<div style={{display: 'flex', gap: '16px', flexWrap: 'wrap'}}>
+  <img src={require('./imgs/native-app-models.jpg').default} alt="Running models in the native app, including ready chat and speech models" width="260" />
+  <img src={require('./imgs/native-app-model-detail.jpg').default} alt="Model detail separating catalog card, canonical store, artifact copies, and ready runtime" width="260" />
+</div>
+
+
 Models do not have to move through one fixed wizard. You can inspect a catalog
 card before downloading, place an already downloaded model, or stop a running
 instance while retaining its files.
@@ -76,6 +79,9 @@ reports durable installation identities for its nodes and also requires system
 authorization. Available actions depend on the device's granted scopes.
 
 ## Chat and spoken responses
+
+<img src={require('./imgs/native-app-chat.jpg').default} alt="A live Skulk conversation in the native app with the spoken-response control" width="300" />
+
 
 Select Skulk for the fabric-aware conversation or choose a ready model for
 ordinary model chat. Canceling generation closes that request's independent

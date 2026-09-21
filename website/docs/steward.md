@@ -16,9 +16,9 @@ and Skulk's bundled documentation. Questions such as “Which models are running
 “Why can this model not fit?” and “How do I configure logging?” therefore use the
 cluster's observations and documentation.
 
-![Steward conversation in the dashboard](./imgs/dashboard-steward.png)
+![Skulk conversation panel in the live dashboard](./imgs/dashboard-steward.png)
 
-*Illustrative conversation with fictional cluster data.*
+*The actual dashboard conversation panel at capture time.*
 
 ## Enable the resident model
 

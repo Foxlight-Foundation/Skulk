@@ -530,20 +530,19 @@ Run `npm run lint`, `npx tsc -b`, `npm test`, `npm run build`, and
 
 ### Documentation screenshots
 
-Capture the current dashboard with the offline Storybook fixtures, which intercept
-API requests and do not operate a live cluster:
+Capture a running dashboard using its actual cluster state. Set the target
+explicitly; the script opens fresh browser contexts and does not reuse login
+credentials or saved conversations:
 
 ```bash
-# Terminal 1, from the repository root (dashboard dependencies installed)
-npm --prefix dashboard-react run storybook -- --ci --host 127.0.0.1 --port 6017
-
-# Terminal 2, from the repository root
-node scripts/capture_docs_screenshots.mjs
+SKULK_DOCS_URL=http://localhost:52415 node scripts/capture_docs_screenshots.mjs
 ```
 
-The script refreshes desktop and phone captures under `website/docs/imgs/`,
-exercises the visible navigation and chat controls, and fails on page errors.
-Inspect every image for clipping, overlays, and incomplete loading before
-committing. Preserve captions identifying the data as fictional; these images
-are UI examples, not performance or deployment evidence. Native-app images have
-a separate capture source and are not produced by this dashboard script.
+The script refreshes desktop and phone captures under `website/docs/imgs/`. It
+blocks non-read HTTP requests and uses only navigation, theme, and panel controls;
+it does not submit chat, modify configuration, or manage models. It fails on page
+errors or attempted non-read requests. Use a target the operator has authorized
+for documentation capture and inspect every image for exposed credentials,
+clipping, overlays, and incomplete loading before committing. Captions should
+identify actual state at capture time; do not replace observed state with fixture
+data. Native operator-app screenshots must come from the app separately.

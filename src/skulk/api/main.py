@@ -1153,7 +1153,7 @@ def _video_create_multipart_schema() -> dict[str, object]:
     ``allOf`` beside the file parts; the parts are merged into a copy of it.
     """
 
-    schema = cast("dict[str, object]", VideoCreateRequest.model_json_schema())
+    schema = _inline_request_schema(VideoCreateRequest.model_json_schema())
     properties = dict(cast("dict[str, object]", schema.get("properties", {})))
     binary: dict[str, object] = {"type": "string", "format": "binary"}
     properties["input_reference"] = {
@@ -1568,13 +1568,62 @@ def _create_fastapi_app() -> FastAPI:
     )
 
 
+def _inline_request_schema(schema: dict[str, object]) -> dict[str, object]:
+    """Inline local definitions before embedding nonrecursive request metadata.
+
+    Pydantic's standalone ``#/$defs`` references address the document root.
+    Once nested inside OpenAPI they would point outside their own schema, so
+    resolve them locally without changing request validation or parsing.
+    """
+
+    def expand(
+        value: object,
+        definitions: dict[str, object],
+        resolving: frozenset[str] = frozenset(),
+    ) -> object:
+        if isinstance(value, list):
+            return [
+                expand(item, definitions, resolving)
+                for item in cast(list[object], value)
+            ]
+        if not isinstance(value, dict):
+            return value
+        fields = cast(dict[str, object], value)
+        local = fields.get("$defs")
+        if isinstance(local, dict):
+            definitions = definitions | cast(dict[str, object], local)
+        reference = fields.get("$ref")
+        if isinstance(reference, str) and reference.startswith("#/$defs/"):
+            if reference in resolving:
+                raise ValueError(
+                    "Recursive request metadata needs an OpenAPI component"
+                )
+            name = (
+                reference.removeprefix("#/$defs/").replace("~1", "/").replace("~0", "~")
+            )
+            target = expand(definitions[name], definitions, resolving | {reference})
+            assert isinstance(target, dict)
+            return cast(dict[str, object], target) | {
+                key: expand(item, definitions, resolving)
+                for key, item in fields.items()
+                if key not in {"$ref", "$defs"}
+            }
+        return {
+            key: expand(item, definitions, resolving)
+            for key, item in fields.items()
+            if key != "$defs"
+        }
+
+    return cast(dict[str, object], expand(schema, {}))
+
+
 def _json_request_body(schema: dict[str, object]) -> dict[str, object]:
     return {
         "requestBody": {
             "required": True,
             "content": {
                 "application/json": {
-                    "schema": schema,
+                    "schema": _inline_request_schema(schema),
                 }
             },
         }
@@ -1584,7 +1633,7 @@ def _json_request_body(schema: dict[str, object]) -> dict[str, object]:
 def _audio_speech_request_body() -> dict[str, object]:
     """Describe the JSON and multipart forms accepted by the speech route."""
 
-    json_schema = cast(dict[str, object], AudioSpeechRequest.model_json_schema())
+    json_schema = _inline_request_schema(AudioSpeechRequest.model_json_schema())
     multipart_schema = cast(dict[str, object], json.loads(json.dumps(json_schema)))
     properties = cast(dict[str, object], multipart_schema.get("properties", {}))
     properties["reference_audio"] = {
@@ -2692,7 +2741,9 @@ class API:
                     "required": True,
                     "content": {
                         "application/json": {
-                            "schema": VideoCreateRequest.model_json_schema()
+                            "schema": _inline_request_schema(
+                                VideoCreateRequest.model_json_schema()
+                            )
                         },
                         "multipart/form-data": {
                             "schema": _video_create_multipart_schema()

@@ -1373,7 +1373,8 @@ and an allowlisted asset fetch interceptor; gallery requests never operate a clu
 
 ## Documentation screenshot refresh
 
-Use the offline Storybook workflow in `CONTRIBUTING.md` and
-`node scripts/capture_docs_screenshots.mjs` to refresh dashboard documentation
-images. Fixtures intercept API calls; retain fictional-data captions and inspect
-both desktop and phone captures before committing.
+Use the live-dashboard workflow in `CONTRIBUTING.md` and
+`SKULK_DOCS_URL=<authorized-dashboard-origin> node scripts/capture_docs_screenshots.mjs`.
+The capture script blocks non-read HTTP requests and records actual dashboard
+state. Inspect desktop and phone captures before committing; native operator-app
+screenshots come from the app separately.

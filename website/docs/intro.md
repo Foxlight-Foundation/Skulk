@@ -20,11 +20,10 @@ cluster; the model, engine, available memory, and network determine which nodes
 can participate in each placement. Joining a cluster does not make every GPU
 interchangeable or every model distributable.
 
-![Skulk dashboard showing a three-node example cluster](./imgs/dash-1.png)
+![Skulk dashboard showing a running three-node cluster](./imgs/dash-1.png)
 
-*Dashboard screenshots in these guides use the current interface with fictional
-nodes, models, and measurements. They illustrate controls and states, not
-performance results.*
+*Screenshots show the actual dashboard and live cluster state at capture time.
+Model availability and resource readings change as the cluster runs.*
 
 ## Start with one model
 

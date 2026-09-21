@@ -9,8 +9,8 @@ Open it from the desktop app or visit `http://localhost:52415` on that machine.
 A dashboard connected to one node can show the cluster; you do not need to find
 the elected master first.
 
-The screenshots below show the actual dashboard with fictional sample data.
-Model names, node names, failure states, and measurements are illustrations.
+The screenshots below show the actual dashboard and live cluster state at
+capture time. Available models and resource readings change as the cluster runs.
 
 ## Cluster: see where work is running
 
@@ -32,7 +32,7 @@ before approving it. See [Talk to Skulk](steward).
 
 ## Model Store: separate downloads from placements
 
-![Model Store with example inventory](./imgs/dash-2.png)
+![Model Store showing the cluster inventory](./imgs/dash-2.png)
 
 Open **Model Store** to inspect canonical downloads, then **Find Models** to
 browse and filter models. Search results describe catalog entries; store
@@ -51,7 +51,7 @@ explains retention and recovery.
 
 ## Chat: choose a ready model
 
-![Chat with a ready example model](./imgs/dash-3.png)
+![Chat ready for a new conversation with a placed model](./imgs/dash-3.png)
 
 Choose a ready chat model in the composer. Conversations, model selection,
 attachments, and generation controls live in the Chat view; history and active

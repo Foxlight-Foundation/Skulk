@@ -15,9 +15,9 @@ it is a configuration change rather than an integration project. The dashboard's
 Open the dashboard and choose **Integrations** in the navigation, or go straight
 to `/integrations`.
 
-![Integration recipes using fictional ready models](./imgs/dashboard-integrations.png)
+![Integration recipes using the cluster’s ready models](./imgs/dashboard-integrations.png)
 
-*The screenshot uses fictional model and cluster data.*
+*The screenshot shows live model availability at capture time.*
 
 ## What the page gives you
 

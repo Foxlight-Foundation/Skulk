@@ -16,9 +16,9 @@ and any provider-specific policy. Process separation helps lifecycle management;
 it is not a sandbox against malicious code running as the same operating-system
 user. Install only bundles from publishers you trust.
 
-![Managed plugin inventory with fictional capability data](./imgs/dashboard-plugins.png)
+![Managed plugin inventory in the live dashboard](./imgs/dashboard-plugins.png)
 
-*Illustrative plugin inventory; this example is not a downloadable package.*
+*The actual plugin inventory at capture time; installed capabilities vary by cluster.*
 
 ## Get a compatible plugin
 

@@ -3,6 +3,7 @@
 import re
 from pathlib import Path
 
+import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.routing import APIRoute, APIWebSocketRoute
@@ -132,3 +133,75 @@ def test_public_route_paths_are_present_in_the_manual_guide(
     for route in documented_app.routes:
         if isinstance(route, APIRoute | APIWebSocketRoute):
             assert route.path_format in documented_paths, route.path_format
+
+
+async def test_all_references_resolve_in_live_openapi(
+    documented_app: FastAPI,
+) -> None:
+    """Resolve every reference against the HTTP schema without exporter repair."""
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=documented_app),
+        base_url="http://localhost",
+    ) as client:
+        response = await client.get("/api/openapi.json")
+    assert response.status_code == 200
+    schema = TypeAdapter(dict[str, JsonValue]).validate_json(response.content)
+    pending: list[JsonValue] = [schema]
+    visited: set[str] = set()
+    while pending:
+        value = pending.pop()
+        if isinstance(value, list):
+            pending.extend(value)
+        elif isinstance(value, dict):
+            reference = value.get("$ref")
+            if isinstance(reference, str) and reference not in visited:
+                assert reference.startswith("#/"), reference
+                visited.add(reference)
+                target: JsonValue = schema
+                for encoded_part in reference[2:].split("/"):
+                    part = encoded_part.replace("~1", "/").replace("~0", "~")
+                    assert isinstance(target, dict) and part in target, reference
+                    target = target[part]
+                pending.append(target)
+            pending.extend(value.values())
+
+
+def test_config_request_retains_direct_and_wrapped_nested_fields(
+    documented_app: FastAPI,
+) -> None:
+    """Inlining must retain configuration structure, constraints, and both forms."""
+    schema = TypeAdapter(dict[str, JsonValue]).validate_python(documented_app.openapi())
+    value: JsonValue = schema
+    for key in (
+        "paths",
+        "/config",
+        "put",
+        "requestBody",
+        "content",
+        "application/json",
+        "schema",
+    ):
+        assert isinstance(value, dict)
+        value = value[key]
+    assert isinstance(value, dict)
+    alternatives = value["anyOf"]
+    assert isinstance(alternatives, list) and len(alternatives) == 2
+    direct, wrapped = alternatives
+    assert isinstance(direct, dict) and isinstance(wrapped, dict)
+    wrapped_properties = wrapped["properties"]
+    assert isinstance(wrapped_properties, dict)
+    assert wrapped["required"] == ["config"]
+    assert wrapped_properties["config"] == direct
+    properties = direct["properties"]
+    assert isinstance(properties, dict)
+    intelligent_fabric = properties["intelligentFabric"]
+    assert isinstance(intelligent_fabric, dict)
+    variants = intelligent_fabric["anyOf"]
+    assert isinstance(variants, list)
+    settings = variants[0]
+    assert isinstance(settings, dict) and settings["additionalProperties"] is False
+    settings_properties = settings["properties"]
+    assert isinstance(settings_properties, dict)
+    enabled = settings_properties["enabled"]
+    assert isinstance(enabled, dict)
+    assert enabled["type"] == "boolean" and enabled["default"] is False
