@@ -410,13 +410,15 @@ A model card's `placement.compatible_backends` selects which engine serves it
   with a caller-minted `prompt_id`, follows `progress_state` on the
   WebSocket, cancels through the jobs API, and hands the container plus a
   first-frame thumbnail to the worker like the test engine does. Renders
-  dispatch through `ServedConcurrentDispatch` at width 1 with a bounded
-  admission queue held by the loop itself (the same loop the served text
-  engines use, queue-less): strictly serial, but acknowledged on admission
-  and queued in the loop rather than the pool, so the worker's control loop
-  is never held behind a render, later renders are still read, and a queued
-  render is cancelled before it ever reaches the server (a cancelled running
-  render is interrupted at its next sampling step). Before `LoadModel` the
+  dispatch through `ServedConcurrentDispatch` at width 1 with an admission
+  queue held by the loop itself (the same loop the served text engines use,
+  queue-less): strictly serial, but acknowledged on admission and queued in
+  the loop rather than the pool, oldest first and never blocking the loop
+  (the queue's depth is bounded upstream by the API's per-node job
+  admission, not by the runner), so the worker's control loop is never held
+  behind a render, later renders are still read, and a queued render is
+  cancelled before it ever reaches the server (a cancelled running render
+  is interrupted at its next sampling step). Before `LoadModel` the
   liveness poll is a no-op; after a fatal render error the server is torn
   down so the next task or idle poll ends the runner for the supervisor. Teardown
   signals the process group; worker startup sweeps init-parented servers

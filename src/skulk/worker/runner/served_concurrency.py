@@ -21,6 +21,7 @@ re-implementing (and re-reviewing) any of that.
 
 import contextlib
 import threading
+import time
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 
@@ -55,6 +56,13 @@ from skulk.worker.runner.diagnostics import record_runner_phase
 # still alive (a dead server between requests must crash the runner, not wedge it
 # Ready) and to re-poll for a dispatch slot while saturated.
 _LIVENESS_POLL_S: float = 2.0
+
+# While generations wait in the loop's queue the receiver is polled at this
+# cadence instead: a permit freed on a worker thread is only noticed on the
+# loop's next pass, and a queued render should not sit idle behind a finished
+# one for the whole liveness interval. The liveness check itself keeps its
+# own cadence.
+_QUEUED_POLL_S: float = 0.1
 
 
 type GenerationTask = TextGeneration | VideoGeneration
@@ -115,21 +123,27 @@ class ServedConcurrentDispatch:
     # --- concurrency state ----------------------------------------------------
 
     def _init_concurrent_dispatch(
-        self, max_concurrency: int, thread_name_prefix: str, admission_queue: int = 0
+        self,
+        max_concurrency: int,
+        thread_name_prefix: str,
+        queue_admitted: bool = False,
     ) -> None:
         """Set up the concurrency state. Call once from the runner's ``__init__``.
 
         ``max_concurrency`` bounds both the pool width and the number of SUBMITTED
-        generations (via the permit semaphore). ``admission_queue`` lets the loop
-        hold that many more generations acknowledged but not yet submitted,
-        in its own queue rather than the pool's: the loop keeps reading, so a
-        queued generation can be cancelled before it ever runs and later tasks
-        are still acknowledged, and only past the queue does load backpressure
-        the receiver. A serial engine whose work is long (a video render) sets
-        a queue; the text engines leave it at zero.
+        generations (via the permit semaphore). With ``queue_admitted`` the loop
+        holds every further generation acknowledged but not yet submitted in
+        its own queue rather than the pool's, oldest first, and never blocks on
+        a permit: it keeps reading, so a queued generation can be cancelled
+        before it ever runs and later tasks are still acknowledged, and the
+        queue's depth is bounded upstream by the API's per-node job admission
+        rather than here (a bound here would put the generation past it back
+        on the blocking path, ahead of the queue and holding the loop). A
+        serial engine whose work is long (a video render) queues; the text
+        engines leave it off and backpressure the receiver past their permits.
         """
         self._max_concurrency = max_concurrency
-        self._admission_queue = admission_queue
+        self._queue_admitted = queue_admitted
         # Acknowledged generations waiting for a permit, oldest first; read and
         # written on the dispatch thread only.
         self._admitted: deque[GenerationTask] = deque()
@@ -196,19 +210,24 @@ class ServedConcurrentDispatch:
         )
         try:
             with self.task_receiver as tasks:
+                last_liveness_check = time.monotonic()
                 while True:
                     # A permit freed by a finished generation, or a cancel for a
                     # queued one, is acted on here: every pass through the loop
                     # settles the queue before waiting on the receiver again.
                     self._dispatch_admitted(pool)
                     try:
-                        task = tasks.receive_timeout(_LIVENESS_POLL_S)
+                        task = tasks.receive_timeout(
+                            _QUEUED_POLL_S if self._admitted else _LIVENESS_POLL_S
+                        )
                     except WouldBlock:
                         # No task within the poll window: verify the server
                         # subprocess is still alive. Without this a server that
                         # dies BETWEEN requests leaves the runner gossiping Ready
                         # forever while every future request fails.
-                        self._ensure_server_alive()
+                        if time.monotonic() - last_liveness_check >= _LIVENESS_POLL_S:
+                            self._ensure_server_alive()
+                            last_liveness_check = time.monotonic()
                         continue
                     except (EndOfStream, ClosedResourceError):
                         break
@@ -216,6 +235,7 @@ class ServedConcurrentDispatch:
                     # runner on the next task, not only on an idle poll: under
                     # steady traffic the poll branch above may never run.
                     self._ensure_server_alive()
+                    last_liveness_check = time.monotonic()
                     if task.task_id in self.seen:
                         logger.warning("repeat task - potential error")
                         continue
@@ -234,13 +254,15 @@ class ServedConcurrentDispatch:
                             # over-capacity request. Ack means "accepted".
                             self.acknowledge_task(task)
                             self._clear_stale_cancel_all_if_idle()
-                            # With room in the admission queue, the generation
-                            # waits there and the loop goes on reading; it is
-                            # dispatched, or cancelled, by _dispatch_admitted.
+                            # A queueing engine holds the generation in the
+                            # loop's queue and goes on reading; it is dispatched,
+                            # or cancelled, by _dispatch_admitted, behind every
+                            # generation queued before it (a non-empty queue
+                            # never lets a newcomer take the permit first).
                             if self._admitted or not self._dispatch_permits.acquire(
                                 blocking=False
                             ):
-                                if len(self._admitted) < self._admission_queue:
+                                if self._queue_admitted:
                                     self._note_dispatch_waiter_started()
                                     self._admitted.append(task)
                                     continue

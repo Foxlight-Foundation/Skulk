@@ -189,12 +189,6 @@ def _saved_file(outputs: dict[str, Any], node_id: str, output_root: Path) -> Pat
     return candidate
 
 
-# Renders the loop holds acknowledged behind the one running, cancellable
-# while they wait. The API admits a bounded number of jobs per node, so this
-# only has to exceed what one node can queue in practice.
-_QUEUED_RENDERS: Final = 8
-
-
 @final
 class Runner(ServedConcurrentDispatch):
     """ComfyUI-backed video runner; same constructor shape as the image runner."""
@@ -221,9 +215,13 @@ class Runner(ServedConcurrentDispatch):
         self.current_status: RunnerStatus = RunnerIdle()
         # Width 1: one ComfyUI server renders one prompt at a time, but the
         # shared loop acknowledges every render on admission and holds the
-        # next ones in a bounded queue, so the worker plans on (a cancel
-        # included) while a render waits or runs, however many are waiting.
-        self._init_concurrent_dispatch(1, "comfy-render", admission_queue=_QUEUED_RENDERS)
+        # next ones in its queue, oldest first, so the worker plans on (a
+        # cancel included) while a render waits or runs, however many are
+        # waiting. The queue has no bound of its own: the API admits a
+        # bounded number of jobs per node, and a bound here would block the
+        # loop on the render past it (the very hold this fixes) and let that
+        # render take the slot ahead of the queue.
+        self._init_concurrent_dispatch(1, "comfy-render", queue_admitted=True)
         self.update_status(RunnerIdle())
 
     # --- events ---------------------------------------------------------------

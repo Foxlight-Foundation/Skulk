@@ -46,7 +46,7 @@ from skulk.worker.runner.served_concurrency import ServedConcurrentDispatch
 class _FakeHost(ServedConcurrentDispatch):
     """Minimal host runner: real mixin, stubbed engine hooks + status plumbing."""
 
-    def __init__(self, max_concurrency: int, admission_queue: int = 0) -> None:
+    def __init__(self, max_concurrency: int, queue_admitted: bool = False) -> None:
         self.runner_id = RunnerId("fake")
         self.server_dead = False
         self.seen: set[TaskId] = set()
@@ -56,6 +56,7 @@ class _FakeHost(ServedConcurrentDispatch):
         self._events_lock = threading.Lock()
         self.generate_gate: threading.Event | None = None
         self.started = threading.Semaphore(0)
+        self.started_order: list[TaskId] = []
         self.peak_inflight = 0
         self.admission_samples: list[int] = []
         self._samples_lock = threading.Lock()
@@ -75,7 +76,7 @@ class _FakeHost(ServedConcurrentDispatch):
         self.shard_metadata: Any = type(
             "S", (), {"model_card": type("C", (), {"model_id": ModelId("m")})()}
         )()
-        self._init_concurrent_dispatch(max_concurrency, "fake-gen", admission_queue)
+        self._init_concurrent_dispatch(max_concurrency, "fake-gen", queue_admitted)
 
     # engine hooks
     def _generate(self, task: Task) -> None:
@@ -83,6 +84,7 @@ class _FakeHost(ServedConcurrentDispatch):
         # capture, not the live count, mirroring what the real served runners do.
         with self._samples_lock:
             self.admission_samples.append(self._admission_concurrency(task.task_id))
+            self.started_order.append(task.task_id)
         self.started.release()
         self.peak_inflight = max(self.peak_inflight, self._inflight_count())
         if self.generate_gate is not None:
@@ -581,7 +583,7 @@ def test_video_renders_queue_behind_the_slot_and_stay_cancellable() -> None:
     third renders are acknowledged while the first holds the slot, the third
     is cancelled while queued without a generation, and the second runs after
     the first."""
-    host = _VideoFakeHost(max_concurrency=1, admission_queue=8)
+    host = _VideoFakeHost(max_concurrency=1, queue_admitted=True)
     _load_ready(host)
     host.generate_gate = threading.Event()
     t = host.start()
@@ -614,6 +616,56 @@ def test_video_renders_queue_behind_the_slot_and_stay_cancellable() -> None:
         # Two starts in all: the first's and the second's, never the third's.
         assert host.started.acquire(timeout=5)
         assert not host.started.acquire(timeout=0.2)
+        _wait_inflight(host, 0)
+        assert isinstance(host.current_status, RunnerReady)
+    finally:
+        host.generate_gate.set()
+        host.send(Shutdown(instance_id=_iid(), runner_id=host.runner_id))
+        t.join(timeout=5)
+
+
+def test_video_renders_queue_in_arrival_order_however_many_wait() -> None:
+    """The queue has no bound of its own: with one render holding the slot,
+    a dozen more are all acknowledged while it runs (the loop never blocks),
+    a cancel for one in the middle lands while it waits, and the rest run in
+    the order they arrived, none taking the slot ahead of an earlier one."""
+    host = _VideoFakeHost(max_concurrency=1, queue_admitted=True)
+    _load_ready(host)
+    host.generate_gate = threading.Event()
+    t = host.start()
+    try:
+        first = _vgen()
+        host.send(first)
+        assert host.started.acquire(timeout=5)
+        queued = [_vgen() for _ in range(12)]
+        for render in queued:
+            host.send(render)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not all(
+            host.acknowledged(render.task_id) for render in queued
+        ):
+            time.sleep(0.02)
+        assert all(host.acknowledged(render.task_id) for render in queued)
+        _wait_dispatch_waiters(host, len(queued))
+        # Still one start: nothing queued has run past the held slot.
+        assert not host.started.acquire(timeout=0.2)
+        dropped = queued[5]
+        host._cancel_sender.send(dropped.task_id)
+        host.generate_gate.set()
+        expected_complete = 1 + len(queued) - 1
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and (
+            host.task_statuses(TaskStatus.Complete) < expected_complete
+            or host.task_statuses(TaskStatus.Cancelled) < 1
+        ):
+            time.sleep(0.05)
+        assert host.task_statuses(TaskStatus.Complete) == expected_complete
+        assert host.task_statuses(TaskStatus.Cancelled) == 1
+        with host._samples_lock:
+            started = list(host.started_order)
+        assert started == [first.task_id] + [
+            render.task_id for render in queued if render is not dropped
+        ]
         _wait_inflight(host, 0)
         assert isinstance(host.current_status, RunnerReady)
     finally:
