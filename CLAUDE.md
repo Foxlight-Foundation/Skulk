@@ -420,7 +420,9 @@ A model card's `placement.compatible_backends` selects which engine serves it
   cancelled before it ever reaches the server (a cancelled running render
   is interrupted at its next sampling step). Before `LoadModel` the
   liveness poll is a no-op; after a fatal render error the server is torn
-  down so the next task or idle poll ends the runner for the supervisor. Teardown
+  down so the next task, the next queued render, or the idle poll ends the
+  runner for the supervisor, and the renders still queued are failed by the
+  runner itself rather than dispatched against nothing. Teardown
   signals the process group; worker startup sweeps init-parented servers
   launched with Skulk's `--user-directory`. Tags `comfy-cuda` and
   `comfy-rocm` (the ROCm lane launches with `ROCM_LAUNCH_FLAGS`:

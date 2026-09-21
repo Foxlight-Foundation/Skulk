@@ -674,6 +674,51 @@ def test_video_renders_queue_in_arrival_order_however_many_wait() -> None:
         t.join(timeout=5)
 
 
+def test_a_dead_server_ends_the_loop_before_a_queued_render_runs() -> None:
+    """A server that died under the running render is caught when the loop
+    would dispatch the next queued one: the loop ends (the supervisor restarts
+    the runner), the queued renders are failed by the runner itself, and
+    none of them is started against nothing."""
+    host = _VideoFakeHost(max_concurrency=1, queue_admitted=True)
+    _load_ready(host)
+    host.generate_gate = threading.Event()
+    failure: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            host.run_dispatch_loop()
+        except BaseException as exc:  # noqa: BLE001 - the loop's exit is the assertion
+            failure.append(exc)
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    try:
+        first, second, third = _vgen(), _vgen(), _vgen()
+        host.send(first)
+        assert host.started.acquire(timeout=5)
+        host.send(second)
+        host.send(third)
+        _wait_dispatch_waiters(host, 2)
+        assert host.acknowledged(second.task_id) and host.acknowledged(third.task_id)
+        # The server dies under the first render; the first finishes.
+        host.server_dead = True
+        host.generate_gate.set()
+        t.join(timeout=10)
+        assert not t.is_alive()
+        assert failure and "fake server died" in str(failure[0])
+        assert host.task_statuses(TaskStatus.Complete) == 1
+        assert host.task_statuses(TaskStatus.Failed) == 2
+        # Only the first ever started.
+        assert not host.started.acquire(timeout=0.2)
+        assert host._dispatch_waiters == 0
+    finally:
+        host.server_dead = False
+        host.generate_gate.set()
+        if t.is_alive():
+            host.send(Shutdown(instance_id=_iid(), runner_id=host.runner_id))
+            t.join(timeout=5)
+
+
 def test_a_dead_server_ends_the_loop_on_the_next_task() -> None:
     """A server that died is caught on the next received task, not only on an
     idle poll, so a runner under steady traffic does not keep admitting work

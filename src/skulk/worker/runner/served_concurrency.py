@@ -329,6 +329,15 @@ class ServedConcurrentDispatch:
             # Drain in-flight generations, then stop the server. Shutdown already
             # cancels them; this also covers the EndOfStream / crash exits.
             pool.shutdown(wait=True)
+            # Generations still queued when the loop ends on a crash never run:
+            # the runner says so itself rather than leaving their terminal to
+            # the supervisor's sweep of everything it acknowledged. A sender
+            # already closed under us must not stop the server teardown.
+            while self._admitted:
+                queued = self._admitted.popleft()
+                with contextlib.suppress(Exception):
+                    self.send_task_status(queued, TaskStatus.Failed)
+                self._note_dispatch_waiter_finished()
             self._teardown_server()
 
     # --- dispatch -------------------------------------------------------------
@@ -347,6 +356,15 @@ class ServedConcurrentDispatch:
                 continue
             if not self._dispatch_permits.acquire(blocking=False):
                 return
+            # Never a queued generation against a server that died under the
+            # last one: the check the loop makes for a received task, made for
+            # a queued one, so the runner ends here and the supervisor restarts
+            # it instead of the queue draining into "server not running".
+            try:
+                self._ensure_server_alive()
+            except BaseException:
+                self._dispatch_permits.release()
+                raise
             self._admitted.popleft()
             self._note_dispatch_waiter_finished()
             self._dispatch_generation(head, pool)
