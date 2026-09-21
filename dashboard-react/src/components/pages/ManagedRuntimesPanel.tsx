@@ -52,6 +52,8 @@ function RuntimeControls({ runtime, unavailable, nodes, details, nodeEvidence, f
   // Removal is armed from the menu and confirmed in the drawer: it is the
   // explicit end of an uninstall, and the retained state does not come back.
   const [removalArmed, setRemovalArmed] = useState(false);
+  // Dismissing the drawer disarms it: the next opening asks again.
+  const closeDrawer = () => { setExpanded(false); setRemovalArmed(false); };
   // A refused removal is said on its own: the uninstall it follows is complete,
   // and the lifecycle notice is hidden once an operation completes.
   const [purgeNotice, setPurgeNotice] = useState('');
@@ -134,7 +136,7 @@ function RuntimeControls({ runtime, unavailable, nodes, details, nodeEvidence, f
         { id: 'purge', label: t('plugins.purgeMenu', 'Remove uninstalled plugin…'), danger: true, disabled: !runtime.uninstalled || pending || busy || unavailable, onSelect: () => { setRemovalArmed(true); setExpanded(true); } },
       ]} />
     </div>
-    <RightDrawer open={expanded} onClose={() => setExpanded(false)} title={name} ariaLabel={t('plugins.runtimeDetails', 'Runtime details')}
+    <RightDrawer open={expanded} onClose={closeDrawer} title={name} ariaLabel={t('plugins.runtimeDetails', 'Runtime details')}
       width={width} minWidth={360} maxWidth={900} onWidthChange={setWidth} closeLabel={t('common.close', 'Close')} resizeLabel={t('plugins.resize', 'Resize plugin details')}>
     <div style={{ overflowY: 'auto' }}><RuntimeCard aria-label={runtime.plugin_id}>
     <h3>{t('plugins.runtimeOverview', 'Runtime overview')}</h3>

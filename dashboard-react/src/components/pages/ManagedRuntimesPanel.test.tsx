@@ -189,6 +189,19 @@ it('removes an uninstalled plugin only after a second, explicit confirmation', a
   await act(async () => { await vi.waitFor(() => expect(host.textContent).not.toContain('managed.fixture')); });
 });
 
+it('disarms removal when the drawer is dismissed, so reopening asks again', async () => {
+  runtime = { ...runtime, uninstalled: true, enabled: false, stale: true, service: null };
+  await act(async () => { store.dispatch(apiSlice.util.invalidateTags(['Plugins'])); });
+  await contains('Uninstalled');
+  await click('Remove uninstalled plugin');
+  await contains('Remove now');
+  await act(async () => { host.querySelector<HTMLButtonElement>('button[aria-label="Close"]')!.click(); });
+  await click('Configure');
+  await contains('Remove uninstalled plugin');
+  expect([...host.querySelectorAll('button')].some((item) => item.textContent === 'Remove now')).toBe(false);
+  expect(deletes).toHaveLength(0);
+});
+
 it('says a refused removal even though the uninstall before it is complete', async () => {
   operation = { request: { operation_id: 'e'.repeat(32), action: 'uninstall' }, state: 'complete', error_code: null };
   runtime = { ...runtime, uninstalled: true, enabled: false, stale: true, service: null, operation_id: operation.request.operation_id, operation_state: 'complete' };

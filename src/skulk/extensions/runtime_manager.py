@@ -875,15 +875,18 @@ class RuntimeManager:
                 await controller.close()
                 if downloads is not None:
                     await downloads.close()
-                self.controllers.pop(identifier, None)
-                self.downloads.pop(identifier, None)
-                self.errors.pop(identifier, None)
+                # The directory goes before the manager forgets the installation:
+                # a removal that fails on disk leaves a closed, still-listed
+                # installation that the same purge can be asked for again.
                 await asyncio.to_thread(shutil.rmtree, root)
                 descriptor = os.open(self.installations, os.O_RDONLY | os.O_DIRECTORY)
                 try:
                     os.fsync(descriptor)
                 finally:
                     os.close(descriptor)
+                self.controllers.pop(identifier, None)
+                self.downloads.pop(identifier, None)
+                self.errors.pop(identifier, None)
 
         # Owned to the end: a caller that gives up mid-removal must not leave a
         # deleting thread racing the next registration of the same identity.
