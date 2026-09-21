@@ -17,6 +17,7 @@ from skulk.shared.types.common import CommandId, ModelId
 from skulk.shared.types.events import (
     Event,
     RunnerStatusUpdated,
+    TaskAcknowledged,
     TaskStatusUpdated,
 )
 from skulk.shared.types.tasks import (
@@ -27,8 +28,10 @@ from skulk.shared.types.tasks import (
     TaskId,
     TaskStatus,
     TextGeneration,
+    VideoGeneration,
 )
 from skulk.shared.types.text_generation import TextGenerationTaskParams
+from skulk.shared.types.video import VideoGenerationTaskParams
 from skulk.shared.types.worker.runners import (
     RunnerId,
     RunnerIdle,
@@ -43,8 +46,9 @@ from skulk.worker.runner.served_concurrency import ServedConcurrentDispatch
 class _FakeHost(ServedConcurrentDispatch):
     """Minimal host runner: real mixin, stubbed engine hooks + status plumbing."""
 
-    def __init__(self, max_concurrency: int) -> None:
+    def __init__(self, max_concurrency: int, queue_admitted: bool = False) -> None:
         self.runner_id = RunnerId("fake")
+        self.server_dead = False
         self.seen: set[TaskId] = set()
         self.cancelled_tasks: set[TaskId] = set()
         self.current_status: RunnerStatus = RunnerIdle()
@@ -52,6 +56,7 @@ class _FakeHost(ServedConcurrentDispatch):
         self._events_lock = threading.Lock()
         self.generate_gate: threading.Event | None = None
         self.started = threading.Semaphore(0)
+        self.started_order: list[TaskId] = []
         self.peak_inflight = 0
         self.admission_samples: list[int] = []
         self._samples_lock = threading.Lock()
@@ -71,7 +76,7 @@ class _FakeHost(ServedConcurrentDispatch):
         self.shard_metadata: Any = type(
             "S", (), {"model_card": type("C", (), {"model_id": ModelId("m")})()}
         )()
-        self._init_concurrent_dispatch(max_concurrency, "fake-gen")
+        self._init_concurrent_dispatch(max_concurrency, "fake-gen", queue_admitted)
 
     # engine hooks
     def _generate(self, task: Task) -> None:
@@ -79,6 +84,7 @@ class _FakeHost(ServedConcurrentDispatch):
         # capture, not the live count, mirroring what the real served runners do.
         with self._samples_lock:
             self.admission_samples.append(self._admission_concurrency(task.task_id))
+            self.started_order.append(task.task_id)
         self.started.release()
         self.peak_inflight = max(self.peak_inflight, self._inflight_count())
         if self.generate_gate is not None:
@@ -91,7 +97,8 @@ class _FakeHost(ServedConcurrentDispatch):
         self._is_cancelled(task.task_id)
 
     def _ensure_server_alive(self) -> None:
-        pass
+        if self.server_dead:
+            raise RuntimeError("fake server died")
 
     def _teardown_server(self) -> None:
         pass
@@ -141,6 +148,31 @@ class _FakeHost(ServedConcurrentDispatch):
                 for e in self.events
                 if isinstance(e, TaskStatusUpdated) and e.task_status is status
             )
+
+
+class _VideoFakeHost(_FakeHost):
+    """The video engine's shape: renders are the generations, one at a time."""
+
+    _generation_kinds = (VideoGeneration,)
+
+    def acknowledge_task(self, task: Task) -> None:
+        with self._events_lock:
+            self.events.append(TaskAcknowledged(task_id=task.task_id))
+
+    def acknowledged(self, task_id: TaskId) -> bool:
+        with self._events_lock:
+            return any(
+                isinstance(e, TaskAcknowledged) and e.task_id == task_id
+                for e in self.events
+            )
+
+
+def _vgen() -> VideoGeneration:
+    return VideoGeneration(
+        command_id=CommandId(),
+        task_params=VideoGenerationTaskParams(prompt="a fox", model="m", seconds=4),
+        instance_id=_iid(),
+    )
 
 
 def _iid() -> Any:
@@ -504,3 +536,214 @@ def test_stamp_runner_stats_serial_reports_not_batching_and_floors_inflight() ->
 
     assert stamped.serving_batches is False  # max_concurrency 1
     assert stamped.in_flight_at_admission == 1  # floored to >= 1
+
+
+def test_video_render_queued_behind_another_is_acknowledged_and_cancellable() -> None:
+    """The video engine's regression: a render queued behind a running one is
+    acknowledged on admission (so the worker keeps planning) and, cancelled
+    while it waits, never reaches the server; the running one completes."""
+    host = _VideoFakeHost(max_concurrency=1)
+    _load_ready(host)
+    host.generate_gate = threading.Event()
+    t = host.start()
+    try:
+        first, second = _vgen(), _vgen()
+        host.send(first)
+        assert host.started.acquire(timeout=5)
+        host.send(second)
+        # Acknowledged while the first render still holds the only slot.
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not host.acknowledged(second.task_id):
+            time.sleep(0.02)
+        assert host.acknowledged(second.task_id)
+        assert host._inflight_count() == 1
+        _wait_dispatch_waiters(host, 1)
+        host._cancel_sender.send(second.task_id)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and host.task_statuses(TaskStatus.Cancelled) < 1:
+            time.sleep(0.05)
+        assert host.task_statuses(TaskStatus.Cancelled) == 1
+        # The second render was never generated: one start, the first's.
+        assert not host.started.acquire(timeout=0.2)
+        host.generate_gate.set()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and host.task_statuses(TaskStatus.Complete) < 1:
+            time.sleep(0.05)
+        assert host.task_statuses(TaskStatus.Complete) == 1
+        _wait_inflight(host, 0)
+        assert isinstance(host.current_status, RunnerReady)
+    finally:
+        host.generate_gate.set()
+        host.send(Shutdown(instance_id=_iid(), runner_id=host.runner_id))
+        t.join(timeout=5)
+
+
+def test_video_renders_queue_behind_the_slot_and_stay_cancellable() -> None:
+    """With an admission queue, a width-one engine keeps reading: the second and
+    third renders are acknowledged while the first holds the slot, the third
+    is cancelled while queued without a generation, and the second runs after
+    the first."""
+    host = _VideoFakeHost(max_concurrency=1, queue_admitted=True)
+    _load_ready(host)
+    host.generate_gate = threading.Event()
+    t = host.start()
+    try:
+        first, second, third = _vgen(), _vgen(), _vgen()
+        host.send(first)
+        assert host.started.acquire(timeout=5)
+        host.send(second)
+        host.send(third)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not (
+            host.acknowledged(second.task_id) and host.acknowledged(third.task_id)
+        ):
+            time.sleep(0.02)
+        assert host.acknowledged(second.task_id) and host.acknowledged(third.task_id)
+        # Neither queued render has started: one slot, one start so far.
+        assert not host.started.acquire(timeout=0.2)
+        host._cancel_sender.send(third.task_id)
+        host.generate_gate.set()
+        # The first completes, the second starts and completes, the third is
+        # cancelled without ever generating.
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and (
+            host.task_statuses(TaskStatus.Complete) < 2
+            or host.task_statuses(TaskStatus.Cancelled) < 1
+        ):
+            time.sleep(0.05)
+        assert host.task_statuses(TaskStatus.Complete) == 2
+        assert host.task_statuses(TaskStatus.Cancelled) == 1
+        # Two starts in all: the first's and the second's, never the third's.
+        assert host.started.acquire(timeout=5)
+        assert not host.started.acquire(timeout=0.2)
+        _wait_inflight(host, 0)
+        assert isinstance(host.current_status, RunnerReady)
+    finally:
+        host.generate_gate.set()
+        host.send(Shutdown(instance_id=_iid(), runner_id=host.runner_id))
+        t.join(timeout=5)
+
+
+def test_video_renders_queue_in_arrival_order_however_many_wait() -> None:
+    """The queue has no bound of its own: with one render holding the slot,
+    a dozen more are all acknowledged while it runs (the loop never blocks),
+    a cancel for one in the middle lands while it waits, and the rest run in
+    the order they arrived, none taking the slot ahead of an earlier one."""
+    host = _VideoFakeHost(max_concurrency=1, queue_admitted=True)
+    _load_ready(host)
+    host.generate_gate = threading.Event()
+    t = host.start()
+    try:
+        first = _vgen()
+        host.send(first)
+        assert host.started.acquire(timeout=5)
+        queued = [_vgen() for _ in range(12)]
+        for render in queued:
+            host.send(render)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not all(
+            host.acknowledged(render.task_id) for render in queued
+        ):
+            time.sleep(0.02)
+        assert all(host.acknowledged(render.task_id) for render in queued)
+        _wait_dispatch_waiters(host, len(queued))
+        # Still one start: nothing queued has run past the held slot.
+        assert not host.started.acquire(timeout=0.2)
+        dropped = queued[5]
+        host._cancel_sender.send(dropped.task_id)
+        host.generate_gate.set()
+        expected_complete = 1 + len(queued) - 1
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and (
+            host.task_statuses(TaskStatus.Complete) < expected_complete
+            or host.task_statuses(TaskStatus.Cancelled) < 1
+        ):
+            time.sleep(0.05)
+        assert host.task_statuses(TaskStatus.Complete) == expected_complete
+        assert host.task_statuses(TaskStatus.Cancelled) == 1
+        with host._samples_lock:
+            started = list(host.started_order)
+        assert started == [first.task_id] + [
+            render.task_id for render in queued if render is not dropped
+        ]
+        _wait_inflight(host, 0)
+        assert isinstance(host.current_status, RunnerReady)
+    finally:
+        host.generate_gate.set()
+        host.send(Shutdown(instance_id=_iid(), runner_id=host.runner_id))
+        t.join(timeout=5)
+
+
+def test_a_dead_server_ends_the_loop_before_a_queued_render_runs() -> None:
+    """A server that died under the running render is caught when the loop
+    would dispatch the next queued one: the loop ends (the supervisor restarts
+    the runner), the queued renders are failed by the runner itself, and
+    none of them is started against nothing."""
+    host = _VideoFakeHost(max_concurrency=1, queue_admitted=True)
+    _load_ready(host)
+    host.generate_gate = threading.Event()
+    failure: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            host.run_dispatch_loop()
+        except BaseException as exc:  # noqa: BLE001 - the loop's exit is the assertion
+            failure.append(exc)
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    try:
+        first, second, third = _vgen(), _vgen(), _vgen()
+        host.send(first)
+        assert host.started.acquire(timeout=5)
+        host.send(second)
+        host.send(third)
+        _wait_dispatch_waiters(host, 2)
+        assert host.acknowledged(second.task_id) and host.acknowledged(third.task_id)
+        # The server dies under the first render; the first finishes.
+        host.server_dead = True
+        host.generate_gate.set()
+        t.join(timeout=10)
+        assert not t.is_alive()
+        assert failure and "fake server died" in str(failure[0])
+        assert host.task_statuses(TaskStatus.Complete) == 1
+        assert host.task_statuses(TaskStatus.Failed) == 2
+        # Only the first ever started.
+        assert not host.started.acquire(timeout=0.2)
+        assert host._dispatch_waiters == 0
+    finally:
+        host.server_dead = False
+        host.generate_gate.set()
+        if t.is_alive():
+            host.send(Shutdown(instance_id=_iid(), runner_id=host.runner_id))
+            t.join(timeout=5)
+
+
+def test_a_dead_server_ends_the_loop_on_the_next_task() -> None:
+    """A server that died is caught on the next received task, not only on an
+    idle poll, so a runner under steady traffic does not keep admitting work
+    against nothing."""
+    host = _FakeHost(max_concurrency=1)
+    _load_ready(host)
+    failure: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            host.run_dispatch_loop()
+        except BaseException as exc:  # noqa: BLE001 - the loop's exit is the assertion
+            failure.append(exc)
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    try:
+        host.server_dead = True
+        host.send(_gen())
+        t.join(timeout=5)
+        assert not t.is_alive()
+        assert failure and "fake server died" in str(failure[0])
+    finally:
+        host.server_dead = False
+        if t.is_alive():
+            host.send(Shutdown(instance_id=_iid(), runner_id=host.runner_id))
+            t.join(timeout=5)
+

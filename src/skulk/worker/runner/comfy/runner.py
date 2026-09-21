@@ -20,7 +20,6 @@ import time
 from pathlib import Path
 from typing import Any, Final, cast, final
 
-from anyio import WouldBlock
 from loguru import logger
 from PIL import Image
 
@@ -41,10 +40,8 @@ from skulk.shared.types.events import (
     TaskStatusUpdated,
 )
 from skulk.shared.types.tasks import (
-    CANCEL_ALL_TASKS,
     ConnectToGroup,
     LoadModel,
-    Shutdown,
     StartWarmup,
     Task,
     TaskId,
@@ -69,8 +66,6 @@ from skulk.shared.types.worker.runners import (
     RunnerLoading,
     RunnerReady,
     RunnerRunning,
-    RunnerShutdown,
-    RunnerShuttingDown,
     RunnerStatus,
     RunnerWarmingUp,
 )
@@ -92,6 +87,7 @@ from skulk.worker.runner.comfy.server import (
     RenderResult,
     run_prompt,
 )
+from skulk.worker.runner.served_concurrency import ServedConcurrentDispatch
 
 _HASH_CHUNK: Final = 1 << 20
 _THUMBNAIL_QUALITY: Final = 85
@@ -194,7 +190,7 @@ def _saved_file(outputs: dict[str, Any], node_id: str, output_root: Path) -> Pat
 
 
 @final
-class Runner:
+class Runner(ServedConcurrentDispatch):
     """ComfyUI-backed video runner; same constructor shape as the image runner."""
 
     def __init__(
@@ -217,6 +213,15 @@ class Runner:
         self.cancelled_tasks: set[TaskId] = set()
         self.seen: set[TaskId] = set()
         self.current_status: RunnerStatus = RunnerIdle()
+        # Width 1: one ComfyUI server renders one prompt at a time, but the
+        # shared loop acknowledges every render on admission and holds the
+        # next ones in its queue, oldest first, so the worker plans on (a
+        # cancel included) while a render waits or runs, however many are
+        # waiting. The queue has no bound of its own: the API admits a
+        # bounded number of jobs per node, and a bound here would block the
+        # loop on the render past it (the very hold this fixes) and let that
+        # render take the slot ahead of the queue.
+        self._init_concurrent_dispatch(1, "comfy-render", queue_admitted=True)
         self.update_status(RunnerIdle())
 
     # --- events ---------------------------------------------------------------
@@ -234,42 +239,22 @@ class Runner:
         """Tell the supervisor the task was received."""
         self.event_sender.send(TaskAcknowledged(task_id=task.task_id))
 
-    # --- cancellation ---------------------------------------------------------
-
-    def _drain_cancellations(self) -> None:
-        while True:
-            try:
-                cancelled = self.cancel_receiver.receive_nowait()
-            except WouldBlock:
-                return
-            self.cancelled_tasks.add(cancelled)
-
-    def _is_cancelled(self, task_id: TaskId) -> bool:
-        self._drain_cancellations()
-        return task_id in self.cancelled_tasks or CANCEL_ALL_TASKS in self.cancelled_tasks
-
     # --- main loop ------------------------------------------------------------
 
+    _generation_kinds = (VideoGeneration,)
+
     def main(self) -> None:
-        """Serve tasks until shutdown, tearing the server down on every exit."""
-        try:
-            with self.task_receiver as tasks:
-                for task in tasks:
-                    if task.task_id in self.seen:
-                        logger.warning("repeat task - potential error")
-                    self.seen.add(task.task_id)
-                    self.cancelled_tasks.discard(CANCEL_ALL_TASKS)
-                    self.send_task_status(task, TaskStatus.Running)
-                    self.handle_task(task)
-                    if self._is_cancelled(task.task_id):
-                        self.send_task_status(task, TaskStatus.Cancelled)
-                    else:
-                        self.send_task_status(task, TaskStatus.Complete)
-                    self.update_status(self.current_status)
-                    if isinstance(self.current_status, RunnerShutdown):
-                        break
-        finally:
-            self._teardown_server()
+        """Serve tasks until shutdown through the shared served-dispatch loop.
+
+        Renders stay strictly serial (width 1), but a render is acknowledged the
+        moment it is admitted rather than when the server gets to it. The
+        worker's control loop waits on that acknowledgement before it plans
+        again, so without this a second render queued behind a running one
+        froze the worker until the first finished, and no cancel could reach
+        either of them. Shutdown and the liveness poll are the loop's as well;
+        the loop tears the server down on every exit.
+        """
+        self.run_dispatch_loop()
 
     def _teardown_server(self) -> None:
         if self.server is not None:
@@ -277,8 +262,18 @@ class Runner:
             self.server = None
 
     def _ensure_server_alive(self) -> None:
-        if self.server is None or not self.server.alive():
-            tail = self.server.log_tail() if self.server is not None else "(no server)"
+        """Raise if the server the runner should have is gone.
+
+        Before ``LoadModel`` there is no server to check and the loop's idle
+        poll must not end the runner; once the runner has been ready, a
+        missing or dead server is fatal, and the supervisor restarts it.
+        """
+        if self.server is None:
+            if isinstance(self.current_status, (RunnerReady, RunnerRunning)):
+                raise RuntimeError("the ComfyUI server is not running; log tail:\n(no server)")
+            return
+        if not self.server.alive():
+            tail = self.server.log_tail()
             self._teardown_server()
             raise RuntimeError(f"the ComfyUI server is not running; log tail:\n{tail}")
 
@@ -301,33 +296,48 @@ class Runner:
                 # resident; a warm-up prompt would be a full render.
                 self._ensure_server_alive()
                 self.current_status = RunnerReady()
-            case VideoGeneration(task_params=params, command_id=command_id) if isinstance(
-                self.current_status, RunnerReady
-            ):
-                self.update_status(RunnerRunning())
-                self.acknowledge_task(task)
-                self._ensure_server_alive()
-                try:
-                    self._render(task.task_id, command_id, params)
-                except Exception as error:
-                    self.event_sender.send(
-                        ChunkGenerated(
-                            command_id=command_id,
-                            chunk=ErrorChunk(model=self.model_id, finish_reason="error", error_message=str(error)),
-                        )
-                    )
-                    shutil.rmtree(SKULK_VIDEO_OUTPUT_DIR / str(command_id), ignore_errors=True)
-                    if not isinstance(error, ValueError):
-                        raise
-                    logger.warning(f"comfy engine rejected {command_id}: {error}")
-                self.current_status = RunnerReady()
-            case Shutdown():
-                self.update_status(RunnerShuttingDown())
-                self.acknowledge_task(task)
-                self._teardown_server()
-                self.current_status = RunnerShutdown()
             case _:
+                # VideoGeneration and Shutdown are the dispatch loop's.
                 raise ValueError(f"unexpected task {type(task).__name__} in state {self.current_status}")
+
+    def _generate(self, task: Task) -> None:
+        """Pool-worker body for one admitted render.
+
+        Acknowledgement and the Ready/Running transitions belong to the dispatch
+        loop. A render cancelled while it waited for the server is skipped here
+        without touching ComfyUI; one cancelled while it runs is interrupted by
+        ``run_prompt``, which polls the cancel set between events.
+        """
+        assert isinstance(task, VideoGeneration)
+        command_id = task.command_id
+        if self._is_cancelled(task.task_id):
+            logger.info(f"comfy engine render skipped (cancelled before it started) for {command_id}")
+            return
+        self._ensure_server_alive()
+        try:
+            self._render(task.task_id, command_id, task.task_params)
+            # A cancel that landed while the container was collected sits in
+            # the pipe; read it now so the terminal status says cancelled.
+            self._is_cancelled(task.task_id)
+        except ValueError as error:
+            # The request or the plan was refused (ComfyRenderError included):
+            # the task fails with its reason and the runner lives on.
+            self.event_sender.send(
+                ChunkGenerated(
+                    command_id=command_id,
+                    chunk=ErrorChunk(model=self.model_id, finish_reason="error", error_message=str(error)),
+                )
+            )
+            shutil.rmtree(SKULK_VIDEO_OUTPUT_DIR / str(command_id), ignore_errors=True)
+            logger.warning(f"comfy engine rejected {command_id}: {error}")
+        except Exception:
+            # Anything else is the server or the runner failing. The pool
+            # keeps the loop alive past this thread, so the server goes here
+            # and the loop's next liveness check, on the next task or the idle
+            # poll, ends the runner for the supervisor to restart.
+            shutil.rmtree(SKULK_VIDEO_OUTPUT_DIR / str(command_id), ignore_errors=True)
+            self._teardown_server()
+            raise
 
     # --- model load -----------------------------------------------------------
 

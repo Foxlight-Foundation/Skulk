@@ -572,7 +572,7 @@ def test_runner_renders_through_a_comfy_server(
         runner.handle_task(StartWarmup(instance_id=instance))
         params = _params(FL2VA_ID, seconds=4, steps=3, aspect_ratio="16:9")
         command = CommandId("cmd-render")
-        runner.handle_task(
+        runner._generate(
             VideoGeneration(
                 command_id=command,
                 instance_id=instance,
@@ -619,9 +619,7 @@ def test_runner_renders_through_a_comfy_server(
         submitted = next(fake_comfy.glob("video_output/*.prompt.json"))
         assert '"MiniMaxH3ImageToVideo"' in submitted.read_text()
     finally:
-        runner.handle_task(
-            Shutdown(instance_id=instance, runner_id=RunnerId("comfy-runner"))
-        )
+        runner._teardown_server()
     assert runner.server is None
 
 
@@ -643,14 +641,14 @@ def test_runner_cancel_interrupts_the_server_and_keeps_serving(
             owner_node=NodeId("n"),
         )
         cancels.pending.append(task.task_id)
-        runner.handle_task(task)
+        runner._generate(task)
         chunks = _video_chunks(sender)
         assert all(chunk.finish_reason is None for chunk in chunks)
         assert not (fake_comfy / "video_output" / "cmd-cancel").exists()
         assert runner._is_cancelled(task.task_id)
         # The server survived and the next render succeeds.
         sender.events.clear()
-        runner.handle_task(
+        runner._generate(
             VideoGeneration(
                 command_id=CommandId("cmd-after"),
                 instance_id=instance,
@@ -660,9 +658,7 @@ def test_runner_cancel_interrupts_the_server_and_keeps_serving(
         )
         assert _video_chunks(sender)[-1].finish_reason == "stop"
     finally:
-        runner.handle_task(
-            Shutdown(instance_id=instance, runner_id=RunnerId("comfy-runner"))
-        )
+        runner._teardown_server()
 
 
 def test_runner_waits_for_the_history_entry_after_success(
@@ -678,7 +674,7 @@ def test_runner_waits_for_the_history_entry_after_success(
     try:
         runner.handle_task(LoadModel(instance_id=instance))
         runner.handle_task(StartWarmup(instance_id=instance))
-        runner.handle_task(
+        runner._generate(
             VideoGeneration(
                 command_id=CommandId("cmd-late-history"),
                 instance_id=instance,
@@ -689,9 +685,7 @@ def test_runner_waits_for_the_history_entry_after_success(
         assert _video_chunks(sender)[-1].finish_reason == "stop"
         assert (fake_comfy / "video_output" / "cmd-late-history").exists()
     finally:
-        runner.handle_task(
-            Shutdown(instance_id=instance, runner_id=RunnerId("comfy-runner"))
-        )
+        runner._teardown_server()
 
 
 def test_runner_execution_error_fails_the_task_only(
@@ -704,7 +698,7 @@ def test_runner_execution_error_fails_the_task_only(
     try:
         runner.handle_task(LoadModel(instance_id=instance))
         runner.handle_task(StartWarmup(instance_id=instance))
-        runner.handle_task(
+        runner._generate(
             VideoGeneration(
                 command_id=CommandId("cmd-fail"),
                 instance_id=instance,
@@ -736,7 +730,7 @@ def test_runner_execution_error_fails_the_task_only(
             reference_bytes=1,
             total_input_chunks=1,
         )
-        runner.handle_task(
+        runner._generate(
             VideoGeneration(
                 command_id=CommandId("cmd-bad"),
                 instance_id=instance,
@@ -754,9 +748,7 @@ def test_runner_execution_error_fails_the_task_only(
         )
         assert runner.server.alive()
     finally:
-        runner.handle_task(
-            Shutdown(instance_id=instance, runner_id=RunnerId("comfy-runner"))
-        )
+        runner._teardown_server()
 
 
 def test_the_server_serves_consecutive_renders(fake_comfy: Path) -> None:
@@ -768,7 +760,7 @@ def test_the_server_serves_consecutive_renders(fake_comfy: Path) -> None:
         runner.handle_task(LoadModel(instance_id=instance))
         runner.handle_task(StartWarmup(instance_id=instance))
         first = runner.server
-        runner.handle_task(
+        runner._generate(
             VideoGeneration(
                 command_id=CommandId("cmd-a"),
                 instance_id=instance,
@@ -778,9 +770,7 @@ def test_the_server_serves_consecutive_renders(fake_comfy: Path) -> None:
         )
         assert runner.server is first and first is not None and first.alive()
     finally:
-        runner.handle_task(
-            Shutdown(instance_id=instance, runner_id=RunnerId("comfy-runner"))
-        )
+        runner._teardown_server()
 
 
 def test_runner_refuses_to_start_without_a_configured_install(
@@ -805,7 +795,7 @@ def test_runner_dies_when_the_server_dies(fake_comfy: Path) -> None:
     runner.server.process.kill()
     runner.server.process.wait(timeout=10)
     with pytest.raises(RuntimeError, match="not running"):
-        runner.handle_task(
+        runner._generate(
             VideoGeneration(
                 command_id=CommandId("cmd-dead"),
                 instance_id=instance,
@@ -913,3 +903,137 @@ def test_timed_keyframes_anchor_one_guide_per_frame(tmp_path: Path) -> None:
     )
     assert prompt2["guide_keyframe_1"]["inputs"]["positive"] == [NODE_CONDITION, 0]
     assert prompt2["guider"]["inputs"]["conditioning"] == ["guide_keyframe_1", 0]
+
+
+def test_runner_cancels_a_render_queued_behind_another_before_it_starts(
+    fake_comfy: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The regression behind "cancel does not stop rendering": through the real
+    dispatch loop, a render queued behind a running one is acknowledged at
+    once (so the worker keeps planning), a cancel for it lands while it waits
+    and it never reaches the server, and a cancel for the running one
+    interrupts it."""
+    import threading
+    import time
+
+    from skulk.shared.types.events import Event, TaskAcknowledged, TaskStatusUpdated
+    from skulk.shared.types.tasks import Task, TaskStatus
+    from skulk.utils.channels import mp_channel
+
+    monkeypatch.setenv("FAKE_COMFY_STEP_SECONDS", "0.3")
+    event_sender, event_receiver = mp_channel[Event]()
+    task_sender, task_receiver = mp_channel[Task]()
+    cancel_sender, cancel_receiver = mp_channel[TaskId]()
+    card = _card(FL2VA_ID)
+    bound = _bound_instance(card, RunnerId("comfy-runner"), NodeId("n"))
+    runner = Runner(bound, event_sender, task_receiver, cancel_receiver)
+    instance = runner.bound_instance.instance.instance_id
+    events: list[Any] = []
+    lock = threading.Lock()
+
+    def pump() -> None:
+        with event_receiver as incoming:
+            for event in incoming:
+                with lock:
+                    events.append(event)
+
+    def seen(kind: type[Any], task_id: TaskId, status: TaskStatus | None = None) -> bool:
+        with lock:
+            return any(
+                isinstance(e, kind)
+                and e.task_id == task_id
+                and (status is None or getattr(e, "task_status", None) is status)
+                for e in events
+            )
+
+    def wait_for(predicate: Any, timeout: float = 15.0) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return True
+            time.sleep(0.02)
+        return False
+
+    pumper = threading.Thread(target=pump, daemon=True)
+    pumper.start()
+    loop = threading.Thread(target=runner.main, daemon=True)
+    loop.start()
+    try:
+        # Idle past the loop's liveness poll before any server exists: the
+        # poll must not end a runner that has not been asked to load yet.
+        time.sleep(2.6)
+        assert loop.is_alive()
+        load = LoadModel(instance_id=instance)
+        task_sender.send(load)
+        assert wait_for(lambda: seen(TaskStatusUpdated, load.task_id, TaskStatus.Complete))
+        warm = StartWarmup(instance_id=instance)
+        task_sender.send(warm)
+        assert wait_for(lambda: seen(TaskStatusUpdated, warm.task_id, TaskStatus.Complete))
+        first = VideoGeneration(
+            command_id=CommandId("cmd-first"),
+            instance_id=instance,
+            task_params=_params(FL2VA_ID, steps=50),
+            owner_node=NodeId("n"),
+        )
+        second = VideoGeneration(
+            command_id=CommandId("cmd-second"),
+            instance_id=instance,
+            task_params=_params(FL2VA_ID, steps=50),
+            owner_node=NodeId("n"),
+        )
+        task_sender.send(first)
+        assert wait_for(lambda: seen(TaskStatusUpdated, first.task_id, TaskStatus.Running))
+        task_sender.send(second)
+        # Acknowledged while the first render holds the server: this is what
+        # frees the worker's control loop to plan a cancel.
+        assert wait_for(lambda: seen(TaskAcknowledged, second.task_id))
+        assert not seen(TaskStatusUpdated, first.task_id, TaskStatus.Complete)
+        cancel_sender.send(second.task_id)
+        assert wait_for(lambda: seen(TaskStatusUpdated, second.task_id, TaskStatus.Cancelled))
+        # The second render never reached the server: one prompt was submitted.
+        assert len(list(fake_comfy.glob("video_output/*.prompt.json"))) == 1
+        cancel_sender.send(first.task_id)
+        assert wait_for(lambda: seen(TaskStatusUpdated, first.task_id, TaskStatus.Cancelled))
+        assert not (fake_comfy / "video_output" / "cmd-first").exists()
+        assert not (fake_comfy / "video_output" / "cmd-second").exists()
+    finally:
+        task_sender.send(Shutdown(instance_id=instance, runner_id=RunnerId("comfy-runner")))
+        loop.join(timeout=15)
+        event_sender.close()
+        pumper.join(timeout=5)
+    assert runner.server is None
+
+
+def test_runner_reads_a_cancel_that_lands_while_the_container_is_collected(
+    fake_comfy: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cancel arriving after sampling, while the history entry is awaited and
+    the container collected, is read before the render returns, so the loop's
+    terminal status says cancelled rather than complete."""
+    import threading
+    import time
+
+    monkeypatch.setenv("FAKE_COMFY_HISTORY_DELAY_SECONDS", "1.5")
+    sender = _Sender()
+    cancels = _Cancels()
+    runner = _runner(sender, cancels)
+    instance = runner.bound_instance.instance.instance_id
+    try:
+        runner.handle_task(LoadModel(instance_id=instance))
+        runner.handle_task(StartWarmup(instance_id=instance))
+        task = VideoGeneration(
+            command_id=CommandId("cmd-late"),
+            instance_id=instance,
+            task_params=_params(FL2VA_ID, steps=1),
+            owner_node=NodeId("n"),
+        )
+        render = threading.Thread(target=runner._generate, args=(task,), daemon=True)
+        render.start()
+        time.sleep(0.6)
+        cancels.pending.append(task.task_id)
+        render.join(timeout=20)
+        assert not render.is_alive()
+        assert runner._was_cancelled(task.task_id)
+    finally:
+        runner._teardown_server()
+
