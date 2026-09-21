@@ -18,10 +18,11 @@ want it to start when the computer boots and restart if it crashes.
 - Skulk starts automatically, with no more typing `uv run skulk` every time you reboot
 - If Skulk crashes, it comes back up on its own
 - Skulk pulls fresh code, syncs Python deps, and rebuilds the dashboard at every boot (you can turn this off with one line in a config file)
-- A separate Vector log-shipper agent forwards logs to your central log store (you can turn this off too)
+- Optional Vector logging forwards logs to your central store: a separate agent on macOS, a child subprocess on Linux
 - You'll know exactly how to check it's running, see logs, restart it, and turn it off
 
-About 5 minutes per machine. No coding. No sudo for the standard install.
+The service runs as your existing user. Linux may request local elevation to
+enable lingering so that the user service survives logout and starts at boot.
 
 ## Before you start
 
@@ -29,7 +30,7 @@ You need:
 
 1. **A working source-based Skulk install.** You should already be able to run `uv run skulk` from your Skulk folder and have it boot cleanly. The source installer (`curl -fsSL https://raw.githubusercontent.com/Foxlight-Foundation/Skulk/main/install.sh | bash`) provisions that checkout; the [Source Builds and Runtime guide](./build-and-runtime.md) covers it, along with the manual path.
 2. **`uv` on your PATH.** Check by running `which uv`. If you see a path, you're good. If it says "not found", install `uv` from [docs.astral.sh/uv](https://docs.astral.sh/uv/) and come back.
-3. **macOS** (any recent version) **or Linux** with systemd (Ubuntu, Debian, Fedora, Arch, anything modern).
+3. **macOS** supported by the Skulk runtime **or Linux** with systemd (Ubuntu, Debian, Fedora, Arch, anything modern).
 
 That's it.
 
@@ -85,7 +86,7 @@ The script does everything for you:
 
 - Installs the **Skulk** systemd user unit (`skulk.service`).
 - Copies an env file to `~/.skulk/skulk.env` on the first install. This is where you customize behavior; re-running the installer never overwrites your edits.
-- Defaults to `SKULK_LOGGING_EXTERNAL=0` (in-process Vector subprocess shipper) since this release does not include a separate `skulk-vector` systemd unit.
+- Defaults to `SKULK_LOGGING_EXTERNAL=0` (child Vector subprocess shipper) since this release does not include a separate `skulk-vector` systemd unit.
 
 When it finishes (a few seconds), check it's running:
 
@@ -272,7 +273,7 @@ If the dashboard still doesn't load, check the logs (see the table above). Look 
 tail -f ~/.skulk/logs/vector.stderr.log
 ```
 
-**Linux** (in-process Vector subprocess): Vector runs as a child of Skulk and shares its log stream:
+**Linux** (child Vector subprocess): Vector runs as a child of Skulk and shares its log stream:
 
 ```bash
 journalctl --user -u skulk -f | grep -i vector

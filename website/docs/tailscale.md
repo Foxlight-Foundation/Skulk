@@ -50,7 +50,7 @@ tailscale ip -4
 
 ### 2. Install Tailscale on your remote device
 
-On your phone, tablet, or laptop, install the Tailscale app and log in to the **same Tailscale account**. No configuration beyond logging in.
+On your phone, tablet, or laptop, install the Tailscale app and log in to the **same Tailscale account**. Ensure your tailnet access policy permits the connection.
 
 - iOS / Android: search "Tailscale" in the App Store / Play Store
 - macOS / Windows / Linux: [tailscale.com/download](https://tailscale.com/download)
@@ -87,6 +87,16 @@ The operator panel shows:
 - **Tap-twice restart**: tap "Restart" on any node card; a "Confirm?" prompt appears; tap again within 3 seconds to send the restart command. Accidental taps do nothing.
 
 Restarts are sent over the cluster's pub/sub channel, so you can restart any node (including remote ones) from any node's dashboard.
+
+## Access and authorization
+
+Tailscale supplies network reachability; Skulk still applies its direct-host and
+operator authorization rules. Being able to load the dashboard does not grant
+every plugin management or spending-approval permission. For remote operator
+pairing and the relay path, see [Remote access](remote-access.md) and the
+[API guide](api-guide.md). Tailscale access to one API node is sufficient for
+cluster observation; connecting compute peers across networks also requires the
+[data-plane setup](tailscale-clustering.md).
 
 ## API access over Tailscale
 
@@ -142,7 +152,7 @@ First confirm Tailscale can reach the node at all:
 ping 100.101.102.103
 ```
 
-If ping fails, the devices aren't on the same tailnet: check that both are logged into the same Tailscale account (or Headscale server) and that Tailscale is running on both.
+If ping fails, inspect peer status, access policy and device connectivity. A failed ping alone does not establish that the devices belong to different tailnets.
 
 If ping succeeds but port 52415 doesn't respond, Skulk may not be running. SSH in (also works over Tailscale) and check:
 

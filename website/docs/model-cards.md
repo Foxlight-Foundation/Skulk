@@ -41,8 +41,9 @@ An authenticated operator may also install a complete pinned card through
 `POST /models/add-card`. Skulk preserves its artifact bundle but strips every
 signed-registry trust claim and stores it as a custom card. This lets the model
 registry exercise an exact candidate on real hardware before publication while
-keeping publication and model-level repository-code approval as separate trust
-decisions.
+keeping unsigned qualification separate from signed publication. Explicit
+operator addition is the repository-code authorization boundary for executable
+custom cards; qualification credentials do not grant that wider authority.
 Headless qualification may use a dedicated
 `SKULK_EXACT_CARD_QUALIFICATION_TOKEN` bearer for only the temporary install and
 cleanup operations. The token does not approve repository code and does not
@@ -89,9 +90,9 @@ a replacement has transferred and verified atomically.
 
 Fallback cards are still shipped in:
 
-- [`resources/inference_model_cards`](https://github.com/Foxlight-Foundation/Skulk/tree/main/resources/inference_model_cards)
-- [`resources/image_model_cards`](https://github.com/Foxlight-Foundation/Skulk/tree/main/resources/image_model_cards)
-- [`resources/embedding_model_cards`](https://github.com/Foxlight-Foundation/Skulk/tree/main/resources/embedding_model_cards)
+- [`resources/inference_model_cards`](https://github.com/Foxlight-Foundation/Skulk/tree/dev/resources/inference_model_cards)
+- [`resources/image_model_cards`](https://github.com/Foxlight-Foundation/Skulk/tree/dev/resources/image_model_cards)
+- [`resources/embedding_model_cards`](https://github.com/Foxlight-Foundation/Skulk/tree/dev/resources/embedding_model_cards)
 
 They provide a startup catalog when registry access and its bounded verified
 cache are unavailable; they do not replace the signed registry as current
@@ -105,7 +106,7 @@ registry, installed, and bundled cards for the same `model_id`.
 
 The authoritative definition of the model-card interface is the `ModelCard`
 type in
-[`src/skulk/shared/models/model_cards.py`](https://github.com/Foxlight-Foundation/Skulk/tree/main/src/skulk/shared/models/model_cards.py).
+[`src/skulk/shared/models/model_cards.py`](https://github.com/Foxlight-Foundation/Skulk/tree/dev/src/skulk/shared/models/model_cards.py).
 Every field is documented in that model, and the exhaustive, always-current field
 reference is the generated API schema (`ModelCard` and its nested
 `PlacementCardConfig` / `RuntimeCapabilityCardConfig` / `VisionCardConfig` /
@@ -240,7 +241,7 @@ is also valid vocabulary: nodes advertise it alongside their compound tags, so a
 card written against the original `{"mlx"}` set keeps matching.
 
 - `compatible_backends`
-  - the hard filter: the set of backend tags this model may run on. The planner excludes any node whose advertised backends do not intersect this set. The default is `{"mlx"}` (so an unannotated card stays on MLX nodes); a GGUF card lists the llama.cpp tags. This is what keeps an MLX model off an AMD node and a GGUF model off a Mac.
+  - the declared backend set, combined with exact supported matches from the signed engine-support matrix and then filtered by live node and runner support. The planner excludes nodes that match no effective backend. The default is `{"mlx"}` (so an unannotated card stays on MLX nodes); a GGUF card lists the llama.cpp tags. This keeps MLX artifacts on nodes with MLX support and GGUF artifacts on a compatible GGUF engine; the artifact format does not by itself exclude a Mac.
 - `backend_preference`
   - the soft score: an ordered list of preferred tags. When several compatible nodes qualify, the planner prefers the node whose backend ranks earliest, with graceful fallback to the rest. This lets a card say "fastest on Vulkan, but ROCm is fine."
 - `min_vram_gib`

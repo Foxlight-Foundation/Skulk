@@ -8,15 +8,16 @@ it.
 
 An AMD node can run GGUF models through **two engines**:
 
-- **`llama_cpp`** (in-process): the default GGUF path. Skulk loads the model with
+- **`llama_cpp`** (in-process): an optional GGUF path. Skulk loads the model with
   `llama-cpp-python` and decodes on the Radeon GPU via Vulkan. Single-node.
 - **`llama_server`** (served): Skulk launches an external `llama-server` process
   and proxies its OpenAI API. This is the only path to llama.cpp's **native
   multi-token prediction** (`--spec-type draft-mtp`), so it is how you get
   speculative-decoding speedups on an AMD node; see
   [Speculative Decoding](speculative-decoding.md) for how served native MTP
-  works and its measured gains. Single-node; enabled per node by
-  pointing `SKULK_LLAMA_SERVER_BIN` at a `llama-server` binary.
+  works and its measured gains. The source installer provisions this served
+  engine; `SKULK_LLAMA_SERVER_BIN` can select an operator build. Compatible
+  multi-node GGUF placements use its driver/donor RPC path described below.
 
 This page covers what such a node needs, how to bring one up, both engines, and
 how the cluster decides what to run where.
@@ -44,8 +45,8 @@ lands on the Macs, automatically.
 
 On `gfx1151` the reliable, well-supported way to run llama.cpp on the GPU today
 is the **Vulkan backend** (Mesa's RADV driver), not the ROCm/HIP backend. ROCm is
-not required for inference. It is optional and used only for the `rocminfo`
-diagnostic. Skulk's llama.cpp runner offloads through Vulkan (Mesa RADV). On a
+not required for this Vulkan GGUF path; `rocminfo` is optional for diagnosis.
+The ComfyUI video lane described below uses a separate managed ROCm runtime. Skulk's llama.cpp runner offloads through Vulkan (Mesa RADV). On a
 Ryzen AI Max+ 395 (Radeon 8060S) this fully
 offloads a 7B Q4_K_M model to the iGPU and decodes at interactive speed, which is
 what makes the box useful as a cluster node rather than a CPU-only fallback.

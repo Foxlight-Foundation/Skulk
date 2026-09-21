@@ -17,8 +17,8 @@ const strippedBaseUrl = rawBaseUrl.replace(/^\/+|\/+$/g, "");
 const baseUrl = strippedBaseUrl ? `/${strippedBaseUrl}/` : "/";
 
 const config: Config = {
-  title: "Skulk Developer Docs",
-  tagline: "Distributed AI inference, edge-to-edge",
+  title: "Skulk Documentation",
+  tagline: "Run and operate AI across your machines",
   favicon: "img/skulk-logo.svg",
 
   url: "https://foxlight-foundation.github.io",

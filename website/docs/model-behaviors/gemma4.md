@@ -71,15 +71,22 @@ Today that includes declarations for:
 - native multimodal support
 - tool-call format family
 
-## Current Gaps
+## Supported behavior and limits
 
-Current support does **not** mean Gemma 4 is fully feature-complete yet.
+Skulk parses Gemma 4 tool calls through the family grammar shared by the MLX
+and in-process llama.cpp paths, and normalizes them into the ordinary tool-call
+response. Tool support still depends on the selected card and engine; a served
+engine uses its own supported parser contract.
 
-Some follow-up work is intentionally tracked separately, including:
+A model's upstream modalities do not establish Skulk input support. In
+particular, audio-capable Gemma variants are not a substitute for a mounted
+STT card and speech runner. Inspect the effective model capabilities before
+sending media, and do not infer reasoning-budget support from a thinking toggle.
 
-- reasoning budget support
-- audio input support for variants that expose it upstream
-- fuller Gemma 4 tool grammar support
+Carded assistant models can provide Gemma 4 speculative decoding. Skulk stages
+the pinned companion and coordinates it with the target cache; see
+[Speculative decoding](../speculative-decoding.md) for placement and runtime
+constraints.
 
 ## Debugging Gemma 4 Stalls
 
@@ -117,7 +124,7 @@ prefills.
 Gemma 4 currently has a narrower trusted clustered path than more generic text
 models.
 
-Today, the boring path is:
+The baseline clustered path uses:
 
 - Gemma 4-specific prompt rendering
 - Gemma 4-specific thinking-channel parsing

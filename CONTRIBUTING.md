@@ -527,3 +527,28 @@ toolbar. `Inventory` stories cover connected components with fictional responses
 and unprovided observations. Do not replace these fixtures with a real cluster URL.
 Run `npm run lint`, `npx tsc -b`, `npm test`, `npm run build`, and
 `npx vitest run --project storybook` from `dashboard-react` when changing the gallery.
+
+### Documentation screenshots
+
+Capture a running dashboard using its actual cluster state. Set the target
+explicitly; the script opens fresh browser contexts and does not reuse login
+credentials or saved conversations:
+
+```bash
+SKULK_DOCS_URL=http://localhost:52415 node scripts/capture_docs_screenshots.mjs
+```
+
+The script refreshes desktop and phone captures under `website/docs/imgs/`. It
+blocks non-read HTTP requests and uses only navigation, theme, and panel controls;
+it does not submit chat, modify configuration, or manage models. It fails on page
+errors or attempted non-read requests. Use a target the operator has authorized
+for documentation capture and inspect every image for exposed credentials,
+clipping, overlays, and incomplete loading before committing. Captions should
+identify actual state at capture time; do not replace observed state with fixture
+data. Native operator-app screenshots must come from the app separately.
+
+The read-only script captures the pairing form but never generates an invitation.
+For an operator-authorized screenshot of the generated QR screen, create a
+short-lived invitation, capture it, and immediately revoke that same invitation.
+Verify its revoked state before publishing the image and caption it as unusable
+for pairing. Do not publish an active pairing code.

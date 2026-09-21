@@ -6,15 +6,16 @@ sidebar_position: 30
 
 <!-- Copyright 2025 Foxlight Foundation -->
 
-A Skulk cluster moves four different kinds of traffic: raw tensors between the
-pieces of a model, durable decisions that keep the cluster coherent, live
-observations about nodes, and request-scoped payloads on their way to or from a
+A Skulk cluster separates raw tensors between the
+pieces of a model, durable decisions that keep the cluster coherent, operator
+authority, live observations about nodes, and request-scoped payloads on their way to or from a
 model. Skulk carries each on its own **plane**, so high-volume or replaceable
-traffic never clogs the ordered decisions that cluster correctness depends on.
+traffic has bounded queues separate from the ordered decisions that cluster
+correctness depends on. The planes still share host and network resources.
 This separation is what lets Skulk be a general fabric for multi-node compute
 rather than a single-purpose server.
 
-## The four planes
+## Compute and runtime message planes
 
 ### Compute plane
 
@@ -39,6 +40,16 @@ order-sensitive because durable decisions have to be applied the same way
 everywhere. The master indexes and persists only an explicit allowlist of these
 control facts; payload and observational event types are rejected before
 ordering, retention, replay, or global broadcast.
+
+### Authority plane
+
+`AUTHORITY_MESSAGES` carries the signed operator-authority protocol separately
+from ordinary cluster commands and events. It has dedicated bounded Python
+egress and is not replayed as model or cluster-state history. Device membership,
+credential rotation, revocation and gateway authority have their own durable
+store and consensus rules. The elected inference master and the operator
+authority are different roles; knowing a transport peer does not grant operator
+access. See [operator authority](architecture.md#operator-identity-and-authority-foundation).
 
 ### Telemetry plane
 
@@ -87,8 +98,8 @@ Skulk assumes a **trusted cluster fabric**. The intended shapes are:
 - **Thunderbolt or RDMA** for the compute interconnect between directly connected
   machines (a physical, point-to-point link).
 - **A private LAN**, or a **Tailscale** network for nodes in different locations.
-  Tailscale is the supported way to run a cluster across the internet: it gives
-  every node an encrypted, authenticated link with no extra setup in Skulk.
+  Tailscale can provide authenticated private reachability across the internet;
+  configure both control discovery and data-plane peer endpoints for routed links.
 
 Running a cluster across a network you do not control is not a supported
 configuration. Put remote nodes on Tailscale (or another trusted overlay) rather
@@ -105,8 +116,8 @@ The data plane can run over either of two transports:
 On Zenoh, each producer publishes to a key addressed to the API or worker that
 owns the stream, and every node listens only for its own key, so packets are
 delivered directly instead of broadcast. This includes generated `DATA`, generic
-`PROVIDER_DATA`, `REALTIME_AUDIO`, `SPEECH_MEDIA`, `VISION_MEDIA`, and diagnostic
-`TRACE_DATA`. Zenoh also preserves the order of a single producer's messages,
+`PROVIDER_DATA`, `REALTIME_AUDIO`, `SPEECH_MEDIA`, `VISION_MEDIA`, completed
+video `OUTPUT_MEDIA`, and diagnostic `TRACE_DATA`. Zenoh also preserves the order of a single producer's messages,
 which matters for the next section. Zenoh is the shipping default, including on
 a fresh install. With no transport settings, Skulk binds Zenoh to its preferred
 private-LAN or CGNAT fabric IPv4 address (or loopback when offline or

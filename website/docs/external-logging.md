@@ -12,10 +12,22 @@ Forward Skulk's structured logs from every node to one place where you can searc
 
 - Every Skulk node ships its logs to one central store (VictoriaLogs).
 - You can search across the whole cluster from a Grafana panel: by node, by component, by message, by time range.
-- Logs survive node reboots, network blips, and the central store being down (Vector buffers up to 512 MB on disk per node).
-- Skulk's inference path is **never blocked** by a slow log shipper, because the shipper runs as a separate process.
+- Vector buffers up to 512 MiB on disk per node across restarts and temporary outages; when full, the shipped configuration drops new entries.
+- Queued JSON logging decouples inference callers from sink I/O; file-backed shipping also separates shipper lifecycle on macOS. Monitor disk and backlog rather than assuming unlimited buffering.
 
 About 30 minutes for first-time setup of the central stack, then about 1 minute per node.
+
+## Enable logging from the dashboard
+
+Open **Settings → Logging**, turn **Enabled** on, enter your central service's
+**Ingest URL**, and select **Save changes**. These settings synchronize to the
+cluster. There is no need to edit `skulk.yaml` to enable logging from a packaged
+Skulk app. The URL must identify a log ingest endpoint, not the Grafana UI.
+
+Saving config does not install Vector or create a central log server. The node
+still needs a functioning log shipper. The deployment instructions below explain
+how an administrator supplies those services; source-service environment files
+apply to that deployment method, not to every packaged-app installation.
 
 ## Architecture in one picture
 
@@ -53,7 +65,12 @@ Three layers:
 
 ## Why a separate process for Vector?
 
-Skulk's inference threads must never block on logging. If Vector is in the same process and the central store is slow, the kernel pipe between them fills up and every `logger.info()` call in Skulk blocks. By running Vector as a separate agent that reads from a file, slow shipping just means the file grows on disk, and Skulk keeps inferring at full speed.
+Skulk enqueues structured log records before writing the JSON sink. On macOS,
+the separate Vector agent tails captured stdout, so a blocked shipper does not
+hold the sink's pipe open. Linux uses a child Vector process with stdin input.
+These are distinct transport arrangements even though both use a queued sink.
+An outage can still exhaust finite buffers or disk capacity; inspect shipper
+errors, rotation and free space.
 
 This is why the LaunchAgent installer (`deployment/install/install-launchd.sh`) installs **two** agents by default: the Skulk service itself, and a `skulk-vector` shipper that runs alongside it.
 
@@ -103,14 +120,15 @@ The Compose file uses two named volumes:
 
 These survive container restarts and image upgrades. To wipe them, `docker compose down -v`.
 
-## Step 2: Point each Skulk node at the central stack
+## Step 2: Configure nodes and source-service shippers
 
 The shipping process model differs between platforms. Both ship to the same central stack:
 
-- **macOS** runs Vector as a separate LaunchAgent (`foundation.foxlight.skulk-vector`) that tails Skulk's captured stdout file. Lifecycle is decoupled from Skulk, so a slow VictoriaLogs cannot backpressure inference.
-- **Linux** runs Vector as an in-process subprocess that Skulk spawns when `logging.enabled: true` is set in `skulk.yaml`. JSON is piped directly into Vector's stdin via `deployment/logging/vector.yaml` (stdin source). This release does not include a separate `skulk-vector` systemd unit.
+- **macOS** runs Vector as a separate LaunchAgent (`foundation.foxlight.skulk-vector`) that tails Skulk's captured stdout file. Its lifecycle is decoupled from Skulk; file retention and disk space bound the backlog.
+- **Linux** runs Vector as an child subprocess that Skulk spawns when `logging.enabled: true` is set in `skulk.yaml`. JSON is piped directly into Vector's stdin via `deployment/logging/vector.yaml` (stdin source). This release does not include a separate `skulk-vector` systemd unit.
 
-On every node that's running Skulk:
+First save **Settings → Logging → Enabled / Ingest URL** as described above.
+For a source installation supervised by the supplied service wrappers:
 
 1. **Install Vector.** Single binary; instructions at [vector.dev](https://vector.dev/docs/setup/installation/). On macOS: `brew install vectordotdev/brew/vector`. On Debian/Ubuntu: `curl -1sLf 'https://repositories.timber.io/public/vector/cfg/setup/bash.deb.sh' | sudo -E bash && sudo apt install vector`.
 2. **Install the Skulk service** (if you haven't already):
@@ -120,14 +138,16 @@ On every node that's running Skulk:
    deployment/install/install-systemd.sh    # Linux: installs skulk only
    ```
 
-   On macOS, pass `--no-vector` to skip the external Vector agent and fall back to the in-process subprocess model.
+   On macOS, pass `--no-vector` to skip the external Vector agent and fall back to the child subprocess model.
 3. **Tell the shipper where to ship.** Edit `~/.skulk/skulk.env` and set:
 
    ```bash
    SKULK_LOGGING_INGEST_URL=http://<central-host>:9428/insert/jsonline?_stream_fields=node_id,component&_msg_field=msg&_time_field=ts
    ```
 
-   On Linux, also set `logging.enabled: true` and `logging.ingest_url: <same-url>` in `skulk.yaml` so Skulk knows to spawn its in-process Vector subprocess.
+   On Linux, the **Logging** settings saved in the dashboard supply the enabled
+   state and ingest URL for the child Vector process. Headless administrators can
+   set the equivalent `logging.enabled` and `logging.ingest_url` configuration.
 
    The query parameters tell VictoriaLogs which fields to use as stream identifiers (so `node_id` and `component` become indexed dimensions).
 4. **Make sure Skulk is emitting JSON.** On macOS this is on by default when you install via the wrapper (`SKULK_LOGGING_EXTERNAL=1` in the env file). On Linux this is gated by `logging.enabled` in `skulk.yaml`.
@@ -146,7 +166,7 @@ That's it for that node. Repeat on each one.
 
 ## Step 3: Verify logs are flowing
 
-On any node:
+On a macOS node using the external Vector agent:
 
 ```bash
 # Last 5 lines of what Vector is shipping right now
@@ -154,6 +174,12 @@ tail -n 5 ~/.skulk/logs/skulk.stdout.log
 
 # Vector's own status: should show 0 errors and recent successful POSTs
 tail -f ~/.skulk/logs/vector.stderr.log
+```
+
+On Linux's child-shipper path, read the service journal instead:
+
+```bash
+journalctl --user -u skulk -n 100
 ```
 
 In Grafana (`http://<central-host>:3000`), open Explore, pick the VictoriaLogs data source, and run:
@@ -294,7 +320,7 @@ source ~/.skulk/skulk.env
 # External mode (file-tail config used by the macOS LaunchAgent)
 vector --config deployment/logging/vector-external.yaml
 
-# Internal mode (stdin config used by the in-process subprocess shipper)
+# Internal mode (stdin config used by the child subprocess shipper)
 uv run skulk 2>/dev/tty | vector --config deployment/logging/vector.yaml
 ```
 

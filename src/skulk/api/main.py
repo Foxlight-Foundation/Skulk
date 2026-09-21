@@ -1153,7 +1153,7 @@ def _video_create_multipart_schema() -> dict[str, object]:
     ``allOf`` beside the file parts; the parts are merged into a copy of it.
     """
 
-    schema = cast("dict[str, object]", VideoCreateRequest.model_json_schema())
+    schema = _inline_request_schema(VideoCreateRequest.model_json_schema())
     properties = dict(cast("dict[str, object]", schema.get("properties", {})))
     binary: dict[str, object] = {"type": "string", "format": "binary"}
     properties["input_reference"] = {
@@ -1568,13 +1568,62 @@ def _create_fastapi_app() -> FastAPI:
     )
 
 
+def _inline_request_schema(schema: dict[str, object]) -> dict[str, object]:
+    """Inline local definitions before embedding nonrecursive request metadata.
+
+    Pydantic's standalone ``#/$defs`` references address the document root.
+    Once nested inside OpenAPI they would point outside their own schema, so
+    resolve them locally without changing request validation or parsing.
+    """
+
+    def expand(
+        value: object,
+        definitions: dict[str, object],
+        resolving: frozenset[str] = frozenset(),
+    ) -> object:
+        if isinstance(value, list):
+            return [
+                expand(item, definitions, resolving)
+                for item in cast(list[object], value)
+            ]
+        if not isinstance(value, dict):
+            return value
+        fields = cast(dict[str, object], value)
+        local = fields.get("$defs")
+        if isinstance(local, dict):
+            definitions = definitions | cast(dict[str, object], local)
+        reference = fields.get("$ref")
+        if isinstance(reference, str) and reference.startswith("#/$defs/"):
+            if reference in resolving:
+                raise ValueError(
+                    "Recursive request metadata needs an OpenAPI component"
+                )
+            name = (
+                reference.removeprefix("#/$defs/").replace("~1", "/").replace("~0", "~")
+            )
+            target = expand(definitions[name], definitions, resolving | {reference})
+            assert isinstance(target, dict)
+            return cast(dict[str, object], target) | {
+                key: expand(item, definitions, resolving)
+                for key, item in fields.items()
+                if key not in {"$ref", "$defs"}
+            }
+        return {
+            key: expand(item, definitions, resolving)
+            for key, item in fields.items()
+            if key != "$defs"
+        }
+
+    return cast(dict[str, object], expand(schema, {}))
+
+
 def _json_request_body(schema: dict[str, object]) -> dict[str, object]:
     return {
         "requestBody": {
             "required": True,
             "content": {
                 "application/json": {
-                    "schema": schema,
+                    "schema": _inline_request_schema(schema),
                 }
             },
         }
@@ -1584,7 +1633,7 @@ def _json_request_body(schema: dict[str, object]) -> dict[str, object]:
 def _audio_speech_request_body() -> dict[str, object]:
     """Describe the JSON and multipart forms accepted by the speech route."""
 
-    json_schema = cast(dict[str, object], AudioSpeechRequest.model_json_schema())
+    json_schema = _inline_request_schema(AudioSpeechRequest.model_json_schema())
     multipart_schema = cast(dict[str, object], json.loads(json.dumps(json_schema)))
     properties = cast(dict[str, object], multipart_schema.get("properties", {}))
     properties["reference_audio"] = {
@@ -2309,6 +2358,7 @@ class API:
             "/node_id",
             tags=["State & Tracing"],
             summary="Get this API node's ID",
+            description="Return the current session-scoped node ID as a JSON string. No parameters are required.",
         )(lambda: self.node_id)
         self.app.post(
             "/instance",
@@ -2402,11 +2452,13 @@ class API:
             "/instance/{instance_id}",
             tags=["Instances"],
             summary="Get one running instance",
+            description="Return the current instance object for the exact instance ID. Unknown instances return 404; presence does not imply runner readiness.",
         )(self.get_instance)
         self.app.delete(
             "/instance/{instance_id}",
             tags=["Instances"],
             summary="Delete a running instance",
+            description="Send a deletion command for the exact instance ID and return its acknowledgement. Unknown instances return 404; the maintained Steward placement returns 409 while intelligent fabric is enabled.",
         )(self.delete_instance)
         self.app.get(
             "/models/requirements",
@@ -2646,6 +2698,7 @@ class API:
             "/bench/images/generations",
             tags=["Images"],
             summary="Benchmark image generation",
+            description="Generate images with a placed image model and return output with timing statistics. Streaming and partial images are disabled for this benchmark.",
         )(self.bench_image_generations)
         self.app.post(
             "/v1/images/edits",
@@ -2662,7 +2715,10 @@ class API:
             self.list_images
         )
         self.app.get(
-            "/images/{image_id}", tags=["Images"], summary="Fetch one stored image"
+            "/images/{image_id}",
+            tags=["Images"],
+            summary="Fetch one stored image",
+            description="Return cached image bytes with their stored content type. Missing or expired image IDs return 404; images are local to this API node.",
         )(self.get_image)
         self.app.post(
             "/v1/videos",
@@ -2685,7 +2741,9 @@ class API:
                     "required": True,
                     "content": {
                         "application/json": {
-                            "schema": VideoCreateRequest.model_json_schema()
+                            "schema": _inline_request_schema(
+                                VideoCreateRequest.model_json_schema()
+                            )
                         },
                         "multipart/form-data": {
                             "schema": _video_create_multipart_schema()
@@ -2821,12 +2879,14 @@ class API:
             response_model=None,
             tags=["Compatibility APIs"],
             summary="Ollama chat alias",
+            openapi_extra=_json_request_body(OllamaChatRequest.model_json_schema()),
         )(self.ollama_chat)
         self.app.post(
             "/ollama/api/v1/chat",
             response_model=None,
             tags=["Compatibility APIs"],
             summary="Ollama chat alias",
+            openapi_extra=_json_request_body(OllamaChatRequest.model_json_schema()),
         )(self.ollama_chat)
         self.app.post(
             "/ollama/api/generate",
@@ -2858,6 +2918,7 @@ class API:
             "/ollama/api/show",
             tags=["Compatibility APIs"],
             summary="Show Ollama model details",
+            openapi_extra=_json_request_body(OllamaShowRequest.model_json_schema()),
         )(self.ollama_show)
         self.app.get(
             "/ollama/api/ps",
@@ -3228,6 +3289,18 @@ class API:
                 "while model-store location changes still require a restart. The deprecated "
                 "model_trust compatibility field is preserved but cannot be replaced."
             ),
+            openapi_extra=_json_request_body(
+                {
+                    "anyOf": [
+                        SkulkConfig.model_json_schema(),
+                        {
+                            "type": "object",
+                            "required": ["config"],
+                            "properties": {"config": SkulkConfig.model_json_schema()},
+                        },
+                    ]
+                }
+            ),
         )(self.update_config)
         self.app.get(
             "/store/health",
@@ -3353,6 +3426,26 @@ class API:
                 "Start an optimization job for a model already present in the shared store. "
                 "Use this for workflows such as OptiQ conversion or alternate artifact generation."
             ),
+            openapi_extra={
+                "requestBody": {
+                    "required": False,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "target_bpw": {"type": "number", "default": 4.5},
+                                    "candidate_bits": {
+                                        "type": "array",
+                                        "items": {"type": "integer"},
+                                        "default": [4, 8],
+                                    },
+                                },
+                            }
+                        }
+                    },
+                }
+            },
         )(self.optimize_model)
         self.app.post(
             "/admin/restart",

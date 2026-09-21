@@ -22,9 +22,8 @@ The supported path from a fresh machine to a source-based node is:
 curl -fsSL https://raw.githubusercontent.com/Foxlight-Foundation/Skulk/main/install.sh | bash
 ```
 
-The installer targets the stable branch (`main`) regardless of which docs
-channel you are reading. To install the development branch instead (matching
-the `/next/` docs), pass a ref:
+The installer selects `main` by default. Contributors can select another branch
+or exact commit with `--ref`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Foxlight-Foundation/Skulk/main/install.sh | bash -s -- --ref dev
@@ -55,7 +54,7 @@ includes the dashboard.
 
 Skulk releases qualify this same path on clean Apple Silicon, AMD Linux, and
 NVIDIA Linux environments. A candidate run pins the proposed commit; after
-promotion, the shipping run executes the literal `main` command above. Tests
+promotion, an optional shipping sanity check executes the literal `main` command above. Tests
 that attach to an already-configured fleet remain valuable regression coverage,
 but do not substitute for fresh-install qualification.
 
@@ -178,5 +177,4 @@ For local development on Apple Silicon:
 
 Once a node is up, the [API guide](api-guide) walks from placing a model to your
 first token. If you are standing up nodes, treat `uv` as the path that must work first.
-Treat Nix as a developer convenience and CI reproducibility layer unless the
-project explicitly documents otherwise in a future release note.
+Use Nix for development tooling and CI validation around that runtime contract.

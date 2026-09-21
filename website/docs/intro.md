@@ -3,127 +3,87 @@ id: intro
 title: Skulk
 sidebar_position: 1
 slug: /
+description: Run models, manage compute, and use AI capabilities across your machines through one cluster.
 ---
 
 <!-- Copyright 2025 Foxlight Foundation -->
 
-**Skulk is an interconnect fabric for multi-node AI compute.** It joins several
-machines into one cluster and moves work across them as if they were a single
-device.
+**Skulk connects your machines into an AI cluster.** It discovers nodes,
+places models on compatible hardware, manages their files and processes, and
+serves inference through shared APIs. You can operate it from its web dashboard,
+the native phone app, or your own tools.
 
-Its headline use today is **distributed inference**: point Skulk at a few
-machines and it pools their memory and GPUs behind one OpenAI-compatible
-endpoint, so you can run models far larger than any single machine could hold.
+A single machine is a complete cluster. Add compatible machines to run more
+models concurrently or distribute a supported model across devices when it
+cannot fit on one. Apple Silicon and Linux GPU nodes can belong to the same
+cluster; the model, engine, available memory, and network determine which nodes
+can participate in each placement. Joining a cluster does not make every GPU
+interchangeable or every model distributable.
 
-## Get started
+![Skulk dashboard showing a running three-node cluster](./imgs/dash-1.png)
 
-1. Install Skulk on each machine. The packaged apps are the recommended path:
+*Screenshots show the actual dashboard and live cluster state at capture time.
+Model availability and resource readings change as the cluster runs.*
 
-   **Apple Silicon macOS 15 or newer**
+## Start with one model
 
-   [Download the signed Skulk DMG](install#macos), or install it with Homebrew:
+1. **[Install Skulk](install)** on a supported Mac or Linux machine. The desktop
+   app packages the runtime and dashboard; headless and source installations
+   are also available.
+2. **Start the node and open its dashboard.** Check the Cluster view, then open
+   **Model Store → Find Models**. Choose a compatible model and review its
+   placement. Downloaded files and running instances are separate: a stored
+   model still needs a ready instance before it can serve requests.
+3. **Chat or connect a client.** Use dashboard Chat, copy a configuration from
+   **Integrations**, or follow the [API first-success flow](api-guide#first-success-flow).
 
-   ```bash
-   brew install --cask Foxlight-Foundation/skulk/skulk
-   ```
+The [dashboard guide](dashboard) explains the controls. The
+[operator runbook](operations) covers recovery and day-to-day maintenance.
 
-   Open **Skulk** from Applications, click the Skulk fox in the menu bar, and
-   choose **Start Skulk**. Approve **Local Network** access when macOS asks.
+## What you can do
 
-   **Ubuntu or Debian desktop (`amd64` or `arm64`)**
+| Task | How Skulk supports it | Learn more |
+| --- | --- | --- |
+| Chat, code, and reason | Streaming text, model-aware reasoning, tool calls, and structured output through compatible models and engines | [Inference guide](inference) |
+| Connect existing applications | OpenAI-compatible chat, Responses and embeddings; Anthropic Messages and Ollama adapters; configuration recipes | [Integrations](integrations) |
+| Work with images | Image inputs for compatible vision models, plus image generation and editing through supported placements | [Image APIs](api-guide#image-generation-and-editing) |
+| Listen and speak | Batch transcription, synthesized speech, voice discovery, realtime transcription, and voice activity detection | [Speech and realtime](speech-fabric-realtime) |
+| Generate video | Asynchronous jobs with status, content retrieval, cancellation, and deletion, using compatible video cards and engines | [Video jobs](api-guide#video-generation-jobs) |
+| Run larger models | Supported MLX pipeline/tensor placements and served-engine configurations use compatible groups of nodes | [Architecture](architecture), [GPU nodes](nvidia-cuda-nodes) |
+| Reduce repeated downloads | A canonical model store, node-local staging, resumable downloads, companion artifacts, and disk-capacity checks | [Model store](model-store) |
+| Understand model compatibility | Exact artifact cards, signed catalog metadata, engine support, and live hardware capability checks | [Model cards](model-cards), [capabilities](model-capabilities) |
+| Speed up supported models | Speculative decoding with model-specific drafter or assistant artifacts; configurable KV cache behavior | [Speculative decoding](speculative-decoding), [KV cache](kv-cache-backends) |
+| Ask about the cluster | Skulk's resident Steward uses cluster tools and presents governed proposals for operator review | [Talk to Skulk](steward) |
+| Add capabilities | Providers and managed plugins expose typed operations alongside compute nodes | [Capability nodes](capability-nodes), [extensions](extensions) |
+| Operate remotely | Paired native app access through an encrypted relay carrier, or browser access on a trusted private network | [Native app](native-app), [remote access](remote-access) |
+| Diagnose problems | Node doctor, live runner observations, diagnostics, traces, and optional centralized logs | [Node doctor](node-doctor), [tracing](tracing), [logging](external-logging) |
 
-   ```bash
-   curl -fLO https://apt.foxlight.ai/foxlight-archive-keyring.deb
-   sudo apt install ./foxlight-archive-keyring.deb
-   sudo apt update
-   sudo apt install skulk
-   ```
+Feature availability is specific to the selected model and its ready placement.
+For example, a text-only model cannot accept images, a batch transcription model
+does not acquire realtime support because the endpoint exists, and an embedding
+instance is not a chat model. Use the catalog's capability information and
+placement preview before starting work.
 
-   Open **Skulk** from the application menu and choose **Start Skulk**. See the
-   complete [installation guide](install) for updates, headless Linux, cluster
-   namespaces, other Linux distributions, and development builds.
-2. When the app reports **Ready**, choose **Open Dashboard**. Confirm the local
-   machine appears, pick a model, and launch it. A single machine is already a
-   valid one-node cluster; Skulk uses additional compatible nodes when they are
-   available. The supported catalog comes from Skulk's TUF-verified external
-   model-card registry; each card identifies one exact selectable artifact.
-   Skulk starts serving when the placement is ready.
-3. Call the OpenAI-compatible endpoint at `/v1/chat/completions` with any client
-   that speaks that format. The [API guide](api-guide) walks through a first
-   request step by step, from placement to first token.
+## One ecosystem, clear responsibilities
 
-Speech works the same way: launch a speech model and the dashboard chat gains a
-hands-free voice loop, while the cluster serves OpenAI-compatible
-`/v1/audio/speech` and `/v1/audio/transcriptions` endpoints plus a realtime
-transcription WebSocket at `/v1/realtime`
-([speech guide](speech-fabric-realtime)).
+The **Skulk runtime** owns cluster state, model placement, inference, the
+dashboard, and authorization. The **desktop app** installs and supervises a
+local runtime. The **native operator app** controls a remote cluster without
+becoming a compute node. **Relay** carries encrypted traffic between that app
+and a cluster gateway.
 
-For source and runtime internals, see
-[source builds and runtime paths](build-and-runtime). For advanced service
-configuration around a source checkout, see
-[run as a service](run-skulk-as-a-service).
+The **Foxlight Model Registry** supplies signed metadata describing exact model
+artifacts. **Skulk Weights Publisher** prepares companion artifacts referenced
+by those cards. **Capability nodes** add separately installed operations under
+the host's lifecycle and authority rules. The **Steward benchmark** evaluates
+candidate models; the operator-facing Steward itself runs inside Skulk.
 
-## Why Skulk
+Read the [ecosystem guide](ecosystem) for the end-to-end flow from model
+publication to download, placement, inference, and remote operation.
 
-**Run models that don't fit on one machine.** Skulk splits a model across as many
-machines as it needs and routes the work through the pipeline automatically. A
-70B model that won't fit in one Mac's unified memory can run across two.
+## Choose your next step
 
-**Every device counts.** MacBooks, Mac Studios, Mac Pros, and Linux boxes all
-join the same cluster. Skulk elects a master, places models across the available
-nodes, and rebalances when a node leaves or rejoins.
-
-**Supervised and self-healing.** Once started, Skulk runs as a supervised
-service on macOS and Linux: it restarts on crash and rebuilds cluster state on
-recovery. The desktop apps keep first start user-triggered; headless Linux
-operators can explicitly enable start at boot. If the master node dies, a new
-one is elected and the models already placed keep running, so the cluster stays
-available (an in-flight request at the moment of failover may need to be
-retried).
-
-**Manage it from anywhere.** Put your nodes on a Tailscale network and the
-mobile-friendly operator panel gives you live memory, GPU, and temperature for
-every node, plus one-tap node restarts, over plain HTTP. No SSH required.
-
-**OpenAI-compatible.** Any client that speaks the OpenAI chat-completions format
-works out of the box. No SDK changes, no custom client.
-
-**Observable by default.** Runtime tracing, a cross-cluster flight recorder,
-per-node diagnostics, and structured logs you can ship to VictoriaLogs let you
-see exactly what each node is doing during a request.
-
-**Air-gap durable.** Every complete model-store or staged artifact retains its
-full effective card and hashed manifest beside the bytes. Installed models load
-from that local truth before registry access, and node caches can reconcile into
-the central store without downloading again from Hugging Face.
-
-## Common tasks
-
-- **Use the API** to run inference: [API guide](api-guide), and the browsable
-  [API reference](/api/skulk-api).
-- **Manage the cluster** (place models, watch nodes, recover): the
-  [dashboard and operations guide](operations), and
-  [remote access via Tailscale](tailscale).
-- **Debug the cluster** during a request: [tracing and debugging](tracing).
-- **Add models to the model store**: [model store guide](model-store).
-- **Understand model identity and catalog precedence**:
-  [model cards](model-cards).
-- **Span locations or networks** with one cluster:
-  [multi-network clustering](tailscale-clustering).
-
-## What Skulk is, and where it's going
-
-Skulk separates cluster traffic into three planes: a **compute** plane (the
-high-speed interconnect that exchanges model activations between nodes), a
-**control** plane (cluster decisions, task lifecycle, and node health), and a
-**data** plane (generated output streamed back to the requesting node). Keeping
-these separate is what makes Skulk a general fabric rather than a single-purpose
-inference server: inference is the first workload to ride it, not the limit of
-what it can carry.
-
-That foundation opens up more than running one model across machines. The same
-interconnect is built to support disaggregating a model so different nodes handle
-different parts of it, treating memory as its own kind of node, mixing inference
-backends, and composing clusters out of smaller ones. The
-[architecture overview](architecture) explains how the pieces fit together
-today.
+- **Use Skulk:** [install](install), [dashboard](dashboard), [native app](native-app).
+- **Integrate an application:** [API guide](api-guide), [endpoint reference](/api/skulk-api), [integration recipes](integrations).
+- **Operate a cluster:** [operations](operations), [remote access](remote-access), [Thunderbolt](thunderbolt-clustering), [multi-network clustering](tailscale-clustering).
+- **Extend or contribute:** [extensions](extensions), [controller integration](controller-integration), [source builds](build-and-runtime), [architecture reference](architecture-reference).

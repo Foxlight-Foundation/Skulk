@@ -12,8 +12,14 @@ Your cluster speaks the API formats these tools already know, so pointing them a
 it is a configuration change rather than an integration project. The dashboard's
 **Integrations** page writes that configuration for you.
 
-Open the dashboard and choose **Integrations** in the navigation, or go straight
-to `/integrations`.
+Choose **Open Dashboard** from the Skulk desktop app, then select
+**Integrations** in the dashboard navigation. You can also bookmark `/integrations`.
+These recipes configure the external tool; Skulk's own options stay in dashboard
+[Settings](configuration), without editing a Skulk configuration file.
+
+![Integration recipes using the cluster’s ready models](./imgs/dashboard-integrations.png)
+
+*The screenshot shows live model availability at capture time.*
 
 ## What the page gives you
 
@@ -68,28 +74,38 @@ at the top of the page:
 | Anthropic-compatible | `<node>` | Claude Code |
 | Ollama-compatible | `<node>/ollama` | Open WebUI, the Ollama CLI |
 
-Any tool that accepts a custom OpenAI base URL works even if it is not listed
-above. Point it at `<node>/v1`, give it any non-empty API key, and use a model id
-from the page's ready-models list.
+Other tools can connect through a custom OpenAI base URL when the endpoints and
+features they require match Skulk's [API contract](api-guide). Point them at
+`<node>/v1` and use a model id from the ready-models list. On the trusted local
+listener, a client-required API key may be a non-empty placeholder; the paired
+operator gateway requires real scoped credentials.
 
 ## Choosing which address to embed
 
 A configuration file is usually pasted into a tool running on a different
-machine, so the page never embeds `localhost`. It uses the node's own routable
-address instead.
+machine, so the page prefers the node's reported local or Tailscale address. If neither
+is available, it falls back to the browser's current origin. Check that the
+result is reachable from the client before copying it.
 
 When the node is also reachable over Tailscale, an **Address to use** control
 appears so you can choose between the local network address and the Tailscale
 one. Pick Tailscale when the tool runs outside your home network. See
 [Tailscale](./tailscale.md) for setting that up.
 
-Recipes that run in Docker rewrite the address to `host.docker.internal`
-automatically, because a container that dialled the loopback address would reach
-itself rather than the cluster.
+For Docker recipes, loopback addresses (`localhost` and `127.0.0.1`) are
+rewritten to `host.docker.internal`; LAN and Tailscale addresses are retained.
+A container's loopback interface reaches the container itself, so verify host
+name resolution and routing in your Docker environment.
 
 ## Authentication
 
-Skulk does not authenticate requests on a trusted fabric, so the API key in
-every snippet is a placeholder that exists only because most clients refuse to
-start without one. Any non-empty value works. Treat the cluster API as you would
-any other service on your local network.
+These recipes target the trusted local cluster listener. Its placeholder key
+is for clients that require a key field; it is not an access-control boundary.
+Keep that listener on a trusted network and do not expose it directly to the
+internet.
+
+The paired operator gateway is a different boundary: it validates scoped bearer
+credentials and permits an explicit route set. A placeholder key cannot grant
+gateway access, and a recipe does not automatically configure the native relay
+carrier. See [Remote access](remote-access) and
+[operator authentication](api-guide#operator-device-pairing).

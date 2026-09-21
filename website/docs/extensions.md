@@ -20,6 +20,28 @@ call admission also have control-sized endpoints in the
 [HTTP API reference](api-guide.md), but extension authors normally use the
 typed surfaces exported from `skulk.extensions` and documented below.
 
+## Choose an integration surface
+
+| Need | Surface |
+| --- | --- |
+| Add request/response middleware in the Skulk Python process | Entry-point extension installed into Skulk's environment. |
+| Publish a typed capability callable across the cluster | Capability provider with discovery, admission, cancellation and optional streaming. |
+| Install and supervise a separate provider runtime | Managed plugin with a signed release, independent owner and durable manager lifecycle. |
+| Configure or inspect an installed capability node | Plugins dashboard and the generic node management facets. |
+| Prepare a paid or privileged provider operation | Provider-owned proposal review, independent approval and explicit execution. |
+
+These surfaces compose. A managed plugin can expose several capability nodes
+through one transport peer; a capability node is not necessarily a physical
+computer or a model runner. Core owns the generic transport, verification and
+authorization interfaces. The capability-node package owns provider credentials,
+policy, external effects and independent cleanup. See the
+[ecosystem overview](ecosystem.md) and [controller boundary](controller-integration.md).
+
+For installation, start with [the local manager service](#installing-the-local-manager-service)
+and [release discovery and installation](#owner-configured-private-release-source).
+For authoring, continue with the Python contract below. Installing a package is
+not approval to run a paid provider operation.
+
 ## The contract
 
 An extension provides three things (`src/skulk/extensions/types.py`):
@@ -886,17 +908,16 @@ The installed Skulk package includes its declarative model resources. Setup does
 not require a Git checkout or a `SKULK_RESOURCES_DIR` override. If resources are
 missing, reinstall the complete qualified package before retrying setup.
 
-The candidate `skulk-plugin-service setup` command prepares a verified independent
+The `skulk-plugin-service setup` command prepares a verified independent
 manager runtime and registers a fixed nonroot system service on Apple Silicon
-macOS or Linux x86_64 with systemd. Run it as the existing Skulk owner in the qualified
-isolated environment; only its fixed registration helper requests local elevation.
+macOS or Linux x86_64 with systemd. Run it as the existing Skulk owner; only its fixed registration helper requests local elevation.
 It generates service storage and a local profile connection without configuration
 file editing. `skulk-plugin-service status` separates retained setup progress from
 current management availability and registered-runtime integrity.
 If registration succeeds but readiness is still pending, setup reports
 `service_readiness_pending` with the retained operation ID. Once status verifies
-both runtime integrity and management availability, repeat setup in the same
-qualified environment to complete that operation without elevation or restarting
+both runtime integrity and management availability, repeat setup from the same
+verified runtime to complete that operation without elevation or restarting
 the healthy service.
 
 See the [local setup contract](api-guide.md#local-system-service-setup) for supported

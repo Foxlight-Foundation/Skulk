@@ -47,6 +47,10 @@ token.
 - Store and config: [Model Store Endpoints](#model-store-endpoints) and [Configuration Endpoints](#configuration-endpoints)
 - Debugging: [State, Events, and Tracing](#state-events-and-tracing)
 - Pair a device: [Operator Device Pairing](#operator-device-pairing)
+- Speech input: [Audio Transcriptions](#openai-audio-transcriptions-api) and [Realtime WebSocket](#realtime-transcription-websocket-compatibility-edge)
+- Skulk intelligence: [Intelligent Fabric](#intelligent-fabric)
+- Plugins: [Configuration](#plugin-node-configuration) and [Lifecycle and setup](#managed-plugin-lifecycle-and-setup)
+- Fabric providers: [Extension Capabilities](#extension-capabilities)
 
 ## First Success Flow
 
@@ -94,6 +98,19 @@ curl -X POST http://localhost:52415/v1/chat/completions \
 If this fails with `404 No instance found for model ...`, the placement is not ready yet or never launched successfully.
 
 ## Endpoint Overview
+
+The groups below are a navigation summary. The [generated API Reference](/api/skulk-api)
+contains every registered HTTP operation and its request/response schemas, including
+plugin management, pairing, aliases, and internal store transfer routes. On a
+running node, `GET /api/openapi.json` serves the machine-readable schema,
+`GET /api/docs` opens Swagger UI, and `GET /api/redoc` opens ReDoc. These
+documentation pages and dashboard routes are not inference or control operations.
+WebSocket contracts are documented manually under
+[Realtime transcription](#realtime-transcription-websocket-compatibility-edge)
+and [Fabric speech chains](#compose-a-typed-fabric-speech-chain).
+
+Paths containing a model ID accept repository-style IDs with `/`; placeholders
+such as `{model_id}` denote the complete ID, not a single repository component.
 
 ### Compatibility APIs
 
@@ -1327,6 +1344,13 @@ Skulk supports several Ollama-compatible endpoints so tools like OpenWebUI can c
 
 ### Chat
 
+**POST** `/ollama/api/chat` accepts required `model` and `messages`, optional
+`tools`, `think`, `format` (`"json"` or a JSON Schema), and `options` containing
+`num_predict`, `temperature`, `top_p`, `top_k`, `stop`, or `seed`.
+`stream` defaults to `true`: responses are newline-delimited JSON
+(`application/x-ndjson`); set it to `false` for a single JSON result. The model
+must already be placed. Message images require a capable vision model.
+
 ```bash
 curl -X POST http://localhost:52415/ollama/api/chat \
   -H 'Content-Type: application/json' \
@@ -1337,6 +1361,11 @@ curl -X POST http://localhost:52415/ollama/api/chat \
 ```
 
 ### Generate
+
+**POST** `/ollama/api/generate` accepts required `model`, optional `prompt`
+(default empty), `system`, `images`, and the same `options`, `format`, `think`,
+and `stream` controls as chat. It uses the same mounted-model admission and
+NDJSON/single-response behavior.
 
 ```bash
 curl -X POST http://localhost:52415/ollama/api/generate \
@@ -1349,17 +1378,35 @@ curl -X POST http://localhost:52415/ollama/api/generate \
 
 ### List models
 
+**GET** `/ollama/api/tags` takes no parameters and lists catalog cards with
+completed downloads reported in cluster state. Downloaded does not mean placed
+or ready. Compatibility digests are placeholders, not artifact verification
+proofs; use the model/store contracts for immutable identities.
+
 ```bash
 curl http://localhost:52415/ollama/api/tags
 ```
 
 ### Show model details
 
+**POST** `/ollama/api/show` accepts `name` or `model` (`name` takes precedence).
+Missing both returns `400`; an unknown model returns `404`. The response
+contains compatibility `modelfile`, `template`, and family/quantization details.
+
 ```bash
 curl -X POST http://localhost:52415/ollama/api/show \
   -H 'Content-Type: application/json' \
   -d '{"name": "mlx-community/Llama-3.2-1B-Instruct-4bit"}'
 ```
+
+### Running models and version
+
+`GET /ollama/api/ps` takes no parameters and returns `models`, deduplicated
+from current instance assignments. Its compatibility `size` is `0`; use Skulk
+state and diagnostics for memory and readiness information.
+
+`GET /ollama/api/version` takes no parameters and returns `version`, the Skulk
+version label. This is a compatibility probe, not an installed Ollama version.
 
 ### Alias routes
 
@@ -2226,7 +2273,9 @@ curl "http://localhost:52415/instance/previews?model_id=mlx-community/Qwen3.5-9B
 
 Use this when you want a specific combination and want to inspect the exact
 instance shape before launch, including the hardware-aware
-`contextTokenLimit` that the master would stamp.
+`contextTokenLimit` that the master would stamp. Query parameters are required
+`model_id`, optional `sharding` (default `Pipeline`), `instance_meta` (default
+`MlxRing`), and `min_nodes` (default `1`). This computes a placement; it does not launch or reserve it.
 
 ### Create an instance from a fully specified placement
 
@@ -2251,9 +2300,81 @@ for bounded readiness observation and cleanup responsibilities.
 
 **GET** `/instance/{instance_id}`
 
+Pass the exact instance ID as the path parameter. Returns its current instance
+object, including shard assignments and context limit; an unknown ID returns
+`404`. Presence alone does not imply all runners are ready.
+
 ### Delete an instance
 
 **DELETE** `/instance/{instance_id}`
+
+Takes an instance ID and no body. Sends a deletion command and returns
+`message`, `command_id`, and `instance_id`; observe `/state` for completion.
+An unknown ID returns `404`. Deleting the maintained Steward instance while
+intelligent fabric is enabled returns `409`; disable that mode to remove it.
+Deletion interrupts work on the instance and is not a model-file deletion.
+
+### Bind a placement preview to model requirements
+
+`GET /instance/previews` retains its existing `model_id`, `node_ids` and
+`excluded_node_ids` query parameters. Each preview with an instance now includes
+`card_digest`, using the same canonical complete-card digest as
+`GET /models/requirements`; previews without an instance return null. Before
+submitting `POST /instance`, compare that digest to approved requirements and
+retain the exact returned instance. A matching alias or registry ID alone does
+not establish identical card contents. The preview digest grants no admission:
+the API/master card checks and resource-derived context ceiling still apply.
+The exact-instance creation path does not atomically revalidate current topology
+or backend/build support. Controllers must obtain a fresh target-specific preview,
+verify live node support before submission, and continue checking support and
+readiness afterward; an accepted command alone is not proof of usable capacity.
+
+The requirements response also includes `required_capabilities`, the complete
+positively evidenced intrinsic capability set used by core's signed-engine
+resolver. Matrix-only compatibility requires a nonempty set and supported claims
+covering every member for the proposed backend/engine, exact engine build and
+applicable hardware classes. `incomplete_capabilities` remains an independent
+artifact blocker. One positive claim alone is insufficient. Declared compatible
+backends retain their existing behavior; actual platform/runner admission still
+applies after a node joins.
+
+A controller also checks the preview's `contextTokenLimit` against its approved
+per-sequence context budget and verifies the live accepted instance after
+submission: the master computes the limit from current resources. Keep watching
+the exact instance's card, resolved backend, context capacity and node assignment;
+metadata from a previous preview is not fresh readiness evidence.
+
+For `POST /instance`, a positive `contextTokenLimit` is an upper bound chosen by
+the caller. The master preserves a smaller requested window and lowers an
+inflated one to its current resource-derived ceiling; it never raises the request
+to the preview maximum. Nonpositive explicit limits are rejected during placement.
+An omitted limit retains the instance schema's model/engine backfill, still
+bounded by admission. Controllers budgeting a specific load-time KV allocation
+should set that exact limit and verify it on the accepted instance.
+
+
+### Committed GPU capacity during placement
+
+Placement previews and normal launch admission account for existing concrete GPU
+shards, including their stamped context windows, before load telemetry catches
+up. The master also reserves newly accepted creations while their indexed events
+are pending. Previews themselves do not reserve capacity. A later request can
+therefore be refused when another placement has committed the remaining memory.
+`POST /instance` also checks its GPU shard footprint against that remaining pool.
+An exact GPU placement with no usable VRAM observation is refused; it cannot
+substitute a system-RAM estimate for the missing GPU budget. Unstamped non-RPC
+shards resolve against the target node's advertised compatible backends before
+admission; missing backend evidence causes refusal. Accepted shards retain that
+backend choice. Restored unstamped shards on GPU hosts reserve capacity
+conservatively until their engine ownership is known.
+If capacity changes after acknowledgement and the master refuses either an
+exact-create or quick-launch command, `/state` retains `instanceFailures` with
+the acknowledged instance ID and `errorCode: placement_failed`;
+controllers should use this terminal evidence rather than wait for a runner.
+Removing a placement does not promise immediate GPU memory release. RPC instances
+continue using observed memory because their per-device allocations are chosen
+by llama.cpp at runtime; UMA nodes retain their combined host/GPU memory rules.
+
 
 ## Intelligent Fabric
 
@@ -2783,6 +2904,12 @@ Operators do not call this endpoint directly; the reconciler uses it after
 
 **GET** `/store/models/{model_id}/download/status`
 
+Pass the complete model ID; no body is required. Returns store progress as
+`modelId`, `sourceRevision`, `status`, `progress`, and `error`. With no matching
+store response, the public adapter returns `{"status": "not_found"}`; a transport
+failure returns `{"status": "error", "error": "..."}`. Inspect the JSON status
+even after HTTP success. An unconfigured store returns HTTP `503`.
+
 ### Cancel a store download
 
 **DELETE** `/store/models/{model_id}/download`
@@ -2816,13 +2943,52 @@ download for that alias completes successfully.
 Use this to remove staged model artifacts from nodes without deleting the store
 copy itself. Each artifact directory is removed as one unit, so its model bytes,
 installed-card sidecar, revision markers, and last-use marker are evicted
-together.
+together. The optional JSON body accepts `modelId` to restrict the purge to one
+model; omit it for a general purge. The response acknowledges `commandId` and
+`message`; it does not prove every node has finished eviction.
 
 ### Start optimization
 
 **POST** `/store/models/{model_id}/optimize`
 
-Use this for workflows such as model optimization or alternate artifact generation.
+Starts an OptiQ mixed-precision optimization for the path-selected stored
+model. An optional JSON body sets `target_bpw` (default `4.5`) and
+`candidate_bits` (default `[4, 8]`). Returns `modelId`, `status: "started"`,
+and `targetBpw`. Unavailable optimization returns `503`; a conflicting
+optimization returns `409`.
+
+**GET** `/store/models/{model_id}/optimize/status` takes the same model ID and
+no body. Poll for `status`, `progress`, `message`, `resultPath`, `achievedBpw`,
+`estimatedSizeMb`, and `error`. No known job returns `404`; an unavailable
+optimizer returns `503`. A started job is not a completed or placed model.
+
+### Internal store transport
+
+The store host also runs a separate HTTP transport on `store_port` (default
+`12415`). These paths belong to that listener, not the dashboard/API port and
+not its generated OpenAPI document. Workers and the store client use them for
+artifact transfer. Applications should use the public `/store/...` routes
+above. Keep the internal listener within the trusted cluster network; it does
+not provide paired-operator authentication. The import route additionally
+requires a direct loopback peer and refuses forwarding headers.
+
+For these internal paths, encode the complete repository-style `model_id` as
+one URL component (`org%2Fmodel`). The server also supplies `HEAD` counterparts
+for its `GET` routes.
+
+| Method and path | Parameters and behavior |
+| --- | --- |
+| `GET /health` | No parameters. Returns store path and disk `free_bytes`, `total_bytes`, and `used_bytes`. |
+| `GET /registry` | Optional `recover_installed_cards=true` rebuilds installed-card observations before returning the full entry list. This recovery option performs work; ordinary reads do not request it. |
+| `GET /models` | No parameters. Returns the model-ID list present in the store. |
+| `GET /models/{model_id}/files` | Optional `source_revision` must be a full 40-character commit. Returns relative file names after revision and artifact-completeness checks; unavailable or incomplete models return `404`. |
+| `GET /models/{model_id}/{path}` | Relative artifact path, optional `source_revision`, and optional single `Range: bytes=start-end` header. Returns raw bytes (`200`) or a bounded range (`206`); invalid ranges return `400` or `416`, missing files `404`, and paths escaping the model directory `400`. |
+| `POST /models/{model_id}/download` | Optional JSON fields `gguf_file`, `extra_gguf_files`, `source_revision`, `source_repository`, `registry_card_id`, `artifact_bundle_id`, `artifact_role`, `owner_model_id`, and `owner_registry_card_id` carry the exact artifact/companion selection described under public store downloads. Starts or observes the store transfer; completion is separate. |
+| `GET /models/{model_id}/download/status` | Model ID only. Returns `modelId`, `sourceRevision`, `status`, `progress`, and `error`; an unknown transfer returns `404`. |
+| `DELETE /models/{model_id}/download` | Model ID only. Cancels the transfer and returns progress plus `cancelled: true`; no cancellable transfer returns `409`. Partial files remain resumable. |
+| `GET /downloads` | No parameters. Returns pending, active, and failed transfers, including progress and actionable errors. |
+| `DELETE /models/{model_id}` | Model ID only. Removes the stored model and returns `modelId` and `deleted: true`; an absent model returns `404`. |
+| `POST /imports` | Loopback-only JSON `record`, `source_base_url`, `capability_token`, and `target_node_id`. Uses the capability-bound import and verification contract under [Internal cache export](#internal-cache-export). |
 
 ## Models Endpoint
 
@@ -2943,7 +3109,10 @@ them. The dashboard no longer presents a Model trust editor.
 
 **PUT** `/config`
 
-Updates cluster-wide config. Important behavior:
+Accepts a JSON configuration object directly, or wrapped as `{"config": {...}}`.
+This is a replacement-style update with the preservation exceptions below;
+send the full desired configuration rather than assuming every omitted field
+is retained. Invalid configuration returns `422`. Important behavior:
 
 - if you omit `hf_token`, Skulk preserves the existing value
 - if you omit `logging`, Skulk preserves the existing logging config
@@ -2969,13 +3138,19 @@ Updates cluster-wide config. Important behavior:
 
 **GET** `/filesystem/browse`
 
-Used by the dashboard to browse a safe subset of the filesystem when selecting config paths.
+Query parameter `path` defaults to `/Volumes`. Returns the resolved `path`
+and sorted, non-hidden child `directories`, each with `name` and `path`. Only
+directories beneath `/Volumes`, `/home`, `/mnt`, `/tmp`, and `/opt` are
+allowed; symlinks are resolved before checking. A non-directory or path outside
+those roots returns `400`, and insufficient filesystem permissions return
+`403`. This lists directories for configuration pickers; it does not read files.
 
 ### Node identity
 
 **GET** `/node/identity`
 
-Returns hostname, preferred IP, and node identity information used by the dashboard.
+Takes no parameters. Returns `nodeId`, `hostname`, and `ipAddress`. The address
+is a preferred non-loopback IPv4 interface when available, otherwise the hostname.
 
 `GET /node_id` is the minimal companion route: it returns only this node's ID
 (the same value `/node/identity` reports, without the hostname and IP fields).
@@ -3150,7 +3325,9 @@ Operational note:
 
 **GET** `/events`
 
-Returns stored events from the API-side event log.
+Takes no parameters. Returns the retained API-side event log as one JSON
+array (`application/json`), streamed while reading it. This is a finite export,
+not an SSE subscription. An API with event logging disabled returns `[]`.
 
 ### Diagnostics
 
@@ -3389,7 +3566,8 @@ These endpoints operate on trace artifacts stored on the current node:
 - `GET /v1/traces/{task_id}` returns structured trace events for one task
 - `GET /v1/traces/{task_id}/stats` returns aggregated timing summaries
 - `GET /v1/traces/{task_id}/raw` downloads Chrome-trace-compatible JSON
-- `POST /v1/traces/delete` deletes one or more local trace artifacts
+- `POST /v1/traces/delete` accepts `{"taskIds": ["<task-id>"]}` and deletes
+  those local trace artifacts, returning `deleted` and `notFound` ID lists
 
 Example:
 
@@ -3484,6 +3662,621 @@ password/write-only schemas are refused. Inventory is bounded to 32 providers
 and 128 nodes per provider. Configuration dispatch has an eight-request
 concurrency limit and a cooperative thirty-second deadline. In-process
 extensions remain trusted code.
+
+## Managed Plugin Lifecycle and Setup
+
+### Local managed-runtime lifecycle control
+
+The local manager is separate from the HTTP API and remains available
+when a plugin child is disabled or broken. Local setup provisions its protected
+`host.json` with a generated local profile ID and the current Skulk transport identity. Its fixed service command
+is `python -m skulk.extensions.runtime_manager serve --root <service-root>`.
+The terminal transport is `python -m skulk.extensions.runtime_manager call --root
+<service-root>`, reading one JSON request from standard input. These low-level lifecycle entry points share the installed service created by
+`skulk-plugin-service setup`.
+
+The local socket accepts these typed requests:
+
+| Action | Parameters | Behavior |
+| --- | --- | --- |
+| `list` | None | Lists registered installation IDs, selected runtime digests, selection revisions, retained operation references, observed process status and stale/unavailable observations. Process existence does not imply capability readiness. |
+| `register` | `plugin_id` | Registers an empty `managed.*` installation, up to sixteen per manager. Provisions its existing host identity automatically; an existing mismatched identity is refused without replacement. No provider request is made. |
+| `get` | `plugin_id` | Returns desired selection and process observation without paths, credentials or raw output. |
+| `submit` | `plugin_id`, `request` | Accepts a local lifecycle request after validating its revision and target. The nested request contains `operation_id` (32 lowercase hexadecimal characters), `action` (`activate`, `select`, `disable` or `uninstall`), `expected_revision`, and for activation or stopped selection `runtime_digest`, optional `rollback` and `accept_permissions`. No spending authority is conveyed. |
+| `operation` | `plugin_id`, `operation_id` | Reads retained progress. Reconnect reads this result; reusing an ID with different intent is refused. |
+| `recover` | `plugin_id`, `operation_id` | Explicitly resumes only that retained local intent after its fault is corrected. Completed or superseded operations remain unchanged. No new request or provider operation is created. |
+| `reload_runtime` | `generation`, `manifest_sha256` | Selects a manager generation staged from the live Skulk build, verifying its seal under the manager's own fences, then stops so the OS service restarts on it. Refused when the generation is not staged or differs. |
+| `read_catalog` | (none) | Fetches the host's one configured signed catalog, verifies it against the host's discovery trust (publisher known and not revoked, trust and catalog unexpired, Ed25519 signature over the canonical document, protocol window) and returns its review: publisher, revision, window, the document digest, and per entry the bundle identity and title, sequence, release and artifact digests, size, platforms, Skulk build, signed permissions, capability ids, surface titles, durable operations, steward risk classes, and whether the release matches this host. Selects and installs nothing; returns no addresses or credentials. |
+| `catalog_status` | (none) | Catalog source readiness: revision, whether configured, the opaque credential reference and whether it is readable, and the discovery trust revision. No network I/O. |
+| `configure_catalog` | `request` (`expected_revision`, optional `base_url`, `document_filename`, `trust`, write-only `token`, `clear_token`) | Sets the host's catalog address and discovery trust under the catalog fence; the same revision, trust-monotonicity and credential-replacement rules as a release source. |
+
+Activation validates signed artifacts, permission expansion and migration
+compatibility before stopping the owner; it repeats admission checks before
+switching. `select` performs the same checks and publishes `enabled: false`,
+allowing verified host-local setup or migration before any owner startup. A later
+`activate` request must use the new selection revision; selection itself performs
+no migration or identity initialization. Interrupted stopped selections revalidate
+trust and artifacts before completion. Disable retains runtime generations,
+identities and cleanup material, even when release trust is invalid. An explicit
+`disable` may withdraw a stalled `activate` or `select` using the actual current
+selection revision (zero when initial publication never happened). Live work still
+must finish; a pending disable uses recovery rather than another disable. The new
+operation retains `withdraws_operation_id` for its prior local intent. An unpublished
+prior transition becomes `superseded`; one already atomically published is recorded
+as `complete`. Its runtime is never executed to finish withdrawal. Both journals
+retain their history, including when withdrawal itself is interrupted.
+Operations move through `accepted`, `applying`, `complete`, `failed`,
+`recovery_required` or terminal `superseded`; completion confirms the local desired-state change, with
+service and capability readiness observed separately. Pending local selection
+recovery never replays provider requests. A retained accepted record without live
+owned work is reported as `recovery_required`. An accepted operation outlives its
+requesting socket. Validation failures do not interrupt a healthy owner.
+
+The socket is owner-only and accepts eight concurrent clients, one request per
+connection, at most 16 KiB request and 256 KiB response, with a thirty-second
+request deadline. Errors contain the stable `manager_operation_refused` code, with
+two named exceptions: a host whose live Skulk build differs from the manager's answers `manager_build_differs` with the two build digests, and a verified release outside this host's protocol window answers
+`release_protocol_unsupported` with `kind` (`release` or `runtime`), the integer
+`offered` and the integers `accepted`, nothing else;
+local operation records distinguish validation, ownership and local I/O failures.
+This transport is not a LAN listener or remote authorization mechanism. The HTTP lifecycle routes below enforce the existing explicit plugin operator scopes.
+
+
+### Plugin proposal review
+
+These read-only routes require direct owner authority or explicit `plugins:read`.
+Responses use `Cache-Control: no-store`. Disabled installed nodes may retain
+reviewable intent; proposal state is an observation, never execution authority.
+
+- `GET /v1/plugins/{plugin_id}/nodes/{node_id}/proposals` accepts integer `offset`
+  (default `0`, range `0..127`). It returns at most sixteen summaries in `proposals`
+  and an optional `nextOffset`. Each summary includes an exact `reference`, plain
+  text `summary` (1–1,024 characters), `expiresAt` (UTC Unix seconds) and `state`.
+  Concurrent journal changes can move entries between pages; review a selection
+  freshly before taking any later action.
+- `GET /v1/plugins/{plugin_id}/nodes/{node_id}/proposals/{proposal_id}` requires
+  query parameter `proposal_digest` (64 lowercase hexadecimal characters). The
+  provider must match both its opaque ID and immutable intent digest. The response
+  contains `proposal`, `observedAt` (UTC Unix seconds), and 1–32 `fields`, each with
+  a plain-text `label` (1–64 characters) and `value` (1–2,048 characters). Facts cover
+  applicable model/context, resource selection, prices, limits and cleanup terms.
+
+The reference contains `pluginId`, `nodeId`, `proposalId`, and `proposalDigest`.
+Proposal IDs are 1–128 characters from `a-zA-Z0-9._:@-`; they are opaque identifiers,
+not paths or serialized workflows. A digest need not equal its proposal ID. Read
+responses are bounded to 128 KiB and reject another installation's reference.
+Malformed parameters return 422; unsupported nodes/providers return 404; changed
+or inconsistent references return 409; unavailable providers return 503 or 504.
+Failures contain no rejected canonical input or private provider diagnostics.
+
+The core receives safe review data. Canonical execution arguments, approvals and
+execution journals remain with the provider. These GET requests neither create
+intent, grant approval nor replay a prior effect. Clients render fields as text.
+
+### Plugin owner proposal actions
+
+Review responses carry `approvalRevision`: a 64-character lowercase hex fence
+binding the provider's reviewed terms, or `null` when approval is unavailable.
+The optional owner action facet uses the exact reference returned by review.
+Direct owner authority or explicit `plugins:approve` is required for both POST
+routes on direct and relay connections. `plugins:manage` cannot approve;
+`plugins:read` authorizes observation. Responses use `Cache-Control: no-store` and
+contain at most 16 KiB of safe progress metadata.
+
+- `POST /v1/plugins/{plugin_id}/nodes/{node_id}/proposals/{proposal_id}/approve`
+  accepts `operationId` (32 lowercase hexadecimal characters), `reference`, and
+  `reviewRevision` (the exact review fence). The route and reference must match.
+  The API supplies the authenticated operator identity; caller-selected actors,
+  executable inputs and approval proofs are rejected. Providers durably accept
+  intent before work and revalidate terms and authority before execution.
+- `GET /v1/plugins/{plugin_id}/nodes/{node_id}/proposal-operations/{operation_id}`
+  observes the original action without signing, executing or replaying it.
+- `POST /v1/plugins/{plugin_id}/nodes/{node_id}/proposal-operations/{operation_id}/resume`
+  takes no replacement intent (empty body or `{}`). It explicitly recovers an
+  interrupted approval using the original action ID. A currently authorized owner
+  may recover another owner's retained action. Submitted or uncertain work must
+  only be observed, never replayed.
+
+Responses contain `operationId`, exact `reference`, `phase`, `updatedAt` (UTC Unix
+seconds), nullable safe `code`, and nullable `correctiveAction` (up to 512
+characters). Phases are `accepted`, `approving`, `approved`, `dispatching`,
+`acknowledged`, `succeeded`, `refused`, `approval_interrupted`, and `uncertain`.
+`acknowledged` means the capability controller durably accepted the exact approved
+request for asynchronous processing. The provider request may still be queued; this
+is neither provider completion nor inference readiness. Observe `reconciliation`;
+acknowledged work survives owner restart and cannot be replayed or resumed. Success describes
+completion of the selected action; it does not universally mean resource absence.
+Malformed inputs return 422, missing scopes 403, unsupported facets 404,
+inconsistent references or refused actions 409, and unavailable owners 503/504.
+An unconfirmed HTTP reply does not prove that the action was refused.
+
+An optional nullable `reconciliation` object reports later cleanup evidence without
+rewriting `phase`: `state` is `pending`, `active`, `releasing`, `absent`, `attention`
+or `unknown`; `observedAt` is the cleanup journal read time in UTC seconds (null
+before any successful observation); `stale` marks unconfirmed current access or
+worker health; and `code` is a nullable safe status code. These are historical
+receipt observations, not a new provider inventory query or inference-readiness
+claim. A failed refresh retains previous evidence and marks it stale. Providers
+must correlate the exact retained request, never infer absence from a missing
+record, and never replay uncertain work during observation. Confirmed absence
+remains visible beside the original uncertain submission, including after a
+later cleanup-connection outage. The dashboard labels absence and stale evidence
+separately; terminal clients consume the same response fields.
+
+The Plugins page presents provider facts as text with a distinct **Approve and
+execute reviewed proposal** button. It saves only an operation lookup ID in browser
+storage before POST, then observes status after reconnect. It never stores proof
+or credentials and never automatically resumes an interrupted approval. The
+separate **Resume original approval** action is available only for that phase.
+Providers retain raw failure evidence in protected host-local storage.
+
+### Managed plugin HTTP lifecycle
+
+The Plugins page and these routes use the same independently supervised manager
+as terminal operations. All JSON fields in this lifecycle contract use
+`snake_case`. Local `skulk-plugin-service setup` supplies the protected connection;
+HTTP requests cannot choose a manager root, executable or attachment identity.
+A running Skulk API discovers subsequent local setup and installation registration
+without restart. Missing setup returns an actionable unavailable response.
+
+| Method | Path | Parameters and behavior |
+| --- | --- | --- |
+| GET | `/v1/plugins/managed` | Requires `plugins:read`. Returns `installations`, at most sixteen entries, with `plugin_id`, `selected_digest`, `selection_revision`, `enabled`, `service`, `stale`, `error_code`, `operation_id` and `operation_state`. `reload_runtime` is true when the manager can select a staged runtime and restart on request; a host reads it before asking, so a manager from before that request is told apart from one refusing a generation. Pending or selected operation references allow reconnect to resume observation without repeating a mutation. |
+| POST | `/v1/plugins/managed/installations` | Requires `plugins:manage`. Body: `plugin_id` in the `managed.*` namespace. Registers an empty installation and returns its observation. Does not download, stage or enable a release. |
+| GET | `/v1/plugins/managed/installations/{plugin_id}` | Requires `plugins:read`. Returns `installation` observation and `selection`, nullable before a release is selected. |
+| POST | `/v1/plugins/managed/installations/{plugin_id}/operations` | Requires `plugins:manage`. Body: `operation_id` (32 lowercase hexadecimal characters), `action` (`activate`, `select`, `disable` or `uninstall`), `expected_revision` (nonnegative integer), and activation/selection-only `runtime_digest`, optional `rollback` and `accept_permissions` booleans. Returns the retained `LifecycleOperation`. Activation and stopped selection accept only an already staged, verified generation. `select` keeps its owner stopped until a later explicit `activate` request. An explicit `disable` can withdraw a stalled activation/selection, including a revoked release, using the current selection revision. Live work and a pending withdrawal cannot be superseded. `activate` and `select` revalidate the staged metadata; a runtime that a host update has moved outside the protocol window answers `409` with the sentence the guided installer prints (which protocol the host accepts, which the runtime offers, and that the fix is to update Skulk on this host or choose a release published for it). |
+| GET | `/v1/plugins/managed/installations/{plugin_id}/operations/{operation_id}` | Requires `plugins:read`. Reads the original local operation's exact `request`, previewed `selection`, `state`, sanitized `error_code` and optional `withdraws_operation_id`. Superseded unpublished transitions remain terminal history. Never repeats its effect. |
+| POST | `/v1/plugins/managed/installations/{plugin_id}/operations/{operation_id}/recover` | Requires `plugins:manage`. No body. Explicitly resumes the existing journaled local operation; completed or superseded operations are unchanged. |
+
+Direct localhost/Tailscale owner administration remains available under the
+existing origin checks. Remote grants are explicit: a broad operation token does
+not substitute for a plugin grant, and revoked sessions lose access. Responses
+use `Cache-Control: no-store`. Unknown fields and malformed identifiers return
+422; authorization follows the existing 401/403 contract. Capacity exhaustion
+returns 429, unavailable local setup/service or operation returns 503, refused
+selection or conflicting intent returns 409, and a manager deadline returns 504.
+After an uncertain response, read the original operation; do not generate another
+mutation to discover whether the first succeeded. No raw provider response,
+credential value or host-local path is returned.
+
+The dashboard polls inventory and retained operation status, distinguishes stale
+observations, and supports disabling and explicit local recovery. A confirmed
+recovery-needed activation/selection offers Disable even before its first runtime
+was published; the UI explains that this withdraws local intent without running
+the release. An unconfirmed mutation still requires status readback first. Runtime
+completion does not prove capability readiness. Disabling preserves cleanup
+records and independent supervision. These routes convey neither paid approval
+nor permission to replay an uncertain provider create. Release download/staging uses the routes below; provider credential provisioning
+and proposal approval are separate operations.
+
+
+### Private release inspection and installation
+
+Each registered installation has one owner-configured HTTPS release directory and
+publisher trust view. The release directory contains signed v2 metadata, its
+`bundle.pyz` and every exact wheel named by that metadata. URLs are never supplied
+on install requests. The manager verifies metadata, current publisher trust and
+exact host compatibility before requesting any artifact, refuses redirects and
+encoded responses, and checks every artifact size and SHA-256 before offline
+staging. It resolves no dependency versions and does not modify Skulk's environment.
+
+| Method | Path | Parameters and behavior |
+| --- | --- | --- |
+| GET | `/v1/plugins/managed/installations/{plugin_id}/source` | Requires `plugins:read`. Returns `revision`, `configured`, opaque `credential_reference`, `credential_ready` and `trust_revision`; no network request or stored token value. |
+| POST | `/v1/plugins/managed/installations/{plugin_id}/source` | Direct localhost/Tailscale owner only; paired bearers and relay requests are refused. Body: `expected_revision` (zero initially), optional HTTPS `base_url` ending in `/`, `metadata_filename`, `trust`, write-only `token`, and `clear_token`. Omitted directory, filename and trust retain current values; initial setup must supply any missing values. Returns source readiness. `trust` contains monotonic `revision`, Unix `expires_at`, `publishers` mapping publisher IDs to Ed25519 public-key hex, and optional `revoked_publishers`/`revoked_artifacts` arrays. New trust revisions retain all prior revocations; these cannot be removed through source configuration. Same-revision trust changes, stale source revisions and expired trust are refused. |
+| GET | `/v1/plugins/managed/catalog` | Requires `plugins:read`. Fetches and verifies the host's signed catalog (the `read_catalog` manager request) and returns `publisher`, `revision`, `created_at`, `expires_at`, `catalog_sha256` and `entries`, each with `bundle_id`, `bundle_version`, `title`, `publisher`, `sequence`, `release_digest`, `runtime_platform` (the exact artifact family of a runtime-bearing release, else null), `artifact_sha256`, `artifact_bytes`, `transfer_bytes` (the artifact plus every wheel of a runtime-bearing release), `platforms`, `skulk_build_sha256`, `permissions`, `descriptors`, `surfaces`, `operations`, `steward_risks`, `expires_at` and `matches_host`. A release whose served record, signed claims or executable artifact the discovery trust revokes is not listed (wheel revocations are enforced by the release path at inspection and staging). Retained catalog documents are pruned to the newest few beyond every accepted revision. The discovery trust the host accepted is recorded as a floor; a restored older trust file is refused. The accepted catalog revision only moves forward: an older revision, or a different document at the accepted revision, is refused as a rollback. No addresses or credentials; nothing is selected, staged or installed. |
+| GET | `/v1/plugins/managed/catalog/source` | Requires `plugins:read`. Returns catalog source readiness: `revision`, `configured`, `credential_reference`, `credential_ready`, `trust_revision`. No network I/O. |
+| POST | `/v1/plugins/managed/catalog/source` | Direct localhost/Tailscale owner only. Body: `expected_revision` (zero initially), optional HTTPS `base_url` ending in `/`, `document_filename` (default `catalog.json`), `trust` (the publishers trusted for discovery, the same shape as release trust), write-only `token`, and `clear_token`. Initial setup requires the directory and trust; omitted fields retain current values; new trust revisions keep prior revocations; moving the catalog requires supplying its credential again. Nothing is fetched or installed. |
+| POST | `/v1/plugins/managed/catalog/install` | Direct localhost/Tailscale owner only. Body: `catalog_sha256` (the reviewed catalog's digest, from the catalog review), `bundle_id`, `sequence`, optional `runtime_platform` (the listed artifact family, matched by canonical family) and optional `plugin_id` (an existing installation to upgrade; omitted registers a new `managed.` ID). The listing is taken from the retained catalog under that digest and verified again against discovery trust; the digest must still be the newest listing the host accepted from its source for that publisher, or the request is refused as superseded. The listing must fit this host. The installation's release source becomes the listed feed with `release.json` as its record, the discovery trust becomes its publisher trust, and the catalog credential is presented only when the feed shares the catalog's origin (a credential the installation already holds for the listed feed address is kept; otherwise another origin is read anonymously until the installation is given its own credential). An existing installation keeps its bundle and never goes back: another bundle or a lower sequence is refused before the source is touched. The release record is then inspected through the ordinary path and must be the record the listing names (`runtime_digest`, signed publisher, bundle and sequence). Returns `plugin_id`, `listing` (the catalog entry review), `source` (source readiness) and `review` (the release review). Nothing is downloaded beyond the record, staged or activated: continue with the install and activate requests, which remain their own consents. `409` names a refusal without addresses. |
+| GET | `/v1/plugins/managed/installations/{plugin_id}/release` | Requires `plugins:read`. Downloads and verifies only metadata, returning `runtime_digest`, `source_revision`, `publisher`, `bundle_id`, `version`, `sequence`, `platform`, `python_requires`, `skulk_build_sha256`, declared `permissions`, total `artifact_bytes` and Unix `expires_at`. The exact verified metadata is retained for a later install request. A verified release outside this host's protocol window answers `409` with the sentence the guided installer prints: which protocol the host accepts, which the release offers, and that the fix is to update Skulk on this host or choose a release published for it. |
+| POST | `/v1/plugins/managed/installations/{plugin_id}/install` | Requires `plugins:manage`. Body: `operation_id` (32 lowercase hexadecimal characters), exact reviewed `runtime_digest`, `expected_source_revision`. Journals intent before returning `InstallOperation`, then downloads and stages under independent manager ownership. Reusing the ID with the same request reads its retained state; different intent is refused. Does not activate or approve spending. A verified release outside this host's protocol window answers `409` with the sentence the guided installer prints: which protocol the host accepts, which the release offers, and that the fix is to update Skulk on this host or choose a release published for it. |
+| GET | `/v1/plugins/managed/installations/{plugin_id}/install` | Requires `plugins:read`. Returns `operation`, nullable before installation. The retained operation contains exact `request`, signed `review`, `state`, `downloaded_bytes`, sanitized `error_code`, `attempt` (zero initially) and nullable `attempt_source_revision` for explicit recovery. Reconnect polls this route, never resubmits an uncertain request. |
+| POST | `/v1/plugins/managed/installations/{plugin_id}/install/{operation_id}/recover` | Requires `plugins:manage`. `operation_id` is the original 32-character lowercase hexadecimal ID. Body: `expected_source_revision` from current source readiness, including any explicit credential rotation. Revalidates the original signed metadata against current trust and host compatibility, retains prior attempt evidence, and journals another download/staging attempt for the same exact digest. Only `recovery_required` work is retried; other states return unchanged. Refuses busy installers, changed source revisions and more than eight recovery attempts. Does not activate or approve spending. A verified release outside this host's protocol window answers `409` with the sentence the guided installer prints: which protocol the host accepts, which the release offers, and that the fix is to update Skulk on this host or choose a release published for it. |
+
+Installation states are `accepted`, `downloading`, `staging`, `staged` and
+`recovery_required`. Failure codes distinguish `download_failed`,
+`installation_failed` and `installation_interrupted`. Accepted work outlives an
+HTTP/browser disconnect. During `staging`, accepted downloads wait up to 30 seconds
+for the local installer lock before verification and installation begin. Short
+service-verification contention resumes the same operation without downloading
+again. If ownership remains busy, the operation becomes `recovery_required` with
+`installation_failed`; finish the competing management command before explicitly
+recovering the original operation. Shutdown cancels this wait without starting
+an installer. Manager shutdown cancels network transfer and waits for
+owned offline staging; an interrupted operation is retained and never automatically
+replayed after restart. Partial artifacts and incomplete runtime evidence remain
+protected for explicit recovery. Recovery retains prior operations, downloaded
+files and incomplete generations before rebuilding. It never moves a selected
+generation or one pending activation, and never reseals a damaged completed
+generation. The original request and review remain immutable even when a rotated
+credential supplies the next attempt. A `staged` result proves preparation, not activation,
+current release trust or capability readiness; activation repeats verification.
+
+The source token is written into a generated protected file before publishing its
+reference. Omission retains the prior reference; `clear_token` explicitly selects
+an anonymous source. Changing a credential-bearing source requires supplying the
+credential again or clearing it, so management cannot silently forward a stored
+token elsewhere. Replaced credentials are retained as protected history. Ordinary
+responses and validation errors never echo token values. A disk fault can apply a
+stricter trust view before source replacement; runtime admission then refuses
+invalid releases and the unchanged source revision permits owner correction.
+
+Metadata is bounded to 128 KiB with a twenty-second download deadline. Artifact
+transfer has a 180-second total deadline and enforces the signed per-file and
+aggregate bounds. Review and operation histories each retain at most 128 entries;
+exhaustion requires local maintenance rather than silent deletion. Only one
+installation download per registered plugin runs at a time. Source replacement
+is refused while its installation is active. Existing inference and other plugins
+remain outside this staging lifetime.
+
+After local service setup, `skulk-plugin-service manage` reads one typed JSON
+request from standard input and uses the generated protected connection. It needs
+no service root or executable path argument and invokes no sudo. The existing
+`register`, `get`, `submit`, `operation` and `recover` actions remain available.
+Release actions are `configure_source` with `plugin_id` and nested source-update
+`request`; `source_status`, `inspect_release` and `install_status` with `plugin_id`;
+`install` with `plugin_id` and nested installation `request`; and `recover_install`
+with `plugin_id`, original `operation_id` and `expected_source_revision`. Keep credential
+input out of shell arguments and shell history. The wire limit remains 16 KiB.
+
+In the Plugins dashboard, **Add plugin** generates a stable installation identity,
+then opens the same source setup operation. The owner enters the HTTPS directory,
+metadata filename, publisher identity/public key, trust expiry and any feed
+credential. Changing publisher details requires distinct trust confirmation and
+replaces the publisher list with that key while retaining all revocations. Existing
+installations expose **Configure release source** for settings and credential
+rotation. Credential inputs are cleared before submission and excluded from Redux,
+browser storage and ordinary errors. Changed source revisions require an explicit
+status refresh before saving. **Retry this installation** recovers only the original
+failed installation after checking current source readiness; reconnect only reads
+the retained operation. Release activation still requires separate permission
+acceptance, and paid-capacity approval remains a separate plugin operation.
+
+The dashboard's **Install a release** controls inspect the configured release,
+show its version/permissions and size, stage exact bytes, and require a separate
+permission acceptance and activation action. Installation progress is restored
+from the server after reconnect. Source/trust entry is available through terminal,
+the dashboard and direct-owner HTTP. Provider credential setup, nonbillable preflight and paid
+proposal approval remain separate from these release-feed operations.
+
+### Guided terminal installation
+
+After local system-service setup, run `skulk-plugin-service install-plugin` in
+the nonroot owner's interactive terminal. It generates an installation identity
+and prints a resume command before registration. Supply the trusted HTTPS
+directory, metadata filename (default `release.json`), publisher ID, Ed25519 public
+key and timezone-aware trust expiry. Confirm publisher trust separately, then enter
+the optional feed bearer through hidden terminal input. Credentials are never
+accepted as arguments, printed or included in retained operation identifiers.
+
+The command displays verified release compatibility, exact digest, size, expiry
+and permissions. Download requires explicit confirmation; starting the plugin owner
+requires separate permission acceptance. Both use the existing revision-fenced
+manager operations. Plugin configuration, nonbillable preflight, capability-node
+enablement and paid approval remain separate plugin operations, available through
+the plugin's documented terminal commands or the Plugins dashboard.
+
+After disconnect or an uncertain response, run the printed
+`skulk-plugin-service install-plugin MANAGED_ID` command. It retains configured
+trust and credentials, reads accepted installation/activation status, and never
+automatically resubmits an effect. Interrupted downloads require explicit recovery
+consent under their original operation ID. An unrelated or failed lifecycle
+transition requires explicit lifecycle inspection/recovery; it is not replaced.
+A newer release at the configured source is reviewed, staged beside the selected one and, after explicit consent, activated over it under the selection revision; an older release at the source is a rollback, refused before any transfer, since rollback is an explicit lifecycle operation.
+Polling is bounded; exiting the terminal leaves manager-owned work running.
+The command accepts at most one installation ID and no executable, path or
+provider command. The existing typed-JSON `manage` interface remains available
+for automation, source rotation and advanced lifecycle operations.
+
+
+### Stable local manager runtime
+
+The local setup implementation stages a separate service copy through
+`stage_service_runtime(root)` and selects it through
+`activate_service_runtime(root, snapshot)`. These are owner-local setup functions,
+not HTTP operations; callers do not submit executable or dependency paths through
+management APIs. Preparation copies the exact installed dependency files, effective
+Skulk code, native bindings and required declarative resources. It resolves no new
+dependencies and does not modify the existing Skulk environment. Unknown editable
+startup hooks and external links are refused rather than borrowed silently.
+
+A complete staged record contains the generation, manifest digest, qualified
+core digest, copied file count and byte count. An interrupted copy retains its
+incomplete directory without changing the selected service runtime. Activation
+requires a stopped manager and preserves plugin installation/configuration and
+cleanup state. The copied bootstrap runs with `-I -S -B` and verifies file bytes,
+permissions, membership and interpreter identity before Python site initialization
+or manager imports. The manager receives its explicit service state root; stored
+credentials and ordinary Skulk configuration are not copied into this runtime.
+
+The local setup command below uses this packaging primitive for existing supported
+isolated Skulk Python environments. Real system-service/reboot qualification on
+both release platforms remains an acceptance gate.
+
+
+### Automatic local transport attachment
+
+Skulk currently generates a new transport identity on each process start. Local
+setup records may include `manager_root` and `profile_id` together; the installation
+must be exactly that manager's `installations/<plugin_id>`. These protected local
+fields are never accepted from HTTP callers. Legacy records without them retain
+manual attachment behavior until migrated by local setup.
+
+The in-process adapters share one process-lifetime `attachment.lock`. Their internal
+`attach` socket request contains the provisioned `profile_id`, the actual live
+`transport_node_id`, and the measured live `skulk_build_sha256`. The manager refuses
+foreign profiles, competing bridge lifetimes, missing bridge ownership and a live
+core build different from its independently installed core. A manager's own build
+measurement alone is not evidence of compatibility with the live API process.
+This operation is local lifecycle metadata, not a remote operator grant or provider
+submission; no new cleanup pairing or enrollment protocol is involved.
+
+Renewal stops affected owners, acquires controller/service/child fences, journals the
+exact old/new attachment, and replaces only transport metadata. Durable plugin IDs,
+selected generations, configuration revisions, receipts and approval reservations
+remain unchanged. Startup completes interrupted journaled writes before loading any
+owner. A foreign installation binding is refused before stopping healthy owners.
+An incomplete write exposes `attachment_recovery_required` until local recovery
+succeeds. Disconnect does not cancel accepted local renewal. API shutdown releases
+its attachment fence without terminating independent cleanup services.
+
+
+### Local system-service setup
+
+Run `skulk-plugin-service setup` in the existing qualified Skulk environment, as
+the nonroot Skulk owner. From a source environment the equivalent is
+`python -m skulk.extensions.service_setup setup`. Do not run the whole command
+under sudo. Setup invokes a fixed standard-library-only local helper through sudo
+for parent-directory provisioning and OS registration; runtime copying, activation,
+configuration and all manager/plugin processes execute as the existing owner.
+No HTTP route invokes this helper, supplies unit contents or accepts an executable.
+
+The command creates an independent verified manager runtime, a generated local
+profile ID, protected setup operations and `SKULK_CONFIG_HOME/managed-service/connection.json`.
+Internal paths and IDs are generated. The connection lives in a private subdirectory;
+existing non-writable-by-others Skulk configuration directory permissions are preserved. One service is associated with one Skulk
+configuration per OS account; a different configuration is refused without
+adopting or rewriting its binding. The base Python installation and existing Skulk
+configuration must live outside Git checkouts and remain available after boot.
+
+| Platform | Durable service root | System registration |
+| --- | --- | --- |
+| Apple Silicon macOS | `/Library/Application Support/SkulkPluginServices/<uid>` | `/Library/LaunchDaemons/foundation.foxlight.skulk.plugins.u<uid>.plist`, using the system domain and a nonroot `UserName` |
+| Linux x86_64 with systemd | `/var/lib/skulk-plugin-services/<uid>` | `/etc/systemd/system/foundation.foxlight.skulk.plugins.u<uid>.service`, using a nonroot numeric `User` and `multi-user.target` |
+
+Setup records a generated `operation_id` and phases `preparing`, `staged`,
+`selected`, `registered`, `ready`. Rerunning after interruption reuses the exact
+completed staged copy and generated profile. A changed source core, Python or
+dependency inventory starts a new setup operation, including when a corrected build
+replaces failed setup. Prior operations, runtime generations and the generated
+profile remain retained. Preparation does not stop
+the existing manager. Activation stops only its fixed service, verifies the copied
+runtime again, preserves the latest transport attachment, and starts the registered
+service. An unrelated definition occupying the reserved service name is refused.
+The exact earlier Linux unit with a quoted working directory is recognized for
+repair; setup replaces it with systemd's literal absolute-path form.
+No provider request, credential provisioning, approval or implicit enable occurs.
+
+`skulk-plugin-service status` reports the last setup phase separately from current
+`registered_runtime_verified` and `management_available`. An old `ready` phase
+is historical completion, not current service health. Corrective error codes are
+`registration_or_integrity_unavailable` and `service_unavailable`; rerun the same
+local setup command using its qualified environment after correcting OS access or
+runtime integrity. When setup's readiness wait expires after successful registration,
+the command exits with status 1 and prints JSON containing the retained
+`operation_id`, `phase: "registered"` and `error_code: "service_readiness_pending"`.
+Registration is preserved. Inspect `skulk-plugin-service status`; when both
+`registered_runtime_verified` and `management_available` are true, rerunning setup
+in the same qualified environment verifies the binding, selected runtime and fixed
+OS definition, then completes the original operation without elevation, restaging
+or restarting the healthy service. A healthy completed setup also needs no elevation.
+Status itself remains read-only. A different source environment still requests a
+new runtime generation; an invalid registration follows the privileged repair path.
+Root-owned unit definitions have fixed arguments; service output
+is not a channel for private plugin diagnostics. Protected plugin evidence remains
+host-local.
+
+These are system services, so qualification begins after OS boot and disk unlock;
+setup does not bypass encryption authentication. Apple's
+[launchd guidance](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html)
+distinguishes system daemons from login-session agents. Linux uses the systemd
+[service](https://github.com/systemd/systemd/blob/v255/man/systemd.service.xml) and
+[process-lifetime](https://github.com/systemd/systemd/blob/v255/man/systemd.kill.xml)
+contracts. The running API discovers the local service and installed runtimes without a
+restart. Use the Plugins dashboard or the managed-plugin HTTP routes above to
+inspect releases, install them, and observe retained operation status.
+
+### Capability-node preflight
+
+`GET /v1/plugins/{plugin_id}/nodes/{node_id}/preflight` runs the installed plugin's
+bounded, nonbillable setup checks. Path parameters select an exact installed plugin
+and persistent node; there is no request body or command/path input. Requires
+direct owner administration or the explicit `plugins:read` grant. Inventory
+`preflightAvailable` indicates support. Disabled or failed children may be checked
+while their management provider remains available.
+
+The response contains `nodeId`, configuration `revision`, `schemaDigest`,
+`valuesDigest`, optional `credentialRevision`, `observedAt` in UTC seconds, and
+`checks` (one to 32 distinct `code`, `passed`, `correctiveAction` records). No
+credentials or protected host evidence are returned. The response uses
+`Cache-Control: no-store`; unknown/unsupported management returns 404, refused
+observations 409, capacity exhaustion 429, unavailable providers 503 and timeout
+504. Responses are bounded to 64 KiB and calls share the plugin-management
+concurrency and deadline limits.
+
+A check may create and remove a protected local storage probe. It does not enable
+the node, approve spending or create paid resources. Results describe the observed
+configuration and are not reusable admission tokens. Supporting plugins enforce
+fresh preflight on enable and restart and retain fresh dispatch admission. The
+Plugins dashboard exposes explicit setup checks and individual corrective actions.
+
+
+### Capability-node public setup files
+
+`GET /v1/plugins/{plugin_id}/nodes/{node_id}/setup` reads public setup exports
+for an exact installed plugin and persistent node. The path parameters select
+that node; there are no body, query, command or executable-path parameters.
+Requires direct owner administration or `plugins:read` on direct and relay routes.
+Inventory `setupAvailable` indicates support. Disabled children can expose setup
+files while their management provider is available.
+
+The response contains `nodeId`, observed configuration `revision` and
+`schemaDigest`, `credentialRevision`, and one to eight `artifacts`. Each artifact
+has a safe `name`, owner-facing `title`, `mediaType` (`application/json` or
+`text/plain`), and public `content` of at most 16,384 characters. Names must be
+unique; the complete response is bounded to 64 KiB and uses `Cache-Control:
+no-store`. Credential values, executable content, protected local paths and raw
+provider evidence must never appear in these exports.
+
+This read cannot generate keys, replace credentials, enable a node or approve
+spending. Revisions describe an observation, not a lock against later changes;
+providers must revalidate bindings at enable and dispatch. Unsupported providers
+or missing selections return 404. Refused operations and invalid responses return
+409, unavailable providers return 503, exhausted admission returns 429, and the
+shared bounded management deadline returns 504. Errors suppress private exception
+text. The Plugins dashboard fetches files only on an explicit action, downloads
+them as inert text, and hides an earlier export after a failed refresh.
+
+
+### Installed plugin local setup command
+
+`skulk-plugin-service setup-plugin <managed-plugin-id> -- <plugin-setup-fields>`
+executes the selected verified generation's setup launcher: the archive's optional
+fixed `__setup__.py`, or the `setup` entry a signed wheel declares under
+`skulk.capability_runtime`.
+The managed plugin ID is the same ID shown by inventory. Installation roots and
+runtime paths resolve from the protected local service connection, never from
+caller-supplied executable or module paths. No new HTTP endpoint is introduced:
+this command is an explicit local owner operation, unavailable to remote grants.
+
+The launcher requires a nonroot owner, matching local service profile, retained
+release/trust history and a selected intact compatible runtime. Disabled selection
+is allowed for setup. Pending selection recovery, missing entrypoints, tampered
+bytes or invalid signatures refuse execution. The plugin owns setup field parsing
+and credential prompts; secrets must be supplied interactively or over protected
+stdin rather than argv. At most 128 fields and 16 KiB of UTF-8 argument bytes are
+accepted. Normal terminal input, output and interrupt behavior are preserved.
+
+The installed-runtime lock is inherited through process replacement and released
+at setup exit. Other runtime activation/staging attempts report contention while
+it is held. Existing services remain supervised; this launcher does not change
+configuration, credentials or lifecycle state itself. Each plugin must document
+and qualify the effects of its own setup entrypoint, including any explicit local
+privileged registration. The public API setup-file export remains a separate,
+read-scoped operation.
+
+
+### Capability-node nonbillable setup operations
+
+An optional installed owner facet exposes fixed setup actions independently of
+child readiness. Credentials use the existing write-only credential endpoints;
+setup forms contain ordinary external inputs. These operations do not enable a
+node, approve spending, or replay uncertain provider submissions.
+
+| Method and path | Parameters and behavior |
+| --- | --- |
+| `GET /v1/plugins/host-network` | No parameters. Requires `plugins:read` or direct owner authority, including the existing origin and transport checks. Returns the live local `nodeId`, public `networkVersion`, domain-separated `namespaceFingerprint`, numeric `control` TCP endpoints (`host`, `port`), `dataTransport` (`gossipsub` or `zenoh`) and Zenoh `data` endpoints (empty for gossipsub). Ports come from running native listeners, including OS-assigned ports. The fingerprint is SHA-256 of UTF-8 `skulk-host-attachment-v1` + NUL + the version/namespace token, distinct from the routing namespace; no raw namespace or credentials are returned. Responses are `Cache-Control: no-store`; unavailable or unsupported TCP listeners return 503, concurrency saturation 429. The read has a two-second deadline. This reports addresses local to the serving host, not endpoints guaranteed reachable remotely. A plugin may use its owned secure transport to connect matching peers; the route never dials, changes configuration, restarts the node, or approves acquisition. |
+| `GET /v1/plugins/{plugin_id}/nodes/{node_id}/setup-actions` | Exact installation/node IDs. Returns `nodeId`, configuration `revision`/`schemaDigest`, `credentialRevision`/`credentialSchemaDigest`, up to eight installed `actions` and 32 retained `operations`. Each action has `actionId`, title, description, ordinary `parametersSchema`, `schemaDigest`, and `requiresApproval` (default false). Requires `plugins:read` or direct owner authority. Does not initialize state or perform setup. |
+| `POST /v1/plugins/{plugin_id}/nodes/{node_id}/setup-operations` | Body: `operationId` (32 lowercase hexadecimal characters), `actionId`, `values`, `expectedRevision`, `expectedSchemaDigest`, `expectedCredentialRevision`, `expectedCredentialSchemaDigest`, `expectedActionSchemaDigest`, `expectedRequiresApproval` (default false; must match the installed action). Encoded intent is bounded to 16 KiB. Requires `plugins:manage` and, for an action declaring `requiresApproval`, `plugins:approve`, or direct owner authority. The provider reserves exact intent durably before background work and returns promptly. |
+| `GET /v1/plugins/{plugin_id}/nodes/{node_id}/setup-operations/{operation_id}` | Exact retained operation ID. Returns last durable progress without waiting for setup completion. Requires `plugins:read` or direct owner authority. |
+| `POST /v1/plugins/{plugin_id}/nodes/{node_id}/setup-operations/{operation_id}/resume` | Exact retained operation ID; no body or an empty object. Replacement fields are rejected. Revalidates prerequisites and resumes the original accepted intent. Requires `plugins:manage` and also `plugins:approve` when either the retained intent or current action requires approval access, or direct owner authority. |
+
+Progress contains `operationId`, `nodeId`, `actionId`, retained `requiresApproval`, phase (`queued`, `running`,
+`complete`, `failed`), optional safe `code` and `correctiveAction`. Completion means
+setup finished, not that preflight passed. Run preflight and the separate enable
+operation afterward. Providers retain enough journal state to reconcile owner
+restarts and deduplicate exact intents. Conflicting IDs or revision/schema changes
+are refused. A lost start response must be reconciled through the same operation
+ID or retained list; reconnect never automatically resubmits. Raw failures and
+credential values are excluded. Damaged state must preserve disable/management and
+refuse unsafe admission rather than create replacement identities or credentials.
+
+Approval access for setup permits protected preparation only; signing a paid
+proposal still requires its distinct review and approval action. Existing setup
+actions default to management-only access. An action upgrade cannot downgrade the
+original operation’s retained authorization requirement. Missing or revoked scope
+returns 403 on direct and relay routes before setup effects.
+
+Responses use `Cache-Control: no-store`. Missing facets/nodes return 404; malformed
+requests return safe 422; conflicting/refused setup returns 409 when the provider
+reports a validation refusal; busy dispatch returns 429; unavailable management or
+timeouts return 503/504. A timeout does not prove setup was rejected. The same
+explicit scopes apply through paired-operator relay routes. All nonbillable setup
+work remains in the plugin owner; core accepts no commands or executable paths.
+
+The Plugins dashboard renders supported ordinary forms from this contract and
+polls retained progress while open. Drafts retain their observed revision fences;
+changed prerequisites require an explicit reload. Failed reads mark observations
+stale and disable actions. Failed operations can be explicitly resumed by ID.
+Closing or reopening the panel does not cancel or repeat server-owned setup.
+
+
+### Installed plugin terminal command
+
+`skulk-plugin-service catalog` reads the host's configured signed catalog in an
+owner terminal and prints the same review the `/v1/plugins/managed/catalog` route
+returns. The catalog address and discovery trust are configured through the
+`configure_catalog` manager request (`skulk-plugin-service manage` with a
+`configure_catalog` document, or the owner-only `POST /v1/plugins/managed/catalog/source`).
+
+`skulk-plugin-service install-plugin --from-catalog BUNDLE_ID [--sequence N]
+[--platform FAMILY] [MANAGED_ID]` installs a listed release. The terminal reads
+the catalog, picks the newest listing of the bundle that fits this host (or the
+named sequence, or the named artifact family; a listing without an artifact
+family is not installable on a host, which installs signed runtime records
+only; two artifacts at one sequence must be told apart with `--platform`),
+prints the listing as consent facts and
+the resume command, and asks whether to bind the installation to the listed
+feed and publisher. With consent the manager configures the installation's
+source from the listing (the same binding as the owner-only
+`POST /v1/plugins/managed/catalog/install`), inspects the release record and
+checks it is the one listed; the release is then reviewed, staged and
+activated through the same prompts as an ordinary installation. Later runs of
+the plain `install-plugin MANAGED_ID` resume and upgrade on the bound source.
+
+`skulk-plugin-service manage-plugin MANAGED_ID -- PLUGIN_ARGUMENTS` is a local
+terminal command, not an HTTP route. It verifies the protected service profile,
+selected signed runtime, qualified host and retained trust before executing the
+management launcher, the archive's fixed optional `__manage__.py` or the `manage`
+entry a signed wheel declares under `skulk.capability_runtime`. Paths and module
+names cannot be supplied.
+The generation fence and terminal I/O survive process replacement; the plugin
+supplies fixed management verbs and derives its durable state coordinates.
+Local setup and management wait up to 30 seconds for installation ownership before
+executing anything. A timeout or selection change refuses the command; this wait
+does not retry plugin execution or any accepted operation.
+Neither this command nor generic management grants mint paid approval. The existing
+`skulk-plugin-service manage` installation-manager interface is unchanged.
+
+
+### Uninstall a managed plugin while retaining cleanup
+
+The terminal manager and `POST /v1/plugins/managed/installations/{plugin_id}/operations`
+accept `action: "uninstall"` with the reviewed `expected_revision` and a new
+32-character hexadecimal `operation_id`. It requires the same `plugins:manage`
+authority as disable. No runtime digest, rollback flag or permission acceptance is
+accepted for withdrawal. For example, send this JSON to `skulk-plugin-service manage`:
+
+```json
+{"action":"submit","plugin_id":"managed.example","request":{"operation_id":"d083ef35f295414188bd7cdb699454f84","action":"uninstall","expected_revision":2}}
+```
+
+Use `operation` with the same plugin and operation identifiers to read completion;
+retrying the original request returns its retained result. Browser reconnects also
+read that result without submitting another operation. In **Plugins → Managed
+runtimes**, **Uninstall plugin** invokes this same operation.
+
+Uninstall stops the plugin owner and withdraws future capabilities and acquisition.
+It retains the installation registration, verified runtime generations, configuration,
+identities, credentials and receipt history. Independently supervised cleanup remains
+outside its process ownership. This is not a data purge or proof of provider absence;
+inspect the plugin's cleanup status separately. Inventory (`GET /v1/plugins/managed`)
+reports `uninstalled: true` from the published uninstall operation, even after manager
+restart or while a replacement operation is pending. Failed downloads or activation
+attempts cannot silently reinstall it. A later successful verified `select` or
+`activate` explicitly reinstalls the retained installation. Disable is refused while
+uninstalled. Uninstall can withdraw a stalled activation or selection, including an
+invalid release, but cannot replace live work or another pending withdrawal.
 
 ## Extension Capabilities
 
@@ -3916,7 +4709,14 @@ Example response when Tailscale is running with MagicDNS:
 
 ## Operator App Integration
 
-The operator panel at `/operator` is designed for mobile access and can also be driven by a native app. The relevant API endpoints are:
+The browser operator panel at `/operator` uses the same Skulk control API as
+the dashboard. The native **Skulk App** uses paired device credentials and the
+designated gateway, including relay transport where configured; follow
+[Operator Device Pairing](#operator-device-pairing) for that authenticated
+connection. A LAN or Tailscale dashboard URL is an address, not a pairing
+invitation or a grant of plugin management authority.
+
+The following routes support direct dashboard integrations:
 
 ### Node and cluster state
 
@@ -3940,7 +4740,7 @@ The operator panel at `/operator` is designed for mobile access and can also be 
 | --- | --- |
 | `POST /admin/restart?node_install_id=<id>` | Resolve a stable installation identity and send a restart command to its current live node |
 
-### Typical operator app workflow
+### Typical direct dashboard integration workflow
 
 1. Call `GET /v1/connectivity/remote-access` on the initially discovered node to get the `preferredUrl`, then use that as the base URL for subsequent calls.
 2. Poll `GET /state` every 5 seconds for node health (memory, GPU, temperature)
@@ -3949,685 +4749,11 @@ The operator panel at `/operator` is designed for mobile access and can also be 
    identity, then call `POST /admin/restart?node_install_id=<id>`.
 4. On first launch or settings screen, show the `operatorUrl` as a QR code so users can hand it off to another device.
 
+
 ## Helpful Next Docs
 
-- [README](https://github.com/Foxlight-Foundation/Skulk/blob/main/README.md)
+- [README](https://github.com/Foxlight-Foundation/Skulk/blob/dev/README.md)
 - [Tracing and debugging](tracing)
 - [Model store guide](model-store)
 - [Architecture overview](architecture)
 - [API Reference](/api/skulk-api)
-
-
-### Bind a placement preview to model requirements
-
-`GET /instance/previews` retains its existing `model_id`, `node_ids` and
-`excluded_node_ids` query parameters. Each preview with an instance now includes
-`card_digest`, using the same canonical complete-card digest as
-`GET /models/requirements`; previews without an instance return null. Before
-submitting `POST /instance`, compare that digest to approved requirements and
-retain the exact returned instance. A matching alias or registry ID alone does
-not establish identical card contents. The preview digest grants no admission:
-the API/master card checks and resource-derived context ceiling still apply.
-The exact-instance creation path does not atomically revalidate current topology
-or backend/build support. Controllers must obtain a fresh target-specific preview,
-verify live node support before submission, and continue checking support and
-readiness afterward; an accepted command alone is not proof of usable capacity.
-
-The requirements response also includes `required_capabilities`, the complete
-positively evidenced intrinsic capability set used by core's signed-engine
-resolver. Matrix-only compatibility requires a nonempty set and supported claims
-covering every member for the proposed backend/engine, exact engine build and
-applicable hardware classes. `incomplete_capabilities` remains an independent
-artifact blocker. One positive claim alone is insufficient. Declared compatible
-backends retain their existing behavior; actual platform/runner admission still
-applies after a node joins.
-
-A controller also checks the preview's `contextTokenLimit` against its approved
-per-sequence context budget and verifies the live accepted instance after
-submission: the master computes the limit from current resources. Keep watching
-the exact instance's card, resolved backend, context capacity and node assignment;
-metadata from a previous preview is not fresh readiness evidence.
-
-For `POST /instance`, a positive `contextTokenLimit` is an upper bound chosen by
-the caller. The master preserves a smaller requested window and lowers an
-inflated one to its current resource-derived ceiling; it never raises the request
-to the preview maximum. Nonpositive explicit limits are rejected during placement.
-An omitted limit retains the instance schema's model/engine backfill, still
-bounded by admission. Controllers budgeting a specific load-time KV allocation
-should set that exact limit and verify it on the accepted instance.
-
-
-### Committed GPU capacity during placement
-
-Placement previews and normal launch admission account for existing concrete GPU
-shards, including their stamped context windows, before load telemetry catches
-up. The master also reserves newly accepted creations while their indexed events
-are pending. Previews themselves do not reserve capacity. A later request can
-therefore be refused when another placement has committed the remaining memory.
-`POST /instance` also checks its GPU shard footprint against that remaining pool.
-An exact GPU placement with no usable VRAM observation is refused; it cannot
-substitute a system-RAM estimate for the missing GPU budget. Unstamped non-RPC
-shards resolve against the target node's advertised compatible backends before
-admission; missing backend evidence causes refusal. Accepted shards retain that
-backend choice. Restored unstamped shards on GPU hosts reserve capacity
-conservatively until their engine ownership is known.
-If capacity changes after acknowledgement and the master refuses either an
-exact-create or quick-launch command, `/state` retains `instanceFailures` with
-the acknowledged instance ID and `errorCode: placement_failed`;
-controllers should use this terminal evidence rather than wait for a runner.
-Removing a placement does not promise immediate GPU memory release. RPC instances
-continue using observed memory because their per-device allocations are chosen
-by llama.cpp at runtime; UMA nodes retain their combined host/GPU memory rules.
-
-
-### Local managed-runtime lifecycle control
-
-The candidate local manager is separate from the HTTP API and remains available
-when a plugin child is disabled or broken. Local setup provisions its protected
-`host.json` with a generated local profile ID and the current Skulk transport identity. Its fixed service command
-is `python -m skulk.extensions.runtime_manager serve --root <service-root>`.
-The terminal transport is `python -m skulk.extensions.runtime_manager call --root
-<service-root>`, reading one JSON request from standard input. These low-level lifecycle entry points share the installed service created by
-`skulk-plugin-service setup`.
-
-The local socket accepts these typed requests:
-
-| Action | Parameters | Behavior |
-| --- | --- | --- |
-| `list` | None | Lists registered installation IDs, selected runtime digests, selection revisions, retained operation references, observed process status and stale/unavailable observations. Process existence does not imply capability readiness. |
-| `register` | `plugin_id` | Registers an empty `managed.*` installation, up to sixteen per manager. Provisions its existing host identity automatically; an existing mismatched identity is refused without replacement. No provider request is made. |
-| `get` | `plugin_id` | Returns desired selection and process observation without paths, credentials or raw output. |
-| `submit` | `plugin_id`, `request` | Accepts a local lifecycle request after validating its revision and target. The nested request contains `operation_id` (32 lowercase hexadecimal characters), `action` (`activate`, `select`, `disable` or `uninstall`), `expected_revision`, and for activation or stopped selection `runtime_digest`, optional `rollback` and `accept_permissions`. No spending authority is conveyed. |
-| `operation` | `plugin_id`, `operation_id` | Reads retained progress. Reconnect reads this result; reusing an ID with different intent is refused. |
-| `recover` | `plugin_id`, `operation_id` | Explicitly resumes only that retained local intent after its fault is corrected. Completed or superseded operations remain unchanged. No new request or provider operation is created. |
-| `reload_runtime` | `generation`, `manifest_sha256` | Selects a manager generation staged from the live Skulk build, verifying its seal under the manager's own fences, then stops so the OS service restarts on it. Refused when the generation is not staged or differs. |
-| `read_catalog` | (none) | Fetches the host's one configured signed catalog, verifies it against the host's discovery trust (publisher known and not revoked, trust and catalog unexpired, Ed25519 signature over the canonical document, protocol window) and returns its review: publisher, revision, window, the document digest, and per entry the bundle identity and title, sequence, release and artifact digests, size, platforms, Skulk build, signed permissions, capability ids, surface titles, durable operations, steward risk classes, and whether the release matches this host. Selects and installs nothing; returns no addresses or credentials. |
-| `catalog_status` | (none) | Catalog source readiness: revision, whether configured, the opaque credential reference and whether it is readable, and the discovery trust revision. No network I/O. |
-| `configure_catalog` | `request` (`expected_revision`, optional `base_url`, `document_filename`, `trust`, write-only `token`, `clear_token`) | Sets the host's catalog address and discovery trust under the catalog fence; the same revision, trust-monotonicity and credential-replacement rules as a release source. |
-
-Activation validates signed artifacts, permission expansion and migration
-compatibility before stopping the owner; it repeats admission checks before
-switching. `select` performs the same checks and publishes `enabled: false`,
-allowing verified host-local setup or migration before any owner startup. A later
-`activate` request must use the new selection revision; selection itself performs
-no migration or identity initialization. Interrupted stopped selections revalidate
-trust and artifacts before completion. Disable retains runtime generations,
-identities and cleanup material, even when release trust is invalid. An explicit
-`disable` may withdraw a stalled `activate` or `select` using the actual current
-selection revision (zero when initial publication never happened). Live work still
-must finish; a pending disable uses recovery rather than another disable. The new
-operation retains `withdraws_operation_id` for its prior local intent. An unpublished
-prior transition becomes `superseded`; one already atomically published is recorded
-as `complete`. Its runtime is never executed to finish withdrawal. Both journals
-retain their history, including when withdrawal itself is interrupted.
-Operations move through `accepted`, `applying`, `complete`, `failed`,
-`recovery_required` or terminal `superseded`; completion confirms the local desired-state change, with
-service and capability readiness observed separately. Pending local selection
-recovery never replays provider requests. A retained accepted record without live
-owned work is reported as `recovery_required`. An accepted operation outlives its
-requesting socket. Validation failures do not interrupt a healthy owner.
-
-The socket is owner-only and accepts eight concurrent clients, one request per
-connection, at most 16 KiB request and 256 KiB response, with a thirty-second
-request deadline. Errors contain the stable `manager_operation_refused` code, with
-two named exceptions: a host whose live Skulk build differs from the manager's answers `manager_build_differs` with the two build digests, and a verified release outside this host's protocol window answers
-`release_protocol_unsupported` with `kind` (`release` or `runtime`), the integer
-`offered` and the integers `accepted`, nothing else;
-local operation records distinguish validation, ownership and local I/O failures.
-This transport is not a LAN listener or remote authorization mechanism. The HTTP lifecycle routes below enforce the existing explicit plugin operator scopes.
-
-
-### Plugin proposal review
-
-These read-only routes require direct owner authority or explicit `plugins:read`.
-Responses use `Cache-Control: no-store`. Disabled installed nodes may retain
-reviewable intent; proposal state is an observation, never execution authority.
-
-- `GET /v1/plugins/{plugin_id}/nodes/{node_id}/proposals` accepts integer `offset`
-  (default `0`, range `0..127`). It returns at most sixteen summaries in `proposals`
-  and an optional `nextOffset`. Each summary includes an exact `reference`, plain
-  text `summary` (1–1,024 characters), `expiresAt` (UTC Unix seconds) and `state`.
-  Concurrent journal changes can move entries between pages; review a selection
-  freshly before taking any later action.
-- `GET /v1/plugins/{plugin_id}/nodes/{node_id}/proposals/{proposal_id}` requires
-  query parameter `proposal_digest` (64 lowercase hexadecimal characters). The
-  provider must match both its opaque ID and immutable intent digest. The response
-  contains `proposal`, `observedAt` (UTC Unix seconds), and 1–32 `fields`, each with
-  a plain-text `label` (1–64 characters) and `value` (1–2,048 characters). Facts cover
-  applicable model/context, resource selection, prices, limits and cleanup terms.
-
-The reference contains `pluginId`, `nodeId`, `proposalId`, and `proposalDigest`.
-Proposal IDs are 1–128 characters from `a-zA-Z0-9._:@-`; they are opaque identifiers,
-not paths or serialized workflows. A digest need not equal its proposal ID. Read
-responses are bounded to 128 KiB and reject another installation's reference.
-Malformed parameters return 422; unsupported nodes/providers return 404; changed
-or inconsistent references return 409; unavailable providers return 503 or 504.
-Failures contain no rejected canonical input or private provider diagnostics.
-
-The core receives safe review data. Canonical execution arguments, approvals and
-execution journals remain with the provider. These GET requests neither create
-intent, grant approval nor replay a prior effect. Clients render fields as text.
-
-### Plugin owner proposal actions
-
-Review responses carry `approvalRevision`: a 64-character lowercase hex fence
-binding the provider's reviewed terms, or `null` when approval is unavailable.
-The optional owner action facet uses the exact reference returned by review.
-Direct owner authority or explicit `plugins:approve` is required for both POST
-routes on direct and relay connections. `plugins:manage` cannot approve;
-`plugins:read` authorizes observation. Responses use `Cache-Control: no-store` and
-contain at most 16 KiB of safe progress metadata.
-
-- `POST /v1/plugins/{plugin_id}/nodes/{node_id}/proposals/{proposal_id}/approve`
-  accepts `operationId` (32 lowercase hexadecimal characters), `reference`, and
-  `reviewRevision` (the exact review fence). The route and reference must match.
-  The API supplies the authenticated operator identity; caller-selected actors,
-  executable inputs and approval proofs are rejected. Providers durably accept
-  intent before work and revalidate terms and authority before execution.
-- `GET /v1/plugins/{plugin_id}/nodes/{node_id}/proposal-operations/{operation_id}`
-  observes the original action without signing, executing or replaying it.
-- `POST /v1/plugins/{plugin_id}/nodes/{node_id}/proposal-operations/{operation_id}/resume`
-  takes no replacement intent (empty body or `{}`). It explicitly recovers an
-  interrupted approval using the original action ID. A currently authorized owner
-  may recover another owner's retained action. Submitted or uncertain work must
-  only be observed, never replayed.
-
-Responses contain `operationId`, exact `reference`, `phase`, `updatedAt` (UTC Unix
-seconds), nullable safe `code`, and nullable `correctiveAction` (up to 512
-characters). Phases are `accepted`, `approving`, `approved`, `dispatching`,
-`acknowledged`, `succeeded`, `refused`, `approval_interrupted`, and `uncertain`.
-`acknowledged` means the capability controller durably accepted the exact approved
-request for asynchronous processing. The provider request may still be queued; this
-is neither provider completion nor inference readiness. Observe `reconciliation`;
-acknowledged work survives owner restart and cannot be replayed or resumed. Success describes
-completion of the selected action; it does not universally mean resource absence.
-Malformed inputs return 422, missing scopes 403, unsupported facets 404,
-inconsistent references or refused actions 409, and unavailable owners 503/504.
-An unconfirmed HTTP reply does not prove that the action was refused.
-
-An optional nullable `reconciliation` object reports later cleanup evidence without
-rewriting `phase`: `state` is `pending`, `active`, `releasing`, `absent`, `attention`
-or `unknown`; `observedAt` is the cleanup journal read time in UTC seconds (null
-before any successful observation); `stale` marks unconfirmed current access or
-worker health; and `code` is a nullable safe status code. These are historical
-receipt observations, not a new provider inventory query or inference-readiness
-claim. A failed refresh retains previous evidence and marks it stale. Providers
-must correlate the exact retained request, never infer absence from a missing
-record, and never replay uncertain work during observation. Confirmed absence
-remains visible beside the original uncertain submission, including after a
-later cleanup-connection outage. The dashboard labels absence and stale evidence
-separately; terminal clients consume the same response fields.
-
-The Plugins page presents provider facts as text with a distinct **Approve and
-execute reviewed proposal** button. It saves only an operation lookup ID in browser
-storage before POST, then observes status after reconnect. It never stores proof
-or credentials and never automatically resumes an interrupted approval. The
-separate **Resume original approval** action is available only for that phase.
-Providers retain raw failure evidence in protected host-local storage.
-
-### Managed plugin HTTP lifecycle
-
-The Plugins page and these routes use the same independently supervised manager
-as terminal operations. All JSON fields in this lifecycle contract use
-`snake_case`. Local `skulk-plugin-service setup` supplies the protected connection;
-HTTP requests cannot choose a manager root, executable or attachment identity.
-A running Skulk API discovers subsequent local setup and installation registration
-without restart. Missing setup returns an actionable unavailable response.
-
-| Method | Path | Parameters and behavior |
-| --- | --- | --- |
-| GET | `/v1/plugins/managed` | Requires `plugins:read`. Returns `installations`, at most sixteen entries, with `plugin_id`, `selected_digest`, `selection_revision`, `enabled`, `service`, `stale`, `error_code`, `operation_id` and `operation_state`. `reload_runtime` is true when the manager can select a staged runtime and restart on request; a host reads it before asking, so a manager from before that request is told apart from one refusing a generation. Pending or selected operation references allow reconnect to resume observation without repeating a mutation. |
-| POST | `/v1/plugins/managed/installations` | Requires `plugins:manage`. Body: `plugin_id` in the `managed.*` namespace. Registers an empty installation and returns its observation. Does not download, stage or enable a release. |
-| GET | `/v1/plugins/managed/installations/{plugin_id}` | Requires `plugins:read`. Returns `installation` observation and `selection`, nullable before a release is selected. |
-| POST | `/v1/plugins/managed/installations/{plugin_id}/operations` | Requires `plugins:manage`. Body: `operation_id` (32 lowercase hexadecimal characters), `action` (`activate`, `select`, `disable` or `uninstall`), `expected_revision` (nonnegative integer), and activation/selection-only `runtime_digest`, optional `rollback` and `accept_permissions` booleans. Returns the retained `LifecycleOperation`. Activation and stopped selection accept only an already staged, verified generation. `select` keeps its owner stopped until a later explicit `activate` request. An explicit `disable` can withdraw a stalled activation/selection, including a revoked release, using the current selection revision. Live work and a pending withdrawal cannot be superseded. `activate` and `select` revalidate the staged metadata; a runtime that a host update has moved outside the protocol window answers `409` with the sentence the guided installer prints (which protocol the host accepts, which the runtime offers, and that the fix is to update Skulk on this host or choose a release published for it). |
-| GET | `/v1/plugins/managed/installations/{plugin_id}/operations/{operation_id}` | Requires `plugins:read`. Reads the original local operation's exact `request`, previewed `selection`, `state`, sanitized `error_code` and optional `withdraws_operation_id`. Superseded unpublished transitions remain terminal history. Never repeats its effect. |
-| POST | `/v1/plugins/managed/installations/{plugin_id}/operations/{operation_id}/recover` | Requires `plugins:manage`. No body. Explicitly resumes the existing journaled local operation; completed or superseded operations are unchanged. |
-
-Direct localhost/Tailscale owner administration remains available under the
-existing origin checks. Remote grants are explicit: a broad operation token does
-not substitute for a plugin grant, and revoked sessions lose access. Responses
-use `Cache-Control: no-store`. Unknown fields and malformed identifiers return
-422; authorization follows the existing 401/403 contract. Capacity exhaustion
-returns 429, unavailable local setup/service or operation returns 503, refused
-selection or conflicting intent returns 409, and a manager deadline returns 504.
-After an uncertain response, read the original operation; do not generate another
-mutation to discover whether the first succeeded. No raw provider response,
-credential value or host-local path is returned.
-
-The dashboard polls inventory and retained operation status, distinguishes stale
-observations, and supports disabling and explicit local recovery. A confirmed
-recovery-needed activation/selection offers Disable even before its first runtime
-was published; the UI explains that this withdraws local intent without running
-the release. An unconfirmed mutation still requires status readback first. Runtime
-completion does not prove capability readiness. Disabling preserves cleanup
-records and independent supervision. These routes convey neither paid approval
-nor permission to replay an uncertain provider create. Release download/staging uses the routes below; provider credential provisioning
-and proposal approval are separate operations.
-
-
-### Private release inspection and installation
-
-Each registered installation has one owner-configured HTTPS release directory and
-publisher trust view. The release directory contains signed v2 metadata, its
-`bundle.pyz` and every exact wheel named by that metadata. URLs are never supplied
-on install requests. The manager verifies metadata, current publisher trust and
-exact host compatibility before requesting any artifact, refuses redirects and
-encoded responses, and checks every artifact size and SHA-256 before offline
-staging. It resolves no dependency versions and does not modify Skulk's environment.
-
-| Method | Path | Parameters and behavior |
-| --- | --- | --- |
-| GET | `/v1/plugins/managed/installations/{plugin_id}/source` | Requires `plugins:read`. Returns `revision`, `configured`, opaque `credential_reference`, `credential_ready` and `trust_revision`; no network request or stored token value. |
-| POST | `/v1/plugins/managed/installations/{plugin_id}/source` | Direct localhost/Tailscale owner only; paired bearers and relay requests are refused. Body: `expected_revision` (zero initially), optional HTTPS `base_url` ending in `/`, `metadata_filename`, `trust`, write-only `token`, and `clear_token`. Omitted directory, filename and trust retain current values; initial setup must supply any missing values. Returns source readiness. `trust` contains monotonic `revision`, Unix `expires_at`, `publishers` mapping publisher IDs to Ed25519 public-key hex, and optional `revoked_publishers`/`revoked_artifacts` arrays. New trust revisions retain all prior revocations; these cannot be removed through source configuration. Same-revision trust changes, stale source revisions and expired trust are refused. |
-| GET | `/v1/plugins/managed/catalog` | Requires `plugins:read`. Fetches and verifies the host's signed catalog (the `read_catalog` manager request) and returns `publisher`, `revision`, `created_at`, `expires_at`, `catalog_sha256` and `entries`, each with `bundle_id`, `bundle_version`, `title`, `publisher`, `sequence`, `release_digest`, `runtime_platform` (the exact artifact family of a runtime-bearing release, else null), `artifact_sha256`, `artifact_bytes`, `transfer_bytes` (the artifact plus every wheel of a runtime-bearing release), `platforms`, `skulk_build_sha256`, `permissions`, `descriptors`, `surfaces`, `operations`, `steward_risks`, `expires_at` and `matches_host`. A release whose served record, signed claims or executable artifact the discovery trust revokes is not listed (wheel revocations are enforced by the release path at inspection and staging). Retained catalog documents are pruned to the newest few beyond every accepted revision. The discovery trust the host accepted is recorded as a floor; a restored older trust file is refused. The accepted catalog revision only moves forward: an older revision, or a different document at the accepted revision, is refused as a rollback. No addresses or credentials; nothing is selected, staged or installed. |
-| GET | `/v1/plugins/managed/catalog/source` | Requires `plugins:read`. Returns catalog source readiness: `revision`, `configured`, `credential_reference`, `credential_ready`, `trust_revision`. No network I/O. |
-| POST | `/v1/plugins/managed/catalog/source` | Direct localhost/Tailscale owner only. Body: `expected_revision` (zero initially), optional HTTPS `base_url` ending in `/`, `document_filename` (default `catalog.json`), `trust` (the publishers trusted for discovery, the same shape as release trust), write-only `token`, and `clear_token`. Initial setup requires the directory and trust; omitted fields retain current values; new trust revisions keep prior revocations; moving the catalog requires supplying its credential again. Nothing is fetched or installed. |
-| POST | `/v1/plugins/managed/catalog/install` | Direct localhost/Tailscale owner only. Body: `catalog_sha256` (the reviewed catalog's digest, from the catalog review), `bundle_id`, `sequence`, optional `runtime_platform` (the listed artifact family, matched by canonical family) and optional `plugin_id` (an existing installation to upgrade; omitted registers a new `managed.` ID). The listing is taken from the retained catalog under that digest and verified again against discovery trust; the digest must still be the newest listing the host accepted from its source for that publisher, or the request is refused as superseded. The listing must fit this host. The installation's release source becomes the listed feed with `release.json` as its record, the discovery trust becomes its publisher trust, and the catalog credential is presented only when the feed shares the catalog's origin (a credential the installation already holds for the listed feed address is kept; otherwise another origin is read anonymously until the installation is given its own credential). An existing installation keeps its bundle and never goes back: another bundle or a lower sequence is refused before the source is touched. The release record is then inspected through the ordinary path and must be the record the listing names (`runtime_digest`, signed publisher, bundle and sequence). Returns `plugin_id`, `listing` (the catalog entry review), `source` (source readiness) and `review` (the release review). Nothing is downloaded beyond the record, staged or activated: continue with the install and activate requests, which remain their own consents. `409` names a refusal without addresses. |
-| GET | `/v1/plugins/managed/installations/{plugin_id}/release` | Requires `plugins:read`. Downloads and verifies only metadata, returning `runtime_digest`, `source_revision`, `publisher`, `bundle_id`, `version`, `sequence`, `platform`, `python_requires`, `skulk_build_sha256`, declared `permissions`, total `artifact_bytes` and Unix `expires_at`. The exact verified metadata is retained for a later install request. A verified release outside this host's protocol window answers `409` with the sentence the guided installer prints: which protocol the host accepts, which the release offers, and that the fix is to update Skulk on this host or choose a release published for it. |
-| POST | `/v1/plugins/managed/installations/{plugin_id}/install` | Requires `plugins:manage`. Body: `operation_id` (32 lowercase hexadecimal characters), exact reviewed `runtime_digest`, `expected_source_revision`. Journals intent before returning `InstallOperation`, then downloads and stages under independent manager ownership. Reusing the ID with the same request reads its retained state; different intent is refused. Does not activate or approve spending. A verified release outside this host's protocol window answers `409` with the sentence the guided installer prints: which protocol the host accepts, which the release offers, and that the fix is to update Skulk on this host or choose a release published for it. |
-| GET | `/v1/plugins/managed/installations/{plugin_id}/install` | Requires `plugins:read`. Returns `operation`, nullable before installation. The retained operation contains exact `request`, signed `review`, `state`, `downloaded_bytes`, sanitized `error_code`, `attempt` (zero initially) and nullable `attempt_source_revision` for explicit recovery. Reconnect polls this route, never resubmits an uncertain request. |
-| POST | `/v1/plugins/managed/installations/{plugin_id}/install/{operation_id}/recover` | Requires `plugins:manage`. `operation_id` is the original 32-character lowercase hexadecimal ID. Body: `expected_source_revision` from current source readiness, including any explicit credential rotation. Revalidates the original signed metadata against current trust and host compatibility, retains prior attempt evidence, and journals another download/staging attempt for the same exact digest. Only `recovery_required` work is retried; other states return unchanged. Refuses busy installers, changed source revisions and more than eight recovery attempts. Does not activate or approve spending. A verified release outside this host's protocol window answers `409` with the sentence the guided installer prints: which protocol the host accepts, which the release offers, and that the fix is to update Skulk on this host or choose a release published for it. |
-
-Installation states are `accepted`, `downloading`, `staging`, `staged` and
-`recovery_required`. Failure codes distinguish `download_failed`,
-`installation_failed` and `installation_interrupted`. Accepted work outlives an
-HTTP/browser disconnect. During `staging`, accepted downloads wait up to 30 seconds
-for the local installer lock before verification and installation begin. Short
-service-verification contention resumes the same operation without downloading
-again. If ownership remains busy, the operation becomes `recovery_required` with
-`installation_failed`; finish the competing management command before explicitly
-recovering the original operation. Shutdown cancels this wait without starting
-an installer. Manager shutdown cancels network transfer and waits for
-owned offline staging; an interrupted operation is retained and never automatically
-replayed after restart. Partial artifacts and incomplete runtime evidence remain
-protected for explicit recovery. Recovery retains prior operations, downloaded
-files and incomplete generations before rebuilding. It never moves a selected
-generation or one pending activation, and never reseals a damaged completed
-generation. The original request and review remain immutable even when a rotated
-credential supplies the next attempt. A `staged` result proves preparation, not activation,
-current release trust or capability readiness; activation repeats verification.
-
-The source token is written into a generated protected file before publishing its
-reference. Omission retains the prior reference; `clear_token` explicitly selects
-an anonymous source. Changing a credential-bearing source requires supplying the
-credential again or clearing it, so management cannot silently forward a stored
-token elsewhere. Replaced credentials are retained as protected history. Ordinary
-responses and validation errors never echo token values. A disk fault can apply a
-stricter trust view before source replacement; runtime admission then refuses
-invalid releases and the unchanged source revision permits owner correction.
-
-Metadata is bounded to 128 KiB with a twenty-second download deadline. Artifact
-transfer has a 180-second total deadline and enforces the signed per-file and
-aggregate bounds. Review and operation histories each retain at most 128 entries;
-exhaustion requires local maintenance rather than silent deletion. Only one
-installation download per registered plugin runs at a time. Source replacement
-is refused while its installation is active. Existing inference and other plugins
-remain outside this staging lifetime.
-
-After local service setup, `skulk-plugin-service manage` reads one typed JSON
-request from standard input and uses the generated protected connection. It needs
-no service root or executable path argument and invokes no sudo. The existing
-`register`, `get`, `submit`, `operation` and `recover` actions remain available.
-Release actions are `configure_source` with `plugin_id` and nested source-update
-`request`; `source_status`, `inspect_release` and `install_status` with `plugin_id`;
-`install` with `plugin_id` and nested installation `request`; and `recover_install`
-with `plugin_id`, original `operation_id` and `expected_source_revision`. Keep credential
-input out of shell arguments and shell history. The wire limit remains 16 KiB.
-
-In the Plugins dashboard, **Add plugin** generates a stable installation identity,
-then opens the same source setup operation. The owner enters the HTTPS directory,
-metadata filename, publisher identity/public key, trust expiry and any feed
-credential. Changing publisher details requires distinct trust confirmation and
-replaces the publisher list with that key while retaining all revocations. Existing
-installations expose **Configure release source** for settings and credential
-rotation. Credential inputs are cleared before submission and excluded from Redux,
-browser storage and ordinary errors. Changed source revisions require an explicit
-status refresh before saving. **Retry this installation** recovers only the original
-failed installation after checking current source readiness; reconnect only reads
-the retained operation. Release activation still requires separate permission
-acceptance, and paid-capacity approval remains a separate plugin operation.
-
-The dashboard's **Install a release** controls inspect the configured release,
-show its version/permissions and size, stage exact bytes, and require a separate
-permission acceptance and activation action. Installation progress is restored
-from the server after reconnect. Source/trust entry is available through terminal,
-the dashboard and direct-owner HTTP. Provider credential setup, nonbillable preflight and paid
-proposal approval remain separate from these release-feed operations.
-
-### Guided terminal installation
-
-After local system-service setup, run `skulk-plugin-service install-plugin` in
-the nonroot owner's interactive terminal. It generates an installation identity
-and prints a resume command before registration. Supply the trusted HTTPS
-directory, metadata filename (default `release.json`), publisher ID, Ed25519 public
-key and timezone-aware trust expiry. Confirm publisher trust separately, then enter
-the optional feed bearer through hidden terminal input. Credentials are never
-accepted as arguments, printed or included in retained operation identifiers.
-
-The command displays verified release compatibility, exact digest, size, expiry
-and permissions. Download requires explicit confirmation; starting the plugin owner
-requires separate permission acceptance. Both use the existing revision-fenced
-manager operations. Plugin configuration, nonbillable preflight, capability-node
-enablement and paid approval remain separate plugin operations, available through
-the plugin's documented terminal commands or the Plugins dashboard.
-
-After disconnect or an uncertain response, run the printed
-`skulk-plugin-service install-plugin MANAGED_ID` command. It retains configured
-trust and credentials, reads accepted installation/activation status, and never
-automatically resubmits an effect. Interrupted downloads require explicit recovery
-consent under their original operation ID. An unrelated or failed lifecycle
-transition requires explicit lifecycle inspection/recovery; it is not replaced.
-A newer release at the configured source is reviewed, staged beside the selected one and, after explicit consent, activated over it under the selection revision; an older release at the source is a rollback, refused before any transfer, since rollback is an explicit lifecycle operation.
-Polling is bounded; exiting the terminal leaves manager-owned work running.
-The command accepts at most one installation ID and no executable, path or
-provider command. The existing typed-JSON `manage` interface remains available
-for automation, source rotation and advanced lifecycle operations.
-
-
-### Stable local manager runtime
-
-The local setup implementation stages a separate service copy through
-`stage_service_runtime(root)` and selects it through
-`activate_service_runtime(root, snapshot)`. These are owner-local setup functions,
-not HTTP operations; callers do not submit executable or dependency paths through
-management APIs. Preparation copies the exact installed dependency files, effective
-Skulk code, native bindings and required declarative resources. It resolves no new
-dependencies and does not modify the existing Skulk environment. Unknown editable
-startup hooks and external links are refused rather than borrowed silently.
-
-A complete staged record contains the generation, manifest digest, qualified
-core digest, copied file count and byte count. An interrupted copy retains its
-incomplete directory without changing the selected service runtime. Activation
-requires a stopped manager and preserves plugin installation/configuration and
-cleanup state. The copied bootstrap runs with `-I -S -B` and verifies file bytes,
-permissions, membership and interpreter identity before Python site initialization
-or manager imports. The manager receives its explicit service state root; stored
-credentials and ordinary Skulk configuration are not copied into this runtime.
-
-The local setup command below uses this packaging primitive for existing supported
-isolated Skulk Python environments. Real system-service/reboot qualification on
-both release platforms remains an acceptance gate.
-
-
-### Automatic local transport attachment
-
-Skulk currently generates a new transport identity on each process start. Local
-setup records may include `manager_root` and `profile_id` together; the installation
-must be exactly that manager's `installations/<plugin_id>`. These protected local
-fields are never accepted from HTTP callers. Legacy records without them retain
-manual attachment behavior until migrated by local setup.
-
-The in-process adapters share one process-lifetime `attachment.lock`. Their internal
-`attach` socket request contains the provisioned `profile_id`, the actual live
-`transport_node_id`, and the measured live `skulk_build_sha256`. The manager refuses
-foreign profiles, competing bridge lifetimes, missing bridge ownership and a live
-core build different from its independently installed core. A manager's own build
-measurement alone is not evidence of compatibility with the live API process.
-This operation is local lifecycle metadata, not a remote operator grant or provider
-submission; no new cleanup pairing or enrollment protocol is involved.
-
-Renewal stops affected owners, acquires controller/service/child fences, journals the
-exact old/new attachment, and replaces only transport metadata. Durable plugin IDs,
-selected generations, configuration revisions, receipts and approval reservations
-remain unchanged. Startup completes interrupted journaled writes before loading any
-owner. A foreign installation binding is refused before stopping healthy owners.
-An incomplete write exposes `attachment_recovery_required` until local recovery
-succeeds. Disconnect does not cancel accepted local renewal. API shutdown releases
-its attachment fence without terminating independent cleanup services.
-
-
-### Local system-service setup
-
-Run `skulk-plugin-service setup` in the existing qualified Skulk environment, as
-the nonroot Skulk owner. From a source environment the equivalent is
-`python -m skulk.extensions.service_setup setup`. Do not run the whole command
-under sudo. Setup invokes a fixed standard-library-only local helper through sudo
-for parent-directory provisioning and OS registration; runtime copying, activation,
-configuration and all manager/plugin processes execute as the existing owner.
-No HTTP route invokes this helper, supplies unit contents or accepts an executable.
-
-The command creates an independent verified manager runtime, a generated local
-profile ID, protected setup operations and `SKULK_CONFIG_HOME/managed-service/connection.json`.
-Internal paths and IDs are generated. The connection lives in a private subdirectory;
-existing non-writable-by-others Skulk configuration directory permissions are preserved. One service is associated with one Skulk
-configuration per OS account; a different configuration is refused without
-adopting or rewriting its binding. The base Python installation and existing Skulk
-configuration must live outside Git checkouts and remain available after boot.
-
-| Platform | Durable service root | System registration |
-| --- | --- | --- |
-| Apple Silicon macOS | `/Library/Application Support/SkulkPluginServices/<uid>` | `/Library/LaunchDaemons/foundation.foxlight.skulk.plugins.u<uid>.plist`, using the system domain and a nonroot `UserName` |
-| Linux x86_64 with systemd | `/var/lib/skulk-plugin-services/<uid>` | `/etc/systemd/system/foundation.foxlight.skulk.plugins.u<uid>.service`, using a nonroot numeric `User` and `multi-user.target` |
-
-Setup records a generated `operation_id` and phases `preparing`, `staged`,
-`selected`, `registered`, `ready`. Rerunning after interruption reuses the exact
-completed staged copy and generated profile. A changed source core, Python or
-dependency inventory starts a new setup operation, including when a corrected build
-replaces failed setup. Prior operations, runtime generations and the generated
-profile remain retained. Preparation does not stop
-the existing manager. Activation stops only its fixed service, verifies the copied
-runtime again, preserves the latest transport attachment, and starts the registered
-service. An unrelated definition occupying the reserved service name is refused.
-The exact earlier Linux unit with a quoted working directory is recognized for
-repair; setup replaces it with systemd's literal absolute-path form.
-No provider request, credential provisioning, approval or implicit enable occurs.
-
-`skulk-plugin-service status` reports the last setup phase separately from current
-`registered_runtime_verified` and `management_available`. An old `ready` phase
-is historical completion, not current service health. Corrective error codes are
-`registration_or_integrity_unavailable` and `service_unavailable`; rerun the same
-local setup command using its qualified environment after correcting OS access or
-runtime integrity. When setup's readiness wait expires after successful registration,
-the command exits with status 1 and prints JSON containing the retained
-`operation_id`, `phase: "registered"` and `error_code: "service_readiness_pending"`.
-Registration is preserved. Inspect `skulk-plugin-service status`; when both
-`registered_runtime_verified` and `management_available` are true, rerunning setup
-in the same qualified environment verifies the binding, selected runtime and fixed
-OS definition, then completes the original operation without elevation, restaging
-or restarting the healthy service. A healthy completed setup also needs no elevation.
-Status itself remains read-only. A different source environment still requests a
-new runtime generation; an invalid registration follows the privileged repair path.
-Root-owned unit definitions have fixed arguments; service output
-is not a channel for private plugin diagnostics. Protected plugin evidence remains
-host-local.
-
-These are system services, so qualification begins after OS boot and disk unlock;
-setup does not bypass encryption authentication. Apple's
-[launchd guidance](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html)
-distinguishes system daemons from login-session agents. Linux uses the systemd
-[service](https://github.com/systemd/systemd/blob/v255/man/systemd.service.xml) and
-[process-lifetime](https://github.com/systemd/systemd/blob/v255/man/systemd.kill.xml)
-contracts. Dynamic API registration, dashboard installation and real reboot
-qualification remain separate integration/acceptance work for this candidate.
-
-### Capability-node preflight
-
-`GET /v1/plugins/{plugin_id}/nodes/{node_id}/preflight` runs the installed plugin's
-bounded, nonbillable setup checks. Path parameters select an exact installed plugin
-and persistent node; there is no request body or command/path input. Requires
-direct owner administration or the explicit `plugins:read` grant. Inventory
-`preflightAvailable` indicates support. Disabled or failed children may be checked
-while their management provider remains available.
-
-The response contains `nodeId`, configuration `revision`, `schemaDigest`,
-`valuesDigest`, optional `credentialRevision`, `observedAt` in UTC seconds, and
-`checks` (one to 32 distinct `code`, `passed`, `correctiveAction` records). No
-credentials or protected host evidence are returned. The response uses
-`Cache-Control: no-store`; unknown/unsupported management returns 404, refused
-observations 409, capacity exhaustion 429, unavailable providers 503 and timeout
-504. Responses are bounded to 64 KiB and calls share the plugin-management
-concurrency and deadline limits.
-
-A check may create and remove a protected local storage probe. It does not enable
-the node, approve spending or create paid resources. Results describe the observed
-configuration and are not reusable admission tokens. Supporting plugins enforce
-fresh preflight on enable and restart and retain fresh dispatch admission. The
-Plugins dashboard exposes explicit setup checks and individual corrective actions.
-
-
-### Capability-node public setup files
-
-`GET /v1/plugins/{plugin_id}/nodes/{node_id}/setup` reads public setup exports
-for an exact installed plugin and persistent node. The path parameters select
-that node; there are no body, query, command or executable-path parameters.
-Requires direct owner administration or `plugins:read` on direct and relay routes.
-Inventory `setupAvailable` indicates support. Disabled children can expose setup
-files while their management provider is available.
-
-The response contains `nodeId`, observed configuration `revision` and
-`schemaDigest`, `credentialRevision`, and one to eight `artifacts`. Each artifact
-has a safe `name`, owner-facing `title`, `mediaType` (`application/json` or
-`text/plain`), and public `content` of at most 16,384 characters. Names must be
-unique; the complete response is bounded to 64 KiB and uses `Cache-Control:
-no-store`. Credential values, executable content, protected local paths and raw
-provider evidence must never appear in these exports.
-
-This read cannot generate keys, replace credentials, enable a node or approve
-spending. Revisions describe an observation, not a lock against later changes;
-providers must revalidate bindings at enable and dispatch. Unsupported providers
-or missing selections return 404. Refused operations and invalid responses return
-409, unavailable providers return 503, exhausted admission returns 429, and the
-shared bounded management deadline returns 504. Errors suppress private exception
-text. The Plugins dashboard fetches files only on an explicit action, downloads
-them as inert text, and hides an earlier export after a failed refresh.
-
-
-### Installed plugin local setup command
-
-`skulk-plugin-service setup-plugin <managed-plugin-id> -- <plugin-setup-fields>`
-executes the selected verified generation's setup launcher: the archive's optional
-fixed `__setup__.py`, or the `setup` entry a signed wheel declares under
-`skulk.capability_runtime`.
-The managed plugin ID is the same ID shown by inventory. Installation roots and
-runtime paths resolve from the protected local service connection, never from
-caller-supplied executable or module paths. No new HTTP endpoint is introduced:
-this command is an explicit local owner operation, unavailable to remote grants.
-
-The launcher requires a nonroot owner, matching local service profile, retained
-release/trust history and a selected intact compatible runtime. Disabled selection
-is allowed for setup. Pending selection recovery, missing entrypoints, tampered
-bytes or invalid signatures refuse execution. The plugin owns setup field parsing
-and credential prompts; secrets must be supplied interactively or over protected
-stdin rather than argv. At most 128 fields and 16 KiB of UTF-8 argument bytes are
-accepted. Normal terminal input, output and interrupt behavior are preserved.
-
-The installed-runtime lock is inherited through process replacement and released
-at setup exit. Other runtime activation/staging attempts report contention while
-it is held. Existing services remain supervised; this launcher does not change
-configuration, credentials or lifecycle state itself. Each plugin must document
-and qualify the effects of its own setup entrypoint, including any explicit local
-privileged registration. The public API setup-file export remains a separate,
-read-scoped operation.
-
-
-### Capability-node nonbillable setup operations
-
-An optional installed owner facet exposes fixed setup actions independently of
-child readiness. Credentials use the existing write-only credential endpoints;
-setup forms contain ordinary external inputs. These operations do not enable a
-node, approve spending, or replay uncertain provider submissions.
-
-| Method and path | Parameters and behavior |
-| --- | --- |
-| `GET /v1/plugins/host-network` | No parameters. Requires `plugins:read` or direct owner authority, including the existing origin and transport checks. Returns the live local `nodeId`, public `networkVersion`, domain-separated `namespaceFingerprint`, numeric `control` TCP endpoints (`host`, `port`), `dataTransport` (`gossipsub` or `zenoh`) and Zenoh `data` endpoints (empty for gossipsub). Ports come from running native listeners, including OS-assigned ports. The fingerprint is SHA-256 of UTF-8 `skulk-host-attachment-v1` + NUL + the version/namespace token, distinct from the routing namespace; no raw namespace or credentials are returned. Responses are `Cache-Control: no-store`; unavailable or unsupported TCP listeners return 503, concurrency saturation 429. The read has a two-second deadline. This reports addresses local to the serving host, not endpoints guaranteed reachable remotely. A plugin may use its owned secure transport to connect matching peers; the route never dials, changes configuration, restarts the node, or approves acquisition. |
-| `GET /v1/plugins/{plugin_id}/nodes/{node_id}/setup-actions` | Exact installation/node IDs. Returns `nodeId`, configuration `revision`/`schemaDigest`, `credentialRevision`/`credentialSchemaDigest`, up to eight installed `actions` and 32 retained `operations`. Each action has `actionId`, title, description, ordinary `parametersSchema`, `schemaDigest`, and `requiresApproval` (default false). Requires `plugins:read` or direct owner authority. Does not initialize state or perform setup. |
-| `POST /v1/plugins/{plugin_id}/nodes/{node_id}/setup-operations` | Body: `operationId` (32 lowercase hexadecimal characters), `actionId`, `values`, `expectedRevision`, `expectedSchemaDigest`, `expectedCredentialRevision`, `expectedCredentialSchemaDigest`, `expectedActionSchemaDigest`, `expectedRequiresApproval` (default false; must match the installed action). Encoded intent is bounded to 16 KiB. Requires `plugins:manage` and, for an action declaring `requiresApproval`, `plugins:approve`, or direct owner authority. The provider reserves exact intent durably before background work and returns promptly. |
-| `GET /v1/plugins/{plugin_id}/nodes/{node_id}/setup-operations/{operation_id}` | Exact retained operation ID. Returns last durable progress without waiting for setup completion. Requires `plugins:read` or direct owner authority. |
-| `POST /v1/plugins/{plugin_id}/nodes/{node_id}/setup-operations/{operation_id}/resume` | Exact retained operation ID; no body or an empty object. Replacement fields are rejected. Revalidates prerequisites and resumes the original accepted intent. Requires `plugins:manage` and also `plugins:approve` when either the retained intent or current action requires approval access, or direct owner authority. |
-
-Progress contains `operationId`, `nodeId`, `actionId`, retained `requiresApproval`, phase (`queued`, `running`,
-`complete`, `failed`), optional safe `code` and `correctiveAction`. Completion means
-setup finished, not that preflight passed. Run preflight and the separate enable
-operation afterward. Providers retain enough journal state to reconcile owner
-restarts and deduplicate exact intents. Conflicting IDs or revision/schema changes
-are refused. A lost start response must be reconciled through the same operation
-ID or retained list; reconnect never automatically resubmits. Raw failures and
-credential values are excluded. Damaged state must preserve disable/management and
-refuse unsafe admission rather than create replacement identities or credentials.
-
-Approval access for setup permits protected preparation only; signing a paid
-proposal still requires its distinct review and approval action. Existing setup
-actions default to management-only access. An action upgrade cannot downgrade the
-original operation’s retained authorization requirement. Missing or revoked scope
-returns 403 on direct and relay routes before setup effects.
-
-Responses use `Cache-Control: no-store`. Missing facets/nodes return 404; malformed
-requests return safe 422; conflicting/refused setup returns 409 when the provider
-reports a validation refusal; busy dispatch returns 429; unavailable management or
-timeouts return 503/504. A timeout does not prove setup was rejected. The same
-explicit scopes apply through paired-operator relay routes. All nonbillable setup
-work remains in the plugin owner; core accepts no commands or executable paths.
-
-The Plugins dashboard renders supported ordinary forms from this contract and
-polls retained progress while open. Drafts retain their observed revision fences;
-changed prerequisites require an explicit reload. Failed reads mark observations
-stale and disable actions. Failed operations can be explicitly resumed by ID.
-Closing or reopening the panel does not cancel or repeat server-owned setup.
-
-
-### Installed plugin terminal command
-
-`skulk-plugin-service catalog` reads the host's configured signed catalog in an
-owner terminal and prints the same review the `/v1/plugins/managed/catalog` route
-returns. The catalog address and discovery trust are configured through the
-`configure_catalog` manager request (`skulk-plugin-service manage` with a
-`configure_catalog` document, or the owner-only `POST /v1/plugins/managed/catalog/source`).
-
-`skulk-plugin-service install-plugin --from-catalog BUNDLE_ID [--sequence N]
-[--platform FAMILY] [MANAGED_ID]` installs a listed release. The terminal reads
-the catalog, picks the newest listing of the bundle that fits this host (or the
-named sequence, or the named artifact family; a listing without an artifact
-family is not installable on a host, which installs signed runtime records
-only; two artifacts at one sequence must be told apart with `--platform`),
-prints the listing as consent facts and
-the resume command, and asks whether to bind the installation to the listed
-feed and publisher. With consent the manager configures the installation's
-source from the listing (the same binding as the owner-only
-`POST /v1/plugins/managed/catalog/install`), inspects the release record and
-checks it is the one listed; the release is then reviewed, staged and
-activated through the same prompts as an ordinary installation. Later runs of
-the plain `install-plugin MANAGED_ID` resume and upgrade on the bound source.
-
-`skulk-plugin-service manage-plugin MANAGED_ID -- PLUGIN_ARGUMENTS` is a local
-terminal command, not an HTTP route. It verifies the protected service profile,
-selected signed runtime, qualified host and retained trust before executing the
-management launcher, the archive's fixed optional `__manage__.py` or the `manage`
-entry a signed wheel declares under `skulk.capability_runtime`. Paths and module
-names cannot be supplied.
-The generation fence and terminal I/O survive process replacement; the plugin
-supplies fixed management verbs and derives its durable state coordinates.
-Local setup and management wait up to 30 seconds for installation ownership before
-executing anything. A timeout or selection change refuses the command; this wait
-does not retry plugin execution or any accepted operation.
-Neither this command nor generic management grants mint paid approval. The existing
-`skulk-plugin-service manage` installation-manager interface is unchanged.
-
-
-### Uninstall a managed plugin while retaining cleanup
-
-The terminal manager and `POST /v1/plugins/managed/installations/{plugin_id}/operations`
-accept `action: "uninstall"` with the reviewed `expected_revision` and a new
-32-character hexadecimal `operation_id`. It requires the same `plugins:manage`
-authority as disable. No runtime digest, rollback flag or permission acceptance is
-accepted for withdrawal. For example, send this JSON to `skulk-plugin-service manage`:
-
-```json
-{"action":"submit","plugin_id":"managed.example","request":{"operation_id":"d083ef35f295414188bd7cdb699454f84","action":"uninstall","expected_revision":2}}
-```
-
-Use `operation` with the same plugin and operation identifiers to read completion;
-retrying the original request returns its retained result. Browser reconnects also
-read that result without submitting another operation. In **Plugins → Managed
-runtimes**, **Uninstall plugin** invokes this same operation.
-
-Uninstall stops the plugin owner and withdraws future capabilities and acquisition.
-It retains the installation registration, verified runtime generations, configuration,
-identities, credentials and receipt history. Independently supervised cleanup remains
-outside its process ownership. This is not a data purge or proof of provider absence;
-inspect the plugin's cleanup status separately. Inventory (`GET /v1/plugins/managed`)
-reports `uninstalled: true` from the published uninstall operation, even after manager
-restart or while a replacement operation is pending. Failed downloads or activation
-attempts cannot silently reinstall it. A later successful verified `select` or
-`activate` explicitly reinstalls the retained installation. Disable is refused while
-uninstalled. Uninstall can withdraw a stalled activation or selection, including an
-invalid release, but cannot replace live work or another pending withdrawal.
