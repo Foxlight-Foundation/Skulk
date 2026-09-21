@@ -7,6 +7,19 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Fixed
+
+- Cancelling a video render works while another render is queued behind it.
+  The ComfyUI runner acknowledged a render only when its server got to it,
+  so a second render queued behind a running one held the worker's control
+  loop until the first finished, and no cancel could reach either: the API
+  reported both cancelled while the GPU rendered them to the end. The runner
+  now dispatches through the shared served-runner loop at width one: renders
+  stay serial, every render is acknowledged on admission, a render cancelled
+  while it waits is never sent to the server, and one cancelled while it runs
+  is interrupted at the next step. The node diagnostics route no longer fails
+  on a runner whose process has already been reaped.
+
 ### Added
 
 - Uninstalled managed plugins can be removed. `DELETE

@@ -17,6 +17,7 @@ from skulk.shared.types.common import CommandId, ModelId
 from skulk.shared.types.events import (
     Event,
     RunnerStatusUpdated,
+    TaskAcknowledged,
     TaskStatusUpdated,
 )
 from skulk.shared.types.tasks import (
@@ -27,8 +28,10 @@ from skulk.shared.types.tasks import (
     TaskId,
     TaskStatus,
     TextGeneration,
+    VideoGeneration,
 )
 from skulk.shared.types.text_generation import TextGenerationTaskParams
+from skulk.shared.types.video import VideoGenerationTaskParams
 from skulk.shared.types.worker.runners import (
     RunnerId,
     RunnerIdle,
@@ -141,6 +144,31 @@ class _FakeHost(ServedConcurrentDispatch):
                 for e in self.events
                 if isinstance(e, TaskStatusUpdated) and e.task_status is status
             )
+
+
+class _VideoFakeHost(_FakeHost):
+    """The video engine's shape: renders are the generations, one at a time."""
+
+    _generation_kinds = (VideoGeneration,)
+
+    def acknowledge_task(self, task: Task) -> None:
+        with self._events_lock:
+            self.events.append(TaskAcknowledged(task_id=task.task_id))
+
+    def acknowledged(self, task_id: TaskId) -> bool:
+        with self._events_lock:
+            return any(
+                isinstance(e, TaskAcknowledged) and e.task_id == task_id
+                for e in self.events
+            )
+
+
+def _vgen() -> VideoGeneration:
+    return VideoGeneration(
+        command_id=CommandId(),
+        task_params=VideoGenerationTaskParams(prompt="a fox", model="m", seconds=4),
+        instance_id=_iid(),
+    )
 
 
 def _iid() -> Any:
@@ -504,3 +532,44 @@ def test_stamp_runner_stats_serial_reports_not_batching_and_floors_inflight() ->
 
     assert stamped.serving_batches is False  # max_concurrency 1
     assert stamped.in_flight_at_admission == 1  # floored to >= 1
+
+
+def test_video_render_queued_behind_another_is_acknowledged_and_cancellable() -> None:
+    """The video engine's regression: a render queued behind a running one is
+    acknowledged on admission (so the worker keeps planning) and, cancelled
+    while it waits, never reaches the server; the running one completes."""
+    host = _VideoFakeHost(max_concurrency=1)
+    _load_ready(host)
+    host.generate_gate = threading.Event()
+    t = host.start()
+    try:
+        first, second = _vgen(), _vgen()
+        host.send(first)
+        assert host.started.acquire(timeout=5)
+        host.send(second)
+        # Acknowledged while the first render still holds the only slot.
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not host.acknowledged(second.task_id):
+            time.sleep(0.02)
+        assert host.acknowledged(second.task_id)
+        assert host._inflight_count() == 1
+        _wait_dispatch_waiters(host, 1)
+        host._cancel_sender.send(second.task_id)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and host.task_statuses(TaskStatus.Cancelled) < 1:
+            time.sleep(0.05)
+        assert host.task_statuses(TaskStatus.Cancelled) == 1
+        # The second render was never generated: one start, the first's.
+        assert not host.started.acquire(timeout=0.2)
+        host.generate_gate.set()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and host.task_statuses(TaskStatus.Complete) < 1:
+            time.sleep(0.05)
+        assert host.task_statuses(TaskStatus.Complete) == 1
+        _wait_inflight(host, 0)
+        assert isinstance(host.current_status, RunnerReady)
+    finally:
+        host.generate_gate.set()
+        host.send(Shutdown(instance_id=_iid(), runner_id=host.runner_id))
+        t.join(timeout=5)
+

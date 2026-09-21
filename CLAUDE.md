@@ -409,7 +409,12 @@ A model card's `placement.compatible_backends` selects which engine serves it
   (`graph.py`, the official workflow templates node for node), submits it
   with a caller-minted `prompt_id`, follows `progress_state` on the
   WebSocket, cancels through the jobs API, and hands the container plus a
-  first-frame thumbnail to the worker like the test engine does. Teardown
+  first-frame thumbnail to the worker like the test engine does. Renders
+  dispatch through `ServedConcurrentDispatch` at width 1 (the same loop the
+  served text engines use): strictly serial, but acknowledged on admission,
+  so the worker's control loop is never held behind a render and a render
+  queued behind a running one can still be cancelled before it starts (a
+  cancelled running render is interrupted at its next sampling step). Teardown
   signals the process group; worker startup sweeps init-parented servers
   launched with Skulk's `--user-directory`. Tags `comfy-cuda` and
   `comfy-rocm` (the ROCm lane launches with `ROCM_LAUNCH_FLAGS`:

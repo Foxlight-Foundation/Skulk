@@ -1011,6 +1011,14 @@ class RunnerSupervisor:
     def diagnostics(self) -> RunnerSupervisorDiagnostics:
         """Return live read-only diagnostics for this runner supervisor."""
 
+        try:
+            pid = self.runner_process.pid
+            process_alive = self.runner_process.is_alive()
+            exit_code = self.runner_process.exitcode
+        except ValueError:
+            # The process object is closed once a finished runner has been
+            # reaped; the supervisor's own record is still worth reading.
+            pid, process_alive, exit_code = None, False, None
         return RunnerSupervisorDiagnostics(
             runner_id=str(self.bound_instance.bound_runner_id),
             instance_id=str(self.bound_instance.instance.instance_id),
@@ -1021,9 +1029,9 @@ class RunnerSupervisor:
             start_layer=self.shard_metadata.start_layer,
             end_layer=self.shard_metadata.end_layer,
             n_layers=self.shard_metadata.n_layers,
-            pid=self.runner_process.pid,
-            process_alive=self.runner_process.is_alive(),
-            exit_code=self.runner_process.exitcode,
+            pid=pid,
+            process_alive=process_alive,
+            exit_code=exit_code,
             status_kind=self.status.__class__.__name__,
             status_since=self._status_since,
             seconds_in_status=time.monotonic() - self._status_since_monotonic,

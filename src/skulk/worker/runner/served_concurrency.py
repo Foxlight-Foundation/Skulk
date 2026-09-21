@@ -35,6 +35,7 @@ from skulk.shared.types.tasks import (
     TaskId,
     TaskStatus,
     TextGeneration,
+    VideoGeneration,
 )
 from skulk.shared.types.worker.instances import BoundInstance
 from skulk.shared.types.worker.runners import (
@@ -55,6 +56,11 @@ from skulk.worker.runner.diagnostics import record_runner_phase
 _LIVENESS_POLL_S: float = 2.0
 
 
+type GenerationTask = TextGeneration | VideoGeneration
+"""The task kinds the dispatch loop admits as generations: acknowledged on
+admission, run on the pool, and given their terminal status by the loop."""
+
+
 class ServedConcurrentDispatch:
     """Mixin: a bounded concurrent task-dispatch loop for a served-backend runner.
 
@@ -62,7 +68,15 @@ class ServedConcurrentDispatch:
     and provide the attributes/methods declared below. ``_generate``,
     ``_ensure_server_alive``, ``_teardown_server`` and ``handle_task`` are
     engine-specific; the rest of the concurrent machinery lives here.
+
+    ``_generation_kinds`` names which generation tasks the loop admits: the
+    text engines take ``TextGeneration``, the video engine ``VideoGeneration``.
+    Whatever the kind, admission acknowledges the task at once, so the worker's
+    control loop (which waits on that acknowledgement) plans on while the task
+    waits for a slot or runs; that is what lets a queued render be cancelled.
     """
+
+    _generation_kinds: tuple[type[GenerationTask], ...] = (TextGeneration,)
 
     # --- supplied by the concrete runner --------------------------------------
     event_sender: MpSender[Event]
@@ -189,7 +203,9 @@ class ServedConcurrentDispatch:
                         continue
                     self.seen.add(task.task_id)
                     match task:
-                        case TextGeneration() if isinstance(
+                        case TextGeneration() | VideoGeneration() if isinstance(
+                            task, self._generation_kinds
+                        ) and isinstance(
                             self.current_status, (RunnerReady, RunnerRunning)
                         ):
                             # Acknowledge acceptance NOW, before any backpressure
@@ -265,7 +281,7 @@ class ServedConcurrentDispatch:
     # --- dispatch -------------------------------------------------------------
 
     def _dispatch_generation(
-        self, task: TextGeneration, pool: ThreadPoolExecutor
+        self, task: GenerationTask, pool: ThreadPoolExecutor
     ) -> None:
         """Admit a generation and run it on the pool without blocking the loop."""
         self.send_task_status(task, TaskStatus.Running)
@@ -303,7 +319,7 @@ class ServedConcurrentDispatch:
             return
         future.add_done_callback(lambda f: self._finish_generation(task, f))
 
-    def _run_one_generation(self, task: TextGeneration) -> None:
+    def _run_one_generation(self, task: GenerationTask) -> None:
         """Pool-worker body: stream one generation on a worker thread.
 
         ``_generate`` catches its own errors and surfaces them as an ErrorChunk;
@@ -326,7 +342,7 @@ class ServedConcurrentDispatch:
                     )
                 )
 
-    def _finish_generation(self, task: TextGeneration, future: "Future[None]") -> None:
+    def _finish_generation(self, task: GenerationTask, future: "Future[None]") -> None:
         """Done-callback: emit the terminal task status and drop the in-flight count."""
         try:
             was_cancelled = self._was_cancelled(task.task_id)
