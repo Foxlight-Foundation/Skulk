@@ -46,8 +46,9 @@ from skulk.worker.runner.served_concurrency import ServedConcurrentDispatch
 class _FakeHost(ServedConcurrentDispatch):
     """Minimal host runner: real mixin, stubbed engine hooks + status plumbing."""
 
-    def __init__(self, max_concurrency: int) -> None:
+    def __init__(self, max_concurrency: int, admission_queue: int = 0) -> None:
         self.runner_id = RunnerId("fake")
+        self.server_dead = False
         self.seen: set[TaskId] = set()
         self.cancelled_tasks: set[TaskId] = set()
         self.current_status: RunnerStatus = RunnerIdle()
@@ -74,7 +75,7 @@ class _FakeHost(ServedConcurrentDispatch):
         self.shard_metadata: Any = type(
             "S", (), {"model_card": type("C", (), {"model_id": ModelId("m")})()}
         )()
-        self._init_concurrent_dispatch(max_concurrency, "fake-gen")
+        self._init_concurrent_dispatch(max_concurrency, "fake-gen", admission_queue)
 
     # engine hooks
     def _generate(self, task: Task) -> None:
@@ -94,7 +95,8 @@ class _FakeHost(ServedConcurrentDispatch):
         self._is_cancelled(task.task_id)
 
     def _ensure_server_alive(self) -> None:
-        pass
+        if self.server_dead:
+            raise RuntimeError("fake server died")
 
     def _teardown_server(self) -> None:
         pass
@@ -572,4 +574,79 @@ def test_video_render_queued_behind_another_is_acknowledged_and_cancellable() ->
         host.generate_gate.set()
         host.send(Shutdown(instance_id=_iid(), runner_id=host.runner_id))
         t.join(timeout=5)
+
+
+def test_video_renders_queue_behind_the_slot_and_stay_cancellable() -> None:
+    """With an admission queue, a width-one engine keeps reading: the second and
+    third renders are acknowledged while the first holds the slot, the third
+    is cancelled while queued without a generation, and the second runs after
+    the first."""
+    host = _VideoFakeHost(max_concurrency=1, admission_queue=8)
+    _load_ready(host)
+    host.generate_gate = threading.Event()
+    t = host.start()
+    try:
+        first, second, third = _vgen(), _vgen(), _vgen()
+        host.send(first)
+        assert host.started.acquire(timeout=5)
+        host.send(second)
+        host.send(third)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not (
+            host.acknowledged(second.task_id) and host.acknowledged(third.task_id)
+        ):
+            time.sleep(0.02)
+        assert host.acknowledged(second.task_id) and host.acknowledged(third.task_id)
+        # Neither queued render has started: one slot, one start so far.
+        assert not host.started.acquire(timeout=0.2)
+        host._cancel_sender.send(third.task_id)
+        host.generate_gate.set()
+        # The first completes, the second starts and completes, the third is
+        # cancelled without ever generating.
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and (
+            host.task_statuses(TaskStatus.Complete) < 2
+            or host.task_statuses(TaskStatus.Cancelled) < 1
+        ):
+            time.sleep(0.05)
+        assert host.task_statuses(TaskStatus.Complete) == 2
+        assert host.task_statuses(TaskStatus.Cancelled) == 1
+        # Two starts in all: the first's and the second's, never the third's.
+        assert host.started.acquire(timeout=5)
+        assert not host.started.acquire(timeout=0.2)
+        _wait_inflight(host, 0)
+        assert isinstance(host.current_status, RunnerReady)
+    finally:
+        host.generate_gate.set()
+        host.send(Shutdown(instance_id=_iid(), runner_id=host.runner_id))
+        t.join(timeout=5)
+
+
+def test_a_dead_server_ends_the_loop_on_the_next_task() -> None:
+    """A server that died is caught on the next received task, not only on an
+    idle poll, so a runner under steady traffic does not keep admitting work
+    against nothing."""
+    host = _FakeHost(max_concurrency=1)
+    _load_ready(host)
+    failure: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            host.run_dispatch_loop()
+        except BaseException as exc:  # noqa: BLE001 - the loop's exit is the assertion
+            failure.append(exc)
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    try:
+        host.server_dead = True
+        host.send(_gen())
+        t.join(timeout=5)
+        assert not t.is_alive()
+        assert failure and "fake server died" in str(failure[0])
+    finally:
+        host.server_dead = False
+        if t.is_alive():
+            host.send(Shutdown(instance_id=_iid(), runner_id=host.runner_id))
+            t.join(timeout=5)
 

@@ -65,6 +65,7 @@ from skulk.shared.types.worker.runners import (
     RunnerLoaded,
     RunnerLoading,
     RunnerReady,
+    RunnerRunning,
     RunnerStatus,
     RunnerWarmingUp,
 )
@@ -188,6 +189,12 @@ def _saved_file(outputs: dict[str, Any], node_id: str, output_root: Path) -> Pat
     return candidate
 
 
+# Renders the loop holds acknowledged behind the one running, cancellable
+# while they wait. The API admits a bounded number of jobs per node, so this
+# only has to exceed what one node can queue in practice.
+_QUEUED_RENDERS: Final = 8
+
+
 @final
 class Runner(ServedConcurrentDispatch):
     """ComfyUI-backed video runner; same constructor shape as the image runner."""
@@ -213,9 +220,10 @@ class Runner(ServedConcurrentDispatch):
         self.seen: set[TaskId] = set()
         self.current_status: RunnerStatus = RunnerIdle()
         # Width 1: one ComfyUI server renders one prompt at a time, but the
-        # shared loop acknowledges every render on admission, so the worker
-        # plans on (a cancel included) while a render waits or runs.
-        self._init_concurrent_dispatch(1, "comfy-render")
+        # shared loop acknowledges every render on admission and holds the
+        # next ones in a bounded queue, so the worker plans on (a cancel
+        # included) while a render waits or runs, however many are waiting.
+        self._init_concurrent_dispatch(1, "comfy-render", admission_queue=_QUEUED_RENDERS)
         self.update_status(RunnerIdle())
 
     # --- events ---------------------------------------------------------------
@@ -256,8 +264,18 @@ class Runner(ServedConcurrentDispatch):
             self.server = None
 
     def _ensure_server_alive(self) -> None:
-        if self.server is None or not self.server.alive():
-            tail = self.server.log_tail() if self.server is not None else "(no server)"
+        """Raise if the server the runner should have is gone.
+
+        Before ``LoadModel`` there is no server to check and the loop's idle
+        poll must not end the runner; once the runner has been ready, a
+        missing or dead server is fatal, and the supervisor restarts it.
+        """
+        if self.server is None:
+            if isinstance(self.current_status, (RunnerReady, RunnerRunning)):
+                raise RuntimeError("the ComfyUI server is not running; log tail:\n(no server)")
+            return
+        if not self.server.alive():
+            tail = self.server.log_tail()
             self._teardown_server()
             raise RuntimeError(f"the ComfyUI server is not running; log tail:\n{tail}")
 
@@ -300,6 +318,9 @@ class Runner(ServedConcurrentDispatch):
         self._ensure_server_alive()
         try:
             self._render(task.task_id, command_id, task.task_params)
+            # A cancel that landed while the container was collected sits in
+            # the pipe; read it now so the terminal status says cancelled.
+            self._is_cancelled(task.task_id)
         except ValueError as error:
             # The request or the plan was refused (ComfyRenderError included):
             # the task fails with its reason and the runner lives on.
@@ -312,9 +333,12 @@ class Runner(ServedConcurrentDispatch):
             shutil.rmtree(SKULK_VIDEO_OUTPUT_DIR / str(command_id), ignore_errors=True)
             logger.warning(f"comfy engine rejected {command_id}: {error}")
         except Exception:
-            # Anything else is the server or the runner failing; the loop's
-            # liveness poll ends the runner and the supervisor observes it.
+            # Anything else is the server or the runner failing. The pool
+            # keeps the loop alive past this thread, so the server goes here
+            # and the loop's next liveness check, on the next task or the idle
+            # poll, ends the runner for the supervisor to restart.
             shutil.rmtree(SKULK_VIDEO_OUTPUT_DIR / str(command_id), ignore_errors=True)
+            self._teardown_server()
             raise
 
     # --- model load -----------------------------------------------------------

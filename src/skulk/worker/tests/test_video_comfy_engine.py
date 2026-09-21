@@ -959,6 +959,10 @@ def test_runner_cancels_a_render_queued_behind_another_before_it_starts(
     loop = threading.Thread(target=runner.main, daemon=True)
     loop.start()
     try:
+        # Idle past the loop's liveness poll before any server exists: the
+        # poll must not end a runner that has not been asked to load yet.
+        time.sleep(2.6)
+        assert loop.is_alive()
         load = LoadModel(instance_id=instance)
         task_sender.send(load)
         assert wait_for(lambda: seen(TaskStatusUpdated, load.task_id, TaskStatus.Complete))
@@ -998,4 +1002,38 @@ def test_runner_cancels_a_render_queued_behind_another_before_it_starts(
         event_sender.close()
         pumper.join(timeout=5)
     assert runner.server is None
+
+
+def test_runner_reads_a_cancel_that_lands_while_the_container_is_collected(
+    fake_comfy: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cancel arriving after sampling, while the history entry is awaited and
+    the container collected, is read before the render returns, so the loop's
+    terminal status says cancelled rather than complete."""
+    import threading
+    import time
+
+    monkeypatch.setenv("FAKE_COMFY_HISTORY_DELAY_SECONDS", "1.5")
+    sender = _Sender()
+    cancels = _Cancels()
+    runner = _runner(sender, cancels)
+    instance = runner.bound_instance.instance.instance_id
+    try:
+        runner.handle_task(LoadModel(instance_id=instance))
+        runner.handle_task(StartWarmup(instance_id=instance))
+        task = VideoGeneration(
+            command_id=CommandId("cmd-late"),
+            instance_id=instance,
+            task_params=_params(FL2VA_ID, steps=1),
+            owner_node=NodeId("n"),
+        )
+        render = threading.Thread(target=runner._generate, args=(task,), daemon=True)
+        render.start()
+        time.sleep(0.6)
+        cancels.pending.append(task.task_id)
+        render.join(timeout=20)
+        assert not render.is_alive()
+        assert runner._was_cancelled(task.task_id)
+    finally:
+        runner._teardown_server()
 

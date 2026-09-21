@@ -21,6 +21,7 @@ re-implementing (and re-reviewing) any of that.
 
 import contextlib
 import threading
+from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 
 from anyio import ClosedResourceError, EndOfStream, WouldBlock
@@ -114,15 +115,24 @@ class ServedConcurrentDispatch:
     # --- concurrency state ----------------------------------------------------
 
     def _init_concurrent_dispatch(
-        self, max_concurrency: int, thread_name_prefix: str
+        self, max_concurrency: int, thread_name_prefix: str, admission_queue: int = 0
     ) -> None:
         """Set up the concurrency state. Call once from the runner's ``__init__``.
 
         ``max_concurrency`` bounds both the pool width and the number of SUBMITTED
-        generations (via the permit semaphore), so excess load backpressures the
-        task receiver rather than queueing unbounded in-process.
+        generations (via the permit semaphore). ``admission_queue`` lets the loop
+        hold that many more generations acknowledged but not yet submitted,
+        in its own queue rather than the pool's: the loop keeps reading, so a
+        queued generation can be cancelled before it ever runs and later tasks
+        are still acknowledged, and only past the queue does load backpressure
+        the receiver. A serial engine whose work is long (a video render) sets
+        a queue; the text engines leave it at zero.
         """
         self._max_concurrency = max_concurrency
+        self._admission_queue = admission_queue
+        # Acknowledged generations waiting for a permit, oldest first; read and
+        # written on the dispatch thread only.
+        self._admitted: deque[GenerationTask] = deque()
         self._dispatch_thread_prefix = thread_name_prefix
         # Worker threads mutate the cancel set and the in-flight counter, so both
         # are lock-guarded; never hold both locks at once (no nested acquisition).
@@ -187,6 +197,10 @@ class ServedConcurrentDispatch:
         try:
             with self.task_receiver as tasks:
                 while True:
+                    # A permit freed by a finished generation, or a cancel for a
+                    # queued one, is acted on here: every pass through the loop
+                    # settles the queue before waiting on the receiver again.
+                    self._dispatch_admitted(pool)
                     try:
                         task = tasks.receive_timeout(_LIVENESS_POLL_S)
                     except WouldBlock:
@@ -198,6 +212,10 @@ class ServedConcurrentDispatch:
                         continue
                     except (EndOfStream, ClosedResourceError):
                         break
+                    # A server that died under the last generation must end the
+                    # runner on the next task, not only on an idle poll: under
+                    # steady traffic the poll branch above may never run.
+                    self._ensure_server_alive()
                     if task.task_id in self.seen:
                         logger.warning("repeat task - potential error")
                         continue
@@ -215,11 +233,24 @@ class ServedConcurrentDispatch:
                             # cancellations / shutdown behind the first
                             # over-capacity request. Ack means "accepted".
                             self.acknowledge_task(task)
+                            self._clear_stale_cancel_all_if_idle()
+                            # With room in the admission queue, the generation
+                            # waits there and the loop goes on reading; it is
+                            # dispatched, or cancelled, by _dispatch_admitted.
+                            if self._admitted or not self._dispatch_permits.acquire(
+                                blocking=False
+                            ):
+                                if len(self._admitted) < self._admission_queue:
+                                    self._note_dispatch_waiter_started()
+                                    self._admitted.append(task)
+                                    continue
+                            else:
+                                self._dispatch_generation(task, pool)
+                                continue
                             # Backpressure: block until a dispatch slot frees so the
                             # runner never accumulates an unbounded backlog. Wake
                             # periodically while saturated so a dead server is still
                             # caught by the liveness check.
-                            self._clear_stale_cancel_all_if_idle()
                             self._note_dispatch_waiter_started()
                             permit_acquired = False
                             cancelled_while_waiting = False
@@ -279,6 +310,24 @@ class ServedConcurrentDispatch:
             self._teardown_server()
 
     # --- dispatch -------------------------------------------------------------
+
+    def _dispatch_admitted(self, pool: ThreadPoolExecutor) -> None:
+        """Settle the admission queue: drop what was cancelled, dispatch what fits."""
+        while self._admitted:
+            head = self._admitted[0]
+            if self._is_cancelled(head.task_id):
+                self._admitted.popleft()
+                try:
+                    self.send_task_status(head, TaskStatus.Cancelled)
+                finally:
+                    self._note_dispatch_waiter_finished()
+                    self._mark_ready_if_idle_after_waiter_terminal()
+                continue
+            if not self._dispatch_permits.acquire(blocking=False):
+                return
+            self._admitted.popleft()
+            self._note_dispatch_waiter_finished()
+            self._dispatch_generation(head, pool)
 
     def _dispatch_generation(
         self, task: GenerationTask, pool: ThreadPoolExecutor
@@ -503,9 +552,16 @@ class ServedConcurrentDispatch:
         )
         self.update_status(RunnerShuttingDown())
         self.acknowledge_task(task)
-        # Break every in-flight stream: their loops poll _is_cancelled.
+        # Break every in-flight stream: their loops poll _is_cancelled. What
+        # was still queued never ran; it is cancelled here, in order.
         with self._cancel_lock:
             self.cancelled_tasks.add(CANCEL_ALL_TASKS)
+        while self._admitted:
+            queued = self._admitted.popleft()
+            try:
+                self.send_task_status(queued, TaskStatus.Cancelled)
+            finally:
+                self._note_dispatch_waiter_finished()
         pool.shutdown(wait=True)
         self._teardown_server()
         record_runner_phase(
