@@ -20,7 +20,7 @@ capabilities extend what the fabric can do beyond inference.
 | [Foxlight Model Registry](model-cards.md) | Publishes signed descriptions of exact model artifacts and separate engine-support evidence | Discover models and understand their requirements |
 | [Model store](model-store.md) | Keeps the cluster's downloaded model artifacts and supplies worker staging | Download once and reuse artifacts across the cluster |
 | Skulk Weights Publisher | Prepares and publishes model companions and other weight artifacts | Supply the bytes referenced by model cards |
-| [Capabilities and plugins](capability-nodes.md) | Add discoverable services with their own permissions, configuration, and lifecycle | Extend the fabric with functions such as governed cloud capacity |
+| [Capabilities and plugins](capability-nodes.md) | Add discoverable services, tools, and applications with their own interfaces, permissions, configuration, and lifecycle | Build on shared AI compute and extend the fabric with new operations |
 | Intelligent Fabric | Provides the cluster-aware Skulk conversation through the built-in Steward runtime | Ask about the fabric and prepare supported actions |
 
 The desktop app and phone app have different jobs. The desktop app runs a

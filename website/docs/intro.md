@@ -8,10 +8,18 @@ description: Run models, manage compute, and use AI capabilities across your mac
 
 <!-- Copyright 2025 Foxlight Foundation -->
 
-**Skulk connects your machines into an AI cluster.** It discovers nodes,
-places models on compatible hardware, manages their files and processes, and
-serves inference through shared APIs. You can operate it from its web dashboard,
-the native phone app, or your own tools.
+**Skulk is an interconnect fabric for multi-node AI compute.**
+
+It brings compute, models, and capabilities together in one platform. Run
+inference across compatible machines, then extend the fabric with plugins that
+add services, tools, and complete applications. Capabilities can expose callable
+operations, their own application interfaces, or both.
+
+Skulk discovers nodes, places models on compatible hardware, manages their files
+and processes, and serves inference through shared APIs. Its capability and
+plugin system lets developers build on that foundation, with discoverable
+providers, declared operations, health, and lifecycle management. You can operate
+the fabric from its web dashboard, the native phone app, or your own tools.
 
 A single machine is a complete cluster. Add compatible machines to run more
 models concurrently or distribute a supported model across devices when it
@@ -24,6 +32,17 @@ interchangeable or every model distributable.
 
 *Screenshots show the actual dashboard and live cluster state at capture time.
 Model availability and resource readings change as the cluster runs.*
+
+## Extend the fabric with capabilities
+
+A capability adds something you can use: a service, a tool, or an application
+that works with the fabric. Plugins package those extensions, and capability
+nodes make their status and available actions visible in the dashboard.
+When a capability shares a host with a compute node, its satellite in the
+cluster topology gives you a direct way to inspect it and open its interface.
+
+See [Capabilities and plugins](capability-nodes) to discover and use capabilities,
+understand how they are packaged, and explore the developer contracts.
 
 ## Start with one model
 

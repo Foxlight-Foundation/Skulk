@@ -12,6 +12,7 @@ const sidebars: SidebarsConfig = {
   guidesSidebar: [
     { type: "doc", id: "intro", label: "Introduction" },
     "ecosystem",
+    "capability-nodes",
     {
       type: "category",
       label: "Get started",
@@ -37,7 +38,7 @@ const sidebars: SidebarsConfig = {
       label: "Operate and extend",
       collapsed: false,
       items: [
-        "steward", "capability-nodes", "remote-access", "operations", "node-doctor",
+        "steward", "remote-access", "operations", "node-doctor",
         "extensions", "controller-integration", "tracing", "external-logging",
       ],
     },
