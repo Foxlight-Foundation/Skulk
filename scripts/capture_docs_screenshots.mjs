@@ -83,6 +83,13 @@ try {
       await page.getByRole('dialog').waitFor();
     },
   });
+  await capture('/', 'dashboard-pairing.png', {
+    action: async page => {
+      await page.getByRole('button', { name: 'Settings', exact: true }).click();
+      await page.getByRole('button', { name: 'Devices & pairing', exact: true }).click();
+      await page.getByRole('button', { name: 'Generate pairing code', exact: true }).waitFor();
+    },
+  });
   await capture('/', 'dashboard-steward.png', {
     dark: true,
     action: async page => {

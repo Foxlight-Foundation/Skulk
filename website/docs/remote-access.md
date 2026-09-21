@@ -18,25 +18,6 @@ A browser session is not the native app's relay carrier. Browser pairing binds
 the tab to the gateway serving its page; it does not create an internet tunnel.
 Do not expose the unauthenticated local API listener directly to the internet.
 
-## How the native relay path works
-
-The designated operator gateway connects outward to the relay. The app connects
-to that relay and establishes a separate, pinned TLS connection through it to the
-cluster gateway. Application TLS terminates at the cluster, so the relay forwards
-encrypted bytes without reading prompts, answers, model names, commands, or
-canonical API bearer credentials.
-
-Each request or stream has an independent connection lane. The on-demand
-connector keeps a control connection and opens bounded data lanes when requests
-arrive; the legacy provisioning format uses a bounded pool of waiting lanes.
-These are provisioning choices, not different model APIs.
-
-The relay still handles connection-routing metadata and aggregate resource
-usage. Content encryption does not mean the relay sees no network metadata.
-The gateway enforces cluster authentication and route permissions after
-termination. If the designated gateway or relay is unavailable, remote app access
-is unavailable; local cluster operation can continue.
-
 ## Prepare remote access
 
 A cluster administrator must provision matching gateway and relay configuration,
@@ -45,9 +26,8 @@ Skulk or opening **Remote Access** alone does not enroll a hosted relay service.
 Use the provisioning handoff supplied with your relay service; there is no
 public relay administration endpoint that a phone can use to create this trust.
 
-The operator's **Remote Access** view and
-`GET /v1/connectivity/remote-access` report local LAN and Tailscale connection options; they are not a relay-health
-check. Diagnose relay provisioning and gateway reachability through the
+Use the dashboard's **Remote Access** view to find local LAN and Tailscale
+connection options. These addresses are not a relay-health check. Diagnose relay provisioning and gateway reachability through the
 administrator's supplied service controls. Keep provider and gateway secrets out
 of screenshots and support messages.
 
@@ -61,7 +41,17 @@ Choose the validity period and allowed device count, then select **Generate
 pairing code**. The displayed code/QR is a bearer secret. Its on-screen visibility
 window is separate from the invitation's validity period: hiding the code does
 not revoke it. Review recent invitations and revoke any that should no longer
-admit devices.
+admit devices. On the phone, choose **Scan pairing code**, allow camera access,
+and center the displayed QR code in the frame. Review the cluster identity
+before confirming. See the [native app guide](native-app.md#pair-with-your-cluster).
+
+Invitation creation and revocation happen when their own controls are selected;
+they do not wait for the main Settings **Save changes** button.
+
+![Dashboard-generated pairing QR code, revoked after capture](./imgs/dashboard-pairing-qr.png)
+
+*This invitation was revoked immediately after capture. The pictured code cannot
+pair a device; generate your own invitation in Settings.*
 
 An invitation admits pairing; the resulting device has its own identity and
 credentials. Revoking an invitation prevents further use of that invitation.
@@ -84,6 +74,25 @@ does not automatically grant plugin privileges. The owner grants
 configuration authority, and approval of a reviewed proposal are distinct
 permissions. Publisher-trust and credential-destination setup remains a direct
 owner operation even for a browser with plugin-management grants.
+
+## How the native relay path works
+
+The designated operator gateway connects outward to the relay. The app connects
+to that relay and establishes a separate, pinned TLS connection through it to the
+cluster gateway. Application TLS terminates at the cluster, so the relay forwards
+encrypted bytes without reading prompts, answers, model names, commands, or
+canonical API bearer credentials.
+
+Each request or stream has an independent connection lane. The on-demand
+connector keeps a control connection and opens bounded data lanes when requests
+arrive; the legacy provisioning format uses a bounded pool of waiting lanes.
+These are provisioning choices, not different model APIs.
+
+The relay still handles connection-routing metadata and aggregate resource
+usage. Content encryption does not mean the relay sees no network metadata.
+The gateway enforces cluster authentication and route permissions after
+termination. If the designated gateway or relay is unavailable, remote app access
+is unavailable; local cluster operation can continue.
 
 ## Troubleshooting
 

@@ -12,8 +12,10 @@ Your cluster speaks the API formats these tools already know, so pointing them a
 it is a configuration change rather than an integration project. The dashboard's
 **Integrations** page writes that configuration for you.
 
-Open the dashboard and choose **Integrations** in the navigation, or go straight
-to `/integrations`.
+Choose **Open Dashboard** from the Skulk desktop app, then select
+**Integrations** in the dashboard navigation. You can also bookmark `/integrations`.
+These recipes configure the external tool; Skulk's own options stay in dashboard
+[Settings](configuration), without editing a Skulk configuration file.
 
 ![Integration recipes using the cluster’s ready models](./imgs/dashboard-integrations.png)
 

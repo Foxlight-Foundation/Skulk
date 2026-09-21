@@ -90,8 +90,10 @@ When a node falls back to direct Hugging Face because the store is unreachable,
 it performs that same exact, serialized check against the actual model cache.
 It does not evict or reject based on the unrelated staging filesystem.
 
-Tune it in the `staging` section of `skulk.yaml`, or per node via
-`node_overrides`:
+Use **Settings → Staging** to enable staging, choose its cache path, or toggle
+**Cleanup on deactivate**, then select **Save changes**. The numeric grace budget
+is an advanced configuration setting, not a field in the Settings panel. Tune it
+in `model_store.staging` or per-node `node_overrides` when needed:
 
 ```yaml
 model_store:
@@ -331,7 +333,8 @@ bytes and disk free alongside the staged models).
 Runtime tracing is a **debugging** feature, not an always-on mode. Leave it
 off in normal operation and switch it on to investigate a specific issue.
 
-Enable it cluster-wide for new requests:
+Open **Observability → Traces** and enable tracing for new requests. For
+headless administration, the equivalent API call is:
 
 ```bash
 curl -X PUT http://localhost:52415/v1/tracing \
@@ -428,8 +431,10 @@ is running or that model inference is ready. See [Extensions](extensions.md) and
 ## Telemetry and access boundaries
 
 Cluster telemetry is an operational transport for current resource observations.
-Opt-in field telemetry is a separate collection feature, controlled by consent and
-`SKULK_TELEMETRY_DISABLE=1`. Centralized logging is a third, separately configured
+Opt-in field telemetry is a separate collection feature. **Settings → Telemetry**
+exposes separate **Performance telemetry** and **Crash diagnostics** consent
+controls; save changes to apply them. The node-local
+`SKULK_TELEMETRY_DISABLE=1` launch override disables field collection. Centralized logging is a third, separately configured
 facility. Disabling field telemetry does not disable cluster liveness observations.
 
 Use the [API guide](api-guide.md) for direct-host, paired-device and relay

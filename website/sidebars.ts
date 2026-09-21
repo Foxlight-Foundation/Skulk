@@ -16,7 +16,7 @@ const sidebars: SidebarsConfig = {
       type: "category",
       label: "Get started",
       collapsed: false,
-      items: ["install", "dashboard", "native-app", "mobile-dashboard", "integrations"],
+      items: ["install", "dashboard", "configuration", "native-app", "mobile-dashboard", "integrations"],
     },
     {
       type: "category",

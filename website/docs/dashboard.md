@@ -93,11 +93,36 @@ configuration, proposals, and cleanup.
 
 ![Dashboard settings](./imgs/dashboard-settings.png)
 
-**Settings** exposes runtime configuration and **Devices & pairing**. Review
-which settings affect the local node and which are propagated before saving.
-Pairing connects an operator device to the cluster's authority; it is separate
-from adding a compute node. Follow [remote access](remote-access) to check
-readiness, create an invitation, and revoke a device when needed.
+For a packaged Skulk installation, use **Settings** in the dashboard to configure
+the cluster. You do not need a terminal or a hand-edited configuration file for
+the controls exposed here. Expand a section, change its values, and choose
+**Save changes**.
+
+| Section | What you configure |
+| --- | --- |
+| **Appearance** | Dashboard color theme |
+| **Model Store** | Store enablement, host, HTTP listener, port, and canonical path |
+| **Download** | Hugging Face fallback |
+| **Staging** | Node-local cache, path, and cleanup on deactivate |
+| **Inference** | KV cache backend for subsequent model launches |
+| **HuggingFace** | Access token for models requiring authorization |
+| **Logging** | Structured logging and ingestion URL |
+| **Intelligent Fabric** | Fabric capability enablement |
+| **Telemetry** | Usage and diagnostic sharing choices |
+
+The [Settings guide](configuration) explains each control, when changes take
+effect, and which configuration is shared with other nodes. Advanced file and
+command-line configuration is available for headless deployments and development.
+
+Open **Settings → Devices & pairing** to connect the native operator app. Choose
+the invitation lifetime and device limit, then **Generate pairing code**.
+
+![Devices and pairing with invitation generation controls](./imgs/dashboard-pairing.png)
+
+Scan the resulting QR code in the mobile app. This pairs an operator device; it
+does not add a compute node. Invitations and device revocations take effect
+immediately, independently of the Settings **Save changes** button. Follow
+[remote access](remote-access) for the full generation-and-scan workflow.
 
 ## Observability and phone layouts
 

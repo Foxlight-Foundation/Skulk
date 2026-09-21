@@ -22,7 +22,12 @@ cluster's observations and documentation.
 
 ## Enable the resident model
 
-Enable intelligent fabric in the cluster configuration:
+Open the dashboard **Settings → Intelligent Fabric**, turn **Enabled** on,
+and select **Save changes**. Skulk prepares its resident model automatically;
+the first start may download weights. Turning the setting off removes the
+system placement. Packaged-app users do not need a terminal for this.
+
+For headless administration, the equivalent configuration is:
 
 ```yaml
 intelligent_fabric:
@@ -31,8 +36,9 @@ intelligent_fabric:
 
 The default `steward_models` list prefers the Qwen3.6 35B tier and falls back through
 Qwen3.5 4B to a 0.8B GGUF model. Skulk picks the first card that the cluster can
-serve, accounting for available engines and memory. You can override the ordered
-list with compatible tool-calling text model cards. The resident instance consumes
+serve, accounting for available engines and memory. Advanced administrators can override the ordered
+`steward_models` list in configuration with compatible tool-calling text cards;
+the Settings panel exposes the enable toggle, not this model preference list. The resident instance consumes
 real cluster memory and uses the same download, staging and runner lifecycle as
 other models.
 

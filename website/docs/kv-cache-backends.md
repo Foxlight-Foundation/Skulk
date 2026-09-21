@@ -8,6 +8,20 @@ sidebar_position: 4
 
 Skulk includes several opt-in KV cache backends for MLX text generation. These backends are intended for long-context and memory-pressure experiments, while preserving existing behavior unless explicitly enabled.
 
+## Choose a backend in Settings
+
+Open **Settings → Inference → KV Cache Backend**, choose a backend and select
+**Save changes**. The change takes effect on the next model launch; it does not
+replace the cache of a running model. This is the normal path for packaged-app
+users. Start with **Default** and validate another backend against your workload.
+
+An explicit `SKULK_KV_CACHE_BACKEND` launch override disables the selector; the
+panel explains that override. Advanced bit widths and retained edge-layer counts
+are not exposed in Settings. **MLX Quantized** requires the
+`SKULK_KV_CACHE_BITS` launch setting. The environment examples below are for
+headless/source deployments and advanced launch configuration, not prerequisites
+for using the dashboard selector.
+
 ## Current Status
 
 - `default`: existing behavior (no cache quantization)
@@ -16,9 +30,11 @@ Skulk includes several opt-in KV cache backends for MLX text generation. These b
 - `turboquant_adaptive`: keeps outer KV layers in FP16 and applies TurboQuant to middle KV layers
 - `optiq`: rotation-based KV cache via [mlx-optiq](https://mlx-optiq.pages.dev/); uses randomized orthogonal rotations with Lloyd-Max quantization and rotated-space attention for compatible attention layouts
 
-If `SKULK_KV_CACHE_BACKEND` is unset, or is set to `default`, Skulk behaves as before.
+The effective backend follows the dashboard/configuration choice unless a
+`SKULK_KV_CACHE_BACKEND` environment override is set. The default configuration
+uses `default`.
 
-## Configuration examples
+## Advanced launch configuration examples
 
 ### mlx-optiq
 

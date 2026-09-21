@@ -35,6 +35,26 @@ With the model store:
 - other nodes stage needed files from that host
 - Skulk keeps the same cluster and inference architecture, but changes where model artifacts come from
 
+## Recommended Setup: Dashboard First
+
+This is the simplest path for most people.
+
+1. Start Skulk on all nodes from the desktop app or, for source checkouts, with
+   `uv run skulk`. Fresh defaults already converge on one store.
+2. Open the dashboard on the node you want to use for administration.
+3. Open **Settings → Model Store** and turn **Enabled** on.
+4. Set **Store host** to the intended host identity, **HTTP host** to its
+   reachable address when different, and review **Port** and **Store path**.
+   Store host and Store path must not be blank when enabled.
+5. Review **Download → Allow HuggingFace fallback** and **Staging**. Staging
+   exposes **Enabled**, **Cache path**, and **Cleanup on deactivate**.
+6. Select **Save changes**. The configuration propagates through the cluster;
+   follow any restart guidance before launching work.
+
+After that, use the dashboard or API normally. When models are available in
+the store, worker nodes stage from the store host instead of downloading
+independently.
+
 ## Installed Cards and Existing Caches
 
 Every complete canonical or staged artifact carries an atomic
@@ -95,7 +115,8 @@ a remote mutation surface.
 
 Automatic imports are enabled by default. On a production fleet where you want
 to inspect the first migration before moving bytes, temporarily enable
-inventory-only mode:
+inventory-only mode through advanced configuration; this control is not exposed
+in the Settings panel:
 
 ```yaml
 model_store:
@@ -221,31 +242,15 @@ or private repositories entered in **any** node's dashboard Settings rides the
 encrypted cluster fabric to the store host (and every other node), and nodes
 joining later adopt it at bootstrap, so one entry covers the fleet. To verify,
 run `skulk doctor` on the store host and check its **Hugging Face token**
-verdict. See [Hugging Face token](./install.md#hugging-face-token) for the
+verdict. See [Hugging Face token](./install.md#add-a-hugging-face-token) for the
 per-node mechanisms and their precedence.
 :::
 
-## Recommended Setup: Dashboard First
-
-This is the simplest path for most people.
-
-1. Start Skulk on all nodes from the desktop app or, for source checkouts, with
-   `uv run skulk`. Fresh defaults already converge on one store.
-2. Open the dashboard on the node you want to use for administration.
-3. Go to **Settings**.
-4. To override the elected default, enable the store host toggle for the
-   machine that should own the canonical store.
-5. Choose its store path.
-6. Save the config.
-7. Restart Skulk on all nodes if the dashboard tells you a restart is required.
-
-After that, use the dashboard or API normally. When models are available in
-the store, worker nodes stage from the store host instead of downloading
-independently.
-
 ## Manual Setup with `skulk.yaml`
 
-If you prefer to configure the model store manually, put the same `skulk.yaml` file on each node.
+For headless or advanced administration, the equivalent settings can be written
+to `skulk.yaml`. Dashboard users can use the controls above without editing files.
+Keep manually managed configuration consistent across nodes.
 
 Minimal example:
 

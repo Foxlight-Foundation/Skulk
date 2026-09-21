@@ -27,12 +27,16 @@ capture time; available models and resource readings can change.
 
 ## Pair with your cluster
 
+<img src={require('./imgs/native-app-pairing.jpg').default} alt="Skulk phone app pairing screen with the Scan pairing code control" width="300" />
+
 1. On the configured gateway, the owner opens dashboard **Settings → Devices &
    pairing** through localhost or its authorized Tailscale connection.
 2. Generate an invitation with the intended validity and device limit. Treat its
    pairing code and QR image as credentials; share them only with intended users.
-3. Scan the invitation in the app and check the presented cluster identity.
-4. Complete pairing. The app stores its device credentials in the operating
+3. On the phone, open **Pair your cluster → Scan pairing code**. Allow camera
+   access when asked, then center the dashboard QR code in the frame. The app
+   scans it automatically.
+4. Check **Confirm this cluster** and its fingerprint, then complete pairing. The app stores its device credentials in the operating
    system's protected credential store and connects through the relay.
 
 The phone does not need Tailscale or another VPN app for this path. Relay

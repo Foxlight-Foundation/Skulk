@@ -546,3 +546,9 @@ for documentation capture and inspect every image for exposed credentials,
 clipping, overlays, and incomplete loading before committing. Captions should
 identify actual state at capture time; do not replace observed state with fixture
 data. Native operator-app screenshots must come from the app separately.
+
+The read-only script captures the pairing form but never generates an invitation.
+For an operator-authorized screenshot of the generated QR screen, create a
+short-lived invitation, capture it, and immediately revoke that same invitation.
+Verify its revoked state before publishing the image and caption it as unusable
+for pairing. Do not publish an active pairing code.

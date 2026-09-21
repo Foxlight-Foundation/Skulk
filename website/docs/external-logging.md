@@ -17,6 +17,18 @@ Forward Skulk's structured logs from every node to one place where you can searc
 
 About 30 minutes for first-time setup of the central stack, then about 1 minute per node.
 
+## Enable logging from the dashboard
+
+Open **Settings → Logging**, turn **Enabled** on, enter your central service's
+**Ingest URL**, and select **Save changes**. These settings synchronize to the
+cluster. There is no need to edit `skulk.yaml` to enable logging from a packaged
+Skulk app. The URL must identify a log ingest endpoint, not the Grafana UI.
+
+Saving config does not install Vector or create a central log server. The node
+still needs a functioning log shipper. The deployment instructions below explain
+how an administrator supplies those services; source-service environment files
+apply to that deployment method, not to every packaged-app installation.
+
 ## Architecture in one picture
 
 ```
@@ -108,14 +120,15 @@ The Compose file uses two named volumes:
 
 These survive container restarts and image upgrades. To wipe them, `docker compose down -v`.
 
-## Step 2: Point each Skulk node at the central stack
+## Step 2: Configure nodes and source-service shippers
 
 The shipping process model differs between platforms. Both ship to the same central stack:
 
 - **macOS** runs Vector as a separate LaunchAgent (`foundation.foxlight.skulk-vector`) that tails Skulk's captured stdout file. Its lifecycle is decoupled from Skulk; file retention and disk space bound the backlog.
 - **Linux** runs Vector as an child subprocess that Skulk spawns when `logging.enabled: true` is set in `skulk.yaml`. JSON is piped directly into Vector's stdin via `deployment/logging/vector.yaml` (stdin source). This release does not include a separate `skulk-vector` systemd unit.
 
-On every node that's running Skulk:
+First save **Settings → Logging → Enabled / Ingest URL** as described above.
+For a source installation supervised by the supplied service wrappers:
 
 1. **Install Vector.** Single binary; instructions at [vector.dev](https://vector.dev/docs/setup/installation/). On macOS: `brew install vectordotdev/brew/vector`. On Debian/Ubuntu: `curl -1sLf 'https://repositories.timber.io/public/vector/cfg/setup/bash.deb.sh' | sudo -E bash && sudo apt install vector`.
 2. **Install the Skulk service** (if you haven't already):
@@ -132,7 +145,9 @@ On every node that's running Skulk:
    SKULK_LOGGING_INGEST_URL=http://<central-host>:9428/insert/jsonline?_stream_fields=node_id,component&_msg_field=msg&_time_field=ts
    ```
 
-   On Linux, also set `logging.enabled: true` and `logging.ingest_url: <same-url>` in `skulk.yaml` so Skulk knows to spawn its in-process Vector subprocess.
+   On Linux, the **Logging** settings saved in the dashboard supply the enabled
+   state and ingest URL for the child Vector process. Headless administrators can
+   set the equivalent `logging.enabled` and `logging.ingest_url` configuration.
 
    The query parameters tell VictoriaLogs which fields to use as stream identifiers (so `node_id` and `component` become indexed dimensions).
 4. **Make sure Skulk is emitting JSON.** On macOS this is on by default when you install via the wrapper (`SKULK_LOGGING_EXTERNAL=1` in the env file). On Linux this is gated by `logging.enabled` in `skulk.yaml`.

@@ -11,6 +11,21 @@ first-party Fabric provider capabilities. Speech model placement, loading,
 health, cancellation, and model-store staging remain owned by the normal Skulk
 model lifecycle.
 
+## Use speech in the dashboard
+
+Launch compatible speech models from **Model Store** and wait for their placements
+to become ready. In **Chat**, use the speech controls that appear for the ready
+models: microphone input fills the draft, and **Auto speech** controls spoken
+responses. Where voice discovery is supported, choose a voice or leave automatic
+language matching enabled. **Narrate code** controls spoken handling of streamed
+code blocks.
+
+These are chat controls, not switches in the global Settings panel. Streaming,
+translation and realtime availability follow the mounted model's capabilities;
+users do not need experimental environment flags to enable them. Browser microphone
+permission and secure-context requirements still apply. The HTTP and provider
+sections below are for application integration and advanced administration.
+
 ## HTTP APIs
 
 Skulk currently exposes:

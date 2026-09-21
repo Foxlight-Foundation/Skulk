@@ -28,7 +28,9 @@ On **every node** that will join the cluster:
 
 ### 1. Enable Tailscale connectivity on every node
 
-Add this to `skulk.yaml` on **every** node, the same three lines everywhere, no per-node IPs to manage:
+This advanced cross-network compute setup is not a control in the dashboard
+Settings panel. Configure the following on **every** node; the same three lines
+enable control-plane discovery, with no per-node bootstrap IP list required:
 
 ```yaml
 connectivity:
