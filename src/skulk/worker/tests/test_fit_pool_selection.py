@@ -65,3 +65,43 @@ def test_guard_pool_follows_the_stamped_backend(
     error = worker._local_shard_fit_error(_shard(backend), context_token_limit=65536)  # pyright: ignore[reportPrivateUsage]
 
     assert (error is not None) is refused
+
+
+@pytest.mark.parametrize(
+    ("unified", "host_available_gb", "refused"),
+    [
+        # A discrete card: the combined pool alone decides.
+        (False, 20, False),
+        # A unified-memory APU with host RAM that still holds the window.
+        (True, 100, False),
+        # The same APU after host RAM fell: the carve-out keeps the combined
+        # pool high, but the fixed window no longer fits host memory.
+        (True, 20, True),
+    ],
+)
+def test_guard_checks_a_fixed_window_against_host_ram_on_unified_memory(
+    monkeypatch: pytest.MonkeyPatch,
+    unified: bool,
+    host_available_gb: int,
+    refused: bool,
+) -> None:
+    monkeypatch.setattr(worker_main, "_local_usable_vram", lambda: Memory.from_gb(100))
+    monkeypatch.setattr(worker_main, "_local_unified_memory_gpu", lambda: unified)
+
+    def wireable(_cls: type[MemoryUsage]) -> MemoryUsage:
+        return MemoryUsage.from_bytes(
+            ram_total=Memory.from_gb(128).in_bytes,
+            ram_available=Memory.from_gb(host_available_gb).in_bytes,
+            swap_total=0,
+            swap_available=0,
+        )
+
+    monkeypatch.setattr(MemoryUsage, "from_local_gpu_wireable", classmethod(wireable))
+    worker = object.__new__(Worker)
+    worker.node_id = NodeId("worker-under-test")
+
+    error = worker._local_shard_fit_error(  # pyright: ignore[reportPrivateUsage]
+        _shard("llama_server-rocm"), context_token_limit=131072
+    )
+
+    assert (error is not None) is refused

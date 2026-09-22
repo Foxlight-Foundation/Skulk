@@ -1037,8 +1037,13 @@ def test_reserve_instance_system_ram_charges_only_ram_backed_shards() -> None:
     # the figure is the smaller of the two.
     assert charged[ram_node] == Memory.from_gb(48) - footprint
     assert charged[ram_node] < untouched[ram_node]
-    # A GPU-offload shard on a discrete-VRAM node lives in VRAM, not here.
+    # A GPU-offload shard on a discrete-VRAM node lives in VRAM, not here, and
+    # so does an unstamped one, which the VRAM reservation already charges.
     assert charged[gpu_node] == untouched[gpu_node]
+    unstamped = reserve_instance_system_ram(
+        node_memory, {InstanceId(): instance_on(gpu_node, None)}, node_vram
+    )
+    assert unstamped[gpu_node] == untouched[gpu_node]
     # A lazily growing MLX cache is charged at the admission floor, not at
     # its stamped window, which is commonly the node's whole fit.
     assert charged[mlx_node] == Memory.from_gb(48) - mlx_footprint

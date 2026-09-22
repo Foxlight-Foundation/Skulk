@@ -568,6 +568,34 @@ def _local_usable_vram() -> Memory | None:
     return Memory.from_bytes(vram_usable)
 
 
+def _local_unified_memory_gpu() -> bool:
+    """Whether THIS node is a unified-memory APU (the GTT spans the whole system).
+
+    The same signature ``_local_usable_vram`` and the master's
+    ``usable_vram_by_node`` use: an amdgpu device whose GTT aperture exceeds
+    the VRAM carve-out and covers all of system RAM. On such a node a
+    fixed-window engine's KV allocation takes host pages, so its stamped
+    window is sized from host RAM and must be checked against host RAM too.
+    """
+    if sys.platform != "linux":
+        return False
+    from skulk.utils.info_gatherer.linux_gpu import (
+        find_amd_gpu_device,
+        read_accelerator_metrics,
+    )
+    from skulk.utils.info_gatherer.nvidia_gpu import prefer_nvidia_telemetry
+
+    device = None if prefer_nvidia_telemetry() else find_amd_gpu_device()
+    if device is None:
+        return False
+    accelerator = read_accelerator_metrics(device)
+    total = accelerator.vram_total_bytes
+    gtt_total = accelerator.gtt_total_bytes
+    if not total or total <= 0 or gtt_total is None or gtt_total <= total:
+        return False
+    return gtt_total >= MemoryUsage.from_local_gpu_wireable().ram_total.in_bytes
+
+
 def _summarize_worker_task(task: Task) -> str:
     """Return a compact task summary for worker lifecycle logs."""
     return summarize_task_for_log(task)
@@ -1127,6 +1155,25 @@ class Worker:
         if vram is not None:
             usable = vram
             pool = f"{vram.in_gb:.1f}GB usable GPU VRAM"
+            # On a unified-memory APU the combined pool keeps the VRAM carve-out
+            # in its figure even as host RAM falls, but a fixed-window engine's
+            # KV allocation takes host pages and its window was sized from host
+            # RAM; check that window against host RAM as well, or the guard
+            # could pass an allocation host memory no longer holds.
+            if shard_preallocates_kv_upfront(shard) and _local_unified_memory_gpu():
+                local = MemoryUsage.from_local_gpu_wireable()
+                host = min(
+                    local.ram_available, gpu_working_set_ceiling(local.ram_total)
+                )
+                if footprint_exceeds_usable(footprint, host, _LOAD_FIT_TOLERANCE):
+                    return (
+                        f"Refusing to load a shard of {shard.model_card.model_id} on "
+                        f"{self.node_id}: ~{footprint.in_gb:.1f}GB needed for its "
+                        f"fixed context window but only ~{host.in_gb:.1f}GB of host "
+                        "RAM is usable on this unified-memory node, beyond the "
+                        f"{_LOAD_FIT_TOLERANCE:.0%} fit tolerance. Refusing before "
+                        "load to avoid an OOM abort."
+                    )
         else:
             local = MemoryUsage.from_local_gpu_wireable()
             usable = min(local.ram_available, gpu_working_set_ceiling(local.ram_total))

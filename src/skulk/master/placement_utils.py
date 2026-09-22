@@ -336,10 +336,16 @@ def reserve_instance_system_ram(
         assignments = instance.shard_assignments
         for node_id, runner_id in assignments.node_to_runner.items():
             shard = assignments.runner_to_shard[runner_id]
+            # The same ownership rule as reserve_instance_vram: a shard that
+            # offloads, or an unstamped one on a discrete-VRAM host, lives in
+            # VRAM and is charged there, never here as well.
             in_discrete_vram = (
                 node_id in node_vram
                 and node_id not in unified_memory_gpu_nodes
-                and backend_offloads_to_vram(shard.resolved_backend)
+                and (
+                    shard.resolved_backend is None
+                    or backend_offloads_to_vram(shard.resolved_backend)
+                )
             )
             if in_discrete_vram:
                 continue
