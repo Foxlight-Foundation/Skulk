@@ -165,6 +165,19 @@ const Spacer = styled.span`
 /* ---- component ---- */
 
 /** Retain an unsaved configuration draft while visiting immediate device actions. */
+/** Server default for ``inference.served_context_tokens``. */
+const SERVED_CONTEXT_DEFAULT_TOKENS = 32768;
+/** Bounds the server enforces on a requested context window. */
+const MIN_SERVED_CONTEXT_TOKENS = 256;
+const MAX_SERVED_CONTEXT_TOKENS = 1048576;
+
+/** Keep a typed value inside the server's accepted range before saving;
+ * an empty or unreadable entry saves the default. */
+function clampServedContext(value: number): number {
+  if (!Number.isFinite(value)) return SERVED_CONTEXT_DEFAULT_TOKENS;
+  return Math.min(MAX_SERVED_CONTEXT_TOKENS, Math.max(MIN_SERVED_CONTEXT_TOKENS, Math.round(value)));
+}
+
 export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
   const { t } = useSkulkTranslation();
   const { fullConfig, effective, configPath, loading, saving, error, fetchConfig, saveFullConfig } = useConfig(
@@ -199,6 +212,8 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
   } });
   const [draft, setDraft] = useState<StoreConfig | null>(null);
   const [kvBackend, setKvBackend] = useState('default');
+  // Held as typed text so a cleared field stays cleared while the operator types.
+  const [servedContextText, setServedContextText] = useState(String(SERVED_CONTEXT_DEFAULT_TOKENS));
   const [hfToken, setHfToken] = useState('');
   const [telemetryDraft, setTelemetryDraft] = useState<TelemetryConfig | null>(null);
   const [fabricDraft, setFabricDraft] = useState<IntelligentFabricConfig>({
@@ -229,6 +244,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
         : null,
     );
     setKvBackend(effective?.kv_cache_backend ?? fullConfig?.inference?.kv_cache_backend ?? 'default');
+    setServedContextText(String(fullConfig?.inference?.served_context_tokens ?? SERVED_CONTEXT_DEFAULT_TOKENS));
     setHfToken(fullConfig?.hf_token ?? '');
     setFabricDraft({
       enabled: fullConfig?.intelligent_fabric?.enabled ?? false,
@@ -288,7 +304,13 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
     // Base on the last fetched config to avoid dropping sections
     const updated: FullConfig = { ...(fullConfig ?? {}) };
     if (draft) updated.model_store = draft;
-    updated.inference = { kv_cache_backend: kvBackend };
+    // Keep every inference field the server knows, not only the ones this
+    // form edits: rebuilding the section from two fields would drop the rest.
+    updated.inference = {
+      ...(fullConfig?.inference ?? {}),
+      kv_cache_backend: kvBackend,
+      served_context_tokens: clampServedContext(Number.parseInt(servedContextText, 10)),
+    };
     // Include logging config
     updated.logging = { ...loggingDraft };
     updated.intelligent_fabric = { ...fabricDraft };
@@ -322,7 +344,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
     } else {
       addToast({ type: 'error', message: t('settings.toasts.saveFailed', 'Failed to save settings') });
     }
-  }, [draft, fullConfig, hfToken, kvBackend, loggingDraft, fabricDraft, telemetryDraft, themeDraft, dispatch, onClose, saveFullConfig, t]);
+  }, [draft, fullConfig, hfToken, kvBackend, servedContextText, loggingDraft, fabricDraft, telemetryDraft, themeDraft, dispatch, onClose, saveFullConfig, t]);
 
   // eslint-disable-next-line react-hooks/set-state-in-effect -- Closing the modal resets its nested navigation for the next opening.
   useEffect(() => { if (!open) setDevicesOpen(false); }, [open]);
@@ -518,6 +540,33 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                 {t('settings.inference.mlxQuantizedOption', 'MLX Quantized (requires SKULK_KV_CACHE_BITS env)')}
               </option>
             </Select>
+            <FieldLabel>
+              {t('settings.inference.servedContext', 'Default served context (tokens)')}
+              <InfoTooltip
+                filled
+                content={t(
+                  'settings.inference.servedContextTooltip',
+                  'llama-server, in-process llama.cpp and vLLM reserve the whole context window in memory when a model loads, whether or not requests use it. Placements that do not choose a window get this many tokens; a placement can ask for more under Advanced, up to what its nodes hold. MLX grows its cache per request and is not affected.',
+                )}
+              />
+            </FieldLabel>
+            <StyledField
+              size="sm"
+              type="number"
+              min={MIN_SERVED_CONTEXT_TOKENS}
+              max={MAX_SERVED_CONTEXT_TOKENS}
+              step={1024}
+              aria-label={t('settings.inference.servedContext', 'Default served context (tokens)')}
+              value={servedContextText}
+              onChange={(e) => setServedContextText((e.target as HTMLInputElement).value)}
+              style={{ maxWidth: 120 }}
+            />
+            <HintText>
+              {t(
+                'settings.inference.servedContextHint',
+                'Applies to the next placement. Running models keep the window they loaded with.',
+              )}
+            </HintText>
             {envOverride ? (
               <HintText>
                 {t(

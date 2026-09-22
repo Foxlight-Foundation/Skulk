@@ -34,6 +34,7 @@ from skulk.shared.models.memory_estimate import (
     estimate_shard_footprint,
     instance_context_token_limit,
     shard_fraction_of_model,
+    shard_preallocates_kv_upfront,
 )
 from skulk.shared.models.model_cards import (
     ModelCard,
@@ -158,6 +159,43 @@ def _listener_ports_in_use(
     return ports
 
 
+def served_context_window(
+    assignments: ShardAssignments,
+    ceiling: int | None,
+    *,
+    requested: int | None,
+    served_default: int | None,
+) -> int | None:
+    """Context window to stamp on a placement, given its memory-fit ceiling.
+
+    ``ceiling`` is the largest window the placement can hold (memory fit,
+    card maximum, engine caps). A caller's ``requested`` window is honored
+    exactly when it fits and refused when it does not, so an operator never
+    gets a silently different window than the one asked for. Without a
+    request, an engine that reserves its whole window at load
+    (``shard_preallocates_kv_upfront``) takes ``served_default`` so it does
+    not commit memory for the card's full context; MLX, which grows its
+    cache per request, keeps the full ceiling.
+
+    Raises:
+        PlacementError: The requested window exceeds what the placement holds.
+    """
+    if requested is not None:
+        if ceiling is not None and requested > ceiling:
+            raise PlacementError(
+                f"The requested context of {requested} tokens exceeds the "
+                f"{ceiling} tokens this placement can hold; request at most "
+                f"{ceiling} or place on nodes with more free memory"
+            )
+        return requested
+    if served_default is not None and any(
+        shard_preallocates_kv_upfront(shard)
+        for shard in assignments.runner_to_shard.values()
+    ):
+        return served_default if ceiling is None else min(ceiling, served_default)
+    return ceiling
+
+
 def add_instance_to_placements(
     command: CreateInstance,
     topology: Topology,
@@ -167,6 +205,7 @@ def add_instance_to_placements(
     unified_memory_gpu_nodes: AbstractSet[NodeId] | None = None,
     approved_remote_code_identities: AbstractSet[str] | None = None,
     node_resources: Mapping[NodeId, NodeResources] | None = None,
+    served_context_default: int | None = None,
 ) -> Mapping[InstanceId, Instance]:
     """Validate and add one caller-specified exact instance placement.
 
@@ -277,6 +316,13 @@ def add_instance_to_placements(
         # the preview maximum. Raising it silently can multiply load-time KV
         # allocation and defeat the caller's resource plan.
         ceiling = requested_limit if ceiling is None else min(ceiling, requested_limit)
+    else:
+        ceiling = served_context_window(
+            assignments,
+            ceiling,
+            requested=None,
+            served_default=served_context_default,
+        )
     instance = command.instance.model_copy(
         update={"context_token_limit": ceiling, "shard_assignments": assignments}
     )
@@ -695,6 +741,7 @@ def place_instance(
     unified_memory_gpu_nodes: AbstractSet[NodeId] | None = None,
     stamped_exclusions: set[NodeId] | None = None,
     approved_remote_code_identities: AbstractSet[str] | None = None,
+    served_context_default: int | None = None,
 ) -> dict[InstanceId, Instance]:
     if remote_code_approval_required(
         command.model_card, approved_remote_code_identities
@@ -1292,6 +1339,12 @@ def place_instance(
             )
         ),
     )
+    context_token_limit = served_context_window(
+        shard_assignments,
+        context_token_limit,
+        requested=command.requested_context_tokens,
+        served_default=served_context_default,
+    )
 
     cycle_digraph: Topology = topology.get_subgraph_from_nodes(selected_cycle.node_ids)
 
@@ -1340,6 +1393,7 @@ def place_instance(
             instance_id=instance_id,
             shard_assignments=shard_assignments,
             context_token_limit=context_token_limit,
+            requested_context_tokens=command.requested_context_tokens,
             excluded_nodes=stamped_exclusions_list,
             system_role=command.system_role,
             driver_node=driver_node,
@@ -1388,6 +1442,7 @@ def place_instance(
                 instance_id=instance_id,
                 shard_assignments=shard_assignments,
                 context_token_limit=context_token_limit,
+                requested_context_tokens=command.requested_context_tokens,
                 excluded_nodes=stamped_exclusions_list,
                 system_role=command.system_role,
                 jaccl_devices=mlx_jaccl_devices,
@@ -1407,6 +1462,7 @@ def place_instance(
                 instance_id=instance_id,
                 shard_assignments=shard_assignments,
                 context_token_limit=context_token_limit,
+                requested_context_tokens=command.requested_context_tokens,
                 excluded_nodes=stamped_exclusions_list,
                 system_role=command.system_role,
                 hosts_by_node=hosts_by_node,
@@ -1476,6 +1532,7 @@ def fallback_command_for_refused_instance(
         # System-role marker (intelligent-fabric steward): repair
         # re-placements re-stamp it so the flag survives node loss.
         system_role=instance.system_role,
+        requested_context_tokens=instance.requested_context_tokens,
     )
 
 
@@ -1511,6 +1568,7 @@ def replacement_command_for_refused_instance(instance: Instance) -> PlaceInstanc
         # System-role marker (intelligent-fabric steward): repair
         # re-placements re-stamp it so the flag survives node loss.
         system_role=instance.system_role,
+        requested_context_tokens=instance.requested_context_tokens,
     )
 
 
@@ -1547,6 +1605,7 @@ def replacement_command_for_download_failed_instance(
         # System-role marker (intelligent-fabric steward): repair
         # re-placements re-stamp it so the flag survives node loss.
         system_role=instance.system_role,
+        requested_context_tokens=instance.requested_context_tokens,
     )
 
 

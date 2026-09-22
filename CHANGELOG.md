@@ -19,6 +19,20 @@ This project records release notes here and mirrors public-facing notes in
   the worker's event loop.
 ### Added
 
+- Placements choose their context window. llama-server, in-process llama.cpp
+  and vLLM reserve the whole window's memory when a model loads, and since the
+  unified-memory fix they were sized to the card's full context (262144 for
+  the steward), reserving memory most workloads never use. They now get a fleet
+  default, `inference.served_context_tokens` (32768, editable in Settings),
+  unless the placement asks for a window: `context_tokens` on
+  `POST /place_instance`, or the new context field in the dashboard's
+  placement dialog, which shows the maximum the chosen nodes hold and roughly
+  how much memory the window reserves. A request above the maximum is refused
+  with the maximum named; repair re-placements keep the request. MLX, which
+  grows its cache per request, keeps the full memory fit. Placement previews
+  add `max_context_tokens`, `default_context_tokens`,
+  `reserves_context_at_load`, and `kv_bytes_per_token`.
+
 - An installed model can take the signed card the registry publishes for it
   from the Downloads page: an Update action beside "Update available" asks
   the store for the current signed card, and when the bytes already

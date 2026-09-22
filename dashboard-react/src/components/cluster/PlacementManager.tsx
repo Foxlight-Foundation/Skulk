@@ -26,6 +26,8 @@ export interface PlacementManagerProps {
     instanceMeta: string;
     minNodes: number;
     excludedNodes: string[];
+    /** Chosen context window; omitted to take the fleet default. */
+    contextTokens?: number;
   }) => void;
   /** Embedding models: hide sharding/networking selectors and node slider */
   isEmbedding?: boolean;
@@ -280,6 +282,56 @@ const Callout = styled.div`
   color: ${({ theme }) => theme.colors.warningText};
 `;
 
+/** Smallest context window the server accepts for a placement. */
+const MIN_CONTEXT_TOKENS = 256;
+
+/** Group a token count for display, e.g. 32768 -> "32,768". */
+function formatTokens(tokens: number): string {
+  return tokens.toLocaleString();
+}
+
+/** Human-readable size for a reserved KV estimate. */
+function formatBytes(bytes: number): string {
+  const gib = bytes / 1024 ** 3;
+  if (gib >= 1) return `${gib.toFixed(1)} GiB`;
+  return `${Math.max(1, Math.round(bytes / 1024 ** 2))} MiB`;
+}
+
+const ContextRow = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+`;
+
+const ContextInput = styled.input`
+  width: 120px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid ${({ theme }) => theme.colors.border};
+  background: ${({ theme }) => theme.colors.surface};
+  color: ${({ theme }) => theme.colors.text};
+  font: inherit;
+  &[aria-invalid='true'] {
+    border-color: ${({ theme }) => theme.colors.error};
+  }
+`;
+
+const ContextMeta = styled.span`
+  color: ${({ theme }) => theme.colors.textSecondary};
+  font-size: 12px;
+`;
+
+const ContextReset = styled.button`
+  background: none;
+  border: none;
+  padding: 0;
+  color: ${({ theme }) => theme.colors.primary};
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+`;
+
 const ErrorCallout = styled.div`
   display: flex;
   align-items: flex-start;
@@ -333,6 +385,10 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
   // with the PlaceInstance command so the master's planner treats those
   // nodes as if they were absent for *this* placement only.
   const [excludedNodes, setExcludedNodes] = useState<Set<string>>(new Set());
+  // Context window typed by the operator, as text so a cleared field stays
+  // cleared while they type; null keeps the fleet default. Engines that
+  // reserve their window at load commit this memory up front.
+  const [contextText, setContextText] = useState<string | null>(null);
 
   // The cluster preview, slider, and combo evaluation all run against the
   // *effective* topology — the original minus excluded nodes. The master
@@ -420,6 +476,7 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
     setSharding('Pipeline');
     setInstanceMeta('MlxRing');
     setExcludedNodes(new Set());
+    setContextText(null);
   }, [open, modelId]);
 
   // Re-fetch previews whenever the modal opens for a model, the model
@@ -540,15 +597,33 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
     }
   }, [minNodes, currentOptions, currentKey]);
 
+  const contextMax = currentPreview?.max_context_tokens ?? null;
+  const contextDefault = currentPreview?.default_context_tokens ?? contextMax;
+  const parsedContext = contextText === null ? null : Number.parseInt(contextText, 10);
+  const contextTokens = parsedContext !== null && Number.isFinite(parsedContext) ? parsedContext : null;
+  const contextChoice = contextText === null ? contextDefault : contextTokens;
+  const contextInvalid =
+    contextText !== null
+    && (contextTokens === null
+      || contextTokens < MIN_CONTEXT_TOKENS
+      || (contextMax !== null && contextTokens > contextMax));
+
   const handleLaunch = useCallback(() => {
     const excludedNodesArr = [...excludedNodes];
     if (isEmbedding) {
       onLaunch({ modelId, sharding: 'Pipeline', instanceMeta: 'MlxRing', minNodes: 1, excludedNodes: excludedNodesArr });
     } else {
-      onLaunch({ modelId, sharding, instanceMeta, minNodes, excludedNodes: excludedNodesArr });
+      onLaunch({
+        modelId,
+        sharding,
+        instanceMeta,
+        minNodes,
+        excludedNodes: excludedNodesArr,
+        ...(contextTokens !== null ? { contextTokens } : {}),
+      });
     }
     onClose();
-  }, [modelId, sharding, instanceMeta, minNodes, excludedNodes, isEmbedding, onLaunch, onClose]);
+  }, [modelId, sharding, instanceMeta, minNodes, excludedNodes, contextTokens, isEmbedding, onLaunch, onClose]);
 
   const toggleNodeExclusion = useCallback((nodeId: string) => {
     setExcludedNodes((prev) => {
@@ -574,7 +649,7 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
   const embeddingComboAvailable = isEmbedding
     ? (optionsByNodeCount[1]?.pipeline_ring?.available ?? false)
     : false;
-  const canLaunch = isEmbedding ? embeddingComboAvailable : (currentCombo?.available ?? false);
+  const canLaunch = isEmbedding ? embeddingComboAvailable : ((currentCombo?.available ?? false) && !contextInvalid);
   const pipelineRing = currentOptions?.pipeline_ring;
   const pipelineJaccl = currentOptions?.pipeline_jaccl;
   const tensorRing = currentOptions?.tensor_ring;
@@ -721,6 +796,61 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
                       'Click a node to exclude it from this placement. Excluded nodes are skipped only for this launch - already-running instances on them are unaffected.',
                     )}
                   </NodePillHint>
+                </Section>
+              )}
+
+              {/* Context window: the window the engine serves. Engines that
+                  reserve it at load commit its memory whether or not requests
+                  use it, so the default is modest and the maximum is shown. */}
+              {!isEmbedding && currentPreview && contextMax !== null && (
+                <Section>
+                  <SectionLabel>{t('placement.contextWindow', 'Context window')}</SectionLabel>
+                  <ContextRow>
+                    <ContextInput
+                      type="number"
+                      min={MIN_CONTEXT_TOKENS}
+                      max={contextMax}
+                      step={1024}
+                      aria-label={t('placement.contextWindow', 'Context window')}
+                      aria-invalid={contextInvalid}
+                      value={contextText ?? String(contextDefault ?? '')}
+                      onChange={(e) => setContextText(e.target.value)}
+                    />
+                    <ContextMeta>
+                      {t('placement.contextTokensOf', 'tokens, up to {max}', { max: formatTokens(contextMax) })}
+                    </ContextMeta>
+                    {contextText !== null && (
+                      <ContextReset type="button" onClick={() => setContextText(null)}>
+                        {t('placement.contextUseDefault', 'Use default ({tokens})', { tokens: formatTokens(contextDefault ?? contextMax) })}
+                      </ContextReset>
+                    )}
+                  </ContextRow>
+                  <NodePillHint>
+                    {currentPreview.reserves_context_at_load
+                      ? currentPreview.kv_bytes_per_token && contextChoice
+                        ? t(
+                          'placement.contextReservedHint',
+                          'This engine reserves the whole window when the model loads: about {size} of memory for {tokens} tokens.',
+                          { size: formatBytes(currentPreview.kv_bytes_per_token * contextChoice), tokens: formatTokens(contextChoice) },
+                        )
+                        : t(
+                          'placement.contextReservedNoSizeHint',
+                          'This engine reserves the whole window when the model loads.',
+                        )
+                      : t(
+                        'placement.contextLazyHint',
+                        'This engine grows its cache per request; the window is a ceiling, not a reservation.',
+                      )}
+                  </NodePillHint>
+                  {contextInvalid && (
+                    <Callout>
+                      <FiInfo size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+                      {t('placement.contextOutOfRange', 'Choose between {min} and {max} tokens for this placement.', {
+                        min: formatTokens(MIN_CONTEXT_TOKENS),
+                        max: formatTokens(contextMax),
+                      })}
+                    </Callout>
+                  )}
                 </Section>
               )}
 

@@ -307,6 +307,15 @@ export interface PlacementPreview {
   /** Per-host alternative to the ranked pick: a single-node placement on a
    * host that passes admission but lost the planner ranking (#557). */
   alternative?: boolean;
+  /** Largest context window this placement holds; a larger request is refused. */
+  max_context_tokens?: number | null;
+  /** Window an unspecified launch gets: the fleet default for engines that
+   * reserve at load, otherwise the maximum. */
+  default_context_tokens?: number | null;
+  /** Whether the engine reserves the whole window's KV memory at load. */
+  reserves_context_at_load?: boolean;
+  /** Estimated KV bytes per token of window across the placement. */
+  kv_bytes_per_token?: number | null;
 }
 
 /** All known capability tags. */

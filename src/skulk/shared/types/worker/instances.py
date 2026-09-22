@@ -182,6 +182,14 @@ class BaseInstance(TaggedModel):
             "loss."
         ),
     )
+    requested_context_tokens: int | None = Field(
+        default=None,
+        description=(
+            "The caller's requested context window at placement, if any. Repair "
+            "re-placements carry it forward so a replacement keeps the window "
+            "the operator chose rather than falling back to the fleet default."
+        ),
+    )
 
     def shard(self, runner_id: RunnerId) -> ShardMetadata | None:
         return self.shard_assignments.runner_to_shard.get(runner_id, None)

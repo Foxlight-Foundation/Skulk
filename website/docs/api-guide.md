@@ -2156,6 +2156,7 @@ curl -X POST http://localhost:52415/place_instance \
 | `sharding` | `Pipeline` or `Tensor` |
 | `instance_meta` | `MlxRing`, `MlxJaccl`, or `LlamaRpc` (multi-node GGUF pooling: one driver node holds the model and each donor node lends GPU memory over the network) |
 | `min_nodes` | Minimum nodes required for the placement |
+| `context_tokens` | Optional context window for this placement, 256 to 1,048,576 tokens. The placer honors it exactly up to the largest window the chosen nodes hold (the preview's `max_context_tokens`) and answers **400** naming that maximum for a larger request; it is never silently lowered. Repair re-placements of the instance keep the same request. When omitted, llama-server, in-process llama.cpp and vLLM placements take the fleet default `inference.served_context_tokens` (32768 unless changed in Settings), because those engines reserve the whole window's KV memory at load; MLX placements keep the full memory fit, since MLX grows its cache per request. |
 | `excluded_nodes` | Optional. Node IDs the master should treat as if absent when scoring this placement. Already-running instances on those nodes are unaffected (exclusion is per-placement, not cluster-wide), and automatic repair re-placements of this instance (memory refusal, download failure) keep honoring the same exclusions. Default: `[]`. Note: node IDs are per-session, so they change when a cluster session restarts. |
 
 The placement is validated against the current cluster state **before** the
@@ -2234,8 +2235,17 @@ mint for that combination, not the shape that was asked about: for example a
 GGUF model previewed at two GPU nodes reports `LlamaRpc` (driver plus memory
 donors) even though the request enumerates the generic metas. Trust the
 preview's reported meta when constructing a follow-up `POST /place_instance`.
-The embedded instance's `contextTokenLimit` is also the exact limit launch
-would stamp. Unified-memory GPUs are not previewed with a discrete-VRAM context
+The embedded instance's `contextTokenLimit` is the largest window the
+placement holds, and each preview also carries `max_context_tokens` (the
+same value), `default_context_tokens` (what a launch without
+`context_tokens` stamps: the fleet default for engines that reserve at load,
+otherwise the maximum), `reserves_context_at_load`, and
+`kv_bytes_per_token` (the estimated KV cost of one token of window across
+the placement, null when the card's attention geometry is unknown), so a
+client can show what a chosen window reserves before launching. Posting the
+preview's instance to `POST /instance` keeps its stamped maximum; an exact
+instance without `contextTokenLimit` takes the fleet default like
+`POST /place_instance`. Unified-memory GPUs are not previewed with a discrete-VRAM context
 lift that the master would later remove.
 
 Besides the planner's ranked pick per shape, the response also contains

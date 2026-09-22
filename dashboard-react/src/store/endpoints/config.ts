@@ -32,6 +32,13 @@ export interface PersistedStoreConfig
 
 export interface InferenceConfig {
   kv_cache_backend: string;
+  /**
+   * Context window, in tokens, that llama-server, in-process llama.cpp and
+   * vLLM placements get when the placement names none. Those engines reserve
+   * the whole window's memory when the model loads. Absent means the server
+   * default (32768).
+   */
+  served_context_tokens?: number;
 }
 
 export interface LoggingConfig {

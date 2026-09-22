@@ -97,6 +97,22 @@ worker's live reading. The live-RAM served window leaves the same fraction of
 headroom, so a window sized to the moment's free memory cannot use the
 tolerance to start with a KV allocation larger than what is actually free."""
 
+SERVED_CONTEXT_DEFAULT_TOKENS: Final = 32768
+"""Context window an engine that reserves its KV cache at load gets when the
+caller names none (llama-server, in-process llama.cpp, vLLM). Those engines
+commit the whole window's memory up front whether or not a request uses it,
+so sizing them to the card's maximum (commonly 262144) reserves memory most
+workloads never touch. Operators change it fleet-wide in Settings
+(``inference.served_context_tokens``) or per placement; MLX grows its cache
+per request and keeps the full memory fit."""
+
+MIN_REQUESTED_CONTEXT_TOKENS: Final = 256
+"""Smallest context window a caller or the fleet setting may request."""
+
+MAX_REQUESTED_CONTEXT_TOKENS: Final = 1_048_576
+"""Largest context window a caller or the fleet setting may request; the
+placement's memory fit and the card's maximum still bound what is stamped."""
+
 KV_HEAD_DIM_FALLBACK: int = 128
 """Attention head dimension assumed when a model card omits it (cards do not
 persist ``head_dim``). 128 dominates current MLX families (Llama/Qwen/GLM)."""
