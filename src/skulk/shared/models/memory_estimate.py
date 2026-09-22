@@ -89,6 +89,14 @@ Reserving a model's advertised max (e.g. GLM-4.7-Flash: 131072) would over-
 refuse by tens of GB. Planning assumption only; exposing it as an operator/UI
 knob is tracked follow-up work."""
 
+LOAD_FIT_TOLERANCE: Final = 0.10
+"""Fraction by which a shard's estimated footprint may exceed live usable memory
+before the worker's pre-load guard refuses (#383): the footprint is padded and
+the master admits on a gossiped figure that can sit a little above the
+worker's live reading. The live-RAM served window leaves the same fraction of
+headroom, so a window sized to the moment's free memory cannot use the
+tolerance to start with a KV allocation larger than what is actually free."""
+
 KV_HEAD_DIM_FALLBACK: int = 128
 """Attention head dimension assumed when a model card omits it (cards do not
 persist ``head_dim``). 128 dominates current MLX families (Llama/Qwen/GLM)."""
@@ -423,8 +431,9 @@ def _system_ram_window_tokens(
     The window is committed at load against what the node has free then, so
     it is sized from the live ``ram_available`` the master admitted the
     placement against, capped at the node's GPU working-set ceiling (the same
-    pool the worker's own pre-spawn guard checks on such a node), after the
-    shard's weights and overhead. The smallest hosting node bounds the
+    pool the worker's own pre-spawn guard checks on such a node), less the
+    guard's ``LOAD_FIT_TOLERANCE`` as headroom, after the shard's weights and
+    overhead. The smallest hosting node bounds the
     instance. It is never below ``KV_CONTEXT_BUDGET_TOKENS``: admission
     already guaranteed that much KV fits, so a live reading lower than the
     floor cannot shrink the window the placement was admitted for. A missing
@@ -440,7 +449,8 @@ def _system_ram_window_tokens(
         node_tokens = _node_window_tokens(
             model_card,
             shard_assignments.runner_to_shard[runner_id],
-            min(ram_available, gpu_working_set_ceiling(ram_total)),
+            min(ram_available, gpu_working_set_ceiling(ram_total))
+            * (1.0 - LOAD_FIT_TOLERANCE),
             fixed_memory_by_node.get(node_id, Memory()),
         )
         if node_tokens is None:

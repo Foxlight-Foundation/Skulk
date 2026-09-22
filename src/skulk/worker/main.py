@@ -47,7 +47,9 @@ from skulk.shared.log_summaries import summarize_task_for_log
 from skulk.shared.models.memory_estimate import (
     GPU_VRAM_WORKING_SET_FRACTION,
     KV_CONTEXT_BUDGET_TOKENS,
+    LOAD_FIT_TOLERANCE,
     UMA_GPU_OS_HEADROOM,
+    backend_offloads_to_vram,
     estimate_shard_footprint,
     gpu_working_set_ceiling,
     shard_preallocates_kv_upfront,
@@ -192,9 +194,10 @@ _RUNNER_CRASH_WINDOW_SECONDS = 60.0
 """Rolling window for ``_RUNNER_CRASH_THRESHOLD`` (see CrashWindow)."""
 
 
-_LOAD_FIT_TOLERANCE = 0.10
+_LOAD_FIT_TOLERANCE = LOAD_FIT_TOLERANCE
 """Fraction by which a shard's estimated footprint may exceed live usable memory
-before the pre-load guard refuses (#383).
+before the pre-load guard refuses (#383). Shared with the estimator, which
+leaves the same headroom when it sizes a live-RAM served window.
 
 The footprint from ``estimate_shard_footprint`` already bakes in the engine
 overhead factor (1.30 for MLX), a full ``KV_CONTEXT_BUDGET_TOKENS`` KV
@@ -1112,8 +1115,15 @@ class Worker:
         # On a discrete-GPU node the engine allocates from VRAM, not system RAM,
         # so size the guard against local usable VRAM or it would falsely refuse
         # the very placement the (VRAM-aware) master just admitted. None on
-        # unified-memory (Apple) nodes, which keep the system-RAM path.
-        vram = _local_usable_vram()
+        # unified-memory (Apple) nodes, which keep the system-RAM path. A shard
+        # the master resolved to a backend that does not offload (``-cpu``, a
+        # bare tag) lives in system RAM even beside a discrete GPU, so it is
+        # checked against RAM, the pool its stamped window was sized from.
+        in_system_ram = (
+            shard.resolved_backend is not None
+            and not backend_offloads_to_vram(shard.resolved_backend)
+        )
+        vram = None if in_system_ram else _local_usable_vram()
         if vram is not None:
             usable = vram
             pool = f"{vram.in_gb:.1f}GB usable GPU VRAM"

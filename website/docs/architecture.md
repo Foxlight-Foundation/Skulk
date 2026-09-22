@@ -642,7 +642,7 @@ the admission floor for a lazily growing MLX cache; a placement whose load
 telemetry cannot have shown yet (awaiting its indexed echo, or still
 loading) is also taken off the observed figure, and the GPU pool of a
 unified-memory APU is derived from the reserved figure. That live figure is
-capped at the
+reduced by the worker guard's fit tolerance as headroom, then capped at the
 node's GPU working-set ceiling and at the static fit, and never below the
 floor; a node without a live reading keeps the floor. The worker's own
 pre-spawn guard checks that stamped window against its current free memory

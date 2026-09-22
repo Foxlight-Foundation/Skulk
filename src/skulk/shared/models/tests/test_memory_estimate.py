@@ -1,6 +1,7 @@
 from skulk.shared.models.memory_estimate import (
     GPU_WORKING_SET_FRACTION,
     LLAMA_CPP_MEMORY_OVERHEAD_FACTOR,
+    LOAD_FIT_TOLERANCE,
     MEMORY_OVERHEAD_FACTOR,
     MEMORY_OVERHEAD_FLOOR,
     estimate_kv_cache_bytes,
@@ -465,6 +466,12 @@ def test_instance_limit_gguf_non_vram_node_sizes_the_window_from_live_ram():
     assert squeezed == KV_CONTEXT_BUDGET_TOKENS
     assert static_fit is not None
     assert generous <= static_fit
+    # The window leaves the worker guard's tolerance as headroom: its
+    # footprint fits within (1 - tolerance) of the pool it was sized from, so
+    # the guard's allowance cannot be spent on memory that is not there.
+    footprint = estimate_shard_footprint(card, 1.0, context_budget=tighter)
+    assert footprint.in_bytes <= Memory.from_gb(30).in_bytes * (1 - LOAD_FIT_TOLERANCE)
+    assert footprint.in_bytes > Memory.from_gb(30).in_bytes * (1 - LOAD_FIT_TOLERANCE) * 0.97
 
 
 def test_instance_limit_gguf_ring_takes_the_smallest_live_window():
