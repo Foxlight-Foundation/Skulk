@@ -11,6 +11,11 @@ from httpx import ASGITransport, AsyncClient
 
 import skulk.api.main as api_main
 from skulk.api.main import API
+from skulk.api.types.api import (
+    CachedArtifactLocation,
+    CacheInventoryStatus,
+    ReconciliationStatus,
+)
 from skulk.shared.models.memory_estimate import estimate_shard_footprint
 from skulk.shared.models.model_cards import (
     ModelCard,
@@ -19,7 +24,7 @@ from skulk.shared.models.model_cards import (
     authorized_model_card_digest,
 )
 from skulk.shared.models.registry import RegistryCapabilityClaim
-from skulk.shared.types.common import ModelId
+from skulk.shared.types.common import ModelId, NodeId
 from skulk.shared.types.memory import Memory
 from skulk.store.installed_cards import (
     InstalledCardRecord,
@@ -348,6 +353,64 @@ async def test_store_generation_supplies_active_metadata_and_current_update(
     assert entry.active_installed_identity == installed_card.registry_card_id
     assert entry.current_registry_identity == current_card.registry_card_id
     assert entry.update_available is True
+
+
+async def test_store_registry_flags_an_update_for_a_custom_generation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A generation installed under a custom card is behind the signed card.
+
+    The store read a generation with no registry identity as current, so
+    the Downloads page never offered the update that would adopt the signed
+    card without moving bytes.
+    """
+
+    current_card = _card("b")
+    store_record = _custom_installed_record(tmp_path)
+    store_client = _RegistryStoreClient(
+        [
+            {
+                "model_id": str(current_card.model_id),
+                "store_path": "example--model",
+                "total_bytes": 1024,
+                "files": ["config.json"],
+                "downloaded_at": "2026-09-22T00:00:00+00:00",
+                "installed_card": store_record.model_dump(mode="json"),
+            }
+        ]
+    )
+    _configure_model_list_test(
+        monkeypatch,
+        catalog_card=current_card,
+        current_registry_card_value=current_card,
+        local_record=None,
+    )
+    api = _api_with_store(store_client)
+
+    # No node caches, store hosts, or reconciliation in this projection: the
+    # flag under test comes from the installed record against the current
+    # signed card.
+    def no_inventory() -> tuple[
+        CacheInventoryStatus, dict[str, list[CachedArtifactLocation]], tuple[NodeId, ...]
+    ]:
+        return (
+            CacheInventoryStatus(
+                state="current", observed_nodes=0, expected_nodes=0, store_nodes=[]
+            ),
+            {},
+            (),
+        )
+
+    monkeypatch.setattr(api, "_cache_inventory_projection", no_inventory)
+    monkeypatch.setattr(api, "_reconciliation_status", ReconciliationStatus(), raising=False)
+
+    response = await api.get_store_registry()
+
+    entry = response.entries[0]
+    assert entry.current_registry_identity == current_card.registry_card_id
+    assert entry.update_available is True
+    assert entry.installed_not_current is True
 
 
 async def test_store_only_installed_card_remains_in_model_list(

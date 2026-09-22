@@ -35,6 +35,8 @@ vi.mock('./ModelSearchModal', () => ({
       onClick={() => onDownloadStarted?.('meta-llama/gated')}
     />
   ),
+  readAcceptedDownload: async () => ({ rejected: false, reason: null }),
+  extractErrorDetail: async () => null,
 }));
 
 vi.mock('../cluster/PlacementManager', () => ({

@@ -3084,6 +3084,7 @@ async def delete_custom_card(model_id: ModelId) -> bool:
     and restore the wrong source beneath a deleted registry override.
     """
     card_path = _custom_cards_dir / (ModelId(model_id).normalize() + ".toml")
+    removed_file = False
     if await card_path.exists():
         stored_card = await ModelCard.load_from_path(card_path)
         if stored_card.model_id != model_id:
@@ -3091,10 +3092,35 @@ async def delete_custom_card(model_id: ModelId) -> bool:
                 "custom model-card storage key belongs to a different alias"
             )
         await card_path.unlink()
-        _card_cache.pop(model_id, None)
-        await _refresh_card_cache()
-        return True
-    return False
+        removed_file = True
+    cached = _card_cache.get(model_id)
+    if not removed_file and (cached is None or not cached.is_custom):
+        return False
+    # A custom card may sit in the directory under any name (the loader
+    # walks every TOML and keys by the declared alias); the rebuild below
+    # would read such a file straight back, so every file declaring the
+    # alias goes too.
+    await _unlink_custom_card_files(model_id)
+    # The cache entry goes whether or not a file backed it on this node: a
+    # replicated delete names the alias, and a custom entry survives every
+    # rebuild (the registry merge never replaces one), so a node holding it
+    # only in memory would otherwise serve the deleted card until restart.
+    _card_cache.pop(model_id, None)
+    await _refresh_card_cache()
+    return True
+
+
+async def _unlink_custom_card_files(model_id: ModelId) -> None:
+    """Remove every custom-directory TOML that declares ``model_id``."""
+    if not await _custom_cards_dir.exists():
+        return
+    async for toml_file in _custom_cards_dir.rglob("*.toml"):
+        try:
+            declared = await ModelCard.load_from_path(toml_file)
+        except Exception:  # noqa: BLE001 - an unreadable file is not this card
+            continue
+        if declared.model_id == model_id:
+            await toml_file.unlink(missing_ok=True)
 
 
 class ConfigData(BaseModel):

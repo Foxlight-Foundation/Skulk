@@ -197,6 +197,32 @@ def test_replacement_qualification_card_wins_before_stale_cleanup(
     assert master._ordered_model_cards[original.model_id] == replacement  # pyright: ignore[reportPrivateUsage]
 
 
+def test_exact_retirement_refuses_a_replaced_custom_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retirement naming the card it saw is refused once the card changed."""
+    _hide_signed_registry(monkeypatch)
+    original = _card("org/model")
+    replacement = original.model_copy(update={"source_revision": "c" * 40})
+
+    def existing_card(_model_id: ModelId) -> ModelCard:
+        return replacement
+
+    monkeypatch.setattr(master_main, "get_card", existing_card)
+    master = _master()
+
+    refused = master._order_custom_model_card_delete(  # pyright: ignore[reportPrivateUsage]
+        DeleteCustomModelCard(model_id=original.model_id, expected_card=original)
+    )
+    ordered = master._order_custom_model_card_delete(  # pyright: ignore[reportPrivateUsage]
+        DeleteCustomModelCard(model_id=original.model_id, expected_card=replacement)
+    )
+
+    assert refused is None
+    assert ordered is not None
+    assert master._ordered_model_cards[original.model_id] is None  # pyright: ignore[reportPrivateUsage]
+
+
 def test_operator_add_wins_before_stale_service_overwrite(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

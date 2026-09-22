@@ -1115,6 +1115,17 @@ class Master:
                 f"boundary (model_id={command.model_id})"
             )
             return None
+        # A retirement names the exact card it saw; the ordering boundary is the
+        # one place a concurrent replacement is visible for certain, so a card
+        # that changed since the caller looked stays.
+        if command.expected_card is not None and (
+            existing is None or existing != command.expected_card
+        ):
+            logger.warning(
+                "Rejected custom card retirement at authoritative ordering "
+                f"boundary: the card changed (model_id={command.model_id})"
+            )
+            return None
         self._ordered_model_cards[command.model_id] = None
         return CustomModelCardDeleted(
             model_id=command.model_id,

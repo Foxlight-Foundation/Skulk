@@ -8,7 +8,7 @@ import type { FleetServingSummary } from '../models/burst';
 import type { InstanceStatus } from '../../types/models';
 import { StoreRegistryTable, type StoreRegistryEntry, type StoreDownloadProgress, type ModelCardInfo, type CompanionInfo, type StoreReconciliationStatus } from '../layout/StoreRegistryTable';
 import type { ClusterCardProps, ClusterCardNode } from '../cluster/ClusterCard';
-import { ModelSearchModal } from './ModelSearchModal';
+import { extractErrorDetail, ModelSearchModal, readAcceptedDownload } from './ModelSearchModal';
 import { FiTrash2, FiSearch } from 'react-icons/fi';
 import { Button } from '../common/Button';
 import { addToast } from '../../hooks/useToast';
@@ -561,6 +561,43 @@ export function ModelStorePage({ topology, nodeResources = {}, downloads, instan
     }
   }, [loadRegistry, t]);
 
+  const handleUpdate = useCallback(async (entry: { model_id: string; current_registry_identity?: string | null }) => {
+    if (!entry.current_registry_identity) return;
+    try {
+      // The store answers "complete" at once when the signed card names the
+      // bytes already installed (same bundle): the sidecar is swapped and no
+      // download starts. A different bundle starts a real download.
+      const res = await fetch(`/store/models/${encodeURIComponent(entry.model_id)}/download`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ registry_card_id: entry.current_registry_identity }),
+      });
+      // The API answers HTTP 200 even when the store host rejected the
+      // request (the rejection rides in the body as status "error"), so the
+      // body decides between the success and the failure toast.
+      const accepted = res.ok ? await readAcceptedDownload(res) : null;
+      if (accepted && !accepted.rejected) {
+        addToast({
+          type: 'success',
+          message: t('downloads.toasts.updateRequested', 'Updating {modelId} to the signed card', { modelId: entry.model_id }),
+        });
+        // Same as a fresh download: forget an earlier failure for this model
+        // so a retry that fails again is reported, then refresh.
+        handleDownloadStarted(entry.model_id);
+      } else {
+        const reason = accepted?.reason ?? (res.ok ? null : await extractErrorDetail(res));
+        addToast({
+          type: 'error',
+          message: reason
+            ? t('downloads.toasts.updateFailedWithReason', 'Failed to update {modelId}: {reason}', { modelId: entry.model_id, reason })
+            : t('downloads.toasts.updateFailedForModel', 'Failed to update {modelId}', { modelId: entry.model_id }),
+        });
+      }
+    } catch {
+      addToast({ type: 'error', message: t('downloads.toasts.updateFailed', 'Failed to update model') });
+    }
+  }, [handleDownloadStarted, t]);
+
   const handleOptimize = useCallback(async (modelId: string) => {
     try {
       const res = await fetch(`/store/models/${encodeURIComponent(modelId)}/optimize`, {
@@ -674,6 +711,7 @@ export function ModelStorePage({ topology, nodeResources = {}, downloads, instan
           clusterCards={clusterCards}
           totalClusterMemoryBytes={totalClusterMemoryBytes}
           onOptimize={handleOptimize}
+          onUpdate={handleUpdate}
         />
       <ModelSearchModal
         open={searchOpen}

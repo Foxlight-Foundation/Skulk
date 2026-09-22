@@ -297,6 +297,8 @@ class DeleteCustomModelCard(BaseCommand):
     """Require the existing alias to be service-owned at ordering time."""
     expected_qualification_card: ModelCard | None = None
     """Exact temporary card the service is authorized to remove."""
+    expected_card: ModelCard | None = None
+    """Exact card an operator retirement removes; a changed card refuses it."""
 
 
 DownloadCommand = (
