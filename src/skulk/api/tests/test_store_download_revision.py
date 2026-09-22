@@ -332,6 +332,9 @@ class _AdoptingStoreClient(_RecordingStoreClient):
         # What the store's installed record names once it answers complete; the
         # signed card by default, as a real adoption leaves it.
         self.installed_identity: str | None = f"card_{'b' * 52}"
+        # Identities the installed-record read answers before settling on
+        # ``installed_identity``; a None models a failed registry read.
+        self.identity_answers: list[str | None] = []
         self.during_request: Callable[[], None] | None = None
 
     async def request_store_download(  # type: ignore[override]
@@ -374,6 +377,8 @@ def _adopting_api(
     api._pending_override_retirements = set()
 
     async def installed_identity(_model_id: ModelId) -> str | None:
+        if store_client.identity_answers:
+            return store_client.identity_answers.pop(0)
         return store_client.installed_identity
 
     monkeypatch.setattr(api, "_installed_store_identity", installed_identity)
@@ -503,6 +508,26 @@ async def test_adoption_captures_the_override_before_asking_the_store(
     # so nothing is retired rather than the replacement.
     with pytest.raises(WouldBlock):
         command_receiver.receive_nowait()
+
+
+async def test_adoption_retries_the_installed_record_read_before_retiring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A registry read that fails right after completion does not abandon the retirement."""
+    custom, current = _override_cards()
+    store_client = _AdoptingStoreClient("complete")
+    store_client.identity_answers = [None, None]
+    api, command_receiver = _adopting_api(monkeypatch, store_client, [custom], current)
+
+    async with api._tg:
+        await api.request_store_download(
+            _operator_request(),
+            _MODEL_ID,
+            StoreDownloadRequest(registry_card_id=current.registry_card_id),
+        )
+    forwarded = command_receiver.receive_nowait()
+    assert isinstance(forwarded.command, DeleteCustomModelCard)
+    assert forwarded.command.expected_card == custom
 
 
 async def test_adoption_retires_nothing_until_the_store_installed_the_signed_card(

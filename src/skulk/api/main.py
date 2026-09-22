@@ -650,6 +650,10 @@ _API_EVENT_LOG_DIR = SKULK_EVENT_LOG_DIR / "api"
 # gives up only after a day and leaves the override for the operator.
 _OVERRIDE_RETIREMENT_POLL_SECONDS = 5.0
 _OVERRIDE_RETIREMENT_DEADLINE_SECONDS = 24 * 60 * 60
+# The store's registry read that proves the adoption can fail transiently
+# right after the download; the check is retried this many times, one poll
+# interval apart, before the retirement is abandoned.
+_OVERRIDE_RETIREMENT_IDENTITY_ATTEMPTS = 12
 
 # Ring retention for the API event log. Unlike the master's log (compacted
 # after every snapshot), the API log has NO compaction. Historically it
@@ -15656,7 +15660,18 @@ class API:
         The command carries ``override`` as the exact card, and the master
         refuses the deletion when the card has changed by the time it orders.
         """
-        installed = await self._installed_store_identity(model_id)
+        # A registry read that fails or times out keeps the model-list cache's
+        # older snapshot, so one failed read must not abandon the retirement:
+        # the store would then hold the signed sidecar (no update offered)
+        # while placements kept the custom card. Retry a bounded number of
+        # times before giving up.
+        installed: str | None = None
+        for attempt in range(_OVERRIDE_RETIREMENT_IDENTITY_ATTEMPTS):
+            installed = await self._installed_store_identity(model_id)
+            if installed == registry_card_id:
+                break
+            if attempt + 1 < _OVERRIDE_RETIREMENT_IDENTITY_ATTEMPTS:
+                await anyio.sleep(_OVERRIDE_RETIREMENT_POLL_SECONDS)
         if installed != registry_card_id:
             logger.warning(
                 "Signed card adoption for %s reported complete but the store's "
