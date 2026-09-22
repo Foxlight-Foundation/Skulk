@@ -307,9 +307,12 @@ def _check_comfy_engine(facts: NodeFacts) -> Sequence[CheckResult]:
 
         # The build identity is what a signed engine-support claim must name
         # exactly; print it so an operator can copy it into a submission.
-        build = engine_build_inventory(frozenset(derived), facts, environ=os.environ).get(
-            "comfy"
+        # Only the comfy tags: the inventory hashes the other engines' binaries,
+        # which this check has no reason to do.
+        comfy_tags = frozenset(
+            tag for tag in derived if tag == "comfy" or tag.startswith("comfy-")
         )
+        build = engine_build_inventory(comfy_tags, facts, environ=os.environ).get("comfy")
         return [
             _ok(
                 check_id,
