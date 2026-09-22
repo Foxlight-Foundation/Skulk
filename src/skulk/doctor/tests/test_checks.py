@@ -779,6 +779,12 @@ def test_comfy_engine_check_verdicts(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     )
     live = checks_module._check_comfy_engine(configured)
     assert live[0].verdict == "ok" and "comfy-cuda" in live[0].detail
+    # Placement reads the build per backend tag first, so a tag-only override
+    # must show as that tag's build, beside the engine entry it does not touch.
+    monkeypatch.setenv("SKULK_ENGINE_BUILDS", '{"comfy-cuda": "custom-build"}')
+    overridden = checks_module._check_comfy_engine(configured)
+    assert "comfy-cuda=custom-build" in overridden[0].detail
+    monkeypatch.delenv("SKULK_ENGINE_BUILDS")
     root_only = gpu.model_copy(update={"comfy_root": "/opt/ComfyUI", "comfy_root_state": "ok"})
     assert checks_module._check_comfy_engine(root_only)[0].verdict == "fail"
 

@@ -312,14 +312,21 @@ def _check_comfy_engine(facts: NodeFacts) -> Sequence[CheckResult]:
         comfy_tags = frozenset(
             tag for tag in derived if tag == "comfy" or tag.startswith("comfy-")
         )
-        build = engine_build_inventory(comfy_tags, facts, environ=os.environ).get("comfy")
+        # Placement reads the build per backend tag before the engine entry,
+        # and SKULK_ENGINE_BUILDS can override one tag alone, so print every
+        # tag's effective build: a claim copied from the engine entry would
+        # not match a tag whose build was overridden.
+        inventory = engine_build_inventory(comfy_tags, facts, environ=os.environ)
+        builds = ", ".join(
+            f"{tag}={inventory[tag]}" for tag in sorted(comfy_tags) if tag in inventory
+        )
         return [
             _ok(
                 check_id,
                 title,
                 f"comfy ({facts.comfy_root}) advertises "
                 f"{sorted(tag for tag in derived if tag.startswith('comfy-'))}"
-                + (f"; engine build {build}" if build else ""),
+                + (f"; engine build {builds}" if builds else ""),
             )
         ]
     if facts.comfy_binary.state != "not_configured" or facts.comfy_root is not None:
