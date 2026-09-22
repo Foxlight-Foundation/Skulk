@@ -288,6 +288,44 @@ def test_registry_skips_a_card_whose_vocabulary_this_build_lacks() -> None:
     )
     with pytest.raises(ValueError, match="n_layers"):
         registry_model_cards(RegistryCatalog.model_validate(malformed, strict=False))
+    # A task of the wrong shape is malformed, not a newer vocabulary.
+    wrong_shape = _with_second_card(
+        cast("dict[str, object]", json.loads(_catalog_payload())),
+        f"card_{'x' * 52}",
+        "org/wrong-shape",
+        tasks=[123],
+    )
+    with pytest.raises(ValueError, match="tasks"):
+        registry_model_cards(RegistryCatalog.model_validate(wrong_shape, strict=False))
+
+
+def test_registry_checks_bundle_agreement_before_skipping_unknown_vocabulary() -> None:
+    """A card this build cannot read still cannot carry a mismatched bundle."""
+    payload = _with_second_card(
+        cast("dict[str, object]", json.loads(_catalog_payload())),
+        f"card_{'w' * 52}",
+        "org/future-modality",
+        holograms={"modes": ["t2h"]},
+    )
+    cards = cast("list[dict[str, object]]", payload["cards"])
+    second = cards[1]
+    second["schema_version"] = 2
+    artifact = cast("dict[str, object]", second["artifact"])
+    artifact["bundle"] = {
+        "bundle_id": f"bundle_{'b' * 52}",
+        "root": None,
+        "files": [{"path": "model-Q4_K_M.gguf", "size_bytes": 1024}],
+        "download_size": 1024,
+    }
+    second_card = cast("dict[str, object]", second["card"])
+    second_card["artifact_bundle"] = {
+        "bundle_id": f"bundle_{'d' * 52}",
+        "root": None,
+        "files": [{"path": "model-Q4_K_M.gguf", "size_bytes": 1024}],
+        "download_size": 1024,
+    }
+    with pytest.raises(ValueError, match="bundle disagrees"):
+        registry_model_cards(RegistryCatalog.model_validate(payload, strict=False))
 
 
 def test_registry_v2_rejects_card_envelope_bundle_disagreement() -> None:
