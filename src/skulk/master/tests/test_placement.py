@@ -1044,6 +1044,26 @@ def test_reserve_instance_system_ram_charges_only_ram_backed_shards() -> None:
     assert charged[mlx_node] == Memory.from_gb(48) - mlx_footprint
     assert charged[mlx_node] > Memory.from_gb(20)
 
+    # A placement whose load telemetry has not shown yet also comes off the
+    # observed figure: an observed figure already lowered by other work would
+    # otherwise hide it behind the ceiling arithmetic.
+    busy = {
+        ram_node: create_node_memory(
+            Memory.from_gb(30).in_bytes, ram_total=Memory.from_gb(64).in_bytes
+        )
+    }
+    pending_id = InstanceId()
+    pending = {pending_id: instance_on(ram_node, "llama_server-cpu")}
+    reflected = reserve_instance_system_ram(busy, pending, node_vram)
+    not_reflected = reserve_instance_system_ram(
+        busy, pending, node_vram, unreflected=frozenset({pending_id})
+    )
+    assert reflected[ram_node] == min(
+        Memory.from_gb(30), Memory.from_gb(48) - footprint
+    )
+    assert not_reflected[ram_node] == Memory.from_gb(30) - footprint
+    assert not_reflected[ram_node] < reflected[ram_node]
+
 
 def test_legacy_instance_backfills_context_token_limit_from_card() -> None:
     # An instance hydrated without a stamped ceiling (pre-#279 slice 2 snapshot

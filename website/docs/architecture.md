@@ -638,7 +638,9 @@ placements it has committed but telemetry may not show yet, pending ones
 included, so two back-to-back placements neither admit nor size a window
 against the same untouched figure; the charge is taken against the node's
 working-set ceiling, at the stamped window for a fixed-window engine and at
-the admission floor for a lazily growing MLX cache, and the GPU pool of a
+the admission floor for a lazily growing MLX cache; a placement whose load
+telemetry cannot have shown yet (awaiting its indexed echo, or still
+loading) is also taken off the observed figure, and the GPU pool of a
 unified-memory APU is derived from the reserved figure. That live figure is
 capped at the
 node's GPU working-set ceiling and at the static fit, and never below the

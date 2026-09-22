@@ -169,10 +169,12 @@ from skulk.shared.types.worker.instances import (
 )
 from skulk.shared.types.worker.runners import (
     RunnerFailed,
+    RunnerLoaded,
     RunnerReady,
     RunnerRunning,
     RunnerShutdown,
     RunnerShuttingDown,
+    RunnerWarmingUp,
 )
 from skulk.shared.types.worker.shards import (
     RpcDonorShardMetadata,
@@ -1229,6 +1231,27 @@ class Master:
         reservations.update(instances)
         return reservations
 
+    def _unreflected_placements(
+        self, placements: Mapping[InstanceId, Instance]
+    ) -> frozenset[InstanceId]:
+        """Placements whose load telemetry cannot have shown yet.
+
+        A placement awaiting its indexed echo has no runners in state, and a
+        replicated one is still loading until every runner reports loaded or
+        beyond; memory telemetry reflects neither, so the reservation takes
+        their footprints off the observed figure as well.
+        """
+        loaded = (RunnerLoaded, RunnerWarmingUp, RunnerReady, RunnerRunning)
+        unreflected: set[InstanceId] = set()
+        for instance_id, instance in placements.items():
+            runners = instance.shard_assignments.runner_to_shard
+            if not all(
+                isinstance(self.state.runners.get(runner_id), loaded)
+                for runner_id in runners
+            ):
+                unreflected.add(instance_id)
+        return frozenset(unreflected)
+
     def _reserved_placement_inputs(
         self,
         node_memory: Mapping[NodeId, MemoryUsage],
@@ -1260,6 +1283,7 @@ class Master:
             placements,
             vram_membership,
             unified_memory_gpu_nodes=unified_nodes,
+            unreflected=self._unreflected_placements(placements),
         )
         vram = usable_vram_by_node(
             self._telemetry_view.node_system,
@@ -3664,6 +3688,7 @@ class Master:
                 node_memory=memory,
             ),
             unified_memory_gpu_nodes=unified_nodes,
+            unreflected=self._unreflected_placements(remaining),
         )
         vram = dict(
             usable_vram_by_node(

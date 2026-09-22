@@ -56,7 +56,7 @@ from skulk.shared.types.worker.instances import (
     MlxRingInstance,
     ShardAssignments,
 )
-from skulk.shared.types.worker.runners import RunnerId
+from skulk.shared.types.worker.runners import RunnerId, RunnerReady
 from skulk.shared.types.worker.shards import PipelineShardMetadata, Sharding
 from skulk.utils.channels import channel
 
@@ -136,20 +136,39 @@ def test_pending_reservations_charge_system_ram_before_telemetry_shows_them() ->
     master = _make_master()
     node_id = NodeId(get_node_id_keypair().to_node_id())
     instance, card = _instance(node_id)
-    master._telemetry_view.node_memory[node_id] = _mem(60.0)
+    # Observed memory already below the working-set ceiling (48 of 64 GB), as
+    # a desktop Mac commonly is.
+    master._telemetry_view.node_memory[node_id] = _mem(40.0)
 
     untouched, _vram = master._placement_memory_inputs()
     master._pending_instance_reservations[instance.instance_id] = instance
     reserved, _vram = master._placement_memory_inputs()
 
     # The card is not a fixed-window engine's, so the reservation charges the
-    # admission floor, against the node's working-set ceiling (48 of 64 GB).
+    # admission floor. A pending placement has no runners in state, so its
+    # footprint comes off the observed figure as well as the ceiling.
     footprint = estimate_shard_footprint(
         card, 1.0, context_budget=KV_CONTEXT_BUDGET_TOKENS
     )
-    assert untouched[node_id].ram_available == Memory.from_gb(60.0)
-    assert reserved[node_id].ram_available == Memory.from_gb(48.0) - footprint
+    assert untouched[node_id].ram_available == Memory.from_gb(40.0)
+    assert reserved[node_id].ram_available == Memory.from_gb(40.0) - footprint
     assert reserved[node_id].ram_total == Memory.from_gb(64.0)
+
+    # Once the placement is replicated and its runner reports ready, telemetry
+    # carries its load: only the ceiling bound remains.
+    del master._pending_instance_reservations[instance.instance_id]
+    runner_id = next(iter(instance.shard_assignments.runner_to_shard))
+    master.state = master.state.model_copy(
+        update={
+            "instances": {instance.instance_id: instance},
+            "runners": {runner_id: RunnerReady()},
+        }
+    )
+    loaded, _vram = master._placement_memory_inputs()
+    assert loaded[node_id].ram_available == min(
+        Memory.from_gb(40.0), Memory.from_gb(48.0) - footprint
+    )
+    assert loaded[node_id].ram_available > reserved[node_id].ram_available
 
 
 def test_freed_instance_credit_is_disabled_by_default() -> None:

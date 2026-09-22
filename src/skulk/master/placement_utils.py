@@ -288,6 +288,7 @@ def reserve_instance_system_ram(
     node_vram: Mapping[NodeId, Memory] | None = None,
     *,
     unified_memory_gpu_nodes: AbstractSet[NodeId] = frozenset(),
+    unreflected: AbstractSet[InstanceId] = frozenset(),
 ) -> dict[NodeId, Memory]:
     """Live system RAM per node, net of placements telemetry may not show yet.
 
@@ -304,9 +305,13 @@ def reserve_instance_system_ram(
     grows its cache lazily (MLX) is charged at the admission floor, the same
     reservation admission and the worker's guard make for it. Observed usage
     already includes loaded instances, so bounding against the remaining
-    static budget never counts an allocation twice, and a node with nothing
-    committed keeps its observed figure untouched. RPC placements choose
-    their split at runtime and stay observation-only, as in the VRAM path.
+    static budget never counts an allocation twice; a placement whose load
+    is not reflected yet (``unreflected``: pending its indexed echo, or
+    still loading) is additionally taken off the observed figure, since an
+    observed figure already lowered by other work would otherwise hide it.
+    A node with nothing committed keeps its observed figure untouched. RPC
+    placements choose their split at runtime and stay observation-only, as
+    in the VRAM path.
 
     Args:
         node_memory: Observed node memory, ``ram_available`` and ``ram_total``.
@@ -316,13 +321,16 @@ def reserve_instance_system_ram(
             them (that is not a unified-memory APU) lives in VRAM, not here.
         unified_memory_gpu_nodes: APUs whose GPU allocations also take host
             pages; their shards charge system RAM.
+        unreflected: Placements whose load telemetry has not shown yet; their
+            footprints also come off the observed figure.
 
     Returns:
         Usable live system RAM keyed by node, for every node in ``node_memory``.
     """
     node_vram = node_vram or {}
     committed: dict[NodeId, int] = {}
-    for instance in current_instances.values():
+    pending: dict[NodeId, int] = {}
+    for instance_id, instance in current_instances.items():
         if isinstance(instance, LlamaRpcInstance):
             continue
         assignments = instance.shard_assignments
@@ -351,6 +359,8 @@ def reserve_instance_system_ram(
                 ),
             )
             committed[node_id] = committed.get(node_id, 0) + footprint.in_bytes
+            if instance_id in unreflected:
+                pending[node_id] = pending.get(node_id, 0) + footprint.in_bytes
     usable: dict[NodeId, Memory] = {}
     for node_id, usage in node_memory.items():
         charged = committed.get(node_id, 0)
@@ -358,9 +368,8 @@ def reserve_instance_system_ram(
             usable[node_id] = usage.ram_available
             continue
         ceiling = gpu_working_set_ceiling(usage.ram_total).in_bytes
-        usable[node_id] = Memory.from_bytes(
-            min(usage.ram_available.in_bytes, max(0, ceiling - charged))
-        )
+        observed = usage.ram_available.in_bytes - pending.get(node_id, 0)
+        usable[node_id] = Memory.from_bytes(max(0, min(observed, ceiling - charged)))
     return usable
 
 
@@ -370,6 +379,7 @@ def reserve_system_ram_usage(
     node_vram: Mapping[NodeId, Memory] | None = None,
     *,
     unified_memory_gpu_nodes: AbstractSet[NodeId] = frozenset(),
+    unreflected: AbstractSet[InstanceId] = frozenset(),
 ) -> dict[NodeId, MemoryUsage]:
     """``node_memory`` with each ``ram_available`` net of committed placements.
 
@@ -382,6 +392,7 @@ def reserve_system_ram_usage(
         current_instances,
         node_vram,
         unified_memory_gpu_nodes=unified_memory_gpu_nodes,
+        unreflected=unreflected,
     )
     return {
         node_id: (
