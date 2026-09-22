@@ -51,6 +51,7 @@ from skulk.shared.models.registry import (
     EMBEDDED_REGISTRY_ROOT,
     RegistryAdvisory,
     RegistryCapabilityClaim,
+    RegistryCard,
     RegistryCatalog,
     RegistryEngineSupportClaim,
     TufRegistryClient,
@@ -159,8 +160,103 @@ def _registry_enabled() -> bool:
     )
 
 
+def _is_vocabulary_skew(error: ValidationError, payload: dict[str, Any]) -> bool:
+    """Whether every failure is a field or task this build does not know.
+
+    ``extra_forbidden`` is a section or field ``ModelCard`` has no slot for;
+    a ``tasks`` failure naming an invalid ``ModelTask`` is a task value the
+    enum lacks, provided the card's ``tasks`` is a list of strings (a task
+    of the wrong shape is malformed, not newer). Both are what a newer
+    registry looks like from an older build. Anything else (a wrong type, a
+    missing revision, a bound) is a malformed card and stays a catalog-level
+    refusal.
+    """
+    failures = error.errors()
+    if not failures:
+        return False
+    raw_tasks = payload.get("tasks")
+    tasks_well_formed = isinstance(raw_tasks, list) and all(
+        isinstance(task, str) for task in cast("list[object]", raw_tasks)
+    )
+    for item in failures:
+        if item["type"] == "extra_forbidden":
+            continue
+        location = item["loc"]
+        if (
+            tasks_well_formed
+            and location
+            and location[0] == "tasks"
+            and "is not a valid ModelTask" in item["msg"]
+        ):
+            continue
+        return False
+    return True
+
+
+def _bundle_file_facts(files: object) -> tuple[tuple[object, object, object], ...] | None:
+    """The (path, size, object id) facts of a raw bundle file list, or None if malformed."""
+    if not isinstance(files, list):
+        return None
+    facts: list[tuple[object, object, object]] = []
+    for item in cast("list[object]", files):
+        if not isinstance(item, dict):
+            return None
+        entry = cast("dict[str, object]", item)
+        facts.append((entry.get("path"), entry.get("size_bytes"), entry.get("object_id")))
+    return tuple(facts)
+
+
+def _check_envelope_bundle_agreement(
+    payload: dict[str, Any], envelope: "RegistryCard"
+) -> None:
+    """Refuse a card whose own bundle disagrees with its signed envelope.
+
+    Read from the raw card body, before this build's ``ModelCard`` sees it,
+    so the check holds for a card this build cannot otherwise parse: a
+    vocabulary skip must never let a mismatched bundle through.
+    """
+    envelope_bundle = envelope.artifact.bundle
+    raw_bundle = payload.get("artifact_bundle")
+    if envelope_bundle is None:
+        if raw_bundle is not None:
+            raise ValueError(
+                f"registry envelope omits card bundle for {envelope.card_id}"
+            )
+        return
+    if not isinstance(raw_bundle, dict):
+        raise ValueError(
+            f"registry envelope bundle disagrees with card {envelope.card_id}"
+        )
+    card_bundle = cast("dict[str, object]", raw_bundle)
+    if (
+        card_bundle.get("bundle_id") != envelope_bundle.bundle_id
+        or card_bundle.get("root") != envelope_bundle.root
+        or card_bundle.get("download_size") != envelope_bundle.download_size
+        or _bundle_file_facts(card_bundle.get("files"))
+        != tuple(
+            (item.path, item.size_bytes, item.object_id)
+            for item in envelope_bundle.files
+        )
+    ):
+        raise ValueError(
+            f"registry envelope bundle disagrees with card {envelope.card_id}"
+        )
+
+
 def registry_model_cards(catalog: RegistryCatalog) -> list["ModelCard"]:
-    """Convert one verified registry snapshot to Skulk runtime cards atomically."""
+    """Convert one verified registry snapshot to Skulk runtime cards.
+
+    Integrity is atomic: a catalog whose envelopes and cards disagree, whose
+    metadata does not cover its card set, whose aliases collide, or whose
+    card bodies are malformed (a wrong type, a companion without its
+    immutable revision) is refused whole, because that is a corrupt,
+    tampered, or mis-signed snapshot. Vocabulary is per card: a card that
+    fails only because it carries a section or a task this build's
+    ``ModelCard`` does not know (a modality a newer registry publishes for
+    builds that predate it) is skipped with a warning, and every other card
+    still loads. Without that, the first card of a new class would take the
+    whole signed catalog away from every older node reading the feed.
+    """
     cards: list[ModelCard] = []
     aliases: set[ModelId] = set()
     card_ids = {envelope.card_id for envelope in catalog.cards}
@@ -227,30 +323,24 @@ def registry_model_cards(catalog: RegistryCatalog) -> list["ModelCard"]:
                 if "embedding_length" in header.scalars:
                     payload["hidden_size"] = header.scalars["embedding_length"]
                 payload["num_key_value_heads"] = header.scalars["attention.head_count_kv"]
-        card = ModelCard.model_validate(payload)
-        envelope_bundle = envelope.artifact.bundle
-        card_bundle = card.artifact_bundle
-        if envelope_bundle is None:
-            if card_bundle is not None:
-                raise ValueError(
-                    f"registry envelope omits card bundle for {envelope.card_id}"
-                )
-        elif card_bundle is None or (
-            card_bundle.bundle_id != envelope_bundle.bundle_id
-            or card_bundle.root != envelope_bundle.root
-            or card_bundle.download_size != envelope_bundle.download_size
-            or tuple(
-                (item.path, item.size_bytes, item.object_id)
-                for item in card_bundle.files
+        # Integrity before readability: the bundle agreement is checked on
+        # the raw body so it also covers a card this build then skips.
+        _check_envelope_bundle_agreement(payload, envelope)
+        try:
+            card = ModelCard.model_validate(payload)
+        except ValidationError as error:
+            if not _is_vocabulary_skew(error, payload):
+                raise
+            unknown = ", ".join(
+                ".".join(str(part) for part in item["loc"]) or "card"
+                for item in error.errors()
             )
-            != tuple(
-                (item.path, item.size_bytes, item.object_id)
-                for item in envelope_bundle.files
+            logger.warning(
+                f"signed registry card {envelope.card_id} ({alias}) carries "
+                f"vocabulary this Skulk build does not know and is skipped: "
+                f"{unknown}"
             )
-        ):
-            raise ValueError(
-                f"registry envelope bundle disagrees with card {envelope.card_id}"
-            )
+            continue
         cards.append(card)
     return cards
 
