@@ -28,6 +28,7 @@ from skulk.master.placement import (
 )
 from skulk.master.placement_utils import (
     reserve_instance_vram,
+    reserve_system_ram_usage,
     unified_memory_gpu_node_ids,
     usable_vram_by_node,
 )
@@ -168,10 +169,14 @@ from skulk.shared.types.worker.instances import (
 )
 from skulk.shared.types.worker.runners import (
     RunnerFailed,
+    RunnerId,
+    RunnerLoaded,
     RunnerReady,
     RunnerRunning,
     RunnerShutdown,
     RunnerShuttingDown,
+    RunnerStatus,
+    RunnerWarmingUp,
 )
 from skulk.shared.types.worker.shards import (
     RpcDonorShardMetadata,
@@ -277,6 +282,15 @@ crediting the freed footprint over-admits the next placement and leaves the
 worker to refuse it. Placement must prefer the observed telemetry over an
 optimistic teardown credit; the worker's local guard should be a last resort,
 not the normal correction path."""
+
+RESERVATION_SETTLE_SECONDS = 5.0
+"""How long a placement stays charged against observed memory after its runners
+report loaded. A runner publishes the status the moment the model is in
+memory, while node memory telemetry is sampled on its own cadence and can be
+coalesced, so for this long after a transition this master applied the
+placement's footprint is still taken off the observed figure; after it, and
+for a runner loaded before this master watched, only the working-set ceiling
+bound remains, so a load telemetry carries is never counted twice."""
 JsonObject = dict[str, object]
 
 # API-facing task types: the ones whose loss strands an open HTTP request.
@@ -851,6 +865,7 @@ class Master:
         # their GPU capacity before queuing the event so consecutive decisions
         # cannot spend the same memory while that echo is outstanding.
         self._pending_instance_reservations: dict[InstanceId, Instance] = {}
+        self._runner_loaded_at: dict[RunnerId, float] = {}
         self._ordered_steward_proposals = dict(
             initial_state.steward_action_proposals if initial_state is not None else {}
         )
@@ -999,12 +1014,34 @@ class Master:
     def _apply_indexed_event(self, indexed: IndexedEvent) -> None:
         """Apply one durable event and synchronize the master's telemetry view."""
 
+        before = self.state.runners
         self.state = apply(self.state, indexed)
+        self._record_runner_loaded_transitions(before)
         if isinstance(indexed.event, InstanceCreated):
             self._pending_instance_reservations.pop(indexed.event.instance.instance_id, None)
         elif isinstance(indexed.event, InstanceDeleted):
             self._pending_instance_reservations.pop(indexed.event.instance_id, None)
         record_membership_from_event(self._telemetry_view, indexed.event)
+
+    def _record_runner_loaded_transitions(
+        self, before: Mapping[RunnerId, RunnerStatus]
+    ) -> None:
+        """Note when a runner first reports loaded, for the reservation settle.
+
+        Only a transition this master saw counts: a runner already loaded
+        when the master started has no record, and its instance reads as
+        reflected in telemetry at once rather than being charged again.
+        """
+        loaded = (RunnerLoaded, RunnerWarmingUp, RunnerReady, RunnerRunning)
+        now = time.monotonic()
+        for runner_id, status in self.state.runners.items():
+            if isinstance(status, loaded) and not isinstance(
+                before.get(runner_id), loaded
+            ):
+                self._runner_loaded_at[runner_id] = now
+        for runner_id in list(self._runner_loaded_at):
+            if runner_id not in self.state.runners:
+                del self._runner_loaded_at[runner_id]
 
     def _ordered_model_card(self, model_id: ModelId) -> ModelCard | None:
         """Return model-card truth at the master's current command order."""
@@ -1228,6 +1265,81 @@ class Master:
         reservations.update(instances)
         return reservations
 
+    def _unreflected_placements(
+        self, placements: Mapping[InstanceId, Instance]
+    ) -> frozenset[InstanceId]:
+        """Placements whose load telemetry cannot have shown yet.
+
+        A placement awaiting its indexed echo has no runners in state, and a
+        replicated one is still loading until every runner reports loaded or
+        beyond; memory telemetry reflects neither, so the reservation takes
+        their footprints off the observed figure as well. A runner this
+        master saw report loaded less than ``RESERVATION_SETTLE_SECONDS``
+        ago is still unreflected, since memory telemetry is sampled on its
+        own cadence; a runner loaded before this master watched has no
+        transition on record and reads as reflected at once.
+        """
+        loaded = (RunnerLoaded, RunnerWarmingUp, RunnerReady, RunnerRunning)
+        now = time.monotonic()
+        unreflected: set[InstanceId] = set()
+        for instance_id, instance in placements.items():
+            runners = instance.shard_assignments.runner_to_shard
+            if not all(
+                isinstance(self.state.runners.get(runner_id), loaded)
+                for runner_id in runners
+            ):
+                unreflected.add(instance_id)
+                continue
+            loaded_at = [
+                self._runner_loaded_at[runner_id]
+                for runner_id in runners
+                if runner_id in self._runner_loaded_at
+            ]
+            if loaded_at and now - max(loaded_at) < RESERVATION_SETTLE_SECONDS:
+                unreflected.add(instance_id)
+        return frozenset(unreflected)
+
+    def _reserved_placement_inputs(
+        self,
+        node_memory: Mapping[NodeId, MemoryUsage],
+        placements: Mapping[InstanceId, Instance],
+    ) -> tuple[dict[NodeId, MemoryUsage], dict[NodeId, Memory]]:
+        """Node memory and usable GPU memory net of what ``placements`` committed.
+
+        The system-RAM counterpart of the VRAM reservation, applied first: a
+        placement whose indexed echo has not returned, or whose load
+        telemetry has not shown, is charged against its node so the next
+        placement neither admits nor sizes a served window against memory
+        that is spoken for. The GPU pool is then derived from the reserved
+        memory, so a unified-memory APU's host-RAM share of the pool reflects
+        the reservation too, and the discrete-VRAM reservation is applied on
+        top as before.
+        """
+        unified_nodes = unified_memory_gpu_node_ids(
+            self._telemetry_view.node_system,
+            self._telemetry_view.node_resources,
+            node_memory=node_memory,
+        )
+        vram_membership = usable_vram_by_node(
+            self._telemetry_view.node_system,
+            self._telemetry_view.node_resources,
+            node_memory=node_memory,
+        )
+        memory = reserve_system_ram_usage(
+            node_memory,
+            placements,
+            vram_membership,
+            unified_memory_gpu_nodes=unified_nodes,
+            unreflected=self._unreflected_placements(placements),
+        )
+        vram = usable_vram_by_node(
+            self._telemetry_view.node_system,
+            self._telemetry_view.node_resources,
+            node_memory=memory,
+            current_instances=placements,
+        )
+        return memory, vram
+
     def _placement_memory_inputs(
         self,
         current_instances: Mapping[InstanceId, Instance] | None = None,
@@ -1254,13 +1366,7 @@ class Master:
         credit = self._freed_credit_by_node()
         base_memory = self._telemetry_view.node_memory
         if not credit:
-            base_vram = usable_vram_by_node(
-                self._telemetry_view.node_system,
-                self._telemetry_view.node_resources,
-                node_memory=base_memory,
-                current_instances=placements,
-            )
-            return base_memory, base_vram
+            return self._reserved_placement_inputs(base_memory, placements)
         # Credit the freed bytes onto each node's ram_available, clamped to
         # ram_total so credited availability never exceeds capacity (telemetry
         # may already have partly caught up, or the footprint estimate may be
@@ -1286,13 +1392,7 @@ class Master:
         # figure directly: usable_vram_by_node applies its own working-set /
         # GTT ceiling, so the credited VRAM is naturally capped and can never
         # exceed the ceiling or total VRAM.
-        vram = usable_vram_by_node(
-            self._telemetry_view.node_system,
-            self._telemetry_view.node_resources,
-            node_memory=memory,
-            current_instances=placements,
-        )
-        return memory, vram
+        return self._reserved_placement_inputs(memory, placements)
 
     def _place_for_steward_action(
         self,
@@ -2795,11 +2895,15 @@ class Master:
                                     replacement_command_for_refused_instance(refused)
                                 )
                                 try:
+                                    repair_memory, repair_vram = self._reserved_placement_inputs(
+                                        self._telemetry_view.node_memory,
+                                        self._placement_reservations(after_delete),
+                                    )
                                     final_placement = place_instance(
                                         replace_command,
                                         self.state.topology,
                                         after_delete,
-                                        self._telemetry_view.node_memory,
+                                        repair_memory,
                                         self.state.node_network,
                                         download_status=self._effective_downloads(),
                                         excluded_nodes=set(
@@ -2807,16 +2911,11 @@ class Master:
                                         ),
                                         stamped_exclusions=set(refused.excluded_nodes),
                                         node_resources=self._telemetry_view.node_resources,
-                                        node_vram=usable_vram_by_node(
-                                            self._telemetry_view.node_system,
-                                            self._telemetry_view.node_resources,
-                                            node_memory=self._telemetry_view.node_memory,
-                                            current_instances=self._placement_reservations(after_delete),
-                                        ),
+                                        node_vram=repair_vram,
                                         unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
                                             self._telemetry_view.node_system,
                                             self._telemetry_view.node_resources,
-                                            node_memory=self._telemetry_view.node_memory,
+                                            node_memory=repair_memory,
                                         ),
                                         approved_remote_code_identities=self._model_trust_approvals,
                                     )
@@ -2855,11 +2954,15 @@ class Master:
                                         refused, command.node_id
                                     )
                                     try:
+                                        repair_memory, repair_vram = self._reserved_placement_inputs(
+                                            self._telemetry_view.node_memory,
+                                            self._placement_reservations(after_delete),
+                                        )
                                         final_placement = place_instance(
                                             fallback,
                                             self.state.topology,
                                             after_delete,
-                                            self._telemetry_view.node_memory,
+                                            repair_memory,
                                             self.state.node_network,
                                             download_status=self._effective_downloads(),
                                             excluded_nodes=set(fallback.excluded_nodes),
@@ -2867,16 +2970,11 @@ class Master:
                                                 refused.excluded_nodes
                                             ),
                                             node_resources=self._telemetry_view.node_resources,
-                                            node_vram=usable_vram_by_node(
-                                                self._telemetry_view.node_system,
-                                                self._telemetry_view.node_resources,
-                                                node_memory=self._telemetry_view.node_memory,
-                                                current_instances=self._placement_reservations(after_delete),
-                                            ),
+                                            node_vram=repair_vram,
                                             unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
                                                 self._telemetry_view.node_system,
                                                 self._telemetry_view.node_resources,
-                                                node_memory=self._telemetry_view.node_memory,
+                                                node_memory=repair_memory,
                                             ),
                                             approved_remote_code_identities=self._model_trust_approvals,
                                         )
@@ -3337,26 +3435,25 @@ class Master:
                 replace_command = replacement_command_for_download_failed_instance(
                     instance, failed_nodes
                 )
+                repair_memory, repair_vram = self._reserved_placement_inputs(
+                    self._telemetry_view.node_memory,
+                    self._placement_reservations(after_delete),
+                )
                 final_placement = place_instance(
                     replace_command,
                     self.state.topology,
                     after_delete,
-                    self._telemetry_view.node_memory,
+                    repair_memory,
                     self.state.node_network,
                     download_status=self._effective_downloads(),
                     excluded_nodes=set(replace_command.excluded_nodes),
                     stamped_exclusions=set(instance.excluded_nodes),
                     node_resources=self._telemetry_view.node_resources,
-                    node_vram=usable_vram_by_node(
-                        self._telemetry_view.node_system,
-                        self._telemetry_view.node_resources,
-                        node_memory=self._telemetry_view.node_memory,
-                        current_instances=self._placement_reservations(after_delete),
-                    ),
+                    node_vram=repair_vram,
                     unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
                         self._telemetry_view.node_system,
                         self._telemetry_view.node_resources,
-                        node_memory=self._telemetry_view.node_memory,
+                        node_memory=repair_memory,
                     ),
                     approved_remote_code_identities=self._model_trust_approvals,
                 )
@@ -3547,17 +3644,16 @@ class Master:
             min_nodes=1,
             system_role="steward",
         )
-        placement_memory = node_memory or self._telemetry_view.node_memory
-        placement_vram = (
-            node_vram
-            if node_vram is not None
-            else usable_vram_by_node(
-                self._telemetry_view.node_system,
-                self._telemetry_view.node_resources,
-                node_memory=placement_memory,
-                current_instances=self._placement_reservations(current_instances),
+        if node_vram is not None:
+            # A caller handing in both maps (the replacement snapshot) has
+            # already reserved them.
+            placement_memory = node_memory or self._telemetry_view.node_memory
+            placement_vram = node_vram
+        else:
+            placement_memory, placement_vram = self._reserved_placement_inputs(
+                node_memory or self._telemetry_view.node_memory,
+                self._placement_reservations(current_instances),
             )
-        )
         return place_instance(
             command,
             self.state.topology,
@@ -3623,6 +3719,24 @@ class Master:
             self._telemetry_view.node_resources,
             node_memory=memory,
         )
+        remaining = {
+            identifier: instance
+            for identifier, instance in self.state.instances.items()
+            if identifier != current.instance_id
+        }
+        # The other placements' system RAM is spoken for in this snapshot
+        # too; reserve it before the GPU pool is derived from the memory.
+        memory = reserve_system_ram_usage(
+            memory,
+            remaining,
+            usable_vram_by_node(
+                self._telemetry_view.node_system,
+                self._telemetry_view.node_resources,
+                node_memory=memory,
+            ),
+            unified_memory_gpu_nodes=unified_nodes,
+            unreflected=self._unreflected_placements(remaining),
+        )
         vram = dict(
             usable_vram_by_node(
                 self._telemetry_view.node_system,
@@ -3644,11 +3758,7 @@ class Master:
         return memory, reserve_instance_vram(
             vram,
             self._telemetry_view.node_system,
-            {
-                identifier: instance
-                for identifier, instance in self.state.instances.items()
-                if identifier != current.instance_id
-            },
+            remaining,
             unified_memory_gpu_nodes=unified_nodes,
         )
 

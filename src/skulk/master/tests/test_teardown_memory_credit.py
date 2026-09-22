@@ -9,13 +9,19 @@ placement inputs stay grounded in observed telemetry.
 """
 
 import asyncio
+import time
 
 import pytest
 
+import skulk.master.main as master_main
 from skulk.master.main import Master
 from skulk.master.placement import place_instance
 from skulk.master.tests.conftest import create_node_network
 from skulk.routing.router import get_node_id_keypair
+from skulk.shared.models.memory_estimate import (
+    KV_CONTEXT_BUDGET_TOKENS,
+    estimate_shard_footprint,
+)
 from skulk.shared.models.model_cards import (
     ModelCard,
     ModelId,
@@ -52,7 +58,7 @@ from skulk.shared.types.worker.instances import (
     MlxRingInstance,
     ShardAssignments,
 )
-from skulk.shared.types.worker.runners import RunnerId
+from skulk.shared.types.worker.runners import RunnerId, RunnerReady
 from skulk.shared.types.worker.shards import PipelineShardMetadata, Sharding
 from skulk.utils.channels import channel
 
@@ -125,6 +131,57 @@ def test_no_recent_free_leaves_memory_unchanged() -> None:
     master._telemetry_view.node_memory[node_id] = _mem(4.0)
     memory, _vram = master._placement_memory_inputs()
     assert memory[node_id].ram_available.in_gb == 4.0
+
+
+def test_pending_reservations_charge_system_ram_before_telemetry_shows_them(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A placement awaiting its indexed echo already reduces its node's RAM."""
+    master = _make_master()
+    node_id = NodeId(get_node_id_keypair().to_node_id())
+    instance, card = _instance(node_id)
+    # Observed memory already below the working-set ceiling (48 of 64 GB), as
+    # a desktop Mac commonly is.
+    master._telemetry_view.node_memory[node_id] = _mem(40.0)
+
+    untouched, _vram = master._placement_memory_inputs()
+    master._pending_instance_reservations[instance.instance_id] = instance
+    reserved, _vram = master._placement_memory_inputs()
+
+    # The card is not a fixed-window engine's, so the reservation charges the
+    # admission floor. A pending placement has no runners in state, so its
+    # footprint comes off the observed figure as well as the ceiling.
+    footprint = estimate_shard_footprint(
+        card, 1.0, context_budget=KV_CONTEXT_BUDGET_TOKENS
+    )
+    assert untouched[node_id].ram_available == Memory.from_gb(40.0)
+    assert reserved[node_id].ram_available == Memory.from_gb(40.0) - footprint
+    assert reserved[node_id].ram_total == Memory.from_gb(64.0)
+
+    # Once the placement is replicated and its runner reports ready, the
+    # charge stays on the observed figure for a settle period (telemetry is
+    # sampled on its own cadence), then only the ceiling bound remains.
+    del master._pending_instance_reservations[instance.instance_id]
+    runner_id = next(iter(instance.shard_assignments.runner_to_shard))
+    master.state = master.state.model_copy(
+        update={
+            "instances": {instance.instance_id: instance},
+            "runners": {runner_id: RunnerReady()},
+        }
+    )
+    # A runner loaded before this master watched has no transition on record
+    # and reads as reflected at once; one this master saw load stays charged
+    # for the settle period.
+    already_loaded, _vram = master._placement_memory_inputs()
+    ceiling_only = min(Memory.from_gb(40.0), Memory.from_gb(48.0) - footprint)
+    assert already_loaded[node_id].ram_available == ceiling_only
+    master._runner_loaded_at[runner_id] = time.monotonic()
+    just_loaded, _vram = master._placement_memory_inputs()
+    assert just_loaded[node_id].ram_available == reserved[node_id].ram_available
+    monkeypatch.setattr(master_main, "RESERVATION_SETTLE_SECONDS", 0.0)
+    loaded, _vram = master._placement_memory_inputs()
+    assert loaded[node_id].ram_available == ceiling_only
+    assert loaded[node_id].ram_available > reserved[node_id].ram_available
 
 
 def test_freed_instance_credit_is_disabled_by_default() -> None:

@@ -618,30 +618,45 @@ allowing a burst of long requests to exhaust and terminate the server.
 
 Context sizing for the GGUF engines is dynamic rather than a fixed constant.
 Placement reserves KV cache for an 8192-token admission floor, but the window a
-runner actually serves comes from a deterministic memory-fit ceiling the master
-computes once at placement time and stamps onto the instance: for each hosting
-node, the tokens whose KV cache fits that node's GPU working set after its
-weight share and overhead, taken as the minimum across nodes and capped at the
-card's advertised maximum context. Determinism is load-bearing here (every rank
-must admit or reject a request identically or the collectives deadlock), so the
-calculation uses only static inputs such as total RAM and a node's discrete
-VRAM total, never the time-varying available-memory reading
+runner actually serves comes from a memory-fit ceiling the master computes once
+at placement time and stamps onto the instance: for each hosting node, the
+tokens whose KV cache fits that node's GPU working set after its weight share
+and overhead, taken as the minimum across nodes and capped at the card's
+advertised maximum context. Every rank reads the stamped value rather than
+recomputing it, which is what keeps multi-rank admission verdicts identical
+(divergent verdicts deadlock the collectives)
 (`instance_context_token_limit` in `src/skulk/shared/models/memory_estimate.py`).
 The engines that commit their whole context window at load (in-process
-llama.cpp, llama-server, vLLM) get the lifted window only where it lands in
-discrete GPU VRAM, the same pool placement admitted the model against. A GGUF
-placement on a node without discrete VRAM keeps the 8192-token floor. That
-includes unified-memory AMD APUs: placement can use their combined BIOS
-VRAM/GTT pool, but llama.cpp's load-time amdgpu allocation also consumes host
-pages, so a steady-state combined-pool fit cannot safely justify a larger fixed
-window. CPU fits similarly derive from total system RAM while the load-time
-window competes with live available memory. An uncomputable fit (a card without
-KV-head metadata, or a pooled RPC placement) also clamps back to the floor
-rather than committing a fictitious window that would fail at load. MLX is
-unaffected either way: it grows its KV cache lazily per request and keeps the
-full memory/card fit. The practical effect is that a true discrete-VRAM GPU
-node serves a model at the largest context that actually fits it, instead of a
-fixed clamp that makes served models unusable for real-context work. The
+llama.cpp, llama-server, vLLM) take that static fit where the window lands in
+discrete GPU VRAM, the same pool placement admitted the model against.
+Everywhere the window is committed in system RAM (Apple unified memory, a
+unified-memory AMD APU whose load-time amdgpu allocation also consumes host
+pages, a CPU-resolved shard) the master sizes it instead from the live
+available memory it has just admitted the placement against. The master
+hands every placement path node memory already net of the footprints of
+placements it has committed but telemetry may not show yet, pending ones
+included, so two back-to-back placements neither admit nor size a window
+against the same untouched figure; the charge is taken against the node's
+working-set ceiling, at the stamped window for a fixed-window engine and at
+the admission floor for a lazily growing MLX cache; a placement whose load
+telemetry cannot have shown yet (awaiting its indexed echo, still
+loading, or loaded for less than a short settle period, since memory
+telemetry is sampled on its own cadence) is also taken off the observed
+figure, and the GPU pool of a
+unified-memory APU is derived from the reserved figure. That live figure is
+reduced by the worker guard's fit tolerance as headroom, then capped at the
+node's GPU working-set ceiling and at the static fit, and never below the
+floor; a node without a live reading keeps the floor. The worker's own
+pre-spawn guard checks that stamped window against its current free memory
+before loading, so a reading that has gone stale by load time is refused
+rather than committed. An uncomputable fit (a card without KV-head metadata,
+or a pooled RPC placement) also clamps back to the floor rather than
+committing a fictitious window that would fail at load. MLX is unaffected
+either way: it grows its KV cache lazily per request and keeps the full
+memory/card fit. The practical effect is that a node serves a model at the
+largest context that actually fits it, on unified memory as well as on a
+discrete GPU, instead of a fixed clamp that makes served models unusable for
+real-context work. The
 [Architecture Reference](architecture-reference) carries the exact admission
 arithmetic.
 
