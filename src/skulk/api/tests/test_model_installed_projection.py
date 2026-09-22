@@ -227,15 +227,27 @@ async def test_models_use_cluster_store_installed_record(
 
 @pytest.mark.parametrize("local", [False, True])
 @pytest.mark.parametrize("same_identity", [False, True])
+@pytest.mark.parametrize("verified", [False, True])
 async def test_installed_registry_metadata_refresh(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     local: bool,
     same_identity: bool,
+    verified: bool,
 ) -> None:
     """Refresh same-artifact signed evidence without replacing installed truth."""
     installed_card = _card("a")
     record = _installed_record(tmp_path, installed_card)
+    if not verified:
+        (
+            tmp_path / str(installed_card.registry_card_id) / ".skulk-source-revision"
+        ).unlink()
+        record = build_installed_card_record(
+            tmp_path / str(installed_card.registry_card_id),
+            installed_card,
+            artifact_format="gguf",
+        )
+        assert record.verification == "local_legacy"
     claim = RegistryCapabilityClaim(
         capability_id="video.generate",
         scope="model",
@@ -269,13 +281,13 @@ async def test_installed_registry_metadata_refresh(
         )
     )
     entry = (await api.get_models(status=None)).data[0]
-    expected = current if same_identity else installed_card
+    expected = current if same_identity and verified else installed_card
     assert entry.registry_snapshot_id == expected.registry_snapshot_id
     assert entry.registry_architecture == expected.registry_architecture
     assert tuple(entry.capability_claims) == expected.registry_capability_claims
     assert entry.registry_card_id == installed_card.registry_card_id
     assert entry.active_installed_identity == record.installed_identity
-    assert entry.installed_verification == "registry_verified"
+    assert entry.installed_verification == record.verification
     assert entry.update_available is not same_identity
     assert record.model_card == installed_card
     requirements = await api.get_model_requirements(str(current.model_id))

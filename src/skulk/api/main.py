@@ -9223,6 +9223,8 @@ class API:
                 and not card.is_custom
                 and catalog_card.registry_card_id is not None
                 and catalog_card.registry_card_id == card.registry_card_id
+                and installed_record.verification == "registry_verified"
+                and installed_record.installed_identity == catalog_card.registry_card_id
             ):
                 # Signed sidecars can advance without changing artifact identity.
                 # Keep installed-state evidence, but do not freeze architecture,
