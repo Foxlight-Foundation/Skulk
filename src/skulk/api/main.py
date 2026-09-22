@@ -9218,6 +9218,16 @@ class API:
             installed_record = installed_record or local_installed_record
         if installed_record is not None:
             card = installed_record.model_card
+            if (
+                not catalog_card.is_custom
+                and not card.is_custom
+                and catalog_card.registry_card_id is not None
+                and catalog_card.registry_card_id == card.registry_card_id
+            ):
+                # Signed sidecars can advance without changing artifact identity.
+                # Keep installed-state evidence, but do not freeze architecture,
+                # capability claims, or runtime projections at installation time.
+                card = catalog_card
         return card, installed_record
 
     @staticmethod

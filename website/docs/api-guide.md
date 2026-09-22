@@ -3030,6 +3030,13 @@ trust, and `registry_card_id` fields describe that retained full card. The
 separate `current_registry_identity` and `update_available` fields describe a
 newer signed catalog generation without pretending it is already active.
 
+When the signed catalog and installed generation have the same immutable card
+ID, current verified catalog metadata takes precedence over the retained
+sidecar: architecture, capability claims, snapshot, and runtime projections can
+refresh without reinstalling weights. Installed identity and verification remain
+those of the retained generation. Custom overrides and different card IDs do
+not inherit another artifact's metadata.
+
 Important fields:
 
 | Field | Type | Meaning |
