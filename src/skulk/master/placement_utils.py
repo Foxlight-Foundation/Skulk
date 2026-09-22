@@ -14,9 +14,11 @@ from skulk.shared.models.memory_estimate import (
     backend_offloads_to_vram,
     estimate_recurrent_cache_bytes,
     estimate_shard_footprint,
+    gpu_working_set_ceiling,
     memory_overhead_factor,
     per_token_kv_bytes,
     shard_fraction_of_model,
+    shard_preallocates_kv_upfront,
 )
 from skulk.shared.models.memory_estimate import (
     KV_CONTEXT_BUDGET_TOKENS as PLACEMENT_KV_CONTEXT_BUDGET_TOKENS,
@@ -295,13 +297,16 @@ def reserve_instance_system_ram(
     system-RAM twin of ``reserve_instance_vram``: every shard whose memory
     lands in system RAM (MLX, a CPU-resolved shard, anything on a node
     without discrete VRAM or on a unified-memory APU) charges its estimated
-    footprint at its stamped window against the node's physical RAM, and the
-    usable figure is the smaller of the observed ``ram_available`` and the
-    uncommitted physical RAM. Observed usage already includes loaded
-    instances, so bounding against the remaining physical budget never counts
-    an allocation twice, and a node with nothing committed keeps its observed
-    figure untouched. RPC placements choose their split at runtime and stay
-    observation-only, as in the VRAM path.
+    footprint against the node's GPU working-set ceiling, the same capacity
+    admission caps each candidate at, and the usable figure is the smaller
+    of the observed ``ram_available`` and the uncommitted ceiling. A
+    fixed-window engine is charged at its stamped window; an engine that
+    grows its cache lazily (MLX) is charged at the admission floor, the same
+    reservation admission and the worker's guard make for it. Observed usage
+    already includes loaded instances, so bounding against the remaining
+    static budget never counts an allocation twice, and a node with nothing
+    committed keeps its observed figure untouched. RPC placements choose
+    their split at runtime and stay observation-only, as in the VRAM path.
 
     Args:
         node_memory: Observed node memory, ``ram_available`` and ``ram_total``.
@@ -341,15 +346,20 @@ def reserve_instance_system_ram(
                 context_budget=(
                     instance.context_token_limit
                     if instance.context_token_limit is not None
+                    and shard_preallocates_kv_upfront(shard)
                     else PLACEMENT_KV_CONTEXT_BUDGET_TOKENS
                 ),
             )
             committed[node_id] = committed.get(node_id, 0) + footprint.in_bytes
     usable: dict[NodeId, Memory] = {}
     for node_id, usage in node_memory.items():
-        uncommitted = max(0, usage.ram_total.in_bytes - committed.get(node_id, 0))
+        charged = committed.get(node_id, 0)
+        if charged <= 0:
+            usable[node_id] = usage.ram_available
+            continue
+        ceiling = gpu_working_set_ceiling(usage.ram_total).in_bytes
         usable[node_id] = Memory.from_bytes(
-            min(usage.ram_available.in_bytes, uncommitted)
+            min(usage.ram_available.in_bytes, max(0, ceiling - charged))
         )
     return usable
 

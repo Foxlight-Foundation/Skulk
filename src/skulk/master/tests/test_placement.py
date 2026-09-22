@@ -875,7 +875,9 @@ def _make_shard_metadata(model_card: ModelCard) -> PipelineShardMetadata:
     )
 
 
-def _served_gguf_card(model_id: str = "served-gguf") -> ModelCard:
+def _served_gguf_card(
+    model_id: str = "served-gguf", context_length: int = 1048576
+) -> ModelCard:
     """A GGUF card whose KV cost is known, so a served window can be sized."""
     return ModelCard(
         model_id=ModelId(model_id),
@@ -886,7 +888,7 @@ def _served_gguf_card(model_id: str = "served-gguf") -> ModelCard:
         num_key_value_heads=8,
         tasks=[ModelTask.TextGeneration],
         gguf_file="model-Q4_K_M.gguf",
-        context_length=1048576,
+        context_length=context_length,
     )
 
 
@@ -901,30 +903,37 @@ def test_served_window_on_unified_memory_follows_live_ram_net_of_placements() ->
     topology = Topology()
     node_id = NodeId()
     topology.add_node(node_id)
-    # A node with room for two of these models plus a wide window each; the
-    # reservation is what keeps the first window from claiming the whole node.
     node_memory = {
         node_id: create_node_memory(
             Memory.from_gb(120).in_bytes, ram_total=Memory.from_gb(128).in_bytes
         )
     }
     node_network = {node_id: create_node_network()}
+    # The first card's advertised context caps its window, so it leaves room.
+    first_card = _served_gguf_card("served-gguf-first", context_length=32768)
+    second_card = _served_gguf_card("served-gguf-second")
 
     first = place_instance(
-        place_instance_command(_served_gguf_card("served-gguf-first")),
-        topology,
-        {},
-        node_memory,
-        node_network,
+        place_instance_command(first_card), topology, {}, node_memory, node_network
     )
     first_instance = next(iter(first.values()))
-    assert first_instance.context_token_limit is not None
-    assert first_instance.context_token_limit > KV_CONTEXT_BUDGET_TOKENS
+    assert first_instance.context_token_limit == 32768
 
+    alone = next(
+        iter(
+            place_instance(
+                place_instance_command(second_card),
+                topology,
+                {},
+                node_memory,
+                node_network,
+            ).values()
+        )
+    )
     # The master hands placement memory already net of committed placements
     # (reserve_system_ram_usage); the first placement is pending here.
     second = place_instance(
-        place_instance_command(_served_gguf_card("served-gguf-second")),
+        place_instance_command(second_card),
         topology,
         first,
         reserve_system_ram_usage(node_memory, first),
@@ -935,11 +944,12 @@ def test_served_window_on_unified_memory_follows_live_ram_net_of_placements() ->
         for instance_id, instance in second.items()
         if instance_id not in first
     )
+    assert alone.context_token_limit is not None
     assert second_instance.context_token_limit is not None
     assert (
         KV_CONTEXT_BUDGET_TOKENS
         <= second_instance.context_token_limit
-        < first_instance.context_token_limit
+        < alone.context_token_limit
     )
 
 
@@ -968,13 +978,32 @@ def test_reserve_instance_system_ram_charges_only_ram_backed_shards() -> None:
             context_token_limit=stamped_window,
         )
 
+    mlx_node = NodeId()
+    mlx_card = card.model_copy(update={"gguf_file": None})
+
+    def mlx_instance() -> MlxRingInstance:
+        runner_id = RunnerId()
+        return MlxRingInstance(
+            instance_id=InstanceId(),
+            shard_assignments=ShardAssignments(
+                model_id=mlx_card.model_id,
+                runner_to_shard={
+                    runner_id: _make_shard_metadata(mlx_card).model_copy(
+                        update={"resolved_backend": "mlx"}
+                    )
+                },
+                node_to_runner={mlx_node: runner_id},
+            ),
+            hosts_by_node={},
+            ephemeral_port=50000,
+            context_token_limit=230000,
+        )
+
     node_memory = {
-        ram_node: create_node_memory(
+        node_id: create_node_memory(
             Memory.from_gb(60).in_bytes, ram_total=Memory.from_gb(64).in_bytes
-        ),
-        gpu_node: create_node_memory(
-            Memory.from_gb(60).in_bytes, ram_total=Memory.from_gb(64).in_bytes
-        ),
+        )
+        for node_id in (ram_node, gpu_node, mlx_node)
     }
     node_vram = {gpu_node: Memory.from_gb(48)}
     untouched = reserve_instance_system_ram(node_memory, {}, node_vram)
@@ -983,6 +1012,7 @@ def test_reserve_instance_system_ram_charges_only_ram_backed_shards() -> None:
         {
             InstanceId(): instance_on(ram_node, "llama_server-cpu"),
             InstanceId(): instance_on(gpu_node, "llama_server-cuda"),
+            InstanceId(): mlx_instance(),
         },
         node_vram,
     )
@@ -992,16 +1022,27 @@ def test_reserve_instance_system_ram_charges_only_ram_backed_shards() -> None:
         resolved_backend="llama_server-cpu",
         context_budget=stamped_window,
     )
+    mlx_footprint = estimate_shard_footprint(
+        mlx_card,
+        1.0,
+        resolved_backend="mlx",
+        context_budget=KV_CONTEXT_BUDGET_TOKENS,
+    )
 
     # Without commitments the observed figure stands untouched.
     assert untouched[ram_node] == Memory.from_gb(60)
     # The RAM-backed shard's footprint at its stamped window comes off the
-    # physical budget; observed memory that already reflects loads is never
-    # subtracted, so the figure is the smaller of the two.
-    assert charged[ram_node] == Memory.from_gb(64) - footprint
+    # working-set ceiling (48 of 64 GB), the capacity admission caps at;
+    # observed memory that already reflects loads is never subtracted, so
+    # the figure is the smaller of the two.
+    assert charged[ram_node] == Memory.from_gb(48) - footprint
     assert charged[ram_node] < untouched[ram_node]
     # A GPU-offload shard on a discrete-VRAM node lives in VRAM, not here.
     assert charged[gpu_node] == untouched[gpu_node]
+    # A lazily growing MLX cache is charged at the admission floor, not at
+    # its stamped window, which is commonly the node's whole fit.
+    assert charged[mlx_node] == Memory.from_gb(48) - mlx_footprint
+    assert charged[mlx_node] > Memory.from_gb(20)
 
 
 def test_legacy_instance_backfills_context_token_limit_from_card() -> None:

@@ -142,17 +142,13 @@ def test_pending_reservations_charge_system_ram_before_telemetry_shows_them() ->
     master._pending_instance_reservations[instance.instance_id] = instance
     reserved, _vram = master._placement_memory_inputs()
 
+    # The card is not a fixed-window engine's, so the reservation charges the
+    # admission floor, against the node's working-set ceiling (48 of 64 GB).
     footprint = estimate_shard_footprint(
-        card,
-        1.0,
-        context_budget=(
-            instance.context_token_limit
-            if instance.context_token_limit is not None
-            else KV_CONTEXT_BUDGET_TOKENS
-        ),
+        card, 1.0, context_budget=KV_CONTEXT_BUDGET_TOKENS
     )
     assert untouched[node_id].ram_available == Memory.from_gb(60.0)
-    assert reserved[node_id].ram_available == Memory.from_gb(64.0) - footprint
+    assert reserved[node_id].ram_available == Memory.from_gb(48.0) - footprint
     assert reserved[node_id].ram_total == Memory.from_gb(64.0)
 
 

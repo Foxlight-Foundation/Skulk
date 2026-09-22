@@ -636,7 +636,11 @@ available memory it has just admitted the placement against. The master
 hands every placement path node memory already net of the footprints of
 placements it has committed but telemetry may not show yet, pending ones
 included, so two back-to-back placements neither admit nor size a window
-against the same untouched figure. That live figure is capped at the
+against the same untouched figure; the charge is taken against the node's
+working-set ceiling, at the stamped window for a fixed-window engine and at
+the admission floor for a lazily growing MLX cache, and the GPU pool of a
+unified-memory APU is derived from the reserved figure. That live figure is
+capped at the
 node's GPU working-set ceiling and at the static fit, and never below the
 floor; a node without a live reading keeps the floor. The worker's own
 pre-spawn guard checks that stamped window against its current free memory

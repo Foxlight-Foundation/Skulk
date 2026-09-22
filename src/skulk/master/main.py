@@ -1229,29 +1229,45 @@ class Master:
         reservations.update(instances)
         return reservations
 
-    def _reserved_node_memory(
+    def _reserved_placement_inputs(
         self,
         node_memory: Mapping[NodeId, MemoryUsage],
         placements: Mapping[InstanceId, Instance],
-        node_vram: Mapping[NodeId, Memory],
-    ) -> dict[NodeId, MemoryUsage]:
-        """Node memory net of the system RAM ``placements`` have committed.
+    ) -> tuple[dict[NodeId, MemoryUsage], dict[NodeId, Memory]]:
+        """Node memory and usable GPU memory net of what ``placements`` committed.
 
-        The system-RAM counterpart of the VRAM reservation: a placement whose
-        indexed echo has not returned, or whose load telemetry has not shown,
-        is already charged against its node so the next placement neither
-        admits nor sizes a served window against memory that is spoken for.
+        The system-RAM counterpart of the VRAM reservation, applied first: a
+        placement whose indexed echo has not returned, or whose load
+        telemetry has not shown, is charged against its node so the next
+        placement neither admits nor sizes a served window against memory
+        that is spoken for. The GPU pool is then derived from the reserved
+        memory, so a unified-memory APU's host-RAM share of the pool reflects
+        the reservation too, and the discrete-VRAM reservation is applied on
+        top as before.
         """
-        return reserve_system_ram_usage(
+        unified_nodes = unified_memory_gpu_node_ids(
+            self._telemetry_view.node_system,
+            self._telemetry_view.node_resources,
+            node_memory=node_memory,
+        )
+        vram_membership = usable_vram_by_node(
+            self._telemetry_view.node_system,
+            self._telemetry_view.node_resources,
+            node_memory=node_memory,
+        )
+        memory = reserve_system_ram_usage(
             node_memory,
             placements,
-            node_vram,
-            unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
-                self._telemetry_view.node_system,
-                self._telemetry_view.node_resources,
-                node_memory=node_memory,
-            ),
+            vram_membership,
+            unified_memory_gpu_nodes=unified_nodes,
         )
+        vram = usable_vram_by_node(
+            self._telemetry_view.node_system,
+            self._telemetry_view.node_resources,
+            node_memory=memory,
+            current_instances=placements,
+        )
+        return memory, vram
 
     def _placement_memory_inputs(
         self,
@@ -1279,13 +1295,7 @@ class Master:
         credit = self._freed_credit_by_node()
         base_memory = self._telemetry_view.node_memory
         if not credit:
-            base_vram = usable_vram_by_node(
-                self._telemetry_view.node_system,
-                self._telemetry_view.node_resources,
-                node_memory=base_memory,
-                current_instances=placements,
-            )
-            return self._reserved_node_memory(base_memory, placements, base_vram), base_vram
+            return self._reserved_placement_inputs(base_memory, placements)
         # Credit the freed bytes onto each node's ram_available, clamped to
         # ram_total so credited availability never exceeds capacity (telemetry
         # may already have partly caught up, or the footprint estimate may be
@@ -1311,13 +1321,7 @@ class Master:
         # figure directly: usable_vram_by_node applies its own working-set /
         # GTT ceiling, so the credited VRAM is naturally capped and can never
         # exceed the ceiling or total VRAM.
-        vram = usable_vram_by_node(
-            self._telemetry_view.node_system,
-            self._telemetry_view.node_resources,
-            node_memory=memory,
-            current_instances=placements,
-        )
-        return self._reserved_node_memory(memory, placements, vram), vram
+        return self._reserved_placement_inputs(memory, placements)
 
     def _place_for_steward_action(
         self,
@@ -2820,16 +2824,9 @@ class Master:
                                     replacement_command_for_refused_instance(refused)
                                 )
                                 try:
-                                    repair_vram = usable_vram_by_node(
-                                        self._telemetry_view.node_system,
-                                        self._telemetry_view.node_resources,
-                                        node_memory=self._telemetry_view.node_memory,
-                                        current_instances=self._placement_reservations(after_delete),
-                                    )
-                                    repair_memory = self._reserved_node_memory(
+                                    repair_memory, repair_vram = self._reserved_placement_inputs(
                                         self._telemetry_view.node_memory,
                                         self._placement_reservations(after_delete),
-                                        repair_vram,
                                     )
                                     final_placement = place_instance(
                                         replace_command,
@@ -2886,16 +2883,9 @@ class Master:
                                         refused, command.node_id
                                     )
                                     try:
-                                        repair_vram = usable_vram_by_node(
-                                            self._telemetry_view.node_system,
-                                            self._telemetry_view.node_resources,
-                                            node_memory=self._telemetry_view.node_memory,
-                                            current_instances=self._placement_reservations(after_delete),
-                                        )
-                                        repair_memory = self._reserved_node_memory(
+                                        repair_memory, repair_vram = self._reserved_placement_inputs(
                                             self._telemetry_view.node_memory,
                                             self._placement_reservations(after_delete),
-                                            repair_vram,
                                         )
                                         final_placement = place_instance(
                                             fallback,
@@ -3374,16 +3364,9 @@ class Master:
                 replace_command = replacement_command_for_download_failed_instance(
                     instance, failed_nodes
                 )
-                repair_vram = usable_vram_by_node(
-                    self._telemetry_view.node_system,
-                    self._telemetry_view.node_resources,
-                    node_memory=self._telemetry_view.node_memory,
-                    current_instances=self._placement_reservations(after_delete),
-                )
-                repair_memory = self._reserved_node_memory(
+                repair_memory, repair_vram = self._reserved_placement_inputs(
                     self._telemetry_view.node_memory,
                     self._placement_reservations(after_delete),
-                    repair_vram,
                 )
                 final_placement = place_instance(
                     replace_command,
@@ -3590,22 +3573,16 @@ class Master:
             min_nodes=1,
             system_role="steward",
         )
-        placement_memory = node_memory or self._telemetry_view.node_memory
-        placement_vram = (
-            node_vram
-            if node_vram is not None
-            else usable_vram_by_node(
-                self._telemetry_view.node_system,
-                self._telemetry_view.node_resources,
-                node_memory=placement_memory,
-                current_instances=self._placement_reservations(current_instances),
+        if node_vram is not None:
+            # A caller handing in both maps (the replacement snapshot) has
+            # already reserved them.
+            placement_memory = node_memory or self._telemetry_view.node_memory
+            placement_vram = node_vram
+        else:
+            placement_memory, placement_vram = self._reserved_placement_inputs(
+                node_memory or self._telemetry_view.node_memory,
+                self._placement_reservations(current_instances),
             )
-        )
-        placement_memory = self._reserved_node_memory(
-            placement_memory,
-            self._placement_reservations(current_instances),
-            placement_vram,
-        )
         return place_instance(
             command,
             self.state.topology,
@@ -3671,6 +3648,23 @@ class Master:
             self._telemetry_view.node_resources,
             node_memory=memory,
         )
+        remaining = {
+            identifier: instance
+            for identifier, instance in self.state.instances.items()
+            if identifier != current.instance_id
+        }
+        # The other placements' system RAM is spoken for in this snapshot
+        # too; reserve it before the GPU pool is derived from the memory.
+        memory = reserve_system_ram_usage(
+            memory,
+            remaining,
+            usable_vram_by_node(
+                self._telemetry_view.node_system,
+                self._telemetry_view.node_resources,
+                node_memory=memory,
+            ),
+            unified_memory_gpu_nodes=unified_nodes,
+        )
         vram = dict(
             usable_vram_by_node(
                 self._telemetry_view.node_system,
@@ -3689,18 +3683,12 @@ class Master:
             if isinstance(total_bytes, int) and total_bytes > 0:
                 credited_bytes = min(total_bytes, credited_bytes)
             vram[node_id] = Memory.from_bytes(credited_bytes)
-        remaining = {
-            identifier: instance
-            for identifier, instance in self.state.instances.items()
-            if identifier != current.instance_id
-        }
-        reserved_vram = reserve_instance_vram(
+        return memory, reserve_instance_vram(
             vram,
             self._telemetry_view.node_system,
             remaining,
             unified_memory_gpu_nodes=unified_nodes,
         )
-        return self._reserved_node_memory(memory, remaining, reserved_vram), reserved_vram
 
     def _reset_steward_upgrade(self) -> None:
         """Forget one in-progress best-brain convergence attempt."""
