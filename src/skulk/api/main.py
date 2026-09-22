@@ -645,6 +645,11 @@ class _TelemetrySender(Protocol):
 serve = cast(_HypercornServe, hypercorn_asyncio.serve)
 
 _API_EVENT_LOG_DIR = SKULK_EVENT_LOG_DIR / "api"
+# A signed-card adoption that needs a real download is followed by polling
+# the store; multi-gigabyte artifacts on slow links take hours, so the watcher
+# gives up only after a day and leaves the override for the operator.
+_OVERRIDE_RETIREMENT_POLL_SECONDS = 5.0
+_OVERRIDE_RETIREMENT_DEADLINE_SECONDS = 24 * 60 * 60
 
 # Ring retention for the API event log. Unlike the master's log (compacted
 # after every snapshot), the API log has NO compaction. Historically it
@@ -1894,6 +1899,7 @@ class API:
         # hanging the caller. Bounded FIFO; consumed at stream registration.
         self._pending_stream_failures: dict[CommandId, ErrorChunk] = {}
         self._store_client = store_client
+        self._pending_override_retirements: set[ModelId] = set()
         self._model_list_store_records_cache: dict[ModelId, InstalledCardRecord] = {}
         self._model_list_store_records_cached_at = 0.0
         self._model_list_store_records_lock = asyncio.Lock()
@@ -15474,10 +15480,17 @@ class API:
 
     async def request_store_download(
         self,
+        request: Request,
         model_id: str,
         payload: StoreDownloadRequest | None = None,
     ) -> StoreDownloadResponse:
-        """Request a store download with optional base or companion pins."""
+        """Request a store download with optional base or companion pins.
+
+        Naming a signed card for an alias that a custom card overrides also
+        retires that override once the store has adopted the signed card,
+        provided the caller holds the same operator-mutation authority a
+        direct custom-card deletion requires.
+        """
         if self._store_client is None:
             raise HTTPException(status_code=503, detail="Store not configured")
         requested_model_id = ModelId(model_id)
@@ -15555,20 +15568,102 @@ class API:
         # while the store read the signed generation. Once the store has
         # taken the signed card, retire the override so the signed card is
         # the catalog card on every node, the way a direct delete would.
-        if (
-            requested_card_id is not None
-            and registry_card_id is not None
-            and result.get("status") == "complete"
-        ):
-            catalog_card = get_card(requested_model_id)
-            if catalog_card is not None and catalog_card.is_custom:
-                await self.command_sender.send(
-                    ForwarderCommand(
-                        origin=self._system_id,
-                        command=DeleteCustomModelCard(model_id=requested_model_id),
-                    )
-                )
+        if requested_card_id is not None and registry_card_id is not None:
+            self._schedule_custom_override_retirement(
+                request, requested_model_id, str(result.get("status"))
+            )
         return StoreDownloadResponse.model_validate(result, strict=False)
+
+    def _schedule_custom_override_retirement(
+        self, request: Request, model_id: ModelId, store_status: str
+    ) -> None:
+        """Retire the custom card overriding ``model_id`` once the store adopts.
+
+        The override is captured now and only that exact card is retired
+        later, so a custom card an operator replaces while the download runs
+        is never deleted by the older request. The retirement is a replicated
+        catalog deletion, so it needs the authority ``DELETE
+        /models/custom/{model_id}`` needs; a caller without it still gets the
+        download and the override stays until an operator removes it.
+        """
+        override = get_card(model_id)
+        if override is None or not override.is_custom:
+            return
+        if not self._operator_mutation_allowed(request):
+            logger.info(
+                "Signed card adoption for %s leaves its custom override in "
+                "place: the caller lacks operator-mutation authority",
+                model_id,
+            )
+            return
+        if store_status == "complete":
+            self._tg.start_soon(self._retire_custom_override, model_id, override)
+            return
+        if store_status not in {"pending", "downloading"}:
+            return
+        if model_id in self._pending_override_retirements:
+            return
+        self._pending_override_retirements.add(model_id)
+        self._tg.start_soon(
+            self._retire_custom_override_on_completion, model_id, override
+        )
+
+    async def _retire_custom_override(
+        self, model_id: ModelId, override: ModelCard
+    ) -> None:
+        """Order the deletion of ``override`` if it still overrides ``model_id``."""
+        if get_card(model_id) != override:
+            logger.info(
+                "Custom card for %s changed while the signed card was adopted; "
+                "leaving the current custom card in place",
+                model_id,
+            )
+            return
+        await self.command_sender.send(
+            ForwarderCommand(
+                origin=self._system_id,
+                command=DeleteCustomModelCard(model_id=model_id),
+            )
+        )
+
+    async def _retire_custom_override_on_completion(
+        self, model_id: ModelId, override: ModelCard
+    ) -> None:
+        """Follow a store download and retire ``override`` when it completes.
+
+        A failed or cancelled download leaves the override alone: the custom
+        card is still the only card whose bytes are installed. An API restart
+        forgets the pending retirement; re-requesting the update after the
+        download has completed retires the override without a transfer.
+        """
+        try:
+            deadline = time.monotonic() + _OVERRIDE_RETIREMENT_DEADLINE_SECONDS
+            while time.monotonic() < deadline:
+                await anyio.sleep(_OVERRIDE_RETIREMENT_POLL_SECONDS)
+                if self._store_client is None:
+                    return
+                status = await self._store_client.get_store_download_status(
+                    str(model_id)
+                )
+                state = status.get("status")
+                if state == "complete":
+                    await self._retire_custom_override(model_id, override)
+                    return
+                if state in {"failed", "cancelled", "not_found"}:
+                    logger.info(
+                        "Signed card adoption for %s ended as %s; the custom "
+                        "override stays in place",
+                        model_id,
+                        state,
+                    )
+                    return
+            logger.warning(
+                "Signed card adoption for %s did not complete within the "
+                "retirement deadline; the custom override stays in place",
+                model_id,
+            )
+        finally:
+            self._pending_override_retirements.discard(model_id)
 
     async def get_store_download_status(self, model_id: str) -> JSONResponse:
         if self._store_client is None:

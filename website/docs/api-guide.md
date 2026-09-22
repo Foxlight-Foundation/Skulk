@@ -2777,6 +2777,18 @@ its required files are fetched, directory layout is preserved, and every
 declared size and available upstream object identity is verified. Trust does
 not depend on which node initiated the request.
 
+When `registry_card_id` names a signed card for an alias that a custom card
+overrides, the API also retires that custom card once the store has adopted
+the signed generation: immediately for a byte-free adoption, otherwise when
+the download completes (a failed or cancelled download leaves it). Only the
+exact custom card present at request time is retired, so a custom card
+replaced during the download stays. The retirement is the same replicated
+deletion as `DELETE /models/custom/{model_id}` and requires the same
+operator-mutation authority; a caller without it still gets the download and
+the override stays until an operator deletes it. An API restart during the
+download forgets the pending retirement; requesting the update again after
+the download has completed retires the override without a transfer.
+
 The optional JSON body accepts the following fields:
 
 - `gguf_file`: non-empty repo-relative GGUF path selecting the base or companion

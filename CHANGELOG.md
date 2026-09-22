@@ -13,9 +13,11 @@ This project records release notes here and mirrors public-facing notes in
   from the Downloads page: an Update action beside "Update available" asks
   the store for the current signed card, and when the bytes already
   installed are that card's bundle the store swaps the sidecar without a
-  download. The store's "update available" now also covers a generation
-  installed under a custom or legacy card, which it previously read as
-  current.
+  download. When a custom card overrode the alias, an operator-authorized
+  update retires that exact custom card once the store has adopted the
+  signed one, after the download when bytes had to move. The store's
+  "update available" now also covers a generation installed under a custom
+  or legacy card, which it previously read as current.
 - Video generation is a capability the dashboard knows: `video_gen` joins the
   model browser's capability filter and chips with its own tint, so a
   catalog video card can be filtered and badged.
