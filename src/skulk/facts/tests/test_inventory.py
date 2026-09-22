@@ -1,3 +1,4 @@
+# pyright: reportPrivateUsage=false
 """Tests for exact open engine and hardware inventory."""
 
 import hashlib
@@ -113,8 +114,50 @@ def test_comfy_build_is_the_checkout_head(monkeypatch: pytest.MonkeyPatch) -> No
         return "a" * 40 if checkout == "/opt/ComfyUI" else None
 
     monkeypatch.setattr(inventory_module, "_git_head", fake_head)
+
+    def fake_torch(interpreter: str) -> str | None:
+        return "2.9.1+cu130" if interpreter == "/opt/SKULK_COMFY_BIN" else None
+
+    monkeypatch.setattr(inventory_module, "_comfy_torch", fake_torch)
     facts = make_facts(gpus=(NVIDIA_A40,)).model_copy(
         update={"comfy_binary": ok_bin("SKULK_COMFY_BIN"), "comfy_root": "/opt/ComfyUI", "comfy_root_state": "ok"}
     )
     builds = inventory_module.engine_build_inventory(frozenset({"comfy", "comfy-cuda"}), facts, environ={})
-    assert builds == {"comfy": "comfy@" + "a" * 40, "comfy-cuda": "comfy@" + "a" * 40}
+    # The torch build is part of the identity: the same checkout on another
+    # torch is another engine for the support matrix.
+    expected = "comfy@" + "a" * 40 + "/torch@2.9.1+cu130"
+    assert builds == {"comfy": expected, "comfy-cuda": expected}
+    # A checkout whose interpreter cannot answer keeps the commit-only form.
+    def no_torch(_interpreter: str) -> str | None:
+        return None
+
+    monkeypatch.setattr(inventory_module, "_comfy_torch", no_torch)
+    builds = inventory_module.engine_build_inventory(frozenset({"comfy"}), facts, environ={})
+    assert builds == {"comfy": "comfy@" + "a" * 40}
+
+
+@pytest.mark.parametrize(
+    ("stdout", "expected"),
+    [
+        ("skulk-torch=2.9.1+cu130\n", "2.9.1+cu130"),
+        ("Welcome banner\nskulk-torch=2.9.1+rocm7.2\nsome warning\n", "2.9.1+rocm7.2"),
+        ("2.9.1+cu130\n", None),
+        ("skulk-torch=\n", None),
+        ("skulk-torch=2.9.1\nskulk-torch=2.9.2\n", None),
+        ("skulk-torch=not a version\n", None),
+    ],
+)
+def test_comfy_torch_reads_only_the_sentinel_line(
+    monkeypatch: pytest.MonkeyPatch, stdout: str, expected: str | None
+) -> None:
+    """Only the sentinel line of the interpreter's output names the torch build."""
+    import subprocess
+
+    from skulk.facts import inventory as inventory_module
+
+    def fake_run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(inventory_module.subprocess, "run", fake_run)
+    inventory_module._comfy_torch.cache_clear()
+    assert inventory_module._comfy_torch(f"/opt/python-{hash(stdout)}") == expected

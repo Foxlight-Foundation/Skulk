@@ -799,8 +799,11 @@ prompt shape in one warm server, so the hipBLASLt routing and the
 server-per-render policy that bridged the gap are gone. An
 operator with a hand-built ComfyUI points `SKULK_COMFY_BIN` at its
 interpreter and `SKULK_COMFY_ROOT` at the checkout; both must be valid or
-the engine stays off with a loud conflict. The checkout's commit is the
-engine's build identity in node telemetry.
+the engine stays off with a loud conflict. The engine's build identity in
+node telemetry is the checkout's commit and the torch build its interpreter
+runs, `comfy@<commit>/torch@<version>`, so the same checkout on another
+torch is another build to a signed engine-support claim; a checkout whose
+torch cannot be read keeps the commit-only form.
 
 ### ComfyUI runner
 
