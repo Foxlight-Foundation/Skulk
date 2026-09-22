@@ -28,6 +28,7 @@
   "capability.text": "Text",
   "capability.thinking": "Thinking",
   "capability.tts": "TTS",
+  "capability.videoGen": "Video Gen",
   "capability.vision": "Vision",
   "capabilityPanel.closePanel": "Close capability panel",
   "capabilityPanel.field.bundle": "Bundle",

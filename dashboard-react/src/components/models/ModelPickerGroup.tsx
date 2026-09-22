@@ -75,7 +75,7 @@ function timeAgo(ts: number, t: SkulkTranslate): string {
 
 /** Capabilities surfaced as chips on the row. `text` is implied and omitted. */
 const CHIP_CAPABILITIES = new Set([
-  'thinking', 'vision', 'code', 'image_gen', 'image_edit', 'embedding', 'tts', 'stt',
+  'thinking', 'vision', 'code', 'image_gen', 'image_edit', 'video_gen', 'embedding', 'tts', 'stt',
 ]);
 
 function bestInstanceStatus(

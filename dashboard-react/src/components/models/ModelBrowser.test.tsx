@@ -44,6 +44,17 @@ const MODELS: ModelInfo[] = [
     family: 'canary',
     storage_size_megabytes: 3100,
   },
+  {
+    id: 'Comfy-Org/MiniMax-H3-FL2VA-comfy-int8',
+    name: 'MiniMax H3 FL2VA',
+    base_model: 'MiniMax H3',
+    family: 'minimax-h3',
+    quantization: 'int8_convrot',
+    storage_size_megabytes: 40500,
+    capabilities: ['video_gen'],
+    catalog_source: 'registry',
+    registry_provenance: 'foxlight',
+  },
 ];
 
 const HUB_MODELS: HuggingFaceModel[] = [{
@@ -127,6 +138,7 @@ describe('ModelBrowser store discovery taxonomy', () => {
       'All',
       'Canary',
       'LongCat AudioDiT',
+      'Minimax H3',
       'Qwen',
     ]);
   });
@@ -154,6 +166,25 @@ describe('ModelBrowser store discovery taxonomy', () => {
     // surfaced on the row.
     expect(container?.textContent).toContain('8bit');
     expect(container?.textContent).toContain('GGUF');
+    expect(container?.textContent).not.toContain('Canary 1B');
+  });
+
+  it('filters and badges video generation as a capability', async () => {
+    await renderBrowser();
+
+    // The video card carries its capability as a chip on its row.
+    expect(container?.textContent).toContain('MiniMax H3');
+    const chips = Array.from(container?.querySelectorAll('span') ?? [])
+      .filter((el) => el.textContent?.toLowerCase() === 'video gen');
+    expect(chips.length).toBeGreaterThan(0);
+
+    // The capability filter offers Video Gen and keeps only the video card.
+    const videoToggle = Array.from(container?.querySelectorAll('button') ?? [])
+      .find((button) => button.textContent === 'Video Gen' && button.hasAttribute('aria-pressed'));
+    expect(videoToggle).not.toBeUndefined();
+    await act(async () => videoToggle?.click());
+    expect(container?.textContent).toContain('MiniMax H3');
+    expect(container?.textContent).not.toContain('Qwen3 4B');
     expect(container?.textContent).not.toContain('Canary 1B');
   });
 
@@ -273,7 +304,7 @@ describe('discovery evidence and download independence', () => {
     }, undefined, MODELS.map(model => model.id));
     const recent = familyChips().find(chip => chip.textContent === 'Recent')!;
     await act(async () => recent.click());
-    expect(container!.textContent).toContain('3 model groups');
+    expect(container!.textContent).toContain('4 model groups');
 
     const ready = [...container!.querySelectorAll('label')].find(label => label.textContent === 'Ready now')!.querySelector('input')!;
     await act(async () => ready.click());
