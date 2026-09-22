@@ -225,6 +225,75 @@ async def test_models_use_cluster_store_installed_record(
     assert response.data[0].update_available is False
 
 
+@pytest.mark.parametrize("local", [False, True])
+@pytest.mark.parametrize("same_identity", [False, True])
+@pytest.mark.parametrize("verified", [False, True])
+async def test_installed_registry_metadata_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    local: bool,
+    same_identity: bool,
+    verified: bool,
+) -> None:
+    """Refresh same-artifact signed evidence without replacing installed truth."""
+    installed_card = _card("a")
+    record = _installed_record(tmp_path, installed_card)
+    if not verified:
+        (
+            tmp_path / str(installed_card.registry_card_id) / ".skulk-source-revision"
+        ).unlink()
+        record = build_installed_card_record(
+            tmp_path / str(installed_card.registry_card_id),
+            installed_card,
+            artifact_format="gguf",
+        )
+        assert record.verification == "local_legacy"
+    claim = RegistryCapabilityClaim(
+        capability_id="video.generate",
+        scope="model",
+        status="claimed",
+        source="upstream_structured",
+        confidence=1.0,
+    )
+    current = _card("a" if same_identity else "b").model_copy(
+        update={
+            "registry_snapshot_id": "snapshot_refreshed",
+            "registry_architecture": "ExampleArchitecture",
+            "registry_capability_claims": (claim,),
+        }
+    )
+    _configure_model_list_test(
+        monkeypatch,
+        catalog_card=current,
+        current_registry_card_value=current,
+        local_record=record if local else None,
+    )
+    api = _api_with_store(
+        _RegistryStoreClient(
+            []
+            if local
+            else [
+                {
+                    "model_id": str(current.model_id),
+                    "installed_card": record.model_dump(mode="json"),
+                }
+            ]
+        )
+    )
+    entry = (await api.get_models(status=None)).data[0]
+    expected = current if same_identity and verified else installed_card
+    assert entry.registry_snapshot_id == expected.registry_snapshot_id
+    assert entry.registry_architecture == expected.registry_architecture
+    assert tuple(entry.capability_claims) == expected.registry_capability_claims
+    assert entry.registry_card_id == installed_card.registry_card_id
+    assert entry.active_installed_identity == record.installed_identity
+    assert entry.installed_verification == record.verification
+    assert entry.update_available is not same_identity
+    assert record.model_card == installed_card
+    requirements = await api.get_model_requirements(str(current.model_id))
+    assert requirements.card_digest == authorized_model_card_digest(expected)
+
+
 async def test_models_fall_back_to_local_installed_record(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -392,7 +461,9 @@ async def test_store_registry_flags_an_update_for_a_custom_generation(
     # flag under test comes from the installed record against the current
     # signed card.
     def no_inventory() -> tuple[
-        CacheInventoryStatus, dict[str, list[CachedArtifactLocation]], tuple[NodeId, ...]
+        CacheInventoryStatus,
+        dict[str, list[CachedArtifactLocation]],
+        tuple[NodeId, ...],
     ]:
         return (
             CacheInventoryStatus(
@@ -403,7 +474,9 @@ async def test_store_registry_flags_an_update_for_a_custom_generation(
         )
 
     monkeypatch.setattr(api, "_cache_inventory_projection", no_inventory)
-    monkeypatch.setattr(api, "_reconciliation_status", ReconciliationStatus(), raising=False)
+    monkeypatch.setattr(
+        api, "_reconciliation_status", ReconciliationStatus(), raising=False
+    )
 
     response = await api.get_store_registry()
 
