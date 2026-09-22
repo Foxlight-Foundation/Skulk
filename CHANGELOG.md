@@ -16,6 +16,9 @@ This project records release notes here and mirrors public-facing notes in
   download. The store's "update available" now also covers a generation
   installed under a custom or legacy card, which it previously read as
   current.
+- Video generation is a capability the dashboard knows: `video_gen` joins the
+  model browser's capability filter and chips with its own tint, so a
+  catalog video card can be filtered and badged.
 
 ### Fixed
 

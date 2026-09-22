@@ -317,6 +317,7 @@ export const CAPABILITIES = [
   'vision',
   'image_gen',
   'image_edit',
+  'video_gen',
   'embedding',
   'tts',
   'stt',

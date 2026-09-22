@@ -62,6 +62,9 @@ const PIPELINE_CAPABILITY: Readonly<Record<string, string>> = {
   'sentence-similarity': 'embedding',
   'text-to-image': 'image_gen',
   'image-to-image': 'image_edit',
+  // Video pipelines stay unfamiliar here on purpose: the Hub import path
+  // cannot build a video card yet, so a video repository must not read as
+  // importable. Catalog video cards carry video_gen themselves.
 };
 
 const Row = styled.div`
