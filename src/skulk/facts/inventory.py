@@ -113,12 +113,25 @@ def _git_head(checkout: str) -> str | None:
     return head if len(head) == 40 else None
 
 
+_TORCH_VERSION_SENTINEL = "skulk-torch="
+_TORCH_VERSION = re.compile(r"^[0-9][A-Za-z0-9.+_-]{0,63}$")
+
+
 @lru_cache(maxsize=8)
 def _comfy_torch(interpreter: str) -> str | None:
-    """Read the torch build the ComfyUI interpreter runs, once per process."""
+    """Read the torch build the ComfyUI interpreter runs, once per process.
+
+    The interpreter prints the version behind a sentinel on its own line and
+    only a line of that exact shape counts, so a banner, a warning, or a
+    wrapper's chatter on stdout cannot become the advertised build.
+    """
     try:
         completed = subprocess.run(  # noqa: S603 - operator-configured interpreter
-            [interpreter, "-c", "import torch; print(torch.__version__)"],
+            [
+                interpreter,
+                "-c",
+                f"import torch; print('{_TORCH_VERSION_SENTINEL}' + torch.__version__)",
+            ],
             check=False,
             capture_output=True,
             text=True,
@@ -128,8 +141,14 @@ def _comfy_torch(interpreter: str) -> str | None:
         return None
     if completed.returncode != 0:
         return None
-    version = completed.stdout.strip().split()[-1] if completed.stdout.strip() else ""
-    return version if 0 < len(version) <= 64 and " " not in version else None
+    versions = [
+        line[len(_TORCH_VERSION_SENTINEL) :].strip()
+        for line in completed.stdout.splitlines()
+        if line.startswith(_TORCH_VERSION_SENTINEL)
+    ]
+    if len(versions) != 1 or not _TORCH_VERSION.fullmatch(versions[0]):
+        return None
+    return versions[0]
 
 
 def _comfy_build(facts: NodeFacts) -> str | None:
