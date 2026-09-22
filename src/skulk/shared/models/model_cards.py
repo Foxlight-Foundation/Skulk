@@ -3084,6 +3084,7 @@ async def delete_custom_card(model_id: ModelId) -> bool:
     and restore the wrong source beneath a deleted registry override.
     """
     card_path = _custom_cards_dir / (ModelId(model_id).normalize() + ".toml")
+    removed_file = False
     if await card_path.exists():
         stored_card = await ModelCard.load_from_path(card_path)
         if stored_card.model_id != model_id:
@@ -3091,10 +3092,17 @@ async def delete_custom_card(model_id: ModelId) -> bool:
                 "custom model-card storage key belongs to a different alias"
             )
         await card_path.unlink()
-        _card_cache.pop(model_id, None)
-        await _refresh_card_cache()
-        return True
-    return False
+        removed_file = True
+    cached = _card_cache.get(model_id)
+    if not removed_file and (cached is None or not cached.is_custom):
+        return False
+    # The cache entry goes whether or not a file backed it on this node: a
+    # replicated delete names the alias, and a custom entry survives every
+    # rebuild (the registry merge never replaces one), so a node holding it
+    # only in memory would otherwise serve the deleted card until restart.
+    _card_cache.pop(model_id, None)
+    await _refresh_card_cache()
+    return True
 
 
 class ConfigData(BaseModel):

@@ -59,6 +59,39 @@ afterEach(async () => {
 });
 
 describe('StoreRegistryTable chat action', () => {
+  it('offers Update for an installed generation behind the signed card', async () => {
+    const onUpdate = vi.fn();
+    container = document.createElement('div');
+    document.body.append(container);
+    root = createRoot(container);
+    const entry = {
+      model_id: 'org/video-model',
+      total_bytes: 1024,
+      files: ['model.safetensors'],
+      downloaded_at: new Date().toISOString(),
+      installed_card: {
+        installed_identity: 'local_' + 'a'.repeat(52),
+        verification: 'custom' as const,
+        artifact_role: 'base' as const,
+      },
+      update_available: true,
+      current_registry_identity: 'card_' + 'b'.repeat(52),
+    };
+    await act(async () => {
+      root?.render(
+        <ThemeProvider theme={darkTheme}>
+          <StoreRegistryTable entries={[entry]} onRefresh={vi.fn()} onDelete={vi.fn()} onUpdate={onUpdate} />
+        </ThemeProvider>,
+      );
+    });
+    expect(container.textContent).toContain('Update available');
+    const button = Array.from(container.querySelectorAll('button'))
+      .find((candidate) => candidate.textContent === 'Update');
+    expect(button).not.toBeUndefined();
+    await act(async () => button?.click());
+    expect(onUpdate).toHaveBeenCalledWith(entry);
+  });
+
   it('shows chat for a ready text-generation model', async () => {
     await renderRegistry('org/chat', { tasks: ['TextGeneration'], capabilities: ['text'] });
 

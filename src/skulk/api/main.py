@@ -14889,9 +14889,12 @@ class API:
                     installed_registry_identity = cast(
                         "dict[str, object]", model_card
                     ).get("registry_card_id")
+            # An installed generation without a registry identity (a custom or
+            # legacy card) is as much behind the signed card as one under an
+            # older signed card: the update is available in both cases.
             update_available = (
-                current_identity is not None
-                and installed_registry_identity is not None
+                installed_dict is not None
+                and current_identity is not None
                 and current_identity != installed_registry_identity
             )
             entry["current_registry_identity"] = current_identity

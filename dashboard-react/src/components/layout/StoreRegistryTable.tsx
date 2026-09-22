@@ -39,6 +39,8 @@ export interface StoreRegistryEntry {
   }>;
   update_available?: boolean;
   installed_not_current?: boolean;
+  /** The signed card the registry currently publishes for this alias, when one exists. */
+  current_registry_identity?: string | null;
   reconciliation_state?: string;
   advisories?: Array<{
     advisory_id: string;
@@ -132,6 +134,10 @@ export interface StoreRegistryTableProps {
   /** Total available cluster RAM in bytes — used to disable launch for models that won't fit */
   totalClusterMemoryBytes?: number;
   onOptimize?: (modelId: string) => void;
+  /** Adopt the signed card the registry currently publishes for an installed
+   *  generation that is behind it (a custom, legacy, or older signed card). The
+   *  store swaps the sidecar without moving bytes when the bundle is the same. */
+  onUpdate?: (entry: StoreRegistryEntry) => void;
   /** Companion (drafter / MTP-head sidecar) entries keyed by model_id. These are
    *  not independently placeable, so their launch/placement/optiq actions are
    *  suppressed and a role badge is shown instead. */
@@ -544,6 +550,22 @@ const PlacementBtn = styled.button`
   }
 `;
 
+const UpdateBtn = styled.button`
+  all: unset;
+  cursor: pointer;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  color: ${({ theme }) => theme.colors.accentText};
+  border: 1px solid ${({ theme }) => theme.colors.accentText};
+  transition: all 0.15s;
+
+  &:hover {
+    background: ${({ theme }) => theme.colors.goldBg};
+  }
+`;
+
 const StopBtn = styled.button`
   all: unset;
   cursor: pointer;
@@ -749,6 +771,7 @@ export function StoreRegistryTable({
   clusterCards = {},
   totalClusterMemoryBytes = 0,
   onOptimize,
+  onUpdate,
   companions = {},
   reconciliation = null,
 }: StoreRegistryTableProps) {
@@ -947,6 +970,15 @@ export function StoreRegistryTable({
                   )}
                   {entry.update_available && (
                     <StateBadge $tone="warn">{t('storeRegistry.updateAvailable', 'Update available')}</StateBadge>
+                  )}
+                  {entry.update_available && entry.current_registry_identity && onUpdate && !active && !downloading && (
+                    <UpdateBtn
+                      type="button"
+                      onClick={() => onUpdate(entry)}
+                      aria-label={t('storeRegistry.updateNamedModel', 'Update {modelId} to the signed card', { modelId: entry.model_id })}
+                    >
+                      {t('storeRegistry.update', 'Update')}
+                    </UpdateBtn>
                   )}
                   {(entry.advisories?.length ?? 0) > 0 && (
                     <InfoTooltip

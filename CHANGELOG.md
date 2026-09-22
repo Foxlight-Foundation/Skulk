@@ -7,8 +7,24 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Added
+
+- An installed model can take the signed card the registry publishes for it
+  from the Downloads page: an Update action beside "Update available" asks
+  the store for the current signed card, and when the bytes already
+  installed are that card's bundle the store swaps the sidecar without a
+  download. The store's "update available" now also covers a generation
+  installed under a custom or legacy card, which it previously read as
+  current.
+
 ### Fixed
 
+- Deleting a custom model card evicts it on every node. A node that held the
+  custom entry only in memory (no file backed it, or the file was named
+  otherwise) kept serving the deleted card until restart, because a custom
+  entry survives every catalog rebuild; the replicated delete now evicts the
+  entry whether or not a file exists and lets the rebuild restore the signed
+  or bundled card.
 - A signed registry card this Skulk build cannot read is skipped with a
   warning instead of failing the whole catalog. The registry publishes new
   card classes (video cards first) ahead of the Skulk builds that read them;

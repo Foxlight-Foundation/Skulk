@@ -233,6 +233,62 @@ async def test_custom_card_deletion_restores_signed_registry_authority(
 
 
 @pytest.mark.anyio
+async def test_custom_card_deletion_evicts_a_cache_entry_without_a_file(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A replicated delete evicts the custom entry even when no file backs it.
+
+    A custom entry survives every rebuild (the registry merge never replaces
+    one), so a node that held it only in memory would serve the deleted card
+    until restart; the delete must evict it and let the rebuild restore the
+    signed card.
+    """
+    custom_dir = tmp_path / "custom"
+    custom_dir.mkdir()
+    registry_card = ModelCard.model_validate(
+        {
+            "model_id": "testorg/override-model",
+            "storage_size": {"in_bytes": 1024},
+            "n_layers": 4,
+            "hidden_size": 64,
+            "supports_tensor": False,
+            "tasks": ["TextGeneration"],
+            "quantization": "registry-fp8",
+            "registry_card_id": f"card_{'a' * 52}",
+            "registry_snapshot_id": "snapshot_test",
+        }
+    )
+    custom_card = registry_card.model_copy(
+        update={
+            "registry_card_id": None,
+            "registry_snapshot_id": None,
+            "quantization": "int4",
+            "is_custom": True,
+        }
+    )
+    monkeypatch.setattr(model_cards_module, "_card_cache", {})
+    monkeypatch.setattr(model_cards_module, "_custom_cards_dir", Path(str(custom_dir)))
+    model_cards_module._card_cache[custom_card.model_id] = custom_card
+
+    async def load_registry() -> bool:
+        for cached_model_id, card in tuple(model_cards_module._card_cache.items()):
+            if not card.is_custom:
+                del model_cards_module._card_cache[cached_model_id]
+        existing = model_cards_module._card_cache.get(registry_card.model_id)
+        if existing is None or not existing.is_custom:
+            model_cards_module._card_cache[registry_card.model_id] = registry_card
+        return True
+
+    monkeypatch.setattr(model_cards_module, "_load_cards_from_registry", load_registry)
+
+    assert await model_cards_module.delete_custom_card(custom_card.model_id)
+    assert model_cards_module._card_cache[registry_card.model_id] == registry_card
+    # An alias that is not a custom entry is not a deletion.
+    assert not await model_cards_module.delete_custom_card(registry_card.model_id)
+    assert model_cards_module._card_cache[registry_card.model_id] == registry_card
+
+
+@pytest.mark.anyio
 async def test_custom_card_deletion_rejects_normalized_alias_collision(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
