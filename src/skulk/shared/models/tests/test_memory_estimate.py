@@ -387,6 +387,27 @@ def test_instance_limit_gguf_cpu_resolved_on_vram_node_clamps_to_floor():
     assert limit == KV_CONTEXT_BUDGET_TOKENS
 
 
+def test_instance_limit_gguf_cpu_resolved_on_vram_node_sizes_from_live_ram():
+    """A CPU-resolved shard on a GPU host is sized from system RAM, not the card's VRAM."""
+    node_id = NodeId("n0")
+    card = _card(16, kv_heads=8, n_layers=32, gguf_file="m-Q4_K_M.gguf").model_copy(
+        update={"context_length": 1048576}
+    )
+    cpu_shard = _pipeline_shard(card, start=0, end=32).model_copy(
+        update={"resolved_backend": "llama_server-cpu"}
+    )
+    assignments = _assignments(card, {"r0": (cpu_shard, str(node_id))})
+    # A small discrete GPU beside plenty of system RAM.
+    limit = instance_context_token_limit(
+        assignments,
+        {node_id: Memory.from_gb(128)},
+        node_vram={node_id: Memory.from_gb(8)},
+        node_ram_available={node_id: Memory.from_gb(100)},
+    )
+    assert limit is not None
+    assert limit > KV_CONTEXT_BUDGET_TOKENS
+
+
 def test_instance_limit_gguf_non_vram_node_without_live_ram_keeps_the_floor():
     # On a node WITHOUT discrete VRAM the static fit is derived from ram_total, but
     # llama.cpp commits the window up front against live ram_available (which

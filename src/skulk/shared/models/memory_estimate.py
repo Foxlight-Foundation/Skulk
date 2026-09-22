@@ -554,14 +554,27 @@ def instance_context_token_limit(
         for node_id, runner_id in node_to_runner.items():
             shard = shard_assignments.runner_to_shard[runner_id]
             ram_total = node_ram_totals.get(node_id)
+            # A shard explicitly resolved to a backend that does not offload
+            # (``-cpu``, a bare tag) lives in system RAM even on a host with a
+            # discrete GPU; its fit is the RAM working set, not the card's
+            # VRAM, or a small GPU would cap a large CPU placement. An
+            # unresolved shard on a GPU host keeps the VRAM fit placement
+            # admitted it against.
+            in_system_ram = (
+                shard.resolved_backend is not None
+                and not backend_offloads_to_vram(shard.resolved_backend)
+            )
+            working_set = (
+                None if in_system_ram else node_vram.get(node_id)
+            ) or (gpu_working_set_ceiling(ram_total) if ram_total is not None else None)
             node_tokens = (
                 _node_window_tokens(
                     model_card,
                     shard,
-                    node_vram.get(node_id) or gpu_working_set_ceiling(ram_total),
+                    working_set,
                     fixed_memory_by_node.get(node_id, Memory()),
                 )
-                if ram_total is not None
+                if working_set is not None
                 else None
             )
             if node_tokens is None:
