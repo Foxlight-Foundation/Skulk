@@ -1,15 +1,19 @@
 # pyright: reportPrivateUsage=false
 """Model-store API requests preserve qualified card revisions."""
 
+from collections.abc import Callable
 from types import SimpleNamespace
 from typing import cast
 
 import pytest
+from anyio import WouldBlock
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
 from skulk.api import main as api_main
 from skulk.api.main import API, StoreDownloadRequest
+from skulk.api.operator_gateway import OPERATOR_GATEWAY_AUTHORIZED_SCOPE_KEY
 from skulk.shared.election import ElectionMessage
 from skulk.shared.models.model_cards import (
     ArtifactBundleConfig,
@@ -18,15 +22,39 @@ from skulk.shared.models.model_cards import (
     ModelId,
     ModelTask,
 )
-from skulk.shared.types.commands import ForwarderCommand, ForwarderDownloadCommand
-from skulk.shared.types.common import NodeId
+from skulk.shared.types.commands import (
+    DeleteCustomModelCard,
+    ForwarderCommand,
+    ForwarderDownloadCommand,
+)
+from skulk.shared.types.common import NodeId, SystemId
 from skulk.shared.types.events import IndexedEvent
 from skulk.shared.types.memory import Memory
 from skulk.store.model_store_client import ModelStoreClient
-from skulk.utils.channels import channel
+from skulk.utils.channels import Receiver, channel
+from skulk.utils.task_group import TaskGroup
 
 _MODEL_ID = "google/gemma-4-31B-it-qat-q4_0-gguf"
 _QUALIFIED_REVISION = "3374b395f6a01379f0dd4997b37aacaab77a3596"
+
+
+def _operator_request() -> Request:
+    """Return a request the operator gateway has already authorized."""
+    return Request(
+        {
+            "type": "http",
+            "headers": [],
+            "client": ("198.51.100.10", 52415),
+            OPERATOR_GATEWAY_AUTHORIZED_SCOPE_KEY: True,
+        }
+    )
+
+
+def _public_request() -> Request:
+    """Return a direct request from a public peer with no operator authority."""
+    return Request(
+        {"type": "http", "headers": [], "client": ("198.51.100.10", 52415)}
+    )
 
 
 class _RecordingStoreClient:
@@ -122,7 +150,7 @@ async def test_store_download_inherits_bundled_card_revision(
     api = object.__new__(API)
     api._store_client = cast(ModelStoreClient, cast(object, store_client))
 
-    await api.request_store_download(_MODEL_ID)
+    await api.request_store_download(_operator_request(), _MODEL_ID)
 
     assert store_client.requests == [
         (
@@ -166,7 +194,7 @@ async def test_store_download_populates_card_cache_before_inheriting_pins(
     api = object.__new__(API)
     api._store_client = cast(ModelStoreClient, cast(object, store_client))
 
-    await api.request_store_download(_MODEL_ID)
+    await api.request_store_download(_operator_request(), _MODEL_ID)
 
     assert lookups == 2
     assert store_client.requests == [
@@ -240,6 +268,7 @@ async def test_store_download_selects_current_registry_generation(
     api._store_client = cast(ModelStoreClient, cast(object, store_client))
 
     await api.request_store_download(
+        _operator_request(),
         _MODEL_ID,
         StoreDownloadRequest(
             registry_card_id=current.registry_card_id,
@@ -263,6 +292,288 @@ async def test_store_download_selects_current_registry_generation(
     ]
 
 
+def _override_cards() -> tuple[ModelCard, ModelCard]:
+    """Return a custom override and the signed card that supersedes it."""
+    custom = ModelCard(
+        model_id=ModelId(_MODEL_ID),
+        storage_size=Memory.from_mb(1),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        gguf_file="model.gguf",
+        source_revision="a" * 40,
+        is_custom=True,
+    )
+    current = ModelCard(
+        model_id=ModelId(_MODEL_ID),
+        storage_size=Memory.from_mb(1),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        gguf_file="model.gguf",
+        source_revision="a" * 40,
+        registry_card_id=f"card_{'b' * 52}",
+        registry_snapshot_id="snapshot_2_current",
+        registry_provenance="foxlight",
+    )
+    return custom, current
+
+
+class _AdoptingStoreClient(_RecordingStoreClient):
+    """A store whose download answer and later polled statuses are scripted."""
+
+    def __init__(self, answer: str, *polled: str) -> None:
+        super().__init__()
+        self.answer = answer
+        self.polled = list(polled)
+        self.polls = 0
+        # What the store's installed record names once it answers complete; the
+        # signed card by default, as a real adoption leaves it.
+        self.installed_identity: str | None = f"card_{'b' * 52}"
+        # Identities the installed-record read answers before settling on
+        # ``installed_identity``; a None models a failed registry read.
+        self.identity_answers: list[str | None] = []
+        self.during_request: Callable[[], None] | None = None
+
+    async def request_store_download(  # type: ignore[override]
+        self, model_id: str, **kwargs: object
+    ) -> dict[str, object]:
+        self.requests.append((model_id,) + tuple(kwargs.values()))  # type: ignore[arg-type]
+        if self.during_request is not None:
+            self.during_request()
+        return {"status": self.answer}
+
+    async def get_store_download_status(self, model_id: str) -> dict[str, object]:
+        self.polls += 1
+        status = self.polled.pop(0) if len(self.polled) > 1 else self.polled[0]
+        return {"modelId": model_id, "status": status}
+
+
+def _adopting_api(
+    monkeypatch: pytest.MonkeyPatch,
+    store_client: _AdoptingStoreClient,
+    catalog: list[ModelCard],
+    current: ModelCard,
+) -> tuple[API, Receiver[ForwarderCommand]]:
+    """Build a bare API whose catalog card is the head of ``catalog``."""
+
+    def catalog_card(_model_id: ModelId) -> ModelCard:
+        return catalog[0]
+
+    def current_card(_model_id: ModelId) -> ModelCard:
+        return current
+
+    monkeypatch.setattr(api_main, "get_card", catalog_card)
+    monkeypatch.setattr(api_main, "get_current_registry_card", current_card)
+    monkeypatch.setattr(api_main, "_OVERRIDE_RETIREMENT_POLL_SECONDS", 0.0)
+    command_sender, command_receiver = channel[ForwarderCommand]()
+    api = object.__new__(API)
+    api._store_client = cast(ModelStoreClient, cast(object, store_client))
+    api.command_sender = command_sender
+    api._system_id = SystemId("adopt-test-node")
+    api._tg = TaskGroup()
+    api._pending_override_retirements = set()
+
+    async def installed_identity(_model_id: ModelId) -> str | None:
+        if store_client.identity_answers:
+            return store_client.identity_answers.pop(0)
+        return store_client.installed_identity
+
+    monkeypatch.setattr(api, "_installed_store_identity", installed_identity)
+    return api, command_receiver
+
+
+async def test_adopting_a_signed_card_retires_the_custom_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A signed-card adoption the store completes also retires a custom card.
+
+    With the custom catalog card left in place, placements kept loading it
+    while the store read the signed generation and hid the update.
+    """
+    custom, current = _override_cards()
+    store_client = _AdoptingStoreClient("complete")
+    api, command_receiver = _adopting_api(monkeypatch, store_client, [custom], current)
+
+    async with api._tg:
+        await api.request_store_download(
+            _operator_request(),
+            _MODEL_ID,
+            StoreDownloadRequest(registry_card_id=current.registry_card_id),
+        )
+    forwarded = command_receiver.receive_nowait()
+    assert isinstance(forwarded.command, DeleteCustomModelCard)
+    assert forwarded.command.model_id == ModelId(_MODEL_ID)
+    assert forwarded.command.expected_card == custom
+    assert store_client.polls == 0
+
+
+async def test_adoption_that_downloads_retires_the_override_on_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pending adoption retires the override once the store reports complete."""
+    custom, current = _override_cards()
+    store_client = _AdoptingStoreClient("pending", "pending", "downloading", "complete")
+    api, command_receiver = _adopting_api(monkeypatch, store_client, [custom], current)
+
+    async with api._tg:
+        await api.request_store_download(
+            _operator_request(),
+            _MODEL_ID,
+            StoreDownloadRequest(registry_card_id=current.registry_card_id),
+        )
+        with pytest.raises(WouldBlock):
+            command_receiver.receive_nowait()
+        assert ModelId(_MODEL_ID) in api._pending_override_retirements
+        # A second request while the first watcher is live adds no watcher.
+        await api.request_store_download(
+            _operator_request(),
+            _MODEL_ID,
+            StoreDownloadRequest(registry_card_id=current.registry_card_id),
+        )
+    forwarded = command_receiver.receive_nowait()
+    assert isinstance(forwarded.command, DeleteCustomModelCard)
+    assert forwarded.command.model_id == ModelId(_MODEL_ID)
+    with pytest.raises(WouldBlock):
+        command_receiver.receive_nowait()
+    assert store_client.polls == 3
+    assert not api._pending_override_retirements
+
+
+@pytest.mark.parametrize("outcome", ["failed", "cancelled", "not_found"])
+async def test_adoption_that_does_not_complete_keeps_the_override(
+    monkeypatch: pytest.MonkeyPatch, outcome: str
+) -> None:
+    """A failed, cancelled, or vanished download leaves the custom card alone."""
+    custom, current = _override_cards()
+    store_client = _AdoptingStoreClient("pending", "downloading", outcome)
+    api, command_receiver = _adopting_api(monkeypatch, store_client, [custom], current)
+
+    async with api._tg:
+        await api.request_store_download(
+            _operator_request(),
+            _MODEL_ID,
+            StoreDownloadRequest(registry_card_id=current.registry_card_id),
+        )
+    with pytest.raises(WouldBlock):
+        command_receiver.receive_nowait()
+    assert not api._pending_override_retirements
+
+
+async def test_adoption_retires_only_the_override_seen_at_request_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A custom card replaced during the download is not deleted by the request."""
+    custom, current = _override_cards()
+    replacement = custom.model_copy(update={"gguf_file": "edited.gguf"})
+    catalog = [custom]
+    store_client = _AdoptingStoreClient("pending", "downloading", "complete")
+    api, command_receiver = _adopting_api(monkeypatch, store_client, catalog, current)
+
+    async with api._tg:
+        await api.request_store_download(
+            _operator_request(),
+            _MODEL_ID,
+            StoreDownloadRequest(registry_card_id=current.registry_card_id),
+        )
+        catalog[0] = replacement
+    with pytest.raises(WouldBlock):
+        command_receiver.receive_nowait()
+    assert store_client.polls == 2
+
+
+async def test_adoption_captures_the_override_before_asking_the_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A card replaced while the store request is in flight is not the one retired."""
+    custom, current = _override_cards()
+    replacement = custom.model_copy(update={"gguf_file": "edited.gguf"})
+    catalog = [custom]
+    store_client = _AdoptingStoreClient("complete")
+    api, command_receiver = _adopting_api(monkeypatch, store_client, catalog, current)
+
+    def replace_during_request() -> None:
+        catalog[0] = replacement
+
+    store_client.during_request = replace_during_request
+    async with api._tg:
+        await api.request_store_download(
+            _operator_request(),
+            _MODEL_ID,
+            StoreDownloadRequest(registry_card_id=current.registry_card_id),
+        )
+    # The captured card is the pre-request one; the catalog now holds another,
+    # so nothing is retired rather than the replacement.
+    with pytest.raises(WouldBlock):
+        command_receiver.receive_nowait()
+
+
+async def test_adoption_retries_the_installed_record_read_before_retiring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A registry read that fails right after completion does not abandon the retirement."""
+    custom, current = _override_cards()
+    store_client = _AdoptingStoreClient("complete")
+    store_client.identity_answers = [None, None]
+    api, command_receiver = _adopting_api(monkeypatch, store_client, [custom], current)
+
+    async with api._tg:
+        await api.request_store_download(
+            _operator_request(),
+            _MODEL_ID,
+            StoreDownloadRequest(registry_card_id=current.registry_card_id),
+        )
+    forwarded = command_receiver.receive_nowait()
+    assert isinstance(forwarded.command, DeleteCustomModelCard)
+    assert forwarded.command.expected_card == custom
+
+
+async def test_adoption_retires_nothing_until_the_store_installed_the_signed_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A store answering complete from an older generation retires nothing.
+
+    A store restarted mid-download loses the transfer and reports the alias
+    complete from the generation it already had, the custom one.
+    """
+    custom, current = _override_cards()
+    store_client = _AdoptingStoreClient("pending", "downloading", "complete")
+    store_client.installed_identity = None
+    api, command_receiver = _adopting_api(monkeypatch, store_client, [custom], current)
+
+    async with api._tg:
+        await api.request_store_download(
+            _operator_request(),
+            _MODEL_ID,
+            StoreDownloadRequest(registry_card_id=current.registry_card_id),
+        )
+    with pytest.raises(WouldBlock):
+        command_receiver.receive_nowait()
+    assert not api._pending_override_retirements
+
+
+async def test_adoption_without_operator_authority_keeps_the_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The download proceeds, but the replicated deletion needs operator authority."""
+    custom, current = _override_cards()
+    store_client = _AdoptingStoreClient("complete")
+    api, command_receiver = _adopting_api(monkeypatch, store_client, [custom], current)
+
+    async with api._tg:
+        await api.request_store_download(
+            _public_request(),
+            _MODEL_ID,
+            StoreDownloadRequest(registry_card_id=current.registry_card_id),
+        )
+    assert len(store_client.requests) == 1
+    with pytest.raises(WouldBlock):
+        command_receiver.receive_nowait()
+    assert not api._pending_override_retirements
+
+
 async def test_store_download_forwards_complete_companion_identity() -> None:
     """The public route must preserve every documented companion field."""
 
@@ -272,6 +583,7 @@ async def test_store_download_forwards_complete_companion_identity() -> None:
     owner_card_id = f"card_{'c' * 52}"
 
     await api.request_store_download(
+        _operator_request(),
         "org/draft",
         StoreDownloadRequest(
             gguf_file="draft.gguf",

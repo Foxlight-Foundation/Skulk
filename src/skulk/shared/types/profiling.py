@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Literal, Self, cast, final
 
 import psutil
+from anyio import to_thread
 from pydantic import UUID4, BaseModel, Field, field_serializer, field_validator
 
 from skulk.shared.models.llama_server_settings import (
@@ -420,7 +421,14 @@ class NodeResources(CamelCaseModel):
         derivation = current_backend_derivation()
         facts = current_node_facts()
         try:
-            engine_builds = engine_build_inventory(derivation.backends, facts)
+            # The inventory asks served engines for their build (a binary's
+            # version, a checkout's HEAD, the ComfyUI interpreter's torch)
+            # through blocking subprocesses; the first call pays them in full
+            # and a hung interpreter pays its whole timeout. Run it off the
+            # worker loop so heartbeats and event application keep moving.
+            engine_builds = await to_thread.run_sync(
+                engine_build_inventory, derivation.backends, facts
+            )
         except ValueError as error:
             from loguru import logger
 

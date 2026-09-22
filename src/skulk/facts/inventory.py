@@ -113,16 +113,67 @@ def _git_head(checkout: str) -> str | None:
     return head if len(head) == 40 else None
 
 
+_TORCH_VERSION_SENTINEL = "skulk-torch="
+_TORCH_VERSION = re.compile(r"^[0-9][A-Za-z0-9.+_-]{0,63}$")
+
+
+@lru_cache(maxsize=8)
+def _comfy_torch(interpreter: str) -> str | None:
+    """Read the torch build the ComfyUI interpreter runs, once per process.
+
+    The interpreter prints the version behind a sentinel on its own line and
+    only a line of that exact shape counts, so a banner, a warning, or a
+    wrapper's chatter on stdout cannot become the advertised build.
+    """
+    try:
+        completed = subprocess.run(  # noqa: S603 - operator-configured interpreter
+            [
+                interpreter,
+                "-c",
+                f"import torch; print('{_TORCH_VERSION_SENTINEL}' + torch.__version__)",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    versions = [
+        line[len(_TORCH_VERSION_SENTINEL) :].strip()
+        for line in completed.stdout.splitlines()
+        if line.startswith(_TORCH_VERSION_SENTINEL)
+    ]
+    if len(versions) != 1 or not _TORCH_VERSION.fullmatch(versions[0]):
+        return None
+    return versions[0]
+
+
 def _comfy_build(facts: NodeFacts) -> str | None:
-    """Return the ComfyUI checkout's commit as the engine's build identity.
+    """Return the ComfyUI checkout's commit, and its torch, as the build identity.
 
     The checkout is the build truth: a managed install is the pinned commit
-    by construction, and a hand-built install is whatever its HEAD says.
+    by construction, and a hand-built install is whatever its HEAD says. The
+    torch build the interpreter runs is part of what serves a render (the
+    same checkout on cu130 and on ROCm are different engines), so it joins
+    the identity as ``comfy@<commit>/torch@<version>`` whenever the
+    interpreter answers; a checkout whose torch cannot be read keeps the
+    commit-only form.
     """
     if facts.comfy_root_state != "ok" or facts.comfy_root is None:
         return None
     head = _git_head(facts.comfy_root)
-    return f"comfy@{head}" if head is not None else None
+    if head is None:
+        return None
+    interpreter = (
+        facts.comfy_binary.configured_path
+        if facts.comfy_binary.state == "ok"
+        else None
+    )
+    torch = _comfy_torch(interpreter) if interpreter is not None else None
+    return f"comfy@{head}/torch@{torch}" if torch is not None else f"comfy@{head}"
 
 
 def _declared_engine_builds(environ: Mapping[str, str]) -> dict[str, str]:
