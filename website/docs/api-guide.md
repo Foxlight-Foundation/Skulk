@@ -2243,9 +2243,10 @@ otherwise the maximum), `reserves_context_at_load`, and
 `kv_bytes_per_token` (the estimated KV cost of one token of window across
 the placement, null when the card's attention geometry is unknown), so a
 client can show what a chosen window reserves before launching. Posting the
-preview's instance to `POST /instance` keeps its stamped maximum; an exact
-instance without `contextTokenLimit` takes the fleet default like
-`POST /place_instance`. Unified-memory GPUs are not previewed with a discrete-VRAM context
+preview's instance to `POST /instance` keeps its stamped maximum; the fleet
+default applies to `POST /place_instance`, while an exact instance keeps its
+own `contextTokenLimit` (or the legacy backfill, the 8192 floor for engines
+that reserve at load, when it omits one). Unified-memory GPUs are not previewed with a discrete-VRAM context
 lift that the master would later remove.
 
 Besides the planner's ranked pick per shape, the response also contains

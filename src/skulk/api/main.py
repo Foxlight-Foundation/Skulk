@@ -3732,6 +3732,18 @@ class API:
 
         return placements[new_ids[0]]
 
+    def _served_context_default(self) -> int:
+        """The fleet served context default as the master will read it.
+
+        Read from the on-disk config, which config sync keeps converged, not
+        the startup snapshot: a default changed from another API node must
+        show in this node's previews the way the master will stamp it.
+        """
+        try:
+            return served_context_default(load_skulk_config())
+        except Exception:
+            return served_context_default(self._skulk_config)
+
     def _preview_context_fields(self, instance: Instance) -> "_PreviewContextFields":
         """Context-window facts a placement preview shows for ``instance``.
 
@@ -3748,7 +3760,7 @@ class API:
             assignments,
             maximum,
             requested=None,
-            served_default=served_context_default(self._skulk_config),
+            served_default=self._served_context_default(),
         )
         kv_bytes = 0
         for shard in shards:

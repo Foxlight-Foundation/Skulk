@@ -85,10 +85,19 @@ def _instance(card: ModelCard, backend: str, window: int) -> MlxRingInstance:
     )
 
 
-def test_preview_shows_the_maximum_the_default_and_the_reservation() -> None:
+def test_preview_shows_the_maximum_the_default_and_the_reservation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     api = _build_api()
+    # The startup snapshot is stale; config sync converged the file to 16384,
+    # which is what the master will stamp and so what the preview must show.
     api._skulk_config = SkulkConfig(
-        inference=InferenceConfig(served_context_tokens=16384)
+        inference=InferenceConfig(served_context_tokens=65536)
+    )
+    monkeypatch.setattr(
+        api_main,
+        "load_skulk_config",
+        lambda: SkulkConfig(inference=InferenceConfig(served_context_tokens=16384)),
     )
     card = _card()
     fields = api._preview_context_fields(
@@ -102,8 +111,11 @@ def test_preview_shows_the_maximum_the_default_and_the_reservation() -> None:
     )
 
 
-def test_preview_leaves_a_lazy_engine_at_its_maximum() -> None:
+def test_preview_leaves_a_lazy_engine_at_its_maximum(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     api = _build_api()
+    monkeypatch.setattr(api_main, "load_skulk_config", lambda: None)
     fields = api._preview_context_fields(_instance(_card(gguf=False), "mlx", 230093))
     assert fields["default_context_tokens"] == 230093
     assert fields["reserves_context_at_load"] is False
@@ -148,3 +160,19 @@ def test_place_route_rejects_an_out_of_range_window(value: int) -> None:
         "/place_instance", json={"model_id": str(_MODEL_ID), "context_tokens": value}
     )
     assert response.status_code == 422
+
+
+@pytest.mark.parametrize("value", [0, 255, 1_048_577])
+def test_an_instance_cannot_carry_an_out_of_range_request(value: int) -> None:
+    """Repairs copy the request into a validated command; bound it at the source."""
+    from pydantic import ValidationError
+
+    template = _instance(_card(), "llama_server-vulkan", 32768)
+    with pytest.raises(ValidationError):
+        MlxRingInstance(
+            instance_id=template.instance_id,
+            shard_assignments=template.shard_assignments,
+            hosts_by_node={},
+            ephemeral_port=0,
+            requested_context_tokens=value,
+        )

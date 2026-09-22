@@ -3112,7 +3112,6 @@ class Master:
                                     node_memory=credited_memory,
                                 ),
                                 approved_remote_code_identities=self._model_trust_approvals,
-                                served_context_default=self._served_context_default(),
                                 node_resources=self._telemetry_view.node_resources,
                             )
                             transition_events = get_transition_events(

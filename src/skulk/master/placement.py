@@ -205,7 +205,6 @@ def add_instance_to_placements(
     unified_memory_gpu_nodes: AbstractSet[NodeId] | None = None,
     approved_remote_code_identities: AbstractSet[str] | None = None,
     node_resources: Mapping[NodeId, NodeResources] | None = None,
-    served_context_default: int | None = None,
 ) -> Mapping[InstanceId, Instance]:
     """Validate and add one caller-specified exact instance placement.
 
@@ -316,13 +315,6 @@ def add_instance_to_placements(
         # the preview maximum. Raising it silently can multiply load-time KV
         # allocation and defeat the caller's resource plan.
         ceiling = requested_limit if ceiling is None else min(ceiling, requested_limit)
-    else:
-        ceiling = served_context_window(
-            assignments,
-            ceiling,
-            requested=None,
-            served_default=served_context_default,
-        )
     instance = command.instance.model_copy(
         update={"context_token_limit": ceiling, "shard_assignments": assignments}
     )
