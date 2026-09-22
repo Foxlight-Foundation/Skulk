@@ -639,8 +639,10 @@ included, so two back-to-back placements neither admit nor size a window
 against the same untouched figure; the charge is taken against the node's
 working-set ceiling, at the stamped window for a fixed-window engine and at
 the admission floor for a lazily growing MLX cache; a placement whose load
-telemetry cannot have shown yet (awaiting its indexed echo, or still
-loading) is also taken off the observed figure, and the GPU pool of a
+telemetry cannot have shown yet (awaiting its indexed echo, still
+loading, or loaded for less than a short settle period, since memory
+telemetry is sampled on its own cadence) is also taken off the observed
+figure, and the GPU pool of a
 unified-memory APU is derived from the reserved figure. That live figure is
 reduced by the worker guard's fit tolerance as headroom, then capped at the
 node's GPU working-set ceiling and at the static fit, and never below the

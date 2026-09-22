@@ -280,6 +280,14 @@ crediting the freed footprint over-admits the next placement and leaves the
 worker to refuse it. Placement must prefer the observed telemetry over an
 optimistic teardown credit; the worker's local guard should be a last resort,
 not the normal correction path."""
+
+RESERVATION_SETTLE_SECONDS = 5.0
+"""How long a placement stays charged against observed memory after its runners
+report loaded. A runner publishes the status the moment the model is in
+memory, while node memory telemetry is sampled on its own cadence and can be
+coalesced, so for this long after the transition the placement's footprint is
+still taken off the observed figure; after it only the working-set ceiling
+bound remains, so a load telemetry carries is never counted twice."""
 JsonObject = dict[str, object]
 
 # API-facing task types: the ones whose loss strands an open HTTP request.
@@ -854,6 +862,7 @@ class Master:
         # their GPU capacity before queuing the event so consecutive decisions
         # cannot spend the same memory while that echo is outstanding.
         self._pending_instance_reservations: dict[InstanceId, Instance] = {}
+        self._instance_loaded_seen: dict[InstanceId, float] = {}
         self._ordered_steward_proposals = dict(
             initial_state.steward_action_proposals if initial_state is not None else {}
         )
@@ -1242,6 +1251,7 @@ class Master:
         their footprints off the observed figure as well.
         """
         loaded = (RunnerLoaded, RunnerWarmingUp, RunnerReady, RunnerRunning)
+        now = time.monotonic()
         unreflected: set[InstanceId] = set()
         for instance_id, instance in placements.items():
             runners = instance.shard_assignments.runner_to_shard
@@ -1250,6 +1260,16 @@ class Master:
                 for runner_id in runners
             ):
                 unreflected.add(instance_id)
+                continue
+            # Loaded is not yet sampled: keep the charge for a settle period
+            # from the first time this master saw the instance loaded.
+            seen = self._instance_loaded_seen.setdefault(instance_id, now)
+            if now - seen < RESERVATION_SETTLE_SECONDS:
+                unreflected.add(instance_id)
+        live = set(self.state.instances) | set(self._pending_instance_reservations)
+        for instance_id in list(self._instance_loaded_seen):
+            if instance_id not in live:
+                del self._instance_loaded_seen[instance_id]
         return frozenset(unreflected)
 
     def _reserved_placement_inputs(

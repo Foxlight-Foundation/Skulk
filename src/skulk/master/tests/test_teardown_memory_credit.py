@@ -12,6 +12,7 @@ import asyncio
 
 import pytest
 
+import skulk.master.main as master_main
 from skulk.master.main import Master
 from skulk.master.placement import place_instance
 from skulk.master.tests.conftest import create_node_network
@@ -131,7 +132,9 @@ def test_no_recent_free_leaves_memory_unchanged() -> None:
     assert memory[node_id].ram_available.in_gb == 4.0
 
 
-def test_pending_reservations_charge_system_ram_before_telemetry_shows_them() -> None:
+def test_pending_reservations_charge_system_ram_before_telemetry_shows_them(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A placement awaiting its indexed echo already reduces its node's RAM."""
     master = _make_master()
     node_id = NodeId(get_node_id_keypair().to_node_id())
@@ -154,8 +157,9 @@ def test_pending_reservations_charge_system_ram_before_telemetry_shows_them() ->
     assert reserved[node_id].ram_available == Memory.from_gb(40.0) - footprint
     assert reserved[node_id].ram_total == Memory.from_gb(64.0)
 
-    # Once the placement is replicated and its runner reports ready, telemetry
-    # carries its load: only the ceiling bound remains.
+    # Once the placement is replicated and its runner reports ready, the
+    # charge stays on the observed figure for a settle period (telemetry is
+    # sampled on its own cadence), then only the ceiling bound remains.
     del master._pending_instance_reservations[instance.instance_id]
     runner_id = next(iter(instance.shard_assignments.runner_to_shard))
     master.state = master.state.model_copy(
@@ -164,6 +168,9 @@ def test_pending_reservations_charge_system_ram_before_telemetry_shows_them() ->
             "runners": {runner_id: RunnerReady()},
         }
     )
+    just_loaded, _vram = master._placement_memory_inputs()
+    assert just_loaded[node_id].ram_available == reserved[node_id].ram_available
+    monkeypatch.setattr(master_main, "RESERVATION_SETTLE_SECONDS", 0.0)
     loaded, _vram = master._placement_memory_inputs()
     assert loaded[node_id].ram_available == min(
         Memory.from_gb(40.0), Memory.from_gb(48.0) - footprint
