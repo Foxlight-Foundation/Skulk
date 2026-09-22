@@ -286,6 +286,13 @@ async def test_custom_card_deletion_evicts_a_cache_entry_without_a_file(
     # An alias that is not a custom entry is not a deletion.
     assert not await model_cards_module.delete_custom_card(registry_card.model_id)
     assert model_cards_module._card_cache[registry_card.model_id] == registry_card
+    # A custom file under another name declares the alias; the rebuild would
+    # read it straight back, so the delete removes it too.
+    await custom_card.save(Path(str(custom_dir / "edited.toml")))
+    model_cards_module._card_cache[custom_card.model_id] = custom_card
+    assert await model_cards_module.delete_custom_card(custom_card.model_id)
+    assert not (custom_dir / "edited.toml").exists()
+    assert model_cards_module._card_cache[registry_card.model_id] == registry_card
 
 
 @pytest.mark.anyio

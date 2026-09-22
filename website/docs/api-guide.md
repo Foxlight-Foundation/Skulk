@@ -2693,13 +2693,21 @@ multiple card aliases from one repository and revision without a store-key
 collision. V1 cards omit this additive field and retain prior behavior.
 
 Entries also include the full `installed_card` record, verification state,
-artifact role and owning card, `current_registry_identity`,
-`installed_not_current`, `update_available`, active signed `advisories`,
+artifact role and owning card, `current_registry_identity` (the signed card
+the registry currently publishes for the alias, when one exists),
+`installed_not_current` (no current signed card, or the installed generation
+is not under it), `update_available` (a current signed card exists and the
+installed generation is not under it: an older signed card, a custom card, or
+a legacy record without a registry identity), active signed `advisories`,
 `cached_on_nodes` (identity, completeness, bytes, last use, in-use state, and
 `location_kind`), and reconciliation state plus last verification time.
 `location_kind` distinguishes canonical `store_local` availability from a
 `node_cache` copy. Companion artifacts are first-class entries grouped under
-their owning base card by the dashboard.
+their owning base card by the dashboard. An update is applied with
+`POST /store/models/{model_id}/download` naming `current_registry_identity`
+as `registry_card_id`: when the installed bundle is the signed card's bundle
+the store rewrites the sidecar and answers `complete` without transferring
+bytes, otherwise a download of the signed artifact starts.
 
 The top-level `cache_inventory` reports `observed_nodes`, `expected_nodes`, and a
 coverage state. Its additive `store_nodes` list identifies live nodes currently

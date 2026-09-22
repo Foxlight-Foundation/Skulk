@@ -8,7 +8,7 @@ import type { FleetServingSummary } from '../models/burst';
 import type { InstanceStatus } from '../../types/models';
 import { StoreRegistryTable, type StoreRegistryEntry, type StoreDownloadProgress, type ModelCardInfo, type CompanionInfo, type StoreReconciliationStatus } from '../layout/StoreRegistryTable';
 import type { ClusterCardProps, ClusterCardNode } from '../cluster/ClusterCard';
-import { ModelSearchModal } from './ModelSearchModal';
+import { extractErrorDetail, ModelSearchModal, readAcceptedDownload } from './ModelSearchModal';
 import { FiTrash2, FiSearch } from 'react-icons/fi';
 import { Button } from '../common/Button';
 import { addToast } from '../../hooks/useToast';
@@ -572,16 +572,23 @@ export function ModelStorePage({ topology, nodeResources = {}, downloads, instan
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ registry_card_id: entry.current_registry_identity }),
       });
-      if (res.ok) {
+      // The API answers HTTP 200 even when the store host rejected the
+      // request (the rejection rides in the body as status "error"), so the
+      // body decides between the success and the failure toast.
+      const accepted = res.ok ? await readAcceptedDownload(res) : null;
+      if (accepted && !accepted.rejected) {
         addToast({
           type: 'success',
           message: t('downloads.toasts.updateRequested', 'Updating {modelId} to the signed card', { modelId: entry.model_id }),
         });
         loadRegistry();
       } else {
+        const reason = accepted?.reason ?? (res.ok ? null : await extractErrorDetail(res));
         addToast({
           type: 'error',
-          message: t('downloads.toasts.updateFailedForModel', 'Failed to update {modelId}', { modelId: entry.model_id }),
+          message: reason
+            ? t('downloads.toasts.updateFailedWithReason', 'Failed to update {modelId}: {reason}', { modelId: entry.model_id, reason })
+            : t('downloads.toasts.updateFailedForModel', 'Failed to update {modelId}', { modelId: entry.model_id }),
         });
       }
     } catch {

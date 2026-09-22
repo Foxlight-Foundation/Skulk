@@ -971,7 +971,7 @@ export function StoreRegistryTable({
                   {entry.update_available && (
                     <StateBadge $tone="warn">{t('storeRegistry.updateAvailable', 'Update available')}</StateBadge>
                   )}
-                  {entry.update_available && entry.current_registry_identity && onUpdate && !active && !downloading && (
+                  {entry.update_available && entry.current_registry_identity && onUpdate && !active && !downloading && !companion && (
                     <UpdateBtn
                       type="button"
                       onClick={() => onUpdate(entry)}

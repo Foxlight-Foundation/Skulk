@@ -240,6 +240,7 @@
   "downloads.toasts.deleteFailedForModel": "Failed to delete {modelId}",
   "downloads.toasts.updateRequested": "Updating {modelId} to the signed card",
   "downloads.toasts.updateFailedForModel": "Failed to update {modelId}",
+  "downloads.toasts.updateFailedWithReason": "Failed to update {modelId}: {reason}",
   "downloads.toasts.updateFailed": "Failed to update model",
   "downloads.toasts.deletedModel": "Deleted {modelId}",
   "downloads.toasts.downloadFailed": "Download of {modelId} failed",
