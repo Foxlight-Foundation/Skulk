@@ -9,6 +9,12 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- A signed registry card this Skulk build cannot read is skipped with a
+  warning instead of failing the whole catalog. The registry publishes new
+  card classes (video cards first) ahead of the Skulk builds that read them;
+  one such card made an older node discard every signed card and fall back
+  to its bundled copies. Integrity checks on the snapshot stay atomic.
+
 - Cancelling a video render works while another render is queued behind it.
   The ComfyUI runner acknowledged a render only when its server got to it,
   so a second render queued behind a running one held the worker's control

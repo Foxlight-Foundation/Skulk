@@ -159,8 +159,42 @@ def _registry_enabled() -> bool:
     )
 
 
+def _is_vocabulary_skew(error: ValidationError) -> bool:
+    """Whether every failure is a field or task this build does not know.
+
+    ``extra_forbidden`` is a section or field ``ModelCard`` has no slot for;
+    a ``tasks`` failure naming an invalid ``ModelTask`` is a task value the
+    enum lacks. Both are what a newer registry looks like from an older
+    build. Anything else (a wrong type, a missing revision, a bound) is a
+    malformed card and stays a catalog-level refusal.
+    """
+    failures = error.errors()
+    if not failures:
+        return False
+    for item in failures:
+        if item["type"] == "extra_forbidden":
+            continue
+        location = item["loc"]
+        if location and location[0] == "tasks" and "is not a valid ModelTask" in item["msg"]:
+            continue
+        return False
+    return True
+
+
 def registry_model_cards(catalog: RegistryCatalog) -> list["ModelCard"]:
-    """Convert one verified registry snapshot to Skulk runtime cards atomically."""
+    """Convert one verified registry snapshot to Skulk runtime cards.
+
+    Integrity is atomic: a catalog whose envelopes and cards disagree, whose
+    metadata does not cover its card set, whose aliases collide, or whose
+    card bodies are malformed (a wrong type, a companion without its
+    immutable revision) is refused whole, because that is a corrupt,
+    tampered, or mis-signed snapshot. Vocabulary is per card: a card that
+    fails only because it carries a section or a task this build's
+    ``ModelCard`` does not know (a modality a newer registry publishes for
+    builds that predate it) is skipped with a warning, and every other card
+    still loads. Without that, the first card of a new class would take the
+    whole signed catalog away from every older node reading the feed.
+    """
     cards: list[ModelCard] = []
     aliases: set[ModelId] = set()
     card_ids = {envelope.card_id for envelope in catalog.cards}
@@ -227,7 +261,21 @@ def registry_model_cards(catalog: RegistryCatalog) -> list["ModelCard"]:
                 if "embedding_length" in header.scalars:
                     payload["hidden_size"] = header.scalars["embedding_length"]
                 payload["num_key_value_heads"] = header.scalars["attention.head_count_kv"]
-        card = ModelCard.model_validate(payload)
+        try:
+            card = ModelCard.model_validate(payload)
+        except ValidationError as error:
+            if not _is_vocabulary_skew(error):
+                raise
+            unknown = ", ".join(
+                ".".join(str(part) for part in item["loc"]) or "card"
+                for item in error.errors()
+            )
+            logger.warning(
+                f"signed registry card {envelope.card_id} ({alias}) carries "
+                f"vocabulary this Skulk build does not know and is skipped: "
+                f"{unknown}"
+            )
+            continue
         envelope_bundle = envelope.artifact.bundle
         card_bundle = card.artifact_bundle
         if envelope_bundle is None:

@@ -234,6 +234,62 @@ def test_registry_v2_bundle_round_trips_to_runtime_card() -> None:
     assert card.artifact_bundle.files[0].path == "model-Q4_K_M.gguf"
 
 
+def _with_second_card(
+    payload: dict[str, object], card_id: str, alias: str, **card_fields: object
+) -> dict[str, object]:
+    """Copy the fixture's card into a second envelope and metadata entry."""
+    cards = cast("list[dict[str, object]]", payload["cards"])
+    metadata = cast("dict[str, object]", payload["card_metadata"])
+    second = cast("dict[str, object]", json.loads(json.dumps(cards[0])))
+    second["card_id"] = card_id
+    second["alias"] = alias
+    second["model_ref"] = alias
+    second_card = cast("dict[str, object]", second["card"])
+    second_card["model_id"] = alias
+    second_card.update(card_fields)
+    cards.append(second)
+    metadata[card_id] = cast(
+        "dict[str, object]", json.loads(json.dumps(metadata[f"card_{'a' * 52}"]))
+    )
+    return payload
+
+
+def test_registry_skips_a_card_whose_vocabulary_this_build_lacks() -> None:
+    """A card with a section or task this build does not know is skipped.
+
+    The registry publishes new card classes ahead of the Skulk builds that
+    read them; one such card must not take the whole signed catalog away
+    from an older node. A malformed card still refuses the catalog."""
+    from loguru import logger
+
+    payload = _with_second_card(
+        cast("dict[str, object]", json.loads(_catalog_payload())),
+        f"card_{'z' * 52}",
+        "org/future-modality",
+        holograms={"modes": ["t2h"]},
+        tasks=["TextToHologram"],
+    )
+    warnings: list[str] = []
+    handler = logger.add(lambda message: warnings.append(str(message)), level="WARNING")
+    try:
+        loaded = registry_model_cards(RegistryCatalog.model_validate(payload, strict=False))
+    finally:
+        logger.remove(handler)
+    assert [str(card.model_id) for card in loaded] == ["org/multi-gguf@q4-k-m"]
+    assert any(
+        "card_" + "z" * 52 in line and "holograms" in line and "tasks" in line
+        for line in warnings
+    )
+    malformed = _with_second_card(
+        cast("dict[str, object]", json.loads(_catalog_payload())),
+        f"card_{'y' * 52}",
+        "org/malformed",
+        n_layers="not-an-integer",
+    )
+    with pytest.raises(ValueError, match="n_layers"):
+        registry_model_cards(RegistryCatalog.model_validate(malformed, strict=False))
+
+
 def test_registry_v2_rejects_card_envelope_bundle_disagreement() -> None:
     """A signed envelope cannot select different bytes from the runtime card."""
 
