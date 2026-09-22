@@ -467,7 +467,7 @@ function buildTheme(colors: ColorTokens) {
     // The capability specimens intentionally retain their distinct tints in both palettes.
     capabilityTints: {
       optiq: '#a78bfa', embedding: '#f472b6', tts: '#38bdf8', stt: '#34d399',
-      code: '#818cf8', image_gen: '#fb923c', image_edit: '#fb923c',
+      code: '#818cf8', image_gen: '#fb923c', image_edit: '#fb923c', video_gen: '#e879f9',
     },
     fontSizes: sharedFontSizes,
     radii: sharedRadii,
