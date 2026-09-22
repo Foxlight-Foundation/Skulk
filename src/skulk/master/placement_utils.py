@@ -1,5 +1,6 @@
 import ipaddress
 from collections.abc import Generator, Mapping
+from collections.abc import Set as AbstractSet
 from typing import Final, final
 
 from loguru import logger
@@ -13,6 +14,7 @@ from skulk.shared.models.memory_estimate import (
     backend_offloads_to_vram,
     estimate_recurrent_cache_bytes,
     estimate_shard_footprint,
+    gpu_working_set_ceiling,
     memory_overhead_factor,
     per_token_kv_bytes,
     shard_fraction_of_model,
@@ -275,6 +277,79 @@ def reserve_instance_vram(
         # lagging telemetry still limits admission until memory is released.
         usable[node_id] = Memory.from_bytes(
             min(observed.in_bytes, max(0, ceiling - committed.get(node_id, 0)))
+        )
+    return usable
+
+
+def reserve_instance_system_ram(
+    node_memory: Mapping[NodeId, MemoryUsage],
+    current_instances: Mapping[InstanceId, Instance],
+    node_vram: Mapping[NodeId, Memory] | None = None,
+    *,
+    unified_memory_gpu_nodes: AbstractSet[NodeId] = frozenset(),
+) -> dict[NodeId, Memory]:
+    """Live system RAM per node for sizing a served window, net of commitments.
+
+    A served window committed in system RAM is sized from the node's live
+    ``ram_available``, but a placement made moments earlier may not show in
+    telemetry yet, and two back-to-back placements would each size a window
+    from the same untouched figure and overcommit the node. This is the
+    system-RAM twin of ``reserve_instance_vram``: every shard whose memory
+    lands in system RAM (MLX, a CPU-resolved shard, anything on a node
+    without discrete VRAM or on a unified-memory APU) charges its estimated
+    footprint at its stamped window against the node's GPU working-set
+    ceiling, and the usable figure is the smaller of the observed
+    ``ram_available`` and the uncommitted ceiling. Observed usage already
+    includes loaded instances, so bounding against the remaining static budget
+    never counts an allocation twice. RPC placements choose their split at
+    runtime and stay observation-only, as in the VRAM path.
+
+    Args:
+        node_memory: Observed node memory, ``ram_available`` and ``ram_total``.
+        current_instances: Placements that still own their reservations.
+        node_vram: Nodes with discrete VRAM; a GPU-offload shard on one of
+            them (that is not a unified-memory APU) lives in VRAM, not here.
+        unified_memory_gpu_nodes: APUs whose GPU allocations also take host
+            pages; their shards charge system RAM.
+
+    Returns:
+        Usable live system RAM keyed by node, for every node in ``node_memory``.
+    """
+    node_vram = node_vram or {}
+    committed: dict[NodeId, int] = {}
+    for instance in current_instances.values():
+        if isinstance(instance, LlamaRpcInstance):
+            continue
+        assignments = instance.shard_assignments
+        for node_id, runner_id in assignments.node_to_runner.items():
+            shard = assignments.runner_to_shard[runner_id]
+            in_discrete_vram = (
+                node_id in node_vram
+                and node_id not in unified_memory_gpu_nodes
+                and backend_offloads_to_vram(shard.resolved_backend)
+            )
+            if in_discrete_vram:
+                continue
+            fraction = shard_fraction_of_model(shard)
+            if fraction is None:
+                continue
+            footprint = estimate_shard_footprint(
+                shard.model_card,
+                fraction,
+                resolved_backend=shard.resolved_backend,
+                llama_server_settings=shard.llama_server_settings,
+                context_budget=(
+                    instance.context_token_limit
+                    if instance.context_token_limit is not None
+                    else PLACEMENT_KV_CONTEXT_BUDGET_TOKENS
+                ),
+            )
+            committed[node_id] = committed.get(node_id, 0) + footprint.in_bytes
+    usable: dict[NodeId, Memory] = {}
+    for node_id, usage in node_memory.items():
+        ceiling = gpu_working_set_ceiling(usage.ram_total).in_bytes
+        usable[node_id] = Memory.from_bytes(
+            min(usage.ram_available.in_bytes, max(0, ceiling - committed.get(node_id, 0)))
         )
     return usable
 

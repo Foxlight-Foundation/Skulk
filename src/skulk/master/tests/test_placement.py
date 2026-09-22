@@ -13,13 +13,17 @@ from skulk.master.placement import (
     replacement_command_for_download_failed_instance,
     replacement_command_for_refused_instance,
 )
+from skulk.master.placement_utils import reserve_instance_system_ram
 from skulk.master.tests.conftest import (
     create_node_memory,
     create_node_network,
     create_rdma_connection,
     create_socket_connection,
 )
-from skulk.shared.models.memory_estimate import KV_CONTEXT_BUDGET_TOKENS
+from skulk.shared.models.memory_estimate import (
+    KV_CONTEXT_BUDGET_TOKENS,
+    estimate_shard_footprint,
+)
 from skulk.shared.models.model_cards import (
     ModelCard,
     ModelId,
@@ -866,6 +870,130 @@ def _make_shard_metadata(model_card: ModelCard) -> PipelineShardMetadata:
         end_layer=model_card.n_layers,
         n_layers=model_card.n_layers,
     )
+
+
+def _served_gguf_card(model_id: str = "served-gguf") -> ModelCard:
+    """A GGUF card whose KV cost is known, so a served window can be sized."""
+    return ModelCard(
+        model_id=ModelId(model_id),
+        storage_size=Memory.from_gb(16),
+        n_layers=32,
+        hidden_size=4096,
+        supports_tensor=True,
+        num_key_value_heads=8,
+        tasks=[ModelTask.TextGeneration],
+        gguf_file="model-Q4_K_M.gguf",
+        context_length=1048576,
+    )
+
+
+def test_served_window_on_unified_memory_follows_live_ram_net_of_placements() -> None:
+    """Back-to-back served placements on one RAM-backed node share the node.
+
+    Without a live figure the window was the 8192 floor. With it, the first
+    placement takes the window that fits live memory; the second is sized
+    net of the first placement's footprint even though telemetry has not yet
+    moved, so the two cannot both claim the whole node.
+    """
+    topology = Topology()
+    node_id = NodeId()
+    topology.add_node(node_id)
+    node_memory = {
+        node_id: create_node_memory(
+            Memory.from_gb(60).in_bytes, ram_total=Memory.from_gb(64).in_bytes
+        )
+    }
+    node_network = {node_id: create_node_network()}
+
+    first = place_instance(
+        place_instance_command(_served_gguf_card("served-gguf-first")),
+        topology,
+        {},
+        node_memory,
+        node_network,
+    )
+    first_instance = next(iter(first.values()))
+    assert first_instance.context_token_limit is not None
+    assert first_instance.context_token_limit > KV_CONTEXT_BUDGET_TOKENS
+
+    second = place_instance(
+        place_instance_command(_served_gguf_card("served-gguf-second")),
+        topology,
+        first,
+        node_memory,
+        node_network,
+    )
+    second_instance = next(
+        instance
+        for instance_id, instance in second.items()
+        if instance_id not in first
+    )
+    assert second_instance.context_token_limit is not None
+    assert (
+        KV_CONTEXT_BUDGET_TOKENS
+        <= second_instance.context_token_limit
+        < first_instance.context_token_limit
+    )
+
+
+def test_reserve_instance_system_ram_charges_only_ram_backed_shards() -> None:
+    """Pending RAM-backed shards reduce the live figure; VRAM-backed ones do not."""
+    ram_node = NodeId()
+    gpu_node = NodeId()
+    card = _served_gguf_card()
+    stamped_window = 32768
+
+    def instance_on(node_id: NodeId, backend: str | None) -> MlxRingInstance:
+        runner_id = RunnerId()
+        return MlxRingInstance(
+            instance_id=InstanceId(),
+            shard_assignments=ShardAssignments(
+                model_id=card.model_id,
+                runner_to_shard={
+                    runner_id: _make_shard_metadata(card).model_copy(
+                        update={"resolved_backend": backend}
+                    )
+                },
+                node_to_runner={node_id: runner_id},
+            ),
+            hosts_by_node={},
+            ephemeral_port=50000,
+            context_token_limit=stamped_window,
+        )
+
+    node_memory = {
+        ram_node: create_node_memory(
+            Memory.from_gb(60).in_bytes, ram_total=Memory.from_gb(64).in_bytes
+        ),
+        gpu_node: create_node_memory(
+            Memory.from_gb(60).in_bytes, ram_total=Memory.from_gb(64).in_bytes
+        ),
+    }
+    node_vram = {gpu_node: Memory.from_gb(48)}
+    untouched = reserve_instance_system_ram(node_memory, {}, node_vram)
+    charged = reserve_instance_system_ram(
+        node_memory,
+        {
+            InstanceId(): instance_on(ram_node, "llama_server-cpu"),
+            InstanceId(): instance_on(gpu_node, "llama_server-cuda"),
+        },
+        node_vram,
+    )
+    footprint = estimate_shard_footprint(
+        card,
+        1.0,
+        resolved_backend="llama_server-cpu",
+        context_budget=stamped_window,
+    )
+
+    # Without commitments the figure is the working-set ceiling (48 of 64 GB),
+    # since the observed 60 GB exceeds it.
+    assert untouched[ram_node] == Memory.from_gb(48)
+    # The RAM-backed shard's footprint at its stamped window comes off the
+    # ceiling; observed memory that already reflects loads is never subtracted.
+    assert charged[ram_node] == Memory.from_gb(48) - footprint
+    # A GPU-offload shard on a discrete-VRAM node lives in VRAM, not here.
+    assert charged[gpu_node] == untouched[gpu_node]
 
 
 def test_legacy_instance_backfills_context_token_limit_from_card() -> None:
