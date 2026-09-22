@@ -15551,6 +15551,10 @@ class API:
             source_revision = source_revision or card.source_revision
             source_repository = source_repository or str(card.artifact_repository)
             registry_card_id = card.registry_card_id
+        # The custom override this adoption may retire is the one in the
+        # catalog before the store is asked, so a card replaced while the store
+        # request is in flight is never the one retired.
+        override = get_card(requested_model_id) if requested_card_id is not None else None
         result = await self._store_client.request_store_download(
             model_id,
             gguf_file=gguf_file,
@@ -15568,27 +15572,40 @@ class API:
         # while the store read the signed generation. Once the store has
         # taken the signed card, retire the override so the signed card is
         # the catalog card on every node, the way a direct delete would.
-        if requested_card_id is not None and registry_card_id is not None:
+        if (
+            requested_card_id is not None
+            and registry_card_id is not None
+            and override is not None
+            and override.is_custom
+        ):
             self._schedule_custom_override_retirement(
-                request, requested_model_id, str(result.get("status"))
+                request,
+                requested_model_id,
+                str(result.get("status")),
+                override,
+                registry_card_id,
             )
         return StoreDownloadResponse.model_validate(result, strict=False)
 
     def _schedule_custom_override_retirement(
-        self, request: Request, model_id: ModelId, store_status: str
+        self,
+        request: Request,
+        model_id: ModelId,
+        store_status: str,
+        override: ModelCard,
+        registry_card_id: str,
     ) -> None:
-        """Retire the custom card overriding ``model_id`` once the store adopts.
+        """Retire ``override`` once the store has adopted ``registry_card_id``.
 
-        The override is captured now and only that exact card is retired
-        later, so a custom card an operator replaces while the download runs
-        is never deleted by the older request. The retirement is a replicated
-        catalog deletion, so it needs the authority ``DELETE
-        /models/custom/{model_id}`` needs; a caller without it still gets the
-        download and the override stays until an operator removes it.
+        Only that exact card is retired, and only after the store's installed
+        record proves the signed generation is what is installed, so a custom
+        card an operator replaces while the download runs is never deleted by
+        the older request and an interrupted download never retires anything.
+        The retirement is a replicated catalog deletion, so it needs the
+        authority ``DELETE /models/custom/{model_id}`` needs; a caller without
+        it still gets the download and the override stays until an operator
+        removes it.
         """
-        override = get_card(model_id)
-        if override is None or not override.is_custom:
-            return
         if not self._operator_mutation_allowed(request):
             logger.info(
                 "Signed card adoption for %s leaves its custom override in "
@@ -15597,7 +15614,9 @@ class API:
             )
             return
         if store_status == "complete":
-            self._tg.start_soon(self._retire_custom_override, model_id, override)
+            self._tg.start_soon(
+                self._retire_custom_override, model_id, override, registry_card_id
+            )
             return
         if store_status not in {"pending", "downloading"}:
             return
@@ -15605,13 +15624,48 @@ class API:
             return
         self._pending_override_retirements.add(model_id)
         self._tg.start_soon(
-            self._retire_custom_override_on_completion, model_id, override
+            self._retire_custom_override_on_completion,
+            model_id,
+            override,
+            registry_card_id,
         )
 
+    async def _installed_store_identity(self, model_id: ModelId) -> str | None:
+        """Return the signed card ID the store proves installed for ``model_id``.
+
+        Reads the store's registry afresh rather than the model-list cache: the
+        answer decides a deletion, and a snapshot a few seconds old can predate
+        the adoption it is meant to confirm. ``None`` when the store has no
+        record, the bytes are not registry-verified, or the store cannot be
+        reached.
+        """
+        self._model_list_store_records_cached_at = 0.0
+        record = (await self._cached_store_installed_records()).get(model_id)
+        if record is None or record.verification != "registry_verified":
+            return None
+        return record.installed_identity
+
     async def _retire_custom_override(
-        self, model_id: ModelId, override: ModelCard
+        self, model_id: ModelId, override: ModelCard, registry_card_id: str
     ) -> None:
-        """Order the deletion of ``override`` if it still overrides ``model_id``."""
+        """Order the deletion of ``override`` once the signed card is installed.
+
+        The store's own installed record must name ``registry_card_id``: a
+        store that restarted during the download answers ``complete`` for the
+        alias from the generation it already had, which is the custom one.
+        The command carries ``override`` as the exact card, and the master
+        refuses the deletion when the card has changed by the time it orders.
+        """
+        installed = await self._installed_store_identity(model_id)
+        if installed != registry_card_id:
+            logger.warning(
+                "Signed card adoption for %s reported complete but the store's "
+                "installed record is %s, not %s; the custom override stays in place",
+                model_id,
+                installed,
+                registry_card_id,
+            )
+            return
         if get_card(model_id) != override:
             logger.info(
                 "Custom card for %s changed while the signed card was adopted; "
@@ -15622,12 +15676,14 @@ class API:
         await self.command_sender.send(
             ForwarderCommand(
                 origin=self._system_id,
-                command=DeleteCustomModelCard(model_id=model_id),
+                command=DeleteCustomModelCard(
+                    model_id=model_id, expected_card=override
+                ),
             )
         )
 
     async def _retire_custom_override_on_completion(
-        self, model_id: ModelId, override: ModelCard
+        self, model_id: ModelId, override: ModelCard, registry_card_id: str
     ) -> None:
         """Follow a store download and retire ``override`` when it completes.
 
@@ -15647,7 +15703,9 @@ class API:
                 )
                 state = status.get("status")
                 if state == "complete":
-                    await self._retire_custom_override(model_id, override)
+                    await self._retire_custom_override(
+                        model_id, override, registry_card_id
+                    )
                     return
                 if state in {"failed", "cancelled", "not_found"}:
                     logger.info(

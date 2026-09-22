@@ -1,6 +1,7 @@
 # pyright: reportPrivateUsage=false
 """Model-store API requests preserve qualified card revisions."""
 
+from collections.abc import Callable
 from types import SimpleNamespace
 from typing import cast
 
@@ -328,11 +329,17 @@ class _AdoptingStoreClient(_RecordingStoreClient):
         self.answer = answer
         self.polled = list(polled)
         self.polls = 0
+        # What the store's installed record names once it answers complete; the
+        # signed card by default, as a real adoption leaves it.
+        self.installed_identity: str | None = f"card_{'b' * 52}"
+        self.during_request: Callable[[], None] | None = None
 
     async def request_store_download(  # type: ignore[override]
         self, model_id: str, **kwargs: object
     ) -> dict[str, object]:
         self.requests.append((model_id,) + tuple(kwargs.values()))  # type: ignore[arg-type]
+        if self.during_request is not None:
+            self.during_request()
         return {"status": self.answer}
 
     async def get_store_download_status(self, model_id: str) -> dict[str, object]:
@@ -365,6 +372,11 @@ def _adopting_api(
     api._system_id = SystemId("adopt-test-node")
     api._tg = TaskGroup()
     api._pending_override_retirements = set()
+
+    async def installed_identity(_model_id: ModelId) -> str | None:
+        return store_client.installed_identity
+
+    monkeypatch.setattr(api, "_installed_store_identity", installed_identity)
     return api, command_receiver
 
 
@@ -389,6 +401,7 @@ async def test_adopting_a_signed_card_retires_the_custom_override(
     forwarded = command_receiver.receive_nowait()
     assert isinstance(forwarded.command, DeleteCustomModelCard)
     assert forwarded.command.model_id == ModelId(_MODEL_ID)
+    assert forwarded.command.expected_card == custom
     assert store_client.polls == 0
 
 
@@ -464,6 +477,56 @@ async def test_adoption_retires_only_the_override_seen_at_request_time(
     with pytest.raises(WouldBlock):
         command_receiver.receive_nowait()
     assert store_client.polls == 2
+
+
+async def test_adoption_captures_the_override_before_asking_the_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A card replaced while the store request is in flight is not the one retired."""
+    custom, current = _override_cards()
+    replacement = custom.model_copy(update={"gguf_file": "edited.gguf"})
+    catalog = [custom]
+    store_client = _AdoptingStoreClient("complete")
+    api, command_receiver = _adopting_api(monkeypatch, store_client, catalog, current)
+
+    def replace_during_request() -> None:
+        catalog[0] = replacement
+
+    store_client.during_request = replace_during_request
+    async with api._tg:
+        await api.request_store_download(
+            _operator_request(),
+            _MODEL_ID,
+            StoreDownloadRequest(registry_card_id=current.registry_card_id),
+        )
+    # The captured card is the pre-request one; the catalog now holds another,
+    # so nothing is retired rather than the replacement.
+    with pytest.raises(WouldBlock):
+        command_receiver.receive_nowait()
+
+
+async def test_adoption_retires_nothing_until_the_store_installed_the_signed_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A store answering complete from an older generation retires nothing.
+
+    A store restarted mid-download loses the transfer and reports the alias
+    complete from the generation it already had, the custom one.
+    """
+    custom, current = _override_cards()
+    store_client = _AdoptingStoreClient("pending", "downloading", "complete")
+    store_client.installed_identity = None
+    api, command_receiver = _adopting_api(monkeypatch, store_client, [custom], current)
+
+    async with api._tg:
+        await api.request_store_download(
+            _operator_request(),
+            _MODEL_ID,
+            StoreDownloadRequest(registry_card_id=current.registry_card_id),
+        )
+    with pytest.raises(WouldBlock):
+        command_receiver.receive_nowait()
+    assert not api._pending_override_retirements
 
 
 async def test_adoption_without_operator_authority_keeps_the_override(
