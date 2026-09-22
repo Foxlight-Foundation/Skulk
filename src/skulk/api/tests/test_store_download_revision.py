@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from typing import cast
 
 import pytest
+from anyio import WouldBlock
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
@@ -18,8 +19,12 @@ from skulk.shared.models.model_cards import (
     ModelId,
     ModelTask,
 )
-from skulk.shared.types.commands import ForwarderCommand, ForwarderDownloadCommand
-from skulk.shared.types.common import NodeId
+from skulk.shared.types.commands import (
+    DeleteCustomModelCard,
+    ForwarderCommand,
+    ForwarderDownloadCommand,
+)
+from skulk.shared.types.common import NodeId, SystemId
 from skulk.shared.types.events import IndexedEvent
 from skulk.shared.types.memory import Memory
 from skulk.store.model_store_client import ModelStoreClient
@@ -261,6 +266,80 @@ async def test_store_download_selects_current_registry_generation(
             "base",
         )
     ]
+
+
+async def test_adopting_a_signed_card_retires_the_custom_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A signed-card adoption the store completes also retires a custom card.
+
+    With the custom catalog card left in place, placements kept loading it
+    while the store read the signed generation and hid the update.
+    """
+
+    custom = ModelCard(
+        model_id=ModelId(_MODEL_ID),
+        storage_size=Memory.from_mb(1),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        gguf_file="model.gguf",
+        source_revision="a" * 40,
+        is_custom=True,
+    )
+    current = ModelCard(
+        model_id=ModelId(_MODEL_ID),
+        storage_size=Memory.from_mb(1),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        gguf_file="model.gguf",
+        source_revision="a" * 40,
+        registry_card_id=f"card_{'b' * 52}",
+        registry_snapshot_id="snapshot_2_current",
+        registry_provenance="foxlight",
+    )
+    def catalog_card(_model_id: ModelId) -> ModelCard:
+        return custom
+
+    def current_card(_model_id: ModelId) -> ModelCard:
+        return current
+
+    monkeypatch.setattr(api_main, "get_card", catalog_card)
+    monkeypatch.setattr(api_main, "get_current_registry_card", current_card)
+
+    class _CompletingStoreClient(_RecordingStoreClient):
+        status = "complete"
+
+        async def request_store_download(  # type: ignore[override]
+            self, model_id: str, **kwargs: object
+        ) -> dict[str, object]:
+            self.requests.append((model_id,) + tuple(kwargs.values()))  # type: ignore[arg-type]
+            return {"status": self.status}
+
+    store_client = _CompletingStoreClient()
+    command_sender, command_receiver = channel[ForwarderCommand]()
+    api = object.__new__(API)
+    api._store_client = cast(ModelStoreClient, cast(object, store_client))
+    api.command_sender = command_sender
+    api._system_id = SystemId("adopt-test-node")
+
+    await api.request_store_download(
+        _MODEL_ID, StoreDownloadRequest(registry_card_id=current.registry_card_id)
+    )
+    forwarded = command_receiver.receive_nowait()
+    assert isinstance(forwarded.command, DeleteCustomModelCard)
+    assert forwarded.command.model_id == ModelId(_MODEL_ID)
+
+    # A store that only accepted a download has not adopted anything yet.
+    store_client.status = "pending"
+    await api.request_store_download(
+        _MODEL_ID, StoreDownloadRequest(registry_card_id=current.registry_card_id)
+    )
+    with pytest.raises(WouldBlock):
+        command_receiver.receive_nowait()
 
 
 async def test_store_download_forwards_complete_companion_identity() -> None:

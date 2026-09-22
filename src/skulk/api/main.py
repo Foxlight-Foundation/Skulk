@@ -15550,6 +15550,24 @@ class API:
             owner_registry_card_id=owner_registry_card_id,
             artifact_role=artifact_role,
         )
+        # Adopting a signed card for an alias that an operator-owned custom
+        # card still overrides would leave placements on the custom card
+        # while the store read the signed generation. Once the store has
+        # taken the signed card, retire the override so the signed card is
+        # the catalog card on every node, the way a direct delete would.
+        if (
+            requested_card_id is not None
+            and registry_card_id is not None
+            and result.get("status") == "complete"
+        ):
+            catalog_card = get_card(requested_model_id)
+            if catalog_card is not None and catalog_card.is_custom:
+                await self.command_sender.send(
+                    ForwarderCommand(
+                        origin=self._system_id,
+                        command=DeleteCustomModelCard(model_id=requested_model_id),
+                    )
+                )
         return StoreDownloadResponse.model_validate(result, strict=False)
 
     async def get_store_download_status(self, model_id: str) -> JSONResponse:

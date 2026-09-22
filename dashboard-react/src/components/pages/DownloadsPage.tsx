@@ -581,7 +581,9 @@ export function ModelStorePage({ topology, nodeResources = {}, downloads, instan
           type: 'success',
           message: t('downloads.toasts.updateRequested', 'Updating {modelId} to the signed card', { modelId: entry.model_id }),
         });
-        loadRegistry();
+        // Same as a fresh download: forget an earlier failure for this model
+        // so a retry that fails again is reported, then refresh.
+        handleDownloadStarted(entry.model_id);
       } else {
         const reason = accepted?.reason ?? (res.ok ? null : await extractErrorDetail(res));
         addToast({
@@ -594,7 +596,7 @@ export function ModelStorePage({ topology, nodeResources = {}, downloads, instan
     } catch {
       addToast({ type: 'error', message: t('downloads.toasts.updateFailed', 'Failed to update model') });
     }
-  }, [loadRegistry, t]);
+  }, [handleDownloadStarted, t]);
 
   const handleOptimize = useCallback(async (modelId: string) => {
     try {
