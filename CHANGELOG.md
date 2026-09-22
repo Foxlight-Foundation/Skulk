@@ -14,7 +14,9 @@ This project records release notes here and mirrors public-facing notes in
   (`comfy@<commit>/torch@<version>`): the same checkout on cu130 and on ROCm
   serve differently, and a signed engine-support claim must name exactly
   what serves. `skulk doctor` prints the identity so it can be copied into a
-  claim.
+  claim. The engine-build inventory now runs in a worker thread when node
+  resources are gathered, so a slow or hung engine probe no longer stalls
+  the worker's event loop.
 ### Added
 
 - Video generation is a capability the dashboard knows: `video_gen` joins the
