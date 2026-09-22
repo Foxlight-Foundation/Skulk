@@ -263,6 +263,11 @@ def add_instance_to_placements(
         node_vram=node_vram,
         unified_memory_gpu_nodes=unified_memory_gpu_nodes,
         fixed_memory_by_node=fixed_memory_by_node,
+        node_ram_available={
+            node_id: node_memory[node_id].ram_available
+            for node_id in assignments.node_to_runner
+            if node_id in node_memory
+        },
     )
     requested_limit = command.instance.context_token_limit
     if requested_limit is not None:
@@ -1258,9 +1263,11 @@ def place_instance(
     )
 
     # Stamp the context-admission ceiling into the placement decision (#279
-    # slice 2). Computed once here from the hosting nodes' static ram_total, so
-    # every rank reads the identical value off replicated state rather than
-    # recomputing from the (now telemetry-plane, last-write-wins) node memory.
+    # slice 2). Computed once here, so every rank reads the identical value off
+    # replicated state rather than recomputing from the (telemetry-plane,
+    # last-write-wins) node memory. The live ram_available handed in is the
+    # figure this placement was just admitted against; it sizes the served
+    # window of a fixed-window engine whose KV lands in system RAM.
     context_token_limit = instance_context_token_limit(
         shard_assignments,
         {
@@ -1269,6 +1276,10 @@ def place_instance(
         },
         node_vram=node_vram,
         unified_memory_gpu_nodes=unified_memory_gpu_nodes,
+        node_ram_available={
+            node_id: node_memory[node_id].ram_available
+            for node_id in selected_cycle.node_ids
+        },
         fixed_memory_by_node=(
             {driver_node: projector_memory}
             if driver_node is not None and projector_memory.in_bytes > 0

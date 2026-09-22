@@ -328,8 +328,8 @@ def test_instance_limit_gguf_not_capped_to_kv_budget_on_vram_node():
     assert limit <= 131072  # never above the card's advertised max
 
 
-def test_instance_limit_gguf_uma_node_clamps_to_floor():
-    """A combined UMA pool may place GGUF but cannot justify a fixed-window lift."""
+def test_instance_limit_gguf_uma_node_sizes_the_window_from_live_ram():
+    """A combined UMA pool does not justify the static fit; live host RAM sizes it."""
     node_id = NodeId("n0")
     card = _card(17, kv_heads=4, n_layers=65, gguf_file="m.gguf").model_copy(
         update={"context_length": 262144}
@@ -344,16 +344,27 @@ def test_instance_limit_gguf_uma_node_clamps_to_floor():
         {node_id: Memory.from_gb(32)},
         node_vram={node_id: Memory.from_gb(42)},
     )
-    uma_limit = instance_context_token_limit(
+    uma_without_live = instance_context_token_limit(
         assignments,
         {node_id: Memory.from_gb(32)},
         node_vram={node_id: Memory.from_gb(42)},
         unified_memory_gpu_nodes=frozenset({node_id}),
     )
+    uma_limit = instance_context_token_limit(
+        assignments,
+        {node_id: Memory.from_gb(32)},
+        node_vram={node_id: Memory.from_gb(42)},
+        unified_memory_gpu_nodes=frozenset({node_id}),
+        node_ram_available={node_id: Memory.from_gb(30)},
+    )
 
     assert discrete_limit is not None
     assert discrete_limit > KV_CONTEXT_BUDGET_TOKENS
-    assert uma_limit == KV_CONTEXT_BUDGET_TOKENS
+    # No live reading: the floor is the only safe window.
+    assert uma_without_live == KV_CONTEXT_BUDGET_TOKENS
+    # A live reading sizes the window from host RAM, below the combined-pool fit.
+    assert uma_limit is not None
+    assert KV_CONTEXT_BUDGET_TOKENS < uma_limit < discrete_limit
 
 
 def test_instance_limit_gguf_cpu_resolved_on_vram_node_clamps_to_floor():
@@ -376,13 +387,12 @@ def test_instance_limit_gguf_cpu_resolved_on_vram_node_clamps_to_floor():
     assert limit == KV_CONTEXT_BUDGET_TOKENS
 
 
-def test_instance_limit_gguf_non_vram_node_clamps_to_floor():
-    # The gguf lift applies only to discrete-VRAM nodes. On a node WITHOUT discrete
-    # VRAM the fit is derived from static ram_total, but llama.cpp preallocates the
-    # window up front against live ram_available (which placement admits on and can
-    # be far lower under memory pressure) -- so preallocating a ram_total-sized
-    # window could OOM. gguf on a non-VRAM node stays at the budget floor. (P1
-    # review, #585.)
+def test_instance_limit_gguf_non_vram_node_without_live_ram_keeps_the_floor():
+    # On a node WITHOUT discrete VRAM the static fit is derived from ram_total, but
+    # llama.cpp commits the window up front against live ram_available (which
+    # placement admits on and can be far lower under memory pressure), so the
+    # static fit alone cannot size the window. Without a live reading the floor is
+    # the only safe window. (P1 review, #585.)
     card = _card(1, kv_heads=8, n_layers=32, gguf_file="m-Q4_K_M.gguf").model_copy(
         update={"context_length": 131072}
     )
@@ -394,6 +404,85 @@ def test_instance_limit_gguf_non_vram_node_clamps_to_floor():
         instance_context_token_limit(assignments, {NodeId("n0"): Memory.from_gb(64)})
         == KV_CONTEXT_BUDGET_TOKENS
     )
+
+
+def test_instance_limit_gguf_non_vram_node_sizes_the_window_from_live_ram():
+    """The served window on unified memory follows the live figure placement admitted on."""
+    node_id = NodeId("n0")
+    card = _card(16, kv_heads=8, n_layers=32, gguf_file="m-Q4_K_M.gguf").model_copy(
+        update={"context_length": 1048576}
+    )
+    assignments = _assignments(
+        card, {"r0": (_pipeline_shard(card, start=0, end=32), str(node_id))}
+    )
+    totals = {node_id: Memory.from_gb(64)}
+
+    generous = instance_context_token_limit(
+        assignments, totals, node_ram_available={node_id: Memory.from_gb(60)}
+    )
+    tighter = instance_context_token_limit(
+        assignments, totals, node_ram_available={node_id: Memory.from_gb(30)}
+    )
+    # Under memory pressure the live figure is below what the floor needs; admission
+    # already guaranteed the floor, so the window never drops beneath it.
+    squeezed = instance_context_token_limit(
+        assignments, totals, node_ram_available={node_id: Memory.from_gb(18)}
+    )
+    # The live figure can exceed the GPU working-set ceiling; the ceiling caps it,
+    # so a reading above it sizes the same window a discrete GPU of that size gets.
+    gpu_shard = _pipeline_shard(card, start=0, end=32).model_copy(
+        update={"resolved_backend": "llama_server-cuda"}
+    )
+    static_fit = instance_context_token_limit(
+        _assignments(card, {"r0": (gpu_shard, str(node_id))}),
+        totals,
+        node_vram={node_id: Memory.from_gb(48)},
+    )
+
+    assert generous is not None and tighter is not None
+    assert generous > tighter > KV_CONTEXT_BUDGET_TOKENS
+    assert squeezed == KV_CONTEXT_BUDGET_TOKENS
+    assert static_fit is not None
+    assert generous <= static_fit
+
+
+def test_instance_limit_gguf_ring_takes_the_smallest_live_window():
+    """A multi-node served placement is bounded by its tightest hosting node."""
+    card = _card(16, kv_heads=8, n_layers=32, gguf_file="m-Q4_K_M.gguf").model_copy(
+        update={"context_length": 1048576}
+    )
+    assignments = _assignments(
+        card,
+        {
+            "r0": (_pipeline_shard(card, start=0, end=16, rank=0, world=2), "n0"),
+            "r1": (_pipeline_shard(card, start=16, end=32, rank=1, world=2), "n1"),
+        },
+    )
+    totals = {NodeId("n0"): Memory.from_gb(64), NodeId("n1"): Memory.from_gb(64)}
+    both_generous = instance_context_token_limit(
+        assignments,
+        totals,
+        node_ram_available={
+            NodeId("n0"): Memory.from_gb(60),
+            NodeId("n1"): Memory.from_gb(60),
+        },
+    )
+    one_tight = instance_context_token_limit(
+        assignments,
+        totals,
+        node_ram_available={
+            NodeId("n0"): Memory.from_gb(60),
+            NodeId("n1"): Memory.from_gb(12),
+        },
+    )
+    one_missing = instance_context_token_limit(
+        assignments,
+        totals,
+        node_ram_available={NodeId("n0"): Memory.from_gb(60)},
+    )
+    assert both_generous is not None and one_tight is not None
+    assert both_generous > one_tight >= KV_CONTEXT_BUDGET_TOKENS
+    assert one_missing == KV_CONTEXT_BUDGET_TOKENS
 
 
 def test_instance_limit_mlx_non_vram_node_keeps_memory_fit():

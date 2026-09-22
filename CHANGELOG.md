@@ -15,6 +15,15 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- Served GGUF models on unified-memory nodes (every Mac, a Strix Halo, a
+  GB10 running llama-server) no longer serve a fixed 8192-token window. The
+  master sizes the window from the live available memory it admitted the
+  placement against, capped at the node's GPU working-set ceiling and the
+  static memory fit, never below the 8192 floor; the worker's pre-spawn guard
+  still refuses a window its current free memory cannot hold. The lift was
+  previously reserved for discrete-VRAM GPUs, which made a served chat model
+  on a Mac unusable for anything longer than a short exchange.
+
 - A signed registry card this Skulk build cannot read is skipped with a
   warning instead of failing the whole catalog. The registry publishes new
   card classes (video cards first) ahead of the Skulk builds that read them;
