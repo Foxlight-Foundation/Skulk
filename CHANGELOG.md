@@ -7,6 +7,12 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Added
+
+- Video generation is a capability the dashboard knows: `video_gen` joins the
+  model browser's capability filter and chips, the Hugging Face result rows
+  map the video pipeline tags onto it, and it carries its own tint.
+
 ### Fixed
 
 - A signed registry card this Skulk build cannot read is skipped with a

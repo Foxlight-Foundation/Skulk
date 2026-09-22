@@ -62,6 +62,9 @@ const PIPELINE_CAPABILITY: Readonly<Record<string, string>> = {
   'sentence-similarity': 'embedding',
   'text-to-image': 'image_gen',
   'image-to-image': 'image_edit',
+  'text-to-video': 'video_gen',
+  'image-to-video': 'video_gen',
+  'image-text-to-video': 'video_gen',
 };
 
 const Row = styled.div`
