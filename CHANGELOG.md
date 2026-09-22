@@ -7,6 +7,15 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Changed
+
+- The ComfyUI engine's build identity in `NodeResources.engine_builds` names
+  the torch build beside the checkout commit
+  (`comfy@<commit>/torch@<version>`): the same checkout on cu130 and on ROCm
+  serve differently, and a signed engine-support claim must name exactly
+  what serves. `skulk doctor` prints the identity so it can be copied into a
+  claim.
+
 ### Fixed
 
 - A signed registry card this Skulk build cannot read is skipped with a

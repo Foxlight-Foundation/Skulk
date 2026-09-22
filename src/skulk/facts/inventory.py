@@ -113,16 +113,48 @@ def _git_head(checkout: str) -> str | None:
     return head if len(head) == 40 else None
 
 
+@lru_cache(maxsize=8)
+def _comfy_torch(interpreter: str) -> str | None:
+    """Read the torch build the ComfyUI interpreter runs, once per process."""
+    try:
+        completed = subprocess.run(  # noqa: S603 - operator-configured interpreter
+            [interpreter, "-c", "import torch; print(torch.__version__)"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    version = completed.stdout.strip().split()[-1] if completed.stdout.strip() else ""
+    return version if 0 < len(version) <= 64 and " " not in version else None
+
+
 def _comfy_build(facts: NodeFacts) -> str | None:
-    """Return the ComfyUI checkout's commit as the engine's build identity.
+    """Return the ComfyUI checkout's commit, and its torch, as the build identity.
 
     The checkout is the build truth: a managed install is the pinned commit
-    by construction, and a hand-built install is whatever its HEAD says.
+    by construction, and a hand-built install is whatever its HEAD says. The
+    torch build the interpreter runs is part of what serves a render (the
+    same checkout on cu130 and on ROCm are different engines), so it joins
+    the identity as ``comfy@<commit>/torch@<version>`` whenever the
+    interpreter answers; a checkout whose torch cannot be read keeps the
+    commit-only form.
     """
     if facts.comfy_root_state != "ok" or facts.comfy_root is None:
         return None
     head = _git_head(facts.comfy_root)
-    return f"comfy@{head}" if head is not None else None
+    if head is None:
+        return None
+    interpreter = (
+        facts.comfy_binary.configured_path
+        if facts.comfy_binary.state == "ok"
+        else None
+    )
+    torch = _comfy_torch(interpreter) if interpreter is not None else None
+    return f"comfy@{head}/torch@{torch}" if torch is not None else f"comfy@{head}"
 
 
 def _declared_engine_builds(environ: Mapping[str, str]) -> dict[str, str]:

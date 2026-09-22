@@ -303,12 +303,20 @@ def _check_comfy_engine(facts: NodeFacts) -> Sequence[CheckResult]:
     derivation = derive_node_backends(facts)
     derived = derivation.backends
     if "comfy" in derived:
+        from skulk.facts.inventory import engine_build_inventory
+
+        # The build identity is what a signed engine-support claim must name
+        # exactly; print it so an operator can copy it into a submission.
+        build = engine_build_inventory(frozenset(derived), facts, environ=os.environ).get(
+            "comfy"
+        )
         return [
             _ok(
                 check_id,
                 title,
                 f"comfy ({facts.comfy_root}) advertises "
-                f"{sorted(tag for tag in derived if tag.startswith('comfy-'))}",
+                f"{sorted(tag for tag in derived if tag.startswith('comfy-'))}"
+                + (f"; engine build {build}" if build else ""),
             )
         ]
     if facts.comfy_binary.state != "not_configured" or facts.comfy_root is not None:
