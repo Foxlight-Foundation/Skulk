@@ -20,7 +20,10 @@ This project records release notes here and mirrors public-facing notes in
   master sizes the window from the live available memory it admitted the
   placement against, capped at the node's GPU working-set ceiling and the
   static memory fit, never below the 8192 floor; the worker's pre-spawn guard
-  still refuses a window its current free memory cannot hold. The lift was
+  still refuses a window its current free memory cannot hold. Placement on
+  system RAM now also charges placements the master has committed but
+  telemetry does not show yet, the way discrete VRAM already did, so two
+  back-to-back placements cannot each claim the whole node. The lift was
   previously reserved for discrete-VRAM GPUs, which made a served chat model
   on a Mac unusable for anything longer than a short exchange.
 

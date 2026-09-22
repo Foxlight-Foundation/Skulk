@@ -16,6 +16,10 @@ from skulk.master.main import Master
 from skulk.master.placement import place_instance
 from skulk.master.tests.conftest import create_node_network
 from skulk.routing.router import get_node_id_keypair
+from skulk.shared.models.memory_estimate import (
+    KV_CONTEXT_BUDGET_TOKENS,
+    estimate_shard_footprint,
+)
 from skulk.shared.models.model_cards import (
     ModelCard,
     ModelId,
@@ -125,6 +129,31 @@ def test_no_recent_free_leaves_memory_unchanged() -> None:
     master._telemetry_view.node_memory[node_id] = _mem(4.0)
     memory, _vram = master._placement_memory_inputs()
     assert memory[node_id].ram_available.in_gb == 4.0
+
+
+def test_pending_reservations_charge_system_ram_before_telemetry_shows_them() -> None:
+    """A placement awaiting its indexed echo already reduces its node's RAM."""
+    master = _make_master()
+    node_id = NodeId(get_node_id_keypair().to_node_id())
+    instance, card = _instance(node_id)
+    master._telemetry_view.node_memory[node_id] = _mem(60.0)
+
+    untouched, _vram = master._placement_memory_inputs()
+    master._pending_instance_reservations[instance.instance_id] = instance
+    reserved, _vram = master._placement_memory_inputs()
+
+    footprint = estimate_shard_footprint(
+        card,
+        1.0,
+        context_budget=(
+            instance.context_token_limit
+            if instance.context_token_limit is not None
+            else KV_CONTEXT_BUDGET_TOKENS
+        ),
+    )
+    assert untouched[node_id].ram_available == Memory.from_gb(60.0)
+    assert reserved[node_id].ram_available == Memory.from_gb(64.0) - footprint
+    assert reserved[node_id].ram_total == Memory.from_gb(64.0)
 
 
 def test_freed_instance_credit_is_disabled_by_default() -> None:

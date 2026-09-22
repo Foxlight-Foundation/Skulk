@@ -14,7 +14,6 @@ from skulk.shared.models.memory_estimate import (
     backend_offloads_to_vram,
     estimate_recurrent_cache_bytes,
     estimate_shard_footprint,
-    gpu_working_set_ceiling,
     memory_overhead_factor,
     per_token_kv_bytes,
     shard_fraction_of_model,
@@ -288,25 +287,26 @@ def reserve_instance_system_ram(
     *,
     unified_memory_gpu_nodes: AbstractSet[NodeId] = frozenset(),
 ) -> dict[NodeId, Memory]:
-    """Live system RAM per node for sizing a served window, net of commitments.
+    """Live system RAM per node, net of placements telemetry may not show yet.
 
-    A served window committed in system RAM is sized from the node's live
-    ``ram_available``, but a placement made moments earlier may not show in
-    telemetry yet, and two back-to-back placements would each size a window
-    from the same untouched figure and overcommit the node. This is the
+    A placement made moments earlier may not show in ``ram_available`` yet,
+    so two back-to-back placements would each admit and size a served window
+    against the same untouched figure and overcommit the node. This is the
     system-RAM twin of ``reserve_instance_vram``: every shard whose memory
     lands in system RAM (MLX, a CPU-resolved shard, anything on a node
     without discrete VRAM or on a unified-memory APU) charges its estimated
-    footprint at its stamped window against the node's GPU working-set
-    ceiling, and the usable figure is the smaller of the observed
-    ``ram_available`` and the uncommitted ceiling. Observed usage already
-    includes loaded instances, so bounding against the remaining static budget
-    never counts an allocation twice. RPC placements choose their split at
-    runtime and stay observation-only, as in the VRAM path.
+    footprint at its stamped window against the node's physical RAM, and the
+    usable figure is the smaller of the observed ``ram_available`` and the
+    uncommitted physical RAM. Observed usage already includes loaded
+    instances, so bounding against the remaining physical budget never counts
+    an allocation twice, and a node with nothing committed keeps its observed
+    figure untouched. RPC placements choose their split at runtime and stay
+    observation-only, as in the VRAM path.
 
     Args:
         node_memory: Observed node memory, ``ram_available`` and ``ram_total``.
-        current_instances: Placements that still own their reservations.
+        current_instances: Placements that still own their reservations,
+            pending ones included.
         node_vram: Nodes with discrete VRAM; a GPU-offload shard on one of
             them (that is not a unified-memory APU) lives in VRAM, not here.
         unified_memory_gpu_nodes: APUs whose GPU allocations also take host
@@ -347,11 +347,40 @@ def reserve_instance_system_ram(
             committed[node_id] = committed.get(node_id, 0) + footprint.in_bytes
     usable: dict[NodeId, Memory] = {}
     for node_id, usage in node_memory.items():
-        ceiling = gpu_working_set_ceiling(usage.ram_total).in_bytes
+        uncommitted = max(0, usage.ram_total.in_bytes - committed.get(node_id, 0))
         usable[node_id] = Memory.from_bytes(
-            min(usage.ram_available.in_bytes, max(0, ceiling - committed.get(node_id, 0)))
+            min(usage.ram_available.in_bytes, uncommitted)
         )
     return usable
+
+
+def reserve_system_ram_usage(
+    node_memory: Mapping[NodeId, MemoryUsage],
+    current_instances: Mapping[InstanceId, Instance],
+    node_vram: Mapping[NodeId, Memory] | None = None,
+    *,
+    unified_memory_gpu_nodes: AbstractSet[NodeId] = frozenset(),
+) -> dict[NodeId, MemoryUsage]:
+    """``node_memory`` with each ``ram_available`` net of committed placements.
+
+    The map placement admits against and sizes served windows from; see
+    ``reserve_instance_system_ram`` for what is charged. ``ram_total`` is
+    never touched, so context-ceiling math stays anchored to capacity.
+    """
+    reserved = reserve_instance_system_ram(
+        node_memory,
+        current_instances,
+        node_vram,
+        unified_memory_gpu_nodes=unified_memory_gpu_nodes,
+    )
+    return {
+        node_id: (
+            usage.model_copy(update={"ram_available": reserved[node_id]})
+            if reserved[node_id] != usage.ram_available
+            else usage
+        )
+        for node_id, usage in node_memory.items()
+    }
 
 
 def unified_memory_gpu_node_ids(

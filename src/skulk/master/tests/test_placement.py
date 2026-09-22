@@ -13,7 +13,10 @@ from skulk.master.placement import (
     replacement_command_for_download_failed_instance,
     replacement_command_for_refused_instance,
 )
-from skulk.master.placement_utils import reserve_instance_system_ram
+from skulk.master.placement_utils import (
+    reserve_instance_system_ram,
+    reserve_system_ram_usage,
+)
 from skulk.master.tests.conftest import (
     create_node_memory,
     create_node_network,
@@ -898,9 +901,11 @@ def test_served_window_on_unified_memory_follows_live_ram_net_of_placements() ->
     topology = Topology()
     node_id = NodeId()
     topology.add_node(node_id)
+    # A node with room for two of these models plus a wide window each; the
+    # reservation is what keeps the first window from claiming the whole node.
     node_memory = {
         node_id: create_node_memory(
-            Memory.from_gb(60).in_bytes, ram_total=Memory.from_gb(64).in_bytes
+            Memory.from_gb(120).in_bytes, ram_total=Memory.from_gb(128).in_bytes
         )
     }
     node_network = {node_id: create_node_network()}
@@ -916,11 +921,13 @@ def test_served_window_on_unified_memory_follows_live_ram_net_of_placements() ->
     assert first_instance.context_token_limit is not None
     assert first_instance.context_token_limit > KV_CONTEXT_BUDGET_TOKENS
 
+    # The master hands placement memory already net of committed placements
+    # (reserve_system_ram_usage); the first placement is pending here.
     second = place_instance(
         place_instance_command(_served_gguf_card("served-gguf-second")),
         topology,
         first,
-        node_memory,
+        reserve_system_ram_usage(node_memory, first),
         node_network,
     )
     second_instance = next(
@@ -986,12 +993,13 @@ def test_reserve_instance_system_ram_charges_only_ram_backed_shards() -> None:
         context_budget=stamped_window,
     )
 
-    # Without commitments the figure is the working-set ceiling (48 of 64 GB),
-    # since the observed 60 GB exceeds it.
-    assert untouched[ram_node] == Memory.from_gb(48)
+    # Without commitments the observed figure stands untouched.
+    assert untouched[ram_node] == Memory.from_gb(60)
     # The RAM-backed shard's footprint at its stamped window comes off the
-    # ceiling; observed memory that already reflects loads is never subtracted.
-    assert charged[ram_node] == Memory.from_gb(48) - footprint
+    # physical budget; observed memory that already reflects loads is never
+    # subtracted, so the figure is the smaller of the two.
+    assert charged[ram_node] == Memory.from_gb(64) - footprint
+    assert charged[ram_node] < untouched[ram_node]
     # A GPU-offload shard on a discrete-VRAM node lives in VRAM, not here.
     assert charged[gpu_node] == untouched[gpu_node]
 

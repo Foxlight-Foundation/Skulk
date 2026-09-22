@@ -632,9 +632,11 @@ discrete GPU VRAM, the same pool placement admitted the model against.
 Everywhere the window is committed in system RAM (Apple unified memory, a
 unified-memory AMD APU whose load-time amdgpu allocation also consumes host
 pages, a CPU-resolved shard) the master sizes it instead from the live
-available memory it has just admitted the placement against, net of the
-footprints of placements that may not show in telemetry yet (so two
-back-to-back placements cannot each claim the whole node), capped at the
+available memory it has just admitted the placement against. The master
+hands every placement path node memory already net of the footprints of
+placements it has committed but telemetry may not show yet, pending ones
+included, so two back-to-back placements neither admit nor size a window
+against the same untouched figure. That live figure is capped at the
 node's GPU working-set ceiling and at the static fit, and never below the
 floor; a node without a live reading keeps the floor. The worker's own
 pre-spawn guard checks that stamped window against its current free memory

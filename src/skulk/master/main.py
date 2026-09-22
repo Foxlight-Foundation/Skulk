@@ -28,6 +28,7 @@ from skulk.master.placement import (
 )
 from skulk.master.placement_utils import (
     reserve_instance_vram,
+    reserve_system_ram_usage,
     unified_memory_gpu_node_ids,
     usable_vram_by_node,
 )
@@ -1217,6 +1218,30 @@ class Master:
         reservations.update(instances)
         return reservations
 
+    def _reserved_node_memory(
+        self,
+        node_memory: Mapping[NodeId, MemoryUsage],
+        placements: Mapping[InstanceId, Instance],
+        node_vram: Mapping[NodeId, Memory],
+    ) -> dict[NodeId, MemoryUsage]:
+        """Node memory net of the system RAM ``placements`` have committed.
+
+        The system-RAM counterpart of the VRAM reservation: a placement whose
+        indexed echo has not returned, or whose load telemetry has not shown,
+        is already charged against its node so the next placement neither
+        admits nor sizes a served window against memory that is spoken for.
+        """
+        return reserve_system_ram_usage(
+            node_memory,
+            placements,
+            node_vram,
+            unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
+                self._telemetry_view.node_system,
+                self._telemetry_view.node_resources,
+                node_memory=node_memory,
+            ),
+        )
+
     def _placement_memory_inputs(
         self,
         current_instances: Mapping[InstanceId, Instance] | None = None,
@@ -1249,7 +1274,7 @@ class Master:
                 node_memory=base_memory,
                 current_instances=placements,
             )
-            return base_memory, base_vram
+            return self._reserved_node_memory(base_memory, placements, base_vram), base_vram
         # Credit the freed bytes onto each node's ram_available, clamped to
         # ram_total so credited availability never exceeds capacity (telemetry
         # may already have partly caught up, or the footprint estimate may be
@@ -1281,7 +1306,7 @@ class Master:
             node_memory=memory,
             current_instances=placements,
         )
-        return memory, vram
+        return self._reserved_node_memory(memory, placements, vram), vram
 
     def _place_for_steward_action(
         self,
@@ -2784,11 +2809,22 @@ class Master:
                                     replacement_command_for_refused_instance(refused)
                                 )
                                 try:
+                                    repair_vram = usable_vram_by_node(
+                                        self._telemetry_view.node_system,
+                                        self._telemetry_view.node_resources,
+                                        node_memory=self._telemetry_view.node_memory,
+                                        current_instances=self._placement_reservations(after_delete),
+                                    )
+                                    repair_memory = self._reserved_node_memory(
+                                        self._telemetry_view.node_memory,
+                                        self._placement_reservations(after_delete),
+                                        repair_vram,
+                                    )
                                     final_placement = place_instance(
                                         replace_command,
                                         self.state.topology,
                                         after_delete,
-                                        self._telemetry_view.node_memory,
+                                        repair_memory,
                                         self.state.node_network,
                                         download_status=self._effective_downloads(),
                                         excluded_nodes=set(
@@ -2796,16 +2832,11 @@ class Master:
                                         ),
                                         stamped_exclusions=set(refused.excluded_nodes),
                                         node_resources=self._telemetry_view.node_resources,
-                                        node_vram=usable_vram_by_node(
-                                            self._telemetry_view.node_system,
-                                            self._telemetry_view.node_resources,
-                                            node_memory=self._telemetry_view.node_memory,
-                                            current_instances=self._placement_reservations(after_delete),
-                                        ),
+                                        node_vram=repair_vram,
                                         unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
                                             self._telemetry_view.node_system,
                                             self._telemetry_view.node_resources,
-                                            node_memory=self._telemetry_view.node_memory,
+                                            node_memory=repair_memory,
                                         ),
                                         approved_remote_code_identities=self._model_trust_approvals,
                                     )
@@ -2844,11 +2875,22 @@ class Master:
                                         refused, command.node_id
                                     )
                                     try:
+                                        repair_vram = usable_vram_by_node(
+                                            self._telemetry_view.node_system,
+                                            self._telemetry_view.node_resources,
+                                            node_memory=self._telemetry_view.node_memory,
+                                            current_instances=self._placement_reservations(after_delete),
+                                        )
+                                        repair_memory = self._reserved_node_memory(
+                                            self._telemetry_view.node_memory,
+                                            self._placement_reservations(after_delete),
+                                            repair_vram,
+                                        )
                                         final_placement = place_instance(
                                             fallback,
                                             self.state.topology,
                                             after_delete,
-                                            self._telemetry_view.node_memory,
+                                            repair_memory,
                                             self.state.node_network,
                                             download_status=self._effective_downloads(),
                                             excluded_nodes=set(fallback.excluded_nodes),
@@ -2856,16 +2898,11 @@ class Master:
                                                 refused.excluded_nodes
                                             ),
                                             node_resources=self._telemetry_view.node_resources,
-                                            node_vram=usable_vram_by_node(
-                                                self._telemetry_view.node_system,
-                                                self._telemetry_view.node_resources,
-                                                node_memory=self._telemetry_view.node_memory,
-                                                current_instances=self._placement_reservations(after_delete),
-                                            ),
+                                            node_vram=repair_vram,
                                             unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
                                                 self._telemetry_view.node_system,
                                                 self._telemetry_view.node_resources,
-                                                node_memory=self._telemetry_view.node_memory,
+                                                node_memory=repair_memory,
                                             ),
                                             approved_remote_code_identities=self._model_trust_approvals,
                                         )
@@ -3326,26 +3363,32 @@ class Master:
                 replace_command = replacement_command_for_download_failed_instance(
                     instance, failed_nodes
                 )
+                repair_vram = usable_vram_by_node(
+                    self._telemetry_view.node_system,
+                    self._telemetry_view.node_resources,
+                    node_memory=self._telemetry_view.node_memory,
+                    current_instances=self._placement_reservations(after_delete),
+                )
+                repair_memory = self._reserved_node_memory(
+                    self._telemetry_view.node_memory,
+                    self._placement_reservations(after_delete),
+                    repair_vram,
+                )
                 final_placement = place_instance(
                     replace_command,
                     self.state.topology,
                     after_delete,
-                    self._telemetry_view.node_memory,
+                    repair_memory,
                     self.state.node_network,
                     download_status=self._effective_downloads(),
                     excluded_nodes=set(replace_command.excluded_nodes),
                     stamped_exclusions=set(instance.excluded_nodes),
                     node_resources=self._telemetry_view.node_resources,
-                    node_vram=usable_vram_by_node(
-                        self._telemetry_view.node_system,
-                        self._telemetry_view.node_resources,
-                        node_memory=self._telemetry_view.node_memory,
-                        current_instances=self._placement_reservations(after_delete),
-                    ),
+                    node_vram=repair_vram,
                     unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
                         self._telemetry_view.node_system,
                         self._telemetry_view.node_resources,
-                        node_memory=self._telemetry_view.node_memory,
+                        node_memory=repair_memory,
                     ),
                     approved_remote_code_identities=self._model_trust_approvals,
                 )
@@ -3547,6 +3590,11 @@ class Master:
                 current_instances=self._placement_reservations(current_instances),
             )
         )
+        placement_memory = self._reserved_node_memory(
+            placement_memory,
+            self._placement_reservations(current_instances),
+            placement_vram,
+        )
         return place_instance(
             command,
             self.state.topology,
@@ -3630,16 +3678,18 @@ class Master:
             if isinstance(total_bytes, int) and total_bytes > 0:
                 credited_bytes = min(total_bytes, credited_bytes)
             vram[node_id] = Memory.from_bytes(credited_bytes)
-        return memory, reserve_instance_vram(
+        remaining = {
+            identifier: instance
+            for identifier, instance in self.state.instances.items()
+            if identifier != current.instance_id
+        }
+        reserved_vram = reserve_instance_vram(
             vram,
             self._telemetry_view.node_system,
-            {
-                identifier: instance
-                for identifier, instance in self.state.instances.items()
-                if identifier != current.instance_id
-            },
+            remaining,
             unified_memory_gpu_nodes=unified_nodes,
         )
+        return self._reserved_node_memory(memory, remaining, reserved_vram), reserved_vram
 
     def _reset_steward_upgrade(self) -> None:
         """Forget one in-progress best-brain convergence attempt."""
