@@ -48,6 +48,7 @@ def _master() -> Master:
     object.__setattr__(master, "_ordered_model_cards", {})
     object.__setattr__(master, "state", State())
     object.__setattr__(master, "_telemetry_view", TelemetryView())
+    object.__setattr__(master, "_runner_loaded_at", {})
     return master
 
 

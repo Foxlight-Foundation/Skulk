@@ -169,11 +169,13 @@ from skulk.shared.types.worker.instances import (
 )
 from skulk.shared.types.worker.runners import (
     RunnerFailed,
+    RunnerId,
     RunnerLoaded,
     RunnerReady,
     RunnerRunning,
     RunnerShutdown,
     RunnerShuttingDown,
+    RunnerStatus,
     RunnerWarmingUp,
 )
 from skulk.shared.types.worker.shards import (
@@ -285,8 +287,9 @@ RESERVATION_SETTLE_SECONDS = 5.0
 """How long a placement stays charged against observed memory after its runners
 report loaded. A runner publishes the status the moment the model is in
 memory, while node memory telemetry is sampled on its own cadence and can be
-coalesced, so for this long after the transition the placement's footprint is
-still taken off the observed figure; after it only the working-set ceiling
+coalesced, so for this long after a transition this master applied the
+placement's footprint is still taken off the observed figure; after it, and
+for a runner loaded before this master watched, only the working-set ceiling
 bound remains, so a load telemetry carries is never counted twice."""
 JsonObject = dict[str, object]
 
@@ -862,7 +865,7 @@ class Master:
         # their GPU capacity before queuing the event so consecutive decisions
         # cannot spend the same memory while that echo is outstanding.
         self._pending_instance_reservations: dict[InstanceId, Instance] = {}
-        self._instance_loaded_seen: dict[InstanceId, float] = {}
+        self._runner_loaded_at: dict[RunnerId, float] = {}
         self._ordered_steward_proposals = dict(
             initial_state.steward_action_proposals if initial_state is not None else {}
         )
@@ -1011,12 +1014,34 @@ class Master:
     def _apply_indexed_event(self, indexed: IndexedEvent) -> None:
         """Apply one durable event and synchronize the master's telemetry view."""
 
+        before = self.state.runners
         self.state = apply(self.state, indexed)
+        self._record_runner_loaded_transitions(before)
         if isinstance(indexed.event, InstanceCreated):
             self._pending_instance_reservations.pop(indexed.event.instance.instance_id, None)
         elif isinstance(indexed.event, InstanceDeleted):
             self._pending_instance_reservations.pop(indexed.event.instance_id, None)
         record_membership_from_event(self._telemetry_view, indexed.event)
+
+    def _record_runner_loaded_transitions(
+        self, before: Mapping[RunnerId, RunnerStatus]
+    ) -> None:
+        """Note when a runner first reports loaded, for the reservation settle.
+
+        Only a transition this master saw counts: a runner already loaded
+        when the master started has no record, and its instance reads as
+        reflected in telemetry at once rather than being charged again.
+        """
+        loaded = (RunnerLoaded, RunnerWarmingUp, RunnerReady, RunnerRunning)
+        now = time.monotonic()
+        for runner_id, status in self.state.runners.items():
+            if isinstance(status, loaded) and not isinstance(
+                before.get(runner_id), loaded
+            ):
+                self._runner_loaded_at[runner_id] = now
+        for runner_id in list(self._runner_loaded_at):
+            if runner_id not in self.state.runners:
+                del self._runner_loaded_at[runner_id]
 
     def _ordered_model_card(self, model_id: ModelId) -> ModelCard | None:
         """Return model-card truth at the master's current command order."""
@@ -1248,7 +1273,11 @@ class Master:
         A placement awaiting its indexed echo has no runners in state, and a
         replicated one is still loading until every runner reports loaded or
         beyond; memory telemetry reflects neither, so the reservation takes
-        their footprints off the observed figure as well.
+        their footprints off the observed figure as well. A runner this
+        master saw report loaded less than ``RESERVATION_SETTLE_SECONDS``
+        ago is still unreflected, since memory telemetry is sampled on its
+        own cadence; a runner loaded before this master watched has no
+        transition on record and reads as reflected at once.
         """
         loaded = (RunnerLoaded, RunnerWarmingUp, RunnerReady, RunnerRunning)
         now = time.monotonic()
@@ -1261,15 +1290,13 @@ class Master:
             ):
                 unreflected.add(instance_id)
                 continue
-            # Loaded is not yet sampled: keep the charge for a settle period
-            # from the first time this master saw the instance loaded.
-            seen = self._instance_loaded_seen.setdefault(instance_id, now)
-            if now - seen < RESERVATION_SETTLE_SECONDS:
+            loaded_at = [
+                self._runner_loaded_at[runner_id]
+                for runner_id in runners
+                if runner_id in self._runner_loaded_at
+            ]
+            if loaded_at and now - max(loaded_at) < RESERVATION_SETTLE_SECONDS:
                 unreflected.add(instance_id)
-        live = set(self.state.instances) | set(self._pending_instance_reservations)
-        for instance_id in list(self._instance_loaded_seen):
-            if instance_id not in live:
-                del self._instance_loaded_seen[instance_id]
         return frozenset(unreflected)
 
     def _reserved_placement_inputs(

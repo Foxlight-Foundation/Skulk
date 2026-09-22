@@ -9,6 +9,7 @@ placement inputs stay grounded in observed telemetry.
 """
 
 import asyncio
+import time
 
 import pytest
 
@@ -168,13 +169,18 @@ def test_pending_reservations_charge_system_ram_before_telemetry_shows_them(
             "runners": {runner_id: RunnerReady()},
         }
     )
+    # A runner loaded before this master watched has no transition on record
+    # and reads as reflected at once; one this master saw load stays charged
+    # for the settle period.
+    already_loaded, _vram = master._placement_memory_inputs()
+    ceiling_only = min(Memory.from_gb(40.0), Memory.from_gb(48.0) - footprint)
+    assert already_loaded[node_id].ram_available == ceiling_only
+    master._runner_loaded_at[runner_id] = time.monotonic()
     just_loaded, _vram = master._placement_memory_inputs()
     assert just_loaded[node_id].ram_available == reserved[node_id].ram_available
     monkeypatch.setattr(master_main, "RESERVATION_SETTLE_SECONDS", 0.0)
     loaded, _vram = master._placement_memory_inputs()
-    assert loaded[node_id].ram_available == min(
-        Memory.from_gb(40.0), Memory.from_gb(48.0) - footprint
-    )
+    assert loaded[node_id].ram_available == ceiling_only
     assert loaded[node_id].ram_available > reserved[node_id].ram_available
 
 
