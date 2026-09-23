@@ -27,6 +27,7 @@ from skulk.shared.types.text_generation import ReasoningEffort
 from skulk.shared.types.video import (
     MAX_VIDEO_PROMPT_CHARS,
     MAX_VIDEO_STYLES,
+    VIDEO_CONTROL_STRENGTH_MAX,
     VIDEO_SHIFT_BOUNDS,
     VideoCodecName,
     VideoJobStatus,
@@ -2345,6 +2346,14 @@ class VideoCreateRequest(BaseModel):
     comma-separated in one field."""
     codec: VideoCodecName | None = None
     """Output video codec in MP4; omitted keeps ``h264``."""
+    control_strength: float | None = Field(
+        default=None, ge=0.0, le=VIDEO_CONTROL_STRENGTH_MAX
+    )
+    """ControlNet strength, with a ``control`` or ``mask`` part; omitted takes the card's."""
+    control_start: float | None = Field(default=None, ge=0.0, le=1.0)
+    """Fraction of the schedule at which the ControlNet starts; omitted is 0."""
+    control_end: float | None = Field(default=None, ge=0.0, le=1.0)
+    """Fraction of the schedule at which it stops; omitted is 1."""
 
     @field_validator("styles", mode="before")
     @classmethod
@@ -2423,6 +2432,14 @@ class VideoEngineInfo(BaseModel, frozen=True):
     """Style embeddings bound into the prompt, in request order."""
     codec: str
     """Video codec of the saved container (`h264` or `av1`)."""
+    control_inputs: list[str] = Field(default_factory=list)
+    """ControlNet inputs the render used: ``control``, ``mask``, ``source``."""
+    control_strength: float | None = None
+    """ControlNet strength applied; null when no ControlNet ran."""
+    control_start: float | None = None
+    """Fraction of the schedule the ControlNet started at, when it ran."""
+    control_end: float | None = None
+    """Fraction of the schedule the ControlNet stopped at, when it ran."""
 
 
 class VideoStatsInfo(BaseModel, frozen=True):

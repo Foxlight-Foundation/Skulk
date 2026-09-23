@@ -23,11 +23,24 @@ from skulk.utils.pydantic_ext import CamelCaseModel
 VideoReferenceKind = Literal["image", "video", "audio"]
 """Media families a request may attach as conditioning input."""
 
-VideoReferenceRole = Literal["first_frame", "last_frame", "keyframe", "reference"]
+VideoReferenceRole = Literal[
+    "first_frame", "last_frame", "keyframe", "reference", "control", "mask", "source"
+]
 """How one attachment conditions generation.
 
 ``first_frame`` and ``last_frame`` are the keyframe anchors of ``fl2va``;
 ``reference`` is a numbered subject, clip, or audio reference for ``ref2va``.
+``control``, ``mask`` and ``source`` feed the card's ControlNet: a control
+video (edges, depth, pose) the render follows, a mask whose white marks what
+to regenerate, and the clip behind that mask.
+"""
+
+VIDEO_STRUCTURAL_ROLES: Final = frozenset({"control", "mask", "source"})
+"""Roles that steer the model through its ControlNet rather than condition it.
+
+They never decide the mode, never count against the card's reference limits,
+and never reach the conditioning node: a control clip read as a first frame
+would silently become a keyframe.
 """
 
 VideoStage = Literal[
@@ -125,6 +138,9 @@ MAX_VIDEO_STYLES = 4
 VIDEO_SHIFT_BOUNDS: Final = (0.01, 100.0)
 """The ``MiniMaxH3SigmaShift`` node's accepted range for either shift."""
 
+VIDEO_CONTROL_STRENGTH_MAX: Final = 10.0
+"""The ``MiniMaxH3FunControlNetApply`` node's upper bound on strength."""
+
 
 def video_sampler_refusal(name: str) -> str | None:
     """Why ``name`` cannot be used as a video sampler, or ``None`` when it can."""
@@ -188,6 +204,8 @@ class VideoReferenceSpec(CamelCaseModel):
             raise ValueError("keyframe roles require an image attachment")
         if (self.role == "keyframe") != (self.at_seconds is not None):
             raise ValueError("a keyframe carries at_seconds and no other role does")
+        if self.role in VIDEO_STRUCTURAL_ROLES and self.kind not in ("image", "video"):
+            raise ValueError(f"a {self.role} attachment is an image or a video")
         family = self.media_type.split("/", 1)[0]
         if family != self.kind:
             raise ValueError(f"{self.kind} attachment cannot carry {self.media_type}")
@@ -250,6 +268,14 @@ class VideoGenerationTaskParams(BaseModel):
     """Card style embeddings to apply, by companion name, in order."""
     codec: VideoCodecName | None = None
     """Output video codec in the MP4 container; ``None`` keeps ``h264``."""
+    control_strength: float | None = Field(
+        default=None, ge=0.0, le=VIDEO_CONTROL_STRENGTH_MAX
+    )
+    """ControlNet strength; ``None`` takes the card companion's."""
+    control_start: float = Field(default=0.0, ge=0.0, le=1.0)
+    """Fraction of the schedule at which the ControlNet starts to steer."""
+    control_end: float = Field(default=1.0, ge=0.0, le=1.0)
+    """Fraction of the schedule at which it stops; above ``control_start``."""
     references: tuple[VideoReferenceSpec, ...] = ()
     """Conditioning attachments in slot order."""
     total_input_chunks: int = Field(default=0, ge=0)
@@ -339,6 +365,20 @@ class VideoGenerationTaskParams(BaseModel):
             and self.implied_mode() is not VideoMode.ReferenceToAudioVideo
         ):
             raise ValueError("reference_fidelity applies to ref2va only")
+        for role in VIDEO_STRUCTURAL_ROLES:
+            if roles.count(role) > 1:
+                raise ValueError(f"at most one {role} attachment is allowed")
+        if "source" in roles and "mask" not in roles:
+            raise ValueError("a source clip is read only behind a mask")
+        steered = "control" in roles or "mask" in roles
+        if not steered and (
+            self.control_strength is not None
+            or self.control_start != 0.0
+            or self.control_end != 1.0
+        ):
+            raise ValueError("control settings need a control or mask attachment")
+        if self.control_start >= self.control_end:
+            raise ValueError("control_start must come before control_end")
         if self.references and self.total_input_chunks < len(self.references):
             # Every attachment occupies at least one media frame; a smaller
             # count would let the worker's ingress gate treat the task as
@@ -449,8 +489,16 @@ class VideoEngineSettings(CamelCaseModel):
     """Style embeddings bound into the prompt, in request order."""
     codec: str
     """Video codec of the saved container (`h264` or `av1`)."""
+    control_inputs: tuple[str, ...] = ()
+    """The ControlNet inputs the render used (``control``, ``mask``, ``source``)."""
+    control_strength: float | None = None
+    """ControlNet strength applied; ``None`` when no ControlNet ran."""
+    control_start: float | None = None
+    """Fraction of the schedule the ControlNet started at, when it ran."""
+    control_end: float | None = None
+    """Fraction of the schedule the ControlNet stopped at, when it ran."""
 
-    @field_validator("styles", mode="before")
+    @field_validator("styles", "control_inputs", mode="before")
     @classmethod
     def _coerce_styles(cls, value: object) -> object:
         # The job registry persists this record as JSON and reloads it in

@@ -413,7 +413,14 @@ A model card's `placement.compatible_backends` selects which engine serves it
   port, custom and API nodes disabled, Skulk-owned input/output/temp/user
   directories, an `extra_model_paths.yaml` exposing the staged artifact),
   binds the card and request onto ComfyUI's own MiniMax H3 node graph
-  (`graph.py`, the official workflow templates node for node), submits it
+  (`graph.py`, the official workflow templates node for node; a request's
+  `control`, `mask`, and `source` attachments, the `VIDEO_STRUCTURAL_ROLES`,
+  never decide the mode, never count against the card's reference limits,
+  and never reach the conditioning node, but load the card's `model_patch`
+  ControlNet through `ModelPatchLoader` and apply
+  `MiniMaxH3FunControlNetApply` after the sigma shift, so the scheduler and
+  guider walk the patched model; `stats.engine` records what it read and
+  the strength and window it applied), submits it
   with a caller-minted `prompt_id`, follows `progress_state` on the
   WebSocket, cancels through the jobs API, and hands the container plus a
   first-frame thumbnail to the worker like the test engine does. Renders
