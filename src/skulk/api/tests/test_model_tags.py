@@ -446,8 +446,9 @@ def test_model_list_entry_projects_the_video_and_license_sections() -> None:
     assert (payload["video"]["frame_grid_multiple"], payload["video"]["frame_grid_offset"], payload["video"]["canvas_multiple"]) == (17, 5, 32)
     assert payload["video"]["audio_output"] is True and payload["video"]["audio_sample_rate"] == 32000
     assert payload["video"]["reference_limits"]["max_images"] == 4
-    # Only adapters are selectable per request; embeddings and patches are not listed.
+    # Adapters and style embeddings are selectable per request; model patches are not.
     assert payload["video"]["adapters"] == [{"name": "turbo_8step", "modes": ["t2va"], "steps": 8, "strength": 1.0}]
+    assert payload["video"]["styles"] == [{"name": "style", "modes": []}]
     assert payload["license"] == {"name": "Test License", "url": "https://example.invalid/LICENSE", "spdx_id": None, "notice": "Regional terms apply.", "display_name": "MiniMax H3"}
 
     text_card = ModelCard(model_id=ModelId("mlx-community/text"), storage_size=Memory.from_bytes(1024), n_layers=1, hidden_size=1, supports_tensor=False, tasks=[ModelTask.TextGeneration])

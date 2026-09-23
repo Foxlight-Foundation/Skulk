@@ -10961,6 +10961,7 @@ class API:
                     sampler=engine.sampler,
                     scheduler=engine.scheduler,
                     steps=engine.steps,
+                    seed=engine.seed,
                     video_shift=engine.video_shift,
                     audio_shift=engine.audio_shift,
                     adapter=engine.adapter,

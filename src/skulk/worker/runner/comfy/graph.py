@@ -379,6 +379,7 @@ class ComfyRenderPlan:
             sampler=self.sampler,
             scheduler=self.scheduler,
             steps=self.plan.steps,
+            seed=self.plan.seed,
             video_shift=self.video_shift,
             audio_shift=self.audio_shift,
             adapter=None if self.adapter is None else self.adapter.name,
