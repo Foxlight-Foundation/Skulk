@@ -40,6 +40,24 @@ def test_installed_runtime_seal_detects_mutation(tmp_path: Path, fault: str) -> 
         verify_installed_runtime(tmp_path, ("b" if fault == "identity" else "a") * 64)
 
 
+def test_desktop_metadata_does_not_unseal_a_generation(tmp_path: Path) -> None:
+    """Browsing a generation in Finder leaves it sealed; a link by that name does not."""
+    private_directory(tmp_path)
+    runtime = tmp_path / "runtime"
+    private_directory(runtime)
+    write_private(runtime / "library.py", b"VALUE=7\n")
+    private_directory(runtime / "lib")
+    seal_runtime(tmp_path, "a" * 64)
+    write_private(runtime / ".DS_Store", b"finder")
+    write_private(runtime / "lib/.DS_Store", b"finder")
+    write_private(runtime / "._library.py", b"appledouble")
+    verify_installed_runtime(tmp_path, "a" * 64)
+    (runtime / "lib/.DS_Store").unlink()
+    (runtime / "lib/.DS_Store").symlink_to(runtime / "library.py")
+    with pytest.raises(ValueError):
+        verify_installed_runtime(tmp_path, "a" * 64)
+
+
 async def test_cached_stage_refuses_startup_injection_before_execution(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

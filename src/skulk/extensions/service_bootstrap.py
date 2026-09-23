@@ -79,6 +79,18 @@ def digest_file(path: Path) -> str:
         return hashlib.file_digest(source, "sha256").hexdigest()
 
 
+def _desktop_metadata(path: Path, info: os.stat_result) -> bool:
+    """A regular file a desktop file browser leaves behind, never imported or run.
+
+    The same rule as ``skulk.extensions.runtime_files.is_desktop_metadata``,
+    restated here because this file may import only the standard library.
+    Finder writes ``.DS_Store`` into every folder it shows; sealing it would
+    let an operator browsing the runtime stop the manager from starting.
+    """
+    named = path.name == ".DS_Store" or path.name.startswith("._")
+    return named and stat.S_ISREG(info.st_mode)
+
+
 def runtime_tree(root: Path, base_python: Path) -> dict[str, list[str | int]]:
     """Seal the complete bounded runtime tree and its fixed interpreter aliases.
 
@@ -96,6 +108,8 @@ def runtime_tree(root: Path, base_python: Path) -> dict[str, list[str | int]]:
             raise ValueError("service runtime file count exceeds bound")
         relative = path.relative_to(root).as_posix()
         info = path.lstat()
+        if _desktop_metadata(path, info):
+            continue
         mode = stat.S_IMODE(info.st_mode)
         if info.st_uid != os.getuid():
             raise ValueError("service runtime ownership differs")

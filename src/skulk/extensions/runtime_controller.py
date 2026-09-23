@@ -24,6 +24,14 @@ from skulk.extensions.runtime_selection import (
 from skulk.extensions.runtime_service import RuntimeService
 
 _OWNER_EXIT_SECONDS = 35.0
+# An owner that exits without being asked to is started again after each of
+# these waits in turn; after the last, the failure stands until an operator
+# acts or the manager restarts. The waits grow so a crash on start costs a few
+# attempts over minutes, not a tight loop re-verifying the runtime.
+_RESTART_DELAYS_SECONDS: tuple[float, ...] = (5.0, 15.0, 45.0, 120.0, 300.0)
+# A lifetime this long was healthy: its exit is a new fault, not the same one
+# again, so the count of consecutive failures starts over.
+_STABLE_LIFETIME_SECONDS = 600.0
 
 
 class LifecycleRequest(BaseModel):
@@ -316,7 +324,47 @@ class RuntimeController:
             return
         self.stopped = asyncio.Event()
         self.service = RuntimeService(self.root)
-        self.service_task = asyncio.create_task(self.service.serve(self.stopped))
+        self.service_task = asyncio.create_task(
+            self._supervise(self.service, self.stopped)
+        )
+
+    async def _supervise(self, service: RuntimeService, stopped: asyncio.Event) -> bool:
+        """Serve the selected owner, starting it again after it exits, until stopped.
+
+        Returns true when a lifetime ended cleanly (a stop, a disabled or
+        absent selection) and false when the restarts are spent. Invariants:
+
+        - One owner lifetime at a time: the next begins only after ``serve``
+          has returned, which waits for the owner and its fence.
+        - A stop is final: once ``stopped`` is set no lifetime begins,
+          including from inside a wait between attempts.
+        - Restarts are bounded by ``_RESTART_DELAYS_SECONDS``; a lifetime of
+          at least ``_STABLE_LIFETIME_SECONDS`` resets the count.
+        - A clean return is never restarted, and no lifetime replays work:
+          each is a new ``RuntimeService`` over the same selection, and the
+          owner's own journal decides what an interrupted operation means.
+        """
+        loop = asyncio.get_running_loop()
+        failures = 0
+        while True:
+            self.service = service
+            began = loop.time()
+            if await service.serve(stopped):
+                return True
+            if stopped.is_set() or self.closed:
+                return False
+            if loop.time() - began >= _STABLE_LIFETIME_SECONDS:
+                failures = 0
+            if failures >= len(_RESTART_DELAYS_SECONDS):
+                return False
+            delay = _RESTART_DELAYS_SECONDS[failures]
+            failures += 1
+            with contextlib.suppress(TimeoutError):
+                async with asyncio.timeout(delay):
+                    await stopped.wait()
+            if stopped.is_set() or self.closed:
+                return False
+            service = RuntimeService(self.root)
 
     async def _stop_service(self) -> None:
         self.stopped.set()
