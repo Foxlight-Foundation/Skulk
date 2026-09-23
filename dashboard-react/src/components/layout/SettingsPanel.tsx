@@ -164,7 +164,6 @@ const Spacer = styled.span`
 
 /* ---- component ---- */
 
-/** Retain an unsaved configuration draft while visiting immediate device actions. */
 /** Server default for ``inference.served_context_tokens``. */
 const SERVED_CONTEXT_DEFAULT_TOKENS = 32768;
 /** Bounds the server enforces on a requested context window. */
@@ -178,6 +177,7 @@ function clampServedContext(value: number): number {
   return Math.min(MAX_SERVED_CONTEXT_TOKENS, Math.max(MIN_SERVED_CONTEXT_TOKENS, Math.round(value)));
 }
 
+/** Retain an unsaved configuration draft while visiting immediate device actions. */
 export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
   const { t } = useSkulkTranslation();
   const { fullConfig, effective, configPath, loading, saving, error, fetchConfig, saveFullConfig } = useConfig(
