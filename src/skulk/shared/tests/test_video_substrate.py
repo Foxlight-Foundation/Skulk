@@ -41,6 +41,8 @@ from skulk.shared.types.chunks import DataChunk, ErrorChunk, VideoChunk
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.state import State
 from skulk.shared.types.video import (
+    VideoEngineSettings,
+    VideoGenerationStats,
     VideoGenerationTaskParams,
     VideoOutputManifest,
     VideoReferenceSpec,
@@ -332,6 +334,46 @@ def test_job_registry_marks_in_flight_jobs_failed_after_restart(tmp_path: Path) 
     live = reloaded.get(CommandId("live"))
     assert live is not None and live.status == "failed" and "restarted" in (live.error or "")
     assert reloaded.get(CommandId("done")).status == "completed"  # pyright: ignore[reportOptionalMemberAccess]
+
+
+def test_job_registry_keeps_what_a_render_ran_with_across_a_restart(
+    tmp_path: Path,
+) -> None:
+    """The engine record survives the JSON mirror, styles included.
+
+    A finished job the reload refused would be dropped, and the store would
+    then treat its clip as unknown and delete it.
+    """
+    index = tmp_path / "jobs.json"
+    registry = VideoJobRegistry(index)
+    for job_id, styles in (("styled", ("minimaxh3_bullet_time", "minimaxh3_dark_magic")), ("plain", ())):
+        job = registry.create(_job(job_id))
+        engine = VideoEngineSettings(
+            sampler="res_multistep",
+            scheduler="simple",
+            steps=8,
+            video_shift=12.0,
+            audio_shift=3.0,
+            adapter="turbo_fl2v_8step",
+            adapter_strength=1.0,
+            width=1344,
+            height=768,
+            frame_count=124,
+            styles=styles,
+            codec="h264",
+        )
+        stats = VideoGenerationStats(
+            steps=8, seconds_per_step=20.0, total_generation_time=340.0, engine=engine
+        )
+        registry.update(job.id, stats=stats, render_finished=True, media_delivered=True)
+        registry.settle(job.id)
+    reloaded = VideoJobRegistry(index)
+    for job_id, styles in (("styled", ("minimaxh3_bullet_time", "minimaxh3_dark_magic")), ("plain", ())):
+        job = reloaded.get(CommandId(job_id))
+        assert job is not None and job.status == "completed"
+        assert job.stats is not None and job.stats.engine is not None
+        assert job.stats.engine.styles == styles
+        assert job.stats.engine.video_shift == 12.0
 
 
 def test_job_registry_bounds_retained_terminal_jobs(tmp_path: Path) -> None:

@@ -450,6 +450,16 @@ class VideoEngineSettings(CamelCaseModel):
     codec: str
     """Video codec of the saved container (`h264` or `av1`)."""
 
+    @field_validator("styles", mode="before")
+    @classmethod
+    def _coerce_styles(cls, value: object) -> object:
+        # The job registry persists this record as JSON and reloads it in
+        # strict Python mode, where the tuple comes back as a list; refusing
+        # it would drop the finished job on restart and orphan its clip.
+        if isinstance(value, list):
+            return tuple(cast("list[object]", value))
+        return value
+
 
 class VideoGenerationStats(CamelCaseModel):
     """Runner-reported timing for one render."""
