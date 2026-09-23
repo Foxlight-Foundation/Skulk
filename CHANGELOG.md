@@ -24,7 +24,8 @@ This project records release notes here and mirrors public-facing notes in
   `styles` (the card's style embeddings) and `codec` (h264 or AV1), each
   defaulting to what the ComfyUI template used before. Samplers that cannot
   serve distilled H3 are refused with the reason. A finished job reports the
-  settings it actually ran with in `stats.engine`.
+  settings it actually ran with in `stats.engine`, the seed included when the
+  request gave none, and `GET /v1/models` lists each video card's styles.
 
 - Placements choose their context window. llama-server, in-process llama.cpp
   and vLLM reserve the whole window's memory when a model loads, and since the

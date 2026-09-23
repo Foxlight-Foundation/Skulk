@@ -49,6 +49,18 @@ def test_defaults_are_the_official_template() -> None:
     assert (engine.video_shift, engine.audio_shift) == (12.0, 3.0)
 
 
+def test_the_record_names_the_seed_even_when_the_request_gave_none() -> None:
+    """An unseeded request resolves a seed; the take must say which."""
+    card = _card(FL2VA_ID)
+    params = _params(FL2VA_ID, seed=None)
+    render = plan_comfy_render(params, card)
+    engine = render.engine_settings()
+    assert engine.seed is not None and engine.seed == render.plan.seed
+    prompt = build_prompt(render, params, (), "cmd")
+    assert prompt["noise"]["inputs"]["noise_seed"] == engine.seed
+    assert plan_comfy_render(_params(FL2VA_ID, seed=11), card).engine_settings().seed == 11
+
+
 def test_request_settings_reach_the_graph_and_the_record() -> None:
     card = _card(FL2VA_ID)
     params = _params(

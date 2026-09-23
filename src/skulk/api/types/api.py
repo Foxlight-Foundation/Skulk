@@ -684,6 +684,18 @@ class VideoAdapterSection(BaseModel):
     strength: float | None = Field(default=None, description="Default adapter strength.")
 
 
+class VideoStyleSection(BaseModel):
+    """One style embedding a video card ships, selectable per request."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    name: str = Field(description="Style name accepted by the video job `styles` field.")
+    modes: list[VideoModeName] = Field(
+        default_factory=list,
+        description="Generation modes the style is declared for; empty means every mode.",
+    )
+
+
 class VideoReferenceLimitsSection(BaseModel):
     """Per-kind reference attachment limits for reference-to-video cards."""
 
@@ -730,6 +742,10 @@ class VideoCapabilitySection(BaseModel):
     adapters: list[VideoAdapterSection] = Field(
         default_factory=list, description="Named adapters (LoRAs) selectable through the job `lora` field."
     )
+    styles: list[VideoStyleSection] = Field(
+        default_factory=list,
+        description="Style embeddings selectable through the job `styles` field.",
+    )
 
     @classmethod
     def from_model_card(cls, model_card: ModelCard) -> "VideoCapabilitySection | None":
@@ -775,6 +791,14 @@ class VideoCapabilitySection(BaseModel):
                 )
                 for companion in config.companions
                 if companion.kind == VideoCompanionKind.Lora
+            ],
+            styles=[
+                VideoStyleSection(
+                    name=companion.name,
+                    modes=cast("list[VideoModeName]", [mode.value for mode in companion.modes]),
+                )
+                for companion in config.companions
+                if companion.kind == VideoCompanionKind.Embedding
             ],
         )
 
@@ -2403,6 +2427,8 @@ class VideoEngineInfo(BaseModel, frozen=True):
     """Schedule that placed its noise levels (a `BasicScheduler` name)."""
     steps: int
     """Sampling steps the schedule ran."""
+    seed: int | None = None
+    """The noise seed the render drew from, resolved when the request gave none."""
     video_shift: float | None
     """Video sigma shift applied; null leaves the loader default."""
     audio_shift: float | None
