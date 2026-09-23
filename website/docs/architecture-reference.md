@@ -51,7 +51,7 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 
 ### Video card projection on the models route
 
-`GET /v1/models` entries carry `video` (`VideoCapabilitySection.from_model_card`, `api/types/api.py`: modes, seconds range, fps, frame grid, canvas rules, audio output, default steps, reference limits, LoRA adapters with trained steps) and `license` (`LicenseSection.from_model_card`: name, url, spdx_id, notice, display_name) beside the existing capability sections; both null when the card declares none. Consumers plan `POST /v1/videos` requests and render license attribution from the node's catalog, never from a bundled copy of the card.
+`GET /v1/models` entries carry `video` (`VideoCapabilitySection.from_model_card`, `api/types/api.py`: modes, seconds range, fps, frame grid, canvas rules, audio output, default steps, reference limits, LoRA adapters with trained steps and shifts, style embeddings, and every engine setting a job accepts with its default: sampler and scheduler lists from `shared/types/video.py`, the card's trained shifts with their bounds, `ref2va` reference sizing, and codecs) and `license` (`LicenseSection.from_model_card`: name, url, spdx_id, notice, display_name) beside the existing capability sections; both null when the card declares none. Consumers plan `POST /v1/videos` requests and render license attribution from the node's catalog, never from a bundled copy of the card.
 
 ### ComfyUI engine provisioning
 

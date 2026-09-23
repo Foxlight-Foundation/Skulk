@@ -26,6 +26,10 @@ from skulk.shared.models.model_cards import (
     VideoMode,
 )
 from skulk.shared.types.video import (
+    VIDEO_DEFAULT_CODEC,
+    VIDEO_DEFAULT_REFERENCE_FIDELITY,
+    VIDEO_DEFAULT_SAMPLER,
+    VIDEO_DEFAULT_SCHEDULER,
     VIDEO_OUTPUT_FILENAME,
     VIDEO_THUMBNAIL_FILENAME,
     VideoEngineSettings,
@@ -38,10 +42,12 @@ from skulk.worker.runner.video_plan import RenderPlan, plan_render
 ComfyPrompt = dict[str, dict[str, Any]]
 """ComfyUI's API prompt format: node id to ``class_type`` plus ``inputs``."""
 
-SAMPLER_NAME: Final = "res_multistep"
-SCHEDULER_NAME: Final = "simple"
-REFERENCE_FIDELITY_DEFAULT: Final = "match"
-CODEC_DEFAULT: Final = "h264"
+# The defaults are published to clients from the shared types (the models
+# route's video section); the graph reads the same values.
+SAMPLER_NAME: Final = VIDEO_DEFAULT_SAMPLER
+SCHEDULER_NAME: Final = VIDEO_DEFAULT_SCHEDULER
+REFERENCE_FIDELITY_DEFAULT: Final = VIDEO_DEFAULT_REFERENCE_FIDELITY
+CODEC_DEFAULT: Final = VIDEO_DEFAULT_CODEC
 OUTPUT_PREFIX_STEM: Final = PurePosixPath(VIDEO_OUTPUT_FILENAME).stem
 THUMBNAIL_PREFIX_STEM: Final = PurePosixPath(VIDEO_THUMBNAIL_FILENAME).stem
 
