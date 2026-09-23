@@ -56,6 +56,20 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- A managed plugin's owner that exits unexpectedly is started again. The
+  plugin manager restarts it after growing waits (5 s to 300 s, then every
+  five minutes while it keeps failing), so an owner stopped by a condition
+  that clears later comes back by itself; before, an owner that died, for
+  example when its host's disk filled, stayed down until the manager itself
+  restarted.
+
+- Browsing the plugin service root in Finder no longer stops the plugin
+  manager. The `.DS_Store` and AppleDouble files Finder leaves behind are
+  ignored by the manager's installation scan, the build fingerprint, the core
+  runtime copy, the pre-start runtime check and the installed seal; before,
+  one such file refused every manager request, and one rewritten inside the
+  core runtime made the manager fail to start.
+
 - A repair re-placement of an exact `POST /instance` placement keeps the
   window the instance was stamped with instead of falling back to the fleet's
   served context default.

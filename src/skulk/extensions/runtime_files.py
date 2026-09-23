@@ -8,6 +8,21 @@ from typing import final
 from uuid import uuid4
 
 
+def is_desktop_metadata(path: Path) -> bool:
+    """Whether ``path`` is a regular file a desktop file browser leaves behind.
+
+    Finder writes ``.DS_Store`` into every folder it shows, and AppleDouble
+    ``._`` companions onto volumes without extended attributes. Neither is
+    ever imported or executed, so an operator browsing the plugin tree must
+    not stop the manager by it. Only a regular file qualifies: a link or a
+    directory under one of these names is still whatever the caller's rules
+    make of it.
+    """
+    if path.name != ".DS_Store" and not path.name.startswith("._"):
+        return False
+    return stat.S_ISREG(path.lstat().st_mode)
+
+
 def private_directory(path: Path) -> None:
     """Create or validate an owner-only directory without accepting a symlink."""
     path.mkdir(mode=0o700, parents=True, exist_ok=True)

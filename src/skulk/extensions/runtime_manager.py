@@ -53,6 +53,7 @@ from skulk.extensions.runtime_download import (
 )
 from skulk.extensions.runtime_files import (
     RuntimeLock,
+    is_desktop_metadata,
     private_directory,
     read_private,
     write_private,
@@ -454,7 +455,11 @@ class RuntimeManager:
         self.close_task: asyncio.Task[None] | None = None
 
     def _identifiers(self) -> list[str]:
-        names = sorted(path.name for path in self.installations.iterdir())
+        names = sorted(
+            path.name
+            for path in self.installations.iterdir()
+            if not is_desktop_metadata(path)
+        )
         if len(names) > 16:
             raise ValueError("installation count exceeds bound")
         return [_PLUGIN_ID.validate_python(name, strict=True) for name in names]

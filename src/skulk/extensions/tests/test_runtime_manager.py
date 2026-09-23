@@ -186,6 +186,38 @@ async def test_purge_removes_an_installation_that_never_selected_a_release(
     RuntimeLock(tmp_path, "manager.lock").close()
 
 
+async def test_finder_metadata_among_installations_refuses_nothing(
+    tmp_path: Path,
+) -> None:
+    """A folder browsed in Finder still lists and attaches its installations."""
+    private_directory(tmp_path)
+    write_private(
+        tmp_path / "host.json",
+        HostSettings(transport_node_id="fixture-peer").model_dump_json().encode(),
+    )
+    manager = RuntimeManager(tmp_path)
+    await manager.start()
+    identifier = "managed.fixture"
+    try:
+        await manager_request(
+            tmp_path, InstallationRequest(action="register", plugin_id=identifier)
+        )
+        write_private(tmp_path / "installations" / ".DS_Store", b"finder")
+        write_private(tmp_path / "installations" / "._managed.fixture", b"appledouble")
+        inventory = await manager_request(tmp_path, InventoryRequest())
+        assert "error" not in inventory
+        listed = inventory["result"]
+        assert isinstance(listed, dict)
+        installations = listed["installations"]
+        assert isinstance(installations, list)
+        assert [
+            item["plugin_id"] for item in installations if isinstance(item, dict)
+        ] == [identifier]
+    finally:
+        await manager.close()
+    RuntimeLock(tmp_path, "manager.lock").close()
+
+
 async def test_bad_host_binding_does_not_remove_management(
     tmp_path: Path,
 ) -> None:
