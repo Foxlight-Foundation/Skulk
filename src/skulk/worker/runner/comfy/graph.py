@@ -27,6 +27,7 @@ from skulk.shared.models.model_cards import (
 )
 from skulk.shared.types.video import (
     VIDEO_OUTPUT_FILENAME,
+    VIDEO_STRUCTURAL_ROLES,
     VIDEO_THUMBNAIL_FILENAME,
     VideoEngineSettings,
     VideoGenerationTaskParams,
@@ -63,6 +64,8 @@ NODE_CREATE_VIDEO: Final = "create_video"
 NODE_SAVE_VIDEO: Final = "save_video"
 NODE_THUMBNAIL_FRAME: Final = "thumbnail_frame"
 NODE_SAVE_THUMBNAIL: Final = "save_thumbnail"
+NODE_CONTROL_PATCH: Final = "control_patch"
+NODE_CONTROL: Final = "control"
 
 _STAGE_BY_NODE: Final[dict[str, VideoStage]] = {
     NODE_UNET: "encoding",
@@ -284,6 +287,61 @@ def select_adapter(
 
 
 @dataclass(frozen=True, slots=True)
+class ControlChoice:
+    """The card's ControlNet as one render applies it."""
+
+    name: str
+    file: str
+    """The patch file relative to ComfyUI's ``model_patches`` folder."""
+    strength: float
+    start: float
+    """Fraction of the schedule at which it starts to steer."""
+    end: float
+    """Fraction of the schedule at which it stops."""
+    inputs: tuple[str, ...]
+    """The structural roles the request attached, in role order."""
+
+
+def select_control(
+    params: VideoGenerationTaskParams, card: ModelCard, mode: VideoMode
+) -> ControlChoice | None:
+    """The card's ControlNet when the request attaches a control input, else none.
+
+    A control clip or a mask means nothing without the patch that reads it,
+    so a card with no ``model_patch`` companion for the mode refuses rather
+    than rendering as if the attachment were absent. A companion restricted
+    to other modes is not the card's ControlNet for this one.
+    """
+    roles = tuple(
+        role
+        for role in ("control", "mask", "source")
+        if any(spec.role == role for spec in params.references)
+    )
+    if not roles:
+        return None
+    assert card.video is not None
+    for companion in card.video.companions:
+        if companion.kind is not VideoCompanionKind.ModelPatch:
+            continue
+        if companion.modes and mode not in companion.modes:
+            continue
+        return ControlChoice(
+            name=companion.name,
+            file=companion_file(companion, card),
+            strength=params.control_strength
+            if params.control_strength is not None
+            else (companion.strength if companion.strength is not None else 1.0),
+            start=params.control_start,
+            end=params.control_end,
+            inputs=roles,
+        )
+    raise ValueError(
+        f"{card.model_id} carries no ControlNet for mode {mode.value}; "
+        "a control or mask attachment needs one"
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class ComfyRenderPlan:
     """A render plan plus the engine choices ComfyUI needs to build the graph."""
 
@@ -301,6 +359,8 @@ class ComfyRenderPlan:
     style_tokens: tuple[str, ...] = ()
     """The ``embedding:`` tokens those styles bind to."""
     codec: str = CODEC_DEFAULT
+    control: ControlChoice | None = None
+    """The ControlNet this render applies, when the request attached a control input."""
 
     @property
     def steps(self) -> int:
@@ -331,6 +391,10 @@ class ComfyRenderPlan:
             else None,
             styles=self.styles,
             codec=self.codec,
+            control_inputs=() if self.control is None else self.control.inputs,
+            control_strength=None if self.control is None else self.control.strength,
+            control_start=None if self.control is None else self.control.start,
+            control_end=None if self.control is None else self.control.end,
         )
 
 
@@ -400,7 +464,62 @@ def plan_comfy_render(
         styles=params.styles,
         style_tokens=style_tokens(params, card),
         codec=params.codec or CODEC_DEFAULT,
+        control=select_control(params, card, mode),
     )
+
+
+def _frames(prompt: ComfyPrompt, name: str, title: str, binding: ReferenceBinding) -> list[Any]:
+    """Load one structural attachment as an IMAGE batch: a still, or a clip's frames."""
+    if binding.spec.kind == "image":
+        prompt[f"{name}_load"] = _node("LoadImage", title, image=binding.input_name)
+        return _link(f"{name}_load", 0)
+    prompt[f"{name}_load"] = _node("LoadVideo", title, file=binding.input_name)
+    prompt[f"{name}_frames"] = _node(
+        "GetVideoComponents", f"{title} frames", video=_link(f"{name}_load")
+    )
+    return _link(f"{name}_frames", 0)
+
+
+def _add_control(
+    prompt: ComfyPrompt,
+    control: ControlChoice,
+    structural: dict[str, ReferenceBinding],
+    model_ref: list[Any],
+) -> list[Any]:
+    """Patch the model with the card's ControlNet; return the patched model's link.
+
+    The node fits every input to the render itself: a short clip holds its
+    last frame, a long one is cut, and each frame is scaled and centre-cropped
+    to the canvas. A mask is read from its red channel, white marking what to
+    regenerate; the source clip is read only behind a mask.
+    """
+    prompt[NODE_CONTROL_PATCH] = _node(
+        "ModelPatchLoader", "Load ControlNet", name=control.file
+    )
+    inputs: dict[str, object] = {
+        "model": model_ref,
+        "model_patch": _link(NODE_CONTROL_PATCH),
+        "vae": _link(NODE_VIDEO_VAE),
+        "strength": control.strength,
+        "start_percent": control.start,
+        "end_percent": control.end,
+    }
+    if "control" in structural:
+        inputs["control_video"] = _frames(
+            prompt, "control_video", "Control clip", structural["control"]
+        )
+    if "mask" in structural:
+        frames = _frames(prompt, "mask", "Mask", structural["mask"])
+        prompt["mask_channel"] = _node(
+            "ImageToMask", "Mask from red", image=frames, channel="red"
+        )
+        inputs["mask"] = _link("mask_channel", 0)
+        if "source" in structural:
+            inputs["source_video"] = _frames(
+                prompt, "source_video", "Source clip", structural["source"]
+            )
+    prompt[NODE_CONTROL] = _node("MiniMaxH3FunControlNetApply", "ControlNet", **inputs)
+    return _link(NODE_CONTROL)
 
 
 def _node(class_type: str, title: str, **inputs: object) -> dict[str, Any]:
@@ -462,6 +581,19 @@ def build_prompt(
     plan = render.plan
     files = render.files
     prompt: ComfyPrompt = {}
+    # Structural attachments steer the model through the ControlNet; the
+    # conditioning builders read every attachment they are handed as a
+    # keyframe or a reference, so they never see these.
+    structural = {
+        binding.spec.role: binding
+        for binding in references
+        if binding.spec.role in VIDEO_STRUCTURAL_ROLES
+    }
+    references = tuple(
+        binding
+        for binding in references
+        if binding.spec.role not in VIDEO_STRUCTURAL_ROLES
+    )
     prompt[NODE_UNET] = _node(
         "UNETLoader", "Load H3", unet_name=files.diffusion_model, weight_dtype="default"
     )
@@ -503,6 +635,10 @@ def build_prompt(
         prompt[NODE_AUDIO_VAE] = _node(
             "VAELoader", "Load audio VAE", vae_name=files.audio_vae
         )
+    if render.control is not None:
+        # After the shift, so the node turns its start and end fractions into
+        # sigmas on the schedule the sampler will actually walk.
+        model_ref = _add_control(prompt, render.control, structural, model_ref)
 
     if render.mode is VideoMode.ReferenceToAudioVideo:
         conditioning = _add_reference_condition(prompt, render, params, references)

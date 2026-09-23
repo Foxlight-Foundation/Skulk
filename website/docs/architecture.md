@@ -860,7 +860,13 @@ except the ones that cannot serve distilled H3), the schedule, either sigma
 shift, `ref2va` reference fidelity, the card's style embeddings (bound as
 `embedding:` tokens ahead of the prompt) and the output codec, and the
 finished job reports every setting it resolved in `stats.engine`, so a take
-records what produced it. References are the
+records what produced it. The card's Fun ControlNet union (its `model_patch`
+companion) steers a render when the request attaches a `control` clip, a
+`mask`, or a `source` clip behind that mask. These structural roles never
+decide the mode, never count against the card's reference limits, and never
+reach the conditioning node; the patch is loaded with `ModelPatchLoader` and
+applied after the sigma shift, so its start and end fractions land on the
+schedule the sampler walks. References are the
 files the worker already verified, named by their path below the input
 directory. The prompt carries a Skulk-minted id and client id so the
 WebSocket delivers only this render's `executing`, `progress_state`, and

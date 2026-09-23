@@ -27,7 +27,13 @@ from skulk.api.main import API
 from skulk.api.video_jobs import VideoAttachment, VideoJob, VideoJobRegistry
 from skulk.api.video_store import VideoStore
 from skulk.routing.output_media import OutputMediaPacket
-from skulk.shared.models.model_cards import ModelCard, ModelTask, VideoCardConfig
+from skulk.shared.models.model_cards import (
+    ModelCard,
+    ModelTask,
+    VideoCardConfig,
+    VideoCompanionKind,
+    VideoMode,
+)
 from skulk.shared.types.chunks import ErrorChunk
 from skulk.shared.types.commands import TaskCancelled, VideoGeneration
 from skulk.shared.types.common import CommandId, ModelId, NodeId
@@ -85,6 +91,12 @@ def _card() -> ModelCard:
                     "max_audio_clips": 1,
                 },
                 "companions": [
+                    {
+                        "kind": "model_patch",
+                        "name": "fun_controlnet_union",
+                        "path": "model_patches/fun_controlnet_union.safetensors",
+                        "strength": 1.0,
+                    },
                     {
                         "kind": "embedding",
                         "name": "bullet_time",
@@ -818,6 +830,94 @@ def test_cancel_notifies_the_worker_when_the_render_finishes_during_the_send(
     assert client.post("/v1/videos/racing/cancel").json()["status"] == "cancelled"
     assert [packet.kind for packet in terminals] == ["cancelled"]
     assert terminals[0].target_node == NodeId("worker-1")
+
+
+def test_create_multipart_takes_a_control_clip_outside_the_reference_limits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The card allows one reference clip; a control clip beside it is not one."""
+    api = _make_api(monkeypatch)
+    client = TestClient(api.app)
+    response = client.post(
+        "/v1/videos",
+        data={
+            "model": str(MODEL),
+            "prompt": "follow the pose",
+            "seconds": "5",
+            "control_strength": "0.6",
+            "control_end": "0.5",
+        },
+        files=[
+            ("reference", ("clip.mp4", b"\x00ref", "video/mp4")),
+            ("control", ("pose.mp4", b"\x00pose", "video/mp4")),
+        ],
+    )
+    assert response.status_code == 200, response.text
+    params = _sent_command(api).task_params
+    assert [spec.role for spec in params.references] == ["reference", "control"]
+    # A control clip never decides the mode.
+    assert params.implied_mode() is VideoMode.ReferenceToAudioVideo
+    assert (params.control_strength, params.control_start, params.control_end) == (
+        0.6,
+        0.0,
+        0.5,
+    )
+
+
+def test_create_refuses_a_control_input_the_card_cannot_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _make_api(monkeypatch)
+    card = _card()
+    assert card.video is not None
+    plain = card.model_copy(
+        update={
+            "video": card.video.model_copy(
+                update={
+                    "companions": [
+                        companion
+                        for companion in card.video.companions
+                        if companion.kind is not VideoCompanionKind.ModelPatch
+                    ]
+                }
+            )
+        }
+    )
+
+    async def load(model_id: ModelId) -> ModelCard:
+        return plain
+
+    monkeypatch.setattr(ModelCard, "load", staticmethod(load))
+    client = TestClient(api.app)
+    response = client.post(
+        "/v1/videos",
+        data={"model": str(MODEL), "prompt": "x", "seconds": "5"},
+        files=[("mask", ("mask.png", b"\x89PNG mask", "image/png"))],
+    )
+    assert response.status_code == 400
+    assert "carries no ControlNet" in response.json()["error"]["message"]
+    api._send.assert_not_called()
+
+
+def test_create_refuses_control_settings_without_a_control_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _make_api(monkeypatch)
+    client = TestClient(api.app)
+    response = client.post(
+        "/v1/videos",
+        json={"model": str(MODEL), "prompt": "x", "seconds": 5, "control_strength": 0.5},
+    )
+    assert response.status_code == 400
+    assert "control or mask" in response.json()["error"]["message"]
+    response = client.post(
+        "/v1/videos",
+        data={"model": str(MODEL), "prompt": "x", "seconds": "5"},
+        files=[("source_video", ("take.mp4", b"\x00take", "video/mp4"))],
+    )
+    assert response.status_code == 400
+    assert "behind a mask" in response.json()["error"]["message"]
+    api._send.assert_not_called()
 
 
 def test_create_multipart_rejects_unknown_file_fields(

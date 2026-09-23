@@ -26,6 +26,13 @@ This project records release notes here and mirrors public-facing notes in
   serve distilled H3 are refused with the reason. A finished job reports the
   settings it actually ran with in `stats.engine`.
 
+- Video jobs can steer the render with the card's ControlNet. A multipart
+  `POST /v1/videos` accepts a `control` clip (edges, depth, or pose), a
+  `mask` whose white marks what to regenerate, and a `source_video` behind
+  that mask, with `control_strength`, `control_start` and `control_end`. A
+  card without a ControlNet for the mode refuses them, and `stats.engine`
+  records what the ControlNet ran with.
+
 - Placements choose their context window. llama-server, in-process llama.cpp
   and vLLM reserve the whole window's memory when a model loads, and since the
   unified-memory fix they were sized to the card's full context (262144 for
