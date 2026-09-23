@@ -28,6 +28,7 @@ from skulk.shared.models.model_cards import (
 from skulk.shared.types.video import (
     VIDEO_OUTPUT_FILENAME,
     VIDEO_THUMBNAIL_FILENAME,
+    VideoEngineSettings,
     VideoGenerationTaskParams,
     VideoReferenceSpec,
     VideoStage,
@@ -39,6 +40,8 @@ ComfyPrompt = dict[str, dict[str, Any]]
 
 SAMPLER_NAME: Final = "res_multistep"
 SCHEDULER_NAME: Final = "simple"
+REFERENCE_FIDELITY_DEFAULT: Final = "match"
+CODEC_DEFAULT: Final = "h264"
 OUTPUT_PREFIX_STEM: Final = PurePosixPath(VIDEO_OUTPUT_FILENAME).stem
 THUMBNAIL_PREFIX_STEM: Final = PurePosixPath(VIDEO_THUMBNAIL_FILENAME).stem
 
@@ -221,9 +224,36 @@ def companion_file(companion: VideoCompanionConfig, card: ModelCard) -> str:
 class AdapterChoice:
     """A low-rank adapter selected for one render plus the sigma shifts it wants."""
 
+    name: str
     file: str
     strength: float
     steps: int | None
+
+
+def style_tokens(params: VideoGenerationTaskParams, card: ModelCard) -> tuple[str, ...]:
+    """The ``embedding:`` prompt tokens for the request's styles, in order.
+
+    ComfyUI's text encoder resolves ``embedding:<name>`` against the files in
+    its ``embeddings`` folder by the path without its extension, so each style
+    binds to its companion's file there. A style that is not one of the
+    card's embedding companions is refused rather than passed through, since
+    the encoder ignores an unknown embedding with only a log line.
+    """
+    assert card.video is not None
+    embeddings = {
+        companion.name: companion
+        for companion in card.video.companions
+        if companion.kind is VideoCompanionKind.Embedding
+    }
+    tokens: list[str] = []
+    for name in params.styles:
+        companion = embeddings.get(name)
+        if companion is None:
+            raise ValueError(f"{card.model_id} has no style embedding named {name!r}")
+        tokens.append(
+            "embedding:" + PurePosixPath(companion_file(companion, card)).with_suffix("").as_posix()
+        )
+    return tuple(tokens)
 
 
 def select_adapter(
@@ -263,11 +293,45 @@ class ComfyRenderPlan:
     adapter: AdapterChoice | None
     video_shift: float | None
     audio_shift: float | None
+    sampler: str = SAMPLER_NAME
+    scheduler: str = SCHEDULER_NAME
+    reference_fidelity: str = REFERENCE_FIDELITY_DEFAULT
+    styles: tuple[str, ...] = ()
+    """The requested style names, recorded as given."""
+    style_tokens: tuple[str, ...] = ()
+    """The ``embedding:`` tokens those styles bind to."""
+    codec: str = CODEC_DEFAULT
 
     @property
     def steps(self) -> int:
         """Sampling steps for this render."""
         return self.plan.steps
+
+    def prompt_text(self, prompt: str) -> str:
+        """The prompt the text encoder reads: the style tokens, then the prompt."""
+        if not self.style_tokens:
+            return prompt
+        return " ".join(self.style_tokens) + " " + prompt
+
+    def engine_settings(self) -> VideoEngineSettings:
+        """What this render runs with, for the job's record."""
+        return VideoEngineSettings(
+            sampler=self.sampler,
+            scheduler=self.scheduler,
+            steps=self.plan.steps,
+            video_shift=self.video_shift,
+            audio_shift=self.audio_shift,
+            adapter=None if self.adapter is None else self.adapter.name,
+            adapter_strength=None if self.adapter is None else self.adapter.strength,
+            width=self.plan.width,
+            height=self.plan.height,
+            frame_count=self.plan.frame_count,
+            reference_fidelity=self.reference_fidelity
+            if self.mode is VideoMode.ReferenceToAudioVideo
+            else None,
+            styles=self.styles,
+            codec=self.codec,
+        )
 
 
 def plan_comfy_render(
@@ -276,9 +340,10 @@ def plan_comfy_render(
     """Resolve a request against the card for the ComfyUI engine.
 
     Steps come from the request, else the selected adapter's trained count,
-    else the card default; sigma shifts come from the adapter when it declares
-    them, else the card. Audio is rendered only when the request asks and the
-    card produces it.
+    else the card default; sigma shifts come from the request, else the
+    adapter when it declares them, else the card. Sampler and scheduler come
+    from the request, else the engine defaults the ComfyUI templates use.
+    Audio is rendered only when the request asks and the card produces it.
     """
     video = card.video
     if video is None:
@@ -292,6 +357,7 @@ def plan_comfy_render(
     audio_shift = video.audio_shift
     if companion is not None:
         adapter = AdapterChoice(
+            name=companion.name,
             file=companion_file(companion, card),
             strength=params.lora_strength
             if params.lora_strength is not None
@@ -304,6 +370,10 @@ def plan_comfy_render(
         audio_shift = (
             companion.audio_shift if companion.audio_shift is not None else audio_shift
         )
+    if params.video_shift is not None:
+        video_shift = params.video_shift
+    if params.audio_shift is not None:
+        audio_shift = params.audio_shift
     base = plan_render(params, video)
     if params.steps is None and adapter is not None and adapter.steps is not None:
         base = RenderPlan(
@@ -324,6 +394,12 @@ def plan_comfy_render(
         adapter=adapter,
         video_shift=video_shift,
         audio_shift=audio_shift,
+        sampler=params.sampler or SAMPLER_NAME,
+        scheduler=params.scheduler or SCHEDULER_NAME,
+        reference_fidelity=params.reference_fidelity or REFERENCE_FIDELITY_DEFAULT,
+        styles=params.styles,
+        style_tokens=style_tokens(params, card),
+        codec=params.codec or CODEC_DEFAULT,
     )
 
 
@@ -435,13 +511,13 @@ def build_prompt(
 
     prompt[NODE_NOISE] = _node("RandomNoise", "Seed", noise_seed=plan.seed)
     prompt[NODE_SAMPLER_SELECT] = _node(
-        "KSamplerSelect", "Sampler", sampler_name=SAMPLER_NAME
+        "KSamplerSelect", "Sampler", sampler_name=render.sampler
     )
     prompt[NODE_SCHEDULER] = _node(
         "BasicScheduler",
         "Schedule",
         model=model_ref,
-        scheduler=SCHEDULER_NAME,
+        scheduler=render.scheduler,
         steps=plan.steps,
         denoise=1.0,
     )
@@ -482,7 +558,7 @@ def build_prompt(
         video=_link(NODE_CREATE_VIDEO),
         filename_prefix=f"{output_subdir}/{OUTPUT_PREFIX_STEM}",
         format="mp4",
-        **{"format.codec": "h264"},
+        **{"format.codec": render.codec},
     )
     prompt[NODE_THUMBNAIL_FRAME] = _node(
         "ImageFromBatch",
@@ -511,7 +587,7 @@ def _add_keyframe_condition(
     inputs: dict[str, object] = {
         "clip": _link(NODE_CLIP),
         "vae": _link(NODE_VIDEO_VAE),
-        "prompt": params.prompt,
+        "prompt": render.prompt_text(params.prompt),
         "width": plan.width,
         "height": plan.height,
         "length": plan.frame_count,
@@ -590,11 +666,11 @@ def _add_reference_condition(
     inputs: dict[str, object] = {
         "clip": _link(NODE_CLIP),
         "vae": _link(NODE_VIDEO_VAE),
-        "prompt": params.prompt,
+        "prompt": render.prompt_text(params.prompt),
         "width": plan.width,
         "height": plan.height,
         "length": plan.frame_count,
-        "ref_image_size": "match",
+        "ref_image_size": render.reference_fidelity,
     }
     if NODE_AUDIO_VAE in prompt:
         inputs["audio_vae"] = _link(NODE_AUDIO_VAE)

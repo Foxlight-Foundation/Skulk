@@ -24,7 +24,15 @@ from skulk.shared.models.registry import (
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.text_generation import ReasoningEffort
-from skulk.shared.types.video import MAX_VIDEO_PROMPT_CHARS, VideoJobStatus
+from skulk.shared.types.video import (
+    MAX_VIDEO_PROMPT_CHARS,
+    MAX_VIDEO_STYLES,
+    VIDEO_SHIFT_BOUNDS,
+    VideoCodecName,
+    VideoJobStatus,
+    VideoReferenceFidelity,
+    VideoSchedulerName,
+)
 from skulk.shared.types.worker.instances import Instance, InstanceId, InstanceMeta
 from skulk.shared.types.worker.shards import Sharding, ShardMetadata
 from skulk.store.installed_cards import InstalledArtifactRole, InstalledCardRecord
@@ -2317,6 +2325,33 @@ class VideoCreateRequest(BaseModel):
     """Adapter strength override."""
     audio: bool = True
     """Whether the output must carry the model's synchronized audio track."""
+    sampler: str | None = None
+    """Sampler name from the engine's list; omitted keeps ``res_multistep``.
+    Samplers that cannot serve distilled H3 are refused by name."""
+    scheduler: VideoSchedulerName | None = None
+    """Sigma schedule; omitted keeps ``simple``."""
+    video_shift: float | None = Field(
+        default=None, ge=VIDEO_SHIFT_BOUNDS[0], le=VIDEO_SHIFT_BOUNDS[1]
+    )
+    """Video sigma shift; omitted takes the adapter's, else the card's."""
+    audio_shift: float | None = Field(
+        default=None, ge=VIDEO_SHIFT_BOUNDS[0], le=VIDEO_SHIFT_BOUNDS[1]
+    )
+    """Audio sigma shift; omitted takes the adapter's, else the card's."""
+    reference_fidelity: VideoReferenceFidelity | None = None
+    """``ref2va`` only: ``match`` (default) or ``max`` reference image sizing."""
+    styles: list[str] = Field(default_factory=list, max_length=MAX_VIDEO_STYLES)
+    """Card style embeddings to apply by name. A multipart form sends them
+    comma-separated in one field."""
+    codec: VideoCodecName | None = None
+    """Output video codec in MP4; omitted keeps ``h264``."""
+
+    @field_validator("styles", mode="before")
+    @classmethod
+    def _split_styles(cls, value: object) -> object:
+        if isinstance(value, str):
+            return [part.strip() for part in value.split(",") if part.strip()]
+        return value
 
 
 class VideoError(BaseModel, frozen=True):
@@ -2359,6 +2394,26 @@ class VideoOutputInfo(BaseModel, frozen=True):
     """Size of the thumbnail in bytes when one is available."""
 
 
+class VideoEngineInfo(BaseModel, frozen=True):
+    """The engine settings a render resolved and ran with."""
+
+    sampler: str
+    scheduler: str
+    steps: int
+    video_shift: float | None
+    audio_shift: float | None
+    adapter: str | None
+    """Adapter companion name, when one was applied."""
+    adapter_strength: float | None
+    width: int
+    height: int
+    frame_count: int
+    reference_fidelity: str | None
+    """``match`` or ``max`` for ``ref2va``; null for other modes."""
+    styles: list[str]
+    codec: str
+
+
 class VideoStatsInfo(BaseModel, frozen=True):
     """Runner-reported timing for one render."""
 
@@ -2370,6 +2425,8 @@ class VideoStatsInfo(BaseModel, frozen=True):
     """Wall time from dispatch to a finished container."""
     peak_memory_bytes: int | None
     """Peak accelerator memory when the engine reports one."""
+    engine: VideoEngineInfo | None = None
+    """What the render ran with; null for renders from an older engine."""
 
 
 class VideoResource(BaseModel, frozen=True):

@@ -13,7 +13,7 @@ API keeps it in its video store until it expires.
 from __future__ import annotations
 
 import re
-from typing import Annotated, Literal, cast
+from typing import Annotated, Final, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -47,6 +47,97 @@ MAX_VIDEO_KEYFRAMES = 8
 """Timed keyframes per request; each anchors one frame of the clip."""
 """Upper bound on attachments per request before card limits apply."""
 MAX_VIDEO_PROMPT_CHARS = 8000
+
+VIDEO_SAMPLERS: Final[tuple[str, ...]] = (
+    "res_multistep",
+    "res_multistep_ancestral",
+    "euler",
+    "euler_ancestral",
+    "heun",
+    "heunpp2",
+    "exp_heun_2_x0",
+    "exp_heun_2_x0_sde",
+    "dpm_2",
+    "dpm_2_ancestral",
+    "lms",
+    "dpmpp_2s_ancestral",
+    "dpmpp_sde",
+    "dpmpp_sde_gpu",
+    "dpmpp_2m",
+    "dpmpp_2m_sde",
+    "dpmpp_2m_sde_gpu",
+    "dpmpp_2m_sde_heun",
+    "dpmpp_2m_sde_heun_gpu",
+    "dpmpp_3m_sde",
+    "dpmpp_3m_sde_gpu",
+    "ddpm",
+    "lcm",
+    "ipndm",
+    "ipndm_v",
+    "deis",
+    "gradient_estimation",
+    "er_sde",
+    "seeds_2",
+    "seeds_3",
+    "sa_solver",
+    "sa_solver_pece",
+    "ddim",
+    "uni_pc",
+    "uni_pc_bh2",
+)
+"""Samplers a video request may name: the pinned ComfyUI's ``KSamplerSelect``
+list minus the ones that cannot serve distilled H3 (see
+``VIDEO_UNAVAILABLE_SAMPLER_REASONS``). A caller curates further; this is the
+engine's truthful set, not a recommendation."""
+
+VIDEO_UNAVAILABLE_SAMPLER_REASONS: Final[dict[str, str]] = {
+    "dpm_fast": "chooses its own step count from a sigma range, so render time and the plan cannot be predicted",
+    "dpm_adaptive": "chooses its own step count from a sigma range, so render time and the plan cannot be predicted",
+    "cfgpp_ud10_ab": "needs a classifier-free guidance branch, which distilled H3 does not have",
+}
+"""Samplers refused by name, with the reason the refusal gives. Every
+``*_cfg_pp`` variant is refused for the CFG reason as well."""
+
+VideoSchedulerName = Literal[
+    "simple",
+    "normal",
+    "sgm_uniform",
+    "beta",
+    "kl_optimal",
+    "linear_quadratic",
+    "karras",
+    "exponential",
+    "ddim_uniform",
+]
+"""Sigma schedules the pinned ComfyUI's ``BasicScheduler`` offers."""
+
+VideoReferenceFidelity = Literal["match", "max"]
+"""How ``ref2va`` sizes reference images: ``match`` the output canvas, or
+``max`` (keep them at full resolution; stronger likeness, several times
+slower by the node's own account)."""
+
+VideoCodecName = Literal["h264", "av1"]
+"""Video codecs the pinned ComfyUI's ``SaveVideo`` writes into MP4."""
+
+MAX_VIDEO_STYLES = 4
+"""Style embeddings one request may apply."""
+
+VIDEO_SHIFT_BOUNDS: Final = (0.01, 100.0)
+"""The ``MiniMaxH3SigmaShift`` node's accepted range for either shift."""
+
+
+def video_sampler_refusal(name: str) -> str | None:
+    """Why ``name`` cannot be used as a video sampler, or ``None`` when it can."""
+    if name in VIDEO_UNAVAILABLE_SAMPLER_REASONS:
+        return f"sampler {name!r} {VIDEO_UNAVAILABLE_SAMPLER_REASONS[name]}"
+    if name.endswith("_cfg_pp"):
+        return (
+            f"sampler {name!r} needs a classifier-free guidance branch, which "
+            "distilled H3 does not have"
+        )
+    if name not in VIDEO_SAMPLERS:
+        return f"sampler {name!r} is not offered by the pinned engine"
+    return None
 """Prompt length ceiling; structured H3 prompts run to several thousand chars."""
 
 
@@ -141,6 +232,24 @@ class VideoGenerationTaskParams(BaseModel):
     """Adapter strength override."""
     audio: bool = True
     """Whether the output must carry the model's synchronized audio track."""
+    sampler: str | None = None
+    """Sampler name; ``None`` keeps the engine default (``res_multistep``)."""
+    scheduler: VideoSchedulerName | None = None
+    """Sigma schedule; ``None`` keeps the engine default (``simple``)."""
+    video_shift: float | None = Field(
+        default=None, ge=VIDEO_SHIFT_BOUNDS[0], le=VIDEO_SHIFT_BOUNDS[1]
+    )
+    """Video sigma shift; ``None`` takes the adapter's, else the card's."""
+    audio_shift: float | None = Field(
+        default=None, ge=VIDEO_SHIFT_BOUNDS[0], le=VIDEO_SHIFT_BOUNDS[1]
+    )
+    """Audio sigma shift; ``None`` takes the adapter's, else the card's."""
+    reference_fidelity: VideoReferenceFidelity | None = None
+    """``ref2va`` reference-image sizing; ``None`` keeps ``match``."""
+    styles: tuple[str, ...] = Field(default=(), max_length=MAX_VIDEO_STYLES)
+    """Card style embeddings to apply, by companion name, in order."""
+    codec: VideoCodecName | None = None
+    """Output video codec in the MP4 container; ``None`` keeps ``h264``."""
     references: tuple[VideoReferenceSpec, ...] = ()
     """Conditioning attachments in slot order."""
     total_input_chunks: int = Field(default=0, ge=0)
@@ -153,6 +262,29 @@ class VideoGenerationTaskParams(BaseModel):
     def _coerce_references(cls, value: object) -> object:
         if isinstance(value, list):
             return tuple(cast("list[object]", value))
+        return value
+
+    @field_validator("styles", mode="before")
+    @classmethod
+    def _coerce_styles(cls, value: object) -> object:
+        if isinstance(value, list):
+            return tuple(cast("list[object]", value))
+        return value
+
+    @field_validator("styles")
+    @classmethod
+    def _validate_styles(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if len(set(value)) != len(value):
+            raise ValueError("a style may be applied once")
+        if any(not name or name != name.strip() for name in value):
+            raise ValueError("style names must be non-empty and unpadded")
+        return value
+
+    @field_validator("sampler")
+    @classmethod
+    def _validate_sampler(cls, value: str | None) -> str | None:
+        if value is not None and (refusal := video_sampler_refusal(value)):
+            raise ValueError(refusal)
         return value
 
     @field_validator("size")
@@ -202,6 +334,11 @@ class VideoGenerationTaskParams(BaseModel):
             raise ValueError("reference_bytes must equal the attachment total")
         if not self.references and (self.reference_bytes or self.total_input_chunks):
             raise ValueError("reference accounting requires attachments")
+        if (
+            self.reference_fidelity is not None
+            and self.implied_mode() is not VideoMode.ReferenceToAudioVideo
+        ):
+            raise ValueError("reference_fidelity applies to ref2va only")
         if self.references and self.total_input_chunks < len(self.references):
             # Every attachment occupies at least one media frame; a smaller
             # count would let the worker's ingress gate treat the task as
@@ -276,6 +413,33 @@ class VideoOutputManifest(CamelCaseModel):
         return self
 
 
+class VideoEngineSettings(CamelCaseModel):
+    """What a render actually ran with, after request, adapter and card.
+
+    Recorded so a take says what produced it: a request may leave any of
+    these unset and inherit them, and a later card or adapter change must not
+    rewrite the history of an earlier take.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    sampler: str
+    scheduler: str
+    steps: int = Field(ge=1)
+    video_shift: float | None = None
+    audio_shift: float | None = None
+    adapter: str | None = None
+    """Adapter companion name, when one was applied."""
+    adapter_strength: float | None = None
+    width: int = Field(ge=1)
+    height: int = Field(ge=1)
+    frame_count: int = Field(ge=1)
+    reference_fidelity: str | None = None
+    """``match`` or ``max`` for ``ref2va``; ``None`` for other modes."""
+    styles: tuple[str, ...] = ()
+    codec: str
+
+
 class VideoGenerationStats(CamelCaseModel):
     """Runner-reported timing for one render."""
 
@@ -289,6 +453,8 @@ class VideoGenerationStats(CamelCaseModel):
     """Wall time from dispatch to a finished container."""
     peak_memory_bytes: int | None = Field(default=None, ge=0)
     """Peak accelerator memory observed by the engine when it reports one."""
+    engine: VideoEngineSettings | None = None
+    """The engine settings the render resolved and ran with."""
 
 
 VideoJobStatus = Literal["queued", "in_progress", "completed", "failed", "cancelled"]

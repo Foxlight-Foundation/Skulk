@@ -251,6 +251,7 @@ from skulk.api.types import (
     VideoCapabilitySection,
     VideoCreateRequest,
     VideoDeletedResponse,
+    VideoEngineInfo,
     VideoError,
     VideoListResponse,
     VideoOutputInfo,
@@ -381,6 +382,7 @@ from skulk.shared.models.model_cards import (
     ModelCard,
     ModelId,
     ModelTask,
+    VideoCompanionKind,
     VideoMode,
     add_to_card_cache,
     authorized_model_card_digest,
@@ -10929,11 +10931,29 @@ class API:
             )
         stats: VideoStatsInfo | None = None
         if job.stats is not None:
+            engine = job.stats.engine
             stats = VideoStatsInfo(
                 steps=job.stats.steps,
                 seconds_per_step=job.stats.seconds_per_step,
                 total_generation_time=job.stats.total_generation_time,
                 peak_memory_bytes=job.stats.peak_memory_bytes,
+                engine=None
+                if engine is None
+                else VideoEngineInfo(
+                    sampler=engine.sampler,
+                    scheduler=engine.scheduler,
+                    steps=engine.steps,
+                    video_shift=engine.video_shift,
+                    audio_shift=engine.audio_shift,
+                    adapter=engine.adapter,
+                    adapter_strength=engine.adapter_strength,
+                    width=engine.width,
+                    height=engine.height,
+                    frame_count=engine.frame_count,
+                    reference_fidelity=engine.reference_fidelity,
+                    styles=list(engine.styles),
+                    codec=engine.codec,
+                ),
             )
         return VideoResource(
             id=str(job.id),
@@ -11241,6 +11261,13 @@ class API:
                 lora=create.lora,
                 lora_strength=create.lora_strength,
                 audio=create.audio,
+                sampler=create.sampler,
+                scheduler=create.scheduler,
+                video_shift=create.video_shift,
+                audio_shift=create.audio_shift,
+                reference_fidelity=create.reference_fidelity,
+                styles=tuple(create.styles),
+                codec=create.codec,
                 references=tuple(references),
                 total_input_chunks=sum(len(item.chunks) for item in attachments),
                 reference_bytes=sum(item.size_bytes for item in attachments),
@@ -11249,6 +11276,21 @@ class API:
             raise HTTPException(
                 status_code=400, detail=_validation_detail(error)
             ) from error
+        embeddings = {
+            companion.name
+            for companion in card.video.companions
+            if companion.kind is VideoCompanionKind.Embedding
+        }
+        unknown_styles = [name for name in params.styles if name not in embeddings]
+        if unknown_styles:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"{card.model_id} has no style embedding named "
+                    f"{', '.join(repr(name) for name in unknown_styles)}; it offers "
+                    f"{', '.join(sorted(embeddings)) or 'none'}"
+                ),
+            )
         implied = params.model_copy(update={"mode": None}).implied_mode()
         if params.mode is not None and params.mode != implied:
             raise HTTPException(

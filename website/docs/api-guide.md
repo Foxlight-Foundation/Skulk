@@ -1561,7 +1561,7 @@ Every route returns or lists this object. The first block matches OpenAI's
 | `audio` | boolean | Whether a synchronized audio track was required |
 | `stage` | string or null | Latest render phase: `queued`, `encoding`, `sampling`, `decoding`, `muxing`, `uploading` |
 | `output` | object or null | Container facts once rendered: `sha256`, `size_bytes`, `content_type`, `width`, `height`, `frame_count`, `fps`, `seconds`, `audio_sample_rate`, `audio_channels`, `has_thumbnail`, and when a thumbnail exists its `thumbnail_sha256` and `thumbnail_size_bytes` so a client can verify the `variant=thumbnail` bytes it fetches |
-| `stats` | object or null | Runner timing: `steps`, `seconds_per_step`, `total_generation_time`, `peak_memory_bytes` |
+| `stats` | object or null | Runner timing: `steps`, `seconds_per_step`, `total_generation_time`, `peak_memory_bytes`, and `engine`: what the render ran with after the request, the adapter and the card were resolved (`sampler`, `scheduler`, `steps`, `video_shift`, `audio_shift`, `adapter`, `adapter_strength`, `width`, `height`, `frame_count`, `reference_fidelity` for `ref2va`, `styles`, `codec`), null from an engine that does not report it |
 
 ### Create a video job
 
@@ -1608,6 +1608,13 @@ Request fields (JSON keys or form fields):
 | `lora` | string | Name of a card companion adapter, for example a turbo LoRA |
 | `lora_strength` | number | 0.0 to 2.0 |
 | `audio` | boolean | Default `true`; the job fails at settlement if the render carries no audio track |
+| `sampler` | string | Engine tier. Omitted keeps `res_multistep`, the ComfyUI template's choice. Any sampler the pinned ComfyUI offers is accepted except those that cannot serve distilled H3, which are refused with the reason: `dpm_fast` and `dpm_adaptive` pick their own step count, and every `*_cfg_pp` variant plus `cfgpp_ud10_ab` needs a classifier-free guidance branch |
+| `scheduler` | string | Engine tier. `simple` (default), `normal`, `sgm_uniform`, `beta`, `kl_optimal`, `linear_quadratic`, `karras`, `exponential`, or `ddim_uniform` |
+| `video_shift` | number | Engine tier. Video sigma shift, 0.01 to 100; omitted takes the adapter's, else the card's |
+| `audio_shift` | number | Engine tier. Audio sigma shift, 0.01 to 100; omitted takes the adapter's, else the card's. The audio schedule rides the video one scaled by `video_shift / audio_shift` |
+| `reference_fidelity` | string | `ref2va` only: `match` (default) sizes reference images to the canvas; `max` keeps them at full resolution for stronger likeness at a much higher cost. Refused for other modes |
+| `styles` | array of strings | Up to 4 of the card's style embeddings by name, applied in order as `embedding:` tokens ahead of the prompt. A multipart form sends them comma-separated in one field. An unknown name is refused with the card's list |
+| `codec` | string | `h264` (default) or `av1`, in the MP4 container |
 
 File parts (multipart only), in slot order:
 
@@ -1702,7 +1709,9 @@ it. Returns `{ "id": ..., "object": "video.deleted", "deleted": true }`.
 - `cancelled` is a distinct terminal status.
 - Multipart accepts a last frame and repeated references, not only the single
   `input_reference`, and the JSON body accepts the `mode`, `aspect_ratio`,
-  `steps`, `seed`, `lora`, `lora_strength`, and `audio` extensions.
+  `steps`, `seed`, `lora`, `lora_strength`, `audio`, and engine-tier
+  (`sampler`, `scheduler`, `video_shift`, `audio_shift`,
+  `reference_fidelity`, `styles`, `codec`) extensions.
 - There is no remix route; submit a new job with the changed prompt.
 
 ## Benchmark Endpoints
