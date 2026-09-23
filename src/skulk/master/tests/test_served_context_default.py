@@ -17,7 +17,7 @@ from skulk.shared.topology import Topology
 from skulk.shared.types.commands import PlaceInstance
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.memory import Memory
-from skulk.shared.types.worker.instances import Instance, InstanceMeta
+from skulk.shared.types.worker.instances import Instance, InstanceId, InstanceMeta
 from skulk.shared.types.worker.runners import RunnerId, ShardAssignments
 from skulk.shared.types.worker.shards import PipelineShardMetadata, Sharding
 
@@ -190,3 +190,51 @@ def test_master_reads_the_default_from_the_converged_config(
 
     monkeypatch.setattr(master_main, "load_skulk_config", unreadable)
     assert master._served_context_default() == SERVED_CONTEXT_DEFAULT_TOKENS  # pyright: ignore[reportPrivateUsage]
+
+
+
+def test_an_exact_placement_keeps_its_window_through_repair() -> None:
+    """An exact instance's stamped window becomes its repair intent."""
+    from skulk.master.placement import add_instance_to_placements
+    from skulk.shared.types.commands import CreateInstance
+    from skulk.shared.types.worker.instances import MlxRingInstance
+
+    card = _card(gguf=True)
+    node_id = NodeId("exact-node")
+    runner = RunnerId("exact-runner")
+    exact = MlxRingInstance(
+        instance_id=InstanceId("exact-instance"),
+        shard_assignments=ShardAssignments(
+            model_id=card.model_id,
+            runner_to_shard={
+                runner: PipelineShardMetadata(
+                    model_card=card,
+                    device_rank=0,
+                    world_size=1,
+                    start_layer=0,
+                    end_layer=32,
+                    n_layers=32,
+                    resolved_backend="llama_server-cpu",
+                )
+            },
+            node_to_runner={node_id: runner},
+        ),
+        hosts_by_node={node_id: []},
+        ephemeral_port=50000,
+        context_token_limit=131072,
+    )
+    topology = Topology()
+    topology.add_node(node_id)
+    placed = add_instance_to_placements(
+        CreateInstance(instance=exact),
+        topology,
+        {},
+        {
+            node_id: create_node_memory(
+                Memory.from_gb(100).in_bytes, ram_total=Memory.from_gb(128).in_bytes
+            )
+        },
+    )[exact.instance_id]
+    assert placed.context_token_limit == 131072
+    assert placed.requested_context_tokens == 131072
+    assert replacement_command_for_refused_instance(placed).requested_context_tokens == 131072

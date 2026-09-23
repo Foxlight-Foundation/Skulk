@@ -2246,7 +2246,9 @@ client can show what a chosen window reserves before launching. Posting the
 preview's instance to `POST /instance` keeps its stamped maximum; the fleet
 default applies to `POST /place_instance`, while an exact instance keeps its
 own `contextTokenLimit` (or the legacy backfill, the 8192 floor for engines
-that reserve at load, when it omits one). Unified-memory GPUs are not previewed with a discrete-VRAM context
+that reserve at load, when it omits one). The window an exact instance is stamped with is
+recorded as its repair intent, so a memory-refusal or download-failure
+re-placement rebuilds the same window rather than the fleet default. Unified-memory GPUs are not previewed with a discrete-VRAM context
 lift that the master would later remove.
 
 Besides the planner's ranked pick per shape, the response also contains
