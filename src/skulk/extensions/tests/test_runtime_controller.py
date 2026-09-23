@@ -1,3 +1,4 @@
+# pyright: reportPrivateUsage=false
 """Durable owner operations with actual isolated processes and interrupted selection."""
 
 import asyncio
@@ -10,7 +11,7 @@ import pytest
 
 from skulk.extensions.runtime_controller import LifecycleRequest, RuntimeController
 from skulk.extensions.runtime_files import RuntimeLock, write_private
-from skulk.extensions.runtime_service import RuntimeService
+from skulk.extensions.runtime_service import RuntimeService, ServiceProcessState
 from skulk.extensions.tests.test_runtime_service import installed, running, status
 
 
@@ -532,10 +533,10 @@ async def _next_lifetime(
     return controller.service
 
 
-async def test_an_owner_that_exits_is_started_again_until_the_restarts_are_spent(
+async def test_an_owner_that_exits_keeps_being_started_again(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Each unexpected exit begins a new lifetime; the last failure then stands."""
+    """Each unexpected exit begins a new lifetime, past the end of the ramp too."""
     monkeypatch.setattr(
         "skulk.extensions.runtime_controller._RESTART_DELAYS_SECONDS", (0.05, 0.05)
     )
@@ -546,17 +547,52 @@ async def test_an_owner_that_exits_is_started_again_until_the_restarts_are_spent
         assert controller.service is not None
         service = controller.service
         await running(service)
-        for _ in range(2):
+        for _ in range(4):
             await _kill_owner(service)
             service = await _next_lifetime(controller, service)
             assert status(selector.root).service_instance == service.instance
+    finally:
+        await controller.close()
+    RuntimeLock(selector.root, "manager.lock").close()
+
+
+async def test_a_launcher_that_raises_after_its_owner_exits_is_still_restarted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A full disk failing the last status write is a failed lifetime, not the end."""
+    monkeypatch.setattr(
+        "skulk.extensions.runtime_controller._RESTART_DELAYS_SECONDS", (0.05,)
+    )
+    selector = await installed(tmp_path, monkeypatch)
+    controller = RuntimeController(selector.root)
+    await controller.start()
+    original = RuntimeService._status
+    refused: list[str] = []
+
+    def full_disk(
+        self: RuntimeService,
+        state: ServiceProcessState,
+        error: Literal[
+            "verification_failed", "owner_exited", "ownership_busy", "service_failed"
+        ]
+        | None = None,
+    ) -> None:
+        if state == "failed" and not refused:
+            refused.append(self.instance)
+            raise OSError(28, "No space left on device")
+        original(self, state, error)
+
+    monkeypatch.setattr(RuntimeService, "_status", full_disk)
+    try:
+        assert controller.service is not None
+        service = controller.service
+        await running(service)
         await _kill_owner(service)
+        replacement = await _next_lifetime(controller, service)
+        assert refused == [service.instance]
         assert controller.service_task is not None
-        async with asyncio.timeout(15):
-            assert await controller.service_task is False
-        assert controller.service is service
-        observed = status(selector.root)
-        assert (observed.state, observed.error_code) == ("failed", "owner_exited")
+        assert not controller.service_task.done()
+        assert status(selector.root).service_instance == replacement.instance
     finally:
         await controller.close()
     RuntimeLock(selector.root, "manager.lock").close()
@@ -588,12 +624,14 @@ async def test_a_stop_while_waiting_to_restart_starts_nothing(
     RuntimeLock(selector.root, "manager.lock").close()
 
 
-async def test_a_healthy_lifetime_resets_the_restart_count(
+async def test_a_healthy_lifetime_starts_the_waits_over(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An owner that ran long enough has a new fault when it exits, not the same one."""
+    # The second wait is far longer than the test allows: only a lifetime
+    # counted as healthy brings the next restart back to the first wait.
     monkeypatch.setattr(
-        "skulk.extensions.runtime_controller._RESTART_DELAYS_SECONDS", (0.05,)
+        "skulk.extensions.runtime_controller._RESTART_DELAYS_SECONDS", (0.05, 60.0)
     )
     monkeypatch.setattr(
         "skulk.extensions.runtime_controller._STABLE_LIFETIME_SECONDS", 0.0
@@ -605,8 +643,6 @@ async def test_a_healthy_lifetime_resets_the_restart_count(
         assert controller.service is not None
         service = controller.service
         await running(service)
-        # One restart is allowed in a row; every lifetime counts as healthy,
-        # so three exits in turn are each started again.
         for _ in range(3):
             await _kill_owner(service)
             service = await _next_lifetime(controller, service)

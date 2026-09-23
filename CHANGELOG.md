@@ -57,8 +57,9 @@ This project records release notes here and mirrors public-facing notes in
 ### Fixed
 
 - A managed plugin's owner that exits unexpectedly is started again. The
-  plugin manager restarts it after growing waits (5 s to 300 s, five
-  attempts, reset by a ten-minute lifetime); before, an owner that died, for
+  plugin manager restarts it after growing waits (5 s to 300 s, then every
+  five minutes while it keeps failing), so an owner stopped by a condition
+  that clears later comes back by itself; before, an owner that died, for
   example when its host's disk filled, stayed down until the manager itself
   restarted.
 

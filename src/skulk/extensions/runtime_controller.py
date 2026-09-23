@@ -25,9 +25,13 @@ from skulk.extensions.runtime_service import RuntimeService
 
 _OWNER_EXIT_SECONDS = 35.0
 # An owner that exits without being asked to is started again after each of
-# these waits in turn; after the last, the failure stands until an operator
-# acts or the manager restarts. The waits grow so a crash on start costs a few
-# attempts over minutes, not a tight loop re-verifying the runtime.
+# these waits in turn, and then after the last one for as long as it keeps
+# failing. The waits grow so a crash on start costs a few attempts over
+# minutes, not a tight loop; the last repeats rather than giving up because
+# the causes that end an owner (a full disk, memory pressure) clear by
+# themselves, often long after a fixed number of attempts. One attempt costs
+# one verification of the generation, which a running owner repeats every
+# thirty seconds anyway.
 _RESTART_DELAYS_SECONDS: tuple[float, ...] = (5.0, 15.0, 45.0, 120.0, 300.0)
 # A lifetime this long was healthy: its exit is a new fault, not the same one
 # again, so the count of consecutive failures starts over.
@@ -332,14 +336,18 @@ class RuntimeController:
         """Serve the selected owner, starting it again after it exits, until stopped.
 
         Returns true when a lifetime ended cleanly (a stop, a disabled or
-        absent selection) and false when the restarts are spent. Invariants:
+        absent selection) and false when a stop ended supervision after a
+        failure. Invariants:
 
         - One owner lifetime at a time: the next begins only after ``serve``
-          has returned, which waits for the owner and its fence.
+          has returned or raised, ``serve`` runs its owner teardown in
+          ``finally`` blocks before either, and the supervisor fence refuses
+          a new owner while any earlier one survives.
         - A stop is final: once ``stopped`` is set no lifetime begins,
           including from inside a wait between attempts.
-        - Restarts are bounded by ``_RESTART_DELAYS_SECONDS``; a lifetime of
-          at least ``_STABLE_LIFETIME_SECONDS`` resets the count.
+        - Restarts wait ``_RESTART_DELAYS_SECONDS`` in turn and then the last
+          of them for as long as failures continue; a lifetime of at least
+          ``_STABLE_LIFETIME_SECONDS`` starts the waits over.
         - A clean return is never restarted, and no lifetime replays work:
           each is a new ``RuntimeService`` over the same selection, and the
           owner's own journal decides what an interrupted operation means.
@@ -349,15 +357,23 @@ class RuntimeController:
         while True:
             self.service = service
             began = loop.time()
-            if await service.serve(stopped):
-                return True
+            try:
+                if await service.serve(stopped):
+                    return True
+            except (OSError, ValueError):
+                # A launcher that raises has already run its owner teardown;
+                # what usually failed is a status write after it, typically on
+                # a full disk. It is a failed lifetime like any other: the
+                # next lifetime's fences refuse to start an owner while an
+                # earlier one survives.
+                pass
             if stopped.is_set() or self.closed:
                 return False
             if loop.time() - began >= _STABLE_LIFETIME_SECONDS:
                 failures = 0
-            if failures >= len(_RESTART_DELAYS_SECONDS):
-                return False
-            delay = _RESTART_DELAYS_SECONDS[failures]
+            delay = _RESTART_DELAYS_SECONDS[
+                min(failures, len(_RESTART_DELAYS_SECONDS) - 1)
+            ]
             failures += 1
             with contextlib.suppress(TimeoutError):
                 async with asyncio.timeout(delay):

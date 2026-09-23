@@ -1890,9 +1890,10 @@ reaps the owner within a bounded grace period and checks the supervisor fence be
 reporting stopped. Surviving children must retain that fence. The launcher never
 owns independent cleanup services or restarts a failed owner within its lifetime.
 The controller above it supervises: an owner that exits unexpectedly is started
-again as a new launcher lifetime after growing waits (5 s to 300 s, five
-attempts; a ten-minute lifetime resets the count), a stop during a wait starts
-nothing, and no lifetime replays work. Every tree walk in this subsystem (the
+again as a new launcher lifetime after growing waits (5 s to 300 s, then every
+300 s while failures continue; a ten-minute lifetime starts the waits over; a
+launcher that raises after its teardown counts as a failed lifetime), a stop
+during a wait starts nothing, and no lifetime replays work. Every tree walk in this subsystem (the
 installation scan, the core build fingerprint, the core runtime copy, the
 bootstrap's pre-start check and the installed seal) ignores the regular files
 a desktop file browser leaves behind (`.DS_Store`, AppleDouble `._` files),
