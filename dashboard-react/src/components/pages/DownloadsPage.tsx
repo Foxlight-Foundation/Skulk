@@ -467,7 +467,7 @@ export function ModelStorePage({ topology, nodeResources = {}, downloads, instan
     return statuses;
   }, [instances, runners]);
 
-  const handleLaunchWithParams = useCallback(async (params: { modelId: string; sharding: string; instanceMeta: string; minNodes: number; excludedNodes?: string[] }) => {
+  const handleLaunchWithParams = useCallback(async (params: { modelId: string; sharding: string; instanceMeta: string; minNodes: number; excludedNodes?: string[]; contextTokens?: number }) => {
     try {
       const res = await fetch('/place_instance', {
         method: 'POST',
@@ -478,6 +478,7 @@ export function ModelStorePage({ topology, nodeResources = {}, downloads, instan
           instance_meta: params.instanceMeta,
           min_nodes: params.minNodes,
           excluded_nodes: params.excludedNodes ?? [],
+          ...(params.contextTokens !== undefined ? { context_tokens: params.contextTokens } : {}),
         }),
       });
       if (res.ok) {

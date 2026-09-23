@@ -35,6 +35,7 @@ from typing import (
     Final,
     Literal,
     Protocol,
+    TypedDict,
     TypeVar,
     cast,
 )
@@ -331,6 +332,7 @@ from skulk.master.placement import (
     PlacementInfoPendingError,
     require_instance_model_card_identity,
     require_instance_model_code_approval,
+    served_context_window,
 )
 from skulk.master.placement import place_instance as get_instance_placements
 from skulk.master.placement_utils import (
@@ -370,6 +372,8 @@ from skulk.shared.models.memory_estimate import (
     GPU_WORKING_SET_FRACTION,
     estimate_shard_footprint,
     per_token_kv_bytes,
+    shard_fraction_of_model,
+    shard_preallocates_kv_upfront,
 )
 from skulk.shared.models.model_cards import (
     AudioCardKind,
@@ -570,6 +574,7 @@ from skulk.store.config import (
     persist_model_trust_config,
     resolve_config_path,
     resolve_node_staging,
+    served_context_default,
     update_skulk_config_atomic,
 )
 from skulk.tools.web_search import default_browser_tool_provider
@@ -1672,6 +1677,15 @@ def _steward_canary_failure_command(instance_id: InstanceId) -> FailInstance:
             "Skulk tore down the placement for automatic recovery."
         ),
     )
+
+
+class _PreviewContextFields(TypedDict):
+    """Context-window facts spread into a ``PlacementPreview``."""
+
+    max_context_tokens: int | None
+    default_context_tokens: int | None
+    reserves_context_at_load: bool
+    kv_bytes_per_token: int | None
 
 
 class API:
@@ -3536,6 +3550,7 @@ class API:
             instance_meta=payload.instance_meta,
             min_nodes=payload.min_nodes,
             excluded_nodes=list(payload.excluded_nodes),
+            requested_context_tokens=payload.context_tokens,
         )
 
         # Dry-run the placement against this node's replicated state before
@@ -3716,6 +3731,57 @@ class API:
             )
 
         return placements[new_ids[0]]
+
+    def _served_context_default(self) -> int:
+        """The fleet served context default as the master will read it.
+
+        Read from the on-disk config, which config sync keeps converged, not
+        the startup snapshot: a default changed from another API node must
+        show in this node's previews the way the master will stamp it.
+        """
+        try:
+            return served_context_default(load_skulk_config())
+        except Exception:
+            return served_context_default(self._skulk_config)
+
+    def _preview_context_fields(self, instance: Instance) -> "_PreviewContextFields":
+        """Context-window facts a placement preview shows for ``instance``.
+
+        The preview's instance is computed without the fleet default, so its
+        stamped window is the largest the placement holds; the default an
+        unspecified launch would get, whether the engine reserves the window
+        at load, and the per-token KV cost let a client show what a chosen
+        window will reserve before launching.
+        """
+        assignments = instance.shard_assignments
+        shards = list(assignments.runner_to_shard.values())
+        maximum = instance.context_token_limit
+        default = served_context_window(
+            assignments,
+            maximum,
+            requested=None,
+            served_default=self._served_context_default(),
+        )
+        kv_bytes = 0
+        for shard in shards:
+            fraction = shard_fraction_of_model(shard)
+            per_token = per_token_kv_bytes(
+                shard.model_card,
+                resolved_backend=shard.resolved_backend,
+                llama_server_settings=shard.llama_server_settings,
+            )
+            if fraction is None or per_token <= 0:
+                kv_bytes = 0
+                break
+            kv_bytes += int(per_token * fraction)
+        return _PreviewContextFields(
+            max_context_tokens=maximum,
+            default_context_tokens=default,
+            reserves_context_at_load=any(
+                shard_preallocates_kv_upfront(shard) for shard in shards
+            ),
+            kv_bytes_per_token=kv_bytes or None,
+        )
 
     async def get_placement_previews(
         self,
@@ -3941,6 +4007,7 @@ class API:
                         sharding=sharding,
                         instance_meta=minted_meta,
                         instance=instance,
+                        **self._preview_context_fields(instance),
                         memory_delta_by_node=memory_delta_by_node or None,
                         error=None,
                         compatibility_source=compatibility_source,
@@ -4042,6 +4109,7 @@ class API:
                             sharding=alt_sharding,
                             instance_meta=instance_meta_of(alt_instance),
                             instance=alt_instance,
+                            **self._preview_context_fields(alt_instance),
                             memory_delta_by_node={
                                 str(candidate): model_card.storage_size.in_bytes
                             },

@@ -187,6 +187,7 @@ from skulk.store.config import (
     load_skulk_config,
     persist_model_trust_config,
     resolve_config_path,
+    served_context_default,
 )
 from skulk.utils.channels import Receiver, Sender
 from skulk.utils.disk_event_log import DiskEventLog
@@ -1299,6 +1300,19 @@ class Master:
                 unreflected.add(instance_id)
         return frozenset(unreflected)
 
+    def _served_context_default(self) -> int:
+        """Fleet default served window for placements that name none.
+
+        Read at placement time from the converged cluster config, so a change
+        in Settings applies to the next placement without a restart; an
+        unreadable config falls back to the built-in default rather than
+        blocking placement.
+        """
+        try:
+            return served_context_default(load_skulk_config())
+        except Exception:
+            return served_context_default(None)
+
     def _reserved_placement_inputs(
         self,
         node_memory: Mapping[NodeId, MemoryUsage],
@@ -1420,6 +1434,7 @@ class Master:
                 node_memory=credited_memory,
             ),
             approved_remote_code_identities=self._model_trust_approvals,
+            served_context_default=self._served_context_default(),
         )
 
     async def _execute_approved_steward_action(
@@ -2918,6 +2933,7 @@ class Master:
                                             node_memory=repair_memory,
                                         ),
                                         approved_remote_code_identities=self._model_trust_approvals,
+                                        served_context_default=self._served_context_default(),
                                     )
                                     logger.warning(
                                         "Re-placing "
@@ -2977,6 +2993,7 @@ class Master:
                                                 node_memory=repair_memory,
                                             ),
                                             approved_remote_code_identities=self._model_trust_approvals,
+                                            served_context_default=self._served_context_default(),
                                         )
                                         for new_id in final_placement:
                                             if new_id not in after_delete:
@@ -3069,6 +3086,7 @@ class Master:
                                     node_memory=credited_memory,
                                 ),
                                 approved_remote_code_identities=self._model_trust_approvals,
+                                served_context_default=self._served_context_default(),
                             )
                             transition_events = get_transition_events(
                                 self.state.instances, placement, self.state.tasks
@@ -3456,6 +3474,7 @@ class Master:
                         node_memory=repair_memory,
                     ),
                     approved_remote_code_identities=self._model_trust_approvals,
+                    served_context_default=self._served_context_default(),
                 )
                 logger.warning(
                     f"Re-placing {replace_command.model_card.model_id} excluding "
@@ -3669,6 +3688,7 @@ class Master:
                 node_memory=placement_memory,
             ),
             approved_remote_code_identities=self._model_trust_approvals,
+            served_context_default=self._served_context_default(),
         )
 
     def _steward_replacement_memory_inputs(

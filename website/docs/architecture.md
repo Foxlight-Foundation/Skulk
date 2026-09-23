@@ -653,10 +653,23 @@ rather than committed. An uncomputable fit (a card without KV-head metadata,
 or a pooled RPC placement) also clamps back to the floor rather than
 committing a fictitious window that would fail at load. MLX is unaffected
 either way: it grows its KV cache lazily per request and keeps the full
-memory/card fit. The practical effect is that a node serves a model at the
+memory/card fit. The practical effect is that a node can serve a model at the
 largest context that actually fits it, on unified memory as well as on a
 discrete GPU, instead of a fixed clamp that makes served models unusable for
-real-context work. The
+real-context work.
+
+That largest window is a ceiling, not the default. Because llama-server,
+in-process llama.cpp and vLLM reserve the whole window's memory when the model
+loads, a placement that names no window gets the fleet's served context
+default instead (`inference.served_context_tokens`, 32768 unless changed in
+Settings), bounded by the memory fit and the card maximum. A placement may ask
+for any window up to the ceiling (`context_tokens` on `POST /place_instance`,
+or the context field under the dashboard's placement options); the placer
+honors the request exactly or refuses it naming the ceiling, and repair
+re-placements carry the request forward. Placement previews report the
+ceiling, the default, whether the engine reserves at load, and the per-token KV
+cost, so the memory a window reserves is visible before launch. MLX keeps the
+full fit by default, since it reserves nothing ahead of use. The
 [Architecture Reference](architecture-reference) carries the exact admission
 arithmetic.
 

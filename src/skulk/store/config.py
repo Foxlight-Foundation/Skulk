@@ -81,6 +81,11 @@ import yaml
 from loguru import logger
 from pydantic import Field, field_validator, model_validator
 
+from skulk.shared.models.memory_estimate import (
+    MAX_REQUESTED_CONTEXT_TOKENS,
+    MIN_REQUESTED_CONTEXT_TOKENS,
+    SERVED_CONTEXT_DEFAULT_TOKENS,
+)
 from skulk.utils.pydantic_ext import FrozenModel
 
 # Keep the shipped listener outside the IANA dynamic/private range and the
@@ -655,11 +660,42 @@ class InferenceConfig(FrozenModel):
 
     Attributes:
         kv_cache_backend: KV cache backend to use.
+        served_context_tokens: Fleet default context window for engines that
+            reserve their whole KV cache at load (llama-server, in-process
+            llama.cpp, vLLM) when a placement names none.
     """
 
     kv_cache_backend: Literal[
         "default", "mlx_quantized", "turboquant", "turboquant_adaptive", "optiq"
     ] = "default"
+    served_context_tokens: int = Field(
+        default=SERVED_CONTEXT_DEFAULT_TOKENS,
+        ge=MIN_REQUESTED_CONTEXT_TOKENS,
+        le=MAX_REQUESTED_CONTEXT_TOKENS,
+        description=(
+            "Context window, in tokens, that llama-server, in-process llama.cpp "
+            "and vLLM placements get when the placement names none. These "
+            "engines reserve the whole window's memory when the model loads, so "
+            "the default keeps them from committing memory for the card's full "
+            "context. A placement may request more, up to what its nodes hold; "
+            "MLX grows its cache per request and is not affected."
+        ),
+    )
+
+
+def served_context_default(config: "SkulkConfig | None") -> int:
+    """Return the fleet's served context default from a loaded config.
+
+    Args:
+        config: The loaded ``skulk.yaml``, or ``None`` when none exists.
+
+    Returns:
+        ``inference.served_context_tokens``, or the built-in default when the
+        section is absent.
+    """
+    if config is None or config.inference is None:
+        return SERVED_CONTEXT_DEFAULT_TOKENS
+    return config.inference.served_context_tokens
 
 
 def resolve_config_path() -> Path:

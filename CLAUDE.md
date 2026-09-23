@@ -340,7 +340,10 @@ A model card's `placement.compatible_backends` selects which engine serves it
   `served_spec_type` / `served_spec_n_max` runtime fields. The node's
   `SKULK_LLAMA_SERVER_PARALLEL` slot count (default 16) is honored exactly, with
   `--kv-unified` above one slot so every slot keeps the full stamped window
-  rather than `n_ctx / N` (#689). Exact prompt-plus-output reservations queue
+  rather than `n_ctx / N` (#689). The stamped window is the fleet default
+  `inference.served_context_tokens` (32768) unless the placement requests one
+  (`context_tokens`, honored up to the memory fit or refused), because this
+  engine reserves the whole window's memory at load. Exact prompt-plus-output reservations queue
   FIFO against that shared pool before generation, and an unavailable
   token-count probe reserves the whole pool as a fail-safe. A GGUF vision card
   becomes eligible when it pins one exact projector path and size at its

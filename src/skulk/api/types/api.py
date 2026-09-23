@@ -6,6 +6,10 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from skulk.shared.models.capabilities import ResolvedCapabilityProfile
+from skulk.shared.models.memory_estimate import (
+    MAX_REQUESTED_CONTEXT_TOKENS,
+    MIN_REQUESTED_CONTEXT_TOKENS,
+)
 from skulk.shared.models.model_cards import (
     AudioResponseFormat,
     ModelCard,
@@ -1795,6 +1799,21 @@ class PlaceInstanceParams(BaseModel):
             "cluster-wide."
         ),
     )
+    context_tokens: int | None = Field(
+        default=None,
+        ge=MIN_REQUESTED_CONTEXT_TOKENS,
+        le=MAX_REQUESTED_CONTEXT_TOKENS,
+        description=(
+            "Optional context window for this placement, in tokens. The placer "
+            "honors it up to the largest window the chosen nodes hold "
+            "(`max_context_tokens` in the placement preview) and refuses a "
+            "larger request with 400. When omitted, llama-server, in-process "
+            "llama.cpp and vLLM placements take the fleet default "
+            "(`inference.served_context_tokens`, 32768 unless changed) because "
+            "they reserve the whole window's memory at load; MLX keeps the "
+            "full memory fit."
+        ),
+    )
 
 
 class CreateInstanceParams(BaseModel):
@@ -1850,6 +1869,38 @@ class PlacementPreview(BaseModel):
     instance: Instance | None = None
     # Keys are NodeId strings, values are additional bytes that would be used on that node
     memory_delta_by_node: dict[str, int] | None = None
+    max_context_tokens: int | None = Field(
+        default=None,
+        description=(
+            "Largest context window this placement can hold (memory fit, card "
+            "maximum, engine caps); a `context_tokens` request above it is "
+            "refused. Null when no instance is present or no ceiling applies."
+        ),
+    )
+    default_context_tokens: int | None = Field(
+        default=None,
+        description=(
+            "Window this placement gets when `context_tokens` is omitted: the "
+            "fleet default for engines that reserve at load, otherwise the "
+            "maximum."
+        ),
+    )
+    reserves_context_at_load: bool = Field(
+        default=False,
+        description=(
+            "Whether the engine reserves the whole window's KV memory when the "
+            "model loads (llama-server, in-process llama.cpp, vLLM), so the "
+            "chosen window costs memory whether or not requests use it."
+        ),
+    )
+    kv_bytes_per_token: int | None = Field(
+        default=None,
+        description=(
+            "Estimated KV-cache bytes one token of window costs across the "
+            "placement, for showing what a window reserves. Null when the "
+            "card's attention geometry is unknown."
+        ),
+    )
     error: str | None = None
     error_code: Literal[
         "no_valid_placement",

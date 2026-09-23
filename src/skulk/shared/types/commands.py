@@ -6,6 +6,10 @@ from skulk.api.types import (
     ImageEditsTaskParams,
     ImageGenerationTaskParams,
 )
+from skulk.shared.models.memory_estimate import (
+    MAX_REQUESTED_CONTEXT_TOKENS,
+    MIN_REQUESTED_CONTEXT_TOKENS,
+)
 from skulk.shared.models.model_cards import ModelCard, ModelId
 from skulk.shared.types.audio import (
     AudioTranscriptionTaskParams,
@@ -136,6 +140,17 @@ class PlaceInstance(BaseCommand):
     # intelligent-fabric steward). Only the master's invariant pass and
     # repair builders set this; the operator placement API never does.
     system_role: Literal["steward"] | None = None
+    requested_context_tokens: int | None = Field(
+        default=None,
+        ge=MIN_REQUESTED_CONTEXT_TOKENS,
+        le=MAX_REQUESTED_CONTEXT_TOKENS,
+        description=(
+            "Caller-chosen context window. The placer honors it up to the "
+            "largest window the chosen placement can hold and refuses a larger "
+            "request; when omitted, engines that reserve their window at load "
+            "take the fleet's served context default."
+        ),
+    )
 
 
 class CreateInstance(BaseCommand):

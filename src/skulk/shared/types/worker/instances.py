@@ -7,6 +7,8 @@ from pydantic import Field, field_validator, model_validator
 
 from skulk.shared.models.memory_estimate import (
     KV_CONTEXT_BUDGET_TOKENS,
+    MAX_REQUESTED_CONTEXT_TOKENS,
+    MIN_REQUESTED_CONTEXT_TOKENS,
     shard_preallocates_kv_upfront,
 )
 from skulk.shared.models.model_cards import ModelTask
@@ -180,6 +182,16 @@ class BaseInstance(TaggedModel):
             "replayed from older event logs) means a normal user placement. "
             "Repair re-placements re-stamp the role so it survives node "
             "loss."
+        ),
+    )
+    requested_context_tokens: int | None = Field(
+        default=None,
+        ge=MIN_REQUESTED_CONTEXT_TOKENS,
+        le=MAX_REQUESTED_CONTEXT_TOKENS,
+        description=(
+            "The caller's requested context window at placement, if any. Repair "
+            "re-placements carry it forward so a replacement keeps the window "
+            "the operator chose rather than falling back to the fleet default."
         ),
     )
 

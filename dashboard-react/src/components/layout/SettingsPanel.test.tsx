@@ -189,6 +189,49 @@ describe('SettingsPanel persisted config handling', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it('saves the served context default and keeps the rest of the inference section', async () => {
+    localStorage.setItem('skulk-settings-sections', JSON.stringify({ inference: true }));
+    const saveFullConfig = vi.fn<(config: unknown) => Promise<boolean>>(async () => true);
+    useConfigMock.mockReturnValue({
+      fullConfig: {
+        inference: { kv_cache_backend: 'default', served_context_tokens: 65536, future_field: 'kept' },
+      },
+      effective: { kv_cache_backend: 'default', has_hf_token: false, experimental_mode_enabled: false },
+      configPath: '/tmp/skulk.yaml',
+      loading: false,
+      saving: false,
+      error: null,
+      fetchConfig: vi.fn(async () => undefined),
+      saveFullConfig,
+    });
+    container = document.createElement('div');
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () => {
+      root?.render(
+        <ThemeProvider theme={darkTheme}>
+          <SettingsPanel open onClose={vi.fn()} />
+        </ThemeProvider>,
+      );
+    });
+
+    const field = container.querySelector<HTMLInputElement>('input[aria-label="Default served context (tokens)"]');
+    expect(field?.value).toBe('65536');
+    await userEvent.clear(field!);
+    await userEvent.type(field!, '16384');
+    const saveButton = [...container.querySelectorAll<HTMLButtonElement>('button')]
+      .find((button) => button.textContent === 'Save changes');
+    await act(async () => {
+      saveButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(saveFullConfig).toHaveBeenCalledOnce();
+    expect(saveFullConfig.mock.calls[0]?.[0]).toMatchObject({
+      inference: { kv_cache_backend: 'default', served_context_tokens: 16384, future_field: 'kept' },
+    });
+    localStorage.removeItem('skulk-settings-sections');
+  });
+
 });
 
 it('preserves an unsaved draft across Devices and commits it only with Save', async () => {
