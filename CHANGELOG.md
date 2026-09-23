@@ -48,6 +48,10 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- A repair re-placement of an exact `POST /instance` placement keeps the
+  window the instance was stamped with instead of falling back to the fleet's
+  served context default.
+
 - Served GGUF models on unified-memory nodes (every Mac, a Strix Halo, a
   GB10 running llama-server) no longer serve a fixed 8192-token window. The
   master sizes the window from the live available memory it admitted the

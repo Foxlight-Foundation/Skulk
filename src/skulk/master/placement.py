@@ -30,6 +30,8 @@ from skulk.shared.models.capabilities import (
 )
 from skulk.shared.models.memory_estimate import (
     KV_CONTEXT_BUDGET_TOKENS,
+    MAX_REQUESTED_CONTEXT_TOKENS,
+    MIN_REQUESTED_CONTEXT_TOKENS,
     backend_offloads_to_vram,
     estimate_shard_footprint,
     instance_context_token_limit,
@@ -315,8 +317,24 @@ def add_instance_to_placements(
         # the preview maximum. Raising it silently can multiply load-time KV
         # allocation and defeat the caller's resource plan.
         ceiling = requested_limit if ceiling is None else min(ceiling, requested_limit)
+    # An exact placement names its window in contextTokenLimit, not as a
+    # request; record the stamped window as the repair intent so a refusal
+    # or download-failure re-placement rebuilds the same window instead of
+    # falling back to the fleet default. A value outside the request bounds
+    # (a tiny memory-limited fit) is left unrecorded; repair then re-derives.
+    repair_intent = command.instance.requested_context_tokens
+    if (
+        repair_intent is None
+        and ceiling is not None
+        and MIN_REQUESTED_CONTEXT_TOKENS <= ceiling <= MAX_REQUESTED_CONTEXT_TOKENS
+    ):
+        repair_intent = ceiling
     instance = command.instance.model_copy(
-        update={"context_token_limit": ceiling, "shard_assignments": assignments}
+        update={
+            "context_token_limit": ceiling,
+            "shard_assignments": assignments,
+            "requested_context_tokens": repair_intent,
+        }
     )
     if not isinstance(instance, LlamaRpcInstance):
         for node_id, runner_id in assignments.node_to_runner.items():
