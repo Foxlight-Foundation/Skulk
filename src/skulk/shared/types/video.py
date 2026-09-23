@@ -13,7 +13,7 @@ API keeps it in its video store until it expires.
 from __future__ import annotations
 
 import re
-from typing import Annotated, Final, Literal, cast
+from typing import Annotated, Final, Literal, cast, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -124,6 +124,27 @@ MAX_VIDEO_STYLES = 4
 
 VIDEO_SHIFT_BOUNDS: Final = (0.01, 100.0)
 """The ``MiniMaxH3SigmaShift`` node's accepted range for either shift."""
+
+VIDEO_DEFAULT_SAMPLER: Final = "res_multistep"
+"""Sampler a render uses when the request names none."""
+
+VIDEO_DEFAULT_SCHEDULER: Final = "simple"
+"""Sigma schedule a render uses when the request names none."""
+
+VIDEO_SCHEDULERS: Final[tuple[str, ...]] = get_args(VideoSchedulerName)
+"""Every schedule a video request may name, in the engine's order."""
+
+VIDEO_DEFAULT_REFERENCE_FIDELITY: Final = "match"
+"""Reference sizing a ``ref2va`` render uses when the request names none."""
+
+VIDEO_REFERENCE_FIDELITIES: Final[tuple[str, ...]] = get_args(VideoReferenceFidelity)
+"""Every reference sizing a ``ref2va`` request may name."""
+
+VIDEO_DEFAULT_CODEC: Final = "h264"
+"""Codec a render is written with when the request names none."""
+
+VIDEO_CODECS: Final[tuple[str, ...]] = get_args(VideoCodecName)
+"""Every codec a video request may name."""
 
 
 def video_sampler_refusal(name: str) -> str | None:
