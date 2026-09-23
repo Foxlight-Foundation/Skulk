@@ -469,6 +469,8 @@ class VideoEngineSettings(CamelCaseModel):
     """Schedule that placed its noise levels (a `BasicScheduler` name)."""
     steps: int = Field(ge=1)
     """Sampling steps the schedule ran."""
+    seed: int | None = Field(default=None, ge=0)
+    """The noise seed the render drew from, resolved when the request gave none."""
     video_shift: float | None = None
     """Video sigma shift applied; ``None`` leaves the loader default."""
     audio_shift: float | None = None
