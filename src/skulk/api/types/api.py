@@ -2398,20 +2398,31 @@ class VideoEngineInfo(BaseModel, frozen=True):
     """The engine settings a render resolved and ran with."""
 
     sampler: str
+    """Sampler that integrated the render (a `KSamplerSelect` name)."""
     scheduler: str
+    """Schedule that placed its noise levels (a `BasicScheduler` name)."""
     steps: int
+    """Sampling steps the schedule ran."""
     video_shift: float | None
+    """Video sigma shift applied; null leaves the loader default."""
     audio_shift: float | None
+    """Audio sigma shift applied; null leaves the loader default."""
     adapter: str | None
     """Adapter companion name, when one was applied."""
     adapter_strength: float | None
+    """Strength the adapter was applied at; null without an adapter."""
     width: int
+    """Output canvas width in pixels."""
     height: int
+    """Output canvas height in pixels."""
     frame_count: int
+    """Frames rendered, on the card's frame grid."""
     reference_fidelity: str | None
     """``match`` or ``max`` for ``ref2va``; null for other modes."""
     styles: list[str]
+    """Style embeddings bound into the prompt, in request order."""
     codec: str
+    """Video codec of the saved container (`h264` or `av1`)."""
 
 
 class VideoStatsInfo(BaseModel, frozen=True):

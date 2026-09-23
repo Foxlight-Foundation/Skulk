@@ -424,20 +424,31 @@ class VideoEngineSettings(CamelCaseModel):
     model_config = ConfigDict(frozen=True)
 
     sampler: str
+    """Sampler that integrated the render (a `KSamplerSelect` name)."""
     scheduler: str
+    """Schedule that placed its noise levels (a `BasicScheduler` name)."""
     steps: int = Field(ge=1)
+    """Sampling steps the schedule ran."""
     video_shift: float | None = None
+    """Video sigma shift applied; ``None`` leaves the loader default."""
     audio_shift: float | None = None
+    """Audio sigma shift applied; ``None`` leaves the loader default."""
     adapter: str | None = None
     """Adapter companion name, when one was applied."""
     adapter_strength: float | None = None
+    """Strength the adapter was applied at; ``None`` without an adapter."""
     width: int = Field(ge=1)
+    """Output canvas width in pixels."""
     height: int = Field(ge=1)
+    """Output canvas height in pixels."""
     frame_count: int = Field(ge=1)
+    """Frames rendered, on the card's frame grid."""
     reference_fidelity: str | None = None
     """``match`` or ``max`` for ``ref2va``; ``None`` for other modes."""
     styles: tuple[str, ...] = ()
+    """Style embeddings bound into the prompt, in request order."""
     codec: str
+    """Video codec of the saved container (`h264` or `av1`)."""
 
 
 class VideoGenerationStats(CamelCaseModel):
