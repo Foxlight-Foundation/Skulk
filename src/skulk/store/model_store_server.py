@@ -204,6 +204,15 @@ async def _require_trusted_registry_peer_record(
         expected_file = None
         if record.artifact_role == "vision_weights" and trusted_card.vision is not None:
             expected_revision = trusted_card.vision.weights_revision
+        elif record.artifact_role == "video_companion":
+            expected_revision = next(
+                (
+                    revision
+                    for companion, revision in trusted_card.external_video_companions()
+                    if companion == expected_repository
+                ),
+                None,
+            )
         elif runtime is not None:
             if record.artifact_role == "mtp_sidecar":
                 expected_revision = runtime.mtp_sidecar_revision
@@ -239,6 +248,7 @@ _ARTIFACT_ROLES: frozenset[str] = frozenset(
         "assistant",
         "served_draft",
         "vllm_draft",
+        "video_companion",
     }
 )
 
@@ -748,6 +758,15 @@ class ModelStoreServer:
             expected_file: str | None = None
             if artifact_role == "vision_weights" and card.vision is not None:
                 expected_revision = card.vision.weights_revision
+            elif artifact_role == "video_companion":
+                expected_revision = next(
+                    (
+                        revision
+                        for companion, revision in card.external_video_companions()
+                        if companion == repository
+                    ),
+                    None,
+                )
             elif card.runtime is not None:
                 runtime = card.runtime
                 if artifact_role == "mtp_sidecar":

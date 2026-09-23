@@ -2846,7 +2846,8 @@ The optional JSON body accepts the following fields:
 - `owner_registry_card_id`: immutable signed identity of that owning base card.
   Omit it only for bundled or custom owner cards without a registry identity.
 - `artifact_role`: one of `base`, `vision_weights`, `mtp_sidecar`, `assistant`,
-  `served_draft`, or `vllm_draft`; defaults to `base`.
+  `served_draft`, `vllm_draft`, or `video_companion` (a video card's externally
+  hosted companion, such as guide preprocessor weights); defaults to `base`.
 
 A complete companion request names the companion repository and immutable
 revision, its role, and its owning card:

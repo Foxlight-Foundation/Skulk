@@ -497,6 +497,51 @@ async def test_store_host_binds_companion_to_full_owning_card(
 
 
 @pytest.mark.anyio
+async def test_store_host_binds_a_video_companion_to_its_pinned_revision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A preprocessor repository downloads only at the revision its owner pins."""
+    payload = _registry_card().model_dump(mode="json")
+    payload["trust_remote_code"] = False
+    payload["tasks"] = ["TextToVideo"]
+    payload["video"] = {
+        "modes": ["t2va"],
+        "companions": [
+            {
+                "kind": "preprocessor",
+                "name": "pose",
+                "role": "pose_estimator",
+                "path": "checkpoints/pose.safetensors",
+                "repo": "org/pose",
+                "revision": "d" * 40,
+            }
+        ],
+    }
+    owner = ModelCard.model_validate(payload)
+
+    async def cards() -> list[ModelCard]:
+        return [owner]
+
+    monkeypatch.setattr(model_store_server_module, "get_all_model_cards", cards)
+
+    async def request(revision: str) -> ModelCard | None:
+        return await ModelStoreServer._require_remote_code_download_approval(
+            "org/pose",
+            None,
+            source_repository="org/pose",
+            source_revision=revision,
+            pinned_gguf=None,
+            owner_model_id=str(owner.model_id),
+            owner_registry_card_id=owner.registry_card_id,
+            artifact_role="video_companion",
+        )
+
+    assert await request("d" * 40) == owner
+    with pytest.raises(web.HTTPConflict, match="disagrees with immutable owning card"):
+        await request("e" * 40)
+
+
+@pytest.mark.anyio
 async def test_store_host_rejects_refreshed_companion_owner_alias_mismatch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

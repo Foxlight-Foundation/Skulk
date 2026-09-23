@@ -366,6 +366,52 @@ def test_revision_qualified_companion_associates_owning_card(tmp_path: Path) -> 
     assert record.owner_card_id == owner.registry_card_id
 
 
+def test_video_companion_repository_associates_only_when_complete(
+    tmp_path: Path,
+) -> None:
+    """A preprocessor repository is its named files, not a model directory."""
+
+    revision = "c" * 40
+    payload = _card().model_dump(mode="json")
+    payload["tasks"] = ["TextToVideo"]
+    payload["video"] = {
+        "modes": ["t2va"],
+        "companions": [
+            {
+                "kind": "preprocessor",
+                "name": "pose",
+                "role": "pose_estimator",
+                "path": "checkpoints/pose.safetensors",
+                "repo": "org/pose",
+                "revision": revision,
+            },
+            {
+                "kind": "preprocessor",
+                "name": "person",
+                "role": "person_detector",
+                "path": "diffusion_models/person.safetensors",
+                "repo": "org/pose",
+                "revision": revision,
+            },
+        ],
+    }
+    owner = ModelCard.model_validate(payload)
+    companion = tmp_path / f"org--pose--revision-{revision}"
+    (companion / "checkpoints").mkdir(parents=True)
+    (companion / "checkpoints" / "pose.safetensors").write_bytes(b"pose")
+    (companion / ".skulk-source-revision").write_text(f"{revision}\n")
+
+    assert associate_installed_card(companion, [owner]) is None
+
+    (companion / "diffusion_models").mkdir()
+    (companion / "diffusion_models" / "person.safetensors").write_bytes(b"person")
+    record = associate_installed_card(companion, [owner])
+
+    assert record is not None
+    assert record.artifact_role == "video_companion"
+    assert record.owner_model_id == str(owner.model_id)
+
+
 def test_served_draft_record_selects_its_own_gguf(tmp_path: Path) -> None:
     """A separate served draft cannot inherit its owner's base quant file."""
 

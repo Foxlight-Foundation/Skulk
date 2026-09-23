@@ -48,6 +48,7 @@ InstalledArtifactRole = Literal[
     "assistant",
     "served_draft",
     "vllm_draft",
+    "video_companion",
 ]
 
 
@@ -449,6 +450,11 @@ def companion_artifact_role(
             return "served_draft"
         if runtime.vllm_spec_draft_repo == repository:
             return "vllm_draft"
+    if any(
+        companion == repository
+        for companion, _ in owner_card.external_video_companions()
+    ):
+        return "video_companion"
     raise ValueError(
         f"{repository} is not a declared companion of {owner_card.model_id}"
     )
@@ -1086,6 +1092,7 @@ def associate_installed_card(
                     ),
                 ]
             )
+        companion_candidates.extend(card.external_video_companions())
         for repository, revision in companion_candidates:
             if repository is None or not _artifact_directory_matches(
                 directory_name, ModelId(repository), revision
@@ -1187,6 +1194,22 @@ def _legacy_companion_artifact_is_complete(
         return any(
             candidate.is_file() and candidate.stat().st_size > 0
             for candidate in model_directory.rglob("*.safetensors")
+        )
+    if artifact_role == "video_companion":
+        # A video companion repository is staged as exactly the files the
+        # card names from it, not as a model directory.
+        expected = [
+            item.path
+            for item in (card.video.companions if card.video is not None else ())
+            if item.repo is not None
+            and _artifact_directory_matches(
+                model_directory.name, ModelId(item.repo), item.revision
+            )
+        ]
+        return bool(expected) and all(
+            (model_directory / path).is_file()
+            and (model_directory / path).stat().st_size > 0
+            for path in expected
         )
     if artifact_role == "served_draft":
         selected_file = (

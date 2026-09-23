@@ -30,6 +30,7 @@ from skulk.shared.models.model_cards import (
     VideoCompanionConfig,
     VideoCompanionKind,
     VideoMode,
+    VideoPreprocessorRole,
     VideoReferenceLimits,
     card_serves_video,
 )
@@ -156,6 +157,53 @@ def test_companion_kind_specific_fields() -> None:
         )
 
 
+def test_preprocessor_companions_name_their_role() -> None:
+    """A preprocessor says what its weights do; no other kind may."""
+    pose = {
+        "kind": "preprocessor",
+        "name": "pose",
+        "role": "pose_estimator",
+        "path": "checkpoints/pose.safetensors",
+        "repo": "other/pose",
+        "revision": REVISION,
+        "license": "mit",
+    }
+    video = _video(companions=[pose])
+    assert video.companions[0].role is VideoPreprocessorRole.PoseEstimator
+    with pytest.raises(ValidationError, match="names its role"):
+        _video(companions=[{**pose, "role": None}])
+    with pytest.raises(ValidationError, match="names its role"):
+        VideoCompanionConfig.model_validate(
+            {"kind": "lora", "name": "l", "path": "loras/l.st", "role": "pose_estimator"}
+        )
+    with pytest.raises(ValidationError, match="at most once"):
+        _video(companions=[pose, {**pose, "name": "pose-two"}])
+    with pytest.raises(ValidationError, match="short lowercase identifier"):
+        _video(companions=[{**pose, "license": "MIT License"}])
+
+
+def test_external_video_companions_are_listed_once_per_repository() -> None:
+    """Every path that fetches, gates or protects companions reads one list."""
+    shared = {"repo": "other/pose", "revision": REVISION}
+    card = _card(
+        video=_video(
+            companions=[
+                {"kind": "preprocessor", "name": "pose", "role": "pose_estimator", "path": "checkpoints/p.st", **shared},
+                {"kind": "preprocessor", "name": "person", "role": "person_detector", "path": "diffusion_models/d.st", **shared},
+                {"kind": "preprocessor", "name": "depth", "role": "depth_estimator", "path": "geometry_estimation/g.st", "repo": "other/depth", "revision": "b" * 40},
+                # A companion in the card's own repository is part of its artifact.
+                {"kind": "lora", "name": "turbo", "path": "loras/t.st", "repo": "example/video-model", "revision": REVISION},
+                {"kind": "embedding", "name": "style", "path": "embeddings/s.st"},
+            ]
+        )
+    )
+    assert card.external_video_companions() == (
+        ("other/pose", REVISION),
+        ("other/depth", "b" * 40),
+    )
+    assert _card().external_video_companions() == ()
+
+
 def test_external_companion_needs_revision_on_signed_cards() -> None:
     lora = VideoCompanionConfig(
         kind=VideoCompanionKind.Lora,
@@ -268,8 +316,20 @@ def test_bundled_video_cards_validate_and_pin_every_byte() -> None:
         assert card.placement.compatible_backends == frozenset({"comfy", "comfy-cuda", "comfy-rocm"})
         bundle_paths = {item.path for item in card.artifact_bundle.files}
         for companion in card.video.companions:
-            assert companion.repo is None
-            assert companion.path in bundle_paths
+            if companion.repo is None:
+                assert companion.path in bundle_paths
+                continue
+            # A companion hosted elsewhere is pinned there, sized, and names
+            # the license its repository declares.
+            assert companion.kind is VideoCompanionKind.Preprocessor
+            assert companion.revision is not None and companion.size_bytes
+            assert companion.license is not None
+        roles = {
+            companion.role
+            for companion in card.video.companions
+            if companion.role is not None
+        }
+        assert roles == set(VideoPreprocessorRole)
         for component in card.components or []:
             assert any(item.path.startswith(component.component_path) for item in card.artifact_bundle.files)
         raw_bundle = cast("dict[str, object]", raw["artifact_bundle"])

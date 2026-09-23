@@ -17,7 +17,7 @@ import hashlib
 import os
 import shutil
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Final, cast, final
 
 from loguru import logger
@@ -163,6 +163,36 @@ def _model_directory(card: ModelCard) -> Path:
     root = card.artifact_bundle.root if card.artifact_bundle is not None else None
     load_directory = build_model_path(ModelId(card.model_id), card.source_revision, root)
     return artifact_install_directory(load_directory, root)
+
+
+def _companion_directories(card: ModelCard) -> tuple[Path, ...]:
+    """The staged directory of each companion repository hosted outside the card's.
+
+    Every file the card names from such a repository must be present: the
+    downloader fetches them with the card and treats them as load-bearing, so
+    one missing means an incomplete install, reported by name rather than
+    left for ComfyUI to fail on mid-render.
+    """
+    from skulk.download.download_utils import build_sidecar_path
+
+    if card.video is None:
+        return ()
+    roots: list[Path] = []
+    for repository, revision in card.external_video_companions():
+        for item in card.video.companions:
+            if item.repo is None or str(item.repo) != repository or item.revision != revision:
+                continue
+            found = build_sidecar_path(ModelId(repository), item.path, revision)
+            if found is None:
+                raise RuntimeError(
+                    f"{card.model_id}: companion {item.name} ({repository} {item.path}) is not staged"
+                )
+            # The file keeps its repository-relative path, so the staged root
+            # sits as many levels up as that path is deep.
+            root = found.parents[len(PurePosixPath(item.path).parts) - 1]
+            if root not in roots:
+                roots.append(root)
+    return tuple(roots)
 
 
 def _sha256_and_size(path: Path) -> tuple[str, int]:
@@ -357,7 +387,7 @@ class Runner(ServedConcurrentDispatch):
                 raise RuntimeError(f"{self.model_id}: {folder}/{name} is missing from {model_dir}")
         self.work_dir.mkdir(parents=True, exist_ok=True)
         extra_paths = self.work_dir / "extra_model_paths.yaml"
-        extra_paths.write_text(extra_model_paths_yaml(model_dir))
+        extra_paths.write_text(extra_model_paths_yaml(model_dir, _companion_directories(self.card)))
         server = ComfyServer(
             interpreter=interpreter,
             root=root,
