@@ -854,7 +854,13 @@ bound onto the node graph ComfyUI's own MiniMax H3 workflow templates use:
 the loaders, `MiniMaxH3ImageToVideo` for text and keyframe modes or
 `MiniMaxH3ReferenceToVideo` for numbered image, video, and audio references,
 an optional turbo adapter with its sigma shifts, the `res_multistep` sampler
-on a `simple` schedule, both decoders, and the muxer. References are the
+on a `simple` schedule, both decoders, and the muxer. Those template values
+are defaults: a request may name the sampler (any the pinned ComfyUI offers
+except the ones that cannot serve distilled H3), the schedule, either sigma
+shift, `ref2va` reference fidelity, the card's style embeddings (bound as
+`embedding:` tokens ahead of the prompt) and the output codec, and the
+finished job reports every setting it resolved in `stats.engine`, so a take
+records what produced it. References are the
 files the worker already verified, named by their path below the input
 directory. The prompt carries a Skulk-minted id and client id so the
 WebSocket delivers only this render's `executing`, `progress_state`, and

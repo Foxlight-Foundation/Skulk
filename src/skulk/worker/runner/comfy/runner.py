@@ -419,6 +419,7 @@ class Runner(ServedConcurrentDispatch):
             steps=render.plan.steps,
             seconds_per_step=result.sampling_seconds / max(1, steps_done),
             total_generation_time=time.monotonic() - started,
+            engine=render.engine_settings(),
         )
         self.event_sender.send(
             ChunkGenerated(

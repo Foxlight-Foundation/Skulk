@@ -35,7 +35,12 @@ from skulk.shared.types.memory import Memory
 from skulk.shared.types.state import State
 from skulk.shared.types.tasks import TaskId, TaskStatus
 from skulk.shared.types.tasks import VideoGeneration as VideoGenerationTask
-from skulk.shared.types.video import VideoGenerationTaskParams, VideoOutputManifest
+from skulk.shared.types.video import (
+    VideoEngineSettings,
+    VideoGenerationStats,
+    VideoGenerationTaskParams,
+    VideoOutputManifest,
+)
 from skulk.shared.types.worker.instances import InstanceId
 from skulk.utils.channels import channel
 
@@ -79,6 +84,18 @@ def _card() -> ModelCard:
                     "max_videos": 1,
                     "max_audio_clips": 1,
                 },
+                "companions": [
+                    {
+                        "kind": "embedding",
+                        "name": "bullet_time",
+                        "path": "embeddings/bullet_time.safetensors",
+                    },
+                    {
+                        "kind": "embedding",
+                        "name": "dark_magic",
+                        "path": "embeddings/dark_magic.safetensors",
+                    },
+                ],
             }
         ),
     )
@@ -334,7 +351,12 @@ def test_retrieve_reports_failure_detail(monkeypatch: pytest.MonkeyPatch) -> Non
     assert body["error"] == {"code": "job_failed", "message": "the render crashed"}
 
 
-def _complete_job(api: Any, identifier: str, payload: bytes) -> None:
+def _complete_job(
+    api: Any,
+    identifier: str,
+    payload: bytes,
+    stats: VideoGenerationStats | None = None,
+) -> None:
     command_id = CommandId(identifier)
     digest = hashlib.sha256(payload).hexdigest()
     api._video_jobs.create(_job(identifier, created_at=1))
@@ -359,7 +381,11 @@ def _complete_job(api: Any, identifier: str, payload: bytes) -> None:
         audio_channels=2,
     )
     api._video_jobs.update(
-        command_id, render_finished=True, output=manifest, media_delivered=True
+        command_id,
+        render_finished=True,
+        output=manifest,
+        media_delivered=True,
+        stats=stats,
     )
     api._video_jobs.settle(command_id)
     api._video_jobs.update(command_id, expires_at=int(stored.expires_at))
@@ -911,3 +937,110 @@ def test_create_multipart_requires_a_declared_length(
     assert response.status_code == 411
     assert "Content-Length" in response.json()["error"]["message"]
     api._send.assert_not_called()
+
+
+
+def test_create_forwards_engine_settings_from_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _make_api(monkeypatch)
+    client = TestClient(api.app)
+    response = client.post(
+        "/v1/videos",
+        json={
+            "model": str(MODEL),
+            "prompt": "x",
+            "sampler": "dpmpp_2m",
+            "scheduler": "beta",
+            "video_shift": 9,
+            "audio_shift": 2.5,
+            "styles": ["bullet_time", "dark_magic"],
+            "codec": "av1",
+        },
+    )
+    assert response.status_code == 200, response.text
+    params = _sent_command(api).task_params
+    assert (params.sampler, params.scheduler, params.codec) == ("dpmpp_2m", "beta", "av1")
+    assert (params.video_shift, params.audio_shift) == (9.0, 2.5)
+    assert params.styles == ("bullet_time", "dark_magic")
+
+
+def test_create_reads_multipart_styles_as_one_comma_separated_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _make_api(monkeypatch)
+    client = TestClient(api.app)
+    response = client.post(
+        "/v1/videos",
+        data={
+            "model": str(MODEL),
+            "prompt": "reference",
+            "styles": "bullet_time, dark_magic",
+            "reference_fidelity": "max",
+        },
+        files=[("reference", ("face.png", b"\x89PNG face", "image/png"))],
+    )
+    assert response.status_code == 200, response.text
+    params = _sent_command(api).task_params
+    assert params.styles == ("bullet_time", "dark_magic")
+    assert params.reference_fidelity == "max"
+
+
+@pytest.mark.parametrize(
+    ("extra", "fragment"),
+    [
+        ({"styles": ["nope"]}, "no style embedding named 'nope'"),
+        ({"sampler": "dpm_fast"}, "chooses its own step count"),
+        ({"sampler": "euler_cfg_pp"}, "classifier-free guidance"),
+        ({"scheduler": "turbo"}, "scheduler"),
+        ({"reference_fidelity": "max"}, "ref2va only"),
+        ({"codec": "vp9"}, "codec"),
+        ({"video_shift": 0}, "video_shift"),
+    ],
+)
+def test_create_refuses_unusable_engine_settings(
+    monkeypatch: pytest.MonkeyPatch, extra: dict[str, object], fragment: str
+) -> None:
+    api = _make_api(monkeypatch)
+    client = TestClient(api.app)
+    response = client.post(
+        "/v1/videos", json={"model": str(MODEL), "prompt": "x", **extra}
+    )
+    assert response.status_code == 400, response.text
+    assert fragment in response.json()["error"]["message"]
+    api._send.assert_not_called()
+
+
+def test_retrieve_reports_what_the_render_ran_with(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _make_api(monkeypatch)
+    client = TestClient(api.app)
+    engine = VideoEngineSettings(
+        sampler="dpmpp_2m",
+        scheduler="beta",
+        steps=8,
+        video_shift=12.0,
+        audio_shift=3.0,
+        adapter="turbo_fl2v_8step",
+        adapter_strength=1.0,
+        width=1344,
+        height=768,
+        frame_count=124,
+        styles=("bullet_time",),
+        codec="h264",
+    )
+    _complete_job(
+        api,
+        "job-engine",
+        b"clip-bytes",
+        stats=VideoGenerationStats(
+            steps=8, seconds_per_step=40.0, total_generation_time=400.0, engine=engine
+        ),
+    )
+    body = client.get("/v1/videos/job-engine").json()
+    reported = body["stats"]["engine"]
+    assert reported["sampler"] == "dpmpp_2m" and reported["scheduler"] == "beta"
+    assert reported["adapter"] == "turbo_fl2v_8step" and reported["steps"] == 8
+    assert reported["styles"] == ["bullet_time"] and reported["codec"] == "h264"
+    assert reported["reference_fidelity"] is None

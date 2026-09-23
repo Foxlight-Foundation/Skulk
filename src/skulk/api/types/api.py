@@ -24,7 +24,15 @@ from skulk.shared.models.registry import (
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.text_generation import ReasoningEffort
-from skulk.shared.types.video import MAX_VIDEO_PROMPT_CHARS, VideoJobStatus
+from skulk.shared.types.video import (
+    MAX_VIDEO_PROMPT_CHARS,
+    MAX_VIDEO_STYLES,
+    VIDEO_SHIFT_BOUNDS,
+    VideoCodecName,
+    VideoJobStatus,
+    VideoReferenceFidelity,
+    VideoSchedulerName,
+)
 from skulk.shared.types.worker.instances import Instance, InstanceId, InstanceMeta
 from skulk.shared.types.worker.shards import Sharding, ShardMetadata
 from skulk.store.installed_cards import InstalledArtifactRole, InstalledCardRecord
@@ -676,6 +684,18 @@ class VideoAdapterSection(BaseModel):
     strength: float | None = Field(default=None, description="Default adapter strength.")
 
 
+class VideoStyleSection(BaseModel):
+    """One style embedding a video card ships, selectable per request."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    name: str = Field(description="Style name accepted by the video job `styles` field.")
+    modes: list[VideoModeName] = Field(
+        default_factory=list,
+        description="Generation modes the style is declared for; empty means every mode.",
+    )
+
+
 class VideoReferenceLimitsSection(BaseModel):
     """Per-kind reference attachment limits for reference-to-video cards."""
 
@@ -722,6 +742,10 @@ class VideoCapabilitySection(BaseModel):
     adapters: list[VideoAdapterSection] = Field(
         default_factory=list, description="Named adapters (LoRAs) selectable through the job `lora` field."
     )
+    styles: list[VideoStyleSection] = Field(
+        default_factory=list,
+        description="Style embeddings selectable through the job `styles` field.",
+    )
 
     @classmethod
     def from_model_card(cls, model_card: ModelCard) -> "VideoCapabilitySection | None":
@@ -767,6 +791,14 @@ class VideoCapabilitySection(BaseModel):
                 )
                 for companion in config.companions
                 if companion.kind == VideoCompanionKind.Lora
+            ],
+            styles=[
+                VideoStyleSection(
+                    name=companion.name,
+                    modes=cast("list[VideoModeName]", [mode.value for mode in companion.modes]),
+                )
+                for companion in config.companions
+                if companion.kind == VideoCompanionKind.Embedding
             ],
         )
 
@@ -2317,6 +2349,33 @@ class VideoCreateRequest(BaseModel):
     """Adapter strength override."""
     audio: bool = True
     """Whether the output must carry the model's synchronized audio track."""
+    sampler: str | None = None
+    """Sampler name from the engine's list; omitted keeps ``res_multistep``.
+    Samplers that cannot serve distilled H3 are refused by name."""
+    scheduler: VideoSchedulerName | None = None
+    """Sigma schedule; omitted keeps ``simple``."""
+    video_shift: float | None = Field(
+        default=None, ge=VIDEO_SHIFT_BOUNDS[0], le=VIDEO_SHIFT_BOUNDS[1]
+    )
+    """Video sigma shift; omitted takes the adapter's, else the card's."""
+    audio_shift: float | None = Field(
+        default=None, ge=VIDEO_SHIFT_BOUNDS[0], le=VIDEO_SHIFT_BOUNDS[1]
+    )
+    """Audio sigma shift; omitted takes the adapter's, else the card's."""
+    reference_fidelity: VideoReferenceFidelity | None = None
+    """``ref2va`` only: ``match`` (default) or ``max`` reference image sizing."""
+    styles: list[str] = Field(default_factory=list, max_length=MAX_VIDEO_STYLES)
+    """Card style embeddings to apply by name. A multipart form sends them
+    comma-separated in one field."""
+    codec: VideoCodecName | None = None
+    """Output video codec in MP4; omitted keeps ``h264``."""
+
+    @field_validator("styles", mode="before")
+    @classmethod
+    def _split_styles(cls, value: object) -> object:
+        if isinstance(value, str):
+            return [part.strip() for part in value.split(",") if part.strip()]
+        return value
 
 
 class VideoError(BaseModel, frozen=True):
@@ -2359,6 +2418,39 @@ class VideoOutputInfo(BaseModel, frozen=True):
     """Size of the thumbnail in bytes when one is available."""
 
 
+class VideoEngineInfo(BaseModel, frozen=True):
+    """The engine settings a render resolved and ran with."""
+
+    sampler: str
+    """Sampler that integrated the render (a `KSamplerSelect` name)."""
+    scheduler: str
+    """Schedule that placed its noise levels (a `BasicScheduler` name)."""
+    steps: int
+    """Sampling steps the schedule ran."""
+    seed: int | None = None
+    """The noise seed the render drew from, resolved when the request gave none."""
+    video_shift: float | None
+    """Video sigma shift applied; null leaves the loader default."""
+    audio_shift: float | None
+    """Audio sigma shift applied; null leaves the loader default."""
+    adapter: str | None
+    """Adapter companion name, when one was applied."""
+    adapter_strength: float | None
+    """Strength the adapter was applied at; null without an adapter."""
+    width: int
+    """Output canvas width in pixels."""
+    height: int
+    """Output canvas height in pixels."""
+    frame_count: int
+    """Frames rendered, on the card's frame grid."""
+    reference_fidelity: str | None
+    """``match`` or ``max`` for ``ref2va``; null for other modes."""
+    styles: list[str]
+    """Style embeddings bound into the prompt, in request order."""
+    codec: str
+    """Video codec of the saved container (`h264` or `av1`)."""
+
+
 class VideoStatsInfo(BaseModel, frozen=True):
     """Runner-reported timing for one render."""
 
@@ -2370,6 +2462,8 @@ class VideoStatsInfo(BaseModel, frozen=True):
     """Wall time from dispatch to a finished container."""
     peak_memory_bytes: int | None
     """Peak accelerator memory when the engine reports one."""
+    engine: VideoEngineInfo | None = None
+    """What the render ran with; null for renders from an older engine."""
 
 
 class VideoResource(BaseModel, frozen=True):

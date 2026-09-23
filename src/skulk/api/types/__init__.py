@@ -112,6 +112,7 @@ from .api import VideoAdapterSection as VideoAdapterSection
 from .api import VideoCapabilitySection as VideoCapabilitySection
 from .api import VideoCreateRequest as VideoCreateRequest
 from .api import VideoDeletedResponse as VideoDeletedResponse
+from .api import VideoEngineInfo as VideoEngineInfo
 from .api import VideoError as VideoError
 from .api import VideoListResponse as VideoListResponse
 from .api import VideoModeName as VideoModeName
