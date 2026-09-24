@@ -12,11 +12,14 @@ import pytest
 from skulk.download import download_utils
 from skulk.shared.constants import RESOURCES_DIR
 from skulk.shared.models.model_cards import ModelCard, ModelId
+from skulk.shared.types.chunks import ErrorChunk
 from skulk.shared.types.common import CommandId, NodeId
+from skulk.shared.types.events import ChunkGenerated, Event
 from skulk.shared.types.music import MusicGenerationTaskParams
 from skulk.shared.types.tasks import MusicGeneration
 from skulk.shared.types.worker.instances import InstanceId
 from skulk.shared.types.worker.runners import RunnerRunning
+from skulk.utils.channels import MpSender
 from skulk.worker.runner.audio_cpp.runner import Runner, model_directory
 from skulk.worker.runner.audio_cpp.server import AudioCppServer
 
@@ -52,10 +55,11 @@ def test_ace_step_server_uses_nested_loader_root(
     ) == artifact
 
 
-def test_cancelled_generation_restores_server_before_next_admission(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("outcome", ["cancelled", "oversized"])
+def test_request_stopping_server_restores_it_before_next_admission(
+    monkeypatch: pytest.MonkeyPatch, outcome: str,
 ) -> None:
-    """A queued job can run after cancellation kills the active sidecar."""
+    """A queued job survives cancellation or an oversized response."""
     first_alive = True
     first = cast(
         AudioCppServer,
@@ -71,6 +75,10 @@ def test_cancelled_generation_restores_server_before_next_admission(
     runner._inflight = 1
     runner.current_status = RunnerRunning()
     runner.model_id = ModelId("audio-cpp/test-music")
+    events: list[Event] = []
+    runner.event_sender = cast(
+        MpSender[Event], cast(object, SimpleNamespace(send=events.append)),
+    )
     task = MusicGeneration(
         instance_id=InstanceId(), command_id=CommandId(), owner_node=NodeId("api"),
         task_params=MusicGenerationTaskParams(
@@ -82,7 +90,7 @@ def test_cancelled_generation_restores_server_before_next_admission(
     def cancelled(_runner: Runner, _id: object) -> bool:
         nonlocal cancellation_checks
         cancellation_checks += 1
-        return cancellation_checks > 1
+        return outcome == "cancelled" and cancellation_checks > 1
 
     monkeypatch.setattr(Runner, "_is_cancelled", cancelled)
 
@@ -91,6 +99,8 @@ def test_cancelled_generation_restores_server_before_next_admission(
         first_alive = False
         # The dispatch loop can poll here while the active request unwinds.
         runner._ensure_server_alive()
+        if outcome == "oversized":
+            raise ValueError("audio.cpp response exceeds the 90 MiB envelope limit")
 
     def load_model(_runner: Runner) -> None:
         runner.server = second
@@ -101,3 +111,7 @@ def test_cancelled_generation_restores_server_before_next_admission(
     runner._inflight = 0
     runner._ensure_server_alive()
     assert runner.server is second
+    if outcome == "oversized":
+        assert len(events) == 1
+        assert isinstance(events[0], ChunkGenerated)
+        assert isinstance(events[0].chunk, ErrorChunk)

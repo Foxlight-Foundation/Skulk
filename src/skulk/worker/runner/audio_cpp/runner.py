@@ -224,12 +224,12 @@ class Runner(ServedConcurrentDispatch):
             self._teardown_server()
             raise
         if (
-            self._is_cancelled(task.task_id)
-            and not isinstance(self.current_status, (RunnerShuttingDown, RunnerShutdown))
+            not isinstance(self.current_status, (RunnerShuttingDown, RunnerShutdown))
             and not server.alive()
         ):
-            # Restore readiness before the completion callback releases the
-            # permit to a generation already admitted behind this one.
+            # Cancellation and an oversized response both terminate the
+            # sidecar. Restore it before the completion callback releases the
+            # serial permit to another admitted generation.
             self._teardown_server()
             self._load_model()
 
