@@ -28,10 +28,13 @@ jobs:
         include:
           - runner: macos-15
             platform: macos-arm64
+            openmp: OFF
           - runner: ubuntu-22.04
             platform: linux-amd64
+            openmp: ON
           - runner: ubuntu-22.04-arm
             platform: linux-arm64
+            openmp: ON
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -59,6 +62,7 @@ jobs:
             -DAUDIOCPP_BUILD_SERVER_FRONTENDS=OFF \
             -DAUDIOCPP_DEPLOYMENT_BUILD=OFF \
             -DENGINE_ENABLE_NATIVE_CPU=OFF \
+            -DENGINE_ENABLE_OPENMP=${{ matrix.openmp }} \
             -DENGINE_ENABLE_CUDA=OFF \
             -DENGINE_ENABLE_HIP=OFF \
             -DENGINE_ENABLE_VULKAN=OFF
