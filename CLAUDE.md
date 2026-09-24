@@ -272,12 +272,16 @@ its runner disappears. CUDA, ROCm, and
 Vulkan audio.cpp lanes admit against GPU memory in API preflight and placement;
 Metal and CPU use system RAM. Preparation and exact music placement check the
 full estimated footprint against the corresponding memory pool and reject RPC shaped and
-multi-runner instances. `MusicGeneration` tasks
+multi-runner instances. The exact API route skips its generic RAM-only
+precheck for music. `MusicGeneration` tasks
 produce a bounded `MusicChunk` manifest, while WAV bytes use `OUTPUT_MEDIA`
 purpose `music` and a separate node-local 24-hour store. The music API exposes
 asynchronous `/v1/music` jobs with cancellation and content retrieval.
 The runner restores a stopped sidecar after request failures before releasing
 the serial permit to another admitted job.
+Generic `/v1/cancel/{command_id}` also uses music-specific cancellation and
+output cleanup. An ordered terminal task starts a short terminal-frame
+deadline, so a dropped `MusicChunk` cannot retain an active job indefinitely.
 A model card's `placement.compatible_backends` selects which engine serves it
 (`bootstrap._resolve_text_engine`, backend tags in `src/skulk/shared/backends.py`):
 - **`mlx`** (`worker/engines/mlx/`): in-process MLX on Apple Silicon; owns the

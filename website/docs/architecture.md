@@ -983,7 +983,8 @@ its runner exits unexpectedly. CUDA, ROCm, and Vulkan music lanes consume the re
 GPU memory budget in API preflight and placement; Metal uses Apple unified
 memory and CPU uses system RAM. Preparation and exact placement check the
 complete estimated music footprint against the applicable pool, including the system-memory
-working-set ceiling, before creating one runner shard on one node.
+working-set ceiling, before creating one runner shard on one node. Exact music
+mounts use that backend-specific check without the generic RAM-only precheck.
 Ordinary signed placement selects only ready backends. A `MusicGeneration` command creates a distinct
 task; its runner owns one loopback audio.cpp server per mounted model and emits
 only a terminal `MusicChunk` manifest through the control path. Bounded WAV
@@ -992,7 +993,8 @@ settles the job after both manifest and verified media arrive. The node-local
 music store retains completed content for up to 24 hours. Late task events
 cannot restore output-source state for terminal jobs. The runner restores
 its sidecar after a request transport failure before admitting queued work.
-A session reset
+If ordered task termination arrives without a terminal `MusicChunk`, a short
+grace deadline fails the job and releases its admission slot. A session reset
 closes in-flight music streams, and a create request waiting on that session
 fails instead of dispatching a command into the replacement session.
 

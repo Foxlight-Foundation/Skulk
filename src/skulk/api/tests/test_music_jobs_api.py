@@ -353,11 +353,11 @@ async def test_exact_music_instance_prepares_its_specified_node_before_send(
     def no_remote_code_approvals(_api: API) -> frozenset[str]:
         return frozenset()
 
-    def sufficient_memory(_api: API) -> Memory:
-        return Memory.from_gb(10)
+    def wrong_memory_pool(_api: API) -> Memory:
+        raise AssertionError("music admission must use its selected backend pool")
 
     monkeypatch.setattr(API, "_cluster_remote_code_approvals", no_remote_code_approvals)
-    monkeypatch.setattr(API, "_calculate_total_available_memory", sufficient_memory)
+    monkeypatch.setattr(API, "_calculate_total_available_memory", wrong_memory_pool)
 
     await api.create_instance(CreateInstanceParams(instance=instance))
     api._prepare_music_engine_for_mount.assert_awaited_once_with(
@@ -495,6 +495,7 @@ def _api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
 
     api._load_authorized_model_card = AsyncMock(return_value=_card())
     api.app.post("/v1/music")(api.create_music)
+    api.app.post("/v1/cancel/{command_id}")(api.cancel_command)
     api.app.get("/v1/music")(api.list_music)
     api.app.get("/v1/music/{music_id}")(api.retrieve_music)
     api.app.get("/v1/music/{music_id}/content")(api.music_content)
@@ -721,6 +722,73 @@ def test_cancel_discards_partial_music_output(
     assert response.json()["status"] == "cancelled"
     assert isinstance(api._send.call_args.args[0], TaskCancelled)
     assert api._music_store.get(command_id, "music") is None
+
+
+def test_generic_cancel_routes_music_through_job_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The documented generic cancel route also stops a music generation."""
+    api = _api(tmp_path, monkeypatch)
+    command_id = CommandId("music-generic-cancel")
+    _job(api, command_id, _wav())
+    sender, _receiver = channel[MusicChunk]()
+    api._music_generation_queues[command_id] = sender
+
+    response = TestClient(api.app).post(f"/v1/cancel/{command_id}")
+    assert response.status_code == 200
+    assert response.json()["command_id"] == str(command_id)
+    assert api._music_jobs.get(command_id).status == "cancelled"
+    assert isinstance(api._send.call_args.args[0], TaskCancelled)
+
+
+def test_completed_music_task_without_terminal_frame_expires(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lost DATA terminal cannot hold an active admission slot forever."""
+    api = _api(tmp_path, monkeypatch)
+    command_id = CommandId("music-terminal-lost")
+    _job(api, command_id, _wav())
+    task = MusicGenerationTask(
+        instance_id=InstanceId(), command_id=command_id, owner_node=api.node_id,
+        task_params=MusicGenerationTaskParams(
+            model=str(MODEL), prompt="piano", seconds=20,
+        ),
+    )
+    api._note_music_task_terminal(task)
+    deadline = api._music_job_media_deadlines[command_id]
+    api._expire_music_job_deadlines(deadline + 1)
+    job = api._music_jobs.get(command_id)
+    assert job is not None and job.status == "failed"
+    assert "terminal frame" in (job.error or "")
+    assert api._music_jobs.active_count() == 0
+
+
+async def test_music_terminal_frame_replaces_short_completion_grace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A delayed terminal frame still grants the full WAV transfer window."""
+    api = _api(tmp_path, monkeypatch)
+    command_id = CommandId("music-terminal-delayed")
+    data = _wav()
+    _job(api, command_id, data)
+    task = MusicGenerationTask(
+        instance_id=InstanceId(), command_id=command_id, owner_node=api.node_id,
+        task_params=MusicGenerationTaskParams(
+            model=str(MODEL), prompt="piano", seconds=20,
+        ),
+    )
+    api._note_music_task_terminal(task)
+    short_deadline = api._music_job_media_deadlines[command_id]
+    sender, receiver = channel[MusicChunk]()
+    api._music_generation_queues[command_id] = sender
+    sender.send_nowait(MusicChunk(
+        model=MODEL, finish_reason="stop", output=_manifest(data),
+    ))
+    sender.close()
+    await api._drain_music_job(command_id, receiver)
+    assert api._music_job_media_deadlines[command_id] > short_deadline
+    api._expire_music_job_deadlines(short_deadline + 1)
+    assert api._music_jobs.get(command_id).status == "in_progress"
 
 
 async def test_music_cancel_marker_cannot_outlive_terminal_stream(

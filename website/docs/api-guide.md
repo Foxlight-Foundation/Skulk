@@ -1768,6 +1768,9 @@ both the runner's terminal report and the verified WAV arrive. If delivery
 does not finish within ten minutes, it fails. In-flight jobs become failed
 after an API restart; previously completed content remains available until
 its expiration.
+If the ordered task terminates but its final music frame is lost, the API
+fails the job after a 45-second grace and the next 15-second sweep; it does
+not retain an active job indefinitely.
 
 ### Download music
 
@@ -1782,6 +1785,8 @@ pressure may evict older content sooner.
 **POST** `/v1/music/{music_id}/cancel` cancels a queued or running job,
 terminates its model server if it is generating, and removes partial output.
 Calling it on a terminal job returns that job unchanged.
+`POST /v1/cancel/{music_id}` also cancels an active music job, including one
+whose WAV is still being delivered.
 
 **DELETE** `/v1/music/{music_id}` cancels a live job, removes its WAV, and
 forgets its record. It returns
@@ -1826,10 +1831,10 @@ curl -X POST http://localhost:52415/bench/chat/completions \
 **POST** `/v1/cancel/{command_id}`
 
 Requests cancellation of one in-flight generation command by its command ID.
-It covers text generation, image generation, embeddings, and speech synthesis
-or transcription commands owned by the API node you call: Skulk closes the
-local response stream and sends a task cancellation so the serving runner
-stops instead of generating into the void.
+It covers text generation, image generation, embeddings, speech synthesis or
+transcription, and active video or music jobs owned by the API node you call.
+Skulk closes the local response stream or job, stops an in-flight runner, and
+aborts any unfinished media delivery.
 
 Finding the command ID:
 
@@ -2386,8 +2391,10 @@ returns HTTP 400 with `X-Skulk-Placement-Failure:
 model_card_identity_mismatch`, and no instance state is created.
 For a text-to-music instance, the placement must name exactly one node. The API
 prepares audio.cpp on that node and verifies a ready build and signed support
-claim before accepting the command. If the node cannot be prepared, the request
-returns HTTP 503 with the node's preparation or compatibility diagnostic.
+claim before accepting the command. Music admission checks the selected
+backend's memory pool; GPU lanes use their accelerator memory budget. If the
+node cannot be prepared, the request returns HTTP 503 with the node's
+preparation or compatibility diagnostic.
 
 Persist the submitted instance identity before sending. HTTP acceptance is not
 download or runner readiness. If the response is lost, reconcile that exact ID

@@ -1147,6 +1147,7 @@ _VISION_MEDIA_PENDING_TOTAL_BYTES = 1024 * 1024 * 1024
 # A render's terminal frame and its container arrive on different planes; a
 # job waits this long for the second half before it is failed.
 _VIDEO_JOB_MEDIA_TIMEOUT_SECONDS = 10 * 60.0
+_MUSIC_TERMINAL_FRAME_GRACE_SECONDS = 45.0
 # Output frames that overtake their open frame on the reordering fallback are
 # held per artifact until the open arrives; more than this fails the transfer.
 _OUTPUT_MEDIA_EARLY_PACKETS = 64
@@ -3951,14 +3952,15 @@ class API:
             await self._prepare_music_engine_for_mount(
                 model_card, set(), required_nodes=music_nodes,
             )
-        required_memory = model_card.storage_size
-        available_memory = self._calculate_total_available_memory()
+        if ModelTask.TextToMusic not in model_card.tasks:
+            required_memory = model_card.storage_size
+            available_memory = self._calculate_total_available_memory()
 
-        if required_memory > available_memory:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Insufficient memory to create instance. Required: {required_memory.in_gb:.1f}GB, Available: {available_memory.in_gb:.1f}GB",
-            )
+            if required_memory > available_memory:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Insufficient memory to create instance. Required: {required_memory.in_gb:.1f}GB, Available: {available_memory.in_gb:.1f}GB",
+                )
 
         command = CreateInstance(
             instance=instance,
@@ -5017,6 +5019,12 @@ class API:
 
     async def cancel_command(self, command_id: CommandId) -> CancelCommandResponse:
         """Cancel an active command by closing its stream and notifying workers."""
+        music_job = self._music_jobs.get(command_id)
+        if music_job is not None and not music_job.is_terminal:
+            await self._cancel_music_job(command_id)
+            return CancelCommandResponse(
+                message="Command cancelled.", command_id=command_id,
+            )
         sender = (
             self._text_generation_queues.get(command_id)
             or self._image_generation_queues.get(command_id)
@@ -10893,6 +10901,8 @@ class API:
                     released_task = self.state.tasks.get(event.task_id)
                 if isinstance(released_task, task_types.RealtimeAudioTranscription):
                     self._mark_realtime_task_released(released_task.command_id)
+                if released_task is not None:
+                    self._note_music_task_terminal(released_task)
 
                 if isinstance(
                     event,
@@ -11916,8 +11926,11 @@ class API:
                         command_id, status="in_progress", render_finished=True,
                         output=chunk.output,
                     )
-                    self._music_job_media_deadlines.setdefault(
-                        command_id, time.monotonic() + _VIDEO_JOB_MEDIA_TIMEOUT_SECONDS,
+                    # A terminal task event may have started the short
+                    # missing-terminal-frame grace. The actual terminal frame
+                    # starts the full WAV-transfer deadline instead.
+                    self._music_job_media_deadlines[command_id] = (
+                        time.monotonic() + _VIDEO_JOB_MEDIA_TIMEOUT_SECONDS
                     )
                     self._settle_music_job(command_id)
                     break
@@ -11953,6 +11966,36 @@ class API:
         settled = self._music_jobs.settle(command_id)
         if settled is not None and settled.is_terminal:
             self._release_music_job_buffers(command_id)
+
+    def _note_music_task_terminal(self, task: task_types.Task) -> None:
+        """Bound the wait for a DATA terminal frame after ordered task termination."""
+
+        if not isinstance(task, task_types.MusicGeneration):
+            return
+        job = self._music_jobs.get(task.command_id)
+        if job is None or job.is_terminal or job.render_finished:
+            return
+        deadline = time.monotonic() + _MUSIC_TERMINAL_FRAME_GRACE_SECONDS
+        prior = self._music_job_media_deadlines.get(task.command_id)
+        self._music_job_media_deadlines[task.command_id] = (
+            min(prior, deadline) if prior is not None else deadline
+        )
+
+    def _expire_music_job_deadlines(self, now: float) -> None:
+        """Fail music jobs whose terminal frame or verified WAV never arrived."""
+
+        for command_id, deadline in list(self._music_job_media_deadlines.items()):
+            if deadline > now:
+                continue
+            self._music_job_media_deadlines.pop(command_id, None)
+            job = self._music_jobs.get(command_id)
+            if job is not None and not job.is_terminal:
+                self._finish_music_job(
+                    command_id,
+                    "the finished music was never delivered to the API node"
+                    if job.render_finished
+                    else "the music terminal frame was never delivered to the API node",
+                )
 
     async def _cancel_video_job(self, command_id: CommandId) -> None:
         """Stop one live job in whichever phase it is in.
@@ -12615,15 +12658,7 @@ class API:
                     "the finished video was never delivered to the API node",
                 )
             self._video_store.cleanup_expired()
-            for command_id, deadline in list(self._music_job_media_deadlines.items()):
-                if deadline > now:
-                    continue
-                self._music_job_media_deadlines.pop(command_id, None)
-                job = self._music_jobs.get(command_id)
-                if job is not None and not job.is_terminal:
-                    self._finish_music_job(
-                        command_id, "the finished music was never delivered to the API node"
-                    )
+            self._expire_music_job_deadlines(now)
             self._music_store.cleanup_expired()
 
     async def _apply_vision_media_transport(self) -> None:
