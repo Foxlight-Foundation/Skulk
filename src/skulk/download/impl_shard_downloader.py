@@ -31,6 +31,7 @@ from skulk.store.installed_cards import (
     InstalledArtifactRole,
     build_installed_card_record,
     companion_artifact_role,
+    companion_owner_matches,
     read_installed_card_with_fallback,
     write_installed_card,
 )
@@ -69,15 +70,10 @@ def _replacement_identity_for_installed_card(
             and card_matches
         )
     else:
-        owner_matches = (
-            record.owner_card_id == model_card.registry_card_id
-            if model_card.registry_card_id is not None
-            else record.model_card == model_card
-        )
         generation_matches = (
             record.artifact_role == artifact_role
             and record.artifact_model_id == artifact_model_id
-            and owner_matches
+            and companion_owner_matches(record, model_card)
         )
     if generation_matches:
         return None

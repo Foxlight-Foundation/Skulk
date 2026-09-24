@@ -407,3 +407,68 @@ async def test_partial_staged_dir_is_restaged(tmp_path: Path) -> None:
     await downloader.ensure_shard(_shard_with_sidecar())
 
     assert _BASE_MODEL in store.staged
+
+
+
+def test_a_staged_video_companion_is_complete_when_its_named_files_are(
+    tmp_path: Path,
+) -> None:
+    """Named files at their declared sizes, not a model directory layout."""
+    from skulk.shared.models.model_cards import VideoCardConfig
+    from skulk.store.model_store_client import (
+        _declared_companion_files,
+        _staged_directory_looks_complete,
+    )
+
+    revision = "e" * 40
+    owner = ModelCard(
+        model_id=ModelId("org/video"),
+        storage_size=Memory.from_bytes(0),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextToVideo],
+        video=VideoCardConfig.model_validate(
+            {
+                "modes": ["t2va"],
+                "companions": [
+                    {
+                        "kind": "preprocessor",
+                        "name": "depth",
+                        "role": "depth_estimator",
+                        "path": "geometry_estimation/depth.safetensors",
+                        "repo": "org/depth",
+                        "revision": revision,
+                        "size_bytes": 5,
+                    }
+                ],
+            }
+        ),
+    )
+    shard = PipelineShardMetadata(
+        model_card=ModelCard(
+            model_id=ModelId("org/depth"),
+            source_revision=revision,
+            storage_size=Memory.from_bytes(0),
+            n_layers=1,
+            hidden_size=1,
+            supports_tensor=False,
+            tasks=[ModelTask.TextGeneration],
+        ),
+        device_rank=0,
+        world_size=1,
+        start_layer=0,
+        end_layer=1,
+        n_layers=1,
+    )
+    expected = _declared_companion_files(shard, owner, "video_companion")
+    assert expected == (("geometry_estimation/depth.safetensors", 5),)
+    assert _declared_companion_files(shard, owner, "mtp_sidecar") == ()
+
+    staged = tmp_path / "staged"
+    (staged / "geometry_estimation").mkdir(parents=True)
+    weights = staged / "geometry_estimation" / "depth.safetensors"
+    weights.write_bytes(b"12")
+    assert not _staged_directory_looks_complete(staged, shard.model_card, expected)
+    weights.write_bytes(b"12345")
+    assert _staged_directory_looks_complete(staged, shard.model_card, expected)
