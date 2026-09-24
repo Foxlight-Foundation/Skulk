@@ -1104,14 +1104,19 @@ class Worker:
                 data_transport=self._data_transport,
                 zenoh_connected_peers=peers,
             )
-            if "audio_cpp-cpu" not in resources.backends:
+            ready_lanes = {
+                backend for backend in resources.backends
+                if backend.startswith("audio_cpp-")
+                and backend in resources.engine_builds
+            }
+            if not ready_lanes:
                 details = "; ".join(
                     conflict.message for conflict in resources.capability_conflicts
                     if "audio.cpp" in conflict.message.lower()
                 )
-                raise RuntimeError(details or "prepared audio.cpp did not pass node facts probe")
-            if "audio_cpp-cpu" not in resources.engine_builds:
-                raise RuntimeError("prepared audio.cpp has no verified build inventory")
+                raise RuntimeError(
+                    details or "prepared audio.cpp has no verified ready backend and build"
+                )
             if self._telemetry_sender is None:
                 raise RuntimeError("node resources telemetry is unavailable")
             await self._telemetry_sender.send(

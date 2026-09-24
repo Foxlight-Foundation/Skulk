@@ -197,6 +197,21 @@ async def test_session_reset_fails_open_streams() -> None:
         receiver.receive_nowait()
 
 
+async def test_session_reset_fails_open_music_job_stream() -> None:
+    """Master failover must wake a music job waiting for its terminal frame."""
+    from anyio import EndOfStream
+
+    api = _make_api()
+    sender, receiver = channel[Any]()
+    api._music_generation_queues[CommandId("music-reset")] = sender
+
+    api._fail_open_command_streams_for_session_reset()
+
+    assert isinstance(receiver.receive_nowait(), ErrorChunk)
+    with pytest.raises(EndOfStream):
+        receiver.receive_nowait()
+
+
 async def test_session_reset_with_already_closed_queue_is_silent() -> None:
     api = _make_api()
     command_id = CommandId()

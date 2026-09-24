@@ -111,6 +111,7 @@ def _manifest(data: bytes) -> MusicOutputManifest:
 def _card() -> ModelCard:
     return ModelCard.model_validate({
         "model_id": MODEL, "storage_size": Memory.from_mb(128),
+        "source_revision": "a" * 40,
         "n_layers": 1, "hidden_size": 1, "supports_tensor": False,
         "tasks": ["TextToMusic"],
         "music": {
@@ -119,6 +120,28 @@ def _card() -> ModelCard:
             "language_model_gguf": "language_model_q4_0.gguf",
             "rvq_depth_decoder_gguf": "rvq_depth_decoder_q8_0.gguf",
             "flow_transformer_gguf": "transformer_q4_0.gguf",
+        },
+        "artifact_bundle": {
+            "bundle_id": "bundle_" + "a" * 52,
+            "files": [
+                {"path": name, "size_bytes": 1}
+                for name in (
+                    "language_model_q4_0.gguf",
+                    "rvq_depth_decoder_q8_0.gguf",
+                    "transformer_q4_0.gguf",
+                    "condition_encoder.gguf",
+                    "vocoder.gguf",
+                    "config.json",
+                    "config/condition_encoder.json",
+                    "config/language_model.json",
+                    "config/rvq_depth_decoder.json",
+                    "config/transformer.json",
+                    "config/vocoder.json",
+                    "tokenizer/tokenizer.json",
+                    "tokenizer/tokenizer_config.json",
+                )
+            ],
+            "download_size": 13,
         },
     })
 
@@ -145,6 +168,7 @@ def _api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
     api._pending_stream_failures = {}
     api._output_media_packet_sender = None
     api._send = AsyncMock()
+    api._finalize_command_stream = AsyncMock()
     api._tg = _TaskGroupStub()
     monkeypatch.setattr(VideoStore, "_free_disk_bytes", _ample_free_bytes)
 
@@ -221,6 +245,7 @@ async def test_media_before_terminal_settles_and_serves_wav(
     sender.close()
     await api._drain_music_job(command_id, receiver)
     assert api._music_jobs.get(command_id).status == "completed"
+    api._finalize_command_stream.assert_awaited_once()
     response = TestClient(api.app).get(f"/v1/music/{command_id}/content")
     assert response.status_code == 200 and response.content == data
     assert response.headers["content-type"] == "audio/wav"

@@ -2394,6 +2394,7 @@ class API:
             self._text_generation_queues,
             self._image_generation_queues,
             self._video_generation_queues,
+            self._music_generation_queues,
             self._embedding_queues,
             self._audio_speech_queues,
             self._audio_transcription_queues,
@@ -11833,6 +11834,10 @@ class API:
             job = self._music_jobs.get(command_id)
             if job is not None and not job.is_terminal and not job.render_finished:
                 self._finish_music_job(command_id, "music stream ended without output")
+            await self._finalize_command_stream(
+                command_id,
+                cast(dict[CommandId, Sender[object]], self._music_generation_queues),
+            )
 
     def _settle_music_job(self, command_id: CommandId) -> None:
         """Mark complete only when the measured manifest matches verified media."""
@@ -12747,6 +12752,7 @@ class API:
             command_id in self._text_generation_queues
             or command_id in self._image_generation_queues
             or command_id in self._video_generation_queues
+            or command_id in self._music_generation_queues
             or command_id in self._embedding_queues
             or command_id in self._audio_speech_queues
             or command_id in self._audio_transcription_queues

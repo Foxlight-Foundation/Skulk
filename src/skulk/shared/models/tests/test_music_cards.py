@@ -1,10 +1,14 @@
 """The music task and its model truth remain separate from speech."""
 
+import tomllib
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
 from skulk.api.types.api import MusicCapabilitySection
 from skulk.shared.backends import platform_compatible_backends
+from skulk.shared.constants import RESOURCES_DIR
 from skulk.shared.models.model_cards import (
     ModelCard,
     ModelId,
@@ -20,6 +24,7 @@ def _card(**overrides: object) -> ModelCard:
         "storage_size": Memory.from_bytes(1024),
         "n_layers": 1,
         "hidden_size": 1,
+        "source_revision": "a" * 40,
         "supports_tensor": False,
         "tasks": ["TextToMusic"],
         "music": {
@@ -30,6 +35,28 @@ def _card(**overrides: object) -> ModelCard:
             "language_model_gguf": "language_model_q4_0.gguf",
             "rvq_depth_decoder_gguf": "rvq_depth_decoder_q8_0.gguf",
             "flow_transformer_gguf": "transformer_q4_0.gguf",
+        },
+        "artifact_bundle": {
+            "bundle_id": "bundle_" + "a" * 52,
+            "files": [
+                {"path": name, "size_bytes": 1}
+                for name in (
+                    "language_model_q4_0.gguf",
+                    "rvq_depth_decoder_q8_0.gguf",
+                    "transformer_q4_0.gguf",
+                    "condition_encoder.gguf",
+                    "vocoder.gguf",
+                    "config.json",
+                    "config/condition_encoder.json",
+                    "config/language_model.json",
+                    "config/rvq_depth_decoder.json",
+                    "config/transformer.json",
+                    "config/vocoder.json",
+                    "tokenizer/tokenizer.json",
+                    "tokenizer/tokenizer_config.json",
+                )
+            ],
+            "download_size": 13,
         },
     }
     payload.update(overrides)
@@ -56,6 +83,43 @@ def test_music_task_and_section_must_agree() -> None:
         _card(tasks=["TextGeneration"])
     with pytest.raises(ValidationError, match="must remain separate"):
         _card(audio={"kind": "tts"})
+    with pytest.raises(ValidationError, match="require an artifact bundle"):
+        _card(artifact_bundle=None)
+
+
+def test_curated_music_cards_have_verified_generator_geometry() -> None:
+    """Prevent synthetic layer and width placeholders in signed music cards."""
+    directory = Path(RESOURCES_DIR) / "music_model_cards"
+    expected = {
+        "audio-cpp--ACE-Step1.5-Turbo-BF16.toml": (24, 2048),
+        "audio-cpp--MiniMax-Music3-GGUF-Q4.toml": (36, 4096),
+    }
+    for filename, geometry in expected.items():
+        card = ModelCard.model_validate(
+            tomllib.loads((directory / filename).read_text())
+        )
+        assert (card.n_layers, card.hidden_size) == geometry
+        assert card.placement.backend_preference == ()
+
+
+@pytest.mark.parametrize(
+    "missing",
+    [
+        "condition_encoder.gguf",
+        "config/vocoder.json",
+        "tokenizer/tokenizer.json",
+        "vocoder.gguf",
+    ],
+)
+def test_minimax_bundle_requires_auxiliary_runtime_files(missing: str) -> None:
+    card = _card()
+    assert card.artifact_bundle is not None
+    files = tuple(file for file in card.artifact_bundle.files if file.path != missing)
+    incomplete = card.artifact_bundle.model_copy(
+        update={"files": files, "download_size": sum(file.size_bytes for file in files)}
+    )
+    with pytest.raises(ValidationError, match="omits required runtime files"):
+        _card(artifact_bundle=incomplete)
 
 
 def test_music_bounds_and_minimax_lyrics_are_validated() -> None:
@@ -66,15 +130,31 @@ def test_music_bounds_and_minimax_lyrics_are_validated() -> None:
     }
     with pytest.raises(ValidationError, match="requires lyrics"):
         MusicCardConfig.model_validate(
-            {"family": "minimax_music3", "lyrics": "optional", "min_seconds": 5, "max_seconds": 60, **components}
+            {
+                "family": "minimax_music3",
+                "lyrics": "optional",
+                "min_seconds": 5,
+                "max_seconds": 60,
+                **components,
+            }
         )
     with pytest.raises(ValidationError, match="cannot exceed 120"):
         MusicCardConfig.model_validate(
-            {"family": "ace_step_1_5", "lyrics": "optional", "min_seconds": 5, "max_seconds": 121}
+            {
+                "family": "ace_step_1_5",
+                "lyrics": "optional",
+                "min_seconds": 5,
+                "max_seconds": 121,
+            }
         )
     with pytest.raises(ValidationError, match="cannot exceed max_seconds"):
         MusicCardConfig.model_validate(
-            {"family": "ace_step_1_5", "lyrics": "optional", "min_seconds": 60, "max_seconds": 5}
+            {
+                "family": "ace_step_1_5",
+                "lyrics": "optional",
+                "min_seconds": 60,
+                "max_seconds": 5,
+            }
         )
 
 

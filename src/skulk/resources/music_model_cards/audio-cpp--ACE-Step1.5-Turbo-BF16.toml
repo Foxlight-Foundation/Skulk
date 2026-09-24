@@ -4,8 +4,10 @@ model_id = "audio-cpp/ACE-Step1.5-Turbo-BF16"
 source_repository = "audio-cpp/audio.cpp-gguf"
 source_revision = "a776907b362419343f4b9996bdd899619efcf3f8"
 gguf_file = "ACE-Step1.5-GGUF/turbo/ace-step-1.5-turbo-bf16.gguf"
-n_layers = 1
-hidden_size = 1
+# Turbo DiT geometry from acestep-v15-turbo/config.json embedded in this exact GGUF.
+# These fields describe that component, not a layer count for the whole bundle.
+n_layers = 24
+hidden_size = 2048
 supports_tensor = false
 tasks = ["TextToMusic"]
 family = "ace_step_1_5"
@@ -23,7 +25,7 @@ spdx_id = "MIT"
 
 [placement]
 compatible_backends = []
-backend_preference = ["audio_cpp-cuda", "audio_cpp-metal", "audio_cpp-rocm", "audio_cpp-vulkan", "audio_cpp-cpu"]
+backend_preference = []
 
 [music]
 family = "ace_step_1_5"

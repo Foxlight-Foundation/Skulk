@@ -194,7 +194,9 @@ def _is_vocabulary_skew(error: ValidationError, payload: dict[str, Any]) -> bool
     return True
 
 
-def _bundle_file_facts(files: object) -> tuple[tuple[object, object, object], ...] | None:
+def _bundle_file_facts(
+    files: object,
+) -> tuple[tuple[object, object, object], ...] | None:
     """The (path, size, object id) facts of a raw bundle file list, or None if malformed."""
     if not isinstance(files, list):
         return None
@@ -203,7 +205,9 @@ def _bundle_file_facts(files: object) -> tuple[tuple[object, object, object], ..
         if not isinstance(item, dict):
             return None
         entry = cast("dict[str, object]", item)
-        facts.append((entry.get("path"), entry.get("size_bytes"), entry.get("object_id")))
+        facts.append(
+            (entry.get("path"), entry.get("size_bytes"), entry.get("object_id"))
+        )
     return tuple(facts)
 
 
@@ -323,7 +327,9 @@ def registry_model_cards(catalog: RegistryCatalog) -> list["ModelCard"]:
                 payload["n_layers"] = header.scalars["block_count"]
                 if "embedding_length" in header.scalars:
                     payload["hidden_size"] = header.scalars["embedding_length"]
-                payload["num_key_value_heads"] = header.scalars["attention.head_count_kv"]
+                payload["num_key_value_heads"] = header.scalars[
+                    "attention.head_count_kv"
+                ]
         # Integrity before readability: the bundle agreement is checked on
         # the raw body so it also covers a card this build then skips.
         _check_envelope_bundle_agreement(payload, envelope)
@@ -1372,7 +1378,9 @@ class VideoCompanionConfig(CamelCaseModel):
     @model_validator(mode="after")
     def _validate_kind_fields(self) -> "VideoCompanionConfig":
         if self.repo is not None and self.revision is None:
-            raise ValueError("an external companion repo requires an immutable revision")
+            raise ValueError(
+                "an external companion repo requires an immutable revision"
+            )
         if self.kind is not VideoCompanionKind.Lora and (
             self.steps is not None
             or self.video_shift is not None
@@ -1527,11 +1535,15 @@ class VideoCardConfig(CamelCaseModel):
         if self.min_seconds > self.max_seconds:
             raise ValueError("min_seconds cannot exceed max_seconds")
         if not 0 <= self.frame_grid_offset < self.frame_grid_multiple:
-            raise ValueError("frame_grid_offset must lie inside the frame grid multiple")
+            raise ValueError(
+                "frame_grid_offset must lie inside the frame grid multiple"
+            )
         if self.audio_output and (
             self.audio_sample_rate is None or self.audio_channels is None
         ):
-            raise ValueError("audio_output requires audio_sample_rate and audio_channels")
+            raise ValueError(
+                "audio_output requires audio_sample_rate and audio_channels"
+            )
         if (
             VideoMode.ReferenceToAudioVideo in self.modes
             and self.reference_limits is None
@@ -1696,9 +1708,11 @@ class ArtifactBundleFile(CamelCaseModel):
     def validate_object_id(cls, value: str | None) -> str | None:
         """Accept only explicit SHA-256 or Git SHA-1 object identities."""
 
-        if value is not None and re.fullmatch(
-            r"(?:sha256:[0-9a-f]{64}|git-sha1:[0-9a-f]{40})", value
-        ) is None:
+        if (
+            value is not None
+            and re.fullmatch(r"(?:sha256:[0-9a-f]{64}|git-sha1:[0-9a-f]{40})", value)
+            is None
+        ):
             raise ValueError("unsupported artifact bundle object identity")
         return value
 
@@ -1759,9 +1773,10 @@ class ArtifactBundleConfig(CamelCaseModel):
         paths = tuple(item.path for item in self.files)
         if len(set(paths)) != len(paths):
             raise ValueError("artifact bundle files must be unique")
-        if self.download_size <= 0 or sum(
-            item.size_bytes for item in self.files
-        ) != self.download_size:
+        if (
+            self.download_size <= 0
+            or sum(item.size_bytes for item in self.files) != self.download_size
+        ):
             raise ValueError("artifact bundle download size must equal file sizes")
         if self.root is not None:
             prefix = f"{self.root}/"
@@ -2503,9 +2518,10 @@ async def _resolve_hf_source_revision(
         return source_revision
     info = await to_thread.run_sync(lambda: model_info(model_id, revision="main"))
     resolved_revision = getattr(info, "sha", None)
-    if not isinstance(resolved_revision, str) or re.fullmatch(
-        r"[0-9a-fA-F]{40}", resolved_revision
-    ) is None:
+    if (
+        not isinstance(resolved_revision, str)
+        or re.fullmatch(r"[0-9a-fA-F]{40}", resolved_revision) is None
+    ):
         raise ValueError(
             f"Hugging Face did not return an immutable revision for {model_id}"
         )
@@ -2846,8 +2862,7 @@ class ModelCard(CamelCaseModel):
             if repository and repository != base_repository and revision is None:
                 revision_field = f"{field_name.removesuffix('_repo')}_revision"
                 raise ValueError(
-                    f"{context} with {field_name} require immutable "
-                    f"{revision_field}"
+                    f"{context} with {field_name} require immutable {revision_field}"
                 )
 
     @property
@@ -2894,6 +2909,12 @@ class ModelCard(CamelCaseModel):
             raise ValueError("TextToMusic requires a [music] section and vice versa")
         if self.music is not None and self.audio is not None:
             raise ValueError("music and speech [audio] sections must remain separate")
+        if (
+            self.music is not None
+            and self.music.family == MusicModelFamily.MiniMaxMusic3
+            and self.artifact_bundle is None
+        ):
+            raise ValueError("MiniMax music cards require an artifact bundle")
         if self.music is not None and self.artifact_bundle is not None:
             bundle_paths = {item.path for item in self.artifact_bundle.files}
             selected = (
@@ -2903,6 +2924,25 @@ class ModelCard(CamelCaseModel):
             )
             if any(path is not None and path not in bundle_paths for path in selected):
                 raise ValueError("selected music components must be in artifact_bundle")
+            if self.music.family == MusicModelFamily.MiniMaxMusic3:
+                required = frozenset(
+                    (
+                        "condition_encoder.gguf",
+                        "config.json",
+                        "config/condition_encoder.json",
+                        "config/language_model.json",
+                        "config/rvq_depth_decoder.json",
+                        "config/transformer.json",
+                        "config/vocoder.json",
+                        "tokenizer/tokenizer.json",
+                        "tokenizer/tokenizer_config.json",
+                        "vocoder.gguf",
+                    )
+                )
+                if not required.issubset(bundle_paths):
+                    raise ValueError(
+                        "MiniMax artifact_bundle omits required runtime files"
+                    )
         return self
 
     @model_validator(mode="after")

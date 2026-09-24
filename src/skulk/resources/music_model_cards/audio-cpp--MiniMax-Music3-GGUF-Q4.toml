@@ -4,8 +4,10 @@ model_id = "audio-cpp/MiniMax-Music3-GGUF-Q4"
 source_repository = "audio-cpp/MiniMax-Music3-GGUF"
 source_revision = "9634a1e1364f94f1ac85a38c114ef105c678f824"
 gguf_file = "language_model_q4_0.gguf"
-n_layers = 1
-hidden_size = 1
+# Autoregressive language-model geometry from the pinned config/language_model.json.
+# These fields describe that component, not a layer count for the whole bundle.
+n_layers = 36
+hidden_size = 4096
 supports_tensor = false
 tasks = ["TextToMusic"]
 family = "minimax_music3"
@@ -24,7 +26,7 @@ display_name = "MiniMax-Music3"
 
 [placement]
 compatible_backends = []
-backend_preference = ["audio_cpp-cuda", "audio_cpp-metal", "audio_cpp-rocm", "audio_cpp-vulkan", "audio_cpp-cpu"]
+backend_preference = []
 
 [music]
 family = "minimax_music3"

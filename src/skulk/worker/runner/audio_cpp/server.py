@@ -31,10 +31,10 @@ _REQUEST_SECONDS: Final = 45 * 60.0
 
 def _parent_death_signal() -> None:  # pyright: ignore[reportUnusedFunction]
     """Kill the sidecar if its runner process dies abruptly on Linux."""
-    if os.name != "posix":
+    if sys.platform != "linux":
         return
     with contextlib.suppress(OSError, AttributeError):
-        ctypes.CDLL("libc.so.6", use_errno=True).prctl(signal.SIGKILL, 9, 0, 0, 0)
+        ctypes.CDLL("libc.so.6", use_errno=True).prctl(1, signal.SIGKILL, 0, 0, 0)
 
 
 def _free_loopback_port() -> int:

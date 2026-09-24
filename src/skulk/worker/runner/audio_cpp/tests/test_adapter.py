@@ -3,12 +3,16 @@
 import base64
 import io
 import json
+import signal
 import wave
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
+from unittest.mock import Mock
 
 import pytest
 
+import skulk.worker.runner.audio_cpp.server as audio_server
 from skulk.shared.models.model_cards import MusicCardConfig
 from skulk.worker.runner.audio_cpp.adapter import (
     MAX_AUDIO_CPP_RESPONSE_BYTES,
@@ -16,6 +20,22 @@ from skulk.worker.runner.audio_cpp.adapter import (
     decode_audio_cpp_music_response,
 )
 from skulk.worker.runner.audio_cpp.server import server_config
+
+
+def test_linux_parent_death_signal_uses_pr_set_pdeathsig(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An abrupt runner exit must request SIGKILL for its server child."""
+    prctl = Mock()
+    def fake_cdll(_name: str, *, use_errno: bool) -> SimpleNamespace:
+        assert use_errno
+        return SimpleNamespace(prctl=prctl)
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(audio_server.sys, "platform", "linux")
+        scoped.setattr(audio_server.ctypes, "CDLL", fake_cdll)
+        audio_server._parent_death_signal()  # pyright: ignore[reportPrivateUsage]
+    prctl.assert_called_once_with(1, signal.SIGKILL, 0, 0, 0)
 
 
 def _family(name: str) -> MusicCardConfig:
