@@ -1561,7 +1561,7 @@ Every route returns or lists this object. The first block matches OpenAI's
 | `audio` | boolean | Whether a synchronized audio track was required |
 | `stage` | string or null | Latest render phase: `queued`, `encoding`, `sampling`, `decoding`, `muxing`, `uploading` |
 | `output` | object or null | Container facts once rendered: `sha256`, `size_bytes`, `content_type`, `width`, `height`, `frame_count`, `fps`, `seconds`, `audio_sample_rate`, `audio_channels`, `has_thumbnail`, and when a thumbnail exists its `thumbnail_sha256` and `thumbnail_size_bytes` so a client can verify the `variant=thumbnail` bytes it fetches |
-| `stats` | object or null | Runner timing: `steps`, `seconds_per_step`, `total_generation_time`, `peak_memory_bytes`, and `engine`: what the render ran with after the request, the adapter and the card were resolved (`sampler`, `scheduler`, `steps`, `seed` (resolved when the request gave none), `video_shift`, `audio_shift`, `adapter`, `adapter_strength`, `width`, `height`, `frame_count`, `reference_fidelity` for `ref2va`, `styles`, `codec`, and when the ControlNet ran `control_inputs`, `control_strength`, `control_start`, `control_end`), null from an engine that does not report it |
+| `stats` | object or null | Runner timing: `steps`, `seconds_per_step`, `total_generation_time`, `peak_memory_bytes`, and `engine`: what the render ran with after the request, the adapter and the card were resolved (`sampler`, `scheduler`, `steps`, `seed` (resolved when the request gave none), `video_shift`, `audio_shift`, `adapter`, `adapter_strength`, `width`, `height`, `frame_count`, `reference_fidelity` for `ref2va`, `styles`, `codec`, and when the ControlNet ran `control_inputs`, `control_strength`, `control_start`, `control_end`, and `control_kind` when a guide was derived from a control clip), null from an engine that does not report it |
 
 ### Create a video job
 
@@ -1618,6 +1618,7 @@ Request fields (JSON keys or form fields):
 | `control_strength` | number | ControlNet strength, 0 to 10, with a `control` or `mask` part; omitted takes the card companion's |
 | `control_start` | number | Fraction of the sampling schedule, 0 to 1, at which the ControlNet starts to steer; default 0 |
 | `control_end` | number | Fraction at which it stops, above `control_start`; default 1. Any control setting without a `control` or `mask` part is refused |
+| `control_kind` | string | What the render derives from the `control` clip: `pose` (default), `depth`, or `edges`. Only with a `control` part; a kind the card has no weights for is refused with **400** naming the kinds it derives (see the card's `video.guides`) |
 
 File parts (multipart only), in slot order:
 
@@ -1627,7 +1628,7 @@ File parts (multipart only), in slot order:
 | `last_frame` | last frame | Image |
 | `keyframe` | keyframe | Repeatable image anchored at a time into the clip; pair every part with one `keyframe_at` form value (seconds, zero or more, in the same order). At most 8, at distinct times, none past the clip's end. Alone they imply `fl2va`; beside `reference` parts they anchor a `ref2va` render. The engine snaps each to the nearest frame |
 | `reference` | reference | Repeatable; images, video clips, or audio in the order given |
-| `control` | control | One clip (or a still) the card's ControlNet follows: edges, depth, or pose, prepared by the caller. The engine holds its last frame when it is short, cuts it when it is long, and scales and centre-crops each frame to the canvas |
+| `control` | control | One ordinary clip (or a still) whose motion or structure the render follows. The render derives the guide from it (`control_kind`): whole-body pose (people detected with RT-DETR, keypoints from SDPose), depth (Depth Anything 3), or Canny edges, as ComfyUI's own H3 ControlNet template does. The engine holds the guide's last frame when it is short, cuts it when it is long, and scales and centre-crops each frame to the canvas |
 | `mask` | mask | One image or clip for the ControlNet, read from its red channel; white marks what to regenerate |
 | `source_video` | source | One clip behind the mask, read only with a `mask` part; without it the masked region is generated into an empty frame |
 
@@ -3097,7 +3098,7 @@ Important fields:
 | `remote_code_approved_on_this_node` | boolean | Deprecated compatibility alias for `remote_code_approved_for_cluster` |
 | `remote_code_automatically_trusted` | boolean | Whether repository code is authorized by signed publication, explicit addition, or bundled distribution for this exact card |
 | `audio` | object | Declared speech metadata from the model card, including `kind`, audio response formats, streaming/realtime flags, built-in `voices`, `default_voice`, voice/reference-audio flags, translation support, and sample rates |
-| `video` | object or null | Declared video generation contract from a video model card: `modes` (`t2va`, `fl2va`, `ref2va`), `min_seconds`/`max_seconds`, `fps`, frame grid (`frame_grid_multiple`, `frame_grid_offset`), `canvas_multiple`, `default_short_edge`, `max_pixels`, `aspect_ratios`, `audio_output` with `audio_sample_rate`/`audio_channels`, `default_steps`, `reference_limits`, `adapters` (named LoRAs with `modes`, `steps`, `strength`, selectable through the video job `lora` field), and `styles` (the card's style embeddings with `modes`, selectable through the video job `styles` field). Null for non-video cards |
+| `video` | object or null | Declared video generation contract from a video model card: `modes` (`t2va`, `fl2va`, `ref2va`), `min_seconds`/`max_seconds`, `fps`, frame grid (`frame_grid_multiple`, `frame_grid_offset`), `canvas_multiple`, `default_short_edge`, `max_pixels`, `aspect_ratios`, `audio_output` with `audio_sample_rate`/`audio_channels`, `default_steps`, `reference_limits`, `adapters` (named LoRAs with `modes`, `steps`, `strength`, selectable through the video job `lora` field), `styles` (the card's style embeddings with `modes`, selectable through the video job `styles` field), `guides` (each guide the card derives from a `control` clip: `kind`, the `modes` it applies to, and the preprocessor `weights` it loads with their `repository` and `license`; empty without a ControlNet), and `default_guide` (the guide a `control` clip gives when `control_kind` is omitted). Null for non-video cards |
 | `license` | object or null | Operator-facing license facts from the card: `name`, `url`, `spdx_id`, `notice`, and `display_name` (a product name the license requires in a UI). Informational; nothing is enforced |
 | `resolved_capabilities.supports_speech_synthesis` | boolean | Whether clients should treat the model as a text-to-speech model |
 | `resolved_capabilities.supports_transcription` | boolean | Whether clients should treat the model as a speech-to-text model |

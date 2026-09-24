@@ -17,7 +17,12 @@ from typing import Annotated, Final, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from skulk.shared.models.model_cards import VideoMode
+from skulk.shared.models.model_cards import (
+    VideoCardConfig,
+    VideoCompanionKind,
+    VideoMode,
+    VideoPreprocessorRole,
+)
 from skulk.utils.pydantic_ext import CamelCaseModel
 
 VideoReferenceKind = Literal["image", "video", "audio"]
@@ -140,6 +145,47 @@ VIDEO_SHIFT_BOUNDS: Final = (0.01, 100.0)
 
 VIDEO_CONTROL_STRENGTH_MAX: Final = 10.0
 """The ``MiniMaxH3FunControlNetApply`` node's upper bound on strength."""
+
+VideoGuideKind = Literal["pose", "depth", "edges"]
+"""What a render derives from an ordinary ``control`` clip to steer by: the
+figures' whole-body pose, the scene's depth, or its edges. The ControlNet
+union follows each; HED and MLSD have no built-in preprocessor."""
+
+VIDEO_GUIDE_KINDS: Final[tuple[str, ...]] = ("pose", "depth", "edges")
+"""Every guide kind, in the order a caller is offered them."""
+
+VIDEO_DEFAULT_GUIDE: Final[VideoGuideKind] = "pose"
+"""The guide a ``control`` clip gives when the request names none: the one
+ComfyUI's own H3 ControlNet template derives."""
+
+VIDEO_GUIDE_PREPROCESSORS: Final[dict[str, tuple[VideoPreprocessorRole, ...]]] = {
+    "pose": (VideoPreprocessorRole.PoseEstimator, VideoPreprocessorRole.PersonDetector),
+    "depth": (VideoPreprocessorRole.DepthEstimator,),
+    "edges": (),
+}
+"""The preprocessor weights each guide needs from the card; edges need none."""
+
+
+def derivable_guides(video: VideoCardConfig, mode: VideoMode) -> tuple[str, ...]:
+    """The guide kinds a card can derive for ``mode``, in offer order.
+
+    A guide steers through the card's ControlNet, so a card without one for
+    the mode derives none; each kind also needs every preprocessor role it
+    names among the card's companions.
+    """
+    has_controlnet = any(
+        companion.kind is VideoCompanionKind.ModelPatch
+        and (not companion.modes or mode in companion.modes)
+        for companion in video.companions
+    )
+    if not has_controlnet:
+        return ()
+    roles = {companion.role for companion in video.companions if companion.role is not None}
+    return tuple(
+        kind
+        for kind in VIDEO_GUIDE_KINDS
+        if all(role in roles for role in VIDEO_GUIDE_PREPROCESSORS[kind])
+    )
 
 
 def video_sampler_refusal(name: str) -> str | None:
@@ -276,6 +322,9 @@ class VideoGenerationTaskParams(BaseModel):
     """Fraction of the schedule at which the ControlNet starts to steer."""
     control_end: float = Field(default=1.0, ge=0.0, le=1.0)
     """Fraction of the schedule at which it stops; above ``control_start``."""
+    control_kind: VideoGuideKind | None = None
+    """What to derive from the ``control`` clip; ``None`` derives the default
+    guide (pose). Meaningful only with a ``control`` attachment."""
     references: tuple[VideoReferenceSpec, ...] = ()
     """Conditioning attachments in slot order."""
     total_input_chunks: int = Field(default=0, ge=0)
@@ -379,6 +428,8 @@ class VideoGenerationTaskParams(BaseModel):
             raise ValueError("control settings need a control or mask attachment")
         if self.control_start >= self.control_end:
             raise ValueError("control_start must come before control_end")
+        if self.control_kind is not None and "control" not in roles:
+            raise ValueError("control_kind names what to derive from a control clip")
         if self.references and self.total_input_chunks < len(self.references):
             # Every attachment occupies at least one media frame; a smaller
             # count would let the worker's ingress gate treat the task as
@@ -499,6 +550,8 @@ class VideoEngineSettings(CamelCaseModel):
     """Fraction of the schedule the ControlNet started at, when it ran."""
     control_end: float | None = None
     """Fraction of the schedule the ControlNet stopped at, when it ran."""
+    control_kind: str | None = None
+    """The guide derived from the control clip; ``None`` without one."""
 
     @field_validator("styles", "control_inputs", mode="before")
     @classmethod
