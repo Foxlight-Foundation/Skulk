@@ -130,14 +130,21 @@ def _cache_root(wheel: AudioCppWheel) -> Path:
 
 
 def _cached_binary(root: Path, wheel: AudioCppWheel) -> Path | None:
-    """Return an intact cache entry only after rechecking its binary digest."""
+    """Verify cached runtime files against the independently pinned wheel."""
     binary = root / _BINARY_MEMBER
+    wheel_path = root / wheel.filename
     try:
         raw = cast("object", json.loads((root / "provisioned.json").read_text()))
         if not isinstance(raw, dict):
             return None
         record = cast("dict[str, object]", raw)
-        if record.get("wheel_sha256") != wheel.sha256:
+        if (
+            record.get("source_revision") != AUDIO_CPP_SOURCE_REVISION
+            or record.get("wheel_sha256") != wheel.sha256
+            or not wheel_path.is_file()
+            or wheel_path.stat().st_size > _MAX_WHEEL_BYTES
+            or _sha256(wheel_path) != wheel.sha256
+        ):
             return None
         if not binary.is_file() or not os.access(binary, os.X_OK):
             return None
@@ -145,16 +152,36 @@ def _cached_binary(root: Path, wheel: AudioCppWheel) -> Path | None:
         if not isinstance(member_hashes, dict):
             return None
         hashes = cast("dict[str, object]", member_hashes)
-        for member in _REQUIRED_MEMBERS:
-            expected = hashes.get(member)
-            path = root / member
-            if not isinstance(expected, str) or not path.is_file():
+        with zipfile.ZipFile(wheel_path) as archive:
+            members = {item.filename: item for item in archive.infolist()}
+            if not members.keys() >= _REQUIRED_MEMBERS or sum(
+                members[member].file_size for member in _REQUIRED_MEMBERS
+            ) > _MAX_EXPANDED_BYTES:
                 return None
-            if _sha256(path) != expected:
-                return None
-    except (OSError, ValueError):
+            for member in _REQUIRED_MEMBERS:
+                expected = hashes.get(member)
+                path = root / member
+                if not isinstance(expected, str) or not path.is_file():
+                    return None
+                archive_digest = hashlib.sha256()
+                with archive.open(members[member]) as stream:
+                    while chunk := stream.read(1024 * 1024):
+                        archive_digest.update(chunk)
+                if expected != archive_digest.hexdigest() or _sha256(path) != expected:
+                    return None
+    except (OSError, ValueError, KeyError, zipfile.BadZipFile):
         return None
     return binary
+
+
+def verified_cached_audio_cpp_binary(binary: Path) -> bool:
+    """Return whether this executable belongs to this host's pinned wheel cache."""
+    try:
+        wheel = audio_cpp_wheel_for_host()
+    except RuntimeError:
+        return False
+    root = _cache_root(wheel)
+    return binary == root / _BINARY_MEMBER and _cached_binary(root, wheel) == binary
 
 
 def audio_cpp_model_specs(
@@ -287,7 +314,8 @@ def _prepare_pinned_audio_cpp(*, allow_download: bool, env: Mapping[str, str]) -
         wheel_path = staging / wheel.filename
         _download_wheel(wheel, wheel_path)
         binary_sha256 = _extract_wheel(wheel_path, staging)
-        wheel_path.unlink()
+        # Offline revalidation needs the original pinned bytes. A mutable
+        # provisioned.json beside the payload cannot establish integrity.
         (staging / "provisioned.json").write_text(
             json.dumps(
                 {

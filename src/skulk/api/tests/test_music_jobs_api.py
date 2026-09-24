@@ -262,14 +262,17 @@ async def test_music_place_dry_run_uses_ordered_preparation_resources(
     api._cluster_remote_code_approvals = no_remote_code_approvals
     api.paused = False
     seen_resources: list[object] = []
+    seen_required_nodes: list[object] = []
 
     def dry_run(_command: object, **kwargs: object) -> dict[InstanceId, MlxRingInstance]:
         seen_resources.append(kwargs["node_resources"])
+        seen_required_nodes.append(kwargs["required_nodes"])
         return {}
 
     monkeypatch.setattr(api_module, "get_instance_placements", dry_run)
     await api.place_instance(PlaceInstanceParams(model_id=MODEL))
     assert seen_resources == [{node: ready}]
+    assert seen_required_nodes == [{node}]
     assert api._telemetry_view.node_resources[node] is stale
     api._send.assert_awaited_once()
     assert api._send.call_args.args[0].prepared_node_resources == {node: ready}

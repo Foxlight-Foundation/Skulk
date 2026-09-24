@@ -248,6 +248,9 @@ v0.8.2 server package, absent from Skulk's base environment. Node Facts probe
 its source revision and actual devices before advertising any compute lane.
 
 Startup rehydrates a previously verified cached package without a download.
+The cache retains and rehashes the pinned wheel, then compares extracted runtime
+files with its archive members. Upstream's short revision output is accepted
+only for that verified wheel; standalone overrides need the full pinned revision.
 Standalone binary overrides may use `SKULK_AUDIO_CPP_SPECS_DIR`; facts and the
 runner require both pinned model specs before readiness or load.
 
@@ -266,7 +269,8 @@ broadcasting success. The API reads that ordered snapshot instead of waiting
 for telemetry and uses it in the request-local placement dry-run and subsequent
 `PlaceInstance` or `CreateInstance` command. The master overlays the verified
 resources while handling that command so delayed telemetry cannot undo the
-preparation barrier. Placement
+preparation barrier. The API dry-run and master require the prepared node for
+ordinary music placement. Placement
 stamps the exact engine build on music shards; the runner rehashes and probes
 the executable and selected lane before every sidecar start. Linux uses a
 parent-death signal and macOS uses a detached watchdog to end the server when

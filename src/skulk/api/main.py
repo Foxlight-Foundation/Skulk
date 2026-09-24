@@ -3855,6 +3855,7 @@ class API:
                     current_instances=self.state.instances,
                     node_memory=self._telemetry_view.node_memory,
                     node_network=self.state.node_network,
+                    required_nodes=({prepared[0]} if prepared is not None else None),
                     download_status=self._telemetry_view.effective_downloads(
                         self.state.downloads
                     ),

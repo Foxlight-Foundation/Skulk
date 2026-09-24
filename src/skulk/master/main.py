@@ -1144,6 +1144,11 @@ class Master:
             self.state.instances,
             credited_memory,
             self.state.node_network,
+            required_nodes=(
+                set(command.prepared_node_resources)
+                if command.prepared_node_resources
+                else None
+            ),
             download_status=self._effective_downloads(),
             excluded_nodes=set(command.excluded_nodes),
             node_resources=resources,

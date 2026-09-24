@@ -2263,6 +2263,11 @@ silently failing on the master:
   per-node memory info lags the edges. The request internally waits up to
   15 seconds for the info to arrive before giving up, so retry shortly on 503.
 
+For text-to-music, Skulk prepares audio.cpp on one eligible node and verifies
+its ready build and signed model support before placement. The API dry-run and
+master then place on that prepared node; if preparation fails, the request
+returns **503** with a diagnostic and leaves the node healthy.
+
 The request expresses intent, not a reservation of a prior preview. A card may
 declare any number of open backend tags plus an ordered preference. The planner
 first removes candidates blocked by participation policy, engine/build

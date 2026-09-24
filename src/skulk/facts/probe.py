@@ -68,7 +68,6 @@ _DEVICE_PREFIX_TO_COMPUTE = {
     "hip": "rocm",
 }
 
-_AUDIO_CPP_SOURCE_PREFIX = "4d88768"
 _AUDIO_CPP_DEVICE_COMPUTES = {
     "MTL": "metal",
     "VK": "vulkan",
@@ -98,7 +97,21 @@ def probe_audio_cpp(binary: str) -> AudioCppProbe:
     if version.returncode or devices.returncode:
         detail = (version.stderr + devices.stderr).strip() or "probe exited nonzero"
         return AudioCppProbe(outcome="failed", detail=detail[:400])
-    if f"git: {_AUDIO_CPP_SOURCE_PREFIX}" not in version.stdout:
+    from skulk.provisioning.audio_cpp import (
+        AUDIO_CPP_SOURCE_REVISION,
+        verified_cached_audio_cpp_binary,
+    )
+
+    revision = re.search(r"(?m)^git: ([0-9a-f]+)(?:\s|$)", version.stdout)
+    # Upstream's v0.8.2 CLI prints a short git revision. Trust that abbreviated
+    # output only for a binary reverified against our immutable wheel pin.
+    if revision is None or (
+        revision.group(1) != AUDIO_CPP_SOURCE_REVISION
+        and not (
+            AUDIO_CPP_SOURCE_REVISION.startswith(revision.group(1))
+            and verified_cached_audio_cpp_binary(Path(binary))
+        )
+    ):
         return AudioCppProbe(outcome="failed", detail="audio.cpp source revision differs from the pinned v0.8.2 build")
     compiled = {
         token.strip().lower()

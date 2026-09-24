@@ -4,12 +4,15 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
+
 from skulk.facts.derive import derive_node_backends
 from skulk.facts.inventory import engine_build_inventory
 from skulk.facts.probe import gather_node_facts
+from skulk.provisioning.audio_cpp import AUDIO_CPP_SOURCE_REVISION
 
 
-def _fake_server(path: Path, *, revision: str = "4d88768") -> Path:
+def _fake_server(path: Path, *, revision: str = AUDIO_CPP_SOURCE_REVISION) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     specs = path.parent.parent / "model_specs"
     specs.mkdir(parents=True, exist_ok=True)
@@ -119,3 +122,33 @@ def test_wrong_source_or_invalid_override_never_advertises_false_lane(
     assert [conflict.code for conflict in derived.conflicts] == [
         "backend_override_conflict"
     ]
+
+
+def test_unverified_short_revision_cannot_advertise_engine(tmp_path: Path) -> None:
+    """A matching seven-character prefix is insufficient for an override."""
+    binary = _fake_server(tmp_path / "bin" / "audiocpp_server", revision="4d88768")
+    facts = gather_node_facts(
+        env={"SKULK_AUDIO_CPP_BIN": str(binary)},
+        platform="darwin",
+        drm_root=tmp_path,
+    )
+    assert facts.audio_cpp_probe.outcome == "failed"
+
+
+def test_verified_wheel_may_report_upstream_short_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The wheel digest establishes exact provenance when upstream abbreviates it."""
+    import skulk.provisioning.audio_cpp as audio_cpp
+
+    binary = _fake_server(tmp_path / "bin" / "audiocpp_server", revision="4d88768")
+    def verified_wheel(_path: Path) -> bool:
+        return True
+
+    monkeypatch.setattr(audio_cpp, "verified_cached_audio_cpp_binary", verified_wheel)
+    facts = gather_node_facts(
+        env={"SKULK_AUDIO_CPP_BIN": str(binary)},
+        platform="darwin",
+        drm_root=tmp_path,
+    )
+    assert facts.audio_cpp_probe.outcome == "ready"

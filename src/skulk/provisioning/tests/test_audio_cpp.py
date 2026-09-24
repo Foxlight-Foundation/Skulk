@@ -1,10 +1,13 @@
+# pyright: reportPrivateUsage=false
 """Pinned audio.cpp preparation, cache reuse, and offline failure behavior."""
 
 import hashlib
+import json
 import os
 import zipfile
 from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -19,7 +22,7 @@ _SPECS_SOURCE = (
 def _wheel(tmp_path: Path) -> tuple[audio_cpp.AudioCppWheel, Path]:
     wheel_path = tmp_path / "skulk_audio_cpp_cpu-0.8.2.post1-py3-none-macosx_15_0_arm64.whl"
     with zipfile.ZipFile(wheel_path, "w") as archive:
-        for member in audio_cpp._REQUIRED_MEMBERS:  # pyright: ignore[reportPrivateUsage]
+        for member in audio_cpp._REQUIRED_MEMBERS:
             if member.endswith("audiocpp_server"):
                 payload = b"#!/bin/sh\n"
             elif "/model_specs/" in member:
@@ -60,6 +63,7 @@ def test_prepare_download_then_offline_cache_reuse(
     assert installed.is_file()
     monkeypatch.delenv("SKULK_AUDIO_CPP_BIN", raising=False)
     assert audio_cpp.prepare_audio_cpp(allow_download=False, environ={}) == installed
+    assert audio_cpp.verified_cached_audio_cpp_binary(installed)
     monkeypatch.delenv("SKULK_AUDIO_CPP_BIN", raising=False)
     assert audio_cpp.rehydrate_cached_audio_cpp(environ={}) == installed
     assert os.environ["SKULK_AUDIO_CPP_BIN"] == str(installed)
@@ -75,13 +79,32 @@ def test_offline_miss_and_tampered_cache_fail_closed(
     monkeypatch.delenv("SKULK_AUDIO_CPP_BIN", raising=False)
     with pytest.raises(RuntimeError, match="not in the verified local cache"):
         audio_cpp.prepare_audio_cpp(allow_download=False, environ={})
-    monkeypatch.setattr(
-        audio_cpp,
-        "_download_wheel",
-        _fixture_downloader(source),
-    )
+    monkeypatch.setattr(audio_cpp, "_download_wheel", _fixture_downloader(source))
     installed = audio_cpp.prepare_audio_cpp(allow_download=True, environ={})
     installed.write_bytes(b"replaced executable")
+    monkeypatch.delenv("SKULK_AUDIO_CPP_BIN", raising=False)
+    with pytest.raises(RuntimeError, match="not in the verified local cache"):
+        audio_cpp.prepare_audio_cpp(allow_download=False, environ={})
+
+
+def test_editing_cache_record_cannot_approve_replaced_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rewritten cache record cannot attest to bytes absent from the pinned wheel."""
+    wheel, source = _wheel(tmp_path)
+    monkeypatch.setattr(audio_cpp, "SKULK_ENGINES_DIR", tmp_path / "cache")
+    monkeypatch.setattr(audio_cpp, "audio_cpp_wheel_for_host", lambda: wheel)
+    monkeypatch.setattr(audio_cpp, "_download_wheel", _fixture_downloader(source))
+    monkeypatch.delenv("SKULK_AUDIO_CPP_BIN", raising=False)
+    installed = audio_cpp.prepare_audio_cpp(allow_download=True, environ={})
+    installed.write_bytes(b"#!/bin/sh\n# replaced\n")
+    record_path = installed.parents[2] / "provisioned.json"
+    record = cast("dict[str, object]", json.loads(record_path.read_text()))
+    record["binary_sha256"] = hashlib.sha256(installed.read_bytes()).hexdigest()
+    member_hashes = cast("dict[str, str]", record["member_sha256"])
+    member_hashes[audio_cpp._BINARY_MEMBER] = hashlib.sha256(installed.read_bytes()).hexdigest()
+    record_path.write_text(json.dumps(record))
+    assert not audio_cpp.verified_cached_audio_cpp_binary(installed)
     monkeypatch.delenv("SKULK_AUDIO_CPP_BIN", raising=False)
     with pytest.raises(RuntimeError, match="not in the verified local cache"):
         audio_cpp.prepare_audio_cpp(allow_download=False, environ={})

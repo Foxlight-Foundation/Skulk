@@ -1,6 +1,9 @@
 # pyright: reportPrivateUsage=false
 """Ordered preparation completion closes the telemetry race before placement."""
 
+import pytest
+
+import skulk.master.main as master_module
 from skulk.master.main import Master
 from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
 from skulk.shared.types.commands import PlaceInstance
@@ -14,7 +17,9 @@ from skulk.shared.types.worker.instances import InstanceMeta
 from skulk.shared.types.worker.shards import Sharding
 
 
-def test_preparation_completion_makes_build_ready_on_master() -> None:
+def test_preparation_completion_makes_build_ready_on_master(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Placement sees the worker-verified build when completion is indexed."""
     node = NodeId("music-node")
     master = object.__new__(Master)
@@ -87,6 +92,38 @@ def test_preparation_completion_makes_build_ready_on_master() -> None:
 
     assert master._placement_resources_for_command(command)[node] == resources
     assert master._telemetry_view.node_resources[node] != resources
+
+    # The prepared host is a placement constraint, not merely a refreshed
+    # resource hint. A second ready host must not win the planner's scoring.
+    other = NodeId("other-ready-node")
+    master.state.topology.add_node(other)
+    master._telemetry_view.node_resources[other] = resources
+    def accept_card(_command: PlaceInstance) -> None:
+        pass
+
+    def empty_memory(**_kwargs: object) -> tuple[dict[object, object], dict[object, object]]:
+        return {}, {}
+
+    def empty_downloads() -> dict[object, object]:
+        return {}
+
+    def no_context_default() -> None:
+        return None
+
+    monkeypatch.setattr(master, "_require_ordered_place_instance_card", accept_card)
+    monkeypatch.setattr(master, "_placement_memory_inputs", empty_memory)
+    monkeypatch.setattr(master, "_effective_downloads", empty_downloads)
+    monkeypatch.setattr(master, "_served_context_default", no_context_default)
+    master._model_trust_approvals = set()
+    seen: list[object] = []
+
+    def capture_placement(*_args: object, **kwargs: object) -> dict[object, object]:
+        seen.append(kwargs["required_nodes"])
+        return {}
+
+    monkeypatch.setattr(master_module, "place_instance", capture_placement)
+    master._place_requested_instance(command)
+    assert seen == [{node}]
 
 
 def test_preparation_completion_does_not_restore_timed_out_node() -> None:

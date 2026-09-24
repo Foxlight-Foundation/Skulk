@@ -960,6 +960,10 @@ bounded and belong on the node-addressed output media plane, outside State
 and the event log.
 Before initial facts are gathered at startup, a verified cached audio.cpp
 package may restore its executable path without contacting the package channel.
+The cache retains the SHA-256-pinned wheel and compares every extracted runtime
+file with its archive member; an editable cache record cannot establish integrity.
+Upstream's short revision output is accepted only for this verified wheel;
+standalone binaries must report the full pinned source revision.
 The facts probe checks both pinned model specs; a standalone binary may name
 its specs through `SKULK_AUDIO_CPP_SPECS_DIR`. Only then can the node publish
 ready audio.cpp lanes for restored instances.
@@ -973,7 +977,8 @@ view before broadcasting success. The API also binds that verified snapshot to
 its `PlaceInstance` or `CreateInstance` command. During that command's placement,
 the master overlays the prepared node's resources, even if older telemetry
 arrives after the preparation event. The API uses the same snapshot for its
-signed claim check and request-local placement dry-run. Exact placements reject
+signed claim check and request-local placement dry-run. Both the API dry-run
+and master constrain ordinary placement to the prepared node. Exact placements reject
 RPC shaped music instances and require a matching ready build and signed support
 claim.
 Placement stamps the selected audio.cpp build on the music shard. At each
