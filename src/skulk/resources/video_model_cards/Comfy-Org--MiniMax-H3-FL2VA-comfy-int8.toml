@@ -76,6 +76,39 @@ path = "model_patches/minimax_h3_fun_controlnet_union_pruned_int8_convrot.safete
 size_bytes = 2296635360
 strength = 1.0
 
+# Guide preprocessors: the weights that derive a control video from an
+# ordinary clip inside the render, as ComfyUI's own H3 ControlNet template
+# does. Hosted in their own repositories and pinned there.
+[[video.companions]]
+kind = "preprocessor"
+name = "sdpose_wholebody"
+role = "pose_estimator"
+repo = "Comfy-Org/SDPose"
+revision = "acb43fbe8142b54d9ebd52b720b81dd4e14c8d81"
+path = "checkpoints/sdpose_wholebody_fp16.safetensors"
+size_bytes = 1916645792
+license = "mit"
+
+[[video.companions]]
+kind = "preprocessor"
+name = "rt_detr_v4_person"
+role = "person_detector"
+repo = "Comfy-Org/SDPose"
+revision = "acb43fbe8142b54d9ebd52b720b81dd4e14c8d81"
+path = "diffusion_models/rt_detr_v4-x-hgnet_fp16.safetensors"
+size_bytes = 123968978
+license = "mit"
+
+[[video.companions]]
+kind = "preprocessor"
+name = "depth_anything_3_mono_large"
+role = "depth_estimator"
+repo = "Comfy-Org/Depth-Anything-3"
+revision = "1aaeea516f22fb2f4c7fae761c8ed470c6cf9f93"
+path = "geometry_estimation/depth_anything_3_mono_large.safetensors"
+size_bytes = 1336748056
+license = "apache-2.0"
+
 [[video.companions]]
 kind = "embedding"
 name = "minimaxh3_art_is_explosion"

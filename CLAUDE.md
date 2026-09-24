@@ -829,7 +829,7 @@ card-content digest from the same effective catalog/installed precedence as
 place resources; controllers must repeat identity and live compatibility checks.
 
 Skulk now treats model capability handling as two layers:
-- **Model cards**: persisted declarative metadata, including optional `reasoning`, `modalities`, `audio`, `video`, `license`, `tooling`, and `runtime` sections for refined model support. The `video` section declares audio-video generation truth (modes `t2va`/`fl2va`/`ref2va`, each implying one of `TextToVideo`/`ImageToVideo`/`ReferenceToVideo`; duration, fps and frame grid; canvas; audio output; reference limits; pinned lora/model_patch/embedding/graph_template companions) and names no engine; video cards are hidden until `SKULK_ENABLE_VIDEO_MODELS=true`, like the image gate
+- **Model cards**: persisted declarative metadata, including optional `reasoning`, `modalities`, `audio`, `video`, `license`, `tooling`, and `runtime` sections for refined model support. The `video` section declares audio-video generation truth (modes `t2va`/`fl2va`/`ref2va`, each implying one of `TextToVideo`/`ImageToVideo`/`ReferenceToVideo`; duration, fps and frame grid; canvas; audio output; reference limits; pinned lora/model_patch/embedding/graph_template companions, plus externally hosted `preprocessor` weights with a `role` and `license`, fetched with the card and read through `ModelCard.external_video_companions()`) and names no engine; video cards are hidden until `SKULK_ENABLE_VIDEO_MODELS=true`, like the image gate
 - **Resolved capability profiles**: normalized runtime behavior contracts derived from the card plus conservative family defaults
 
 This capability spine is the source of truth for model-aware reasoning defaults, prompt rendering, output parsing, tool-call handling, speech/TTS/STT metadata, and additive `/v1/models` metadata consumed by the dashboard.
@@ -965,8 +965,8 @@ and state remain inert for rolling compatibility. Before download and runner
 load, Skulk still verifies the signed card, immutable revisions, installed
 sidecar, and artifact identity; deterministic identity failure is terminal for
 the unchanged instance. Every separately hosted companion artifact (vision weights or
-processor, MTP sidecar, assistant model, served GGUF draft, or vLLM drafter)
-must carry its own full revision; companions in the base artifact repository
+processor, MTP sidecar, assistant model, served GGUF draft, vLLM drafter, or a video
+card's guide preprocessor weights) must carry its own full revision; companions in the base artifact repository
 inherit `source_revision`.
 TTS cards may declare `audio.voices`, optional ordered `audio.voice_catalog`
 display/preferred-language metadata, optional checksummed bundled

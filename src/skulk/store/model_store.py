@@ -97,7 +97,7 @@ from skulk.store.installed_cards import (
 from skulk.store.staging_eviction import MINIMUM_STAGING_FREE_DISK_BYTES
 
 if TYPE_CHECKING:
-    from skulk.shared.models.model_cards import ModelCard
+    from skulk.shared.models.model_cards import ArtifactBundleConfig, ModelCard
 
 _SOURCE_REVISION_MARKER = ".skulk-source-revision"
 _SOURCE_REVISION_STAGING_MARKER = ".skulk-source-revision-staging"
@@ -258,6 +258,68 @@ def select_store_gguf_download_files(
         return any(fnmatch(entry.path, pattern) for pattern in keep_patterns)
 
     return [entry for entry in file_list if _keep(entry)]
+
+
+def transfer_bundle(
+    model_card: ModelCard | None, artifact_role: InstalledArtifactRole
+) -> ArtifactBundleConfig | None:
+    """The signed bundle that selects a transfer's files, for a base artifact only.
+
+    A companion transfer carries its owning card for trust and ownership, but
+    the owner's bundle lists the owner's files, which the companion's
+    repository does not hold; applying it there would refuse every companion.
+    """
+    if model_card is None or artifact_role != "base":
+        return None
+    return model_card.artifact_bundle
+
+
+def video_companion_selection(
+    owner_card: ModelCard | None, repository: str, revision: str | None
+) -> frozenset[tuple[str, int | None]]:
+    """The files, with declared sizes, an owning card names from one companion repository."""
+    if owner_card is None or owner_card.video is None:
+        return frozenset()
+    return frozenset(
+        (item.path, item.size_bytes)
+        for item in owner_card.video.companions
+        if item.repo is not None and str(item.repo) == repository and item.revision == revision
+    )
+
+
+def select_store_video_companion_files(
+    file_list: list[FileListEntry],
+    owner_card: ModelCard,
+    repository: str,
+    revision: str,
+) -> list[FileListEntry]:
+    """The exact files an owning video card names from one companion repository.
+
+    Each must be listed at the pinned revision, at its declared size when the
+    card states one.
+    """
+    expected = [
+        item
+        for item in (owner_card.video.companions if owner_card.video is not None else ())
+        if item.repo is not None and str(item.repo) == repository and item.revision == revision
+    ]
+    if not expected:
+        raise ValueError(
+            f"{owner_card.model_id} names no companion files from {repository}@{revision}"
+        )
+    listed_by_path = {entry.path: entry for entry in file_list}
+    selected: list[FileListEntry] = []
+    for item in expected:
+        observed = listed_by_path.get(item.path)
+        if observed is None:
+            raise FileNotFoundError(f"Video companion file is absent: {item.path}")
+        if item.size_bytes is not None and observed.size != item.size_bytes:
+            raise ValueError(
+                f"Video companion size mismatch for {item.path}: expected "
+                f"{item.size_bytes}, listing reports {observed.size}"
+            )
+        selected.append(observed)
+    return selected
 
 
 def select_store_artifact_bundle_files(
@@ -552,8 +614,13 @@ class ModelStore:
         source_revision: str | None,
         source_repository: str | None,
         model_card: ModelCard | None = None,
+        artifact_role: InstalledArtifactRole = "base",
     ) -> bool:
-        """Return whether the canonical entry matches the complete byte source."""
+        """Return whether the canonical entry matches the complete byte source.
+
+        A companion is matched by repository and revision: ``model_card`` is its
+        owner then, whose bundle describes the owner's bytes, not the companion's.
+        """
         entry = self.get_entry(model_id)
         if entry is None or entry.source_revision != source_revision:
             return False
@@ -561,21 +628,17 @@ class ModelStore:
         requested_repository = source_repository or model_id
         if registered_repository != requested_repository:
             return False
-        if model_card is None or model_card.artifact_bundle is None:
+        bundle = transfer_bundle(model_card, artifact_role)
+        if bundle is None:
             return True
         installed = entry.installed_card
-        if (
-            installed is None
-            or installed.artifact_bundle_id != model_card.artifact_bundle.bundle_id
-        ):
+        if installed is None or installed.artifact_bundle_id != bundle.bundle_id:
             return False
         model_path = _resolve_store_child_path(self._store_path, entry.store_path)
         if model_path is None or not verify_installed_card(model_path, installed):
             return False
         installed_sizes = {item.path: item.size_bytes for item in installed.files}
-        requested_sizes = {
-            item.path: item.size_bytes for item in model_card.artifact_bundle.files
-        }
+        requested_sizes = {item.path: item.size_bytes for item in bundle.files}
         return installed_sizes == requested_sizes
 
     def list_models(self) -> list[StoreModelEntry]:
@@ -1175,6 +1238,35 @@ class ModelStore:
             )
 
     @staticmethod
+    def _serves_request(
+        existing: StoreDownloadStatus,
+        model_card: ModelCard | None,
+        owner_model_id: str | None,
+        owner_card_id: str | None,
+    ) -> bool:
+        """Whether ``existing``'s transfer serves a request from this owner.
+
+        A video companion is the same bytes for every card that pins its
+        repository at its revision, so a transfer serves another such card when
+        its file selection covers that card's; concurrent placements of two
+        cards sharing preprocessors then share one transfer instead of the
+        second being refused. Every other artifact belongs to one owner.
+        """
+        if existing.artifact_role == "video_companion":
+            repository = existing.source_repository or existing.model_id
+            requested = video_companion_selection(
+                model_card, repository, existing.source_revision
+            )
+            return bool(requested) and requested <= video_companion_selection(
+                existing.model_card, repository, existing.source_revision
+            )
+        return (
+            ModelStore._same_requested_card(existing.model_card, model_card)
+            and existing.owner_model_id == owner_model_id
+            and existing.owner_card_id == owner_card_id
+        )
+
+    @staticmethod
     def _same_requested_card(
         existing: ModelCard | None,
         requested: ModelCard | None,
@@ -1308,10 +1400,10 @@ class ModelStore:
                     or existing_repository != requested_repository
                     or existing.pinned_gguf != pinned_gguf
                     or existing.extra_pinned_gguf != requested_companions
-                    or not self._same_requested_card(existing.model_card, model_card)
                     or existing.artifact_role != artifact_role
-                    or existing.owner_model_id != owner_model_id
-                    or existing.owner_card_id != owner_card_id
+                    or not self._serves_request(
+                        existing, model_card, owner_model_id, owner_card_id
+                    )
                 ):
                     raise ValueError(
                         f"{model_id} is already downloading a different artifact "
@@ -1340,10 +1432,10 @@ class ModelStore:
                     or missing_companion
                     or existing.source_revision != source_revision
                     or existing_repository != requested_repository
-                    or not self._same_requested_card(existing.model_card, model_card)
                     or existing.artifact_role != artifact_role
-                    or existing.owner_model_id != owner_model_id
-                    or existing.owner_card_id != owner_card_id
+                    or not self._serves_request(
+                        existing, model_card, owner_model_id, owner_card_id
+                    )
                     # Artifact-level, not alias-level. is_in_store() only asks
                     # whether *some* registered generation of this alias sits on
                     # disk, so a surviving generation (typically a legacy
@@ -1357,6 +1449,7 @@ class ModelStore:
                         existing.source_revision,
                         existing.source_repository,
                         existing.model_card,
+                        existing.artifact_role,
                     )
                 )
                 if existing.status in ("failed", "cancelled") or stale_complete:
@@ -1370,6 +1463,7 @@ class ModelStore:
                 source_revision,
                 source_repository,
                 model_card,
+                artifact_role,
             )
             if (
                 self.is_in_store(model_id)
@@ -1741,11 +1835,9 @@ class ModelStore:
                 :12
             ]
             sanitized = f"{sanitized}--source-{repository_digest}"
-        if model_card is not None and model_card.artifact_bundle is not None:
-            sanitized = (
-                f"{sanitized}--bundle-"
-                f"{model_card.artifact_bundle.bundle_id.removeprefix('bundle_')[:16]}"
-            )
+        bundle = transfer_bundle(model_card, artifact_role)
+        if bundle is not None:
+            sanitized = f"{sanitized}--bundle-{bundle.bundle_id.removeprefix('bundle_')[:16]}"
         target_dir = self._store_path / sanitized
         previous_entry = self.get_entry(model_id)
         transfer_lock_acquired = False
@@ -1787,7 +1879,11 @@ class ModelStore:
             # its ``*mmproj*.gguf``.
             selected_files = (
                 select_store_artifact_bundle_files(repo_file_list, model_card)
-                if model_card is not None and model_card.artifact_bundle is not None
+                if model_card is not None and bundle is not None
+                else select_store_video_companion_files(
+                    repo_file_list, model_card, artifact_repository, revision
+                )
+                if model_card is not None and artifact_role == "video_companion"
                 else select_store_gguf_download_files(
                     repo_file_list,
                     pinned_gguf,
@@ -1855,15 +1951,29 @@ class ModelStore:
                         "available. Free disk space or move the model store."
                     )
             downloaded_bytes = 0
-            bundle_files = (
-                {item.path: item for item in model_card.artifact_bundle.files}
-                if model_card is not None and model_card.artifact_bundle is not None
-                else {}
+            # Exact sizes (and object ids when signed) each selected file must
+            # arrive at: the base bundle's, or a video companion's declared sizes.
+            expected_files: dict[str, tuple[int, str | None]] = (
+                {item.path: (item.size_bytes, item.object_id) for item in bundle.files}
+                if bundle is not None
+                else {
+                    item.path: (item.size_bytes, None)
+                    for item in (
+                        model_card.video.companions
+                        if model_card is not None
+                        and artifact_role == "video_companion"
+                        and model_card.video is not None
+                        else ()
+                    )
+                    if item.size_bytes is not None
+                    and item.repo is not None
+                    and str(item.repo) == artifact_repository
+                }
             )
 
             for f in file_list:
                 file_size = f.size or 0
-                bundle_file = bundle_files.get(f.path)
+                expected_file = expected_files.get(f.path)
 
                 def make_progress_cb(fsize: int):
                     def cb(curr: int, total: int, is_renamed: bool) -> None:
@@ -1874,7 +1984,7 @@ class ModelStore:
 
                     return cb
 
-                if bundle_file is None:
+                if expected_file is None:
                     await download_file_with_retry(
                         ModelId(artifact_repository),
                         revision,
@@ -1889,8 +1999,8 @@ class ModelStore:
                         f.path,
                         target_dir,
                         make_progress_cb(file_size),
-                        expected_size=bundle_file.size_bytes,
-                        expected_object_id=bundle_file.object_id,
+                        expected_size=expected_file[0],
+                        expected_object_id=expected_file[1],
                     )
                 downloaded_bytes += file_size
                 status.progress = downloaded_bytes / max(total_bytes, 1)
@@ -1931,7 +2041,7 @@ class ModelStore:
                 )
             if (
                 expected_projector is None
-                and (model_card is None or model_card.artifact_bundle is None)
+                and bundle is None
                 and repo_ships_projector
                 and not has_gguf_projector(files)
             ):

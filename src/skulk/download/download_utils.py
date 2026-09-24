@@ -499,8 +499,9 @@ def companion_download_specs(
 
     Companions are the artifacts a model needs beyond its own repo: a
     separate vision-weights repo, an MTP sidecar (``mtp_sidecar_repo``), a
-    speculative-decoding assistant model (``assistant_model_repo``), or a
-    served-engine draft model (``served_spec_draft_repo``).
+    speculative-decoding assistant model (``assistant_model_repo``), a
+    served-engine draft model (``served_spec_draft_repo``), or a video card's
+    externally hosted companions (preprocessor weights).
     Every downloader path that resolves a base model MUST also ensure its
     companions — a base model present on disk without its companion is the
     "model loads, speculative decoding silently unavailable" failure mode
@@ -509,9 +510,10 @@ def companion_download_specs(
     Returns ``(shard, allow_patterns, required)`` triples; the shards carry
     bare model cards (no ``runtime``/``vision`` sections), so recursively
     ensuring a companion never yields further companions. ``required``
-    distinguishes criticality: split vision weights are load-bearing (a
-    vision model without them is broken — fetch failures must fail the
-    base), while MTP sidecars and assistants degrade gracefully to
+    distinguishes criticality: split vision weights and video preprocessor
+    weights are load-bearing (a vision model without them is broken, and a
+    video card would advertise guides it cannot derive — fetch failures must
+    fail the base), while MTP sidecars and assistants degrade gracefully to
     run-without-speculation (best-effort).
     """
 
@@ -558,6 +560,20 @@ def companion_download_specs(
                 True,
             )
         )
+    if model_card.video is not None:
+        # A video card's companions from other repositories (preprocessor
+        # weights such as the pose estimator) are fetched as exact files at
+        # their pinned revisions, keeping the repository's layout so the
+        # engine finds each under the folder its loader reads.
+        for repository, revision in model_card.external_video_companions():
+            files = [
+                item.path
+                for item in model_card.video.companions
+                if item.repo is not None
+                and str(item.repo) == repository
+                and item.revision == revision
+            ]
+            specs.append((_bare_shard(repository, revision), files, True))
     runtime = model_card.runtime
     # The runner only loads the sidecar when mtp_heads is also set (see
     # load_mlx_items); downloading one the runner will never load wastes
@@ -694,6 +710,14 @@ def model_companions_present_on_disk(
                     break
         if not vision_present:
             return False
+    if model_card.video is not None:
+        # Preprocessor weights are load-bearing: a card that advertises a
+        # guide it cannot derive would fail the render, not degrade it.
+        for item in model_card.video.companions:
+            if item.repo is None or str(item.repo) == str(model_card.artifact_repository):
+                continue
+            if build_sidecar_path(ModelId(item.repo), item.path, item.revision) is None:
+                return False
     if required_only:
         return True
     runtime = model_card.runtime

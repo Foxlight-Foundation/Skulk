@@ -12720,6 +12720,9 @@ class API:
                 in_use.add(str(card.model_id))
                 if card.vision and card.vision.weights_repo:
                     in_use.add(card.vision.weights_repo)
+                in_use.update(
+                    repository for repository, _ in card.external_video_companions()
+                )
                 if card.runtime is not None:
                     if card.runtime.mtp_sidecar_repo:
                         in_use.add(card.runtime.mtp_sidecar_repo)

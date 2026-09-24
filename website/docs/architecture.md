@@ -1779,7 +1779,8 @@ commit before metadata compilation. The MLX vision processor path may enable
 repository code internally, but vision capability alone no longer creates a
 separate permission prompt.
 When a card names any separately hosted companion—vision weights or processor,
-an MTP sidecar, an assistant model, or a served-engine/vLLM draft—its signed
+an MTP sidecar, an assistant model, a served-engine/vLLM draft, or a video
+card's guide preprocessor weights—its signed
 content must also name that repository's full immutable revision. Every download
 and loader receives the corresponding pin; a companion in the base artifact
 repository inherits `source_revision`. The card therefore authorizes immutable
