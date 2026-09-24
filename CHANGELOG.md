@@ -33,6 +33,29 @@ This project records release notes here and mirrors public-facing notes in
   settings it actually ran with in `stats.engine`, the seed included when the
   request gave none, and `GET /v1/models` lists each video card's styles.
 
+- Video jobs can steer the render with the card's ControlNet. A multipart
+  `POST /v1/videos` accepts a `control` clip, a `mask` whose white marks
+  what to regenerate, and a `source_video` behind that mask, with
+  `control_strength`, `control_start` and `control_end`. The control clip is
+  ordinary footage: the render derives the guide from it, as ComfyUI's H3
+  ControlNet template does, by `control_kind` (`pose` by default, `depth`,
+  or `edges`). `GET /v1/models` lists the guides each video card derives and
+  the weights they load. A card without a ControlNet for the mode, or
+  without the weights for a guide, refuses them, and `stats.engine` records
+  what the ControlNet ran with. On CUDA the ComfyUI engine runs on PyTorch's
+  own allocator (`--disable-cuda-malloc`): on the async allocator ComfyUI
+  would otherwise choose, a ControlNet render aborted the engine on the
+  GB10.
+
+- Video cards can pin companions hosted in other repositories. A new
+  `preprocessor` companion kind carries the weights that derive a guide video
+  from an ordinary clip (`role`: `pose_estimator`, `person_detector`, or
+  `depth_estimator`) and the `license` its repository declares. They download
+  with the card at their pinned revisions, count toward the card's
+  completeness, are protected from eviction while the card is in use, and the
+  ComfyUI engine searches each staged repository. The bundled MiniMax H3
+  cards pin SDPose, its RT-DETR person detector, and Depth Anything 3.
+
 - Placements choose their context window. llama-server, in-process llama.cpp
   and vLLM reserve the whole window's memory when a model loads, and since the
   unified-memory fix they were sized to the card's full context (262144 for

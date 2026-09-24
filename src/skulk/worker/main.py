@@ -26,7 +26,7 @@ from PIL import Image
 from skulk.download.download_utils import (
     build_model_path,
     companion_download_specs,
-    resolve_model_in_path,
+    installed_artifact_in_path,
 )
 from skulk.routing.connection_message import ConnectionMessage
 from skulk.routing.output_media import OutputMediaPacket
@@ -2944,16 +2944,10 @@ class Worker:
                     model_id = shard.model_card.model_id
                     self._download_backoff.record_attempt(model_id)
 
-                    found_path = resolve_model_in_path(
-                        model_id,
-                        shard.model_card.source_revision,
-                        expected_card=shard.model_card,
-                        artifact_root=(
-                            shard.model_card.artifact_bundle.root
-                            if shard.model_card.artifact_bundle is not None
-                            else None
-                        ),
-                    )
+                    # Only a base whose declared companions are on disk too
+                    # is already installed; otherwise the coordinator's
+                    # download path fetches what is missing.
+                    found_path = installed_artifact_in_path(shard.model_card)
                     if found_path is not None:
                         logger.info(
                             f"Model {model_id} found in SKULK_MODELS_PATH at {found_path}"

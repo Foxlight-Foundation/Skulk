@@ -91,7 +91,10 @@ operator-managed installations can provide `SKULK_COMFY_BIN` and `SKULK_COMFY_RO
 The model card defines supported modes: text-to-video (`t2va`), first/last-frame
 conditioning (`fl2va`), or reference images, clips and audio (`ref2va`). It also
 defines durations, frame grids, canvas limits, output audio and available adapters.
-Select only modes and references supported by that card.
+Select only modes and references supported by that card. A card may also pin guide
+preprocessor weights hosted in other repositories (a pose estimator and the person
+detector it crops with, a depth estimator); Skulk downloads them with the card at
+their pinned revisions, and each names the license its repository declares.
 
 Submit `/v1/videos`, retain the returned job ID, and poll its status. Download the
 completed MP4 or thumbnail from that API node. Completion requires both the

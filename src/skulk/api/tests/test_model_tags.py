@@ -452,6 +452,9 @@ def test_model_list_entry_projects_the_video_and_license_sections() -> None:
     assert payload["video"]["styles"] == [{"name": "style", "modes": []}]
     assert payload["video"]["reference_fidelities"] == ["match", "max"]
     assert payload["video"]["default_reference_fidelity"] == "match"
+    # Without a ControlNet the card derives no guide from a control clip.
+    assert payload["video"]["guides"] == [] and payload["video"]["default_guide"] is None
+    assert payload["video"]["default_control_strength"] is None
     assert payload["license"] == {"name": "Test License", "url": "https://example.invalid/LICENSE", "spdx_id": None, "notice": "Regional terms apply.", "display_name": "MiniMax H3"}
 
     text_card = ModelCard(model_id=ModelId("mlx-community/text"), storage_size=Memory.from_bytes(1024), n_layers=1, hidden_size=1, supports_tensor=False, tasks=[ModelTask.TextGeneration])

@@ -24,18 +24,23 @@ from skulk.shared.models.model_cards import (
     VideoCompanionConfig,
     VideoCompanionKind,
     VideoMode,
+    VideoPreprocessorRole,
 )
 from skulk.shared.types.video import (
     VIDEO_DEFAULT_CODEC,
+    VIDEO_DEFAULT_GUIDE,
     VIDEO_DEFAULT_REFERENCE_FIDELITY,
     VIDEO_DEFAULT_SAMPLER,
     VIDEO_DEFAULT_SCHEDULER,
+    VIDEO_GUIDE_PREPROCESSORS,
     VIDEO_OUTPUT_FILENAME,
+    VIDEO_STRUCTURAL_ROLES,
     VIDEO_THUMBNAIL_FILENAME,
     VideoEngineSettings,
     VideoGenerationTaskParams,
     VideoReferenceSpec,
     VideoStage,
+    derivable_guides,
 )
 from skulk.worker.runner.video_plan import RenderPlan, plan_render
 
@@ -69,6 +74,8 @@ NODE_CREATE_VIDEO: Final = "create_video"
 NODE_SAVE_VIDEO: Final = "save_video"
 NODE_THUMBNAIL_FRAME: Final = "thumbnail_frame"
 NODE_SAVE_THUMBNAIL: Final = "save_thumbnail"
+NODE_CONTROL_PATCH: Final = "control_patch"
+NODE_CONTROL: Final = "control"
 
 _STAGE_BY_NODE: Final[dict[str, VideoStage]] = {
     NODE_UNET: "encoding",
@@ -103,15 +110,29 @@ MODEL_FOLDERS: Final[tuple[str, ...]] = (
     "loras",
     "embeddings",
     "model_patches",
+    "checkpoints",
+    "geometry_estimation",
 )
-"""ComfyUI folder keys the engine exposes from a staged artifact directory."""
+"""ComfyUI folder keys the engine exposes from a staged artifact directory.
+
+The last two hold guide preprocessor weights: SDPose loads through the
+checkpoint loader, and Depth Anything 3 through the geometry-estimation one;
+the RT-DETR person detector shares ``diffusion_models``.
+"""
+
+PREPROCESSOR_FOLDERS: Final[dict[VideoPreprocessorRole, str]] = {
+    VideoPreprocessorRole.PoseEstimator: "checkpoints",
+    VideoPreprocessorRole.PersonDetector: "diffusion_models",
+    VideoPreprocessorRole.DepthEstimator: "geometry_estimation",
+}
+"""The ComfyUI folder each preprocessor role's loader reads its weights from."""
 
 
 def stage_for_node(node_id: str) -> VideoStage | None:
     """Map an executing graph node onto Skulk's coarse render stage."""
     if node_id in _STAGE_BY_NODE:
         return _STAGE_BY_NODE[node_id]
-    if node_id.startswith(("ref_", "load_", "guide_")):
+    if node_id.startswith(("ref_", "load_", "guide_", "derive_")):
         return "encoding"
     return None
 
@@ -200,24 +221,26 @@ def resolve_model_files(card: ModelCard) -> ComfyModelFiles:
     )
 
 
-def companion_file(companion: VideoCompanionConfig, card: ModelCard) -> str:
+def companion_file(companion: VideoCompanionConfig) -> str:
     """The name ComfyUI lists a companion under, relative to its model folder.
 
-    Companions in the card's own repository sit inside the staged artifact
-    directory, so the name is the path below the folder ComfyUI reads for
-    that kind (``loras/``, ``model_patches/``, ``embeddings/``).
+    A companion keeps its repository's layout wherever it is staged: inside
+    the card's artifact directory when it shares the card's repository, or
+    in its own staged directory when it is hosted elsewhere, which the
+    engine adds to ComfyUI's search roots. Either way the name is the path
+    below the folder ComfyUI reads for that kind (``loras/``,
+    ``model_patches/``, ``embeddings/``, or a preprocessor role's folder).
     """
-    if companion.repo is not None and companion.repo != card.model_id:
-        raise ValueError(
-            f"companion {companion.name!r} lives in {companion.repo}; externally hosted "
-            "companions are not wired into the comfy engine"
-        )
     path = PurePosixPath(companion.path)
-    folder = {
-        VideoCompanionKind.Lora: "loras",
-        VideoCompanionKind.ModelPatch: "model_patches",
-        VideoCompanionKind.Embedding: "embeddings",
-    }.get(companion.kind)
+    folder = (
+        PREPROCESSOR_FOLDERS[companion.role]
+        if companion.role is not None
+        else {
+            VideoCompanionKind.Lora: "loras",
+            VideoCompanionKind.ModelPatch: "model_patches",
+            VideoCompanionKind.Embedding: "embeddings",
+        }.get(companion.kind)
+    )
     if folder is None or not path.parts or path.parts[0] != folder:
         raise ValueError(
             f"companion {companion.name!r} ({companion.kind.value}) at {companion.path!r} is not "
@@ -257,7 +280,7 @@ def style_tokens(params: VideoGenerationTaskParams, card: ModelCard) -> tuple[st
         if companion is None:
             raise ValueError(f"{card.model_id} has no style embedding named {name!r}")
         tokens.append(
-            "embedding:" + PurePosixPath(companion_file(companion, card)).with_suffix("").as_posix()
+            "embedding:" + PurePosixPath(companion_file(companion)).with_suffix("").as_posix()
         )
     return tuple(tokens)
 
@@ -289,6 +312,120 @@ def select_adapter(
     raise ValueError(f"{card.model_id} has no lora companion named {params.lora!r}")
 
 
+POSE_LONGER_EDGE: Final = 1024
+"""The pose clip's longer edge before detection, as ComfyUI's H3 ControlNet
+template resizes it (lanczos)."""
+POSE_PERSON_THRESHOLD: Final = 0.5
+POSE_MAX_PEOPLE: Final = 2
+"""The template's person detector keeps at most two figures above 0.5."""
+POSE_BATCH_SIZE: Final = 16
+POSE_SCORE_THRESHOLD: Final = 0.51
+"""Keypoints drawn: the template's whole body (body, hands, face, feet, head)
+at stick width 4 and face points 2, above this score."""
+DEPTH_RESOLUTION: Final = 504
+"""Depth Anything 3 runs with the clip's shorter edge at this many pixels
+(``lower_bound_resize``), as ComfyUI's video depth blueprint does."""
+EDGE_LOW_THRESHOLD: Final = 0.4
+EDGE_HIGH_THRESHOLD: Final = 0.8
+"""The Canny node's own defaults."""
+
+
+@dataclass(frozen=True, slots=True)
+class GuideChoice:
+    """What a render derives from its control clip, and the weights that do it."""
+
+    kind: str
+    """``pose``, ``depth`` or ``edges``."""
+    files: dict[VideoPreprocessorRole, str]
+    """Each preprocessor's weights, relative to the folder its loader reads."""
+
+
+@dataclass(frozen=True, slots=True)
+class ControlChoice:
+    """The card's ControlNet as one render applies it."""
+
+    name: str
+    file: str
+    """The patch file relative to ComfyUI's ``model_patches`` folder."""
+    strength: float
+    start: float
+    """Fraction of the schedule at which it starts to steer."""
+    end: float
+    """Fraction of the schedule at which it stops."""
+    inputs: tuple[str, ...]
+    """The structural roles the request attached, in role order."""
+    guide: GuideChoice | None = None
+    """What the control clip is turned into; ``None`` when none is attached."""
+
+
+def select_guide(
+    params: VideoGenerationTaskParams, card: ModelCard, mode: VideoMode
+) -> GuideChoice:
+    """The guide to derive from the request's control clip, with its weights.
+
+    The clip is ordinary footage: the render derives the pose, depth or
+    edges the ControlNet follows. A kind the card cannot derive for the mode
+    is refused with the kinds it can.
+    """
+    assert card.video is not None
+    kind = params.control_kind or VIDEO_DEFAULT_GUIDE
+    available = derivable_guides(card.video, mode)
+    if kind not in available:
+        raise ValueError(
+            f"{card.model_id} cannot derive a {kind} guide for mode {mode.value}; "
+            f"it derives {', '.join(available) or 'none'}"
+        )
+    needed = VIDEO_GUIDE_PREPROCESSORS[kind]
+    return GuideChoice(
+        kind=kind,
+        files={
+            companion.role: companion_file(companion)
+            for companion in card.video.companions
+            if companion.role is not None and companion.role in needed
+        },
+    )
+
+
+def select_control(
+    params: VideoGenerationTaskParams, card: ModelCard, mode: VideoMode
+) -> ControlChoice | None:
+    """The card's ControlNet when the request attaches a control input, else none.
+
+    A control clip or a mask means nothing without the patch that reads it,
+    so a card with no ``model_patch`` companion for the mode refuses rather
+    than rendering as if the attachment were absent. A companion restricted
+    to other modes is not the card's ControlNet for this one.
+    """
+    roles = tuple(
+        role
+        for role in ("control", "mask", "source")
+        if any(spec.role == role for spec in params.references)
+    )
+    if not roles:
+        return None
+    assert card.video is not None
+    for companion in card.video.companions:
+        if companion.kind is not VideoCompanionKind.ModelPatch:
+            continue
+        if companion.modes and mode not in companion.modes:
+            continue
+        return ControlChoice(
+            name=companion.name,
+            file=companion_file(companion),
+            strength=params.control_strength
+            if params.control_strength is not None
+            else (companion.strength if companion.strength is not None else 1.0),
+            start=params.control_start,
+            end=params.control_end,
+            inputs=roles,
+            guide=select_guide(params, card, mode) if "control" in roles else None,
+        )
+    raise ValueError(
+        f"{card.model_id} carries no ControlNet for mode {mode.value}; "
+        "a control or mask attachment needs one"
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class ComfyRenderPlan:
     """A render plan plus the engine choices ComfyUI needs to build the graph."""
@@ -307,6 +444,8 @@ class ComfyRenderPlan:
     style_tokens: tuple[str, ...] = ()
     """The ``embedding:`` tokens those styles bind to."""
     codec: str = CODEC_DEFAULT
+    control: ControlChoice | None = None
+    """The ControlNet this render applies, when the request attached a control input."""
 
     @property
     def steps(self) -> int:
@@ -338,6 +477,13 @@ class ComfyRenderPlan:
             else None,
             styles=self.styles,
             codec=self.codec,
+            control_inputs=() if self.control is None else self.control.inputs,
+            control_strength=None if self.control is None else self.control.strength,
+            control_start=None if self.control is None else self.control.start,
+            control_end=None if self.control is None else self.control.end,
+            control_kind=None
+            if self.control is None or self.control.guide is None
+            else self.control.guide.kind,
         )
 
 
@@ -365,7 +511,7 @@ def plan_comfy_render(
     if companion is not None:
         adapter = AdapterChoice(
             name=companion.name,
-            file=companion_file(companion, card),
+            file=companion_file(companion),
             strength=params.lora_strength
             if params.lora_strength is not None
             else (companion.strength or 1.0),
@@ -407,7 +553,155 @@ def plan_comfy_render(
         styles=params.styles,
         style_tokens=style_tokens(params, card),
         codec=params.codec or CODEC_DEFAULT,
+        control=select_control(params, card, mode),
     )
+
+
+def _frames(prompt: ComfyPrompt, name: str, title: str, binding: ReferenceBinding) -> list[Any]:
+    """Load one structural attachment as an IMAGE batch: a still, or a clip's frames."""
+    if binding.spec.kind == "image":
+        prompt[f"{name}_load"] = _node("LoadImage", title, image=binding.input_name)
+        return _link(f"{name}_load", 0)
+    prompt[f"{name}_load"] = _node("LoadVideo", title, file=binding.input_name)
+    prompt[f"{name}_frames"] = _node(
+        "GetVideoComponents", f"{title} frames", video=_link(f"{name}_load")
+    )
+    return _link(f"{name}_frames", 0)
+
+
+def _add_control(
+    prompt: ComfyPrompt,
+    control: ControlChoice,
+    structural: dict[str, ReferenceBinding],
+    model_ref: list[Any],
+) -> list[Any]:
+    """Patch the model with the card's ControlNet; return the patched model's link.
+
+    The node fits every input to the render itself: a short clip holds its
+    last frame, a long one is cut, and each frame is scaled and centre-cropped
+    to the canvas. A mask is read from its red channel, white marking what to
+    regenerate; the source clip is read only behind a mask.
+    """
+    prompt[NODE_CONTROL_PATCH] = _node(
+        "ModelPatchLoader", "Load ControlNet", name=control.file
+    )
+    inputs: dict[str, object] = {
+        "model": model_ref,
+        "model_patch": _link(NODE_CONTROL_PATCH),
+        "vae": _link(NODE_VIDEO_VAE),
+        "strength": control.strength,
+        "start_percent": control.start,
+        "end_percent": control.end,
+    }
+    if "control" in structural:
+        assert control.guide is not None
+        clip = _frames(prompt, "control_video", "Control clip", structural["control"])
+        inputs["control_video"] = _derive_guide(prompt, control.guide, clip)
+    if "mask" in structural:
+        frames = _frames(prompt, "mask", "Mask", structural["mask"])
+        prompt["mask_channel"] = _node(
+            "ImageToMask", "Mask from red", image=frames, channel="red"
+        )
+        inputs["mask"] = _link("mask_channel", 0)
+        if "source" in structural:
+            inputs["source_video"] = _frames(
+                prompt, "source_video", "Source clip", structural["source"]
+            )
+    prompt[NODE_CONTROL] = _node("MiniMaxH3FunControlNetApply", "ControlNet", **inputs)
+    return _link(NODE_CONTROL)
+
+
+def _derive_guide(prompt: ComfyPrompt, guide: GuideChoice, frames: list[Any]) -> list[Any]:
+    """Turn the control clip's frames into the guide the ControlNet follows.
+
+    Each chain is ComfyUI's own: the pose one is its H3 ControlNet template's
+    SDPose subgraph, depth its video Depth Anything 3 blueprint, edges its
+    Canny node. Returns the guide frames' link.
+    """
+    if guide.kind == "pose":
+        prompt["derive_resize"] = _node(
+            "ResizeImageMaskNode",
+            "Pose clip size",
+            input=frames,
+            resize_type="scale longer dimension",
+            scale_method="lanczos",
+            **{"resize_type.longer_size": POSE_LONGER_EDGE},
+        )
+        prompt["derive_pose_model"] = _node(
+            "CheckpointLoaderSimple",
+            "Load pose estimator",
+            ckpt_name=guide.files[VideoPreprocessorRole.PoseEstimator],
+        )
+        prompt["derive_detector"] = _node(
+            "UNETLoader",
+            "Load person detector",
+            unet_name=guide.files[VideoPreprocessorRole.PersonDetector],
+            weight_dtype="default",
+        )
+        prompt["derive_people"] = _node(
+            "RTDETR_detect",
+            "Find people",
+            model=_link("derive_detector"),
+            image=_link("derive_resize"),
+            threshold=POSE_PERSON_THRESHOLD,
+            class_name="person",
+            max_detections=POSE_MAX_PEOPLE,
+        )
+        prompt["derive_keypoints"] = _node(
+            "SDPoseKeypointExtractor",
+            "Estimate poses",
+            model=_link("derive_pose_model", 0),
+            vae=_link("derive_pose_model", 2),
+            image=_link("derive_resize"),
+            batch_size=POSE_BATCH_SIZE,
+            bboxes=_link("derive_people"),
+        )
+        prompt["derive_pose"] = _node(
+            "SDPoseDrawKeypoints",
+            "Draw poses",
+            keypoints=_link("derive_keypoints"),
+            draw_body=True,
+            draw_hands=True,
+            draw_face=True,
+            draw_feet=True,
+            stick_width=4,
+            face_point_size=2,
+            score_threshold=POSE_SCORE_THRESHOLD,
+            draw_head=True,
+        )
+        return _link("derive_pose")
+    if guide.kind == "depth":
+        prompt["derive_depth_model"] = _node(
+            "LoadDA3Model",
+            "Load depth estimator",
+            model_name=guide.files[VideoPreprocessorRole.DepthEstimator],
+            weight_dtype="default",
+        )
+        prompt["derive_depth_geometry"] = _node(
+            "DA3Inference",
+            "Estimate depth",
+            da3_model=_link("derive_depth_model"),
+            image=frames,
+            resolution=DEPTH_RESOLUTION,
+            resize_method="lower_bound_resize",
+            mode="mono",
+        )
+        prompt["derive_depth"] = _node(
+            "DA3Render",
+            "Depth map",
+            da3_geometry=_link("derive_depth_geometry"),
+            output="depth",
+            **{"output.normalization": "v2_style", "output.apply_sky_clip": False},
+        )
+        return _link("derive_depth")
+    prompt["derive_edges"] = _node(
+        "Canny",
+        "Detect edges",
+        image=frames,
+        low_threshold=EDGE_LOW_THRESHOLD,
+        high_threshold=EDGE_HIGH_THRESHOLD,
+    )
+    return _link("derive_edges")
 
 
 def _node(class_type: str, title: str, **inputs: object) -> dict[str, Any]:
@@ -469,6 +763,19 @@ def build_prompt(
     plan = render.plan
     files = render.files
     prompt: ComfyPrompt = {}
+    # Structural attachments steer the model through the ControlNet; the
+    # conditioning builders read every attachment they are handed as a
+    # keyframe or a reference, so they never see these.
+    structural = {
+        binding.spec.role: binding
+        for binding in references
+        if binding.spec.role in VIDEO_STRUCTURAL_ROLES
+    }
+    references = tuple(
+        binding
+        for binding in references
+        if binding.spec.role not in VIDEO_STRUCTURAL_ROLES
+    )
     prompt[NODE_UNET] = _node(
         "UNETLoader", "Load H3", unet_name=files.diffusion_model, weight_dtype="default"
     )
@@ -510,6 +817,10 @@ def build_prompt(
         prompt[NODE_AUDIO_VAE] = _node(
             "VAELoader", "Load audio VAE", vae_name=files.audio_vae
         )
+    if render.control is not None:
+        # After the shift, so the node turns its start and end fractions into
+        # sigmas on the schedule the sampler will actually walk.
+        model_ref = _add_control(prompt, render.control, structural, model_ref)
 
     if render.mode is VideoMode.ReferenceToAudioVideo:
         conditioning = _add_reference_condition(prompt, render, params, references)
@@ -741,15 +1052,22 @@ def _add_reference_condition(
     return _add_timed_guides(prompt, render, timed, conditioning)
 
 
-def extra_model_paths_yaml(model_dir: Path) -> str:
+def extra_model_paths_yaml(
+    model_dir: Path, companion_dirs: tuple[Path, ...] = ()
+) -> str:
     """The ``extra_model_paths.yaml`` that exposes a staged artifact to ComfyUI.
 
-    Only folders present in the artifact are listed; ComfyUI treats each as
-    an additional search root for that model kind, so the loader file names
-    in the graph resolve without copying weights into the checkout.
+    Only folders present in each root are listed; ComfyUI treats each as an
+    additional search root for that model kind, so the loader file names in
+    the graph resolve without copying weights into the checkout. The card's
+    artifact directory comes first; each externally hosted companion
+    repository's staged directory follows as a root of its own.
     """
-    lines = ["skulk:", f"  base_path: {model_dir.resolve().as_posix()}"]
-    for folder in MODEL_FOLDERS:
-        if (model_dir / folder).is_dir():
-            lines.append(f"  {folder}: {folder}")
+    lines: list[str] = []
+    for index, root in enumerate((model_dir, *companion_dirs)):
+        lines.append("skulk:" if index == 0 else f"skulk_companion_{index}:")
+        lines.append(f"  base_path: {root.resolve().as_posix()}")
+        for folder in MODEL_FOLDERS:
+            if (root / folder).is_dir():
+                lines.append(f"  {folder}: {folder}")
     return "\n".join(lines) + "\n"

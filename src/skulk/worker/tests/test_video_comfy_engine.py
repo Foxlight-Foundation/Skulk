@@ -17,6 +17,7 @@ from skulk.shared.models.model_cards import (
     ModelCard,
     ModelId,
     VideoMode,
+    VideoPreprocessorRole,
     get_bundled_card,
 )
 from skulk.shared.types.chunks import ErrorChunk, VideoChunk
@@ -56,6 +57,7 @@ from skulk.worker.runner.comfy.graph import (
     NODE_SHIFT,
     bind_references,
     build_prompt,
+    companion_file,
     extra_model_paths_yaml,
     plan_comfy_render,
     resolve_model_files,
@@ -98,6 +100,22 @@ def _reference(
         sha256=_DIGEST,
         local_path=str(local_path),
     )
+
+
+def _stage_companions(card: ModelCard, root: Path) -> None:
+    """Lay out a card's externally hosted companions as the downloader stages them."""
+    from skulk.download.download_utils import _SOURCE_REVISION_MARKER
+
+    assert card.video is not None
+    for companion in card.video.companions:
+        if companion.repo is None:
+            continue
+        assert companion.revision is not None
+        staged = root / f"{ModelId(companion.repo).normalize()}--revision-{companion.revision}"
+        target = staged / companion.path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"weights")
+        (staged / _SOURCE_REVISION_MARKER).write_text(companion.revision)
 
 
 def test_h3_cards_resolve_their_loader_files() -> None:
@@ -371,6 +389,54 @@ def test_extra_model_paths_lists_the_folders_the_artifact_has(tmp_path: Path) ->
     assert "text_encoders" not in text and "embeddings" not in text
 
 
+def test_each_staged_companion_repository_is_a_search_root(tmp_path: Path) -> None:
+    """The card's artifact comes first, then every companion repository's own root."""
+    base = tmp_path / "base"
+    pose = tmp_path / "pose"
+    for folder in (base / "diffusion_models", pose / "checkpoints", pose / "diffusion_models"):
+        folder.mkdir(parents=True)
+    lines = extra_model_paths_yaml(base, (pose,)).splitlines()
+    assert lines[0] == "skulk:" and lines[1] == f"  base_path: {base.resolve().as_posix()}"
+    second = lines.index("skulk_companion_1:")
+    assert lines[second + 1] == f"  base_path: {pose.resolve().as_posix()}"
+    assert "  checkpoints: checkpoints" in lines[second:]
+
+
+def test_preprocessor_weights_load_by_their_repository_path() -> None:
+    """Each role's loader reads its own folder; the name is the path below it."""
+    card = _card(FL2VA_ID)
+    assert card.video is not None
+    names = {
+        companion.role: companion_file(companion)
+        for companion in card.video.companions
+        if companion.role is not None
+    }
+    assert names == {
+        VideoPreprocessorRole.PoseEstimator: "sdpose_wholebody_fp16.safetensors",
+        VideoPreprocessorRole.PersonDetector: "rt_detr_v4-x-hgnet_fp16.safetensors",
+        VideoPreprocessorRole.DepthEstimator: "depth_anything_3_mono_large.safetensors",
+    }
+
+
+def test_a_missing_companion_file_is_named_before_the_engine_starts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Staged companions become roots; an unstaged one is refused by name."""
+    import skulk.shared.constants as constants
+
+    card = _card(FL2VA_ID)
+    monkeypatch.setattr(constants, "SKULK_MODELS_PATH", (tmp_path,))
+    _stage_companions(card, tmp_path)
+    roots = runner_module._companion_directories(card)
+    assert [root.name for root in roots] == [
+        "Comfy-Org--SDPose--revision-acb43fbe8142b54d9ebd52b720b81dd4e14c8d81",
+        "Comfy-Org--Depth-Anything-3--revision-1aaeea516f22fb2f4c7fae761c8ed470c6cf9f93",
+    ]
+    (roots[1] / "geometry_estimation" / "depth_anything_3_mono_large.safetensors").unlink()
+    with pytest.raises(RuntimeError, match="depth_anything_3_mono_large .* is not staged"):
+        runner_module._companion_directories(card)
+
+
 def test_server_args_are_headless_and_skulk_owned(tmp_path: Path) -> None:
     args = server_args(
         Path("/venv/bin/python"),
@@ -527,6 +593,11 @@ def fake_comfy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         assert name is not None
         (model_dir / folder).mkdir(parents=True, exist_ok=True)
         (model_dir / folder / name).write_bytes(b"")
+    import skulk.shared.constants as constants
+
+    # The card's preprocessor weights are staged in their own repositories.
+    monkeypatch.setattr(constants, "SKULK_MODELS_PATH", (tmp_path / "companions",))
+    _stage_companions(card, tmp_path / "companions")
     monkeypatch.setattr(runner_module, "_model_directory", lambda card: model_dir)  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
     monkeypatch.setattr(runner_module, "SKULK_CACHE_HOME", tmp_path / "cache")
     monkeypatch.setattr(

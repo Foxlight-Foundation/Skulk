@@ -567,9 +567,12 @@ from skulk.shared.types.text_generation import (
 )
 from skulk.shared.types.video import (
     MAX_VIDEO_REFERENCES,
+    VIDEO_DEFAULT_GUIDE,
+    VIDEO_STRUCTURAL_ROLES,
     VideoGenerationTaskParams,
     VideoReferenceRole,
     VideoReferenceSpec,
+    derivable_guides,
 )
 from skulk.shared.types.worker.downloads import (
     DownloadAttemptId,
@@ -1216,6 +1219,23 @@ def _video_create_multipart_schema() -> dict[str, object]:
         "type": "array",
         "items": binary,
         "description": "Reference images, clips, or audio, in slot order.",
+    }
+    properties["control"] = {
+        **binary,
+        "description": (
+            "Ordinary clip (or a still) whose motion or structure the render "
+            "follows; the render derives the guide named by control_kind."
+        ),
+    }
+    properties["mask"] = {
+        **binary,
+        "description": (
+            "Mask image or clip for the ControlNet; white marks what to regenerate."
+        ),
+    }
+    properties["source_video"] = {
+        **binary,
+        "description": "The clip behind the mask; read only with a mask.",
     }
     return {**schema, "title": "VideoCreateMultipart", "properties": properties}
 
@@ -11155,6 +11175,11 @@ class API:
                     reference_fidelity=engine.reference_fidelity,
                     styles=list(engine.styles),
                     codec=engine.codec,
+                    control_inputs=list(engine.control_inputs),
+                    control_strength=engine.control_strength,
+                    control_start=engine.control_start,
+                    control_end=engine.control_end,
+                    control_kind=engine.control_kind,
                 ),
             )
         return VideoResource(
@@ -11287,6 +11312,9 @@ class API:
             ("last_frame", "last_frame"),
             ("keyframe", "keyframe"),
             ("reference", "reference"),
+            ("control", "control"),
+            ("mask", "mask"),
+            ("source_video", "source"),
         )
         recognized = {field_name for field_name, _role in fields}
         keyframe_times = _keyframe_times(form)
@@ -11310,7 +11338,8 @@ class API:
                     status_code=400,
                     detail=(
                         f"{key} is not an attachment field; use input_reference, "
-                        "first_frame, last_frame, keyframe, or reference"
+                        "first_frame, last_frame, keyframe, reference, control, "
+                        "mask, or source_video"
                     ),
                 )
         try:
@@ -11470,6 +11499,10 @@ class API:
                 reference_fidelity=create.reference_fidelity,
                 styles=tuple(create.styles),
                 codec=create.codec,
+                control_strength=create.control_strength,
+                control_start=0.0 if create.control_start is None else create.control_start,
+                control_end=1.0 if create.control_end is None else create.control_end,
+                control_kind=create.control_kind,
                 references=tuple(references),
                 total_input_chunks=sum(len(item.chunks) for item in attachments),
                 reference_bytes=sum(item.size_bytes for item in attachments),
@@ -11493,6 +11526,38 @@ class API:
                     f"{', '.join(sorted(embeddings)) or 'none'}"
                 ),
             )
+        steering = [
+            spec.role for spec in params.references if spec.role in VIDEO_STRUCTURAL_ROLES
+        ]
+        if steering:
+            # A control clip or a mask means nothing without the card's
+            # ControlNet; refused here rather than failing on the worker.
+            mode = params.implied_mode()
+            if not any(
+                companion.kind is VideoCompanionKind.ModelPatch
+                and (not companion.modes or mode in companion.modes)
+                for companion in card.video.companions
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"{card.model_id} carries no ControlNet for {mode.value}; "
+                        f"a {steering[0]} attachment needs one"
+                    ),
+                )
+            if "control" in steering:
+                # The clip is ordinary footage; the render derives the guide,
+                # so a kind the card has no weights for is refused here.
+                kind = params.control_kind or VIDEO_DEFAULT_GUIDE
+                available = derivable_guides(card.video, mode)
+                if kind not in available:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"{card.model_id} cannot derive a {kind} guide for "
+                            f"{mode.value}; it derives {', '.join(available) or 'none'}"
+                        ),
+                    )
         implied = params.model_copy(update={"mode": None}).implied_mode()
         if params.mode is not None and params.mode != implied:
             raise HTTPException(
@@ -11929,9 +11994,14 @@ class API:
                 ),
             )
         limits = card.video.reference_limits
+        # A control clip, a mask and its source steer the ControlNet; they are
+        # not references and the card's reference limits do not count them.
+        conditioning = [
+            spec for spec in params.references if spec.role not in VIDEO_STRUCTURAL_ROLES
+        ]
         if limits is not None:
             counts = {
-                kind: sum(1 for spec in params.references if spec.kind == kind)
+                kind: sum(1 for spec in conditioning if spec.kind == kind)
                 for kind in ("image", "video", "audio")
             }
             if (
@@ -11940,7 +12010,7 @@ class API:
                 or counts["audio"] > limits.max_audio_clips
                 or (
                     limits.max_files is not None
-                    and len(params.references) > limits.max_files
+                    and len(conditioning) > limits.max_files
                 )
             ):
                 raise HTTPException(
@@ -13222,6 +13292,9 @@ class API:
                 in_use.add(str(card.model_id))
                 if card.vision and card.vision.weights_repo:
                     in_use.add(card.vision.weights_repo)
+                in_use.update(
+                    repository for repository, _ in card.external_video_companions()
+                )
                 if card.runtime is not None:
                     if card.runtime.mtp_sidecar_repo:
                         in_use.add(card.runtime.mtp_sidecar_repo)

@@ -816,7 +816,11 @@ launches ComfyUI with `--bf16-vae --disable-mmap --cache-none`, the flags
 validated for MiniMax H3 on Strix Halo (memory-mapping a checkpoint above 64
 GB through unified memory is pathologically slow, the fp32 VAE decode does
 not fit beside the transformer, and node outputs are not worth retaining on
-a host whose GPU memory is the system's). The AMD channel is the one whose
+a host whose GPU memory is the system's). The CUDA lane launches ComfyUI
+with `--disable-cuda-malloc`: on the async allocator backend ComfyUI would
+otherwise choose, a render that applies the Fun ControlNet patch aborts the
+server on its first sampling step on the GB10, while PyTorch's own allocator
+renders it and costs a plain render nothing. The AMD channel is the one whose
 gfx1151 BLAS libraries are complete for H3: the rocm7.2 torch wheel from the
 PyTorch index, the lane's first wheel set, shipped a gfx1151 rocBLAS without
 the single-precision batched GEMM the Qwen3-VL text encoder's vision tower
@@ -860,7 +864,19 @@ except the ones that cannot serve distilled H3), the schedule, either sigma
 shift, `ref2va` reference fidelity, the card's style embeddings (bound as
 `embedding:` tokens ahead of the prompt) and the output codec, and the
 finished job reports every setting it resolved in `stats.engine`, so a take
-records what produced it. References are the
+records what produced it. The card's Fun ControlNet union (its `model_patch`
+companion) steers a render when the request attaches a `control` clip, a
+`mask`, or a `source` clip behind that mask. These structural roles never
+decide the mode, never count against the card's reference limits, and never
+reach the conditioning node; the patch is loaded with `ModelPatchLoader` and
+applied after the sigma shift, so its start and end fractions land on the
+schedule the sampler walks. The control clip is ordinary footage: the render
+derives the guide the ControlNet follows from it, pose (an RT-DETR person
+detector, then SDPose whole-body keypoints drawn as skeletons), depth (Depth
+Anything 3) or Canny edges, using ComfyUI's own preprocessor chains and the
+card's preprocessor companions. A card derives a guide only when it carries
+the ControlNet for the mode and every preprocessor weight that guide needs;
+`/v1/models` lists what each card derives. References are the
 files the worker already verified, named by their path below the input
 directory. The prompt carries a Skulk-minted id and client id so the
 WebSocket delivers only this render's `executing`, `progress_state`, and
@@ -1798,7 +1814,8 @@ commit before metadata compilation. The MLX vision processor path may enable
 repository code internally, but vision capability alone no longer creates a
 separate permission prompt.
 When a card names any separately hosted companion—vision weights or processor,
-an MTP sidecar, an assistant model, or a served-engine/vLLM draft—its signed
+an MTP sidecar, an assistant model, a served-engine/vLLM draft, or a video
+card's guide preprocessor weights—its signed
 content must also name that repository's full immutable revision. Every download
 and loader receives the corresponding pin; a companion in the base artifact
 repository inherits `source_revision`. The card therefore authorizes immutable
