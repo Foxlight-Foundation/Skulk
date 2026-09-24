@@ -16,6 +16,7 @@ from skulk.shared.models.model_cards import (
     ModelId,
     ModelTask,
     VideoCardConfig,
+    VideoPreprocessorRole,
 )
 from skulk.shared.types.memory import Memory
 from skulk.store.model_store import ModelStore
@@ -111,3 +112,75 @@ async def test_a_video_companion_fetches_its_named_files_not_the_owners_bundle(
     # The stored companion matches its request, so asking again fetches nothing.
     assert await request() == "complete"
     assert fetched == [(POSE_FILE, 5)]
+
+
+async def test_a_stored_companion_serves_another_card_only_with_its_files(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A second card naming more files from the same repository fetches them."""
+    fetched: list[str] = []
+
+    async def file_list(model_id: ModelId, revision: str, recursive: bool) -> list[FileListEntry]:
+        return [
+            FileListEntry(type="file", path=POSE_FILE, size=5),
+            FileListEntry(type="file", path="diffusion_models/person.safetensors", size=5),
+        ]
+
+    async def download(
+        model_id: ModelId, revision: str, path: str, target_dir: Path, *_args: object, **_kwargs: object
+    ) -> Path:
+        fetched.append(path)
+        target = target_dir / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"12345")
+        return target
+
+    monkeypatch.setattr(download_utils, "fetch_file_list_with_cache", file_list)
+    monkeypatch.setattr(download_utils, "download_file_with_retry", download)
+    monkeypatch.setattr(model_store_module, "MINIMUM_STAGING_FREE_DISK_BYTES", 0)
+    store = ModelStore(tmp_path)
+    first = _owner()
+    assert first.video is not None
+    wider = first.model_copy(
+        update={
+            "model_id": ModelId("org/other-video"),
+            "video": first.video.model_copy(
+                update={
+                    "companions": (
+                        *first.video.companions,
+                        first.video.companions[0].model_copy(
+                            update={
+                                "name": "person",
+                                "role": VideoPreprocessorRole.PersonDetector,
+                                "path": "diffusion_models/person.safetensors",
+                            }
+                        ),
+                    )
+                }
+            ),
+        }
+    )
+
+    async def request(owner: ModelCard) -> str:
+        status = await store.request_download(
+            "org/pose",
+            source_revision=REVISION,
+            model_card=owner,
+            artifact_role="video_companion",
+            owner_model_id=str(owner.model_id),
+        )
+        for _ in range(200):
+            if status.status in ("complete", "failed", "cancelled"):
+                break
+            await asyncio.sleep(0.01)
+        return status.status
+
+    assert await request(first) == "complete"
+    assert fetched == [POSE_FILE]
+    # The stored entry lacks the wider card's detector, so it downloads again.
+    assert await request(wider) == "complete"
+    assert "diffusion_models/person.safetensors" in fetched
+    # And the first card is still served from what is stored.
+    count = len(fetched)
+    assert await request(first) == "complete"
+    assert len(fetched) == count

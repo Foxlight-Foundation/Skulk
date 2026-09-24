@@ -595,6 +595,38 @@ class ModelStore:
         entry = self.get_entry(model_id)
         return entry is not None and entry.source_revision == source_revision
 
+    def _entry_holds_companion_files(
+        self,
+        entry: StoreModelEntry,
+        owner_card: ModelCard,
+        repository: str,
+        revision: str | None,
+    ) -> bool:
+        """Whether a stored video companion holds every file ``owner_card`` names.
+
+        Several cards can pin one companion repository at one revision while
+        naming different files from it; an entry fetched for one of them serves
+        another only when it already holds that card's files at their sizes.
+        """
+        expected = [
+            item
+            for item in (owner_card.video.companions if owner_card.video is not None else ())
+            if item.repo is not None and str(item.repo) == repository and item.revision == revision
+        ]
+        model_path = _resolve_store_child_path(self._store_path, entry.store_path)
+        if not expected or model_path is None:
+            return False
+        for item in expected:
+            candidate = model_path / item.path
+            try:
+                if not candidate.is_file() or (
+                    item.size_bytes is not None and candidate.stat().st_size != item.size_bytes
+                ):
+                    return False
+            except OSError:
+                return False
+        return True
+
     def entry_matches_artifact(
         self,
         model_id: str,
@@ -615,6 +647,10 @@ class ModelStore:
         requested_repository = source_repository or model_id
         if registered_repository != requested_repository:
             return False
+        if artifact_role == "video_companion" and model_card is not None:
+            return self._entry_holds_companion_files(
+                entry, model_card, requested_repository, source_revision
+            )
         bundle = transfer_bundle(model_card, artifact_role)
         if bundle is None:
             return True
