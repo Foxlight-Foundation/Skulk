@@ -126,10 +126,26 @@ async def test_a_stored_companion_serves_another_card_only_with_its_files(
             FileListEntry(type="file", path="diffusion_models/person.safetensors", size=5),
         ]
 
+
+async def test_concurrent_cards_sharing_a_companion_share_its_transfer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Placing both cards at once joins one transfer instead of refusing the second."""
+    release = asyncio.Event()
+    started = asyncio.Event()
+
+    async def file_list(model_id: ModelId, revision: str, recursive: bool) -> list[FileListEntry]:
+        return [FileListEntry(type="file", path=POSE_FILE, size=5)]
+
     async def download(
         model_id: ModelId, revision: str, path: str, target_dir: Path, *_args: object, **_kwargs: object
     ) -> Path:
+<<<<<<< HEAD
         fetched.append(path)
+=======
+        started.set()
+        await release.wait()
+>>>>>>> origin/feature/video-external-companions
         target = target_dir / path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(b"12345")
@@ -140,6 +156,7 @@ async def test_a_stored_companion_serves_another_card_only_with_its_files(
     monkeypatch.setattr(model_store_module, "MINIMUM_STAGING_FREE_DISK_BYTES", 0)
     store = ModelStore(tmp_path)
     first = _owner()
+<<<<<<< HEAD
     assert first.video is not None
     wider = first.model_copy(
         update={
@@ -163,12 +180,19 @@ async def test_a_stored_companion_serves_another_card_only_with_its_files(
 
     async def request(owner: ModelCard) -> str:
         status = await store.request_download(
+=======
+    second = first.model_copy(update={"model_id": ModelId("org/second-video")})
+
+    def request(owner: ModelCard):  # noqa: ANN202
+        return store.request_download(
+>>>>>>> origin/feature/video-external-companions
             "org/pose",
             source_revision=REVISION,
             model_card=owner,
             artifact_role="video_companion",
             owner_model_id=str(owner.model_id),
         )
+<<<<<<< HEAD
         for _ in range(200):
             if status.status in ("complete", "failed", "cancelled"):
                 break
@@ -184,3 +208,15 @@ async def test_a_stored_companion_serves_another_card_only_with_its_files(
     count = len(fetched)
     assert await request(first) == "complete"
     assert len(fetched) == count
+=======
+
+    active = await request(first)
+    await started.wait()
+    assert await request(second) is active
+    release.set()
+    for _ in range(200):
+        if active.status == "complete":
+            break
+        await asyncio.sleep(0.01)
+    assert active.status == "complete"
+>>>>>>> origin/feature/video-external-companions
