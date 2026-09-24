@@ -3823,6 +3823,9 @@ class API:
             sharding=payload.sharding,
             instance_meta=payload.instance_meta,
             min_nodes=payload.min_nodes,
+            prepared_node_resources=(
+                {} if prepared is None else {prepared[0]: prepared[1]}
+            ),
             excluded_nodes=list(payload.excluded_nodes),
             requested_context_tokens=payload.context_tokens,
         )
@@ -3949,9 +3952,11 @@ class API:
                     status_code=400,
                     detail="Music instances require exactly one specified node",
                 )
-            await self._prepare_music_engine_for_mount(
+            prepared = await self._prepare_music_engine_for_mount(
                 model_card, set(), required_nodes=music_nodes,
             )
+        else:
+            prepared = None
         if ModelTask.TextToMusic not in model_card.tasks:
             required_memory = model_card.storage_size
             available_memory = self._calculate_total_available_memory()
@@ -3964,6 +3969,9 @@ class API:
 
         command = CreateInstance(
             instance=instance,
+            prepared_node_resources=(
+                {} if prepared is None else {prepared[0]: prepared[1]}
+            ),
         )
         await self._send(command)
 

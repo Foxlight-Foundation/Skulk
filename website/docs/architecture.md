@@ -969,12 +969,13 @@ including when the API already sees a ready package. `AudioCppPreparationRequest
 and `AudioCppPreparationCompleted` report the lifecycle; the worker verifies
 the package, publishes fresh `NodeResources`, and includes that verified snapshot
 in the ordered completion. The master applies the snapshot to its live resource
-view before broadcasting success, so placement sees the exact build even when
-ordinary telemetry arrives later. Exact placements reject RPC shaped music
-instances and require a matching ready build and signed support claim.
-The API uses the ordered completion resources for its signed claim check and
-the subsequent request-local placement dry-run, so a dropped telemetry update
-cannot reject a successfully prepared mount.
+view before broadcasting success. The API also binds that verified snapshot to
+its `PlaceInstance` or `CreateInstance` command. During that command's placement,
+the master overlays the prepared node's resources, even if older telemetry
+arrives after the preparation event. The API uses the same snapshot for its
+signed claim check and request-local placement dry-run. Exact placements reject
+RPC shaped music instances and require a matching ready build and signed support
+claim.
 Placement stamps the selected audio.cpp build on the music shard. At each
 sidecar launch, the runner checks the executable digest and selected device
 against that stamp. Linux ties the sidecar to its runner with a parent-death

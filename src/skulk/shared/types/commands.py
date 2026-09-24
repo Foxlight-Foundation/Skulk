@@ -20,6 +20,7 @@ from skulk.shared.types.chunks import InputChunk
 from skulk.shared.types.common import CommandId, NodeId, SystemId
 from skulk.shared.types.embedding import TextEmbeddingTaskParams
 from skulk.shared.types.music import MusicGenerationTaskParams
+from skulk.shared.types.profiling import NodeResources
 from skulk.shared.types.steward_actions import (
     StewardActionProposal,
     StewardActionProposalId,
@@ -145,6 +146,10 @@ class PlaceInstance(BaseCommand):
     sharding: Sharding
     instance_meta: InstanceMeta
     min_nodes: int
+    prepared_node_resources: dict[NodeId, NodeResources] = Field(
+        default_factory=dict,
+        description="Worker-verified audio.cpp resources from this music mount preparation, scoped to this placement command.",
+    )
     # Per-placement node exclusions — the planner treats these nodes as if
     # they were absent from the topology when scoring this placement only.
     # Empty list (default) preserves the unfiltered behavior. Already-running
@@ -170,6 +175,10 @@ class PlaceInstance(BaseCommand):
 
 class CreateInstance(BaseCommand):
     instance: Instance
+    prepared_node_resources: dict[NodeId, NodeResources] = Field(
+        default_factory=dict,
+        description="Worker-verified audio.cpp resources for the exact music node, scoped to this placement command.",
+    )
 
 
 class DeleteInstance(BaseCommand):

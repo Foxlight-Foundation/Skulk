@@ -272,6 +272,7 @@ async def test_music_place_dry_run_uses_ordered_preparation_resources(
     assert seen_resources == [{node: ready}]
     assert api._telemetry_view.node_resources[node] is stale
     api._send.assert_awaited_once()
+    assert api._send.call_args.args[0].prepared_node_resources == {node: ready}
 
 
 async def test_mount_preflight_uses_vram_for_cuda_music(
@@ -349,7 +350,11 @@ async def test_exact_music_instance_prepares_its_specified_node_before_send(
     )
     api: Any = object.__new__(API)
     api._send = AsyncMock()
-    api._prepare_music_engine_for_mount = AsyncMock()
+    ready = NodeResources(
+        backends=frozenset({"audio_cpp", "audio_cpp-cpu"}),
+        engine_builds={"audio_cpp-cpu": "qualified-build"},
+    )
+    api._prepare_music_engine_for_mount = AsyncMock(return_value=(node, ready))
     monkeypatch.setattr(API, "_load_authorized_model_card", AsyncMock(return_value=card))
     def no_remote_code_approvals(_api: API) -> frozenset[str]:
         return frozenset()
@@ -365,6 +370,7 @@ async def test_exact_music_instance_prepares_its_specified_node_before_send(
         card, set(), required_nodes={node},
     )
     api._send.assert_awaited_once()
+    assert api._send.call_args.args[0].prepared_node_resources == {node: ready}
 
     api._send.reset_mock()
     api._prepare_music_engine_for_mount.side_effect = HTTPException(

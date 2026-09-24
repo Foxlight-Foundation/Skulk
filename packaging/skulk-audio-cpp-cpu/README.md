@@ -9,3 +9,6 @@ Skulk from immutable registry cards.
 The CPU binary is available for Apple Silicon macOS 15+, Linux amd64, and
 Linux arm64. Package availability does not assert that either model has been
 qualified on any of these hosts.
+
+The wheel index refuses to replace a published filename with different bytes.
+Rebuilds with a new digest require a new package version and updated Skulk pins.

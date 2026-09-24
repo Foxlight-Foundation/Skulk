@@ -262,9 +262,11 @@ observed ready, and indexed `AudioCppPreparationRequested`/
 `AudioCppPreparationCompleted` events. The worker verifies the package and
 publishes fresh `NodeResources` (including host architecture); the successful
 completion also carries those verified facts, which the master applies before
-broadcasting success so signed placement cannot race its telemetry view.
-The API reads that ordered snapshot instead of waiting for telemetry and uses
-it in the request-local placement dry-run. Placement
+broadcasting success. The API reads that ordered snapshot instead of waiting
+for telemetry and uses it in the request-local placement dry-run and subsequent
+`PlaceInstance` or `CreateInstance` command. The master overlays the verified
+resources while handling that command so delayed telemetry cannot undo the
+preparation barrier. Placement
 stamps the exact engine build on music shards; the runner rehashes and probes
 the executable and selected lane before every sidecar start. Linux uses a
 parent-death signal and macOS uses a detached watchdog to end the server when

@@ -42,6 +42,7 @@ from skulk.shared.models.memory_estimate import (
 from skulk.shared.models.model_cards import (
     ModelCard,
     ModelId,
+    ModelTask,
     VideoMode,
     get_card,
     get_current_registry_card,
@@ -111,7 +112,7 @@ from skulk.shared.types.events import (
     is_persistable_control_event,
 )
 from skulk.shared.types.memory import Memory
-from skulk.shared.types.profiling import MemoryUsage
+from skulk.shared.types.profiling import MemoryUsage, NodeResources
 from skulk.shared.types.state import State
 from skulk.shared.types.state_sync import StateSnapshot, StateSyncMessage
 from skulk.shared.types.steward_actions import (
@@ -1091,6 +1092,96 @@ class Master:
         # refresh these facts after the preparation barrier.
         self._telemetry_view.node_resources[event.target_node] = resources
 
+    def _placement_resources_for_command(
+        self, command: PlaceInstance | CreateInstance,
+    ) -> Mapping[NodeId, NodeResources]:
+        """Overlay one verified music preparation for this placement only.
+
+        Telemetry can deliver an older resource packet after the indexed
+        preparation event. Carrying its worker-verified snapshot on the
+        following command keeps placement ordered across that race.
+        """
+
+        prepared = command.prepared_node_resources
+        if not prepared:
+            return self._telemetry_view.node_resources
+        model_id = (
+            command.model_card.model_id
+            if isinstance(command, PlaceInstance)
+            else command.instance.shard_assignments.model_id
+        )
+        card = self._ordered_placement_model_card(model_id)
+        if card is None or ModelTask.TextToMusic not in card.tasks or len(prepared) != 1:
+            raise ValueError("Prepared audio.cpp resources require one music node")
+        node_id, resources = next(iter(prepared.items()))
+        if node_id not in self.state.topology.list_nodes():
+            raise ValueError("Prepared audio.cpp node is no longer a cluster member")
+        if isinstance(command, CreateInstance) and (
+            node_id not in command.instance.shard_assignments.node_to_runner
+        ):
+            raise ValueError("Prepared audio.cpp node does not match exact placement")
+        if not any(
+            backend.startswith("audio_cpp-")
+            and backend in resources.engine_builds
+            for backend in resources.backends
+        ):
+            raise ValueError("Prepared audio.cpp resources contain no ready build")
+        return {**self._telemetry_view.node_resources, node_id: resources}
+
+    def _place_requested_instance(
+        self, command: PlaceInstance,
+    ) -> dict[InstanceId, Instance]:
+        """Place one quick command using its prepared music snapshot if present."""
+
+        self._require_ordered_place_instance_card(command)
+        resources = self._placement_resources_for_command(command)
+        credited_memory, credited_vram = self._placement_memory_inputs(
+            node_resources=resources,
+        )
+        return place_instance(
+            command,
+            self.state.topology,
+            self.state.instances,
+            credited_memory,
+            self.state.node_network,
+            download_status=self._effective_downloads(),
+            excluded_nodes=set(command.excluded_nodes),
+            node_resources=resources,
+            node_vram=credited_vram,
+            unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
+                self._telemetry_view.node_system,
+                resources,
+                node_memory=credited_memory,
+            ),
+            approved_remote_code_identities=self._model_trust_approvals,
+            served_context_default=self._served_context_default(),
+        )
+
+    def _create_requested_instance(
+        self, command: CreateInstance,
+    ) -> Mapping[InstanceId, Instance]:
+        """Validate one exact placement with its prepared music snapshot."""
+
+        self._require_ordered_create_instance_card(command)
+        resources = self._placement_resources_for_command(command)
+        credited_memory, credited_vram = self._placement_memory_inputs(
+            node_resources=resources,
+        )
+        return add_instance_to_placements(
+            command,
+            self.state.topology,
+            self.state.instances,
+            credited_memory,
+            node_vram=credited_vram,
+            unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
+                self._telemetry_view.node_system,
+                resources,
+                node_memory=credited_memory,
+            ),
+            approved_remote_code_identities=self._model_trust_approvals,
+            node_resources=resources,
+        )
+
     def _record_runner_loaded_transitions(
         self, before: Mapping[RunnerId, RunnerStatus]
     ) -> None:
@@ -1384,6 +1475,7 @@ class Master:
         self,
         node_memory: Mapping[NodeId, MemoryUsage],
         placements: Mapping[InstanceId, Instance],
+        node_resources: Mapping[NodeId, NodeResources] | None = None,
     ) -> tuple[dict[NodeId, MemoryUsage], dict[NodeId, Memory]]:
         """Node memory and usable GPU memory net of what ``placements`` committed.
 
@@ -1396,14 +1488,18 @@ class Master:
         the reservation too, and the discrete-VRAM reservation is applied on
         top as before.
         """
+        resources = (
+            self._telemetry_view.node_resources
+            if node_resources is None else node_resources
+        )
         unified_nodes = unified_memory_gpu_node_ids(
             self._telemetry_view.node_system,
-            self._telemetry_view.node_resources,
+            resources,
             node_memory=node_memory,
         )
         vram_membership = usable_vram_by_node(
             self._telemetry_view.node_system,
-            self._telemetry_view.node_resources,
+            resources,
             node_memory=node_memory,
         )
         memory = reserve_system_ram_usage(
@@ -1415,7 +1511,7 @@ class Master:
         )
         vram = usable_vram_by_node(
             self._telemetry_view.node_system,
-            self._telemetry_view.node_resources,
+            resources,
             node_memory=memory,
             current_instances=placements,
         )
@@ -1424,6 +1520,7 @@ class Master:
     def _placement_memory_inputs(
         self,
         current_instances: Mapping[InstanceId, Instance] | None = None,
+        node_resources: Mapping[NodeId, NodeResources] | None = None,
     ) -> tuple[
         Mapping[NodeId, MemoryUsage],
         Mapping[NodeId, Memory],
@@ -1447,7 +1544,9 @@ class Master:
         credit = self._freed_credit_by_node()
         base_memory = self._telemetry_view.node_memory
         if not credit:
-            return self._reserved_placement_inputs(base_memory, placements)
+            return self._reserved_placement_inputs(
+                base_memory, placements, node_resources,
+            )
         # Credit the freed bytes onto each node's ram_available, clamped to
         # ram_total so credited availability never exceeds capacity (telemetry
         # may already have partly caught up, or the footprint estimate may be
@@ -1473,7 +1572,9 @@ class Master:
         # figure directly: usable_vram_by_node applies its own working-set /
         # GTT ceiling, so the credited VRAM is naturally capped and can never
         # exceed the ceiling or total VRAM.
-        return self._reserved_placement_inputs(memory, placements)
+        return self._reserved_placement_inputs(
+            memory, placements, node_resources,
+        )
 
     def _place_for_steward_action(
         self,
@@ -3183,59 +3284,13 @@ class Master:
                                     )
                                 generated_events.extend(transition_events)
                         case PlaceInstance():
-                            self._require_ordered_place_instance_card(command)
-                            # node_memory/node_vram come from the telemetry plane
-                            # (#279 slice 2). Recently-freed credit is pruned
-                            # here and disabled by default (#314); the usable-GPU
-                            # map admits discrete/UMA GPU nodes against the pool
-                            # their backend can actually allocate from.
-                            credited_memory, credited_vram = (
-                                self._placement_memory_inputs()
-                            )
-                            placement = place_instance(
-                                command,
-                                self.state.topology,
-                                self.state.instances,
-                                credited_memory,
-                                self.state.node_network,
-                                download_status=self._effective_downloads(),
-                                excluded_nodes=set(command.excluded_nodes),
-                                node_resources=self._telemetry_view.node_resources,
-                                node_vram=credited_vram,
-                                unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
-                                    self._telemetry_view.node_system,
-                                    self._telemetry_view.node_resources,
-                                    node_memory=credited_memory,
-                                ),
-                                approved_remote_code_identities=self._model_trust_approvals,
-                                served_context_default=self._served_context_default(),
-                            )
+                            placement = self._place_requested_instance(command)
                             transition_events = get_transition_events(
                                 self.state.instances, placement, self.state.tasks
                             )
                             generated_events.extend(transition_events)
                         case CreateInstance():
-                            self._require_ordered_create_instance_card(command)
-                            # Placement inputs come from telemetry (#279 slice 2);
-                            # the recently-freed bookkeeping path is pruned here
-                            # and normally contributes no speculative credit.
-                            credited_memory, credited_vram = (
-                                self._placement_memory_inputs()
-                            )
-                            placement = add_instance_to_placements(
-                                command,
-                                self.state.topology,
-                                self.state.instances,
-                                credited_memory,
-                                node_vram=credited_vram,
-                                unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
-                                    self._telemetry_view.node_system,
-                                    self._telemetry_view.node_resources,
-                                    node_memory=credited_memory,
-                                ),
-                                approved_remote_code_identities=self._model_trust_approvals,
-                                node_resources=self._telemetry_view.node_resources,
-                            )
+                            placement = self._create_requested_instance(command)
                             transition_events = get_transition_events(
                                 self.state.instances, placement, self.state.tasks
                             )

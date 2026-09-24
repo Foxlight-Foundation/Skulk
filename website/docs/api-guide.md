@@ -2395,6 +2395,8 @@ claim before accepting the command. Music admission checks the selected
 backend's memory pool; GPU lanes use their accelerator memory budget. If the
 node cannot be prepared, the request returns HTTP 503 with the node's
 preparation or compatibility diagnostic.
+The accepted placement carries the verified preparation snapshot so delayed
+node telemetry cannot replace the ready engine view during that request.
 
 Persist the submitted instance identity before sending. HTTP acceptance is not
 download or runner readiness. If the response is lost, reconcile that exact ID
