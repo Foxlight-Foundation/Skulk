@@ -13746,6 +13746,7 @@ class API:
                 task_types.ImageGeneration,
                 task_types.ImageEdits,
                 task_types.VideoGeneration,
+                task_types.MusicGeneration,
                 task_types.TextEmbedding,
                 task_types.SpeechSynthesis,
                 task_types.AudioTranscription,

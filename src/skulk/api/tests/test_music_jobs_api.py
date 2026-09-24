@@ -41,6 +41,7 @@ from skulk.shared.types.profiling import (
     SystemPerformanceProfile,
 )
 from skulk.shared.types.tasks import MusicGeneration as MusicGenerationTask
+from skulk.shared.types.tasks import TaskStatus
 from skulk.shared.types.worker.instances import (
     InstanceId,
     LlamaRpcInstance,
@@ -761,6 +762,43 @@ def test_completed_music_task_without_terminal_frame_expires(
     assert job is not None and job.status == "failed"
     assert "terminal frame" in (job.error or "")
     assert api._music_jobs.active_count() == 0
+
+
+async def test_completed_music_task_data_gap_finishes_without_cancellation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A DATA gap after ordered completion must retain normal task cleanup."""
+
+    api = _api(tmp_path, monkeypatch)
+    command_id = CommandId("music-data-gap")
+    _job(api, command_id, _wav())
+    task = MusicGenerationTask(
+        instance_id=InstanceId(), command_id=command_id, owner_node=api.node_id,
+        task_status=TaskStatus.Complete,
+        task_params=MusicGenerationTaskParams(
+            model=str(MODEL), prompt="piano", seconds=20,
+        ),
+    )
+    api.state = SimpleNamespace(tasks={task.task_id: task})
+
+    def record_transport_failure(_failed_command_id: CommandId) -> None:
+        pass
+
+    api._data_plane_observer = SimpleNamespace(
+        record_transport_failure=record_transport_failure,
+    )
+    api.command_sender = SimpleNamespace(send=AsyncMock())
+    sender, receiver = channel[MusicChunk]()
+    api._music_generation_queues[command_id] = sender
+
+    async with anyio.create_task_group() as group:
+        group.start_soon(api._drain_music_job, command_id, receiver)
+        await api._fail_data_stream_transport(command_id, "missing DATA sequence")
+
+    api.command_sender.send.assert_not_awaited()
+    assert command_id not in api._cancelled_command_ids
+    api._finalize_command_stream.assert_awaited_once()
+    assert api._music_jobs.get(command_id).status == "failed"
 
 
 async def test_music_terminal_frame_replaces_short_completion_grace(
