@@ -23,6 +23,7 @@ from skulk.extensions import service_bootstrap
 from skulk.extensions.runtime_artifacts import Digest, measure_host
 from skulk.extensions.runtime_files import (
     RuntimeLock,
+    is_desktop_metadata,
     private_directory,
     read_private,
     write_private,
@@ -111,6 +112,11 @@ def _sources() -> tuple[_SourceFile, ...]:
             if "__pycache__" in relative.parts or path.suffix in {".pyc", ".pyo"}:
                 continue
             if primary and relative.parts[0] in {"skulk", "skulk_pyo3_bindings"}:
+                continue
+            # Finder's metadata in the source checkout is not part of the
+            # runtime; packing it would bind the runtime to a file Finder
+            # rewrites whenever the folder is browsed.
+            if is_desktop_metadata(path):
                 continue
             info = path.lstat()
             if stat.S_ISLNK(info.st_mode):

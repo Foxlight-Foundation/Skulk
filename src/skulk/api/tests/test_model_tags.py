@@ -31,6 +31,7 @@ from skulk.shared.models.registry import (
 )
 from skulk.shared.types.common import ModelId
 from skulk.shared.types.memory import Memory
+from skulk.shared.types.video import VIDEO_SAMPLERS
 
 
 def test_model_tags_include_vision() -> None:
@@ -447,8 +448,10 @@ def test_model_list_entry_projects_the_video_and_license_sections() -> None:
     assert payload["video"]["audio_output"] is True and payload["video"]["audio_sample_rate"] == 32000
     assert payload["video"]["reference_limits"]["max_images"] == 4
     # Adapters and style embeddings are selectable per request; model patches are not.
-    assert payload["video"]["adapters"] == [{"name": "turbo_8step", "modes": ["t2va"], "steps": 8, "strength": 1.0}]
+    assert payload["video"]["adapters"] == [{"name": "turbo_8step", "modes": ["t2va"], "steps": 8, "strength": 1.0, "video_shift": None, "audio_shift": None}]
     assert payload["video"]["styles"] == [{"name": "style", "modes": []}]
+    assert payload["video"]["reference_fidelities"] == ["match", "max"]
+    assert payload["video"]["default_reference_fidelity"] == "match"
     # Without a ControlNet the card derives no guide from a control clip.
     assert payload["video"]["guides"] == [] and payload["video"]["default_guide"] is None
     assert payload["license"] == {"name": "Test License", "url": "https://example.invalid/LICENSE", "spdx_id": None, "notice": "Regional terms apply.", "display_name": "MiniMax H3"}
@@ -456,4 +459,48 @@ def test_model_list_entry_projects_the_video_and_license_sections() -> None:
     text_card = ModelCard(model_id=ModelId("mlx-community/text"), storage_size=Memory.from_bytes(1024), n_layers=1, hidden_size=1, supports_tensor=False, tasks=[ModelTask.TextGeneration])
     text_payload = API._model_list_entry(text_card).model_dump(by_alias=True)
     assert text_payload["video"] is None and text_payload["license"] is None
+
+
+def test_the_video_section_publishes_every_engine_setting_a_request_takes() -> None:
+    """A client builds any valid request, and sees its defaults, from the models route alone."""
+    card = ModelCard(
+        model_id=ModelId("Comfy-Org/MiniMax-H3-Shifts"),
+        storage_size=Memory.from_bytes(1024),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextToVideo],
+        video=VideoCardConfig(
+            modes=(VideoMode.TextToAudioVideo,),
+            min_seconds=4,
+            max_seconds=15,
+            fps=24,
+            frame_grid_multiple=17,
+            frame_grid_offset=5,
+            canvas_multiple=32,
+            audio_output=True,
+            audio_sample_rate=32000,
+            audio_channels=2,
+            default_steps=20,
+            video_shift=12.0,
+            audio_shift=3.0,
+            companions=(
+                VideoCompanionConfig(kind=VideoCompanionKind.Lora, name="turbo_768p", path="loras/turbo.safetensors", steps=4, video_shift=6.0),
+            ),
+        ),
+    )
+
+    payload = API._model_list_entry(card).model_dump(by_alias=True)
+
+    assert payload["video"]["samplers"] == list(VIDEO_SAMPLERS) and "res_multistep" in payload["video"]["samplers"]
+    assert payload["video"]["default_sampler"] == "res_multistep"
+    assert payload["video"]["schedulers"] == ["simple", "normal", "sgm_uniform", "beta", "kl_optimal", "linear_quadratic", "karras", "exponential", "ddim_uniform"]
+    assert payload["video"]["default_scheduler"] == "simple"
+    assert (payload["video"]["video_shift"], payload["video"]["audio_shift"]) == (12.0, 3.0)
+    assert payload["video"]["shift_bounds"] == [0.01, 100.0]
+    # An adapter's own shift wins over the card's; an unset one keeps it.
+    assert (payload["video"]["adapters"][0]["video_shift"], payload["video"]["adapters"][0]["audio_shift"]) == (6.0, None)
+    # Reference sizing only applies to reference-to-video.
+    assert payload["video"]["reference_fidelities"] == [] and payload["video"]["default_reference_fidelity"] is None
+    assert payload["video"]["codecs"] == ["h264", "av1"] and payload["video"]["default_codec"] == "h264"
 

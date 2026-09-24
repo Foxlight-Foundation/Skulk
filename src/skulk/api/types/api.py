@@ -16,6 +16,7 @@ from skulk.shared.models.model_cards import (
     ModelId,
     VideoCardConfig,
     VideoCompanionKind,
+    VideoMode,
 )
 from skulk.shared.models.registry import (
     RegistryAdvisory,
@@ -28,10 +29,18 @@ from skulk.shared.types.text_generation import ReasoningEffort
 from skulk.shared.types.video import (
     MAX_VIDEO_PROMPT_CHARS,
     MAX_VIDEO_STYLES,
+    VIDEO_CODECS,
     VIDEO_CONTROL_STRENGTH_MAX,
+    VIDEO_DEFAULT_CODEC,
     VIDEO_DEFAULT_GUIDE,
+    VIDEO_DEFAULT_REFERENCE_FIDELITY,
+    VIDEO_DEFAULT_SAMPLER,
+    VIDEO_DEFAULT_SCHEDULER,
     VIDEO_GUIDE_KINDS,
     VIDEO_GUIDE_PREPROCESSORS,
+    VIDEO_REFERENCE_FIDELITIES,
+    VIDEO_SAMPLERS,
+    VIDEO_SCHEDULERS,
     VIDEO_SHIFT_BOUNDS,
     VideoCodecName,
     VideoGuideKind,
@@ -689,6 +698,14 @@ class VideoAdapterSection(BaseModel):
     )
     steps: int | None = Field(default=None, description="Sampling steps the adapter was trained for.")
     strength: float | None = Field(default=None, description="Default adapter strength.")
+    video_shift: float | None = Field(
+        default=None,
+        description="Video sigma shift a render with this adapter uses when the request sets none; null keeps the card's.",
+    )
+    audio_shift: float | None = Field(
+        default=None,
+        description="Audio sigma shift a render with this adapter uses when the request sets none; null keeps the card's.",
+    )
 
 
 class VideoStyleSection(BaseModel):
@@ -784,6 +801,43 @@ class VideoCapabilitySection(BaseModel):
         default_factory=list,
         description="Style embeddings selectable through the job `styles` field.",
     )
+    samplers: list[str] = Field(
+        default_factory=lambda: list(VIDEO_SAMPLERS),
+        description="Every sampler the job `sampler` field accepts: the engine's list, not a recommendation.",
+    )
+    default_sampler: str = Field(
+        default=VIDEO_DEFAULT_SAMPLER, description="Sampler a render uses when the request names none."
+    )
+    schedulers: list[str] = Field(
+        default_factory=lambda: list(VIDEO_SCHEDULERS),
+        description="Every sigma schedule the job `scheduler` field accepts.",
+    )
+    default_scheduler: str = Field(
+        default=VIDEO_DEFAULT_SCHEDULER, description="Sigma schedule a render uses when the request names none."
+    )
+    video_shift: float | None = Field(
+        default=None,
+        description="The card's trained video sigma shift, used when neither the request nor its adapter sets one; null keeps the model's built-in value.",
+    )
+    audio_shift: float | None = Field(
+        default=None,
+        description="The card's trained audio sigma shift, used when neither the request nor its adapter sets one; null keeps the model's built-in value.",
+    )
+    shift_bounds: list[float] = Field(
+        default_factory=lambda: list(VIDEO_SHIFT_BOUNDS),
+        description="Inclusive range the job `video_shift` and `audio_shift` fields accept.",
+    )
+    reference_fidelities: list[str] = Field(
+        default_factory=list,
+        description="Reference sizings the job `reference_fidelity` field accepts; empty when the card serves no `ref2va`.",
+    )
+    default_reference_fidelity: str | None = Field(
+        default=None, description="Reference sizing a `ref2va` render uses when the request names none."
+    )
+    codecs: list[str] = Field(
+        default_factory=lambda: list(VIDEO_CODECS), description="Every codec the job `codec` field accepts."
+    )
+    default_codec: str = Field(default=VIDEO_DEFAULT_CODEC, description="Codec a render is written with by default.")
     guides: list[VideoGuideSection] = Field(
         default_factory=list,
         description=(
@@ -819,6 +873,14 @@ class VideoCapabilitySection(BaseModel):
             audio_sample_rate=config.audio_sample_rate,
             audio_channels=config.audio_channels,
             default_steps=config.default_steps,
+            video_shift=config.video_shift,
+            audio_shift=config.audio_shift,
+            reference_fidelities=(
+                list(VIDEO_REFERENCE_FIDELITIES) if VideoMode.ReferenceToAudioVideo in config.modes else []
+            ),
+            default_reference_fidelity=(
+                VIDEO_DEFAULT_REFERENCE_FIDELITY if VideoMode.ReferenceToAudioVideo in config.modes else None
+            ),
             reference_limits=(
                 VideoReferenceLimitsSection(
                     max_images=limits.max_images,
@@ -838,6 +900,8 @@ class VideoCapabilitySection(BaseModel):
                     modes=cast("list[VideoModeName]", [mode.value for mode in companion.modes]),
                     steps=companion.steps,
                     strength=companion.strength,
+                    video_shift=companion.video_shift,
+                    audio_shift=companion.audio_shift,
                 )
                 for companion in config.companions
                 if companion.kind == VideoCompanionKind.Lora
