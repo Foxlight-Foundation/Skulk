@@ -111,11 +111,29 @@ Every field is documented in that model, and the exhaustive, always-current fiel
 reference is the generated API schema (`ModelCard` and its nested
 `PlacementCardConfig` / `RuntimeCapabilityCardConfig` / `VisionCardConfig` /
 `ReasoningCardConfig` / `ModalitiesCardConfig` / `ToolingCardConfig` /
-`ComponentInfo`) in the [API reference](/api/skulk-api). This page is the curated
+`AudioCardConfig` / `MusicCardConfig` / `VideoCardConfig` /
+`LicenseCardConfig` / `ArtifactBundleConfig` / `ComponentInfo`) in the
+[API reference](/api/skulk-api). This page is the curated
 narrative; when in doubt about an exact field, the schema is canonical.
 
 Cards are camelCase on the wire and strict (unknown fields are rejected), so every
 node in a cluster must run the same Skulk version.
+
+The registry validates the persisted card body against its own strict schema
+before signing it. Its [model-card contract](https://github.com/Foxlight-Foundation/foxlight-model-registry/blob/main/docs/model-cards.md)
+maps field groups and publication evidence. When a card section changes, update
+both schema readers and both guides before publishing cards that use it.
+
+| Card surface | Source of truth | Runtime meaning |
+| --- | --- | --- |
+| Identity and bytes | `model_id`, `source_repository`, `source_revision`, `gguf_file`, `artifact_bundle` | One selected artifact and complete pinned download. |
+| Intrinsic behavior | `tasks` and typed sections such as `[audio]`, `[music]`, and `[video]` | What the selected model can do and which request fields it accepts. |
+| Compatibility | `[placement]` and separate signed engine-support claims | Candidate backends and exact qualified model/build/hardware combinations. |
+| Live admission | `NodeResources.engine_builds`, hardware facts, and Skulk runner limits | Whether a particular node is ready to serve the card now. |
+
+A valid artifact card is not by itself a live placement claim. The engine
+package, model weights, signed support decision, and current node resources
+remain separate truths.
 
 ## Core Fields
 
@@ -134,18 +152,17 @@ node in a cluster must run the same Skulk version.
 - `num_key_value_heads`
   - optional KV head count for tensor compatibility decisions
 - `gguf_file`
-  - for GGUF (llama.cpp) models only: the repo-relative weights file the runner loads (the selected quant's first shard), resolved once at card creation; `null` for safetensors/MLX cards
+  - for GGUF models, including music: the exact repository-relative weights file selected by the card (the selected quant's first shard for text GGUF); `null` for safetensors/MLX cards
 - `source_revision`
   - optional full Hugging Face commit hash for the qualified model artifacts; when set, metadata, store downloads, direct downloads, and worker staging all use that immutable revision instead of the repository's mutable `main` branch
 - `artifact_bundle`
-  - optional signed v2 manifest for one exact executable artifact: `artifact_root`,
-    `files` (repository-relative path, size, and optional immutable upstream
-    object identity), `bundle_identity`, `download_size`, and equivalent
-    alternate locations
+  - optional signed v2 manifest for one exact executable artifact: `root`,
+    `files` (repository-relative `path`, `size_bytes`, and optional immutable
+    `object_id`), content-derived `bundle_id`, and `download_size`
   - signed v2 cards require this manifest to be internally consistent. Paths
     are canonical POSIX-relative paths and cannot escape the repository or the
     declared artifact root
-  - the loader runs from `artifact_root`, while file paths such as `gguf_file`
+  - the loader runs from `root` when set, while file paths such as `gguf_file`
     remain repository-relative for compatibility
 - `components`
   - for multi-component models (such as a diffusion stack): the per-component weight layout; `null` for a single-weights model
@@ -155,7 +172,7 @@ node in a cluster must run the same Skulk version.
 - `supports_tensor`
   - whether tensor-style placement is allowed (GGUF/llama.cpp cards set this `false`)
 - `tasks`
-  - supported task families such as `TextGeneration`, `TextEmbedding`, image tasks, `TextToSpeech`, `SpeechToText`, or `SpeechTranslation`
+  - supported task families such as `TextGeneration`, `TextEmbedding`, image tasks, `TextToSpeech`, `SpeechToText`, `SpeechTranslation`, or `TextToMusic`
 - `trust_remote_code`
   - whether the artifact requires repository-supplied Python; signed publication authorizes the exact immutable registry card regardless of provenance
   - explicitly adding an external model authorizes its pinned card, and an omitted Hugging Face revision is resolved to one immutable commit before the card is created; bundled cards are authorized by the Skulk release that ships them
@@ -164,6 +181,8 @@ node in a cluster must run the same Skulk version.
   - this field controls the loader's repository-code behavior, not a second operator approval ceremony; artifact identity and immutable revision checks still fail closed
 - `uses_cfg`
   - whether the model uses classifier-free guidance (relevant to some image/diffusion models)
+- `generator_revision`
+  - optional version of the card generator used to produce a curated card; it is metadata about card production, not a mutable model revision
 
 ### Catalog metadata
 
@@ -329,6 +348,63 @@ exposes a true incremental streaming session. The bundled
 `mlx-community/Voxtral-Mini-4B-Realtime-2602-4bit` card is the first validated
 contract candidate. Batch Parakeet and Whisper cards deliberately keep both
 flags false.
+
+### `[music]`
+
+Declares text-to-music model truth. A music card has `tasks = ["TextToMusic"]`
+as its sole task, a complete `artifact_bundle`, and no speech `[audio]`
+section. The registry derives `music.generate` from that task; it does not
+classify every upstream `text-to-audio` repository as music.
+
+- `family`
+  - `minimax_music3` or `ace_step_1_5`; the music adapter uses this typed value
+    to translate Skulk's request into family-specific engine options. The
+    top-level `family` is a separate coarse model label.
+- `lyrics`
+  - `required`, `optional`, or `unsupported`; MiniMax Music 3 requires lyrics.
+- `min_seconds` / `max_seconds`
+  - positive accepted generation targets with `min_seconds <= max_seconds <= 120`.
+    A target is a request budget, not a promise of exact WAV duration.
+- `language_model_gguf` / `rvq_depth_decoder_gguf` /
+  `flow_transformer_gguf`
+  - the three MiniMax GGUF components selected by this exact card. Their paths
+    are relative to the bundle's loader root, have matching component roles,
+    and must occur in the bundle. ACE-Step does not use these fields.
+
+MiniMax's selected language model is also the card's `gguf_file`. Its bundle
+contains that model, the selected RVQ decoder and flow transformer, plus the
+required conditioner, vocoder, tokenizer, and configuration files. ACE-Step
+selects one GGUF as `gguf_file`; its bundle contains only that file. See the
+registry's complete [MiniMax Q4](https://github.com/Foxlight-Foundation/foxlight-model-registry/blob/main/seed/cards/music_model_cards/audio-cpp--MiniMax-Music3-GGUF-Q4.toml)
+and [ACE-Step Turbo BF16](https://github.com/Foxlight-Foundation/foxlight-model-registry/blob/main/seed/cards/music_model_cards/audio-cpp--ACE-Step1.5-Turbo-BF16.toml)
+cards for exact component identities and sizes. Each other quant or selected
+variant requires its own card.
+
+Both initial music cards set `placement.compatible_backends = []`. That means
+they do not claim legacy backend compatibility. A signed `supported` claim
+must match the exact card, audio.cpp build, `music.generate` capability,
+architecture, and applicable hardware class after load and generation
+qualification. The node must also report that same ready build before Skulk
+will place it. Installing the audio.cpp package alone grants no model support.
+
+### `[video]`
+
+Declares audio-video generation truth independently of an engine. `modes`
+contains `t2va`, `fl2va`, or `ref2va`, and the card's video tasks must match
+those modes. Duration bounds, `fps`, frame-grid and canvas multiples, aspect
+ratios, pixel limits, and sampling defaults constrain requests. `audio_output`
+requires `audio_sample_rate` and `audio_channels`. `ref2va` requires typed
+`reference_limits`. `companions` pin adapters, patches, embeddings, or graph
+templates to their source revision and declared modes. The generated
+`VideoCardConfig` schema in the [API reference](/api/skulk-api) lists every
+field and its type.
+
+### `[license]`
+
+Records operator-facing `name`, optional `url`, `spdx_id`, `notice`, and
+`display_name`. These facts help an operator review the selected artifact's
+terms and attribution. Skulk does not enforce license conditions at download
+or placement time.
 
 ### `[tooling]`
 
