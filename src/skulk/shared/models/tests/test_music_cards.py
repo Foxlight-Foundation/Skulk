@@ -85,6 +85,14 @@ def test_music_task_and_section_must_agree() -> None:
         _card(audio={"kind": "tts"})
     with pytest.raises(ValidationError, match="require an artifact bundle"):
         _card(artifact_bundle=None)
+    with pytest.raises(ValidationError, match="require an artifact bundle"):
+        _card(
+            music={
+                "family": "ace_step_1_5", "lyrics": "optional",
+                "min_seconds": 5, "max_seconds": 60,
+            },
+            artifact_bundle=None,
+        )
 
 
 def test_curated_music_cards_have_verified_generator_geometry() -> None:

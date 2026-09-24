@@ -2909,12 +2909,8 @@ class ModelCard(CamelCaseModel):
             raise ValueError("TextToMusic requires a [music] section and vice versa")
         if self.music is not None and self.audio is not None:
             raise ValueError("music and speech [audio] sections must remain separate")
-        if (
-            self.music is not None
-            and self.music.family == MusicModelFamily.MiniMaxMusic3
-            and self.artifact_bundle is None
-        ):
-            raise ValueError("MiniMax music cards require an artifact bundle")
+        if self.music is not None and self.artifact_bundle is None:
+            raise ValueError("music cards require an artifact bundle")
         if self.music is not None and self.artifact_bundle is not None:
             root_prefix = (
                 f"{self.artifact_bundle.root}/"
