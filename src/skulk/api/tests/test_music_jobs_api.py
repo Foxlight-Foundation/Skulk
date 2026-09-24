@@ -19,7 +19,11 @@ from fastapi.testclient import TestClient
 import skulk.api.main as api_module
 from skulk.api.main import API
 from skulk.api.music_jobs import MusicJob, MusicJobRegistry
-from skulk.api.types.api import CreateInstanceParams, MusicCreateRequest
+from skulk.api.types.api import (
+    CreateInstanceParams,
+    MusicCreateRequest,
+    PlaceInstanceParams,
+)
 from skulk.api.video_store import VideoStore
 from skulk.routing.output_media import OutputMediaPacket
 from skulk.shared.models.model_cards import ModelCard, ModelId
@@ -213,9 +217,60 @@ async def test_mount_preflight_uses_ordered_preparation_resources(
         )
 
     monkeypatch.setattr(api_module, "registry_supported_backends_for_node", supported_backends)
-    await api._prepare_music_engine_for_mount(_card(), set())
+    prepared = await api._prepare_music_engine_for_mount(_card(), set())
     api._send.assert_awaited_once()
     assert api._telemetry_view.node_resources[node] is stale
+    assert prepared == (node, ready)
+
+
+async def test_music_place_dry_run_uses_ordered_preparation_resources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dropped telemetry update cannot reject a successfully prepared mount."""
+    card = _card()
+    node = NodeId("music-node")
+    stale = NodeResources(backends=frozenset(), architecture="arm64")
+    ready = stale.model_copy(update={
+        "backends": frozenset({"audio_cpp", "audio_cpp-metal"}),
+        "engine_builds": {"audio_cpp-metal": "qualified-build"},
+    })
+    api: Any = object.__new__(API)
+    api.state = SimpleNamespace(
+        topology=Topology(), instances={}, node_network={}, downloads={},
+    )
+
+    def empty_downloads(_downloads: object) -> dict[str, object]:
+        return {}
+
+    api._telemetry_view = SimpleNamespace(
+        node_resources={node: stale},
+        node_memory={node: MemoryUsage.from_bytes(
+            ram_total=Memory.from_gb(8).in_bytes,
+            ram_available=Memory.from_gb(8).in_bytes,
+            swap_total=0, swap_available=0,
+        )},
+        node_system={}, effective_downloads=empty_downloads,
+    )
+    api._load_authorized_model_card = AsyncMock(return_value=card)
+    api._prepare_music_engine_for_mount = AsyncMock(return_value=(node, ready))
+    api._send = AsyncMock()
+
+    def no_remote_code_approvals() -> frozenset[str]:
+        return frozenset()
+
+    api._cluster_remote_code_approvals = no_remote_code_approvals
+    api.paused = False
+    seen_resources: list[object] = []
+
+    def dry_run(_command: object, **kwargs: object) -> dict[InstanceId, MlxRingInstance]:
+        seen_resources.append(kwargs["node_resources"])
+        return {}
+
+    monkeypatch.setattr(api_module, "get_instance_placements", dry_run)
+    await api.place_instance(PlaceInstanceParams(model_id=MODEL))
+    assert seen_resources == [{node: ready}]
+    assert api._telemetry_view.node_resources[node] is stale
+    api._send.assert_awaited_once()
 
 
 async def test_mount_preflight_uses_vram_for_cuda_music(

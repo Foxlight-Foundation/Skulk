@@ -82,6 +82,8 @@ def test_music_task_and_section_must_agree() -> None:
         _card(music=None)
     with pytest.raises(ValidationError, match=r"TextToMusic requires a \[music\]"):
         _card(tasks=["TextGeneration"])
+    with pytest.raises(ValidationError, match="TextToMusic must be the sole task"):
+        _card(tasks=["TextToMusic", "TextGeneration"])
     with pytest.raises(ValidationError, match="must remain separate"):
         _card(audio={"kind": "tts"})
     with pytest.raises(ValidationError, match="require an artifact bundle"):

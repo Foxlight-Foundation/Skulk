@@ -251,7 +251,8 @@ Startup rehydrates a previously verified cached package without a download.
 Standalone binary overrides may use `SKULK_AUDIO_CPP_SPECS_DIR`; facts and the
 runner require both pinned model specs before readiness or load.
 
-`NodeResources.engine_builds` hashes the executable. `TextToMusic` cards have
+`NodeResources.engine_builds` hashes the executable. `TextToMusic` is the sole
+task on a music card. The cards have
 their own `[music]` section and require exact signed support claims. The
 `audio-cpp-engine-wheel` workflow builds the CPU-capable package for Apple
 Silicon macOS and Linux amd64/arm64 from the pinned source. Music model weights
@@ -262,16 +263,19 @@ observed ready, and indexed `AudioCppPreparationRequested`/
 publishes fresh `NodeResources` (including host architecture); the successful
 completion also carries those verified facts, which the master applies before
 broadcasting success so signed placement cannot race its telemetry view.
-The API reads that ordered snapshot instead of waiting for telemetry. Placement
+The API reads that ordered snapshot instead of waiting for telemetry and uses
+it in the request-local placement dry-run. Placement
 stamps the exact engine build on music shards; the runner rehashes and probes
 the executable and selected lane before every sidecar start. CUDA, ROCm, and
 Vulkan audio.cpp lanes admit against GPU memory in API preflight and placement;
-Metal and CPU use system RAM. Preparation and exact music placement check the full estimated
-footprint against the corresponding memory pool and rejects RPC shaped and
+Metal and CPU use system RAM. Preparation and exact music placement check the
+full estimated footprint against the corresponding memory pool and reject RPC shaped and
 multi-runner instances. `MusicGeneration` tasks
 produce a bounded `MusicChunk` manifest, while WAV bytes use `OUTPUT_MEDIA`
 purpose `music` and a separate node-local 24-hour store. The music API exposes
 asynchronous `/v1/music` jobs with cancellation and content retrieval.
+The runner restores a stopped sidecar after request failures before releasing
+the serial permit to another admitted job.
 A model card's `placement.compatible_backends` selects which engine serves it
 (`bootstrap._resolve_text_engine`, backend tags in `src/skulk/shared/backends.py`):
 - **`mlx`** (`worker/engines/mlx/`): in-process MLX on Apple Silicon; owns the

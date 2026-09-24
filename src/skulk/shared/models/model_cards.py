@@ -2923,6 +2923,8 @@ class ModelCard(CamelCaseModel):
         has_task = ModelTask.TextToMusic in self.tasks
         if has_task != (self.music is not None):
             raise ValueError("TextToMusic requires a [music] section and vice versa")
+        if has_task and self.tasks != [ModelTask.TextToMusic]:
+            raise ValueError("TextToMusic must be the sole task on a music card")
         if self.music is not None and self.audio is not None:
             raise ValueError("music and speech [audio] sections must remain separate")
         if self.music is not None and self.artifact_bundle is None:

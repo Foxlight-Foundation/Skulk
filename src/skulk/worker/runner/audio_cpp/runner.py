@@ -251,15 +251,16 @@ class Runner(ServedConcurrentDispatch):
             shutil.rmtree(output_dir, ignore_errors=True)
             self._teardown_server()
             raise
-        if (
-            not isinstance(self.current_status, (RunnerShuttingDown, RunnerShutdown))
-            and not server.alive()
-        ):
-            # Cancellation and an oversized response both terminate the
-            # sidecar. Restore it before the completion callback releases the
-            # serial permit to another admitted generation.
-            self._teardown_server()
-            self._load_model()
+        finally:
+            if (
+                not isinstance(self.current_status, (RunnerShuttingDown, RunnerShutdown))
+                and (self.server is None or not self.server.alive())
+            ):
+                # Cancellation, oversized responses, and HTTP failures must
+                # restore the sidecar before another queued job gets the
+                # serial permit, including when the active job raises.
+                self._teardown_server()
+                self._load_model()
 
     def _render(
         self,

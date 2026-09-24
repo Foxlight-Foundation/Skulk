@@ -550,6 +550,7 @@ from skulk.shared.types.memory import Memory
 from skulk.shared.types.music import MusicGenerationTaskParams
 from skulk.shared.types.profiling import (
     MemoryUsage,
+    NodeResources,
     SystemPerformanceProfile,
     read_wired_memory_bytes,
 )
@@ -3660,8 +3661,8 @@ class API:
     async def _prepare_music_engine_for_mount(
         self, card: ModelCard, excluded_nodes: set[NodeId],
         *, required_nodes: set[NodeId] | None = None,
-    ) -> None:
-        """Prepare an eligible node, optionally pinned by an exact placement."""
+    ) -> tuple[NodeId, NodeResources] | None:
+        """Prepare an eligible node and return its ordered verified resources."""
 
         if ModelTask.TextToMusic not in card.tasks:
             return
@@ -3793,7 +3794,7 @@ class API:
                     errors.append(f"{node_id}: no supported signed music claim matches the prepared build and hardware")
                     continue
                 if supports_with_capacity(node_id, supported):
-                    return
+                    return node_id, fresh
                 errors.append(f"{node_id}: supported music backend lacks available model memory")
             finally:
                 self._audio_cpp_prepare_events.pop(request_id, None)
@@ -3805,7 +3806,17 @@ class API:
 
     async def place_instance(self, payload: PlaceInstanceParams):
         card = await self._load_authorized_model_card(payload.model_id)
-        await self._prepare_music_engine_for_mount(card, set(payload.excluded_nodes))
+        prepared = await self._prepare_music_engine_for_mount(
+            card, set(payload.excluded_nodes)
+        )
+        # Preparation's indexed completion can beat or outlive a lossy node
+        # telemetry update. Use its verified facts in this request's dry-run;
+        # the master has already applied the same ordered snapshot.
+        placement_resources = (
+            self._telemetry_view.node_resources
+            if prepared is None
+            else {**self._telemetry_view.node_resources, prepared[0]: prepared[1]}
+        )
         command = PlaceInstance(
             model_card=card,
             sharding=payload.sharding,
@@ -3844,16 +3855,16 @@ class API:
                         self.state.downloads
                     ),
                     excluded_nodes=set(command.excluded_nodes),
-                    node_resources=self._telemetry_view.node_resources,
+                    node_resources=placement_resources,
                     node_vram=usable_vram_by_node(
                         self._telemetry_view.node_system,
-                        self._telemetry_view.node_resources,
+                        placement_resources,
                         node_memory=self._telemetry_view.node_memory,
                         current_instances=self.state.instances,
                     ),
                     unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
                         self._telemetry_view.node_system,
-                        self._telemetry_view.node_resources,
+                        placement_resources,
                         node_memory=self._telemetry_view.node_memory,
                     ),
                     approved_remote_code_identities=self._cluster_remote_code_approvals(),

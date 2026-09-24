@@ -83,7 +83,7 @@ def test_ace_step_server_uses_nested_loader_root(
     ) == artifact
 
 
-@pytest.mark.parametrize("outcome", ["cancelled", "oversized"])
+@pytest.mark.parametrize("outcome", ["cancelled", "oversized", "http_error"])
 def test_request_stopping_server_restores_it_before_next_admission(
     monkeypatch: pytest.MonkeyPatch, outcome: str,
 ) -> None:
@@ -114,6 +114,7 @@ def test_request_stopping_server_restores_it_before_next_admission(
         ),
     )
     cancellation_checks = 0
+    render_attempts = 0
 
     def cancelled(_runner: Runner, _id: object) -> bool:
         nonlocal cancellation_checks
@@ -123,19 +124,28 @@ def test_request_stopping_server_restores_it_before_next_admission(
     monkeypatch.setattr(Runner, "_is_cancelled", cancelled)
 
     def render(_runner: Runner, *_args: object) -> None:
-        nonlocal first_alive
+        nonlocal first_alive, render_attempts
+        render_attempts += 1
         first_alive = False
         # The dispatch loop can poll here while the active request unwinds.
         runner._ensure_server_alive()
         if outcome == "oversized":
             raise ValueError("audio.cpp response exceeds the 90 MiB envelope limit")
+        if outcome == "http_error" and render_attempts == 1:
+            raise RuntimeError("audio.cpp generation failed: HTTP 503")
 
     def load_model(_runner: Runner) -> None:
         runner.server = second
 
     monkeypatch.setattr(Runner, "_render", render)
     monkeypatch.setattr(Runner, "_load_model", load_model)
-    runner._generate(task)
+    if outcome == "http_error":
+        with pytest.raises(RuntimeError, match="HTTP 503"):
+            runner._generate(task)
+        runner._generate(task)
+        assert render_attempts == 2
+    else:
+        runner._generate(task)
     runner._inflight = 0
     runner._ensure_server_alive()
     assert runner.server is second
