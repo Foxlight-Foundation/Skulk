@@ -1159,6 +1159,21 @@ class VideoCompanionKind(str, Enum):
     """A prompt embedding referenced from the prompt text."""
     GraphTemplate = "graph_template"
     """An engine graph template bound with request parameters at render time."""
+    Preprocessor = "preprocessor"
+    """Weights a guide preprocessor loads to derive a control video from an
+    ordinary clip inside the render (a pose estimator, the person detector
+    it crops with, a depth estimator); ``role`` says which."""
+
+
+class VideoPreprocessorRole(str, Enum):
+    """What a preprocessor companion's weights do in deriving a guide video."""
+
+    PoseEstimator = "pose_estimator"
+    """Whole-body keypoint estimation (SDPose), drawn as the pose guide."""
+    PersonDetector = "person_detector"
+    """Person detection (RT-DETR) that crops each figure for the pose estimator."""
+    DepthEstimator = "depth_estimator"
+    """Monocular depth estimation (Depth Anything 3), rendered as the depth guide."""
 
 
 class VideoCompanionConfig(CamelCaseModel):
@@ -1187,6 +1202,13 @@ class VideoCompanionConfig(CamelCaseModel):
     """Video sigma shift the companion expects, when it differs from the card."""
     audio_shift: float | None = None
     """Audio sigma shift the companion expects, when it differs from the card."""
+    role: VideoPreprocessorRole | None = None
+    """For preprocessor companions, what the weights do; required for them
+    and refused on every other kind."""
+    license: str | None = None
+    """The license its hosting repository declares, as a lowercase SPDX-style
+    identifier (``mit``, ``apache-2.0``), shown to the operator beside the
+    card's own license; companions in the card's repository fall under that."""
 
     @field_validator("kind", mode="before")
     @classmethod
@@ -1194,6 +1216,15 @@ class VideoCompanionConfig(CamelCaseModel):
         if isinstance(value, VideoCompanionKind):
             return value
         return VideoCompanionKind(value)
+
+    @field_validator("role", mode="before")
+    @classmethod
+    def _validate_role(
+        cls, value: str | VideoPreprocessorRole | None
+    ) -> VideoPreprocessorRole | None:
+        if value is None or isinstance(value, VideoPreprocessorRole):
+            return value
+        return VideoPreprocessorRole(value)
 
     @field_validator("name")
     @classmethod
@@ -1234,6 +1265,13 @@ class VideoCompanionConfig(CamelCaseModel):
     def _serialize_modes(self, value: tuple[VideoMode, ...]) -> list[str]:
         return [item.value for item in value]
 
+    @field_validator("license")
+    @classmethod
+    def _validate_license(cls, value: str | None) -> str | None:
+        if value is not None and re.fullmatch(r"[a-z0-9][a-z0-9.+-]{0,63}", value) is None:
+            raise ValueError("a companion license is a short lowercase identifier")
+        return value
+
     @field_validator("size_bytes")
     @classmethod
     def _validate_size(cls, value: int | None) -> int | None:
@@ -1258,6 +1296,8 @@ class VideoCompanionConfig(CamelCaseModel):
             VideoCompanionKind.ModelPatch,
         ):
             raise ValueError("strength applies only to lora and model_patch companions")
+        if (self.kind is VideoCompanionKind.Preprocessor) != (self.role is not None):
+            raise ValueError("a preprocessor companion names its role, and only it does")
         return self
 
 
@@ -1426,6 +1466,21 @@ class VideoCardConfig(CamelCaseModel):
         ]
         if len({mode for mode, _ in templates}) != len(templates):
             raise ValueError("each mode may have at most one graph template")
+        roles = [item.role for item in self.companions if item.role is not None]
+        if len(set(roles)) != len(roles):
+            # The engine loads one set of weights per preprocessing step; two
+            # candidates for a role would leave the choice to file order.
+            raise ValueError("each preprocessor role may appear at most once")
+        revisions: dict[str, str | None] = {}
+        for item in self.companions:
+            if item.repo is None:
+                continue
+            # A companion repository is staged and verified once per card, so
+            # every file taken from it must come from the same revision.
+            if revisions.setdefault(str(item.repo), item.revision) != item.revision:
+                raise ValueError(
+                    f"companions from {item.repo} must all pin one revision"
+                )
         return self
 
     @property
@@ -2707,6 +2762,27 @@ class ModelCard(CamelCaseModel):
     def artifact_repository(self) -> ModelId:
         """Return the upstream repository independently of the artifact alias."""
         return self.source_repository or self.model_id
+
+    def external_video_companions(self) -> tuple[tuple[str, str], ...]:
+        """The separate repositories this card's video companions come from.
+
+        Returns each distinct ``(repository, revision)`` outside the card's own
+        artifact repository, in declaration order. Downloads, the completeness
+        gate, the in-use sets that protect staged artifacts from eviction, and
+        installed-artifact records all read this one list, so a companion
+        repository cannot be fetched by one path and forgotten by another.
+        """
+        if self.video is None:
+            return ()
+        base = str(self.artifact_repository)
+        seen: dict[tuple[str, str], None] = {}
+        for item in self.video.companions:
+            if item.repo is None or str(item.repo) == base:
+                continue
+            # The companion validator requires a revision for any external repo.
+            assert item.revision is not None
+            seen.setdefault((str(item.repo), item.revision), None)
+        return tuple(seen)
 
     @model_validator(mode="after")
     def _validate_pipeline_split_limit(self) -> "ModelCard":

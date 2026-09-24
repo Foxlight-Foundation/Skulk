@@ -485,19 +485,63 @@ def _make_store_url(host: str, port: int, path: str) -> str:
     return f"http://{host}:{port}{path}"
 
 
+def _declared_companion_files(
+    shard: ShardMetadata,
+    owner_card: ModelCard | None,
+    artifact_role: InstalledArtifactRole,
+) -> tuple[tuple[str, int | None], ...]:
+    """The exact files, with sizes when known, an owner names from a video companion.
+
+    A video companion repository is staged as the files its owning card names
+    from it, not as a model directory, so the ordinary layout probes cannot
+    tell it is complete. Empty for every other artifact.
+    """
+    if (
+        artifact_role != "video_companion"
+        or owner_card is None
+        or owner_card.video is None
+    ):
+        return ()
+    repository = str(shard.model_card.artifact_repository)
+    return tuple(
+        (item.path, item.size_bytes)
+        for item in owner_card.video.companions
+        if item.repo is not None
+        and str(item.repo) == repository
+        and item.revision == shard.model_card.source_revision
+    )
+
+
 def _staged_directory_looks_complete(
-    directory: Path, model_card: ModelCard | None = None
+    directory: Path,
+    model_card: ModelCard | None = None,
+    expected_files: tuple[tuple[str, int | None], ...] = (),
 ) -> bool:
     """Heuristic completeness check for a staged directory.
 
     Accepts the three repo layouts the store serves: a full model repo
     (index-based completeness, same probe the downloader uses), a
     single-file companion model (config.json + model.safetensors), or an
-    MTP sidecar (mtp.safetensors). A directory with leftover ``.partial``
-    files is never complete.
+    MTP sidecar (mtp.safetensors). ``expected_files`` names an exact file
+    set instead (a video companion's), each a regular file of its declared
+    size. A directory with leftover ``.partial`` files is never complete.
     """
     if any(directory.rglob("*.partial")):
         return False
+    if expected_files:
+        root = directory.resolve()
+        for path, size in expected_files:
+            candidate = (root / path).resolve()
+            try:
+                if (
+                    not candidate.is_relative_to(root)
+                    or not candidate.is_file()
+                    or (size is not None and candidate.stat().st_size != size)
+                ):
+                    return False
+            except OSError:
+                return False
+        return True
     if model_card is not None and model_card.artifact_bundle is not None:
         root = directory.resolve()
         for item in model_card.artifact_bundle.files:
@@ -2182,6 +2226,9 @@ class ModelStoreDownloader(ShardDownloader):
         owner_card_id = (
             retained_card.registry_card_id if installed_owner_card is not None else None
         )
+        companion_files = _declared_companion_files(
+            shard, installed_owner_card, installed_artifact_role
+        )
 
         if not self._staging_config.enabled:
             # When staging is disabled but the store client has a local store
@@ -2194,7 +2241,7 @@ class ModelStoreDownloader(ShardDownloader):
                 if (
                     direct_path is not None
                     and _staged_directory_looks_complete(
-                        direct_path, shard.model_card
+                        direct_path, shard.model_card, companion_files
                     )
                     and not _staged_pinned_gguf_missing(shard, direct_path)
                     and not _staged_same_repo_draft_missing(shard, direct_path)
@@ -2243,7 +2290,7 @@ class ModelStoreDownloader(ShardDownloader):
                         if (
                             replacement_path is None
                             or not _staged_directory_looks_complete(
-                                replacement_path, shard.model_card
+                                replacement_path, shard.model_card, companion_files
                             )
                             or _staged_pinned_gguf_missing(shard, replacement_path)
                             or await _staged_vision_projector_missing_async(
@@ -2299,7 +2346,9 @@ class ModelStoreDownloader(ShardDownloader):
         )
         if (
             dest_path.exists()
-            and _staged_directory_looks_complete(dest_path, shard.model_card)
+            and _staged_directory_looks_complete(
+                dest_path, shard.model_card, companion_files
+            )
             and not _staged_pinned_gguf_missing(shard, dest_path)
             and not await _staged_vision_projector_missing_async(
                 shard,

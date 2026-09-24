@@ -17,7 +17,9 @@ import skulk.shared.constants as constants_module
 from skulk.download.download_utils import (
     companion_artifact_location,
     companion_download_specs,
+    installed_artifact_in_path,
     model_companions_present_on_disk,
+    resolve_model_in_path,
 )
 from skulk.shared.models.model_cards import (
     ModelCard,
@@ -300,3 +302,96 @@ def test_served_draft_present_on_disk(models_dir: Path) -> None:
         )
     )
     assert model_companions_present_on_disk(card)
+
+
+def _video_card() -> ModelCard:
+    """A video card with two preprocessor files in one external repository."""
+    from skulk.shared.models.model_cards import VideoCardConfig
+
+    return ModelCard(
+        model_id=ModelId("test-org/video-base"),
+        storage_size=Memory.from_bytes(0),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextToVideo],
+        video=VideoCardConfig.model_validate(
+            {
+                "modes": ["t2va"],
+                "companions": [
+                    {
+                        "kind": "preprocessor",
+                        "name": "pose",
+                        "role": "pose_estimator",
+                        "path": "checkpoints/pose.safetensors",
+                        "repo": "test-org/pose",
+                        "revision": "5" * 40,
+                    },
+                    {
+                        "kind": "preprocessor",
+                        "name": "person",
+                        "role": "person_detector",
+                        "path": "diffusion_models/person.safetensors",
+                        "repo": "test-org/pose",
+                        "revision": "5" * 40,
+                    },
+                ],
+            }
+        ),
+    )
+
+
+def test_video_preprocessors_download_as_exact_files() -> None:
+    """One required transfer per repository, fetching only the named files."""
+    specs = companion_download_specs(_video_card())
+    assert [
+        (str(shard.model_card.model_id), shard.model_card.source_revision, patterns, required)
+        for shard, patterns, required in specs
+    ] == [
+        (
+            "test-org/pose",
+            "5" * 40,
+            ["checkpoints/pose.safetensors", "diffusion_models/person.safetensors"],
+            True,
+        )
+    ]
+
+
+def test_a_video_card_missing_a_preprocessor_file_is_incomplete(
+    models_dir: Path,
+) -> None:
+    """Preprocessor weights are load-bearing, offline included."""
+    card = _video_card()
+    staged = models_dir / f"test-org--pose--revision-{'5' * 40}"
+    (staged / "checkpoints").mkdir(parents=True)
+    (staged / "checkpoints" / "pose.safetensors").write_bytes(b"w")
+    (staged / download_utils_module._SOURCE_REVISION_MARKER).write_text("5" * 40)
+    assert not model_companions_present_on_disk(card)
+    assert not model_companions_present_on_disk(card, required_only=True)
+    (staged / "diffusion_models").mkdir()
+    (staged / "diffusion_models" / "person.safetensors").write_bytes(b"w")
+    assert model_companions_present_on_disk(card)
+
+
+def test_a_staged_base_is_not_installed_until_its_new_companions_are(
+    models_dir: Path,
+) -> None:
+    """A card that gains companions after its base was staged downloads them.
+
+    The worker's models-path shortcut once answered with the old base, so the
+    download that fetches the preprocessors never ran and the runner refused
+    the card for a companion that was never asked for.
+    """
+    card = _video_card()
+    base = models_dir / "test-org--video-base"
+    base.mkdir()
+    (base / "model.gguf").write_bytes(b"w")
+    assert resolve_model_in_path(ModelId("test-org/video-base")) == base
+    assert installed_artifact_in_path(card) is None
+    staged = models_dir / f"test-org--pose--revision-{'5' * 40}"
+    for path in ("checkpoints/pose.safetensors", "diffusion_models/person.safetensors"):
+        (staged / path).parent.mkdir(parents=True, exist_ok=True)
+        (staged / path).write_bytes(b"w")
+    (staged / download_utils_module._SOURCE_REVISION_MARKER).write_text("5" * 40)
+    assert installed_artifact_in_path(card) == base
+

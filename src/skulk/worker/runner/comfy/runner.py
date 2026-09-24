@@ -17,7 +17,7 @@ import hashlib
 import os
 import shutil
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Final, cast, final
 
 from loguru import logger
@@ -106,6 +106,21 @@ kernel on gfx1151 (measured against the math path on the hardware).
 """
 
 
+CUDA_LAUNCH_FLAGS: Final[tuple[str, ...]] = ("--disable-cuda-malloc",)
+"""ComfyUI flags for the CUDA lane: PyTorch's own caching allocator.
+
+ComfyUI defaults CUDA devices to the ``cudaMallocAsync`` allocator backend.
+With it, a MiniMax H3 render that applies the Fun ControlNet patch aborts
+the server on its first sampling step on the GB10 (``cuMemFreeAsync``
+returns ``CUDA_ERROR_INVALID_VALUE`` inside the model's forward, where
+ComfyUI's allocation graph hands back memory the async backend did not
+record). The native allocator renders the same graph, and a plain render
+measured the same on both (43.2 s against 42.1 s for 480x480 at four
+steps), so the CUDA lane uses it for every render rather than only for
+guided ones: one server serves consecutive renders.
+"""
+
+
 def _local_comfy_backend() -> str | None:
     """The node's own advertised ``comfy-<compute>`` tag, for an unstamped shard."""
     from skulk.shared.backends import probe_node_backends
@@ -130,10 +145,10 @@ def _is_rocm_lane(resolved_backend: str | None) -> bool:
 def launch_flags(resolved_backend: str | None) -> tuple[str, ...]:
     """Extra ComfyUI flags for the node's compute backend.
 
-    CUDA needs nothing beyond the headless defaults; the ROCm lane adds
-    ``ROCM_LAUNCH_FLAGS``.
+    The ROCm lane adds ``ROCM_LAUNCH_FLAGS`` and every other lane, CUDA,
+    adds ``CUDA_LAUNCH_FLAGS``.
     """
-    return ROCM_LAUNCH_FLAGS if _is_rocm_lane(resolved_backend) else ()
+    return ROCM_LAUNCH_FLAGS if _is_rocm_lane(resolved_backend) else CUDA_LAUNCH_FLAGS
 
 
 def _configured_install() -> tuple[Path, Path]:
@@ -163,6 +178,36 @@ def _model_directory(card: ModelCard) -> Path:
     root = card.artifact_bundle.root if card.artifact_bundle is not None else None
     load_directory = build_model_path(ModelId(card.model_id), card.source_revision, root)
     return artifact_install_directory(load_directory, root)
+
+
+def _companion_directories(card: ModelCard) -> tuple[Path, ...]:
+    """The staged directory of each companion repository hosted outside the card's.
+
+    Every file the card names from such a repository must be present: the
+    downloader fetches them with the card and treats them as load-bearing, so
+    one missing means an incomplete install, reported by name rather than
+    left for ComfyUI to fail on mid-render.
+    """
+    from skulk.download.download_utils import build_sidecar_path
+
+    if card.video is None:
+        return ()
+    roots: list[Path] = []
+    for repository, revision in card.external_video_companions():
+        for item in card.video.companions:
+            if item.repo is None or str(item.repo) != repository or item.revision != revision:
+                continue
+            found = build_sidecar_path(ModelId(repository), item.path, revision)
+            if found is None:
+                raise RuntimeError(
+                    f"{card.model_id}: companion {item.name} ({repository} {item.path}) is not staged"
+                )
+            # The file keeps its repository-relative path, so the staged root
+            # sits as many levels up as that path is deep.
+            root = found.parents[len(PurePosixPath(item.path).parts) - 1]
+            if root not in roots:
+                roots.append(root)
+    return tuple(roots)
 
 
 def _sha256_and_size(path: Path) -> tuple[str, int]:
@@ -357,7 +402,7 @@ class Runner(ServedConcurrentDispatch):
                 raise RuntimeError(f"{self.model_id}: {folder}/{name} is missing from {model_dir}")
         self.work_dir.mkdir(parents=True, exist_ok=True)
         extra_paths = self.work_dir / "extra_model_paths.yaml"
-        extra_paths.write_text(extra_model_paths_yaml(model_dir))
+        extra_paths.write_text(extra_model_paths_yaml(model_dir, _companion_directories(self.card)))
         server = ComfyServer(
             interpreter=interpreter,
             root=root,
