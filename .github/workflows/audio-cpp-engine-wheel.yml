@@ -12,7 +12,7 @@ on:
       - "packaging/skulk-audio-cpp-cpu/**"
       - ".github/workflows/audio-cpp-engine-wheel.yml"
   push:
-    branches: [initiative/audio-cpp-engine]
+    branches: [dev]
     paths:
       - "packaging/skulk-audio-cpp-cpu/**"
       - ".github/workflows/audio-cpp-engine-wheel.yml"

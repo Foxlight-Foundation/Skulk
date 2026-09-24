@@ -34,7 +34,8 @@ on:
   push:
     branches: [dev]
     paths:
-      - "packaging/**"
+      - "packaging/skulk-llama-server-cuda/**"
+      - "packaging/skulk-llama-server-vulkan/**"
       - ".github/workflows/engine-wheel.yml"
 
 env:
@@ -84,8 +85,15 @@ jobs:
       - name: Install build prerequisites
         run: |
           set -euo pipefail
-          apt-get update -qq
-          apt-get install -y -qq git cmake build-essential libcurl4-openssl-dev curl ca-certificates binutils gnupg
+          install_prerequisites() {
+            # Ubuntu can retire a security-package revision while a container
+            # or mirror still holds its old index, causing a package 404.
+            rm -rf /var/lib/apt/lists/*
+            apt-get update -qq -o APT::Update::Error-Mode=any -o Acquire::Retries=3 || return
+            apt-get install -y -qq -o Acquire::Retries=3 "$@"
+          }
+          install_prerequisites git cmake build-essential libcurl4-openssl-dev curl ca-certificates binutils gnupg \
+            || install_prerequisites git cmake build-essential libcurl4-openssl-dev curl ca-certificates binutils gnupg
           if [ "${{ matrix.variant }}" = "vulkan" ]; then
             # LunarG Vulkan SDK for glslc + headers, the same source upstream
             # llama.cpp CI uses for its Vulkan builds.
@@ -93,8 +101,7 @@ jobs:
               | gpg --dearmor -o /usr/share/keyrings/lunarg.gpg
             echo "deb [signed-by=/usr/share/keyrings/lunarg.gpg] https://packages.lunarg.com/vulkan jammy main" \
               > /etc/apt/sources.list.d/lunarg-vulkan.list
-            apt-get update -qq
-            apt-get install -y -qq vulkan-sdk
+            install_prerequisites vulkan-sdk || install_prerequisites vulkan-sdk
           fi
 
       - uses: actions/checkout@v4
