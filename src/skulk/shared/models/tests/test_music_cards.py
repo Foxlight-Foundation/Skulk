@@ -6,15 +6,18 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+import skulk.shared.models.model_cards as model_cards_module
 from skulk.api.types.api import MusicCapabilitySection
-from skulk.shared.backends import platform_compatible_backends
+from skulk.shared.backends import platform_compatible_backends, resolve_node_backend
 from skulk.shared.constants import RESOURCES_DIR
 from skulk.shared.models.model_cards import (
     ModelCard,
     ModelId,
     MusicCardConfig,
     MusicLyricRequirement,
+    registry_supported_backends_for_node,
 )
+from skulk.shared.models.registry import RegistryEngineSupportClaim
 from skulk.shared.types.memory import Memory
 
 
@@ -249,8 +252,41 @@ def test_music_bounds_and_minimax_lyrics_are_validated() -> None:
 
 
 def test_music_platform_gate_accepts_only_audio_cpp() -> None:
-    assert platform_compatible_backends(
-        frozenset({"audio_cpp-cpu", "mlx_audio-metal", "llama_cpp-cpu"}),
+    available = frozenset({
+        "audio_cpp", "audio_cpp-cuda", "audio_cpp-cpu", "mlx_audio-metal", "llama_cpp-cpu",
+    })
+    compatible = platform_compatible_backends(
+        available,
         card_serves_vision=False,
         card_serves_music=True,
-    ) == frozenset({"audio_cpp-cpu"})
+    )
+    assert compatible == frozenset({"audio_cpp-cuda", "audio_cpp-cpu"})
+    assert resolve_node_backend(compatible, (), available) == "audio_cpp-cuda"
+
+
+def test_music_signed_support_omits_aggregate_engine_tag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An engine-wide claim expands only concrete lanes on a ready node."""
+    claim = RegistryEngineSupportClaim.model_construct(
+        status="supported", engine="audio_cpp", engine_build="verified-build",
+        capability_id="music.generate", hardware_classes=(),
+    )
+
+    def required(_card: ModelCard) -> frozenset[str]:
+        return frozenset({"music.generate"})
+
+    def supported(_card: ModelCard) -> tuple[RegistryEngineSupportClaim, ...]:
+        return (claim,)
+
+    monkeypatch.setattr(model_cards_module, "get_model_required_capabilities", required)
+    monkeypatch.setattr(model_cards_module, "get_model_engine_support", supported)
+    assert registry_supported_backends_for_node(
+        _card(),
+        node_backends=frozenset({"audio_cpp", "audio_cpp-cuda", "audio_cpp-cpu"}),
+        engine_builds={
+            "audio_cpp": "verified-build", "audio_cpp-cuda": "verified-build",
+            "audio_cpp-cpu": "verified-build",
+        },
+        hardware_classes=frozenset(),
+    ) == frozenset({"audio_cpp-cuda", "audio_cpp-cpu"})

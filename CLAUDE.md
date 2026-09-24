@@ -260,6 +260,8 @@ their own `[music]` section and require exact signed support claims. The
 `audio-cpp-engine-wheel` workflow builds the CPU-capable package for Apple
 Silicon macOS and Linux amd64/arm64 from the pinned source. Music model weights
 are separate immutable downloads.
+The bare `audio_cpp` tag reports availability; music support claims and runner
+placement select a concrete compute lane so memory and device choice agree.
 Music mounting uses targeted `PrepareAudioCpp` even for a package already
 observed ready, and indexed `AudioCppPreparationRequested`/
 `AudioCppPreparationCompleted` events. The worker verifies the package and

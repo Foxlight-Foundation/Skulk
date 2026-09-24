@@ -386,6 +386,9 @@ must match the exact card, audio.cpp build, `music.generate` capability,
 architecture, and applicable hardware class after load and generation
 qualification. The node must also report that same ready build before Skulk
 will place it. Installing the audio.cpp package alone grants no model support.
+Music placement resolves a concrete `audio_cpp-cpu`, `audio_cpp-metal`,
+`audio_cpp-vulkan`, `audio_cpp-cuda`, or `audio_cpp-rocm` lane. The bare
+`audio_cpp` tag reports engine availability but cannot select a music runner.
 
 ### `[video]`
 

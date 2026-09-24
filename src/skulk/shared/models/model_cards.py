@@ -31,7 +31,7 @@ from pydantic import (
 )
 from tomlkit.exceptions import TOMLKitError
 
-from skulk.shared.backends import engine_of
+from skulk.shared.backends import AUDIO_CPP_COMPUTE_BACKENDS, engine_of
 from skulk.shared.constants import (
     RESOURCES_DIR,
     SKULK_CUSTOM_MODEL_CARDS_DIR,
@@ -822,6 +822,10 @@ def registry_supported_backends_for_node(
     support_claims = get_model_engine_support(model_card)
     resolved: set[str] = set()
     for backend in node_backends:
+        # A bare engine tag describes availability, not the compute lane whose
+        # memory pool and device the music runner will actually use.
+        if model_card.music is not None and backend not in AUDIO_CPP_COMPUTE_BACKENDS:
+            continue
         supported_capabilities: set[str] = set()
         for claim in support_claims:
             if claim.status != "supported":

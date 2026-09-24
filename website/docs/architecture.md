@@ -958,6 +958,8 @@ the compute lanes that its pinned executable reports through version and
 device probes; its SHA-256 is the live build identity. Music WAV bytes are
 bounded and belong on the node-addressed output media plane, outside State
 and the event log.
+The bare `audio_cpp` tag reports engine availability; model placement and
+memory admission use only a concrete probed compute lane.
 Before initial facts are gathered at startup, a verified cached audio.cpp
 package may restore its executable path without contacting the package channel.
 The cache retains the SHA-256-pinned wheel and compares every extracted runtime

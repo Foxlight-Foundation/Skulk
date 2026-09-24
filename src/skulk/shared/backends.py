@@ -267,6 +267,9 @@ _VISION_SERVING_ENGINES: Final[frozenset[EngineType]] = frozenset(
 )
 _SPEECH_SERVING_ENGINES: Final[frozenset[EngineType]] = frozenset({"mlx_audio"})
 _MUSIC_SERVING_ENGINES: Final[frozenset[EngineType]] = frozenset({"audio_cpp"})
+AUDIO_CPP_COMPUTE_BACKENDS: Final[frozenset[str]] = frozenset(
+    {"audio_cpp-cpu", "audio_cpp-metal", "audio_cpp-vulkan", "audio_cpp-cuda", "audio_cpp-rocm"}
+)
 
 # Engines whose runner binding cannot LOAD a family the served sibling serves
 # fine. The in-process ``llama_cpp`` engine runs whatever llama.cpp build the
@@ -345,7 +348,8 @@ def platform_compatible_backends(
         filtered = frozenset(
             tag
             for tag in filtered
-            if (engine := engine_of(tag)) is None or engine in _MUSIC_SERVING_ENGINES
+            if (engine := engine_of(tag)) is None
+            or (engine in _MUSIC_SERVING_ENGINES and tag in AUDIO_CPP_COMPUTE_BACKENDS)
         )
     if card_supports_tool_calling and card_vllm_tool_call_parser is None:
         filtered = frozenset(tag for tag in filtered if engine_of(tag) != "vllm")
