@@ -3,6 +3,7 @@
 
 import threading
 import tomllib
+from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -16,12 +17,39 @@ from skulk.shared.types.chunks import ErrorChunk
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.events import ChunkGenerated, Event
 from skulk.shared.types.music import MusicGenerationTaskParams
+from skulk.shared.types.node_facts import AudioCppProbe
 from skulk.shared.types.tasks import MusicGeneration
 from skulk.shared.types.worker.instances import InstanceId
 from skulk.shared.types.worker.runners import RunnerRunning
 from skulk.utils.channels import MpSender
-from skulk.worker.runner.audio_cpp.runner import Runner, model_directory
+from skulk.worker.runner.audio_cpp.runner import (
+    Runner,
+    model_directory,
+    verify_audio_cpp_launch,
+)
 from skulk.worker.runner.audio_cpp.server import AudioCppServer
+
+
+def test_sidecar_launch_rechecks_stamped_build_and_lane(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """A replaced binary cannot load under the prior signed build claim."""
+    binary = tmp_path / "audiocpp_server"
+    binary.write_bytes(b"qualified build")
+    expected = f"audio.cpp@sha256:{sha256(binary.read_bytes()).hexdigest()}"
+
+    def ready_probe(_binary: str) -> AudioCppProbe:
+        return AudioCppProbe(outcome="ready", computes=("cpu",))
+
+    monkeypatch.setattr(
+        "skulk.worker.runner.audio_cpp.runner.probe_audio_cpp", ready_probe,
+    )
+    verify_audio_cpp_launch(binary, expected, "cpu")
+    with pytest.raises(RuntimeError, match="lane cuda is no longer usable"):
+        verify_audio_cpp_launch(binary, expected, "cuda")
+    binary.write_bytes(b"different build")
+    with pytest.raises(RuntimeError, match="changed since music placement"):
+        verify_audio_cpp_launch(binary, expected, "cpu")
 
 
 def test_ace_step_server_uses_nested_loader_root(

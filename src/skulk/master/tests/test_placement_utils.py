@@ -627,6 +627,22 @@ def test_usable_vram_by_node_admits_served_engine_gpu_nodes():
     assert served_cpu not in gated  # CPU-only -> no VRAM admission
 
 
+def test_usable_vram_by_node_admits_audio_cpp_gpu_lanes() -> None:
+    """Music on CUDA, ROCm, or Vulkan must enter the discrete VRAM pool."""
+    acc = AcceleratorMetrics(vendor="amd", vram_total_bytes=Memory.from_gb(24).in_bytes)
+    for lane in ("audio_cpp-cuda", "audio_cpp-rocm", "audio_cpp-vulkan"):
+        node = NodeId(lane)
+        resources = {node: NodeResources(backends=frozenset({"audio_cpp", lane}))}
+        assert node in usable_vram_by_node(
+            {node: SystemPerformanceProfile(accelerator=acc)}, resources,
+        )
+    cpu_node = NodeId("music-cpu")
+    assert cpu_node not in usable_vram_by_node(
+        {cpu_node: SystemPerformanceProfile(accelerator=acc)},
+        {cpu_node: NodeResources(backends=frozenset({"audio_cpp", "audio_cpp-cpu"}))},
+    )
+
+
 def test_usable_vram_by_node_uma_counts_gtt():
     """A unified-memory APU (Strix Halo: GTT spans system RAM) must count the
     GPU's GTT-mapped system RAM, not just the BIOS VRAM carve-out. With 64 GiB

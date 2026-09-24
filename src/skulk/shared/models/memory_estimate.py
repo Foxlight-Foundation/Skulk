@@ -306,8 +306,9 @@ def backend_offloads_to_vram(resolved_backend: str | None) -> bool:
     """Whether a resolved backend allocates weights + KV from DISCRETE GPU VRAM.
 
     A GPU compute tag (``llama_cpp-cuda`` / ``-rocm``, ``llama_server-cuda`` /
-    ``-rocm``, ``vllm-cuda`` / ``-rocm``, ``comfy-cuda`` / ``-rocm``) offloads to
-    VRAM. A ``-cpu`` tag OR a bare engine tag (no compute suffix) does not offload
+    ``-rocm``, ``vllm-cuda`` / ``-rocm``, ``comfy-cuda`` / ``-rocm``, or
+    ``audio_cpp-cuda`` / ``-rocm`` / ``-vulkan``) offloads to dedicated VRAM.
+    Audio.cpp Metal uses Apple unified memory. A ``-cpu`` tag OR a bare engine tag (no compute suffix) does not offload
     to the GPU and allocates from system RAM, so it does NOT. ``None``
     (unresolved) is treated as not-VRAM: we cannot confirm VRAM offload, so the
     caller stays conservative.
@@ -318,8 +319,10 @@ def backend_offloads_to_vram(resolved_backend: str | None) -> bool:
         # The video engine has no CPU mode: a card that names only the bare
         # engine tag still lands its model on the GPU.
         return True
+    if resolved_backend == "audio_cpp-metal":
+        return False
     return resolved_backend.startswith(
-        ("llama_cpp-", "llama_server-", "vllm-", "comfy-")
+        ("llama_cpp-", "llama_server-", "vllm-", "comfy-", "audio_cpp-")
     ) and not resolved_backend.endswith("-cpu")
 
 

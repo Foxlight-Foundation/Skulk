@@ -121,6 +121,63 @@ async def test_mount_preflight_skips_ready_build_without_signed_music_support(
     api._send.assert_not_called()
 
 
+async def test_mount_preflight_uses_ordered_preparation_resources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dropped telemetry update cannot undo a completed preparation."""
+    node = NodeId("music-node")
+    topology = Topology()
+    topology.add_node(node)
+    stale = NodeResources(
+        backends=frozenset(), architecture="arm64",
+        hardware_classes=frozenset({"platform:darwin"}),
+    )
+    ready = stale.model_copy(update={
+        "backends": frozenset({"audio_cpp", "audio_cpp-metal"}),
+        "engine_builds": {"audio_cpp-metal": "qualified-build"},
+    })
+    memory = MemoryUsage.from_bytes(
+        ram_total=2**30, ram_available=2**30,
+        swap_total=0, swap_available=0,
+    )
+    api: Any = object.__new__(API)
+    api.node_id = NodeId("api-node")
+    api.state = SimpleNamespace(topology=topology)
+    api._telemetry_view = SimpleNamespace(
+        node_resources={node: stale}, node_memory={node: memory},
+    )
+    api._audio_cpp_prepare_events = {}
+    api._audio_cpp_prepare_results = {}
+
+    async def complete_preparation(command: PrepareAudioCpp) -> None:
+        api._audio_cpp_prepare_results[command.command_id] = AudioCppPreparationCompleted(
+            request_id=command.command_id,
+            target_node=node,
+            owner_node=command.owner_node,
+            success=True,
+            resources=ready,
+        )
+        api._audio_cpp_prepare_events[command.command_id].set()
+
+    api._send = AsyncMock(side_effect=complete_preparation)
+
+    def supported_backends(
+        _card: ModelCard, *, node_backends: frozenset[str],
+        engine_builds: dict[str, str], hardware_classes: frozenset[str],
+    ) -> frozenset[str]:
+        assert node_backends and hardware_classes
+        return (
+            frozenset({"audio_cpp-metal"})
+            if engine_builds.get("audio_cpp-metal") == "qualified-build"
+            else frozenset()
+        )
+
+    monkeypatch.setattr(api_module, "registry_supported_backends_for_node", supported_backends)
+    await api._prepare_music_engine_for_mount(_card(), set())
+    api._send.assert_awaited_once()
+    assert api._telemetry_view.node_resources[node] is stale
+
+
 async def test_exact_music_instance_prepares_its_specified_node_before_send(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

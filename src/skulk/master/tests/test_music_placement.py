@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import skulk.master.placement as placement_module
 from skulk.master.placement import (
     PlacementError,
     add_instance_to_placements,
@@ -15,7 +16,7 @@ from skulk.shared.models.model_cards import ModelCard
 from skulk.shared.topology import Topology
 from skulk.shared.types.commands import CreateInstance, PlaceInstance
 from skulk.shared.types.common import NodeId
-from skulk.shared.types.profiling import NodeResources
+from skulk.shared.types.profiling import MemoryUsage, NodeResources
 from skulk.shared.types.worker.instances import (
     InstanceId,
     InstanceMeta,
@@ -122,3 +123,45 @@ def test_music_exact_command_rejects_rpc_instance() -> None:
         add_instance_to_placements(
             CreateInstance(instance=instance), Topology(), {}, {},
         )
+
+
+def test_music_exact_placement_stamps_verified_engine_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A caller supplied build cannot replace the node's measured identity."""
+    card = _music_card()
+    node = NodeId("music-node")
+    runner = RunnerId("music-runner")
+    instance = MlxRingInstance(
+        instance_id=InstanceId(),
+        shard_assignments=ShardAssignments(
+            model_id=card.model_id,
+            runner_to_shard={runner: PipelineShardMetadata(
+                model_card=card, device_rank=0, world_size=1,
+                start_layer=0, end_layer=36, n_layers=36,
+                resolved_backend="audio_cpp-cpu",
+                resolved_engine_build="caller-build",
+            )},
+            node_to_runner={node: runner},
+        ),
+        hosts_by_node={node: []},
+        ephemeral_port=52415,
+    )
+    resources = NodeResources(
+        backends=frozenset({"audio_cpp", "audio_cpp-cpu"}),
+        engine_builds={"audio_cpp-cpu": "verified-build"},
+    )
+    def supported(_card: ModelCard, _resources: NodeResources) -> frozenset[str]:
+        return frozenset({"audio_cpp-cpu"})
+
+    monkeypatch.setattr(placement_module, "_card_platform_backends", supported)
+    memory = MemoryUsage.from_bytes(
+        ram_total=1 << 40, ram_available=1 << 40,
+        swap_total=0, swap_available=0,
+    )
+    placed = add_instance_to_placements(
+        CreateInstance(instance=instance), Topology(), {}, {node: memory},
+        node_resources={node: resources},
+    )
+    stamped = placed[instance.instance_id].shard_assignments.runner_to_shard[runner]
+    assert stamped.resolved_engine_build == "verified-build"

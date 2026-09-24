@@ -972,6 +972,12 @@ in the ordered completion. The master applies the snapshot to its live resource
 view before broadcasting success, so placement sees the exact build even when
 ordinary telemetry arrives later. Exact placements reject RPC shaped music
 instances and require a matching ready build and signed support claim.
+The API uses the ordered completion resources for its signed claim check, so a
+dropped telemetry update cannot turn a successful preparation into a timeout.
+Placement stamps the selected audio.cpp build on the music shard. At each
+sidecar launch, the runner checks the executable digest and selected device
+against that stamp. CUDA, ROCm, and Vulkan music lanes consume the reported
+GPU memory budget; Metal uses Apple unified memory and CPU uses system RAM.
 Ordinary signed placement selects only ready backends. A `MusicGeneration` command creates a distinct
 task; its runner owns one loopback audio.cpp server per mounted model and emits
 only a terminal `MusicChunk` manifest through the control path. Bounded WAV

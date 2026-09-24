@@ -32,6 +32,10 @@ class BaseShardMetadata(TaggedModel):
     # lacked the node's resources at placement); the worker then falls back to
     # its local backend probe. See #330.
     resolved_backend: str | None = None
+    resolved_engine_build: str | None = Field(
+        default=None,
+        description="Exact music engine build observed by placement and required at sidecar launch.",
+    )
     llama_server_settings: LlamaServerSettings | None = Field(
         default=None,
         description="Node serving settings captured by placement for memory admission.",

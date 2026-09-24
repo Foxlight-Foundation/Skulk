@@ -3728,31 +3728,21 @@ class API:
                 if not result.success:
                     errors.append(f"{node_id}: {result.error or 'preparation failed'}")
                     continue
-                published = False
-                with anyio.move_on_after(30):
-                    while True:
-                        fresh = self._telemetry_view.node_resources.get(node_id)
-                        if (
-                            fresh is not None
-                            and any(
-                                backend.startswith("audio_cpp-")
-                                and backend in fresh.engine_builds
-                                for backend in fresh.backends
-                            )
-                        ):
-                            published = True
-                            if registry_supported_backends_for_node(
-                                card,
-                                node_backends=fresh.backends,
-                                engine_builds=fresh.engine_builds,
-                                hardware_classes=fresh.hardware_classes,
-                            ):
-                                return
-                            errors.append(f"{node_id}: no supported signed music claim matches the prepared build and hardware")
-                            break
-                        await anyio.sleep(0.2)
-                if not published:
-                    errors.append(f"{node_id}: ready NodeResources did not arrive")
+                fresh = result.resources
+                if result.target_node != node_id or fresh is None or not any(
+                    backend.startswith("audio_cpp-") and backend in fresh.engine_builds
+                    for backend in fresh.backends
+                ):
+                    errors.append(f"{node_id}: preparation returned no verified ready resources")
+                    continue
+                if registry_supported_backends_for_node(
+                    card,
+                    node_backends=fresh.backends,
+                    engine_builds=fresh.engine_builds,
+                    hardware_classes=fresh.hardware_classes,
+                ):
+                    return
+                errors.append(f"{node_id}: no supported signed music claim matches the prepared build and hardware")
             finally:
                 self._audio_cpp_prepare_events.pop(request_id, None)
                 self._audio_cpp_prepare_results.pop(request_id, None)

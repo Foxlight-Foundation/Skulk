@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import os
 import shutil
+from hashlib import sha256
 from pathlib import Path
 from typing import final
 
 from loguru import logger
 
+from skulk.facts.probe import probe_audio_cpp
 from skulk.shared.backends import AUDIO_CPP_BIN_ENV, probe_node_backends
 from skulk.shared.constants import SKULK_CACHE_HOME, SKULK_MUSIC_OUTPUT_DIR
 from skulk.shared.models.model_cards import ModelCard, ModelId
@@ -73,6 +75,28 @@ def _compute_backend(resolved_backend: str | None) -> str:
         raise RuntimeError(f"placed audio.cpp lane {resolved_backend} is no longer ready")
     compute = resolved_backend.removeprefix("audio_cpp-")
     return "hip" if compute == "rocm" else compute
+
+
+def verify_audio_cpp_launch(binary: Path, expected_build: str | None, backend: str) -> None:
+    """Require the placed build and compute lane on the executable about to launch."""
+    if expected_build is None:
+        raise RuntimeError("music placement has no stamped audio.cpp build")
+    probe = probe_audio_cpp(str(binary))
+    compute = "rocm" if backend == "hip" else backend
+    if probe.outcome != "ready" or compute not in probe.computes:
+        raise RuntimeError(
+            f"placed audio.cpp lane {compute} is no longer usable: {probe.detail or 'device missing'}"
+        )
+    digest = sha256()
+    try:
+        with binary.open("rb") as stream:
+            while block := stream.read(1024 * 1024):
+                digest.update(block)
+    except OSError as error:
+        raise RuntimeError("audio.cpp executable cannot be verified at load") from error
+    observed = f"audio.cpp@sha256:{digest.hexdigest()}"
+    if observed != expected_build:
+        raise RuntimeError("audio.cpp executable changed since music placement")
 
 
 @final
@@ -188,12 +212,16 @@ class Runner(ServedConcurrentDispatch):
 
         for component in bundle.files:
             resolve_artifact_file(model_dir, bundle.root, component.path)
+        backend = _compute_backend(self.shard_metadata.resolved_backend)
+        verify_audio_cpp_launch(
+            binary, self.shard_metadata.resolved_engine_build, backend,
+        )
         server = AudioCppServer(
             binary=binary,
             model_specs=specs,
             model_dir=model_dir,
             music=music,
-            backend=_compute_backend(self.shard_metadata.resolved_backend),
+            backend=backend,
             work_dir=self.work_dir,
         )
         server.start()

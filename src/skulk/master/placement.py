@@ -261,8 +261,8 @@ def add_instance_to_placements(
         resolved_shards = dict(assignments.runner_to_shard)
         for node_id, runner_id in assignments.node_to_runner.items():
             shard = resolved_shards[runner_id]
+            resources = (node_resources or {}).get(node_id)
             if shard.model_card.music is not None:
-                resources = (node_resources or {}).get(node_id)
                 if resources is None:
                     raise PlacementError("Ready audio.cpp backend telemetry is required for exact music placement")
                 supported = _card_platform_backends(shard.model_card, resources)
@@ -274,8 +274,15 @@ def add_instance_to_placements(
                         "Exact music placement requires a ready audio.cpp build and matching signed support claim"
                     )
             if shard.resolved_backend is not None:
+                if shard.model_card.music is not None:
+                    assert resources is not None
+                    build = resources.engine_builds.get(shard.resolved_backend)
+                    if build is None:
+                        raise PlacementError("Exact music placement lacks a verified engine build")
+                    resolved_shards[runner_id] = shard.model_copy(
+                        update={"resolved_engine_build": build}
+                    )
                 continue
-            resources = (node_resources or {}).get(node_id)
             if resources is None:
                 # Production callers always supply resources. Retain the legacy
                 # standalone RAM-only helper contract, but never infer a safe
@@ -294,9 +301,13 @@ def add_instance_to_placements(
                 raise PlacementError("No compatible backend for exact placement")
             # Stamp before deriving context and checking the footprint: otherwise
             # the worker can pick a GPU after admission charged only system RAM.
-            resolved_shards[runner_id] = shard.model_copy(
-                update={"resolved_backend": backend}
-            )
+            updates: dict[str, str] = {"resolved_backend": backend}
+            if shard.model_card.music is not None:
+                build = resources.engine_builds.get(backend)
+                if build is None:
+                    raise PlacementError("Exact music placement lacks a verified engine build")
+                updates["resolved_engine_build"] = build
+            resolved_shards[runner_id] = shard.model_copy(update=updates)
         assignments = assignments.model_copy(
             update={"runner_to_shard": resolved_shards}
         )
@@ -1342,8 +1353,15 @@ def place_instance(
         )
         if resolved_backend is not None:
             shard = stamped_runner_to_shard[runner_id]
+            updates: dict[str, str] = {"resolved_backend": resolved_backend}
+            if command.model_card.music is not None:
+                assert resources is not None
+                build = resources.engine_builds.get(resolved_backend)
+                if build is None:
+                    raise PlacementError("Music placement lacks a verified engine build")
+                updates["resolved_engine_build"] = build
             stamped_runner_to_shard[runner_id] = shard.model_copy(
-                update={"resolved_backend": resolved_backend}
+                update=updates
             )
     shard_assignments = ShardAssignments(
         model_id=shard_assignments.model_id,
