@@ -22,6 +22,7 @@ from skulk.store.installed_cards import (
     associate_installed_card,
     build_installed_card_record,
     installed_card_matches,
+    installed_companion_matches,
     read_installed_card,
     read_installed_card_with_fallback,
     refresh_registry_installed_card_if_same_artifact,
@@ -410,6 +411,65 @@ def test_video_companion_repository_associates_only_when_complete(
     assert record is not None
     assert record.artifact_role == "video_companion"
     assert record.owner_model_id == str(owner.model_id)
+
+
+def _video_owner(model_id: str, revision: str) -> ModelCard:
+    """A video card that pins one pose preprocessor from ``org/pose``."""
+
+    payload = _card().model_dump(mode="json")
+    payload["model_id"] = model_id
+    payload["registry_card_id"] = None
+    payload["tasks"] = ["TextToVideo"]
+    payload["video"] = {
+        "modes": ["t2va"],
+        "companions": [
+            {
+                "kind": "preprocessor",
+                "name": "pose",
+                "role": "pose_estimator",
+                "path": "checkpoints/pose.safetensors",
+                "repo": "org/pose",
+                "revision": revision,
+            }
+        ],
+    }
+    return ModelCard.model_validate(payload)
+
+
+def test_one_video_companion_serves_every_card_that_pins_it(tmp_path: Path) -> None:
+    """Two cards naming the same bytes share one copy instead of replacing it."""
+
+    revision = "c" * 40
+    first = _video_owner("org/first-video", revision)
+    second = _video_owner("org/second-video", revision)
+    other = _video_owner("org/third-video", "d" * 40)
+    companion = tmp_path / f"org--pose--revision-{revision}"
+    (companion / "checkpoints").mkdir(parents=True)
+    (companion / "checkpoints" / "pose.safetensors").write_bytes(b"pose")
+    write_installed_card(
+        companion,
+        build_installed_card_record(
+            companion,
+            first,
+            artifact_role="video_companion",
+            artifact_model_id="org/pose",
+            owner_model_id=str(first.model_id),
+            artifact_repository="org/pose",
+            artifact_revision=revision,
+        ),
+    )
+
+    def serves(owner: ModelCard) -> bool:
+        return installed_companion_matches(
+            companion,
+            artifact_model_id="org/pose",
+            owner_card=owner,
+            artifact_role="video_companion",
+        )
+
+    assert serves(first) and serves(second)
+    # A card pinning another revision of the repository needs other bytes.
+    assert not serves(other)
 
 
 def test_served_draft_record_selects_its_own_gguf(tmp_path: Path) -> None:

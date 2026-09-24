@@ -813,6 +813,26 @@ def require_registry_installed_artifact(
         )
 
 
+def companion_owner_matches(record: InstalledCardRecord, owner_card: ModelCard) -> bool:
+    """Whether an installed companion record serves ``owner_card``.
+
+    Most companions belong to the one card they were fetched for. A video
+    companion is the same bytes at one pinned repository revision, which
+    several cards can name (both MiniMax H3 cards pin the same guide
+    preprocessors), so any card that pins the record's repository at its
+    revision accepts it. Keying it to its first owner would make each card
+    replace the other's copy on every ensure.
+    """
+    if record.artifact_role == "video_companion":
+        return (
+            record.artifact_repository,
+            record.artifact_revision,
+        ) in owner_card.external_video_companions()
+    if owner_card.registry_card_id is not None:
+        return record.owner_card_id == owner_card.registry_card_id
+    return record.model_card == owner_card
+
+
 def installed_companion_matches(
     model_directory: Path,
     *,
@@ -841,15 +861,10 @@ def installed_companion_matches(
         return False
     if record is None:
         return False
-    owner_identity_matches = (
-        record.owner_card_id == owner_card.registry_card_id
-        if owner_card.registry_card_id is not None
-        else record.model_card == owner_card
-    )
     return (
         record.artifact_model_id == artifact_model_id
         and record.artifact_role == artifact_role
-        and owner_identity_matches
+        and companion_owner_matches(record, owner_card)
         and verify_installed_card(model_directory, record)
     )
 
