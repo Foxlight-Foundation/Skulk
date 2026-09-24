@@ -141,8 +141,19 @@ class AudioCppServer:
             self.base_url = f"http://127.0.0.1:{port}"
             log = (self.work_dir / "server.log").open("ab")
             self._log = log
+            command = [str(self.binary), "--config", str(config_path), "--no-ui"]
+            if sys.platform == "darwin":
+                # macOS has no prctl(PDEATHSIG). A tiny parent watchdog owns
+                # the detached server and kills its process group if the
+                # runner is SIGKILLed before teardown can run.
+                command = [
+                    sys.executable,
+                    str(Path(__file__).with_name("parent_watchdog.py")),
+                    str(os.getpid()),
+                    *command,
+                ]
             self.process = subprocess.Popen(  # noqa: S603 - pinned executable
-                [str(self.binary), "--config", str(config_path), "--no-ui"],
+                command,
                 cwd=self.work_dir,
                 stdout=log,
                 stderr=subprocess.STDOUT,

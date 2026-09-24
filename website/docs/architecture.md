@@ -977,7 +977,9 @@ the subsequent request-local placement dry-run, so a dropped telemetry update
 cannot reject a successfully prepared mount.
 Placement stamps the selected audio.cpp build on the music shard. At each
 sidecar launch, the runner checks the executable digest and selected device
-against that stamp. CUDA, ROCm, and Vulkan music lanes consume the reported
+against that stamp. Linux ties the sidecar to its runner with a parent-death
+signal; on macOS, a small watchdog terminates the server process group if
+its runner exits unexpectedly. CUDA, ROCm, and Vulkan music lanes consume the reported
 GPU memory budget in API preflight and placement; Metal uses Apple unified
 memory and CPU uses system RAM. Preparation and exact placement check the
 complete estimated music footprint against the applicable pool, including the system-memory
@@ -987,7 +989,8 @@ task; its runner owns one loopback audio.cpp server per mounted model and emits
 only a terminal `MusicChunk` manifest through the control path. Bounded WAV
 bytes use `OUTPUT_MEDIA` with purpose `music`, and the accepting API node
 settles the job after both manifest and verified media arrive. The node-local
-music store retains completed content for up to 24 hours. The runner restores
+music store retains completed content for up to 24 hours. Late task events
+cannot restore output-source state for terminal jobs. The runner restores
 its sidecar after a request transport failure before admitting queued work.
 A session reset
 closes in-flight music streams, and a create request waiting on that session

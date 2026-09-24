@@ -266,7 +266,9 @@ broadcasting success so signed placement cannot race its telemetry view.
 The API reads that ordered snapshot instead of waiting for telemetry and uses
 it in the request-local placement dry-run. Placement
 stamps the exact engine build on music shards; the runner rehashes and probes
-the executable and selected lane before every sidecar start. CUDA, ROCm, and
+the executable and selected lane before every sidecar start. Linux uses a
+parent-death signal and macOS uses a detached watchdog to end the server when
+its runner disappears. CUDA, ROCm, and
 Vulkan audio.cpp lanes admit against GPU memory in API preflight and placement;
 Metal and CPU use system RAM. Preparation and exact music placement check the
 full estimated footprint against the corresponding memory pool and reject RPC shaped and

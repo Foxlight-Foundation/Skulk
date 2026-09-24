@@ -12565,12 +12565,14 @@ class API:
     def _record_music_output_source(self, task: task_types.Task) -> None:
         """Remember the single placed node permitted to deliver a music WAV."""
 
+        if not isinstance(task, task_types.MusicGeneration):
+            return
+        job = self._music_jobs.get(task.command_id)
         if (
-            not isinstance(task, task_types.MusicGeneration)
-            or task.task_status == task_types.TaskStatus.Failed
+            task.task_status == task_types.TaskStatus.Failed
             or task.owner_node != self.node_id
-            or task.command_id not in self._music_generation_queues
-            and self._music_jobs.get(task.command_id) is None
+            or job is None
+            or job.is_terminal
         ):
             return
         instance = self.state.instances.get(task.instance_id)

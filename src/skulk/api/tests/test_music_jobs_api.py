@@ -635,6 +635,10 @@ def test_music_output_source_tracks_only_live_local_jobs(
     _job(api, command_id, _wav())
     api._record_music_output_source(local_task)
     assert api._music_output_sources == {command_id: worker_node}
+    api._music_jobs.fail(command_id, "cancelled before task creation", cancelled=True)
+    api._music_output_sources.clear()
+    api._record_music_output_source(local_task)
+    assert api._music_output_sources == {}
 
 
 @pytest.mark.anyio
