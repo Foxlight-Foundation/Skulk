@@ -16,6 +16,11 @@ on:
       - "packaging/skulk-audio-cpp-cpu/**"
       - ".github/workflows/audio-cpp-engine-wheel.yml"
   workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish all three attested wheels to the Foxlight engine index"
+        type: boolean
+        default: false
 
 env:
   AUDIO_CPP_REF: 4d88768fbcae4e6eb3352c6ab1422dabb7d90b58
@@ -109,3 +114,23 @@ jobs:
           name: audio-cpp-${{ matrix.platform }}
           path: packaging/skulk-audio-cpp-cpu/dist/*.whl
           if-no-files-found: error
+
+  publish-index:
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: audio-cpp-*
+          merge-multiple: true
+          path: dist
+      - uses: astral-sh/setup-uv@v6
+      - name: Publish exact wheels to the Foxlight index
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: uv run --no-project --with boto3 python scripts/publish_wheel_index.py dist/skulk_audio_cpp_cpu-*.whl
