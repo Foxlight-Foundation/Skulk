@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
+import anyio
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
@@ -18,14 +19,14 @@ from fastapi.testclient import TestClient
 import skulk.api.main as api_module
 from skulk.api.main import API
 from skulk.api.music_jobs import MusicJob, MusicJobRegistry
-from skulk.api.types.api import CreateInstanceParams
+from skulk.api.types.api import CreateInstanceParams, MusicCreateRequest
 from skulk.api.video_store import VideoStore
 from skulk.routing.output_media import OutputMediaPacket
 from skulk.shared.models.model_cards import ModelCard, ModelId
 from skulk.shared.topology import Topology
 from skulk.shared.types.chunks import MusicChunk
 from skulk.shared.types.commands import MusicGeneration, PrepareAudioCpp, TaskCancelled
-from skulk.shared.types.common import CommandId, NodeId
+from skulk.shared.types.common import CommandId, NodeId, SystemId
 from skulk.shared.types.events import AudioCppPreparationCompleted
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.music import MusicGenerationTaskParams, MusicOutputManifest
@@ -125,6 +126,39 @@ async def test_mount_preflight_skips_ready_build_without_signed_music_support(
             _card(), set(), required_nodes={unsupported},
         )
     api._send.assert_not_called()
+
+
+@pytest.mark.parametrize("lane", ["audio_cpp-cpu", "audio_cpp-metal"])
+async def test_mount_preflight_rejects_weights_only_system_memory_fit(
+    lane: str,
+) -> None:
+    """Do not prepare a music engine where runtime overhead cannot fit."""
+    node = NodeId("music-node")
+    topology = Topology()
+    topology.add_node(node)
+    card = _card()
+    memory = MemoryUsage.from_bytes(
+        ram_total=Memory.from_gb(1).in_bytes,
+        ram_available=card.storage_size.in_bytes + Memory.from_mb(100).in_bytes,
+        swap_total=0, swap_available=0,
+    )
+    api: Any = object.__new__(API)
+    api.state = SimpleNamespace(topology=topology, instances={})
+    api._telemetry_view = SimpleNamespace(
+        node_resources={node: NodeResources(
+            backends=frozenset({"audio_cpp", lane}),
+            architecture="arm64",
+            hardware_classes=frozenset({"platform:darwin"}),
+            engine_builds={lane: "qualified-build"},
+        )},
+        node_memory={node: memory}, node_system={},
+    )
+    api._send = AsyncMock()
+
+    with pytest.raises(HTTPException) as error:
+        await api._prepare_music_engine_for_mount(card, set(), required_nodes={node})
+    assert error.value.status_code == 503
+    api._send.assert_not_awaited()
 
 
 async def test_mount_preflight_uses_ordered_preparation_resources(
@@ -381,6 +415,7 @@ def _api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
     api: Any = object.__new__(API)
     api.app = FastAPI()
     api.node_id = NodeId("api-node")
+    api._system_id = SystemId()
     api._music_generation_queues = {}
     api._text_generation_queues = {}
     api._image_generation_queues = {}
@@ -431,6 +466,68 @@ def test_music_create_enforces_lyric_duration_and_option_contract(
     assert sent.owner_node == api.node_id
     assert sent.task_params.lyrics == "Sing" and sent.task_params.seed == 7
     assert body["id"] == str(sent.command_id)
+
+
+async def test_music_create_does_not_send_after_session_reset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A paused submission must not escape after reset closed its DATA queue."""
+    api = _api(tmp_path, monkeypatch)
+    api._send = API._send.__get__(api, API)
+    api.command_sender = SimpleNamespace(send=AsyncMock())
+    api.paused = True
+    api.paused_ev = anyio.Event()
+    errors: list[HTTPException] = []
+    command_id: CommandId | None = None
+
+    async def submit() -> None:
+        try:
+            await api.create_music(MusicCreateRequest(
+                model=str(MODEL), prompt="Orchestral fox", lyrics="Sing", seconds=30,
+            ))
+        except HTTPException as exc:
+            errors.append(exc)
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(submit)
+        with anyio.fail_after(2):
+            while not api._music_jobs.active_ids():
+                await anyio.sleep(0)
+        command_id = next(iter(api._music_jobs.active_ids()))
+        api._fail_open_command_streams_for_session_reset()
+        api._finish_music_job(command_id, "the API session reset before music delivery")
+        api._system_id = SystemId()
+        api._music_generation_queues = {}
+        api.unpause(1)
+
+    assert len(errors) == 1 and errors[0].status_code == 503
+    api.command_sender.send.assert_not_awaited()
+    assert command_id is not None
+    assert api._music_jobs.get(command_id).status == "failed"
+
+
+async def test_music_create_reports_reset_during_send(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reset during transport delivery must not return a queued stale job."""
+    api = _api(tmp_path, monkeypatch)
+    api._send = API._send.__get__(api, API)
+    api.paused = False
+    api.paused_ev = anyio.Event()
+
+    async def reset_during_send(_command: object) -> None:
+        command_id = next(iter(api._music_jobs.active_ids()))
+        api._finish_music_job(command_id, "the API session reset before music delivery")
+        api._system_id = SystemId()
+        api._music_generation_queues = {}
+
+    api.command_sender = SimpleNamespace(send=AsyncMock(side_effect=reset_during_send))
+    with pytest.raises(HTTPException) as error:
+        await api.create_music(MusicCreateRequest(
+            model=str(MODEL), prompt="Orchestral fox", lyrics="Sing", seconds=30,
+        ))
+    assert error.value.status_code == 503
+    api.command_sender.send.assert_awaited_once()
 
 
 def _job(api: Any, command_id: CommandId, data: bytes) -> None:

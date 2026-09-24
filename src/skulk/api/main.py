@@ -348,6 +348,7 @@ from skulk.master.placement import (
 )
 from skulk.master.placement import place_instance as get_instance_placements
 from skulk.master.placement_utils import (
+    reserve_system_ram_usage,
     unified_memory_gpu_node_ids,
     usable_vram_by_node,
 )
@@ -385,6 +386,7 @@ from skulk.shared.models.memory_estimate import (
     GPU_WORKING_SET_FRACTION,
     backend_offloads_to_vram,
     estimate_shard_footprint,
+    gpu_working_set_ceiling,
     per_token_kv_bytes,
     shard_fraction_of_model,
     shard_preallocates_kv_upfront,
@@ -3668,19 +3670,35 @@ class API:
             node_memory=self._telemetry_view.node_memory,
             current_instances=self.state.instances,
         )
+        node_ram = reserve_system_ram_usage(
+            self._telemetry_view.node_memory,
+            self.state.instances,
+            node_vram,
+            unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
+                self._telemetry_view.node_system,
+                self._telemetry_view.node_resources,
+                node_memory=self._telemetry_view.node_memory,
+            ),
+        )
 
         def supports_with_capacity(node_id: NodeId, backends: frozenset[str]) -> bool:
             """Check signed lanes against the pool their runner actually allocates."""
-            memory = self._telemetry_view.node_memory[node_id]
+            memory = node_ram[node_id]
             vram = node_vram.get(node_id)
-            return any(
-                (
-                    vram is not None and vram.in_bytes >= card.storage_size.in_bytes
+            for backend in backends:
+                pool = (
+                    vram
                     if backend_offloads_to_vram(backend)
-                    else memory.ram_available.in_bytes >= card.storage_size.in_bytes
+                    else min(
+                        memory.ram_available,
+                        gpu_working_set_ceiling(memory.ram_total),
+                    )
                 )
-                for backend in backends
-            )
+                if pool is not None and estimate_shard_footprint(
+                    card, 1.0, resolved_backend=backend,
+                ) <= pool:
+                    return True
+            return False
 
         candidates: list[tuple[bool, int, NodeId]] = []
         for node_id in self.state.topology.list_nodes():
@@ -3689,14 +3707,14 @@ class API:
             ):
                 continue
             resources = self._telemetry_view.node_resources.get(node_id)
-            memory = self._telemetry_view.node_memory.get(node_id)
+            memory = node_ram.get(node_id)
             if resources is None or memory is None or resources.participation != "full":
                 continue
             available = max(
-                memory.ram_available.in_bytes,
+                min(memory.ram_available, gpu_working_set_ceiling(memory.ram_total)).in_bytes,
                 node_vram[node_id].in_bytes if node_id in node_vram else 0,
             )
-            if available < card.storage_size.in_bytes:
+            if available < estimate_shard_footprint(card, 1.0).in_bytes:
                 continue
             architecture = (resources.architecture or "").lower()
             platform_classes = resources.hardware_classes
@@ -11739,6 +11757,7 @@ class API:
             model=request.model, prompt=request.prompt, lyrics=request.lyrics,
             seconds=request.seconds, seed=request.seed,
         )
+        session_id = self._system_id
         command_id = CommandId()
         job = self._music_jobs.create(MusicJob(
             id=command_id, model=request.model, prompt=request.prompt,
@@ -11749,7 +11768,12 @@ class API:
         try:
             await self._send(MusicGeneration(
                 command_id=command_id, task_params=params, owner_node=self.node_id,
-            ))
+            ), expected_session=session_id)
+            if self._system_id != session_id:
+                raise HTTPException(
+                    status_code=503,
+                    detail="The cluster session changed while submitting music; please retry",
+                )
         except BaseException:
             self._finish_music_job(command_id, "the generation command could not be sent")
             raise
@@ -13271,9 +13295,18 @@ class API:
                 logger.warning(f"Trace janitor error: {err}")
             await anyio.sleep(prune_interval_seconds)
 
-    async def _send(self, command: Command):
+    async def _send(
+        self, command: Command, *, expected_session: SystemId | None = None
+    ) -> None:
         while self.paused:
             await self.paused_ev.wait()
+        # A session reset closes the caller's result stream. Do not dispatch
+        # its command into the replacement session after an election wait.
+        if expected_session is not None and self._system_id != expected_session:
+            raise HTTPException(
+                status_code=503,
+                detail="The cluster session changed while submitting music; please retry",
+            )
         await self.command_sender.send(
             ForwarderCommand(origin=self._system_id, command=command)
         )

@@ -978,14 +978,17 @@ Placement stamps the selected audio.cpp build on the music shard. At each
 sidecar launch, the runner checks the executable digest and selected device
 against that stamp. CUDA, ROCm, and Vulkan music lanes consume the reported
 GPU memory budget in API preflight and placement; Metal uses Apple unified
-memory and CPU uses system RAM. Exact music instances contain one runner shard
-on one node.
+memory and CPU uses system RAM. Preparation and exact placement check the complete estimated
+music footprint against the applicable pool, including the system-memory
+working-set ceiling, before creating one runner shard on one node.
 Ordinary signed placement selects only ready backends. A `MusicGeneration` command creates a distinct
 task; its runner owns one loopback audio.cpp server per mounted model and emits
 only a terminal `MusicChunk` manifest through the control path. Bounded WAV
 bytes use `OUTPUT_MEDIA` with purpose `music`, and the accepting API node
 settles the job after both manifest and verified media arrive. The node-local
-music store retains completed content for up to 24 hours.
+music store retains completed content for up to 24 hours. A session reset
+closes in-flight music streams, and a create request waiting on that session
+fails instead of dispatching a command into the replacement session.
 
 ## Speech serving
 

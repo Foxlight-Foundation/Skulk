@@ -16,6 +16,7 @@ from skulk.shared.models.model_cards import ModelCard
 from skulk.shared.topology import Topology
 from skulk.shared.types.commands import CreateInstance, PlaceInstance
 from skulk.shared.types.common import NodeId
+from skulk.shared.types.memory import Memory
 from skulk.shared.types.profiling import MemoryUsage, NodeResources
 from skulk.shared.types.worker.instances import (
     InstanceId,
@@ -191,3 +192,45 @@ def test_music_exact_placement_stamps_verified_engine_build(
     )
     stamped = placed[instance.instance_id].shard_assignments.runner_to_shard[runner]
     assert stamped.resolved_engine_build == "verified-build"
+
+
+@pytest.mark.parametrize("lane", ["audio_cpp-cpu", "audio_cpp-metal"])
+def test_music_exact_placement_checks_full_system_memory_footprint(
+    monkeypatch: pytest.MonkeyPatch, lane: str,
+) -> None:
+    """Weights alone cannot admit a CPU or unified-memory music server."""
+    card = _music_card()
+    node = NodeId("music-node")
+    runner = RunnerId("music-runner")
+    instance = MlxRingInstance(
+        instance_id=InstanceId(),
+        shard_assignments=ShardAssignments(
+            model_id=card.model_id,
+            runner_to_shard={runner: PipelineShardMetadata(
+                model_card=card, device_rank=0, world_size=1,
+                start_layer=0, end_layer=36, n_layers=36,
+                resolved_backend=lane,
+            )},
+            node_to_runner={node: runner},
+        ),
+        hosts_by_node={node: []},
+        ephemeral_port=52415,
+    )
+    resources = NodeResources(
+        backends=frozenset({"audio_cpp", lane}),
+        engine_builds={lane: "verified-build"},
+    )
+    def supported(_card: ModelCard, _resources: NodeResources) -> frozenset[str]:
+        return frozenset({lane})
+
+    monkeypatch.setattr(placement_module, "_card_platform_backends", supported)
+    memory = MemoryUsage.from_bytes(
+        ram_total=Memory.from_gb(64).in_bytes,
+        ram_available=card.storage_size.in_bytes + Memory.from_mb(100).in_bytes,
+        swap_total=0, swap_available=0,
+    )
+    with pytest.raises(PlacementError, match="Insufficient system memory"):
+        add_instance_to_placements(
+            CreateInstance(instance=instance), Topology(), {}, {node: memory},
+            node_resources={node: resources},
+        )

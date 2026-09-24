@@ -1750,7 +1750,9 @@ Unknown fields are rejected. The response is a `music` object with a job `id`,
 `model`, `prompt`, requested `seconds`, `status: "queued"`, `created_at`, and
 null terminal/output fields. One API node admits at most 32 active music jobs.
 The model runner admits one generation at a time. A failed job includes an
-`error`; cancellation produces `status: "cancelled"`.
+`error`; cancellation produces `status: "cancelled"`. If the cluster session
+changes while creation waits to submit, the API returns **503** and the
+request can be retried; the closed session's command is not submitted.
 
 ### List and retrieve music jobs
 

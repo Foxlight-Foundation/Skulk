@@ -34,6 +34,7 @@ from skulk.shared.models.memory_estimate import (
     MIN_REQUESTED_CONTEXT_TOKENS,
     backend_offloads_to_vram,
     estimate_shard_footprint,
+    gpu_working_set_ceiling,
     instance_context_token_limit,
     shard_fraction_of_model,
     shard_preallocates_kv_upfront,
@@ -375,13 +376,23 @@ def add_instance_to_placements(
     if not isinstance(instance, LlamaRpcInstance):
         for node_id, runner_id in assignments.node_to_runner.items():
             shard = assignments.runner_to_shard[runner_id]
-            available = (node_vram or {}).get(node_id)
             fraction = shard_fraction_of_model(shard)
-            if not backend_offloads_to_vram(shard.resolved_backend):
+            uses_vram = backend_offloads_to_vram(shard.resolved_backend)
+            if not uses_vram and not music_instance:
                 continue
+            available = (
+                (node_vram or {}).get(node_id)
+                if uses_vram
+                else (
+                    min(memory.ram_available, gpu_working_set_ceiling(memory.ram_total))
+                    if (memory := node_memory.get(node_id)) is not None
+                    else None
+                )
+            )
             if available is None or fraction is None:
+                pool = "GPU" if uses_vram else "System"
                 raise PlacementError(
-                    "GPU memory telemetry and a concrete shard are required for exact placement"
+                    f"{pool} memory telemetry and a concrete shard are required for exact placement"
                 )
             # A context ceiling alone is not a weights admission check: it can
             # become zero, or fall back to the card when KV geometry is absent.
@@ -396,7 +407,8 @@ def add_instance_to_placements(
                 llama_server_settings=shard.llama_server_settings,
             )
             if ceiling == 0 or footprint > available:
-                raise PlacementError("Insufficient GPU memory for the exact placement")
+                pool = "GPU memory" if uses_vram else "system memory"
+                raise PlacementError(f"Insufficient {pool} for the exact placement")
     return {**current_instances, instance.instance_id: instance}
 
 
