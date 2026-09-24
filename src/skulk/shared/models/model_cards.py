@@ -2916,7 +2916,15 @@ class ModelCard(CamelCaseModel):
         ):
             raise ValueError("MiniMax music cards require an artifact bundle")
         if self.music is not None and self.artifact_bundle is not None:
-            bundle_paths = {item.path for item in self.artifact_bundle.files}
+            root_prefix = (
+                f"{self.artifact_bundle.root}/"
+                if self.artifact_bundle.root is not None
+                else ""
+            )
+            bundle_paths = {
+                item.path.removeprefix(root_prefix)
+                for item in self.artifact_bundle.files
+            }
             selected = (
                 self.music.language_model_gguf,
                 self.music.rvq_depth_decoder_gguf,

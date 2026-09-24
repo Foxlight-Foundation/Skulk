@@ -122,6 +122,21 @@ def test_minimax_bundle_requires_auxiliary_runtime_files(missing: str) -> None:
         _card(artifact_bundle=incomplete)
 
 
+def test_minimax_bundle_checks_paths_relative_to_loader_root() -> None:
+    card = _card()
+    assert card.artifact_bundle is not None
+    rooted = card.artifact_bundle.model_copy(
+        update={
+            "root": "models",
+            "files": tuple(
+                file.model_copy(update={"path": f"models/{file.path}"})
+                for file in card.artifact_bundle.files
+            ),
+        }
+    )
+    assert _card(artifact_bundle=rooted).music == card.music
+
+
 def test_music_bounds_and_minimax_lyrics_are_validated() -> None:
     components = {
         "language_model_gguf": "language_model_q4_0.gguf",
