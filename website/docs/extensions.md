@@ -815,6 +815,28 @@ processor architecture rather than drawn from a fixed list, so any host whose
 wheels a publisher has qualified can install a runtime; Linux service
 registration uses systemd and macOS uses launchd.
 
+The manager supervises each installation's owner. An owner that exits
+without being asked to, whether it crashed or its host ran out of disk, is
+started again as a new launcher lifetime after waits of 5, 15, 45, 120 and
+300 seconds, and then every 300 seconds for as long as it keeps failing, so an
+owner stopped by a condition that clears later (a full disk) comes back by
+itself. Between attempts the service reports `failed`. A lifetime that ran
+for ten minutes starts the waits over, a failure while the launcher writes its
+last status (the disk is full) counts as a failed lifetime like any other, and
+a disable or uninstall during a wait starts nothing. A restart never replays work: each
+lifetime starts the owner over the same selection, and the owner's own
+journal marks what was in flight as interrupted.
+
+Browsing the service root in Finder does not stop the manager. The regular
+files a desktop file browser leaves behind (`.DS_Store`, and AppleDouble `._`
+companions) are ignored by the manager's installation scan, the core build
+fingerprint, the core runtime copy, the manager's pre-start runtime check and
+the installed-generation seal. A link or directory under one of those names
+is still refused. A core runtime staged by an earlier build may record a
+`.DS_Store` copied from the source checkout in its manifest; deleting that
+file fails the runtime check, so restore it from the checkout rather than
+remove it.
+
 `RuntimeInstaller` in `extensions/runtime_install.py` stages complete supplied
 artifacts under a stable service root. It verifies wheel tags, archive paths,
 metadata identities and dependencies before running offline pip with exact hashes,

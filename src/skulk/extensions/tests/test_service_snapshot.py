@@ -1,6 +1,8 @@
 """Pre-site bootstrap integrity, stopped activation and incomplete service copying."""
 
 import hashlib
+import importlib.machinery
+import importlib.util
 import json
 import subprocess
 import sys
@@ -10,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from skulk.extensions import service_bootstrap
+from skulk.extensions.runtime_artifacts import measure_host
 from skulk.extensions.runtime_files import (
     RuntimeLock,
     private_directory,
@@ -206,3 +209,50 @@ async def test_source_editable_dependency_is_not_silently_borrowed(
     with pytest.raises(ValueError, match="path extension"):
         await stage_service_runtime(tmp_path / "service")
     assert not (tmp_path / "service/core-runtime.json").exists()
+
+
+def test_the_runtime_check_ignores_what_finder_leaves_behind(tmp_path: Path) -> None:
+    """Browsing the core runtime in Finder must not stop the manager starting."""
+    runtime = tmp_path / "runtime"
+    private_directory(runtime)
+    write_private(runtime / "module.py", b"VALUE = 1\n")
+    private_directory(runtime / "lib")
+    base = Path(sys.executable).resolve(strict=True)
+    sealed = service_bootstrap.runtime_tree(runtime, base)
+    write_private(runtime / ".DS_Store", b"finder")
+    write_private(runtime / "lib/.DS_Store", b"finder")
+    write_private(runtime / "._module.py", b"appledouble")
+    assert service_bootstrap.runtime_tree(runtime, base) == sealed
+    # Anything else added is still a different runtime.
+    write_private(runtime / "lib/added.py", b"")
+    assert service_bootstrap.runtime_tree(runtime, base) != sealed
+
+
+def test_a_browsed_core_build_measures_as_the_same_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finder's files in the Skulk checkout do not change the build fingerprint."""
+    packages: dict[str, Path] = {}
+    for name in ("skulk", "skulk_pyo3_bindings"):
+        root = tmp_path / name
+        root.mkdir()
+        (root / "__init__.py").write_text(f"NAME = {name!r}\n")
+        packages[name] = root
+    original = importlib.util.find_spec
+
+    def find_spec(
+        name: str, package: str | None = None
+    ) -> importlib.machinery.ModuleSpec | None:
+        if name in packages:
+            return importlib.machinery.ModuleSpec(
+                name, None, origin=str(packages[name] / "__init__.py")
+            )
+        return original(name, package)
+
+    monkeypatch.setattr(importlib.util, "find_spec", find_spec)
+    before = measure_host().skulk_build_sha256
+    (packages["skulk"] / ".DS_Store").write_bytes(b"finder")
+    (packages["skulk"] / "._module.py").write_bytes(b"appledouble")
+    assert measure_host().skulk_build_sha256 == before
+    (packages["skulk"] / "added.py").write_text("")
+    assert measure_host().skulk_build_sha256 != before

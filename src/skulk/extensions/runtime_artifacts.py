@@ -24,7 +24,7 @@ from packaging.utils import canonicalize_name, parse_wheel_filename
 from packaging.version import Version
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, JsonValue
 
-from skulk.extensions.runtime_files import read_private
+from skulk.extensions.runtime_files import is_desktop_metadata, read_private
 
 Digest = Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
 Identifier = Annotated[
@@ -282,6 +282,9 @@ def measure_host() -> QualifiedHost:
                 part in {"__pycache__", "tests", ".pytest_cache"}
                 for part in relative.parts
             ):
+                continue
+            # A folder browsed in Finder is still the same build.
+            if is_desktop_metadata(path):
                 continue
             if path.is_symlink():
                 raise ValueError("core build contains an unsupported file")

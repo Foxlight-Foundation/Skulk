@@ -10,7 +10,11 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from skulk.extensions.runtime_artifacts import Digest, canonical_json
-from skulk.extensions.runtime_files import read_private, write_private
+from skulk.extensions.runtime_files import (
+    is_desktop_metadata,
+    read_private,
+    write_private,
+)
 
 
 class _Entry(BaseModel):
@@ -44,6 +48,9 @@ def _inventory(directory: Path) -> dict[str, _Entry]:
     for path in sorted(directory.rglob("*")):
         if len(entries) >= 20000:
             raise ValueError("installed runtime file count exceeds bound")
+        # Browsing a generation in Finder must not unseal it.
+        if is_desktop_metadata(path):
+            continue
         relative = path.relative_to(directory).as_posix()
         info = path.lstat()
         if info.st_uid != os.getuid():
