@@ -145,6 +145,38 @@ def test_minimax_bundle_checks_paths_relative_to_loader_root() -> None:
     assert _card(artifact_bundle=rooted).music == card.music
 
 
+def test_music_bundles_reject_unselected_quant_weights() -> None:
+    """One signed music card must not download another quant variant."""
+    minimax = _card()
+    assert minimax.artifact_bundle is not None
+    extra_minimax = minimax.artifact_bundle.files[0].model_copy(
+        update={"path": "language_model_q8_0.gguf"}
+    )
+    minimax_bundle = minimax.artifact_bundle.model_copy(
+        update={
+            "files": (*minimax.artifact_bundle.files, extra_minimax),
+            "download_size": minimax.artifact_bundle.download_size + extra_minimax.size_bytes,
+        }
+    )
+    with pytest.raises(ValidationError, match="contains unselected files"):
+        _card(artifact_bundle=minimax_bundle)
+
+    path = Path(RESOURCES_DIR) / "music_model_cards" / "audio-cpp--ACE-Step1.5-Turbo-BF16.toml"
+    ace = ModelCard.model_validate(tomllib.loads(path.read_text()))
+    assert ace.artifact_bundle is not None
+    extra_ace = ace.artifact_bundle.files[0].model_copy(
+        update={"path": "ACE-Step1.5-GGUF/turbo/ace-step-1.5-turbo-q8.gguf"}
+    )
+    ace_bundle = ace.artifact_bundle.model_copy(
+        update={
+            "files": (*ace.artifact_bundle.files, extra_ace),
+            "download_size": ace.artifact_bundle.download_size + extra_ace.size_bytes,
+        }
+    )
+    with pytest.raises(ValidationError, match="only its selected GGUF"):
+        ModelCard.model_validate({**ace.model_dump(), "artifact_bundle": ace_bundle.model_dump()})
+
+
 def test_music_bounds_and_minimax_lyrics_are_validated() -> None:
     components = {
         "language_model_gguf": "language_model_q4_0.gguf",

@@ -2947,6 +2947,24 @@ class ModelCard(CamelCaseModel):
                     raise ValueError(
                         "MiniMax artifact_bundle omits required runtime files"
                     )
+                # One card selects one quant combination. Extra model weights
+                # would silently turn its signed bundle into a multi-quant card.
+                if bundle_paths != set(required).union(
+                    path for path in selected if path is not None
+                ):
+                    raise ValueError(
+                        "MiniMax artifact_bundle contains unselected files"
+                    )
+            elif self.music.family == MusicModelFamily.AceStep15:
+                chosen = (
+                    self.gguf_file.removeprefix(root_prefix)
+                    if self.gguf_file is not None
+                    else None
+                )
+                if chosen is None or bundle_paths != {chosen}:
+                    raise ValueError(
+                        "ACE-Step artifact_bundle must contain only its selected GGUF"
+                    )
         return self
 
     @model_validator(mode="after")
