@@ -27,6 +27,8 @@ from skulk.shared.models.model_cards import (
     VideoPreprocessorRole,
 )
 from skulk.shared.types.video import (
+    VIDEO_DEFAULT_GUIDE,
+    VIDEO_GUIDE_PREPROCESSORS,
     VIDEO_OUTPUT_FILENAME,
     VIDEO_STRUCTURAL_ROLES,
     VIDEO_THUMBNAIL_FILENAME,
@@ -34,6 +36,7 @@ from skulk.shared.types.video import (
     VideoGenerationTaskParams,
     VideoReferenceSpec,
     VideoStage,
+    derivable_guides,
 )
 from skulk.worker.runner.video_plan import RenderPlan, plan_render
 
@@ -123,7 +126,7 @@ def stage_for_node(node_id: str) -> VideoStage | None:
     """Map an executing graph node onto Skulk's coarse render stage."""
     if node_id in _STAGE_BY_NODE:
         return _STAGE_BY_NODE[node_id]
-    if node_id.startswith(("ref_", "load_", "guide_")):
+    if node_id.startswith(("ref_", "load_", "guide_", "derive_")):
         return "encoding"
     return None
 
@@ -303,6 +306,34 @@ def select_adapter(
     raise ValueError(f"{card.model_id} has no lora companion named {params.lora!r}")
 
 
+POSE_LONGER_EDGE: Final = 1024
+"""The pose clip's longer edge before detection, as ComfyUI's H3 ControlNet
+template resizes it (lanczos)."""
+POSE_PERSON_THRESHOLD: Final = 0.5
+POSE_MAX_PEOPLE: Final = 2
+"""The template's person detector keeps at most two figures above 0.5."""
+POSE_BATCH_SIZE: Final = 16
+POSE_SCORE_THRESHOLD: Final = 0.51
+"""Keypoints drawn: the template's whole body (body, hands, face, feet, head)
+at stick width 4 and face points 2, above this score."""
+DEPTH_RESOLUTION: Final = 504
+"""Depth Anything 3 runs with the clip's shorter edge at this many pixels
+(``lower_bound_resize``), as ComfyUI's video depth blueprint does."""
+EDGE_LOW_THRESHOLD: Final = 0.4
+EDGE_HIGH_THRESHOLD: Final = 0.8
+"""The Canny node's own defaults."""
+
+
+@dataclass(frozen=True, slots=True)
+class GuideChoice:
+    """What a render derives from its control clip, and the weights that do it."""
+
+    kind: str
+    """``pose``, ``depth`` or ``edges``."""
+    files: dict[VideoPreprocessorRole, str]
+    """Each preprocessor's weights, relative to the folder its loader reads."""
+
+
 @dataclass(frozen=True, slots=True)
 class ControlChoice:
     """The card's ControlNet as one render applies it."""
@@ -317,6 +348,36 @@ class ControlChoice:
     """Fraction of the schedule at which it stops."""
     inputs: tuple[str, ...]
     """The structural roles the request attached, in role order."""
+    guide: GuideChoice | None = None
+    """What the control clip is turned into; ``None`` when none is attached."""
+
+
+def select_guide(
+    params: VideoGenerationTaskParams, card: ModelCard, mode: VideoMode
+) -> GuideChoice:
+    """The guide to derive from the request's control clip, with its weights.
+
+    The clip is ordinary footage: the render derives the pose, depth or
+    edges the ControlNet follows. A kind the card cannot derive for the mode
+    is refused with the kinds it can.
+    """
+    assert card.video is not None
+    kind = params.control_kind or VIDEO_DEFAULT_GUIDE
+    available = derivable_guides(card.video, mode)
+    if kind not in available:
+        raise ValueError(
+            f"{card.model_id} cannot derive a {kind} guide for mode {mode.value}; "
+            f"it derives {', '.join(available) or 'none'}"
+        )
+    needed = VIDEO_GUIDE_PREPROCESSORS[kind]
+    return GuideChoice(
+        kind=kind,
+        files={
+            companion.role: companion_file(companion)
+            for companion in card.video.companions
+            if companion.role is not None and companion.role in needed
+        },
+    )
 
 
 def select_control(
@@ -351,6 +412,7 @@ def select_control(
             start=params.control_start,
             end=params.control_end,
             inputs=roles,
+            guide=select_guide(params, card, mode) if "control" in roles else None,
         )
     raise ValueError(
         f"{card.model_id} carries no ControlNet for mode {mode.value}; "
@@ -413,6 +475,9 @@ class ComfyRenderPlan:
             control_strength=None if self.control is None else self.control.strength,
             control_start=None if self.control is None else self.control.start,
             control_end=None if self.control is None else self.control.end,
+            control_kind=None
+            if self.control is None or self.control.guide is None
+            else self.control.guide.kind,
         )
 
 
@@ -523,9 +588,9 @@ def _add_control(
         "end_percent": control.end,
     }
     if "control" in structural:
-        inputs["control_video"] = _frames(
-            prompt, "control_video", "Control clip", structural["control"]
-        )
+        assert control.guide is not None
+        clip = _frames(prompt, "control_video", "Control clip", structural["control"])
+        inputs["control_video"] = _derive_guide(prompt, control.guide, clip)
     if "mask" in structural:
         frames = _frames(prompt, "mask", "Mask", structural["mask"])
         prompt["mask_channel"] = _node(
@@ -538,6 +603,99 @@ def _add_control(
             )
     prompt[NODE_CONTROL] = _node("MiniMaxH3FunControlNetApply", "ControlNet", **inputs)
     return _link(NODE_CONTROL)
+
+
+def _derive_guide(prompt: ComfyPrompt, guide: GuideChoice, frames: list[Any]) -> list[Any]:
+    """Turn the control clip's frames into the guide the ControlNet follows.
+
+    Each chain is ComfyUI's own: the pose one is its H3 ControlNet template's
+    SDPose subgraph, depth its video Depth Anything 3 blueprint, edges its
+    Canny node. Returns the guide frames' link.
+    """
+    if guide.kind == "pose":
+        prompt["derive_resize"] = _node(
+            "ResizeImageMaskNode",
+            "Pose clip size",
+            input=frames,
+            resize_type="scale longer dimension",
+            scale_method="lanczos",
+            **{"resize_type.longer_size": POSE_LONGER_EDGE},
+        )
+        prompt["derive_pose_model"] = _node(
+            "CheckpointLoaderSimple",
+            "Load pose estimator",
+            ckpt_name=guide.files[VideoPreprocessorRole.PoseEstimator],
+        )
+        prompt["derive_detector"] = _node(
+            "UNETLoader",
+            "Load person detector",
+            unet_name=guide.files[VideoPreprocessorRole.PersonDetector],
+            weight_dtype="default",
+        )
+        prompt["derive_people"] = _node(
+            "RTDETR_detect",
+            "Find people",
+            model=_link("derive_detector"),
+            image=_link("derive_resize"),
+            threshold=POSE_PERSON_THRESHOLD,
+            class_name="person",
+            max_detections=POSE_MAX_PEOPLE,
+        )
+        prompt["derive_keypoints"] = _node(
+            "SDPoseKeypointExtractor",
+            "Estimate poses",
+            model=_link("derive_pose_model", 0),
+            vae=_link("derive_pose_model", 2),
+            image=_link("derive_resize"),
+            batch_size=POSE_BATCH_SIZE,
+            bboxes=_link("derive_people"),
+        )
+        prompt["derive_pose"] = _node(
+            "SDPoseDrawKeypoints",
+            "Draw poses",
+            keypoints=_link("derive_keypoints"),
+            draw_body=True,
+            draw_hands=True,
+            draw_face=True,
+            draw_feet=True,
+            stick_width=4,
+            face_point_size=2,
+            score_threshold=POSE_SCORE_THRESHOLD,
+            draw_head=True,
+        )
+        return _link("derive_pose")
+    if guide.kind == "depth":
+        prompt["derive_depth_model"] = _node(
+            "LoadDA3Model",
+            "Load depth estimator",
+            model_name=guide.files[VideoPreprocessorRole.DepthEstimator],
+            weight_dtype="default",
+        )
+        prompt["derive_depth_geometry"] = _node(
+            "DA3Inference",
+            "Estimate depth",
+            da3_model=_link("derive_depth_model"),
+            image=frames,
+            resolution=DEPTH_RESOLUTION,
+            resize_method="lower_bound_resize",
+            mode="mono",
+        )
+        prompt["derive_depth"] = _node(
+            "DA3Render",
+            "Depth map",
+            da3_geometry=_link("derive_depth_geometry"),
+            output="depth",
+            **{"output.normalization": "v2_style", "output.apply_sky_clip": False},
+        )
+        return _link("derive_depth")
+    prompt["derive_edges"] = _node(
+        "Canny",
+        "Detect edges",
+        image=frames,
+        low_threshold=EDGE_LOW_THRESHOLD,
+        high_threshold=EDGE_HIGH_THRESHOLD,
+    )
+    return _link("derive_edges")
 
 
 def _node(class_type: str, title: str, **inputs: object) -> dict[str, Any]:

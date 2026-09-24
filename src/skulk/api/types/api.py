@@ -14,6 +14,7 @@ from skulk.shared.models.model_cards import (
     AudioResponseFormat,
     ModelCard,
     ModelId,
+    VideoCardConfig,
     VideoCompanionKind,
 )
 from skulk.shared.models.registry import (
@@ -28,11 +29,16 @@ from skulk.shared.types.video import (
     MAX_VIDEO_PROMPT_CHARS,
     MAX_VIDEO_STYLES,
     VIDEO_CONTROL_STRENGTH_MAX,
+    VIDEO_DEFAULT_GUIDE,
+    VIDEO_GUIDE_KINDS,
+    VIDEO_GUIDE_PREPROCESSORS,
     VIDEO_SHIFT_BOUNDS,
     VideoCodecName,
+    VideoGuideKind,
     VideoJobStatus,
     VideoReferenceFidelity,
     VideoSchedulerName,
+    derivable_guides,
 )
 from skulk.shared.types.worker.instances import Instance, InstanceId, InstanceMeta
 from skulk.shared.types.worker.shards import Sharding, ShardMetadata
@@ -697,6 +703,37 @@ class VideoStyleSection(BaseModel):
     )
 
 
+class VideoGuideWeightsSection(BaseModel):
+    """Preprocessor weights a guide loads, with the license their repository declares."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    name: str = Field(description="The card companion's name.")
+    repository: str | None = Field(
+        default=None, description="Hosting repository when it is not the card's own."
+    )
+    license: str | None = Field(
+        default=None, description="License identifier the hosting repository declares."
+    )
+
+
+class VideoGuideSection(BaseModel):
+    """One guide a video card derives from an ordinary control clip."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    kind: VideoGuideKind = Field(
+        description="Value of the video job `control_kind` field: pose, depth, or edges."
+    )
+    modes: list[VideoModeName] = Field(
+        description="Generation modes the card derives this guide for."
+    )
+    weights: list[VideoGuideWeightsSection] = Field(
+        default_factory=list,
+        description="Preprocessor weights the guide loads; empty when it needs none.",
+    )
+
+
 class VideoReferenceLimitsSection(BaseModel):
     """Per-kind reference attachment limits for reference-to-video cards."""
 
@@ -747,6 +784,17 @@ class VideoCapabilitySection(BaseModel):
         default_factory=list,
         description="Style embeddings selectable through the job `styles` field.",
     )
+    guides: list[VideoGuideSection] = Field(
+        default_factory=list,
+        description=(
+            "Guides the card derives from a `control` clip, selectable through the "
+            "job `control_kind` field; empty when it has no ControlNet."
+        ),
+    )
+    default_guide: VideoGuideKind | None = Field(
+        default=None,
+        description="The guide a `control` clip gives when `control_kind` is omitted.",
+    )
 
     @classmethod
     def from_model_card(cls, model_card: ModelCard) -> "VideoCapabilitySection | None":
@@ -755,6 +803,7 @@ class VideoCapabilitySection(BaseModel):
         if config is None:
             return None
         limits = config.reference_limits
+        guides = _guide_sections(config)
         return cls(
             modes=cast("list[VideoModeName]", [mode.value for mode in config.modes]),
             min_seconds=config.min_seconds,
@@ -801,7 +850,41 @@ class VideoCapabilitySection(BaseModel):
                 for companion in config.companions
                 if companion.kind == VideoCompanionKind.Embedding
             ],
+            guides=guides,
+            default_guide=(
+                VIDEO_DEFAULT_GUIDE
+                if any(guide.kind == VIDEO_DEFAULT_GUIDE for guide in guides)
+                else None
+            ),
         )
+
+
+def _guide_sections(config: VideoCardConfig) -> list[VideoGuideSection]:
+    """Each guide kind the card derives, with the modes it derives it for."""
+    sections: list[VideoGuideSection] = []
+    for kind in VIDEO_GUIDE_KINDS:
+        modes = [
+            mode for mode in config.modes if kind in derivable_guides(config, mode)
+        ]
+        if not modes:
+            continue
+        roles = VIDEO_GUIDE_PREPROCESSORS[kind]
+        sections.append(
+            VideoGuideSection(
+                kind=cast("VideoGuideKind", kind),
+                modes=cast("list[VideoModeName]", [mode.value for mode in modes]),
+                weights=[
+                    VideoGuideWeightsSection(
+                        name=companion.name,
+                        repository=None if companion.repo is None else str(companion.repo),
+                        license=companion.license,
+                    )
+                    for companion in config.companions
+                    if companion.role is not None and companion.role in roles
+                ],
+            )
+        )
+    return sections
 
 
 class LicenseSection(BaseModel):
@@ -2378,6 +2461,9 @@ class VideoCreateRequest(BaseModel):
     """Fraction of the schedule at which the ControlNet starts; omitted is 0."""
     control_end: float | None = Field(default=None, ge=0.0, le=1.0)
     """Fraction of the schedule at which it stops; omitted is 1."""
+    control_kind: VideoGuideKind | None = None
+    """What to derive from the ``control`` clip, which is ordinary footage:
+    ``pose``, ``depth`` or ``edges``; omitted derives the card's default guide."""
 
     @field_validator("styles", mode="before")
     @classmethod
@@ -2466,6 +2552,8 @@ class VideoEngineInfo(BaseModel, frozen=True):
     """Fraction of the schedule the ControlNet started at, when it ran."""
     control_end: float | None = None
     """Fraction of the schedule the ControlNet stopped at, when it ran."""
+    control_kind: str | None = None
+    """The guide derived from the control clip; null without one."""
 
 
 class VideoStatsInfo(BaseModel, frozen=True):

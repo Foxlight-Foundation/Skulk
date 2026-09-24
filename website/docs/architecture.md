@@ -866,7 +866,13 @@ companion) steers a render when the request attaches a `control` clip, a
 decide the mode, never count against the card's reference limits, and never
 reach the conditioning node; the patch is loaded with `ModelPatchLoader` and
 applied after the sigma shift, so its start and end fractions land on the
-schedule the sampler walks. References are the
+schedule the sampler walks. The control clip is ordinary footage: the render
+derives the guide the ControlNet follows from it, pose (an RT-DETR person
+detector, then SDPose whole-body keypoints drawn as skeletons), depth (Depth
+Anything 3) or Canny edges, using ComfyUI's own preprocessor chains and the
+card's preprocessor companions. A card derives a guide only when it carries
+the ControlNet for the mode and every preprocessor weight that guide needs;
+`/v1/models` lists what each card derives. References are the
 files the worker already verified, named by their path below the input
 directory. The prompt carries a Skulk-minted id and client id so the
 WebSocket delivers only this render's `executing`, `progress_state`, and

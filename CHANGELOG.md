@@ -28,11 +28,15 @@ This project records release notes here and mirrors public-facing notes in
   request gave none, and `GET /v1/models` lists each video card's styles.
 
 - Video jobs can steer the render with the card's ControlNet. A multipart
-  `POST /v1/videos` accepts a `control` clip (edges, depth, or pose), a
-  `mask` whose white marks what to regenerate, and a `source_video` behind
-  that mask, with `control_strength`, `control_start` and `control_end`. A
-  card without a ControlNet for the mode refuses them, and `stats.engine`
-  records what the ControlNet ran with.
+  `POST /v1/videos` accepts a `control` clip, a `mask` whose white marks
+  what to regenerate, and a `source_video` behind that mask, with
+  `control_strength`, `control_start` and `control_end`. The control clip is
+  ordinary footage: the render derives the guide from it, as ComfyUI's H3
+  ControlNet template does, by `control_kind` (`pose` by default, `depth`,
+  or `edges`). `GET /v1/models` lists the guides each video card derives and
+  the weights they load. A card without a ControlNet for the mode, or
+  without the weights for a guide, refuses them, and `stats.engine` records
+  what the ControlNet ran with.
 
 - Video cards can pin companions hosted in other repositories. A new
   `preprocessor` companion kind carries the weights that derive a guide video

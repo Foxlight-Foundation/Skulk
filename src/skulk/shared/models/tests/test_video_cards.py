@@ -180,6 +180,10 @@ def test_preprocessor_companions_name_their_role() -> None:
         _video(companions=[pose, {**pose, "name": "pose-two"}])
     with pytest.raises(ValidationError, match="short lowercase identifier"):
         _video(companions=[{**pose, "license": "MIT License"}])
+    person = {**pose, "name": "person", "role": "person_detector", "path": "diffusion_models/p.st"}
+    with pytest.raises(ValidationError, match="must all pin one revision"):
+        _video(companions=[pose, {**person, "revision": "b" * 40}])
+    assert len(_video(companions=[pose, person]).companions) == 2
 
 
 def test_external_video_companions_are_listed_once_per_repository() -> None:

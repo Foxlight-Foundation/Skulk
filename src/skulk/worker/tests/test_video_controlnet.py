@@ -1,4 +1,4 @@
-# pyright: reportPrivateUsage=false
+# pyright: reportPrivateUsage=false, reportAny=false
 """The card's ControlNet: control, mask and source attachments, bound and recorded."""
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from skulk.shared.models.model_cards import (
     VideoCompanionKind,
     VideoMode,
 )
-from skulk.shared.types.video import VideoReferenceSpec
+from skulk.shared.types.video import VideoReferenceSpec, derivable_guides
 from skulk.worker.runner.comfy.graph import (
     NODE_CONDITION,
     NODE_CONTROL,
@@ -23,6 +23,8 @@ from skulk.worker.runner.comfy.graph import (
     NODE_GUIDER,
     NODE_SCHEDULER,
     NODE_SHIFT,
+    ComfyPrompt,
+    ComfyRenderPlan,
     bind_references,
     build_prompt,
     plan_comfy_render,
@@ -81,7 +83,8 @@ def test_a_control_clip_patches_the_model_after_the_shift(tmp_path: Path) -> Non
     assert (inputs["strength"], inputs["start_percent"], inputs["end_percent"]) == (1.0, 0.0, 1.0)
     assert inputs["model"] == [NODE_SHIFT, 0]
     assert inputs["model_patch"] == [NODE_CONTROL_PATCH, 0]
-    assert prompt[inputs["control_video"][0]]["class_type"] == "GetVideoComponents"
+    # The clip is ordinary footage: the default guide drawn from it is the pose.
+    assert prompt[inputs["control_video"][0]]["class_type"] == "SDPoseDrawKeypoints"
     assert "mask" not in inputs and "source_video" not in inputs
     # The sampler walks the patched model.
     assert prompt[NODE_SCHEDULER]["inputs"]["model"] == [NODE_CONTROL, 0]
@@ -89,6 +92,100 @@ def test_a_control_clip_patches_the_model_after_the_shift(tmp_path: Path) -> Non
     engine = render.engine_settings()
     assert engine.control_inputs == ("control",)
     assert (engine.control_strength, engine.control_start, engine.control_end) == (1.0, 0.0, 1.0)
+    assert engine.control_kind == "pose"
+
+
+def _guided(
+    tmp_path: Path, card: ModelCard, **overrides: object
+) -> tuple[ComfyPrompt, ComfyRenderPlan]:
+    references = _attachments(tmp_path, ("control", "video", "video/mp4"))
+    params = _params(
+        FL2VA_ID, references=tuple(references), total_input_chunks=1, reference_bytes=1, **overrides
+    )
+    render = plan_comfy_render(params, card)
+    prompt = build_prompt(render, params, bind_references(params.references, tmp_path), "cmd")
+    return prompt, render
+
+
+def test_the_pose_guide_is_comfys_own_sdpose_chain(tmp_path: Path) -> None:
+    """Detect people, estimate whole-body keypoints, draw them: the template's subgraph."""
+    prompt, _ = _guided(tmp_path, _card(FL2VA_ID), control_kind="pose")
+    resize = prompt["derive_resize"]["inputs"]
+    assert prompt[resize["input"][0]]["class_type"] == "GetVideoComponents"
+    assert (resize["resize_type"], resize["resize_type.longer_size"], resize["scale_method"]) == (
+        "scale longer dimension",
+        1024,
+        "lanczos",
+    )
+    assert prompt["derive_pose_model"]["inputs"]["ckpt_name"] == "sdpose_wholebody_fp16.safetensors"
+    assert prompt["derive_detector"]["inputs"]["unet_name"] == "rt_detr_v4-x-hgnet_fp16.safetensors"
+    people = prompt["derive_people"]["inputs"]
+    assert (people["threshold"], people["class_name"], people["max_detections"]) == (0.5, "person", 2)
+    keypoints = prompt["derive_keypoints"]["inputs"]
+    assert keypoints["model"] == ["derive_pose_model", 0] and keypoints["vae"] == ["derive_pose_model", 2]
+    assert keypoints["bboxes"] == ["derive_people", 0] and keypoints["image"] == ["derive_resize", 0]
+    drawn = prompt["derive_pose"]["inputs"]
+    assert all(drawn[flag] for flag in ("draw_body", "draw_hands", "draw_face", "draw_feet", "draw_head"))
+    assert (drawn["stick_width"], drawn["face_point_size"], drawn["score_threshold"]) == (4, 2, 0.51)
+    assert prompt[NODE_CONTROL]["inputs"]["control_video"] == ["derive_pose", 0]
+
+
+def test_the_depth_guide_runs_depth_anything_3(tmp_path: Path) -> None:
+    prompt, render = _guided(tmp_path, _card(FL2VA_ID), control_kind="depth")
+    assert prompt["derive_depth_model"]["inputs"]["model_name"] == "depth_anything_3_mono_large.safetensors"
+    geometry = prompt["derive_depth_geometry"]["inputs"]
+    assert (geometry["resolution"], geometry["resize_method"], geometry["mode"]) == (
+        504,
+        "lower_bound_resize",
+        "mono",
+    )
+    rendered = prompt["derive_depth"]["inputs"]
+    # Dynamic inputs travel as dotted keys in the API format.
+    assert (rendered["output"], rendered["output.normalization"], rendered["output.apply_sky_clip"]) == (
+        "depth",
+        "v2_style",
+        False,
+    )
+    assert prompt[NODE_CONTROL]["inputs"]["control_video"] == ["derive_depth", 0]
+    assert render.engine_settings().control_kind == "depth"
+
+
+def _card_without_preprocessors() -> ModelCard:
+    card = _card(FL2VA_ID)
+    assert card.video is not None
+    kept = tuple(c for c in card.video.companions if c.kind is not VideoCompanionKind.Preprocessor)
+    return card.model_copy(update={"video": card.video.model_copy(update={"companions": kept})})
+
+
+def test_edges_need_no_weights_and_other_guides_do(tmp_path: Path) -> None:
+    """A card without preprocessor weights still derives edges, and says so."""
+    card = _card_without_preprocessors()
+    prompt, _ = _guided(tmp_path, card, control_kind="edges")
+    edges = prompt["derive_edges"]["inputs"]
+    assert (edges["low_threshold"], edges["high_threshold"]) == (0.4, 0.8)
+    assert prompt[edges["image"][0]]["class_type"] == "GetVideoComponents"
+    with pytest.raises(ValueError, match="cannot derive a pose guide for mode t2va; it derives edges"):
+        _guided(tmp_path, card)
+
+
+def test_the_guides_a_card_derives_follow_its_weights_and_controlnet() -> None:
+    card = _card(FL2VA_ID)
+    assert card.video is not None
+    assert derivable_guides(card.video, VideoMode.TextToAudioVideo) == ("pose", "depth", "edges")
+    stripped = _card_without_preprocessors().video
+    assert stripped is not None
+    assert derivable_guides(stripped, VideoMode.TextToAudioVideo) == ("edges",)
+    no_patch = _card_with(None).video
+    assert no_patch is not None
+    assert derivable_guides(no_patch, VideoMode.TextToAudioVideo) == ()
+
+
+def test_a_guide_kind_needs_a_control_clip(tmp_path: Path) -> None:
+    with pytest.raises(ValidationError, match="control_kind names what to derive"):
+        _params(FL2VA_ID, control_kind="depth")
+    mask = _attachments(tmp_path, ("mask", "image", "image/png"))
+    with pytest.raises(ValidationError, match="control_kind names what to derive"):
+        _params(FL2VA_ID, references=tuple(mask), total_input_chunks=1, reference_bytes=1, control_kind="pose")
 
 
 def test_a_control_clip_is_never_read_as_a_keyframe(tmp_path: Path) -> None:

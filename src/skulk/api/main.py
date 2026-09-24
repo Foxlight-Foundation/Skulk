@@ -548,10 +548,12 @@ from skulk.shared.types.text_generation import (
 )
 from skulk.shared.types.video import (
     MAX_VIDEO_REFERENCES,
+    VIDEO_DEFAULT_GUIDE,
     VIDEO_STRUCTURAL_ROLES,
     VideoGenerationTaskParams,
     VideoReferenceRole,
     VideoReferenceSpec,
+    derivable_guides,
 )
 from skulk.shared.types.worker.downloads import (
     DownloadAttemptId,
@@ -1202,8 +1204,8 @@ def _video_create_multipart_schema() -> dict[str, object]:
     properties["control"] = {
         **binary,
         "description": (
-            "Control clip (or a still) the card's ControlNet follows, such as "
-            "edges, depth, or pose."
+            "Ordinary clip (or a still) whose motion or structure the render "
+            "follows; the render derives the guide named by control_kind."
         ),
     }
     properties["mask"] = {
@@ -10976,6 +10978,7 @@ class API:
                     control_strength=engine.control_strength,
                     control_start=engine.control_start,
                     control_end=engine.control_end,
+                    control_kind=engine.control_kind,
                 ),
             )
         return VideoResource(
@@ -11298,6 +11301,7 @@ class API:
                 control_strength=create.control_strength,
                 control_start=0.0 if create.control_start is None else create.control_start,
                 control_end=1.0 if create.control_end is None else create.control_end,
+                control_kind=create.control_kind,
                 references=tuple(references),
                 total_input_chunks=sum(len(item.chunks) for item in attachments),
                 reference_bytes=sum(item.size_bytes for item in attachments),
@@ -11340,6 +11344,19 @@ class API:
                         f"a {steering[0]} attachment needs one"
                     ),
                 )
+            if "control" in steering:
+                # The clip is ordinary footage; the render derives the guide,
+                # so a kind the card has no weights for is refused here.
+                kind = params.control_kind or VIDEO_DEFAULT_GUIDE
+                available = derivable_guides(card.video, mode)
+                if kind not in available:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"{card.model_id} cannot derive a {kind} guide for "
+                            f"{mode.value}; it derives {', '.join(available) or 'none'}"
+                        ),
+                    )
         implied = params.model_copy(update={"mode": None}).implied_mode()
         if params.mode is not None and params.mode != implied:
             raise HTTPException(

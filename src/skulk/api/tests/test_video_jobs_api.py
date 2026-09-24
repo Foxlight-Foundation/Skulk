@@ -97,6 +97,25 @@ def _card() -> ModelCard:
                         "path": "model_patches/fun_controlnet_union.safetensors",
                         "strength": 1.0,
                     },
+                    # Pose weights only: the card derives pose and edges, not depth.
+                    {
+                        "kind": "preprocessor",
+                        "name": "pose",
+                        "role": "pose_estimator",
+                        "path": "checkpoints/pose.safetensors",
+                        "repo": "org/pose",
+                        "revision": "a" * 40,
+                        "license": "mit",
+                    },
+                    {
+                        "kind": "preprocessor",
+                        "name": "person",
+                        "role": "person_detector",
+                        "path": "diffusion_models/person.safetensors",
+                        "repo": "org/pose",
+                        "revision": "a" * 40,
+                        "license": "mit",
+                    },
                     {
                         "kind": "embedding",
                         "name": "bullet_time",
@@ -862,6 +881,50 @@ def test_create_multipart_takes_a_control_clip_outside_the_reference_limits(
         0.0,
         0.5,
     )
+
+
+def test_a_control_clip_derives_the_guide_the_caller_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The clip is ordinary footage; the caller picks what the render derives."""
+    api = _make_api(monkeypatch)
+    client = TestClient(api.app)
+    response = client.post(
+        "/v1/videos",
+        data={"model": str(MODEL), "prompt": "trace the edges", "seconds": "5", "control_kind": "edges"},
+        files=[("control", ("clip.mp4", b"\x00clip", "video/mp4"))],
+    )
+    assert response.status_code == 200, response.text
+    assert _sent_command(api).task_params.control_kind == "edges"
+
+
+def test_create_refuses_a_guide_the_card_has_no_weights_for(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _make_api(monkeypatch)
+    client = TestClient(api.app)
+    response = client.post(
+        "/v1/videos",
+        data={"model": str(MODEL), "prompt": "x", "seconds": "5", "control_kind": "depth"},
+        files=[("control", ("clip.mp4", b"\x00clip", "video/mp4"))],
+    )
+    assert response.status_code == 400
+    assert "cannot derive a depth guide for t2va; it derives pose, edges" in response.json()["error"]["message"]
+    api._send.assert_not_called()
+
+
+def test_models_list_the_guides_a_video_card_derives() -> None:
+    """Each guide names its modes and the weights it loads, with their licenses."""
+    payload = API._model_list_entry(_card()).model_dump(by_alias=True)
+    guides = payload["video"]["guides"]
+    assert [guide["kind"] for guide in guides] == ["pose", "edges"]
+    assert guides[0]["modes"] == ["t2va", "fl2va", "ref2va"]
+    assert guides[0]["weights"] == [
+        {"name": "pose", "repository": "org/pose", "license": "mit"},
+        {"name": "person", "repository": "org/pose", "license": "mit"},
+    ]
+    assert guides[1]["weights"] == []
+    assert payload["video"]["default_guide"] == "pose"
 
 
 def test_create_refuses_a_control_input_the_card_cannot_read(
