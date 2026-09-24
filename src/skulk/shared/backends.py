@@ -39,7 +39,8 @@ def _is_executable_file(path: str) -> bool:
     return os.path.isfile(path) and os.access(path, os.X_OK)
 
 EngineType = Literal[
-    "mlx", "mlx_audio", "llama_cpp", "llama_server", "vllm", "test_video", "comfy"
+    "mlx", "mlx_audio", "llama_cpp", "llama_server", "vllm", "test_video", "comfy",
+    "audio_cpp",
 ]
 """Inference runtime that loads and runs a model; selects the worker runner.
 
@@ -95,6 +96,7 @@ _ENGINES: Final[tuple[EngineType, ...]] = (
     "vllm",
     "test_video",
     "comfy",
+    "audio_cpp",
 )
 _COMPUTE_BACKENDS: Final[tuple[ComputeBackend, ...]] = (
     "metal",
@@ -162,6 +164,13 @@ COMFY_ROOT_ENV: Final = "SKULK_COMFY_ROOT"
 # only ``cuda`` / ``rocm`` are honored; unset falls back to the same
 # declaration chain vLLM uses, then to the observed GPU vendor.
 COMFY_BACKENDS_ENV: Final = "SKULK_COMFY_BACKENDS"
+
+# audio.cpp is absent from the base environment. Only a verified installed
+# executable is eligible for placement; the on-demand package preparation path
+# sets this variable after it has checked the immutable wheel and binary.
+AUDIO_CPP_BIN_ENV: Final = "SKULK_AUDIO_CPP_BIN"
+AUDIO_CPP_SPECS_DIR_ENV: Final = "SKULK_AUDIO_CPP_SPECS_DIR"
+AUDIO_CPP_BACKENDS_ENV: Final = "SKULK_AUDIO_CPP_BACKENDS"
 
 # ComfyUI compute backends Skulk advertises: NVIDIA CUDA and AMD ROCm.
 _COMFY_COMPUTE_BACKENDS: Final[tuple[ComputeBackend, ...]] = ("cuda", "rocm")
@@ -257,6 +266,10 @@ _VISION_SERVING_ENGINES: Final[frozenset[EngineType]] = frozenset(
     {"mlx", "llama_cpp"}
 )
 _SPEECH_SERVING_ENGINES: Final[frozenset[EngineType]] = frozenset({"mlx_audio"})
+_MUSIC_SERVING_ENGINES: Final[frozenset[EngineType]] = frozenset({"audio_cpp"})
+AUDIO_CPP_COMPUTE_BACKENDS: Final[frozenset[str]] = frozenset(
+    {"audio_cpp-cpu", "audio_cpp-metal", "audio_cpp-vulkan", "audio_cpp-cuda", "audio_cpp-rocm"}
+)
 
 # Engines whose runner binding cannot LOAD a family the served sibling serves
 # fine. The in-process ``llama_cpp`` engine runs whatever llama.cpp build the
@@ -277,6 +290,7 @@ def platform_compatible_backends(
     *,
     card_serves_vision: bool,
     card_serves_speech: bool = False,
+    card_serves_music: bool = False,
     card_has_pinned_projector: bool = False,
     card_supports_tool_calling: bool = False,
     card_vllm_tool_call_parser: str | None = None,
@@ -329,6 +343,13 @@ def platform_compatible_backends(
             tag
             for tag in filtered
             if (engine := engine_of(tag)) is None or engine in _SPEECH_SERVING_ENGINES
+        )
+    if card_serves_music:
+        filtered = frozenset(
+            tag
+            for tag in filtered
+            if (engine := engine_of(tag)) is None
+            or (engine in _MUSIC_SERVING_ENGINES and tag in AUDIO_CPP_COMPUTE_BACKENDS)
         )
     if card_supports_tool_calling and card_vllm_tool_call_parser is None:
         filtered = frozenset(tag for tag in filtered if engine_of(tag) != "vllm")

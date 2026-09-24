@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from skulk.api.data_plane import DataPlaneObserver
 from skulk.api.main import API
+from skulk.api.music_jobs import MusicJobRegistry
 from skulk.api.video_jobs import VideoJobRegistry
 from skulk.api.video_store import VideoStore
 from skulk.shared.types.common import CommandId
@@ -42,6 +43,9 @@ def _make_api() -> Any:
     api._image_generation_queues = {}  # pyright: ignore[reportPrivateUsage]
     api._video_generation_queues = {}  # pyright: ignore[reportPrivateUsage]
     api._video_jobs = VideoJobRegistry(None)  # pyright: ignore[reportPrivateUsage]
+    api._music_jobs = MusicJobRegistry(  # pyright: ignore[reportPrivateUsage]
+        Path(tempfile.mkdtemp()) / "jobs.json"
+    )
     api._video_store = VideoStore(Path(tempfile.mkdtemp()))  # pyright: ignore[reportPrivateUsage]
     api._video_job_media_deadlines = {}  # pyright: ignore[reportPrivateUsage]
     api._video_output_sources = {}  # pyright: ignore[reportPrivateUsage]

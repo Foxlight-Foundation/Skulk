@@ -328,6 +328,11 @@ class BoundInstance(CamelCaseModel):
         )
 
     @property
+    def is_music_model(self) -> bool:
+        """Whether this instance runs a separate text-to-music engine."""
+        return ModelTask.TextToMusic in self.bound_shard.model_card.tasks
+
+    @property
     def is_embedding_model(self) -> bool:
         return ModelTask.TextEmbedding in self.bound_shard.model_card.tasks
 

@@ -12,6 +12,7 @@ from skulk.api.types import (
     Usage,
 )
 from skulk.shared.models.model_cards import AudioResponseFormat, ModelId
+from skulk.shared.types.music import MusicOutputManifest
 from skulk.shared.types.video import (
     VideoGenerationStats,
     VideoOutputManifest,
@@ -205,6 +206,22 @@ class VideoChunk(BaseChunk):
                 yield name, value
 
 
+class MusicChunk(BaseChunk):
+    """Terminal music frame; WAV bytes travel only on OUTPUT_MEDIA."""
+
+    output: MusicOutputManifest | None = None
+    finish_reason: Literal["stop", "error"]
+    error_message: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_result(self) -> "MusicChunk":
+        if self.finish_reason == "stop" and self.output is None:
+            raise ValueError("completed music generation requires a WAV manifest")
+        if self.finish_reason == "error" and self.output is not None:
+            raise ValueError("failed music generation cannot carry a WAV manifest")
+        return self
+
+
 class PrefillProgressChunk(BaseChunk):
     """Data class for prefill progress events during streaming."""
 
@@ -222,6 +239,7 @@ GenerationChunk = (
     | TranscriptionChunk
     | PrefillProgressChunk
     | VideoChunk
+    | MusicChunk
 )
 
 

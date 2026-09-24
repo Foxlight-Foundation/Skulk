@@ -31,7 +31,7 @@ from pydantic import (
 )
 from tomlkit.exceptions import TOMLKitError
 
-from skulk.shared.backends import engine_of
+from skulk.shared.backends import AUDIO_CPP_COMPUTE_BACKENDS, engine_of
 from skulk.shared.constants import (
     RESOURCES_DIR,
     SKULK_CUSTOM_MODEL_CARDS_DIR,
@@ -86,6 +86,7 @@ _BUILTIN_CARD_DIRS = [
     Path(RESOURCES_DIR) / "image_model_cards",
     Path(RESOURCES_DIR) / "embedding_model_cards",
     Path(RESOURCES_DIR) / "speech_model_cards",
+    Path(RESOURCES_DIR) / "music_model_cards",
     Path(RESOURCES_DIR) / "video_model_cards",
     # Cards the synthetic test engines serve. They name no downloadable
     # artifact, so they live apart from the corpus the signed registry
@@ -193,7 +194,9 @@ def _is_vocabulary_skew(error: ValidationError, payload: dict[str, Any]) -> bool
     return True
 
 
-def _bundle_file_facts(files: object) -> tuple[tuple[object, object, object], ...] | None:
+def _bundle_file_facts(
+    files: object,
+) -> tuple[tuple[object, object, object], ...] | None:
     """The (path, size, object id) facts of a raw bundle file list, or None if malformed."""
     if not isinstance(files, list):
         return None
@@ -202,7 +205,9 @@ def _bundle_file_facts(files: object) -> tuple[tuple[object, object, object], ..
         if not isinstance(item, dict):
             return None
         entry = cast("dict[str, object]", item)
-        facts.append((entry.get("path"), entry.get("size_bytes"), entry.get("object_id")))
+        facts.append(
+            (entry.get("path"), entry.get("size_bytes"), entry.get("object_id"))
+        )
     return tuple(facts)
 
 
@@ -322,7 +327,9 @@ def registry_model_cards(catalog: RegistryCatalog) -> list["ModelCard"]:
                 payload["n_layers"] = header.scalars["block_count"]
                 if "embedding_length" in header.scalars:
                     payload["hidden_size"] = header.scalars["embedding_length"]
-                payload["num_key_value_heads"] = header.scalars["attention.head_count_kv"]
+                payload["num_key_value_heads"] = header.scalars[
+                    "attention.head_count_kv"
+                ]
         # Integrity before readability: the bundle agreement is checked on
         # the raw body so it also covers a card this build then skips.
         _check_envelope_bundle_agreement(payload, envelope)
@@ -815,6 +822,10 @@ def registry_supported_backends_for_node(
     support_claims = get_model_engine_support(model_card)
     resolved: set[str] = set()
     for backend in node_backends:
+        # A bare engine tag describes availability, not the compute lane whose
+        # memory pool and device the music runner will actually use.
+        if model_card.music is not None and backend not in AUDIO_CPP_COMPUTE_BACKENDS:
+            continue
         supported_capabilities: set[str] = set()
         for claim in support_claims:
             if claim.status != "supported":
@@ -1037,6 +1048,7 @@ class ModelTask(str, Enum):
     TextToSpeech = "TextToSpeech"
     SpeechToText = "SpeechToText"
     SpeechTranslation = "SpeechTranslation"
+    TextToMusic = "TextToMusic"
     TextToVideo = "TextToVideo"
     ImageToVideo = "ImageToVideo"
     ReferenceToVideo = "ReferenceToVideo"
@@ -1066,6 +1078,110 @@ class AudioCardKind(str, Enum):
 
     TextToSpeech = "tts"
     SpeechToText = "stt"
+
+
+class MusicModelFamily(str, Enum):
+    """Music-generation family whose options are translated by its engine adapter."""
+
+    MiniMaxMusic3 = "minimax_music3"
+    AceStep15 = "ace_step_1_5"
+
+
+class MusicLyricRequirement(str, Enum):
+    """Whether a music model accepts or requires a caller's lyrics."""
+
+    Required = "required"
+    Optional = "optional"
+    Unsupported = "unsupported"
+
+
+def _music_component_matches_role(component_path: str, role: str) -> bool:
+    """Keep a selected GGUF tied to its MiniMax component role."""
+    name = PurePosixPath(component_path).name
+    stem = name.removesuffix(".gguf")
+    return name.endswith(".gguf") and (stem == role or stem.startswith(f"{role}_"))
+
+
+class MusicCardConfig(CamelCaseModel):
+    """Model truth for bounded text-to-music generation, separate from speech."""
+
+    family: MusicModelFamily
+    """Architecture family used by the runner's fixed option translator."""
+    lyrics: MusicLyricRequirement
+    """Whether lyrics are required, permitted, or unsupported."""
+    min_seconds: PositiveInt
+    """Shortest generation target accepted for this artifact."""
+    max_seconds: PositiveInt
+    """Longest generation target accepted for this artifact, at most 120 seconds."""
+    language_model_gguf: str | None = None
+    """MiniMax language-model component selected by this exact artifact."""
+    rvq_depth_decoder_gguf: str | None = None
+    """MiniMax RVQ decoder component selected by this exact artifact."""
+    flow_transformer_gguf: str | None = None
+    """MiniMax flow-transformer component selected by this exact artifact."""
+
+    @field_validator(
+        "language_model_gguf", "rvq_depth_decoder_gguf", "flow_transformer_gguf"
+    )
+    @classmethod
+    def _validate_component_path(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        path = PurePosixPath(value)
+        if path.is_absolute() or value != path.as_posix() or ".." in path.parts:
+            raise ValueError("music component paths must be canonical and relative")
+        return value
+
+    @field_validator("family", mode="before")
+    @classmethod
+    def _coerce_family(cls, value: str | MusicModelFamily) -> MusicModelFamily:
+        return value if isinstance(value, MusicModelFamily) else MusicModelFamily(value)
+
+    @field_validator("lyrics", mode="before")
+    @classmethod
+    def _coerce_lyrics(
+        cls, value: str | MusicLyricRequirement
+    ) -> MusicLyricRequirement:
+        return (
+            value
+            if isinstance(value, MusicLyricRequirement)
+            else MusicLyricRequirement(value)
+        )
+
+    @model_validator(mode="after")
+    def _validate_bounds(self) -> "MusicCardConfig":
+        if self.min_seconds > self.max_seconds:
+            raise ValueError("music min_seconds cannot exceed max_seconds")
+        if self.max_seconds > 120:
+            raise ValueError("music max_seconds cannot exceed 120")
+        if (
+            self.family == MusicModelFamily.MiniMaxMusic3
+            and self.lyrics != MusicLyricRequirement.Required
+        ):
+            raise ValueError("MiniMax Music 3 requires lyrics")
+        components = (
+            self.language_model_gguf,
+            self.rvq_depth_decoder_gguf,
+            self.flow_transformer_gguf,
+        )
+        if self.family == MusicModelFamily.MiniMaxMusic3 and any(
+            component is None for component in components
+        ):
+            raise ValueError("MiniMax Music 3 requires three selected GGUF components")
+        if self.family == MusicModelFamily.MiniMaxMusic3 and any(
+            component is not None and not _music_component_matches_role(component, role)
+            for component, role in zip(
+                components,
+                ("language_model", "rvq_depth_decoder", "transformer"),
+                strict=True,
+            )
+        ):
+            raise ValueError("MiniMax component paths must match their declared roles")
+        if self.family == MusicModelFamily.AceStep15 and any(
+            component is not None for component in components
+        ):
+            raise ValueError("ACE-Step does not use MiniMax components")
+        return self
 
 
 class AudioVoiceConfig(FrozenModel):
@@ -1282,7 +1398,9 @@ class VideoCompanionConfig(CamelCaseModel):
     @model_validator(mode="after")
     def _validate_kind_fields(self) -> "VideoCompanionConfig":
         if self.repo is not None and self.revision is None:
-            raise ValueError("an external companion repo requires an immutable revision")
+            raise ValueError(
+                "an external companion repo requires an immutable revision"
+            )
         if self.kind is not VideoCompanionKind.Lora and (
             self.steps is not None
             or self.video_shift is not None
@@ -1437,11 +1555,15 @@ class VideoCardConfig(CamelCaseModel):
         if self.min_seconds > self.max_seconds:
             raise ValueError("min_seconds cannot exceed max_seconds")
         if not 0 <= self.frame_grid_offset < self.frame_grid_multiple:
-            raise ValueError("frame_grid_offset must lie inside the frame grid multiple")
+            raise ValueError(
+                "frame_grid_offset must lie inside the frame grid multiple"
+            )
         if self.audio_output and (
             self.audio_sample_rate is None or self.audio_channels is None
         ):
-            raise ValueError("audio_output requires audio_sample_rate and audio_channels")
+            raise ValueError(
+                "audio_output requires audio_sample_rate and audio_channels"
+            )
         if (
             VideoMode.ReferenceToAudioVideo in self.modes
             and self.reference_limits is None
@@ -1606,9 +1728,11 @@ class ArtifactBundleFile(CamelCaseModel):
     def validate_object_id(cls, value: str | None) -> str | None:
         """Accept only explicit SHA-256 or Git SHA-1 object identities."""
 
-        if value is not None and re.fullmatch(
-            r"(?:sha256:[0-9a-f]{64}|git-sha1:[0-9a-f]{40})", value
-        ) is None:
+        if (
+            value is not None
+            and re.fullmatch(r"(?:sha256:[0-9a-f]{64}|git-sha1:[0-9a-f]{40})", value)
+            is None
+        ):
             raise ValueError("unsupported artifact bundle object identity")
         return value
 
@@ -1669,9 +1793,10 @@ class ArtifactBundleConfig(CamelCaseModel):
         paths = tuple(item.path for item in self.files)
         if len(set(paths)) != len(paths):
             raise ValueError("artifact bundle files must be unique")
-        if self.download_size <= 0 or sum(
-            item.size_bytes for item in self.files
-        ) != self.download_size:
+        if (
+            self.download_size <= 0
+            or sum(item.size_bytes for item in self.files) != self.download_size
+        ):
             raise ValueError("artifact bundle download size must equal file sizes")
         if self.root is not None:
             prefix = f"{self.root}/"
@@ -2413,9 +2538,10 @@ async def _resolve_hf_source_revision(
         return source_revision
     info = await to_thread.run_sync(lambda: model_info(model_id, revision="main"))
     resolved_revision = getattr(info, "sha", None)
-    if not isinstance(resolved_revision, str) or re.fullmatch(
-        r"[0-9a-fA-F]{40}", resolved_revision
-    ) is None:
+    if (
+        not isinstance(resolved_revision, str)
+        or re.fullmatch(r"[0-9a-fA-F]{40}", resolved_revision) is None
+    ):
         raise ValueError(
             f"Hugging Face did not return an immutable revision for {model_id}"
         )
@@ -2474,7 +2600,7 @@ class ModelCard(CamelCaseModel):
     tasks: list[ModelTask]
     """The task types this model serves (``TextGeneration``, ``TextEmbedding``,
     ``TextToImage``, ``ImageToImage``, ``TextToSpeech``, ``SpeechToText``,
-    ``SpeechTranslation``, ``TextToVideo``, ``ImageToVideo``,
+    ``SpeechTranslation``, ``TextToMusic``, ``TextToVideo``, ``ImageToVideo``,
     ``ReferenceToVideo``); selects which runner handles it."""
     components: list[ComponentInfo] | None = None
     """For multi-component models (e.g. a diffusion stack), the per-component
@@ -2555,6 +2681,8 @@ class ModelCard(CamelCaseModel):
     """Optional speech-serving configuration (TTS/STT kind, audio formats,
     streaming/realtime support, voices, reference audio, translation, sample
     rates); ``None`` for non-speech models."""
+    music: MusicCardConfig | None = None
+    """Text-to-music family, lyric requirement, and qualified target-duration bounds."""
     video: VideoCardConfig | None = None
     """Optional audio-video generation contract (modes, duration and frame
     grid, canvas rules, audio output, reference bounds, sampling defaults,
@@ -2754,8 +2882,7 @@ class ModelCard(CamelCaseModel):
             if repository and repository != base_repository and revision is None:
                 revision_field = f"{field_name.removesuffix('_repo')}_revision"
                 raise ValueError(
-                    f"{context} with {field_name} require immutable "
-                    f"{revision_field}"
+                    f"{context} with {field_name} require immutable {revision_field}"
                 )
 
     @property
@@ -2792,6 +2919,86 @@ class ModelCard(CamelCaseModel):
             raise ValueError(
                 "placement.max_pipeline_split_layer must be smaller than n_layers"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_music_task(self) -> "ModelCard":
+        """Require the music task and its typed section to agree."""
+        has_task = ModelTask.TextToMusic in self.tasks
+        if has_task != (self.music is not None):
+            raise ValueError("TextToMusic requires a [music] section and vice versa")
+        if has_task and self.tasks != [ModelTask.TextToMusic]:
+            raise ValueError("TextToMusic must be the sole task on a music card")
+        if self.music is not None and self.audio is not None:
+            raise ValueError("music and speech [audio] sections must remain separate")
+        if self.music is not None and self.artifact_bundle is None:
+            raise ValueError("music cards require an artifact bundle")
+        if self.music is not None and self.artifact_bundle is not None:
+            root_prefix = (
+                f"{self.artifact_bundle.root}/"
+                if self.artifact_bundle.root is not None
+                else ""
+            )
+            bundle_paths = {
+                item.path.removeprefix(root_prefix)
+                for item in self.artifact_bundle.files
+            }
+            selected = (
+                self.music.language_model_gguf,
+                self.music.rvq_depth_decoder_gguf,
+                self.music.flow_transformer_gguf,
+            )
+            if any(path is not None and path not in bundle_paths for path in selected):
+                raise ValueError("selected music components must be in artifact_bundle")
+            if self.music.family == MusicModelFamily.MiniMaxMusic3:
+                language_model = self.music.language_model_gguf
+                if (
+                    language_model is None
+                    or self.gguf_file != f"{root_prefix}{language_model}"
+                ):
+                    raise ValueError(
+                        "MiniMax gguf_file must select its language_model_gguf"
+                    )
+                required = frozenset(
+                    (
+                        "condition_encoder.gguf",
+                        "config.json",
+                        "config/condition_encoder.json",
+                        "config/language_model.json",
+                        "config/rvq_depth_decoder.json",
+                        "config/transformer.json",
+                        "config/vocoder.json",
+                        "tokenizer/tokenizer.json",
+                        "tokenizer/tokenizer_config.json",
+                        "vocoder.gguf",
+                    )
+                )
+                if not required.issubset(bundle_paths):
+                    raise ValueError(
+                        "MiniMax artifact_bundle omits required runtime files"
+                    )
+                # One card selects one quant combination. Extra model weights
+                # would silently turn its signed bundle into a multi-quant card.
+                if bundle_paths != set(required).union(
+                    path for path in selected if path is not None
+                ):
+                    raise ValueError(
+                        "MiniMax artifact_bundle contains unselected files"
+                    )
+            elif self.music.family == MusicModelFamily.AceStep15:
+                chosen = (
+                    self.gguf_file.removeprefix(root_prefix)
+                    if self.gguf_file is not None
+                    else None
+                )
+                if (
+                    chosen is None
+                    or not chosen.endswith(".gguf")
+                    or bundle_paths != {chosen}
+                ):
+                    raise ValueError(
+                        "ACE-Step artifact_bundle must contain only its selected GGUF"
+                    )
         return self
 
     @model_validator(mode="after")

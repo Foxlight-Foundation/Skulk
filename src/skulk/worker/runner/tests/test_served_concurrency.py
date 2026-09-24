@@ -11,7 +11,11 @@ backpressure, and cancellation.
 
 import threading
 import time
+from collections import deque
 from typing import Any, cast
+
+import pytest
+from anyio import WouldBlock
 
 from skulk.shared.types.common import CommandId, ModelId
 from skulk.shared.types.events import (
@@ -41,6 +45,47 @@ from skulk.shared.types.worker.runners import (
 )
 from skulk.utils.channels import mp_channel
 from skulk.worker.runner.served_concurrency import ServedConcurrentDispatch
+
+
+def test_served_runner_bounds_terminal_and_late_cancel_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Long-lived served runners retain only recent replay and cancel IDs."""
+
+    host = _FakeHost(max_concurrency=1)
+    for index in range(5000):
+        task_id = TaskId(f"finished-{index}")
+        assert host._remember_task_id(task_id)
+        host.cancelled_tasks.add(task_id)
+        host._retire_task_id(task_id)
+    assert len(host.seen) == 4096
+    assert host.cancelled_tasks == set()
+    assert not host._remember_task_id(TaskId("finished-4999"))
+
+    active = TaskId("active")
+    assert host._remember_task_id(active)
+
+    class CancelReceiver:
+        """Deliver a burst of cancellation packets without a process queue."""
+
+        def __init__(self) -> None:
+            self.items = deque(
+                [active, *(TaskId(f"late-{index}") for index in range(5000))]
+            )
+
+        def receive_nowait(self) -> TaskId:
+            """Read one pending cancellation or signal an empty receiver."""
+
+            if not self.items:
+                raise WouldBlock
+            return self.items.popleft()
+
+    monkeypatch.setattr(host, "cancel_receiver", CancelReceiver())
+    host._drain_cancellations()
+    assert len(host.cancelled_tasks) == 4097
+    assert active in host.cancelled_tasks
+    host._retire_task_id(active)
+    assert active not in host.cancelled_tasks
 
 
 class _FakeHost(ServedConcurrentDispatch):
@@ -746,4 +791,3 @@ def test_a_dead_server_ends_the_loop_on_the_next_task() -> None:
         if t.is_alive():
             host.send(Shutdown(instance_id=_iid(), runner_id=host.runner_id))
             t.join(timeout=5)
-

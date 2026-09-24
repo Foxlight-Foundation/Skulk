@@ -39,9 +39,8 @@ def _distribution_build(engine: EngineType) -> str | None:
         return None
 
 
-@lru_cache(maxsize=8)
-def _binary_digest(configured_path: str) -> str | None:
-    """Hash one configured executable once for the lifetime of this process."""
+def _fresh_binary_digest(configured_path: str) -> str | None:
+    """Hash the current executable bytes, including after an in-place replacement."""
     path = Path(configured_path)
     try:
         digest_builder = hashlib.sha256()
@@ -54,11 +53,23 @@ def _binary_digest(configured_path: str) -> str | None:
     return digest
 
 
-def _binary_build(label: str, binary: EngineBinaryFact) -> str | None:
+@lru_cache(maxsize=8)
+def _binary_digest(configured_path: str) -> str | None:
+    """Cache the identity of established served-engine binaries."""
+    return _fresh_binary_digest(configured_path)
+
+
+def _binary_build(
+    label: str, binary: EngineBinaryFact, *, fresh: bool = False
+) -> str | None:
     """Return a content-bound build identity for one configured executable."""
     if binary.state != "ok" or binary.configured_path is None:
         return None
-    digest = _binary_digest(binary.configured_path)
+    digest = (
+        _fresh_binary_digest(binary.configured_path)
+        if fresh
+        else _binary_digest(binary.configured_path)
+    )
     if digest is None:
         return None
     return f"{label}@sha256:{digest}"
@@ -222,6 +233,8 @@ def engine_build_inventory(
             build = _vllm_build(facts.vllm_binary)
         elif engine == "comfy":
             build = _comfy_build(facts)
+        elif engine == "audio_cpp":
+            build = _binary_build("audio.cpp", facts.audio_cpp_binary, fresh=True)
         if build is not None:
             discovered[engine] = build
 
@@ -230,7 +243,13 @@ def engine_build_inventory(
         engine = engine_of(backend)
         if engine is None:
             continue
-        build = declared.get(backend) or declared.get(engine) or discovered.get(engine)
+        # A declared build string cannot stand in for this engine's measured
+        # executable digest when registry support is exact-build bound.
+        build = (
+            discovered.get(engine)
+            if engine == "audio_cpp"
+            else declared.get(backend) or declared.get(engine) or discovered.get(engine)
+        )
         if build is None:
             continue
         inventory[backend] = build

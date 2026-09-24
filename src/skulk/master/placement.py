@@ -34,6 +34,7 @@ from skulk.shared.models.memory_estimate import (
     MIN_REQUESTED_CONTEXT_TOKENS,
     backend_offloads_to_vram,
     estimate_shard_footprint,
+    gpu_working_set_ceiling,
     instance_context_token_limit,
     shard_fraction_of_model,
     shard_preallocates_kv_upfront,
@@ -242,6 +243,19 @@ def add_instance_to_placements(
     # than None (review catch on #292).
     assignments = command.instance.shard_assignments
     require_instance_model_card_identity(command.instance)
+    music_instance = any(
+        shard.model_card.music is not None
+        for shard in assignments.runner_to_shard.values()
+    )
+    if (
+        len(assignments.node_to_runner) != 1
+        and music_instance
+    ):
+        raise PlacementError("Music instances require exactly one node")
+    if music_instance and isinstance(command.instance, LlamaRpcInstance):
+        raise PlacementError("Music instances cannot use llama.cpp RPC placement")
+    if music_instance and len(assignments.runner_to_shard) != 1:
+        raise PlacementError("Music instances require exactly one runner shard")
     require_instance_model_code_approval(
         command.instance,
         approved_remote_code_identities,
@@ -250,9 +264,28 @@ def add_instance_to_placements(
         resolved_shards = dict(assignments.runner_to_shard)
         for node_id, runner_id in assignments.node_to_runner.items():
             shard = resolved_shards[runner_id]
-            if shard.resolved_backend is not None:
-                continue
             resources = (node_resources or {}).get(node_id)
+            if shard.model_card.music is not None:
+                if resources is None:
+                    raise PlacementError("Ready audio.cpp backend telemetry is required for exact music placement")
+                supported = _card_platform_backends(shard.model_card, resources)
+                if not supported or (
+                    shard.resolved_backend is not None
+                    and shard.resolved_backend not in supported
+                ):
+                    raise PlacementError(
+                        "Exact music placement requires a ready audio.cpp build and matching signed support claim"
+                    )
+            if shard.resolved_backend is not None:
+                if shard.model_card.music is not None:
+                    assert resources is not None
+                    build = resources.engine_builds.get(shard.resolved_backend)
+                    if build is None:
+                        raise PlacementError("Exact music placement lacks a verified engine build")
+                    resolved_shards[runner_id] = shard.model_copy(
+                        update={"resolved_engine_build": build}
+                    )
+                continue
             if resources is None:
                 # Production callers always supply resources. Retain the legacy
                 # standalone RAM-only helper contract, but never infer a safe
@@ -271,9 +304,13 @@ def add_instance_to_placements(
                 raise PlacementError("No compatible backend for exact placement")
             # Stamp before deriving context and checking the footprint: otherwise
             # the worker can pick a GPU after admission charged only system RAM.
-            resolved_shards[runner_id] = shard.model_copy(
-                update={"resolved_backend": backend}
-            )
+            updates: dict[str, str] = {"resolved_backend": backend}
+            if shard.model_card.music is not None:
+                build = resources.engine_builds.get(backend)
+                if build is None:
+                    raise PlacementError("Exact music placement lacks a verified engine build")
+                updates["resolved_engine_build"] = build
+            resolved_shards[runner_id] = shard.model_copy(update=updates)
         assignments = assignments.model_copy(
             update={"runner_to_shard": resolved_shards}
         )
@@ -339,13 +376,23 @@ def add_instance_to_placements(
     if not isinstance(instance, LlamaRpcInstance):
         for node_id, runner_id in assignments.node_to_runner.items():
             shard = assignments.runner_to_shard[runner_id]
-            available = (node_vram or {}).get(node_id)
             fraction = shard_fraction_of_model(shard)
-            if not backend_offloads_to_vram(shard.resolved_backend):
+            uses_vram = backend_offloads_to_vram(shard.resolved_backend)
+            if not uses_vram and not music_instance:
                 continue
+            available = (
+                (node_vram or {}).get(node_id)
+                if uses_vram
+                else (
+                    min(memory.ram_available, gpu_working_set_ceiling(memory.ram_total))
+                    if (memory := node_memory.get(node_id)) is not None
+                    else None
+                )
+            )
             if available is None or fraction is None:
+                pool = "GPU" if uses_vram else "System"
                 raise PlacementError(
-                    "GPU memory telemetry and a concrete shard are required for exact placement"
+                    f"{pool} memory telemetry and a concrete shard are required for exact placement"
                 )
             # A context ceiling alone is not a weights admission check: it can
             # become zero, or fall back to the card when KV geometry is absent.
@@ -360,7 +407,8 @@ def add_instance_to_placements(
                 llama_server_settings=shard.llama_server_settings,
             )
             if ceiling == 0 or footprint > available:
-                raise PlacementError("Insufficient GPU memory for the exact placement")
+                pool = "GPU memory" if uses_vram else "system memory"
+                raise PlacementError(f"Insufficient {pool} for the exact placement")
     return {**current_instances, instance.instance_id: instance}
 
 
@@ -487,7 +535,11 @@ def _card_platform_backends(
     ``compatible_backends`` goes through this helper so eligibility, the
     common-engine cycle rule, and backend stamping all agree.
     """
-    compatible = set(card.placement.compatible_backends)
+    # Music is admitted only by an exact signed build/hardware claim, even if
+    # an old embedded card carries a legacy compatible_backends declaration.
+    compatible: set[str] = (
+        set() if card.music is not None else set(card.placement.compatible_backends)
+    )
     if node_resources is not None:
         compatible.update(
             registry_supported_backends_for_node(
@@ -502,6 +554,7 @@ def _card_platform_backends(
         frozenset(compatible),
         card_serves_vision=card.vision is not None,
         card_serves_speech=card_serves_speech(card),
+        card_serves_music=card.music is not None,
         card_has_pinned_projector=(
             card.vision is not None and card.vision.has_pinned_projector
         ),
@@ -753,6 +806,8 @@ def place_instance(
     approved_remote_code_identities: AbstractSet[str] | None = None,
     served_context_default: int | None = None,
 ) -> dict[InstanceId, Instance]:
+    if command.model_card.music is not None and command.min_nodes != 1:
+        raise PlacementError("Music instances require exactly one node")
     if remote_code_approval_required(
         command.model_card, approved_remote_code_identities
     ):
@@ -760,7 +815,13 @@ def place_instance(
 
     cycles = topology.get_cycles()
     candidate_cycles = list(filter(lambda it: len(it) >= command.min_nodes, cycles))
+    if command.model_card.music is not None:
+        # audio.cpp runs one complete model on one host; a larger cycle could
+        # otherwise be selected when no single node passes memory admission.
+        candidate_cycles = [cycle for cycle in candidate_cycles if len(cycle) == 1]
     if not candidate_cycles:
+        if command.model_card.music is not None:
+            raise PlacementError("No single-node placement is available for this music model")
         known_nodes = sum(1 for _ in topology.list_nodes())
         if known_nodes >= command.min_nodes:
             # Enough nodes exist for this placement — they just aren't
@@ -1306,8 +1367,15 @@ def place_instance(
         )
         if resolved_backend is not None:
             shard = stamped_runner_to_shard[runner_id]
+            updates: dict[str, str] = {"resolved_backend": resolved_backend}
+            if command.model_card.music is not None:
+                assert resources is not None
+                build = resources.engine_builds.get(resolved_backend)
+                if build is None:
+                    raise PlacementError("Music placement lacks a verified engine build")
+                updates["resolved_engine_build"] = build
             stamped_runner_to_shard[runner_id] = shard.model_copy(
-                update={"resolved_backend": resolved_backend}
+                update=updates
             )
     shard_assignments = ShardAssignments(
         model_id=shard_assignments.model_id,

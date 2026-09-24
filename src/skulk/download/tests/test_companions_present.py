@@ -394,4 +394,3 @@ def test_a_staged_base_is_not_installed_until_its_new_companions_are(
         (staged / path).write_bytes(b"w")
     (staged / download_utils_module._SOURCE_REVISION_MARKER).write_text("5" * 40)
     assert installed_artifact_in_path(card) == base
-

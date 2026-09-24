@@ -18,6 +18,7 @@ from pydantic import ValidationError
 
 from skulk.api import main as api_main
 from skulk.api.main import API
+from skulk.api.music_jobs import MusicJobRegistry
 from skulk.api.video_jobs import (
     MAX_ACTIVE_JOBS,
     MAX_RETAINED_JOBS,
@@ -431,8 +432,10 @@ def test_video_store_adopts_committed_artifacts_after_restart(tmp_path: Path) ->
 def _bare_api(tmp_path: Path) -> API:
     api = object.__new__(API)
     api._video_jobs = VideoJobRegistry(None)  # pyright: ignore[reportPrivateUsage]
+    api._music_jobs = MusicJobRegistry(tmp_path / "music-jobs.json")  # pyright: ignore[reportPrivateUsage]
     api._video_store = VideoStore(tmp_path)  # pyright: ignore[reportPrivateUsage]
     api._video_generation_queues = {}  # pyright: ignore[reportPrivateUsage]
+    api._music_generation_queues = {}  # pyright: ignore[reportPrivateUsage]
     api._text_generation_queues = {}  # pyright: ignore[reportPrivateUsage]
     api._image_generation_queues = {}  # pyright: ignore[reportPrivateUsage]
     api._embedding_queues = {}  # pyright: ignore[reportPrivateUsage]

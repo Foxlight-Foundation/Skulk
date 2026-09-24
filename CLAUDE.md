@@ -242,6 +242,54 @@ never advance casually. `install.sh` is the one-command fresh-box installer
 dependency: nothing optional may be load-bearing.
 
 ### Inference engines
+
+The `audio_cpp` music backend uses a separately installed, pinned audio.cpp
+v0.8.2 server package, absent from Skulk's base environment. Node Facts probe
+its source revision and actual devices before advertising any compute lane.
+
+Startup rehydrates a previously verified cached package without a download.
+The cache retains and rehashes the pinned wheel, then compares extracted runtime
+files with its archive members. Upstream's short revision output is accepted
+only for that verified wheel; standalone overrides need the full pinned revision.
+Standalone binary overrides may use `SKULK_AUDIO_CPP_SPECS_DIR`; facts and the
+runner require both pinned model specs before readiness or load.
+
+`NodeResources.engine_builds` hashes the executable. `TextToMusic` is the sole
+task on a music card. The cards have
+their own `[music]` section and require exact signed support claims. The
+`audio-cpp-engine-wheel` workflow builds the CPU-capable package for Apple
+Silicon macOS and Linux amd64/arm64 from the pinned source. Music model weights
+are separate immutable downloads.
+The bare `audio_cpp` tag reports availability; music support claims and runner
+placement select a concrete compute lane so memory and device choice agree.
+Music mounting uses targeted `PrepareAudioCpp` even for a package already
+observed ready, and indexed `AudioCppPreparationRequested`/
+`AudioCppPreparationCompleted` events. The worker verifies the package and
+publishes fresh `NodeResources` (including host architecture); the successful
+completion also carries those verified facts, which the master applies before
+broadcasting success. The API reads that ordered snapshot instead of waiting
+for telemetry and uses it in the request-local placement dry-run and subsequent
+`PlaceInstance` or `CreateInstance` command. The master overlays the verified
+resources while handling that command so delayed telemetry cannot undo the
+preparation barrier. The API dry-run and master require the prepared node for
+ordinary music placement. Placement
+stamps the exact engine build on music shards; the runner rehashes and probes
+the executable and selected lane before every sidecar start. Linux uses a
+parent-death signal and macOS uses a detached watchdog to end the server when
+its runner disappears. CUDA, ROCm, and
+Vulkan audio.cpp lanes admit against GPU memory in API preflight and placement;
+Metal and CPU use system RAM. Preparation and exact music placement check the
+full estimated footprint against the corresponding memory pool and reject RPC shaped and
+multi-runner instances. The exact API route skips its generic RAM-only
+precheck for music. `MusicGeneration` tasks
+produce a bounded `MusicChunk` manifest, while WAV bytes use `OUTPUT_MEDIA`
+purpose `music` and a separate node-local 24-hour store. The music API exposes
+asynchronous `/v1/music` jobs with cancellation and content retrieval.
+The runner restores a stopped sidecar after request failures before releasing
+the serial permit to another admitted job.
+Generic `/v1/cancel/{command_id}` also uses music-specific cancellation and
+output cleanup. An ordered terminal task starts a short terminal-frame
+deadline, so a dropped `MusicChunk` cannot retain an active job indefinitely.
 A model card's `placement.compatible_backends` selects which engine serves it
 (`bootstrap._resolve_text_engine`, backend tags in `src/skulk/shared/backends.py`):
 - **`mlx`** (`worker/engines/mlx/`): in-process MLX on Apple Silicon; owns the

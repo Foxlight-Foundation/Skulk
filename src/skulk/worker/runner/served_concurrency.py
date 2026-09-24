@@ -22,7 +22,7 @@ re-implementing (and re-reviewing) any of that.
 import contextlib
 import threading
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from concurrent.futures import Future, ThreadPoolExecutor
 
 from anyio import ClosedResourceError, EndOfStream, WouldBlock
@@ -32,6 +32,7 @@ from skulk.shared.types.chunks import ErrorChunk
 from skulk.shared.types.events import ChunkGenerated, Event
 from skulk.shared.types.tasks import (
     CANCEL_ALL_TASKS,
+    MusicGeneration,
     Shutdown,
     Task,
     TaskId,
@@ -64,8 +65,12 @@ _LIVENESS_POLL_S: float = 2.0
 # own cadence.
 _QUEUED_POLL_S: float = 0.1
 
+# Keep enough recent terminal IDs to reject short replay bursts without
+# retaining one entry for every request across a long-lived mounted server.
+_RECENT_TASK_ID_LIMIT = 4096
 
-type GenerationTask = TextGeneration | VideoGeneration
+
+type GenerationTask = TextGeneration | VideoGeneration | MusicGeneration
 """The task kinds the dispatch loop admits as generations: acknowledged on
 admission, run on the pool, and given their terminal status by the loop."""
 
@@ -152,6 +157,10 @@ class ServedConcurrentDispatch:
         # are lock-guarded; never hold both locks at once (no nested acquisition).
         self._status_lock = threading.Lock()
         self._cancel_lock = threading.Lock()
+        self._seen_lock = threading.Lock()
+        self._recent_finished_ids: OrderedDict[TaskId, None] = OrderedDict()
+        self._outstanding_task_ids: set[TaskId] = set()
+        self._pending_cancelled_ids: OrderedDict[TaskId, None] = OrderedDict()
         self._inflight: int = 0
         self._dispatch_waiters: int = 0
         self._dispatch_permits = threading.Semaphore(max_concurrency)
@@ -179,6 +188,40 @@ class ServedConcurrentDispatch:
                 except WouldBlock:
                     break
                 self.cancelled_tasks.add(cancelled)
+                if cancelled != CANCEL_ALL_TASKS and (
+                    cancelled not in self._outstanding_task_ids
+                ):
+                    self._pending_cancelled_ids[cancelled] = None
+                    self._pending_cancelled_ids.move_to_end(cancelled)
+                    while len(self._pending_cancelled_ids) > _RECENT_TASK_ID_LIMIT:
+                        expired, _ = self._pending_cancelled_ids.popitem(last=False)
+                        self.cancelled_tasks.discard(expired)
+
+    def _remember_task_id(self, task_id: TaskId) -> bool:
+        """Admit a new task ID while retaining a bounded replay history."""
+
+        with self._seen_lock:
+            if task_id in self.seen:
+                return False
+            self.seen.add(task_id)
+        with self._cancel_lock:
+            self._outstanding_task_ids.add(task_id)
+            self._pending_cancelled_ids.pop(task_id, None)
+        return True
+
+    def _retire_task_id(self, task_id: TaskId) -> None:
+        """Keep a recent dedup marker and release terminal cancellation state."""
+
+        with self._seen_lock:
+            self._recent_finished_ids[task_id] = None
+            self._recent_finished_ids.move_to_end(task_id)
+            while len(self._recent_finished_ids) > _RECENT_TASK_ID_LIMIT:
+                expired, _ = self._recent_finished_ids.popitem(last=False)
+                self.seen.discard(expired)
+        with self._cancel_lock:
+            self._outstanding_task_ids.discard(task_id)
+            self._pending_cancelled_ids.pop(task_id, None)
+            self.cancelled_tasks.discard(task_id)
 
     def _is_cancelled(self, task_id: TaskId) -> bool:
         self._drain_cancellations()
@@ -236,12 +279,11 @@ class ServedConcurrentDispatch:
                     # steady traffic the poll branch above may never run.
                     self._ensure_server_alive()
                     last_liveness_check = time.monotonic()
-                    if task.task_id in self.seen:
+                    if not self._remember_task_id(task.task_id):
                         logger.warning("repeat task - potential error")
                         continue
-                    self.seen.add(task.task_id)
                     match task:
-                        case TextGeneration() | VideoGeneration() if isinstance(
+                        case TextGeneration() | VideoGeneration() | MusicGeneration() if isinstance(
                             task, self._generation_kinds
                         ) and isinstance(
                             self.current_status, (RunnerReady, RunnerRunning)
@@ -303,10 +345,12 @@ class ServedConcurrentDispatch:
                                 finally:
                                     self._note_dispatch_waiter_finished()
                                     self._mark_ready_if_idle_after_waiter_terminal()
+                                    self._retire_task_id(task.task_id)
                                 continue
                             self._dispatch_generation(task, pool)
                         case Shutdown():
                             self._handle_shutdown(task, pool)
+                            self._retire_task_id(task.task_id)
                             break
                         case _:
                             # Lifecycle (LoadModel) or an out-of-state task: run it
@@ -325,6 +369,7 @@ class ServedConcurrentDispatch:
                             # and aborts the forwarder). Matches the old serial loop.
                             self.send_task_status(task, TaskStatus.Complete)
                             self.update_status(self.current_status)
+                            self._retire_task_id(task.task_id)
         finally:
             # Drain in-flight generations, then stop the server. Shutdown already
             # cancels them; this also covers the EndOfStream / crash exits.
@@ -338,6 +383,7 @@ class ServedConcurrentDispatch:
                 with contextlib.suppress(Exception):
                     self.send_task_status(queued, TaskStatus.Failed)
                 self._note_dispatch_waiter_finished()
+                self._retire_task_id(queued.task_id)
             self._teardown_server()
 
     # --- dispatch -------------------------------------------------------------
@@ -353,6 +399,7 @@ class ServedConcurrentDispatch:
                 finally:
                     self._note_dispatch_waiter_finished()
                     self._mark_ready_if_idle_after_waiter_terminal()
+                    self._retire_task_id(head.task_id)
                 continue
             if not self._dispatch_permits.acquire(blocking=False):
                 return
@@ -405,6 +452,7 @@ class ServedConcurrentDispatch:
             with self._admission_lock:
                 self._admission_inflight.pop(task.task_id, None)
             self._dispatch_permits.release()
+            self._retire_task_id(task.task_id)
             return
         future.add_done_callback(lambda f: self._finish_generation(task, f))
 
@@ -456,6 +504,7 @@ class ServedConcurrentDispatch:
                         self.cancelled_tasks.discard(CANCEL_ALL_TASKS)
             # Release the backpressure slot this generation held.
             self._dispatch_permits.release()
+            self._retire_task_id(task.task_id)
 
     def _note_generation_started(self) -> int:
         """Count a generation in flight; return the post-increment count (#596).

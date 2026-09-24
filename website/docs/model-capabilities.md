@@ -179,6 +179,21 @@ ready single-host runner. The provider accepts mono PCM16, requires a true
 upstream incremental session, and does not infer realtime support from a batch
 transcription API.
 
+## Music contract
+
+`TextToMusic` is a distinct model-card task with a required typed `[music]`
+section. The registry derives `music.generate` from that task and records the
+card's family, lyric rule, and accepted duration targets. Speech's `[audio]`
+section remains reserved for TTS and STT. Music metadata appears in
+`/v1/models`; mounted, ready models serve asynchronous `/v1/music` jobs and
+return verified WAV content. The requested seconds are a generation target,
+not a guarantee of exact output duration.
+
+The capability claim describes the model, while an exact signed `supported`
+engine-build claim and matching live node inventory are required for placement.
+The initial music cards deliberately have no legacy compatible backends. See
+[Model cards](model-cards.md#music) for the complete `[music]` field contract.
+
 ## Fallback Behavior
 
 If a model card does not define advanced sections, Skulk should still work.

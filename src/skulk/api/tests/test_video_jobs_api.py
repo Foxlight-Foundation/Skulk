@@ -24,6 +24,7 @@ from fastapi.testclient import TestClient
 
 from skulk.api import main as api_main
 from skulk.api.main import API
+from skulk.api.music_jobs import MusicJobRegistry
 from skulk.api.video_jobs import VideoAttachment, VideoJob, VideoJobRegistry
 from skulk.api.video_store import VideoStore
 from skulk.routing.output_media import OutputMediaPacket
@@ -153,10 +154,12 @@ def _make_api(monkeypatch: pytest.MonkeyPatch) -> Any:
     api._text_generation_queues = {}
     api._image_generation_queues = {}
     api._video_generation_queues = {}
+    api._music_generation_queues = {}
     api._embedding_queues = {}
     api._audio_speech_queues = {}
     api._audio_transcription_queues = {}
     api._video_jobs = VideoJobRegistry(None)
+    api._music_jobs = MusicJobRegistry(Path(tempfile.mkdtemp()) / "jobs.json")
     api._video_store = VideoStore(Path(tempfile.mkdtemp()))
     api._video_job_media_deadlines = {}
     api._video_output_sources = {}

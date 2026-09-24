@@ -674,3 +674,13 @@ def test_comfy_backend_offloads_to_vram() -> None:
     assert backend_offloads_to_vram("comfy-cuda") and backend_offloads_to_vram("comfy-rocm")
     # The engine has no CPU mode, so even the bare tag lands on the GPU.
     assert backend_offloads_to_vram("comfy")
+
+
+def test_audio_cpp_discrete_gpu_lanes_offload_to_vram() -> None:
+    """A music GPU lane consumes its accelerator pool except unified Metal."""
+    from skulk.shared.models.memory_estimate import backend_offloads_to_vram
+
+    for lane in ("audio_cpp-cuda", "audio_cpp-rocm", "audio_cpp-vulkan"):
+        assert backend_offloads_to_vram(lane)
+    for lane in ("audio_cpp", "audio_cpp-cpu", "audio_cpp-metal"):
+        assert not backend_offloads_to_vram(lane)

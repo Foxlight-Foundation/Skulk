@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Literal, final
 
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, model_validator
 
 from skulk.shared.models.model_cards import ModelCard
 from skulk.shared.topology import Connection
@@ -14,6 +14,7 @@ from skulk.shared.types.common import (
     SessionId,
     SystemId,
 )
+from skulk.shared.types.profiling import NodeResources
 from skulk.shared.types.state import State
 from skulk.shared.types.steward_actions import StewardActionProposal
 from skulk.shared.types.tasks import Task, TaskId, TaskStatus
@@ -73,6 +74,39 @@ class TaskFailed(BaseEvent):
     task_id: TaskId
     error_type: str
     error_message: str
+
+
+class AudioCppPreparationRequested(BaseEvent):
+    """Master-ordered request for a single worker to prepare the music engine."""
+
+    request_id: CommandId
+    target_node: NodeId
+    owner_node: NodeId
+    expires_at: float = Field(
+        description="Unix deadline after which replay must not trigger package acquisition."
+    )
+
+
+class AudioCppPreparationCompleted(BaseEvent):
+    """Target worker's verified readiness snapshot, ordered before mount."""
+
+    request_id: CommandId
+    target_node: NodeId
+    owner_node: NodeId
+    success: bool
+    error: str | None = Field(default=None, max_length=1024)
+    resources: NodeResources | None = Field(
+        default=None,
+        description="Fresh worker-verified resources on success, used as a placement barrier.",
+    )
+
+    @model_validator(mode="after")
+    def _require_success_resources(self) -> "AudioCppPreparationCompleted":
+        """A successful preparation must carry the exact verified resource facts."""
+
+        if self.success and self.resources is None:
+            raise ValueError("Successful audio.cpp preparation requires resources")
+        return self
 
 
 class InstanceCreated(BaseEvent):
@@ -266,6 +300,8 @@ Event = (
     | TaskCreated
     | TaskStatusUpdated
     | TaskFailed
+    | AudioCppPreparationRequested
+    | AudioCppPreparationCompleted
     | TaskDeleted
     | TaskAcknowledged
     | InstanceCreated
@@ -293,6 +329,8 @@ Event = (
 
 _PERSISTED_CONTROL_EVENT_TYPES: tuple[type[BaseEvent], ...] = (
     TestEvent,
+    AudioCppPreparationRequested,
+    AudioCppPreparationCompleted,
     TaskCreated,
     TaskStatusUpdated,
     TaskFailed,

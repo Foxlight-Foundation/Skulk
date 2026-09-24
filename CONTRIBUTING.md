@@ -113,6 +113,8 @@ This starts a Vite dev server on port 3000 with hot reload. The dev server proxi
 - `src/skulk/master/` — Master node (placement, election, event sourcing)
 - `src/skulk/worker/` — Worker node (inference, runner management, download coordination)
 - `src/skulk/worker/runner/`: one package per engine runner (MLX text, image, embeddings, speech, llama.cpp, llama-server, vLLM, RPC donor); `comfy/` drives a headless ComfyUI server for the audio-video engine, `test_video/` is the deterministic test video engine that renders synthetic clips so the video substrate runs without a GPU, and `video_plan.py` is the request-to-plan resolution both share
+- `packaging/skulk-audio-cpp-cpu/`: separately installed audio.cpp music server wheel; `.github/workflows/audio-cpp-engine-wheel.yml` builds CPU-capable packages for the three supported OS/CPU architectures from the pinned upstream source
+- `src/skulk/resources/music_model_cards/`: immutable music artifact cards and their registry architecture sidecars
 - `src/skulk/store/` — Model store (registry, downloads, config, model optimizer)
 - `src/skulk/operator/` — Stable operator identity, quorum certification,
   crash-fault consensus, bounded dormant proposal lifecycle, and

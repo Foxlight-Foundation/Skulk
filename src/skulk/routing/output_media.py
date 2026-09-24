@@ -24,7 +24,7 @@ from skulk.utils.pydantic_ext import CamelCaseModel
 _HEADER_LENGTH_BYTES = 4
 _MAX_HEADER_BYTES = 16_384
 
-OutputMediaPurpose = Literal["video", "thumbnail"]
+OutputMediaPurpose = Literal["video", "thumbnail", "music"]
 """Which artifact of a command an output stream carries."""
 
 

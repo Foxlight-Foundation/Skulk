@@ -25,6 +25,7 @@ from skulk.utils.channels import channel
 _BODYLESS_MUTATIONS = {
     ("POST", "/models/remote-code-approvals/{card_id}"),
     ("POST", "/v1/videos/{video_id}/cancel"),
+    ("POST", "/v1/music/{music_id}/cancel"),
     ("POST", "/v1/cancel/{command_id}"),
     ("POST", "/onboarding"),
     ("POST", "/store/reconciliation/rescan"),

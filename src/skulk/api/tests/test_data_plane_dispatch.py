@@ -21,6 +21,7 @@ from skulk.shared.types.chunks import (
     DataChunk,
     EmbeddingChunk,
     ErrorChunk,
+    MusicChunk,
     PrefillProgressChunk,
     TokenChunk,
     ToolCallChunk,
@@ -29,6 +30,7 @@ from skulk.shared.types.chunks import (
 from skulk.shared.types.commands import ForwarderCommand, ForwarderDownloadCommand
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.events import IndexedEvent
+from skulk.shared.types.music import MusicOutputManifest
 from skulk.shared.types.profiling import NodeResources
 from skulk.shared.types.telemetry import NODE_LIVENESS_TIMEOUT, NodeTelemetry
 from skulk.utils.channels import channel
@@ -60,6 +62,28 @@ def _data_frame(
     """Build one legacy-compatible payload frame for reorder tests."""
 
     return DataChunk(command_id=command_id, sequence=sequence, chunk=chunk)
+
+
+async def test_music_terminal_data_frame_reaches_live_job_queue() -> None:
+    """A music manifest must survive DATA admission and close its job stream."""
+    api = _build_api()
+    command_id = CommandId("music-data-admission")
+    sender, receiver = channel[MusicChunk | ErrorChunk]()
+    api._music_generation_queues[command_id] = sender  # pyright: ignore[reportPrivateUsage]
+    terminal = MusicChunk(
+        model=ModelId("audio-cpp/test-music"),
+        finish_reason="stop",
+        output=MusicOutputManifest(
+            size_bytes=44, sha256="0" * 64, duration_seconds=1,
+            sample_rate=24000, channels=1,
+        ),
+    )
+
+    await api._reorder_and_dispatch(  # pyright: ignore[reportPrivateUsage]
+        DataChunk(command_id=command_id, sequence=0, kind="completed", chunk=terminal)
+    )
+
+    assert receiver.receive_nowait() == terminal
 
 
 def test_reorder_buffer_default_follows_transport(
@@ -108,6 +132,7 @@ async def test_state_surfaces_split_data_transport_health() -> None:
 
     assert payload["nodeResources"] == {
         "remote-management-node": {
+            "architecture": None,
             "backends": [],
             "engineBuilds": {},
             "llamaServerSettings": None,
@@ -119,6 +144,7 @@ async def test_state_surfaces_split_data_transport_health() -> None:
             "capabilityConflicts": [],
         },
         "worker-node": {
+            "architecture": None,
             "backends": ["mlx"],
             "engineBuilds": {},
             "llamaServerSettings": None,

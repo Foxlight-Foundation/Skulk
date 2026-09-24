@@ -138,6 +138,17 @@ class LlamaServerDeviceProbe(CamelCaseModel):
     """Short diagnostic detail for ``failed`` outcomes (bounded, single line)."""
 
 
+@final
+class AudioCppProbe(CamelCaseModel):
+    """Verified source revision and usable compute lanes of one audio.cpp binary."""
+
+    model_config = ConfigDict(frozen=True)
+
+    outcome: Literal["not_run", "ready", "failed"] = "not_run"
+    computes: tuple[str, ...] = ()
+    detail: str = ""
+
+
 CapabilityConflictCode = Literal[
     "gpu_serving_disabled",
     "gpu_detection_degraded",
@@ -260,6 +271,17 @@ class NodeFacts(CamelCaseModel):
 
     declared_comfy_backends: str | None = None
     """Raw ``SKULK_COMFY_BACKENDS`` value, verbatim, or ``None`` when unset."""
+
+    audio_cpp_binary: EngineBinaryFact = Field(
+        default_factory=lambda: EngineBinaryFact(env_var="SKULK_AUDIO_CPP_BIN")
+    )
+    """Only the prepared or explicit audio.cpp executable, never an installable wheel."""
+
+    audio_cpp_probe: AudioCppProbe = AudioCppProbe()
+    """The binary's own version and device report, required for readiness."""
+
+    declared_audio_cpp_backends: str | None = None
+    """Optional operator restriction, checked against the binary's usable lanes."""
 
     def gpus_of(self, vendor: GpuVendor) -> tuple[GpuDeviceFact, ...]:
         """Return the observed GPUs of one vendor, preserving device order."""

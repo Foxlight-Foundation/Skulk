@@ -47,6 +47,7 @@ def _make_api() -> Any:
     api._text_generation_queues = {}
     api._image_generation_queues = {}
     api._video_generation_queues = {}
+    api._music_generation_queues = {}
     api._video_jobs = VideoJobRegistry(None)
     api._video_store = VideoStore(Path(tempfile.mkdtemp()))
     api._video_job_media_deadlines = {}
@@ -192,6 +193,21 @@ async def test_session_reset_fails_open_streams() -> None:
     chunk = receiver.receive_nowait()
     assert isinstance(chunk, ErrorChunk)
     assert "session changed" in chunk.error_message
+    with pytest.raises(EndOfStream):
+        receiver.receive_nowait()
+
+
+async def test_session_reset_fails_open_music_job_stream() -> None:
+    """Master failover must wake a music job waiting for its terminal frame."""
+    from anyio import EndOfStream
+
+    api = _make_api()
+    sender, receiver = channel[Any]()
+    api._music_generation_queues[CommandId("music-reset")] = sender
+
+    api._fail_open_command_streams_for_session_reset()
+
+    assert isinstance(receiver.receive_nowait(), ErrorChunk)
     with pytest.raises(EndOfStream):
         receiver.receive_nowait()
 

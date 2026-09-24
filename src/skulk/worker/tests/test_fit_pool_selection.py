@@ -1,14 +1,59 @@
 """The pre-load guard checks a shard against the pool its stamped backend uses."""
 
+from types import SimpleNamespace
+
 import pytest
 
+import skulk.shared.backends as backends
 import skulk.worker.main as worker_main
 from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.profiling import MemoryUsage
 from skulk.shared.types.worker.shards import PipelineShardMetadata
+from skulk.utils.info_gatherer import linux_gpu, nvidia_gpu
 from skulk.worker.main import Worker
+
+
+@pytest.mark.parametrize(
+    ("advertised", "uses_vram"),
+    [
+        (frozenset({"audio_cpp-cuda"}), True),
+        (frozenset({"audio_cpp-vulkan"}), True),
+        (frozenset({"comfy-cuda"}), True),
+        (frozenset({"audio_cpp-cpu"}), False),
+    ],
+)
+def test_nvidia_vram_probe_uses_the_placement_offload_classes(
+    monkeypatch: pytest.MonkeyPatch,
+    advertised: frozenset[str],
+    uses_vram: bool,
+) -> None:
+    """The worker accepts NVIDIA VRAM for each standalone offload lane."""
+
+    monkeypatch.setattr(worker_main.sys, "platform", "linux")
+    monkeypatch.setattr(linux_gpu, "find_amd_gpu_device", lambda: None)
+    monkeypatch.setattr(nvidia_gpu, "prefer_nvidia_telemetry", lambda: True)
+    monkeypatch.setattr(backends, "probe_node_backends", lambda: advertised)
+    monkeypatch.setattr(nvidia_gpu, "load_nvml", lambda: object())
+
+    def has_nvidia_gpu(_nvml: object) -> bool:
+        return True
+
+    def accelerator_metrics(_nvml: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            vram_total_bytes=Memory.from_gb(16).in_bytes,
+            vram_used_bytes=Memory.from_gb(4).in_bytes,
+        )
+
+    monkeypatch.setattr(nvidia_gpu, "has_nvidia_gpu", has_nvidia_gpu)
+    monkeypatch.setattr(
+        nvidia_gpu, "read_accelerator_metrics", accelerator_metrics,
+    )
+
+    usable = worker_main._local_usable_vram()  # pyright: ignore[reportPrivateUsage]
+
+    assert (usable is not None) is uses_vram
 
 
 def _shard(backend: str | None) -> PipelineShardMetadata:

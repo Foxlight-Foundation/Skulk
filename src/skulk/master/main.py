@@ -42,6 +42,7 @@ from skulk.shared.models.memory_estimate import (
 from skulk.shared.models.model_cards import (
     ModelCard,
     ModelId,
+    ModelTask,
     VideoMode,
     get_card,
     get_current_registry_card,
@@ -63,7 +64,9 @@ from skulk.shared.types.commands import (
     ForwarderDownloadCommand,
     ImageEdits,
     ImageGeneration,
+    MusicGeneration,
     PlaceInstance,
+    PrepareAudioCpp,
     ProposeStewardAction,
     RealtimeAudioTranscription,
     RefuseInstancePlacement,
@@ -82,6 +85,8 @@ from skulk.shared.types.commands import (
 )
 from skulk.shared.types.common import CommandId, NodeId, SessionId, SystemId
 from skulk.shared.types.events import (
+    AudioCppPreparationCompleted,
+    AudioCppPreparationRequested,
     CustomModelCardAdded,
     CustomModelCardDeleted,
     Event,
@@ -107,7 +112,7 @@ from skulk.shared.types.events import (
     is_persistable_control_event,
 )
 from skulk.shared.types.memory import Memory
-from skulk.shared.types.profiling import MemoryUsage
+from skulk.shared.types.profiling import MemoryUsage, NodeResources
 from skulk.shared.types.state import State
 from skulk.shared.types.state_sync import StateSnapshot, StateSyncMessage
 from skulk.shared.types.steward_actions import (
@@ -127,6 +132,9 @@ from skulk.shared.types.tasks import (
 )
 from skulk.shared.types.tasks import (
     ImageGeneration as ImageGenerationTask,
+)
+from skulk.shared.types.tasks import (
+    MusicGeneration as MusicGenerationTask,
 )
 from skulk.shared.types.tasks import (
     RealtimeAudioTranscription as RealtimeAudioTranscriptionTask,
@@ -305,6 +313,7 @@ _COMMAND_TASK_TYPES = (
     SpeechSynthesisTask,
     AudioTranscriptionTask,
     RealtimeAudioTranscriptionTask,
+    MusicGenerationTask,
 )
 
 
@@ -800,6 +809,38 @@ def video_generation_instances(
     return [identifier for _, _, _, identifier in sorted(ranked)]
 
 
+def music_generation_instances(state: State, model_id: ModelId) -> list[InstanceId]:
+    """Rank healthy single-host music instances by readiness and active load."""
+    ranked: list[tuple[bool, int, str, InstanceId]] = []
+    for instance in state.instances.values():
+        assignments = instance.shard_assignments
+        if (
+            assignments.model_id != model_id
+            or len(assignments.runner_to_shard) != 1
+            or len(assignments.node_to_runner) != 1
+        ):
+            continue
+        shard = next(iter(assignments.runner_to_shard.values()))
+        if shard.model_card.music is None:
+            continue
+        statuses = [state.runners.get(runner) for runner in assignments.runner_to_shard]
+        if any(
+            status is None
+            or isinstance(status, (RunnerFailed, RunnerShuttingDown, RunnerShutdown))
+            for status in statuses
+        ):
+            continue
+        ready = all(isinstance(status, (RunnerReady, RunnerRunning)) for status in statuses)
+        active = sum(
+            isinstance(task, MusicGenerationTask)
+            and task.instance_id == instance.instance_id
+            and task.task_status in (TaskStatus.Pending, TaskStatus.Running)
+            for task in state.tasks.values()
+        )
+        ranked.append((not ready, active, str(instance.instance_id), instance.instance_id))
+    return [identifier for _, _, _, identifier in sorted(ranked)]
+
+
 class Master:
     def __init__(
         self,
@@ -1023,6 +1064,128 @@ class Master:
         elif isinstance(indexed.event, InstanceDeleted):
             self._pending_instance_reservations.pop(indexed.event.instance_id, None)
         record_membership_from_event(self._telemetry_view, indexed.event)
+        if isinstance(indexed.event, AudioCppPreparationCompleted):
+            self._record_audio_cpp_preparation(indexed.event)
+
+    def _record_audio_cpp_preparation(
+        self, event: AudioCppPreparationCompleted
+    ) -> None:
+        """Make verified resources visible to placement before broadcasting success."""
+
+        resources = event.resources
+        if (
+            not event.success
+            or resources is None
+            or event.target_node not in self.state.topology.list_nodes()
+        ):
+            return
+        if not any(
+            backend.startswith("audio_cpp-")
+            and backend in resources.engine_builds
+            for backend in resources.backends
+        ):
+            return
+        # Telemetry is lossy and can reach API and master in either order. The
+        # worker's fresh verified snapshot rides the ordered completion event,
+        # so the master's planner has the exact build before the API can send
+        # its following placement command. Ordinary telemetry continues to
+        # refresh these facts after the preparation barrier.
+        self._telemetry_view.node_resources[event.target_node] = resources
+
+    def _placement_resources_for_command(
+        self, command: PlaceInstance | CreateInstance,
+    ) -> Mapping[NodeId, NodeResources]:
+        """Overlay one verified music preparation for this placement only.
+
+        Telemetry can deliver an older resource packet after the indexed
+        preparation event. Carrying its worker-verified snapshot on the
+        following command keeps placement ordered across that race.
+        """
+
+        prepared = command.prepared_node_resources
+        if not prepared:
+            return self._telemetry_view.node_resources
+        model_id = (
+            command.model_card.model_id
+            if isinstance(command, PlaceInstance)
+            else command.instance.shard_assignments.model_id
+        )
+        card = self._ordered_placement_model_card(model_id)
+        if card is None or ModelTask.TextToMusic not in card.tasks or len(prepared) != 1:
+            raise ValueError("Prepared audio.cpp resources require one music node")
+        node_id, resources = next(iter(prepared.items()))
+        if node_id not in self.state.topology.list_nodes():
+            raise ValueError("Prepared audio.cpp node is no longer a cluster member")
+        if isinstance(command, CreateInstance) and (
+            node_id not in command.instance.shard_assignments.node_to_runner
+        ):
+            raise ValueError("Prepared audio.cpp node does not match exact placement")
+        if not any(
+            backend.startswith("audio_cpp-")
+            and backend in resources.engine_builds
+            for backend in resources.backends
+        ):
+            raise ValueError("Prepared audio.cpp resources contain no ready build")
+        return {**self._telemetry_view.node_resources, node_id: resources}
+
+    def _place_requested_instance(
+        self, command: PlaceInstance,
+    ) -> dict[InstanceId, Instance]:
+        """Place one quick command using its prepared music snapshot if present."""
+
+        self._require_ordered_place_instance_card(command)
+        resources = self._placement_resources_for_command(command)
+        credited_memory, credited_vram = self._placement_memory_inputs(
+            node_resources=resources,
+        )
+        return place_instance(
+            command,
+            self.state.topology,
+            self.state.instances,
+            credited_memory,
+            self.state.node_network,
+            required_nodes=(
+                set(command.prepared_node_resources)
+                if command.prepared_node_resources
+                else None
+            ),
+            download_status=self._effective_downloads(),
+            excluded_nodes=set(command.excluded_nodes),
+            node_resources=resources,
+            node_vram=credited_vram,
+            unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
+                self._telemetry_view.node_system,
+                resources,
+                node_memory=credited_memory,
+            ),
+            approved_remote_code_identities=self._model_trust_approvals,
+            served_context_default=self._served_context_default(),
+        )
+
+    def _create_requested_instance(
+        self, command: CreateInstance,
+    ) -> Mapping[InstanceId, Instance]:
+        """Validate one exact placement with its prepared music snapshot."""
+
+        self._require_ordered_create_instance_card(command)
+        resources = self._placement_resources_for_command(command)
+        credited_memory, credited_vram = self._placement_memory_inputs(
+            node_resources=resources,
+        )
+        return add_instance_to_placements(
+            command,
+            self.state.topology,
+            self.state.instances,
+            credited_memory,
+            node_vram=credited_vram,
+            unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
+                self._telemetry_view.node_system,
+                resources,
+                node_memory=credited_memory,
+            ),
+            approved_remote_code_identities=self._model_trust_approvals,
+            node_resources=resources,
+        )
 
     def _record_runner_loaded_transitions(
         self, before: Mapping[RunnerId, RunnerStatus]
@@ -1317,6 +1480,7 @@ class Master:
         self,
         node_memory: Mapping[NodeId, MemoryUsage],
         placements: Mapping[InstanceId, Instance],
+        node_resources: Mapping[NodeId, NodeResources] | None = None,
     ) -> tuple[dict[NodeId, MemoryUsage], dict[NodeId, Memory]]:
         """Node memory and usable GPU memory net of what ``placements`` committed.
 
@@ -1329,14 +1493,18 @@ class Master:
         the reservation too, and the discrete-VRAM reservation is applied on
         top as before.
         """
+        resources = (
+            self._telemetry_view.node_resources
+            if node_resources is None else node_resources
+        )
         unified_nodes = unified_memory_gpu_node_ids(
             self._telemetry_view.node_system,
-            self._telemetry_view.node_resources,
+            resources,
             node_memory=node_memory,
         )
         vram_membership = usable_vram_by_node(
             self._telemetry_view.node_system,
-            self._telemetry_view.node_resources,
+            resources,
             node_memory=node_memory,
         )
         memory = reserve_system_ram_usage(
@@ -1348,7 +1516,7 @@ class Master:
         )
         vram = usable_vram_by_node(
             self._telemetry_view.node_system,
-            self._telemetry_view.node_resources,
+            resources,
             node_memory=memory,
             current_instances=placements,
         )
@@ -1357,6 +1525,7 @@ class Master:
     def _placement_memory_inputs(
         self,
         current_instances: Mapping[InstanceId, Instance] | None = None,
+        node_resources: Mapping[NodeId, NodeResources] | None = None,
     ) -> tuple[
         Mapping[NodeId, MemoryUsage],
         Mapping[NodeId, Memory],
@@ -1380,7 +1549,9 @@ class Master:
         credit = self._freed_credit_by_node()
         base_memory = self._telemetry_view.node_memory
         if not credit:
-            return self._reserved_placement_inputs(base_memory, placements)
+            return self._reserved_placement_inputs(
+                base_memory, placements, node_resources,
+            )
         # Credit the freed bytes onto each node's ram_available, clamped to
         # ram_total so credited availability never exceeds capacity (telemetry
         # may already have partly caught up, or the footprint estimate may be
@@ -1406,7 +1577,9 @@ class Master:
         # figure directly: usable_vram_by_node applies its own working-set /
         # GTT ceiling, so the credited VRAM is naturally capped and can never
         # exceed the ceiling or total VRAM.
-        return self._reserved_placement_inputs(memory, placements)
+        return self._reserved_placement_inputs(
+            memory, placements, node_resources,
+        )
 
     def _place_for_steward_action(
         self,
@@ -2130,6 +2303,22 @@ class Master:
                     match command:
                         case TestCommand():
                             pass
+                        case PrepareAudioCpp():
+                            if command.target_node not in self.state.topology.list_nodes():
+                                generated_events.append(AudioCppPreparationCompleted(
+                                    request_id=command.command_id,
+                                    target_node=command.target_node,
+                                    owner_node=command.owner_node,
+                                    success=False,
+                                    error="target node is not a live cluster member",
+                                ))
+                            else:
+                                generated_events.append(AudioCppPreparationRequested(
+                                    request_id=command.command_id,
+                                    target_node=command.target_node,
+                                    owner_node=command.owner_node,
+                                    expires_at=time.time() + 300,
+                                ))
                         case TextGeneration():
                             eligible = text_generation_instances(
                                 self.state, command.task_params.model
@@ -2297,6 +2486,45 @@ class Master:
                                             "No running instance of "
                                             f"{command.task_params.model} serves "
                                             f"the {requested_mode.value} mode"
+                                        ),
+                                    )
+                                )
+                        case MusicGeneration():
+                            candidates = music_generation_instances(
+                                self.state, ModelId(command.task_params.model)
+                            )
+                            task_id = TaskId()
+                            unavailable = not candidates
+                            selected_instance_id = (
+                                candidates[0]
+                                if candidates
+                                else InstanceId(str(command.command_id))
+                            )
+                            generated_events.append(
+                                TaskCreated(
+                                    task_id=task_id,
+                                    task=MusicGenerationTask(
+                                        task_id=task_id,
+                                        command_id=command.command_id,
+                                        owner_node=command.owner_node,
+                                        instance_id=selected_instance_id,
+                                        task_status=(
+                                            TaskStatus.Failed if unavailable else TaskStatus.Pending
+                                        ),
+                                        task_params=command.task_params,
+                                        trace_enabled=self.state.tracing_enabled,
+                                    ),
+                                )
+                            )
+                            self.command_task_mapping[command.command_id] = task_id
+                            if unavailable:
+                                generated_events.append(
+                                    TaskFailed(
+                                        task_id=task_id,
+                                        error_type="music_model_unavailable",
+                                        error_message=(
+                                            "No healthy single-host music instance serves "
+                                            f"{command.task_params.model}"
                                         ),
                                     )
                                 )
@@ -3061,59 +3289,13 @@ class Master:
                                     )
                                 generated_events.extend(transition_events)
                         case PlaceInstance():
-                            self._require_ordered_place_instance_card(command)
-                            # node_memory/node_vram come from the telemetry plane
-                            # (#279 slice 2). Recently-freed credit is pruned
-                            # here and disabled by default (#314); the usable-GPU
-                            # map admits discrete/UMA GPU nodes against the pool
-                            # their backend can actually allocate from.
-                            credited_memory, credited_vram = (
-                                self._placement_memory_inputs()
-                            )
-                            placement = place_instance(
-                                command,
-                                self.state.topology,
-                                self.state.instances,
-                                credited_memory,
-                                self.state.node_network,
-                                download_status=self._effective_downloads(),
-                                excluded_nodes=set(command.excluded_nodes),
-                                node_resources=self._telemetry_view.node_resources,
-                                node_vram=credited_vram,
-                                unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
-                                    self._telemetry_view.node_system,
-                                    self._telemetry_view.node_resources,
-                                    node_memory=credited_memory,
-                                ),
-                                approved_remote_code_identities=self._model_trust_approvals,
-                                served_context_default=self._served_context_default(),
-                            )
+                            placement = self._place_requested_instance(command)
                             transition_events = get_transition_events(
                                 self.state.instances, placement, self.state.tasks
                             )
                             generated_events.extend(transition_events)
                         case CreateInstance():
-                            self._require_ordered_create_instance_card(command)
-                            # Placement inputs come from telemetry (#279 slice 2);
-                            # the recently-freed bookkeeping path is pruned here
-                            # and normally contributes no speculative credit.
-                            credited_memory, credited_vram = (
-                                self._placement_memory_inputs()
-                            )
-                            placement = add_instance_to_placements(
-                                command,
-                                self.state.topology,
-                                self.state.instances,
-                                credited_memory,
-                                node_vram=credited_vram,
-                                unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
-                                    self._telemetry_view.node_system,
-                                    self._telemetry_view.node_resources,
-                                    node_memory=credited_memory,
-                                ),
-                                approved_remote_code_identities=self._model_trust_approvals,
-                                node_resources=self._telemetry_view.node_resources,
-                            )
+                            placement = self._create_requested_instance(command)
                             transition_events = get_transition_events(
                                 self.state.instances, placement, self.state.tasks
                             )

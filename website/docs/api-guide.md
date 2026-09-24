@@ -1724,6 +1724,75 @@ it. Returns `{ "id": ..., "object": "video.deleted", "deleted": true }`.
   `reference_fidelity`, `styles`, `codec`) extensions.
 - There is no remix route; submit a new job with the changed prompt.
 
+## Music generation
+
+Music generation is an asynchronous job API for a mounted `TextToMusic` card.
+The model's `/v1/models` `music` object identifies its family, lyric rule,
+accepted `min_seconds` and `max_seconds`, and `wav` output format. Music uses
+the existing API authentication policy. Jobs and WAV content belong to the
+API node that accepted the request; poll and download from that node.
+
+### Create a music job
+
+**POST** `/v1/music`
+
+Send JSON with these fields:
+
+| Field | Type | Behavior |
+|-------|------|----------|
+| `model` | string, required | Mounted text-to-music model id |
+| `prompt` | string, required | Nonblank musical description, 1 to 8000 characters |
+| `lyrics` | string or null | Nonblank when supplied; model dependent and required for MiniMax Music 3, up to 20,000 characters |
+| `seconds` | integer, required | Target or generation budget within the card's range and the global 120-second ceiling. MiniMax output can have a different actual duration |
+| `seed` | integer or null | Optional 0 to 4294967295 |
+
+Unknown fields and whitespace-only music text are rejected with **422** before
+the job is created. The response is a `music` object with a job `id`,
+`model`, `prompt`, requested `seconds`, `status: "queued"`, `created_at`, and
+null terminal/output fields. One API node admits at most 32 active music jobs.
+The model runner admits one generation at a time. A failed job includes an
+`error`; cancellation produces `status: "cancelled"`. If the cluster session
+changes while creation waits to submit, the API returns **503** and the
+request can be retried; the closed session's command is not submitted.
+
+### List and retrieve music jobs
+
+**GET** `/v1/music` accepts `limit` (1 to 100, default 20) and `after` (the
+last job id of the previous page). It returns `object: "list"`, `data`,
+`first_id`, `last_id`, and `has_more`, newest first. The node retains the
+newest 256 job records.
+
+**GET** `/v1/music/{music_id}` returns the current `music` object. On
+completion, `output` reports the measured WAV `duration_seconds`, `sample_rate`,
+`channels`, `size_bytes`, and `sha256`. The job reaches `completed` only after
+both the runner's terminal report and the verified WAV arrive. If delivery
+does not finish within ten minutes, it fails. In-flight jobs become failed
+after an API restart; previously completed content remains available until
+its expiration.
+If the ordered task terminates but its final music frame is lost, the API
+fails the job after a 45-second grace and the next 15-second sweep; it does
+not retain an active job indefinitely.
+
+### Download music
+
+**GET** `/v1/music/{music_id}/content` returns `audio/wav` for a completed
+job. It returns **409** before completion and **404** if the job or content
+is absent or has expired. A result exceeding 64 MiB fails instead of being
+truncated. Completed WAV content is retained for up to 24 hours; storage
+pressure may evict older content sooner.
+
+### Cancel or delete music
+
+**POST** `/v1/music/{music_id}/cancel` cancels a queued or running job,
+terminates its model server if it is generating, and removes partial output.
+Calling it on a terminal job returns that job unchanged.
+`POST /v1/cancel/{music_id}` also cancels an active music job, including one
+whose WAV is still being delivered.
+
+**DELETE** `/v1/music/{music_id}` cancels a live job, removes its WAV, and
+forgets its record. It returns
+`{ "id": "...", "object": "music.deleted", "deleted": true }`.
+
 ## Benchmark Endpoints
 
 Benchmark variants of the generation endpoints run the same admission and
@@ -1763,10 +1832,10 @@ curl -X POST http://localhost:52415/bench/chat/completions \
 **POST** `/v1/cancel/{command_id}`
 
 Requests cancellation of one in-flight generation command by its command ID.
-It covers text generation, image generation, embeddings, and speech synthesis
-or transcription commands owned by the API node you call: Skulk closes the
-local response stream and sends a task cancellation so the serving runner
-stops instead of generating into the void.
+It covers text generation, image generation, embeddings, speech synthesis or
+transcription, and active video or music jobs owned by the API node you call.
+Skulk closes the local response stream or job, stops an in-flight runner, and
+aborts any unfinished media delivery.
 
 Finding the command ID:
 
@@ -2195,6 +2264,11 @@ silently failing on the master:
   per-node memory info lags the edges. The request internally waits up to
   15 seconds for the info to arrive before giving up, so retry shortly on 503.
 
+For text-to-music, Skulk prepares audio.cpp on one eligible node and verifies
+its ready build and signed model support before placement. The API dry-run and
+master then place on that prepared node; if preparation fails, the request
+returns **503** with a diagnostic and leaves the node healthy.
+
 The request expresses intent, not a reservation of a prior preview. A card may
 declare any number of open backend tags plus an ordered preference. The planner
 first removes candidates blocked by participation policy, engine/build
@@ -2321,6 +2395,14 @@ The API requires every embedded shard card's `modelId` to match the assignment's
 canonical `modelId` before acknowledging creation. An inconsistent shard card
 returns HTTP 400 with `X-Skulk-Placement-Failure:
 model_card_identity_mismatch`, and no instance state is created.
+For a text-to-music instance, the placement must name exactly one node. The API
+prepares audio.cpp on that node and verifies a ready build and signed support
+claim before accepting the command. Music admission checks the selected
+backend's memory pool; GPU lanes use their accelerator memory budget. If the
+node cannot be prepared, the request returns HTTP 503 with the node's
+preparation or compatibility diagnostic.
+The accepted placement carries the verified preparation snapshot so delayed
+node telemetry cannot replace the ready engine view during that request.
 
 Persist the submitted instance identity before sending. HTTP acceptance is not
 download or runner readiness. If the response is lost, reconcile that exact ID
@@ -3098,6 +3180,7 @@ Important fields:
 | `remote_code_approved_on_this_node` | boolean | Deprecated compatibility alias for `remote_code_approved_for_cluster` |
 | `remote_code_automatically_trusted` | boolean | Whether repository code is authorized by signed publication, explicit addition, or bundled distribution for this exact card |
 | `audio` | object | Declared speech metadata from the model card, including `kind`, audio response formats, streaming/realtime flags, built-in `voices`, `default_voice`, voice/reference-audio flags, translation support, and sample rates |
+| `music` | object or null | Text-to-music family, lyric requirement, qualified duration bounds, and WAV output format; null for non-music cards |
 | `video` | object or null | Declared video generation contract from a video model card: `modes` (`t2va`, `fl2va`, `ref2va`), `min_seconds`/`max_seconds`, `fps`, frame grid (`frame_grid_multiple`, `frame_grid_offset`), `canvas_multiple`, `default_short_edge`, `max_pixels`, `aspect_ratios`, `audio_output` with `audio_sample_rate`/`audio_channels`, `default_steps`, `reference_limits`, `adapters` (named LoRAs with `modes`, `steps`, `strength`, and the `video_shift`/`audio_shift` a render with the adapter uses when the request sets none, selectable through the video job `lora` field), `styles` (the card's style embeddings with `modes`, selectable through the video job `styles` field), and every engine setting the job accepts with its default: `samplers` and `default_sampler`, `schedulers` and `default_scheduler`, the card's trained `video_shift`/`audio_shift` (null keeps the model's built-in value) with `shift_bounds`, `reference_fidelities` and `default_reference_fidelity` (empty and null unless the card serves `ref2va`), `codecs` and `default_codec`, `guides` (each guide the card derives from a `control` clip: `kind`, the `modes` it applies to, and the preprocessor `weights` it loads with their `repository` and `license`; empty without a ControlNet), `default_guide` (the guide a `control` clip gives when `control_kind` is omitted), and the ControlNet's own settings: `control_strength_bounds`, `default_control_strength` (the card's ControlNet's strength, else 1; null without a ControlNet), and `default_control_window` (the `control_start`/`control_end` a render takes when omitted). The lists are the engine's own, not a recommendation. Null for non-video cards |
 | `license` | object or null | Operator-facing license facts from the card: `name`, `url`, `spdx_id`, `notice`, and `display_name` (a product name the license requires in a UI). Informational; nothing is enforced |
 | `resolved_capabilities.supports_speech_synthesis` | boolean | Whether clients should treat the model as a text-to-speech model |
