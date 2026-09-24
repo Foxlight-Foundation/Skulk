@@ -274,6 +274,19 @@ def transfer_bundle(
     return model_card.artifact_bundle
 
 
+def video_companion_selection(
+    owner_card: ModelCard | None, repository: str, revision: str | None
+) -> frozenset[tuple[str, int | None]]:
+    """The files, with declared sizes, an owning card names from one companion repository."""
+    if owner_card is None or owner_card.video is None:
+        return frozenset()
+    return frozenset(
+        (item.path, item.size_bytes)
+        for item in owner_card.video.companions
+        if item.repo is not None and str(item.repo) == repository and item.revision == revision
+    )
+
+
 def select_store_video_companion_files(
     file_list: list[FileListEntry],
     owner_card: ModelCard,
@@ -1225,6 +1238,35 @@ class ModelStore:
             )
 
     @staticmethod
+    def _serves_request(
+        existing: StoreDownloadStatus,
+        model_card: ModelCard | None,
+        owner_model_id: str | None,
+        owner_card_id: str | None,
+    ) -> bool:
+        """Whether ``existing``'s transfer serves a request from this owner.
+
+        A video companion is the same bytes for every card that pins its
+        repository at its revision, so a transfer serves another such card when
+        its file selection covers that card's; concurrent placements of two
+        cards sharing preprocessors then share one transfer instead of the
+        second being refused. Every other artifact belongs to one owner.
+        """
+        if existing.artifact_role == "video_companion":
+            repository = existing.source_repository or existing.model_id
+            requested = video_companion_selection(
+                model_card, repository, existing.source_revision
+            )
+            return bool(requested) and requested <= video_companion_selection(
+                existing.model_card, repository, existing.source_revision
+            )
+        return (
+            ModelStore._same_requested_card(existing.model_card, model_card)
+            and existing.owner_model_id == owner_model_id
+            and existing.owner_card_id == owner_card_id
+        )
+
+    @staticmethod
     def _same_requested_card(
         existing: ModelCard | None,
         requested: ModelCard | None,
@@ -1358,10 +1400,10 @@ class ModelStore:
                     or existing_repository != requested_repository
                     or existing.pinned_gguf != pinned_gguf
                     or existing.extra_pinned_gguf != requested_companions
-                    or not self._same_requested_card(existing.model_card, model_card)
                     or existing.artifact_role != artifact_role
-                    or existing.owner_model_id != owner_model_id
-                    or existing.owner_card_id != owner_card_id
+                    or not self._serves_request(
+                        existing, model_card, owner_model_id, owner_card_id
+                    )
                 ):
                     raise ValueError(
                         f"{model_id} is already downloading a different artifact "
@@ -1390,10 +1432,10 @@ class ModelStore:
                     or missing_companion
                     or existing.source_revision != source_revision
                     or existing_repository != requested_repository
-                    or not self._same_requested_card(existing.model_card, model_card)
                     or existing.artifact_role != artifact_role
-                    or existing.owner_model_id != owner_model_id
-                    or existing.owner_card_id != owner_card_id
+                    or not self._serves_request(
+                        existing, model_card, owner_model_id, owner_card_id
+                    )
                     # Artifact-level, not alias-level. is_in_store() only asks
                     # whether *some* registered generation of this alias sits on
                     # disk, so a surviving generation (typically a legacy
