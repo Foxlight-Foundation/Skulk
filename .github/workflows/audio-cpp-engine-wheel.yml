@@ -1,0 +1,107 @@
+# Build the separately installed audio.cpp music engine from one immutable source.
+# Publication is a separate release gate after hardware and model qualification.
+name: audio-cpp-engine-wheel
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+    paths:
+      - "packaging/skulk-audio-cpp-cpu/**"
+      - ".github/workflows/audio-cpp-engine-wheel.yml"
+  push:
+    branches: [initiative/audio-cpp-engine]
+    paths:
+      - "packaging/skulk-audio-cpp-cpu/**"
+      - ".github/workflows/audio-cpp-engine-wheel.yml"
+  workflow_dispatch:
+
+env:
+  AUDIO_CPP_REF: 4d88768fbcae4e6eb3352c6ab1422dabb7d90b58
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            platform: macos-arm64
+          - runner: ubuntu-22.04
+            platform: linux-amd64
+          - runner: ubuntu-22.04-arm
+            platform: linux-arm64
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux build prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential cmake libcurl4-openssl-dev
+      - name: Fetch pinned audio.cpp source
+        run: |
+          git clone --filter=blob:none https://github.com/0xShug0/audio.cpp /tmp/audio-cpp-src
+          git -C /tmp/audio-cpp-src checkout --detach "$AUDIO_CPP_REF"
+          test "$(git -C /tmp/audio-cpp-src rev-parse HEAD)" = "$AUDIO_CPP_REF"
+      - name: Build only the music server and two families
+        run: |
+          cmake -S /tmp/audio-cpp-src -B /tmp/audio-cpp-build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DAUDIOCPP_MODEL_SET=custom \
+            -DAUDIOCPP_MODELS=ace_step,minimax_music3 \
+            -DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=OFF \
+            -DAUDIOCPP_BUILD_SERVER_FRONTENDS=OFF \
+            -DAUDIOCPP_DEPLOYMENT_BUILD=OFF \
+            -DENGINE_ENABLE_NATIVE_CPU=OFF \
+            -DENGINE_ENABLE_CUDA=OFF \
+            -DENGINE_ENABLE_HIP=OFF \
+            -DENGINE_ENABLE_VULKAN=OFF
+          cmake --build /tmp/audio-cpp-build --target audiocpp_server --parallel 4
+      - name: Assemble and smoke-test wheel
+        run: |
+          mkdir -p packaging/skulk-audio-cpp-cpu/src/skulk_audio_cpp_cpu/bin
+          cp /tmp/audio-cpp-build/bin/audiocpp_server packaging/skulk-audio-cpp-cpu/src/skulk_audio_cpp_cpu/bin/
+          packaging/skulk-audio-cpp-cpu/src/skulk_audio_cpp_cpu/bin/audiocpp_server --version
+          packaging/skulk-audio-cpp-cpu/src/skulk_audio_cpp_cpu/bin/audiocpp_server --list-devices
+      - uses: astral-sh/setup-uv@v6
+      - name: Build wheel
+        run: uv build --wheel packaging/skulk-audio-cpp-cpu
+      - name: Verify wheel payload and record digest
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          wheel, = Path('packaging/skulk-audio-cpp-cpu/dist').glob('*.whl')
+          with ZipFile(wheel) as archive:
+              names = set(archive.namelist())
+              required = {
+                  'skulk_audio_cpp_cpu/bin/audiocpp_server',
+                  'skulk_audio_cpp_cpu/model_specs/ace_step.json',
+                  'skulk_audio_cpp_cpu/model_specs/minimax_music3.json',
+                  'skulk_audio_cpp_cpu/licenses/AUDIO_CPP_LICENSE.txt',
+              }
+              assert required <= names, required - names
+          print(f'{wheel.name} sha256:{hashlib.sha256(wheel.read_bytes()).hexdigest()}')
+          PY
+      - name: Smoke-test installed entry point
+        run: |
+          uv venv /tmp/audio-cpp-smoke --python 3.13
+          uv pip install --python /tmp/audio-cpp-smoke/bin/python packaging/skulk-audio-cpp-cpu/dist/*.whl
+          /tmp/audio-cpp-smoke/bin/skulk-audio-cpp-cpu --version
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: packaging/skulk-audio-cpp-cpu/dist/*.whl
+      - uses: actions/upload-artifact@v4
+        with:
+          name: audio-cpp-${{ matrix.platform }}
+          path: packaging/skulk-audio-cpp-cpu/dist/*.whl
+          if-no-files-found: error
