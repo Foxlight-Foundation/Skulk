@@ -641,6 +641,11 @@ def test_usable_vram_by_node_admits_audio_cpp_gpu_lanes() -> None:
         {cpu_node: SystemPerformanceProfile(accelerator=acc)},
         {cpu_node: NodeResources(backends=frozenset({"audio_cpp", "audio_cpp-cpu"}))},
     )
+    metal_node = NodeId("music-metal")
+    assert metal_node not in usable_vram_by_node(
+        {metal_node: SystemPerformanceProfile(accelerator=acc)},
+        {metal_node: NodeResources(backends=frozenset({"audio_cpp", "audio_cpp-metal"}))},
+    )
 
 
 def test_usable_vram_by_node_uma_counts_gtt():

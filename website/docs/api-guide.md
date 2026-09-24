@@ -1741,12 +1741,13 @@ Send JSON with these fields:
 | Field | Type | Behavior |
 |-------|------|----------|
 | `model` | string, required | Mounted text-to-music model id |
-| `prompt` | string, required | Musical description, 1 to 8000 characters |
-| `lyrics` | string or null | Model dependent; required for MiniMax Music 3, up to 20,000 characters |
+| `prompt` | string, required | Nonblank musical description, 1 to 8000 characters |
+| `lyrics` | string or null | Nonblank when supplied; model dependent and required for MiniMax Music 3, up to 20,000 characters |
 | `seconds` | integer, required | Target or generation budget within the card's range and the global 120-second ceiling. MiniMax output can have a different actual duration |
 | `seed` | integer or null | Optional 0 to 4294967295 |
 
-Unknown fields are rejected. The response is a `music` object with a job `id`,
+Unknown fields and whitespace-only music text are rejected with **422** before
+the job is created. The response is a `music` object with a job `id`,
 `model`, `prompt`, requested `seconds`, `status: "queued"`, `created_at`, and
 null terminal/output fields. One API node admits at most 32 active music jobs.
 The model runner admits one generation at a time. A failed job includes an

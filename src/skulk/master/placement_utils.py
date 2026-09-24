@@ -85,7 +85,10 @@ class CycleMemoryDiagnostics(CamelCaseModel):
 # served llama-server engine launch with ``-ngl`` full-GPU offload; vLLM would
 # join here too. The bare CPU compute tag is excluded by the ``-cpu`` check.
 _GPU_OFFLOAD_ENGINE_PREFIXES: Final = (
-    "llama_cpp-", "llama_server-", "vllm-", "comfy-", "audio_cpp-",
+    "llama_cpp-", "llama_server-", "vllm-", "comfy-",
+)
+_AUDIO_CPP_DISCRETE_LANES: Final = frozenset(
+    {"audio_cpp-cuda", "audio_cpp-rocm", "audio_cpp-vulkan"}
 )
 
 
@@ -105,7 +108,8 @@ def _has_gpu_offload_backend(backends: frozenset[str]) -> bool:
     this predicate gates only AMD/NVIDIA discrete-VRAM observations.
     """
     return any(
-        tag.startswith(_GPU_OFFLOAD_ENGINE_PREFIXES) and not tag.endswith("-cpu")
+        tag in _AUDIO_CPP_DISCRETE_LANES
+        or (tag.startswith(_GPU_OFFLOAD_ENGINE_PREFIXES) and not tag.endswith("-cpu"))
         for tag in backends
     )
 

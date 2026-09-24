@@ -2772,10 +2772,17 @@ class MusicCreateRequest(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
     model: str = Field(min_length=1, description="Mounted text-to-music model.")
-    prompt: str = Field(min_length=1, max_length=8000, description="Musical description.")
-    lyrics: str | None = Field(default=None, min_length=1, max_length=20_000, description="Lyrics, required by MiniMax Music 3.")
+    prompt: str = Field(min_length=1, max_length=8000, description="Nonblank musical description.")
+    lyrics: str | None = Field(default=None, min_length=1, max_length=20_000, description="Nonblank lyrics, required by MiniMax Music 3.")
     seconds: int = Field(ge=1, le=120, description="Generation target or budget; MiniMax may yield a different duration.")
     seed: int | None = Field(default=None, ge=0, le=2**32 - 1, description="Optional deterministic seed.")
+
+    @field_validator("prompt", "lyrics")
+    @classmethod
+    def _require_nonblank_text(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("Music text must contain a non-whitespace character")
+        return value
 
 
 class MusicResource(BaseModel):

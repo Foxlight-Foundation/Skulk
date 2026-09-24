@@ -521,6 +521,10 @@ def test_music_create_enforces_lyric_duration_and_option_contract(
     client = TestClient(api.app)
     base = {"model": str(MODEL), "prompt": "Orchestral fox", "seconds": 30}
     assert client.post("/v1/music", json=base).status_code == 400
+    assert client.post("/v1/music", json={**base, "prompt": "  \n ", "lyrics": "Sing"}).status_code == 422
+    assert client.post("/v1/music", json={**base, "lyrics": " \t "}).status_code == 422
+    api._send.assert_not_awaited()
+    assert client.get("/v1/music").json()["data"] == []
     assert client.post("/v1/music", json={**base, "lyrics": "Sing", "seconds": 61}).status_code == 400
     assert client.post("/v1/music", json={**base, "lyrics": "Sing", "server_path": "/tmp/x"}).status_code == 422
     response = client.post("/v1/music", json={**base, "lyrics": "Sing", "seed": 7})
