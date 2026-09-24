@@ -5,7 +5,7 @@ never builds llama.cpp. Manifest in :mod:`skulk.provisioning.manifest`;
 llama-server logic in :mod:`skulk.provisioning.llama_server`.
 """
 
-from skulk.provisioning.audio_cpp import prepare_audio_cpp
+from skulk.provisioning.audio_cpp import prepare_audio_cpp, rehydrate_cached_audio_cpp
 from skulk.provisioning.comfy import (
     dormant_comfy,
     ensure_comfy,
@@ -37,4 +37,5 @@ __all__ = [
     "provision_llama_server",
     "select_variant",
     "prepare_audio_cpp",
+    "rehydrate_cached_audio_cpp",
 ]

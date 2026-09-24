@@ -10,6 +10,15 @@ from skulk.facts.probe import gather_node_facts
 
 
 def _fake_server(path: Path, *, revision: str = "4d88768") -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    specs = path.parent.parent / "model_specs"
+    specs.mkdir(parents=True, exist_ok=True)
+    source = (
+        Path(__file__).resolve().parents[4]
+        / "packaging/skulk-audio-cpp-cpu/src/skulk_audio_cpp_cpu/model_specs"
+    )
+    for item in source.glob("*.json"):
+        (specs / item.name).write_bytes(item.read_bytes())
     path.write_text(
         "#!/bin/sh\n"
         'if [ "$1" = "--version" ]; then\n'
@@ -35,7 +44,7 @@ def test_installed_package_is_not_ready_until_selected(tmp_path: Path) -> None:
 
 def test_pinned_binary_probe_and_build_inventory(tmp_path: Path) -> None:
     """Ready tags and exact build identity come from the same executable."""
-    binary = _fake_server(tmp_path / "audiocpp_server")
+    binary = _fake_server(tmp_path / "bin" / "audiocpp_server")
     facts = gather_node_facts(
         env={"SKULK_AUDIO_CPP_BIN": str(binary)},
         platform="darwin",
@@ -50,9 +59,23 @@ def test_pinned_binary_probe_and_build_inventory(tmp_path: Path) -> None:
     assert inventory["audio_cpp-metal"] == expected
 
 
+def test_missing_model_specs_prevent_ready_advertisement(tmp_path: Path) -> None:
+    """A CLI-ready override must also have its pinned runtime specs."""
+    binary = _fake_server(tmp_path / "bin" / "audiocpp_server")
+    (tmp_path / "model_specs" / "ace_step.json").unlink()
+    facts = gather_node_facts(
+        env={"SKULK_AUDIO_CPP_BIN": str(binary)},
+        platform="darwin",
+        drm_root=tmp_path,
+    )
+    assert facts.audio_cpp_probe.outcome == "failed"
+    assert "SKULK_AUDIO_CPP_SPECS_DIR" in (facts.audio_cpp_probe.detail or "")
+    assert "audio_cpp" not in derive_node_backends(facts).backends
+
+
 def test_audio_cpp_inventory_rehashes_and_ignores_declared_build(tmp_path: Path) -> None:
     """A model support claim cannot match a stale or operator-invented digest."""
-    binary = _fake_server(tmp_path / "audiocpp_server")
+    binary = _fake_server(tmp_path / "bin" / "audiocpp_server")
     facts = gather_node_facts(
         env={"SKULK_AUDIO_CPP_BIN": str(binary)},
         platform="darwin",
@@ -73,7 +96,7 @@ def test_wrong_source_or_invalid_override_never_advertises_false_lane(
     tmp_path: Path,
 ) -> None:
     """Neither an unrelated build nor a declaration can fabricate readiness."""
-    binary = _fake_server(tmp_path / "audiocpp_server", revision="deadbeef")
+    binary = _fake_server(tmp_path / "bin" / "audiocpp_server", revision="deadbeef")
     bad = gather_node_facts(
         env={"SKULK_AUDIO_CPP_BIN": str(binary)},
         platform="darwin",

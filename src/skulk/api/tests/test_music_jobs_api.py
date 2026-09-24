@@ -26,8 +26,10 @@ from skulk.shared.types.chunks import MusicChunk
 from skulk.shared.types.commands import MusicGeneration, TaskCancelled
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.memory import Memory
-from skulk.shared.types.music import MusicOutputManifest
+from skulk.shared.types.music import MusicGenerationTaskParams, MusicOutputManifest
 from skulk.shared.types.profiling import MemoryUsage, NodeResources
+from skulk.shared.types.tasks import MusicGeneration as MusicGenerationTask
+from skulk.shared.types.worker.instances import InstanceId
 from skulk.utils.channels import channel
 
 MODEL = ModelId("audio-cpp/test-music")
@@ -219,6 +221,39 @@ def _packet(command_id: CommandId, kind: str, data: bytes, sequence: int) -> Out
         **({"total_chunks": 1, "data": data} if kind == "chunk" else {}),
         **({"total_chunks": 1, "total_bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()} if kind == "completed" else {}),
     })
+
+
+def test_music_output_source_tracks_only_live_local_jobs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Replicated remote TaskCreated events must not retain output-source state."""
+    api = _api(tmp_path, monkeypatch)
+    instance_id = InstanceId()
+    worker_node = NodeId("worker-node")
+    api.state = SimpleNamespace(instances={
+        instance_id: SimpleNamespace(
+            shard_assignments=SimpleNamespace(node_to_runner={worker_node: object()})
+        )
+    })
+    command_id = CommandId("music-source")
+    task = MusicGenerationTask(
+        instance_id=instance_id,
+        command_id=command_id,
+        owner_node=NodeId("other-api"),
+        task_params=MusicGenerationTaskParams(
+            model=str(MODEL), prompt="piano", seconds=20
+        ),
+    )
+    api._record_music_output_source(task)
+    assert api._music_output_sources == {}
+
+    local_task = task.model_copy(update={"owner_node": api.node_id})
+    api._record_music_output_source(local_task)
+    assert api._music_output_sources == {}  # deleted before placement
+
+    _job(api, command_id, _wav())
+    api._record_music_output_source(local_task)
+    assert api._music_output_sources == {command_id: worker_node}
 
 
 @pytest.mark.anyio

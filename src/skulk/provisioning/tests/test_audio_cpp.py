@@ -1,6 +1,7 @@
 """Pinned audio.cpp preparation, cache reuse, and offline failure behavior."""
 
 import hashlib
+import os
 import zipfile
 from collections.abc import Callable
 from pathlib import Path
@@ -9,12 +10,23 @@ import pytest
 
 from skulk.provisioning import audio_cpp
 
+_SPECS_SOURCE = (
+    Path(__file__).resolve().parents[4]
+    / "packaging/skulk-audio-cpp-cpu/src/skulk_audio_cpp_cpu/model_specs"
+)
+
 
 def _wheel(tmp_path: Path) -> tuple[audio_cpp.AudioCppWheel, Path]:
     wheel_path = tmp_path / "skulk_audio_cpp_cpu-0.8.2.post1-py3-none-macosx_15_0_arm64.whl"
     with zipfile.ZipFile(wheel_path, "w") as archive:
         for member in audio_cpp._REQUIRED_MEMBERS:  # pyright: ignore[reportPrivateUsage]
-            archive.writestr(member, b"#!/bin/sh\n" if member.endswith("audiocpp_server") else b"{}")
+            if member.endswith("audiocpp_server"):
+                payload = b"#!/bin/sh\n"
+            elif "/model_specs/" in member:
+                payload = (_SPECS_SOURCE / Path(member).name).read_bytes()
+            else:
+                payload = b"{}"
+            archive.writestr(member, payload)
     wheel = audio_cpp.AudioCppWheel(
         filename=wheel_path.name,
         sha256=hashlib.sha256(wheel_path.read_bytes()).hexdigest(),
@@ -48,6 +60,9 @@ def test_prepare_download_then_offline_cache_reuse(
     assert installed.is_file()
     monkeypatch.delenv("SKULK_AUDIO_CPP_BIN", raising=False)
     assert audio_cpp.prepare_audio_cpp(allow_download=False, environ={}) == installed
+    monkeypatch.delenv("SKULK_AUDIO_CPP_BIN", raising=False)
+    assert audio_cpp.rehydrate_cached_audio_cpp(environ={}) == installed
+    assert os.environ["SKULK_AUDIO_CPP_BIN"] == str(installed)
 
 
 def test_offline_miss_and_tampered_cache_fail_closed(
@@ -79,6 +94,40 @@ def test_explicit_override_cannot_hide_invalid_path(tmp_path: Path) -> None:
             allow_download=True,
             environ={"SKULK_AUDIO_CPP_BIN": str(tmp_path / "missing")},
         )
+
+
+def test_standalone_override_requires_pinned_model_specs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An operator binary may keep its specs outside wheel layout, but not drift."""
+    binary = tmp_path / "build" / "bin" / "audiocpp_server"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("#!/bin/sh\n")
+    binary.chmod(0o755)
+    specs = tmp_path / "source" / "model_specs"
+    specs.mkdir(parents=True)
+    for source in _SPECS_SOURCE.glob("*.json"):
+        (specs / source.name).write_bytes(source.read_bytes())
+    monkeypatch.setattr(
+        audio_cpp, "audio_cpp_wheel_for_host",
+        lambda: audio_cpp.AudioCppWheel(
+            filename="skulk_audio_cpp_cpu-0.8.2.post1-py3-none-macosx_15_0_arm64.whl",
+            sha256="a" * 64,
+        ),
+    )
+    env = {
+        "SKULK_AUDIO_CPP_BIN": str(binary),
+        "SKULK_AUDIO_CPP_SPECS_DIR": str(specs),
+    }
+    assert audio_cpp.prepare_audio_cpp(allow_download=False, environ=env) == binary
+    with pytest.raises(RuntimeError, match="paths must be absolute"):
+        audio_cpp.prepare_audio_cpp(
+            allow_download=False,
+            environ={**env, "SKULK_AUDIO_CPP_SPECS_DIR": "relative/specs"},
+        )
+    (specs / "ace_step.json").write_text("{}")
+    with pytest.raises(RuntimeError, match="differs from the pin"):
+        audio_cpp.prepare_audio_cpp(allow_download=False, environ=env)
 
 
 def test_cached_spec_mutation_invalidates_even_selected_binary(

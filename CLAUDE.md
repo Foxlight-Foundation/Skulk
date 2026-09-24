@@ -245,7 +245,12 @@ dependency: nothing optional may be load-bearing.
 
 The `audio_cpp` music backend uses a separately installed, pinned audio.cpp
 v0.8.2 server package, absent from Skulk's base environment. Node Facts probe
-its source revision and actual devices before advertising any compute lane;
+its source revision and actual devices before advertising any compute lane.
+
+Startup rehydrates a previously verified cached package without a download.
+Standalone binary overrides may use `SKULK_AUDIO_CPP_SPECS_DIR`; facts and the
+runner require both pinned model specs before readiness or load.
+
 `NodeResources.engine_builds` hashes the executable. `TextToMusic` cards have
 their own `[music]` section and require exact signed support claims. The
 `audio-cpp-engine-wheel` workflow builds the CPU-capable package for Apple

@@ -427,6 +427,13 @@ def gather_node_facts(
     if audio_cpp_binary.state == "ok":
         assert audio_cpp_binary.configured_path is not None
         audio_cpp_probe = probe_audio_cpp(audio_cpp_binary.configured_path)
+        if audio_cpp_probe.outcome == "ready":
+            from skulk.provisioning.audio_cpp import audio_cpp_model_specs
+
+            try:
+                audio_cpp_model_specs(Path(audio_cpp_binary.configured_path), environ=env)
+            except (OSError, RuntimeError) as error:
+                audio_cpp_probe = AudioCppProbe(outcome="failed", detail=str(error)[:400])
     test_video_engine = (env.get(TEST_VIDEO_ENGINE_ENV, "").strip().lower() in ("1", "true", "yes", "on"))
 
     # Probe the binary's own device list only when there is a usable binary

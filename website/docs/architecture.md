@@ -958,6 +958,11 @@ the compute lanes that its pinned executable reports through version and
 device probes; its SHA-256 is the live build identity. Music WAV bytes are
 bounded and belong on the node-addressed output media plane, outside State
 and the event log.
+Before initial facts are gathered at startup, a verified cached audio.cpp
+package may restore its executable path without contacting the package channel.
+The facts probe checks both pinned model specs; a standalone binary may name
+its specs through `SKULK_AUDIO_CPP_SPECS_DIR`. Only then can the node publish
+ready audio.cpp lanes for restored instances.
 
 Music mounting first sends a targeted `PrepareAudioCpp` command to an eligible
 worker. `AudioCppPreparationRequested` and `AudioCppPreparationCompleted`

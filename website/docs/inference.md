@@ -121,7 +121,15 @@ packages. The package contains the server, model specs, and licenses; model
 weights download separately. An offline node can use a verified cached package
 but cannot fetch one. A failed preparation returns a mount error and leaves the
 node serving its other workloads. `SKULK_AUDIO_CPP_BIN` can point to an
-operator-installed build, which must pass the same source and device probes;
+operator-installed build, which must pass the same source and device probes.
+
+`SKULK_AUDIO_CPP_SPECS_DIR` points to its v0.8.2 model specs when they are not
+beside the binary in the package layout. Skulk checks both required spec
+digests before advertising the engine or loading a model. Both override paths
+must be absolute. On restart, a
+previously installed package is restored from its verified cache without a
+download, including on offline nodes.
+
 `SKULK_AUDIO_CPP_BACKENDS` can restrict advertised compute lanes. Check node
 capability conflicts and engine build inventory when an override or native
 library is incompatible. A CPU-capable package never implies that a given

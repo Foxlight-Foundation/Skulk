@@ -25,7 +25,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from skulk.provisioning.llama_server import AUTOPROVISION_OPT_OUT_ENV
-from skulk.shared.backends import AUDIO_CPP_BIN_ENV
+from skulk.shared.backends import AUDIO_CPP_BIN_ENV, AUDIO_CPP_SPECS_DIR_ENV
 from skulk.shared.constants import SKULK_ENGINES_DIR
 
 AUDIO_CPP_SOURCE_REVISION: Final = "4d88768fbcae4e6eb3352c6ab1422dabb7d90b58"
@@ -58,6 +58,10 @@ _REQUIRED_MEMBERS: Final[frozenset[str]] = frozenset(
     }
 )
 _INSTALL_LOCK = threading.Lock()
+_MODEL_SPEC_SHA256: Final[dict[str, str]] = {
+    "ace_step.json": "e71d84adebb00d607e4d6f97a0c6043e20721c1913f5716e1274e54079a146a9",
+    "minimax_music3.json": "233f0b1e1f9601003739200b3451919925c65ecf2524f4160fa26346bb7c2fe5",
+}
 
 
 @final
@@ -153,6 +157,43 @@ def _cached_binary(root: Path, wheel: AudioCppWheel) -> Path | None:
     return binary
 
 
+def audio_cpp_model_specs(
+    binary: Path, *, environ: Mapping[str, str] | None = None
+) -> Path:
+    """Find the pinned specs for a wheel or standalone binary override."""
+    env = os.environ if environ is None else environ
+    configured = env.get(AUDIO_CPP_SPECS_DIR_ENV, "").strip()
+    directory = Path(configured) if configured else binary.parent.parent / "model_specs"
+    if not binary.is_absolute() or not directory.is_absolute():
+        raise RuntimeError("audio.cpp binary and model specs paths must be absolute")
+    for name, expected_digest in _MODEL_SPEC_SHA256.items():
+        path = directory / name
+        if not path.is_file() or _sha256(path) != expected_digest:
+            raise RuntimeError(
+                f"audio.cpp model spec {name} is missing or differs from the pin "
+                f"in {directory}; set {AUDIO_CPP_SPECS_DIR_ENV} to the v0.8.2 specs directory"
+            )
+    return directory
+
+
+def rehydrate_cached_audio_cpp(
+    *, environ: Mapping[str, str] | None = None
+) -> Path | None:
+    """Restore a previously verified package without network or a new download."""
+    env = os.environ if environ is None else environ
+    if env.get(AUDIO_CPP_BIN_ENV, "").strip():
+        return None  # an explicit operator path remains authoritative
+    try:
+        wheel = audio_cpp_wheel_for_host()
+        cached = _cached_binary(_cache_root(wheel), wheel)
+        if cached is None:
+            return None
+    except (OSError, RuntimeError):
+        return None
+    os.environ[AUDIO_CPP_BIN_ENV] = str(cached)
+    return cached
+
+
 def _download_wheel(wheel: AudioCppWheel, destination: Path) -> None:
     """Stream a bounded wheel from the engine channel and verify SHA-256."""
     total = 0
@@ -220,6 +261,7 @@ def prepare_audio_cpp(
         root = _cache_root(wheel)
         if path == root / _BINARY_MEMBER and _cached_binary(root, wheel) is None:
             raise RuntimeError("the cached audio.cpp package failed integrity verification")
+        audio_cpp_model_specs(path, environ=env)
         return path
     with _INSTALL_LOCK:
         return _prepare_pinned_audio_cpp(allow_download=allow_download, env=env)

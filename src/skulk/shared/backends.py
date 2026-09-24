@@ -169,6 +169,7 @@ COMFY_BACKENDS_ENV: Final = "SKULK_COMFY_BACKENDS"
 # executable is eligible for placement; the on-demand package preparation path
 # sets this variable after it has checked the immutable wheel and binary.
 AUDIO_CPP_BIN_ENV: Final = "SKULK_AUDIO_CPP_BIN"
+AUDIO_CPP_SPECS_DIR_ENV: Final = "SKULK_AUDIO_CPP_SPECS_DIR"
 AUDIO_CPP_BACKENDS_ENV: Final = "SKULK_AUDIO_CPP_BACKENDS"
 
 # ComfyUI compute backends Skulk advertises: NVIDIA CUDA and AMD ROCm.

@@ -167,12 +167,11 @@ class Runner(ServedConcurrentDispatch):
         if not binary_value:
             raise RuntimeError("audio.cpp package has not been prepared on this node")
         binary = Path(binary_value)
-        specs = binary.parent.parent / "model_specs"
-        if not binary.is_file() or not all(
-            (specs / f"{family}.json").is_file()
-            for family in ("ace_step", "minimax_music3")
-        ):
-            raise RuntimeError("audio.cpp package is missing its server or model specs")
+        if not binary.is_file():
+            raise RuntimeError("audio.cpp package is missing its server")
+        from skulk.provisioning.audio_cpp import audio_cpp_model_specs
+
+        specs = audio_cpp_model_specs(binary)
         model_dir = model_directory(self.card)
         from skulk.download.download_utils import resolve_artifact_file
 
