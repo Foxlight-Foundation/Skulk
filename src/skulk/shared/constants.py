@@ -218,6 +218,8 @@ SKULK_ENABLE_VIDEO_MODELS = (
 SKULK_VIDEO_INPUT_DIR = SKULK_CACHE_HOME / "video_input"
 SKULK_VIDEO_OUTPUT_DIR = SKULK_CACHE_HOME / "video_output"
 SKULK_VIDEO_STORE_DIR = SKULK_CACHE_HOME / "videos"
+SKULK_MUSIC_OUTPUT_DIR = SKULK_CACHE_HOME / "music_output"
+SKULK_MUSIC_STORE_DIR = SKULK_CACHE_HOME / "music"
 # Ceiling on finished video artifacts one API node keeps on disk; the store
 # evicts the oldest completed jobs when a new artifact would exceed it.
 SKULK_VIDEO_STORE_MAX_BYTES = int(

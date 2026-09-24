@@ -24,6 +24,7 @@ from skulk.shared.models.registry import (
 )
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.memory import Memory
+from skulk.shared.types.music import MusicJobStatus, MusicOutputManifest
 from skulk.shared.types.text_generation import ReasoningEffort
 from skulk.shared.types.video import (
     MAX_VIDEO_PROMPT_CHARS,
@@ -366,6 +367,10 @@ class ModelListModel(BaseModel):
         default=None,
         description="Optional declarative speech-serving metadata from the model card.",
     )
+    music: "MusicCapabilitySection | None" = Field(
+        default=None,
+        description="Text-to-music family, lyric rule, and generation-target bounds.",
+    )
     tooling: "ToolingCapabilitySection | None" = Field(
         default=None,
         description="Optional declarative tool-calling metadata from the model card.",
@@ -671,6 +676,37 @@ class AudioCapabilitySection(BaseModel):
             supports_reference_audio=config.supports_reference_audio,
             supports_translation=config.supports_translation,
             sample_rates=list(config.sample_rates),
+        )
+
+
+class MusicCapabilitySection(BaseModel):
+    """Public music model contract for constructing a valid POST /v1/music."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    family: Literal["minimax_music3", "ace_step_1_5"] = Field(
+        description="Music model family."
+    )
+    lyrics: Literal["required", "optional", "unsupported"] = Field(
+        description="Whether lyrics are required or permitted."
+    )
+    min_seconds: int = Field(description="Shortest generation target accepted.")
+    max_seconds: int = Field(description="Longest generation target accepted.")
+    output_format: Literal["wav"] = Field(
+        default="wav", description="Only result format in the first music release."
+    )
+
+    @classmethod
+    def from_model_card(cls, model_card: ModelCard) -> "MusicCapabilitySection | None":
+        """Project typed music truth, or None for a non-music model."""
+        config = model_card.music
+        if config is None:
+            return None
+        return cls(
+            family=config.family.value,
+            lyrics=config.lyrics.value,
+            min_seconds=config.min_seconds,
+            max_seconds=config.max_seconds,
         )
 
 
@@ -2597,6 +2633,58 @@ class VideoDeletedResponse(BaseModel, frozen=True):
     """Object type discriminator."""
     deleted: bool = True
     """Always true."""
+
+
+class MusicCreateRequest(BaseModel):
+    """Create one asynchronous text-to-music job."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    model: str = Field(min_length=1, description="Mounted text-to-music model.")
+    prompt: str = Field(min_length=1, max_length=8000, description="Musical description.")
+    lyrics: str | None = Field(default=None, min_length=1, max_length=20_000, description="Lyrics, required by MiniMax Music 3.")
+    seconds: int = Field(ge=1, le=120, description="Generation target or budget; MiniMax may yield a different duration.")
+    seed: int | None = Field(default=None, ge=0, le=2**32 - 1, description="Optional deterministic seed.")
+
+
+class MusicResource(BaseModel):
+    """Status and measured output facts for a music generation job."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    id: str = Field(description="Music job identifier.")
+    object: Literal["music"] = "music"
+    model: str = Field(description="Selected model card.")
+    prompt: str = Field(description="Submitted musical description.")
+    seconds: int = Field(description="Requested target or budget in seconds.")
+    status: MusicJobStatus = Field(description="Current job state.")
+    created_at: int = Field(description="Creation time in Unix seconds.")
+    completed_at: int | None = Field(description="Terminal time in Unix seconds.")
+    expires_at: int | None = Field(description="WAV expiry time in Unix seconds.")
+    error: str | None = Field(description="Failure detail, if any.")
+    output: MusicOutputManifest | None = Field(description="Actual WAV duration, sample rate, channels, size, and digest.")
+
+
+class MusicListResponse(BaseModel):
+    """One page of this API node's music jobs."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    object: Literal["list"] = "list"
+    data: list[MusicResource] = Field(description="Music jobs in newest-first order.")
+    first_id: str | None = Field(description="First job id on this page.")
+    last_id: str | None = Field(description="Last job id on this page.")
+    has_more: bool = Field(description="Whether another page is available.")
+
+
+class MusicDeletedResponse(BaseModel):
+    """Confirmation that a music job was deleted."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    id: str = Field(description="Deleted job identifier.")
+    object: Literal["music.deleted"] = "music.deleted"
+    deleted: bool = True
 
 
 class StartDownloadParams(CamelCaseModel):

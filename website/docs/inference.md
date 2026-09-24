@@ -1,7 +1,7 @@
 ---
 id: inference
 title: Inference and Media
-description: Choose engines and serve text, vision, embeddings, images, speech and video.
+description: Choose engines and serve text, vision, embeddings, images, speech, video and music.
 ---
 
 Skulk connects model discovery, verified artifacts, placement and inference across
@@ -21,6 +21,7 @@ automatically compatible with every model or workload.
 | Speech recognition and translation | `/v1/audio/transcriptions`, `/v1/audio/translations` | A placed STT card; translation requires declared translation support. |
 | Realtime speech | `/v1/realtime` WebSocket and Fabric speech chain | Ready realtime STT capacity; optional VAD, chat and TTS compose the voice loop. |
 | Video with optional synchronized audio | `/v1/videos` jobs | Video models enabled, a compatible video card and ComfyUI capacity. |
+| Text-to-music | `/v1/music` jobs | A mounted `TextToMusic` card, a verified audio.cpp engine build, and an exact signed support claim for that node's hardware. |
 
 See the [API guide](api-guide.md) for request schemas, streaming events, limits and
 examples. Compatibility adapters expose supported subsets of their upstream APIs;
@@ -58,6 +59,7 @@ runner limitations. A model family name alone cannot establish support. See
 | `vllm` | External GPU text serving with continuous batching and paged attention on supported CUDA/ROCm nodes. |
 | `mlx_audio` | Single-node MLX Audio TTS and STT. |
 | `comfy` | Managed headless ComfyUI for card-defined video and audio-video generation. |
+| `audio_cpp` | Separately installed, single-node audio.cpp server for card-defined music generation. |
 
 Multi-node support is engine- and model-specific. MLX sharding does not combine
 Apple and Linux GPU memory into one universal execution pool. GGUF RPC placements
@@ -105,6 +107,33 @@ marked failed. Do not treat a different API node as a transparent job replica.
 `test_video` is a separate deterministic test engine enabled by
 `SKULK_TEST_VIDEO_ENGINE`; its synthetic clips exercise the job and transport
 lifecycle and are not model-generated video.
+
+## Music jobs and engine preparation
+
+Skulk ships without the audio.cpp engine package. When you mount a music card,
+the API chooses a hardware-eligible node, asks that worker to fetch and verify
+the pinned engine package, then waits for fresh node resources before ordinary
+placement. Apple Silicon macOS, Linux `amd64`, and Linux `arm64` have CPU-capable
+packages. The package contains the server, model specs, and licenses; model
+weights download separately. An offline node can use a verified cached package
+but cannot fetch one. A failed preparation returns a mount error and leaves the
+node serving its other workloads. `SKULK_AUDIO_CPP_BIN` can point to an
+operator-installed build, which must pass the same source and device probes;
+`SKULK_AUDIO_CPP_BACKENDS` can restrict advertised compute lanes. Check node
+capability conflicts and engine build inventory when an override or native
+library is incompatible. A CPU-capable package never implies that a given
+model is qualified on that machine.
+The Linux wheels require glibc 2.35 or newer, `libstdc++.so.6`, and
+`libgomp.so.1`; the node probe reports a missing loader dependency instead of
+advertising the engine. They do not embed GPU driver libraries.
+
+The selected model runs in one supervised loopback server with one active
+generation. Submit `/v1/music`, poll the returned ID, and download its WAV
+from the accepting API node. The card controls lyric requirements and duration
+bounds. `seconds` is a target or budget; MiniMax may produce a different actual
+duration, which the completed job reports. WAV results are limited to 64 MiB
+and retained for up to 24 hours. Cancel or delete a job through the music API;
+download any result you need to keep. See [Music generation](api-guide.md#music-generation).
 
 ## Speech and application integration
 

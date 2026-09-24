@@ -108,6 +108,7 @@ async def test_state_surfaces_split_data_transport_health() -> None:
 
     assert payload["nodeResources"] == {
         "remote-management-node": {
+            "architecture": None,
             "backends": [],
             "engineBuilds": {},
             "llamaServerSettings": None,
@@ -119,6 +120,7 @@ async def test_state_surfaces_split_data_transport_health() -> None:
             "capabilityConflicts": [],
         },
         "worker-node": {
+            "architecture": None,
             "backends": ["mlx"],
             "engineBuilds": {},
             "llamaServerSettings": None,

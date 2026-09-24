@@ -63,7 +63,9 @@ from skulk.shared.types.commands import (
     ForwarderDownloadCommand,
     ImageEdits,
     ImageGeneration,
+    MusicGeneration,
     PlaceInstance,
+    PrepareAudioCpp,
     ProposeStewardAction,
     RealtimeAudioTranscription,
     RefuseInstancePlacement,
@@ -82,6 +84,8 @@ from skulk.shared.types.commands import (
 )
 from skulk.shared.types.common import CommandId, NodeId, SessionId, SystemId
 from skulk.shared.types.events import (
+    AudioCppPreparationCompleted,
+    AudioCppPreparationRequested,
     CustomModelCardAdded,
     CustomModelCardDeleted,
     Event,
@@ -127,6 +131,9 @@ from skulk.shared.types.tasks import (
 )
 from skulk.shared.types.tasks import (
     ImageGeneration as ImageGenerationTask,
+)
+from skulk.shared.types.tasks import (
+    MusicGeneration as MusicGenerationTask,
 )
 from skulk.shared.types.tasks import (
     RealtimeAudioTranscription as RealtimeAudioTranscriptionTask,
@@ -792,6 +799,38 @@ def video_generation_instances(
         )
         active = sum(
             isinstance(task, VideoGenerationTask)
+            and task.instance_id == instance.instance_id
+            and task.task_status in (TaskStatus.Pending, TaskStatus.Running)
+            for task in state.tasks.values()
+        )
+        ranked.append((not ready, active, str(instance.instance_id), instance.instance_id))
+    return [identifier for _, _, _, identifier in sorted(ranked)]
+
+
+def music_generation_instances(state: State, model_id: ModelId) -> list[InstanceId]:
+    """Rank healthy single-host music instances by readiness and active load."""
+    ranked: list[tuple[bool, int, str, InstanceId]] = []
+    for instance in state.instances.values():
+        assignments = instance.shard_assignments
+        if (
+            assignments.model_id != model_id
+            or len(assignments.runner_to_shard) != 1
+            or len(assignments.node_to_runner) != 1
+        ):
+            continue
+        shard = next(iter(assignments.runner_to_shard.values()))
+        if shard.model_card.music is None:
+            continue
+        statuses = [state.runners.get(runner) for runner in assignments.runner_to_shard]
+        if any(
+            status is None
+            or isinstance(status, (RunnerFailed, RunnerShuttingDown, RunnerShutdown))
+            for status in statuses
+        ):
+            continue
+        ready = all(isinstance(status, (RunnerReady, RunnerRunning)) for status in statuses)
+        active = sum(
+            isinstance(task, MusicGenerationTask)
             and task.instance_id == instance.instance_id
             and task.task_status in (TaskStatus.Pending, TaskStatus.Running)
             for task in state.tasks.values()
@@ -2130,6 +2169,22 @@ class Master:
                     match command:
                         case TestCommand():
                             pass
+                        case PrepareAudioCpp():
+                            if command.target_node not in self.state.topology.list_nodes():
+                                generated_events.append(AudioCppPreparationCompleted(
+                                    request_id=command.command_id,
+                                    target_node=command.target_node,
+                                    owner_node=command.owner_node,
+                                    success=False,
+                                    error="target node is not a live cluster member",
+                                ))
+                            else:
+                                generated_events.append(AudioCppPreparationRequested(
+                                    request_id=command.command_id,
+                                    target_node=command.target_node,
+                                    owner_node=command.owner_node,
+                                    expires_at=time.time() + 300,
+                                ))
                         case TextGeneration():
                             eligible = text_generation_instances(
                                 self.state, command.task_params.model
@@ -2297,6 +2352,45 @@ class Master:
                                             "No running instance of "
                                             f"{command.task_params.model} serves "
                                             f"the {requested_mode.value} mode"
+                                        ),
+                                    )
+                                )
+                        case MusicGeneration():
+                            candidates = music_generation_instances(
+                                self.state, ModelId(command.task_params.model)
+                            )
+                            task_id = TaskId()
+                            unavailable = not candidates
+                            selected_instance_id = (
+                                candidates[0]
+                                if candidates
+                                else InstanceId(str(command.command_id))
+                            )
+                            generated_events.append(
+                                TaskCreated(
+                                    task_id=task_id,
+                                    task=MusicGenerationTask(
+                                        task_id=task_id,
+                                        command_id=command.command_id,
+                                        owner_node=command.owner_node,
+                                        instance_id=selected_instance_id,
+                                        task_status=(
+                                            TaskStatus.Failed if unavailable else TaskStatus.Pending
+                                        ),
+                                        task_params=command.task_params,
+                                        trace_enabled=self.state.tracing_enabled,
+                                    ),
+                                )
+                            )
+                            self.command_task_mapping[command.command_id] = task_id
+                            if unavailable:
+                                generated_events.append(
+                                    TaskFailed(
+                                        task_id=task_id,
+                                        error_type="music_model_unavailable",
+                                        error_message=(
+                                            "No healthy single-host music instance serves "
+                                            f"{command.task_params.model}"
                                         ),
                                     )
                                 )

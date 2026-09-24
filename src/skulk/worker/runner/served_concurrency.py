@@ -32,6 +32,7 @@ from skulk.shared.types.chunks import ErrorChunk
 from skulk.shared.types.events import ChunkGenerated, Event
 from skulk.shared.types.tasks import (
     CANCEL_ALL_TASKS,
+    MusicGeneration,
     Shutdown,
     Task,
     TaskId,
@@ -65,7 +66,7 @@ _LIVENESS_POLL_S: float = 2.0
 _QUEUED_POLL_S: float = 0.1
 
 
-type GenerationTask = TextGeneration | VideoGeneration
+type GenerationTask = TextGeneration | VideoGeneration | MusicGeneration
 """The task kinds the dispatch loop admits as generations: acknowledged on
 admission, run on the pool, and given their terminal status by the loop."""
 
@@ -241,7 +242,7 @@ class ServedConcurrentDispatch:
                         continue
                     self.seen.add(task.task_id)
                     match task:
-                        case TextGeneration() | VideoGeneration() if isinstance(
+                        case TextGeneration() | VideoGeneration() | MusicGeneration() if isinstance(
                             task, self._generation_kinds
                         ) and isinstance(
                             self.current_status, (RunnerReady, RunnerRunning)

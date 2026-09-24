@@ -433,6 +433,7 @@ def _bare_api(tmp_path: Path) -> API:
     api._video_jobs = VideoJobRegistry(None)  # pyright: ignore[reportPrivateUsage]
     api._video_store = VideoStore(tmp_path)  # pyright: ignore[reportPrivateUsage]
     api._video_generation_queues = {}  # pyright: ignore[reportPrivateUsage]
+    api._music_generation_queues = {}  # pyright: ignore[reportPrivateUsage]
     api._text_generation_queues = {}  # pyright: ignore[reportPrivateUsage]
     api._image_generation_queues = {}  # pyright: ignore[reportPrivateUsage]
     api._embedding_queues = {}  # pyright: ignore[reportPrivateUsage]

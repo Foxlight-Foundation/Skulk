@@ -117,6 +117,12 @@ from skulk.api.model_search import (
     list_gguf_quant_options,
     search_hugging_face_models,
 )
+from skulk.api.music_jobs import (
+    MAX_ACTIVE_MUSIC_JOBS,
+    MAX_RETAINED_MUSIC_JOBS,
+    MusicJob,
+    MusicJobRegistry,
+)
 from skulk.api.node_health import (
     compute_node_health,
     live_data_transports,
@@ -217,6 +223,11 @@ from skulk.api.types import (
     ModelList,
     ModelListModel,
     ModelRequirements,
+    MusicCapabilitySection,
+    MusicCreateRequest,
+    MusicDeletedResponse,
+    MusicListResponse,
+    MusicResource,
     NodeStorageSummary,
     OpenUrlToolRequest,
     OpenUrlToolResponse,
@@ -359,6 +370,7 @@ from skulk.shared.constants import (
     SKULK_IMAGE_TRANSPORT_DEBUG,
     SKULK_MAX_CHUNK_SIZE,
     SKULK_MODELS_DIR,
+    SKULK_MUSIC_STORE_DIR,
     SKULK_TRACING_CACHE_DIR,
     SKULK_VIDEO_STORE_DIR,
     SKULK_VIDEO_STORE_MAX_BYTES,
@@ -382,6 +394,7 @@ from skulk.shared.models.model_cards import (
     ModelCard,
     ModelId,
     ModelTask,
+    MusicLyricRequirement,
     VideoCompanionKind,
     VideoMode,
     add_to_card_cache,
@@ -401,6 +414,7 @@ from skulk.shared.models.model_cards import (
     get_model_required_capabilities,
     preserve_generated_card_constraints,
     record_custom_card_mutation_applied,
+    registry_supported_backends_for_node,
     same_authorized_model_card,
 )
 from skulk.shared.models.registry import RegistryAdvisory
@@ -442,6 +456,7 @@ from skulk.shared.types.chunks import (
     ErrorChunk,
     GenerationChunk,
     ImageChunk,
+    MusicChunk,
     PrefillProgressChunk,
     TokenChunk,
     ToolCallChunk,
@@ -464,7 +479,9 @@ from skulk.shared.types.commands import (
     ForwarderDownloadCommand,
     ImageEdits,
     ImageGeneration,
+    MusicGeneration,
     PlaceInstance,
+    PrepareAudioCpp,
     ProposeStewardAction,
     RealtimeAudioTranscription,
     SetModelTrustApproval,
@@ -509,6 +526,7 @@ from skulk.shared.types.diagnostics import (
     VisionMediaIngressDiagnostics,
 )
 from skulk.shared.types.events import (
+    AudioCppPreparationCompleted,
     CustomModelCardAdded,
     CustomModelCardDeleted,
     Event,
@@ -526,6 +544,7 @@ from skulk.shared.types.events import (
     TraceEventData,
 )
 from skulk.shared.types.memory import Memory
+from skulk.shared.types.music import MusicGenerationTaskParams
 from skulk.shared.types.profiling import (
     MemoryUsage,
     SystemPerformanceProfile,
@@ -2069,6 +2088,9 @@ class API:
         self._video_generation_queues: dict[
             CommandId, Sender[VideoChunk | ErrorChunk]
         ] = {}
+        self._music_generation_queues: dict[
+            CommandId, Sender[MusicChunk | ErrorChunk]
+        ] = {}
         self._embedding_queues: dict[
             CommandId, Sender[EmbeddingChunk | ErrorChunk]
         ] = {}
@@ -2183,6 +2205,28 @@ class API:
                     job.id, "the job's artifacts did not survive an API restart"
                 )
         self._video_store.purge_unknown(adopted)
+        self._music_store = VideoStore(
+            SKULK_MUSIC_STORE_DIR, max_total_bytes=2 * 1024 * 1024 * 1024
+        )
+        self._music_jobs = MusicJobRegistry(SKULK_MUSIC_STORE_DIR / "jobs.json")
+        adopted_music: set[CommandId] = set()
+        for job in self._music_jobs.list(limit=MAX_RETAINED_MUSIC_JOBS):
+            if job.status != "completed" or job.output is None or job.expires_at is None:
+                continue
+            if self._music_store.adopt(
+                job.id, "music", content_type="audio/wav",
+                size_bytes=job.output.size_bytes, sha256=job.output.sha256,
+                expires_at=float(job.expires_at),
+            ):
+                adopted_music.add(job.id)
+            else:
+                self._music_store.delete(job.id)
+                self._music_jobs.invalidate(job.id, "the WAV did not survive an API restart")
+        self._music_store.purge_unknown(adopted_music)
+        self._music_job_media_deadlines: dict[CommandId, float] = {}
+        self._music_output_sources: dict[CommandId, NodeId] = {}
+        self._audio_cpp_prepare_events: dict[CommandId, anyio.Event] = {}
+        self._audio_cpp_prepare_results: dict[CommandId, AudioCppPreparationCompleted] = {}
         self._tg: TaskGroup = TaskGroup()
 
     def set_runner_diagnostics_provider(
@@ -2249,6 +2293,7 @@ class API:
         self._text_generation_queues = {}
         self._image_generation_queues = {}
         self._video_generation_queues = {}
+        self._music_generation_queues = {}
         self._embedding_queues = {}
         self._audio_speech_queues = {}
         self._audio_transcription_queues = {}
@@ -2287,6 +2332,16 @@ class API:
                 )
         self._video_job_media_deadlines = {}
         self._video_output_sources = {}
+        for command_id in list(self._music_job_media_deadlines):
+            job = self._music_jobs.get(command_id)
+            if job is not None and not job.is_terminal:
+                self._finish_music_job(command_id, "the API session reset before music delivery")
+        self._music_job_media_deadlines = {}
+        self._music_output_sources = {}
+        for waiter in self._audio_cpp_prepare_events.values():
+            waiter.set()
+        self._audio_cpp_prepare_events = {}
+        self._audio_cpp_prepare_results = {}
         self._early_output_packets = {}
         self._early_output_packet_bytes = 0
         self._pending_output_completions = {}
@@ -2826,6 +2881,36 @@ class API:
                 "job is a no-op that returns the job unchanged."
             ),
         )(self.cancel_video)
+        self.app.post(
+            "/v1/music", response_model=MusicResource, tags=["Music"],
+            summary="Create a music generation job",
+            description="Start a text-to-music job on a mounted model and return its job status immediately. The requested seconds are a target or budget; MiniMax output duration can differ.",
+        )(self.create_music)
+        self.app.get(
+            "/v1/music", response_model=MusicListResponse, tags=["Music"],
+            summary="List music generation jobs",
+            description="List this API node's recent music jobs, newest first, with cursor pagination.",
+        )(self.list_music)
+        self.app.get(
+            "/v1/music/{music_id}", response_model=MusicResource, tags=["Music"],
+            summary="Retrieve a music generation job",
+            description="Return a music job's lifecycle state and measured WAV metadata when complete.",
+        )(self.retrieve_music)
+        self.app.get(
+            "/v1/music/{music_id}/content", response_class=FileResponse, tags=["Music"],
+            summary="Download generated music",
+            description="Return the verified WAV after completion. Content expires after 24 hours.",
+        )(self.music_content)
+        self.app.post(
+            "/v1/music/{music_id}/cancel", response_model=MusicResource, tags=["Music"],
+            summary="Cancel a music generation job",
+            description="Cancel a queued or running music job and discard partial output; a terminal job is unchanged.",
+        )(self.cancel_music)
+        self.app.delete(
+            "/v1/music/{music_id}", response_model=MusicDeletedResponse, tags=["Music"],
+            summary="Delete a music generation job",
+            description="Cancel the job if needed, delete its stored WAV, and forget its record.",
+        )(self.delete_music)
         self.app.post(
             "/v1/messages",
             response_model=None,
@@ -3545,9 +3630,112 @@ class API:
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
+    async def _prepare_music_engine_for_mount(
+        self, card: ModelCard, excluded_nodes: set[NodeId]
+    ) -> None:
+        """Prepare one hardware-eligible node before ordinary signed placement."""
+
+        if ModelTask.TextToMusic not in card.tasks:
+            return
+        candidates: list[tuple[bool, int, NodeId]] = []
+        for node_id in self.state.topology.list_nodes():
+            if node_id in excluded_nodes:
+                continue
+            resources = self._telemetry_view.node_resources.get(node_id)
+            memory = self._telemetry_view.node_memory.get(node_id)
+            if resources is None or memory is None or resources.participation != "full":
+                continue
+            if memory.ram_available.in_bytes < card.storage_size.in_bytes:
+                continue
+            architecture = (resources.architecture or "").lower()
+            platform_classes = resources.hardware_classes
+            supported_host = (
+                "platform:darwin" in platform_classes and architecture == "arm64"
+            ) or (
+                "platform:linux" in platform_classes
+                and architecture in {"x86_64", "amd64", "aarch64", "arm64"}
+            )
+            if not supported_host:
+                continue
+            ready = any(
+                backend.startswith("audio_cpp-") and backend in resources.engine_builds
+                for backend in resources.backends
+            )
+            candidates.append((ready, memory.ram_available.in_bytes, node_id))
+        candidates.sort(key=lambda item: (item[0], item[1], str(item[2])), reverse=True)
+        if not candidates:
+            raise HTTPException(
+                status_code=503,
+                detail="No healthy Apple Silicon macOS or Linux amd64/arm64 node has enough available memory for this music model",
+            )
+        errors: list[str] = []
+        for ready, _memory, node_id in candidates:
+            if ready:
+                resources = self._telemetry_view.node_resources.get(node_id)
+                if resources is not None and registry_supported_backends_for_node(
+                    card,
+                    node_backends=resources.backends,
+                    engine_builds=resources.engine_builds,
+                    hardware_classes=resources.hardware_classes,
+                ):
+                    return
+                errors.append(f"{node_id}: no supported signed music claim matches its ready engine build and hardware")
+                continue
+            request_id = CommandId()
+            waiter = anyio.Event()
+            self._audio_cpp_prepare_events[request_id] = waiter
+            try:
+                await self._send(PrepareAudioCpp(
+                    command_id=request_id, target_node=node_id,
+                    owner_node=self.node_id,
+                ))
+                with anyio.move_on_after(300):
+                    await waiter.wait()
+                result = self._audio_cpp_prepare_results.pop(request_id, None)
+                if result is None:
+                    errors.append(f"{node_id}: preparation timed out or the API session reset")
+                    continue
+                if not result.success:
+                    errors.append(f"{node_id}: {result.error or 'preparation failed'}")
+                    continue
+                published = False
+                with anyio.move_on_after(30):
+                    while True:
+                        fresh = self._telemetry_view.node_resources.get(node_id)
+                        if (
+                            fresh is not None
+                            and any(
+                                backend.startswith("audio_cpp-")
+                                and backend in fresh.engine_builds
+                                for backend in fresh.backends
+                            )
+                        ):
+                            published = True
+                            if registry_supported_backends_for_node(
+                                card,
+                                node_backends=fresh.backends,
+                                engine_builds=fresh.engine_builds,
+                                hardware_classes=fresh.hardware_classes,
+                            ):
+                                return
+                            errors.append(f"{node_id}: no supported signed music claim matches the prepared build and hardware")
+                            break
+                        await anyio.sleep(0.2)
+                if not published:
+                    errors.append(f"{node_id}: ready NodeResources did not arrive")
+            finally:
+                self._audio_cpp_prepare_events.pop(request_id, None)
+                self._audio_cpp_prepare_results.pop(request_id, None)
+        raise HTTPException(
+            status_code=503,
+            detail="audio.cpp could not be prepared on an eligible node: " + "; ".join(errors),
+        )
+
     async def place_instance(self, payload: PlaceInstanceParams):
+        card = await self._load_authorized_model_card(payload.model_id)
+        await self._prepare_music_engine_for_mount(card, set(payload.excluded_nodes))
         command = PlaceInstance(
-            model_card=await self._load_authorized_model_card(payload.model_id),
+            model_card=card,
             sharding=payload.sharding,
             instance_meta=payload.instance_meta,
             min_nodes=payload.min_nodes,
@@ -9426,6 +9614,7 @@ class API:
             reasoning=ReasoningCapabilitySection.from_model_card(card),
             modalities=ModalitiesCapabilitySection.from_model_card(card),
             audio=AudioCapabilitySection.from_model_card(card),
+            music=MusicCapabilitySection.from_model_card(card),
             tooling=ToolingCapabilitySection.from_model_card(card),
             runtime=RuntimeCapabilitySection.from_model_card(card),
             video=VideoCapabilitySection.from_model_card(card),
@@ -10620,8 +10809,20 @@ class API:
 
                 if isinstance(event, TaskCreated):
                     self._record_video_output_source(event.task)
+                    self._record_music_output_source(event.task)
+                    if isinstance(event.task, task_types.MusicGeneration):
+                        self._music_jobs.update(event.task.command_id, status="in_progress")
                     self._dispatch_pending_speech_media(event.task)
                     self._dispatch_pending_vision_media(event.task)
+
+                if (
+                    isinstance(event, AudioCppPreparationCompleted)
+                    and event.owner_node == self.node_id
+                ):
+                    waiter = self._audio_cpp_prepare_events.get(event.request_id)
+                    if waiter is not None:
+                        self._audio_cpp_prepare_results[event.request_id] = event
+                        waiter.set()
 
                 # Output chunks no longer travel the event log — they arrive on
                 # the data plane (#279 Phase 2), demuxed by _apply_data.
@@ -11378,6 +11579,219 @@ class API:
         self._video_jobs.delete(job.id)
         return VideoDeletedResponse(id=video_id)
 
+    @staticmethod
+    def _music_resource(job: MusicJob) -> MusicResource:
+        """Project a persisted job onto the public music contract."""
+
+        return MusicResource(
+            id=str(job.id), model=job.model, prompt=job.prompt,
+            seconds=job.seconds, status=job.status, created_at=job.created_at,
+            completed_at=job.completed_at, expires_at=job.expires_at,
+            error=job.error, output=job.output,
+        )
+
+    def _music_job_or_404(self, music_id: str) -> MusicJob:
+        """Resolve one API-local music job or return a 404."""
+
+        job = self._music_jobs.get(CommandId(music_id))
+        if job is None:
+            raise HTTPException(status_code=404, detail="Music job not found")
+        return job
+
+    async def create_music(self, request: MusicCreateRequest) -> MusicResource:
+        """Validate model-specific inputs and dispatch an asynchronous music job."""
+
+        card = await self._load_authorized_model_card(ModelId(request.model))
+        if ModelTask.TextToMusic not in card.tasks or card.music is None:
+            raise HTTPException(status_code=400, detail=f"{request.model} is not a music model")
+        music = card.music
+        if not music.min_seconds <= request.seconds <= music.max_seconds:
+            raise HTTPException(
+                status_code=400,
+                detail=f"seconds must lie between {music.min_seconds} and {music.max_seconds} for {request.model}",
+            )
+        if music.lyrics == MusicLyricRequirement.Required and not request.lyrics:
+            raise HTTPException(status_code=400, detail="this model requires lyrics")
+        if music.lyrics == MusicLyricRequirement.Unsupported and request.lyrics is not None:
+            raise HTTPException(status_code=400, detail="this model does not accept lyrics")
+        if self._music_jobs.active_count() >= MAX_ACTIVE_MUSIC_JOBS:
+            raise HTTPException(status_code=503, detail="too many music jobs are active on this API node")
+        params = MusicGenerationTaskParams(
+            model=request.model, prompt=request.prompt, lyrics=request.lyrics,
+            seconds=request.seconds, seed=request.seed,
+        )
+        command_id = CommandId()
+        job = self._music_jobs.create(MusicJob(
+            id=command_id, model=request.model, prompt=request.prompt,
+            seconds=request.seconds, status="queued", created_at=int(time.time()),
+        ))
+        receiver = self._open_stream_queue(self._music_generation_queues, command_id)
+        self._tg.start_soon(self._drain_music_job, command_id, receiver)
+        try:
+            await self._send(MusicGeneration(
+                command_id=command_id, task_params=params, owner_node=self.node_id,
+            ))
+        except BaseException:
+            self._finish_music_job(command_id, "the generation command could not be sent")
+            raise
+        return self._music_resource(job)
+
+    async def list_music(
+        self,
+        limit: int = Query(20, ge=1, le=100),
+        after: str | None = Query(None),
+    ) -> MusicListResponse:
+        """List recent jobs with a stable last-id cursor."""
+
+        jobs = self._music_jobs.list(
+            limit=limit + 1, after=CommandId(after) if after is not None else None,
+        )
+        page = [self._music_resource(job) for job in jobs[:limit]]
+        return MusicListResponse(
+            data=page, first_id=page[0].id if page else None,
+            last_id=page[-1].id if page else None, has_more=len(jobs) > limit,
+        )
+
+    async def retrieve_music(self, music_id: str) -> MusicResource:
+        """Return current status and measured output metadata."""
+
+        return self._music_resource(self._music_job_or_404(music_id))
+
+    async def music_content(self, music_id: str) -> FileResponse:
+        """Return a completed, verified WAV from this API node's 24-hour store."""
+
+        job = self._music_job_or_404(music_id)
+        if job.status != "completed":
+            raise HTTPException(status_code=409, detail=f"music job is {job.status}")
+        stored = self._music_store.get(job.id, "music")
+        if stored is None:
+            raise HTTPException(status_code=404, detail="Music content not found or expired")
+        return FileResponse(
+            path=stored.file_path, media_type="audio/wav", filename=f"{music_id}.wav",
+        )
+
+    async def cancel_music(self, music_id: str) -> MusicResource:
+        """Cancel a live music job and its in-progress transfer."""
+
+        job = self._music_job_or_404(music_id)
+        if not job.is_terminal:
+            await self._cancel_music_job(job.id)
+        return self._music_resource(self._music_job_or_404(music_id))
+
+    async def delete_music(self, music_id: str) -> MusicDeletedResponse:
+        """Cancel, remove stored WAV, and forget the job."""
+
+        job = self._music_job_or_404(music_id)
+        if not job.is_terminal:
+            await self._cancel_music_job(job.id)
+        self._music_store.delete(job.id)
+        self._music_jobs.delete(job.id)
+        return MusicDeletedResponse(id=music_id)
+
+    async def _cancel_music_job(self, command_id: CommandId) -> None:
+        """Stop the command and tell a producing worker to abort any WAV transfer."""
+
+        queue = self._music_generation_queues.get(command_id)
+        if queue is not None:
+            await self._send(TaskCancelled(cancelled_command_id=command_id))
+            self._cancelled_command_ids.add(command_id)
+            queue.close()
+        job = self._music_jobs.get(command_id)
+        source = self._music_output_sources.get(command_id)
+        upload_started = job is not None and (
+            job.render_finished or self._music_store.has_open_assembly(command_id, "music")
+        )
+        self._finish_music_job(command_id, "the job was cancelled", cancelled=True)
+        if upload_started and job is not None and source is not None:
+            await self._send_output_media_terminal(OutputMediaPacket(
+                source_node=self.node_id, target_node=source,
+                command_id=command_id, model=ModelId(job.model), purpose="music",
+                sequence=0, kind="cancelled",
+            ))
+
+    def _release_music_job_buffers(self, command_id: CommandId) -> None:
+        """Drop music transfer deadlines and held out-of-order media frames."""
+
+        self._music_job_media_deadlines.pop(command_id, None)
+        self._music_output_sources.pop(command_id, None)
+        key = (command_id, "music")
+        for held in self._early_output_packets.pop(key, ()):
+            self._early_output_packet_bytes = max(
+                0, self._early_output_packet_bytes - len(held.data)
+            )
+        self._pending_output_completions.pop(key, None)
+
+    def _finish_music_job(
+        self, command_id: CommandId, error: str, *, cancelled: bool = False
+    ) -> MusicJob | None:
+        """End a failed or cancelled music job and discard all partial output."""
+
+        job = self._music_jobs.get(command_id)
+        if job is None or job.is_terminal:
+            return job
+        self._music_store.delete(command_id)
+        self._release_music_job_buffers(command_id)
+        job = self._music_jobs.fail(command_id, error, cancelled=cancelled)
+        self._close_command_queue(command_id)
+        return job
+
+    async def _drain_music_job(
+        self, command_id: CommandId, receiver: Receiver[MusicChunk | ErrorChunk]
+    ) -> None:
+        """Fold terminal DATA frames into a music job; media arrives separately."""
+
+        try:
+            with receiver:
+                async for chunk in receiver:
+                    if isinstance(chunk, ErrorChunk):
+                        self._finish_music_job(
+                            command_id, chunk.error_message,
+                            cancelled=command_id in self._cancelled_command_ids,
+                        )
+                        break
+                    if chunk.finish_reason == "error" or chunk.output is None:
+                        self._finish_music_job(
+                            command_id, chunk.error_message or "music generation ended without output",
+                        )
+                        break
+                    self._music_jobs.update(
+                        command_id, status="in_progress", render_finished=True,
+                        output=chunk.output,
+                    )
+                    self._music_job_media_deadlines.setdefault(
+                        command_id, time.monotonic() + _VIDEO_JOB_MEDIA_TIMEOUT_SECONDS,
+                    )
+                    self._settle_music_job(command_id)
+                    break
+        finally:
+            self._music_generation_queues.pop(command_id, None)
+            job = self._music_jobs.get(command_id)
+            if job is not None and not job.is_terminal and not job.render_finished:
+                self._finish_music_job(command_id, "music stream ended without output")
+
+    def _settle_music_job(self, command_id: CommandId) -> None:
+        """Mark complete only when the measured manifest matches verified media."""
+
+        job = self._music_jobs.get(command_id)
+        if job is None or job.is_terminal or job.output is None:
+            return
+        stored = self._music_store.get(command_id, "music")
+        if stored is None:
+            return
+        if (
+            stored.size_bytes != job.output.size_bytes
+            or stored.sha256 != job.output.sha256
+            or stored.content_type != "audio/wav"
+        ):
+            self._finish_music_job(command_id, "music WAV does not match its manifest")
+            return
+        self._music_jobs.update(
+            command_id, media_delivered=True, expires_at=int(stored.expires_at),
+        )
+        settled = self._music_jobs.settle(command_id)
+        if settled is not None and settled.is_terminal:
+            self._release_music_job_buffers(command_id)
+
     async def _cancel_video_job(self, command_id: CommandId) -> None:
         """Stop one live job in whichever phase it is in.
 
@@ -11735,6 +12149,11 @@ class API:
                     "cancelled",
                 ):
                     continue
+                if packet.purpose == "music":
+                    await self._receive_music_output_media(packet)
+                    continue
+                if packet.purpose not in _VIDEO_ARTIFACT_PURPOSES:
+                    continue
                 command_id = packet.command_id
                 job = self._video_jobs.get(command_id)
                 if job is None or job.is_terminal or packet.model != ModelId(job.model):
@@ -11780,6 +12199,99 @@ class API:
                         self._early_output_packet_bytes += len(packet.data)
                     continue
                 await self._apply_output_media_packet(packet)
+
+    async def _receive_music_output_media(self, packet: OutputMediaPacket) -> None:
+        """Bound and order a music transfer before applying its media frame."""
+
+        command_id = packet.command_id
+        job = self._music_jobs.get(command_id)
+        if job is None or job.is_terminal or packet.model != ModelId(job.model):
+            return
+        source = self._music_output_sources.get(command_id)
+        if source is not None and packet.source_node != source:
+            logger.warning(f"Ignoring music output for {command_id} from unplaced node")
+            return
+        key = (command_id, "music")
+        if packet.kind in ("chunk", "completed") and not self._music_store.has_open_assembly(
+            command_id, "music"
+        ):
+            early = self._early_output_packets.setdefault(key, [])
+            if (
+                len(early) >= _OUTPUT_MEDIA_EARLY_PACKETS
+                or self._early_output_packet_bytes + len(packet.data)
+                > _OUTPUT_MEDIA_EARLY_BYTES_TOTAL
+            ):
+                self._finish_music_job(command_id, "music output arrived before its open frame")
+                await self._send_output_media_terminal(
+                    packet.transport_failure("output stream opened too late")
+                )
+            else:
+                early.append(packet)
+                self._early_output_packet_bytes += len(packet.data)
+            return
+        await self._apply_music_output_media_packet(packet)
+
+    async def _apply_music_output_media_packet(self, packet: OutputMediaPacket) -> None:
+        """Store a verified WAV and acknowledge its producing worker."""
+
+        command_id = packet.command_id
+        key = (command_id, "music")
+        try:
+            if packet.kind == "opened":
+                assert packet.total_bytes is not None
+                assert packet.total_chunks is not None
+                assert packet.content_type is not None
+                self._music_job_media_deadlines.setdefault(
+                    command_id, time.monotonic() + _VIDEO_JOB_MEDIA_TIMEOUT_SECONDS,
+                )
+                evicted = self._music_store.open_assembly(
+                    command_id, "music", content_type=packet.content_type,
+                    total_bytes=packet.total_bytes, total_chunks=packet.total_chunks,
+                    keep=self._music_jobs.active_ids(),
+                )
+                for stale in evicted:
+                    self._music_jobs.mark_expired(stale)
+                held_frames = sorted(
+                    self._early_output_packets.pop(key, []), key=lambda item: item.sequence,
+                )
+                for held in held_frames:
+                    self._early_output_packet_bytes = max(
+                        0, self._early_output_packet_bytes - len(held.data)
+                    )
+                for held in held_frames:
+                    await self._apply_music_output_media_packet(held)
+            elif packet.kind == "chunk":
+                self._music_store.append(command_id, "music", packet.sequence, packet.data)
+                completion = self._pending_output_completions.get(key)
+                if completion is not None and self._music_store.assembly_complete(
+                    command_id, "music"
+                ):
+                    self._pending_output_completions.pop(key, None)
+                    await self._apply_music_output_media_packet(completion)
+            elif packet.kind == "completed":
+                assert packet.sha256 is not None
+                assert packet.total_chunks is not None
+                if self._music_store.has_open_assembly(
+                    command_id, "music"
+                ) and not self._music_store.assembly_complete(command_id, "music"):
+                    self._pending_output_completions[key] = packet
+                    return
+                stored = self._music_store.commit(
+                    command_id, "music", sha256=packet.sha256,
+                    total_chunks=packet.total_chunks,
+                )
+                self._music_jobs.update(command_id, expires_at=int(stored.expires_at))
+                self._settle_music_job(command_id)
+                await self._send_output_media_terminal(packet.accepted())
+            elif packet.kind == "transport_failed":
+                self._finish_music_job(
+                    command_id, packet.error_message or "music output delivery failed"
+                )
+        except (ValueError, OSError) as error:
+            self._finish_music_job(command_id, f"music output rejected: {error}")
+            await self._send_output_media_terminal(
+                packet.transport_failure(str(error)[:1024])
+            )
 
     async def _apply_output_media_packet(self, packet: OutputMediaPacket) -> None:
         """Apply one lifecycle frame to the job's assembly and settlement."""
@@ -11883,6 +12395,18 @@ class API:
         if len(nodes) == 1:
             self._video_output_sources[task.command_id] = nodes[0]
 
+    def _record_music_output_source(self, task: task_types.Task) -> None:
+        """Remember the single placed node permitted to deliver a music WAV."""
+
+        if not isinstance(task, task_types.MusicGeneration):
+            return
+        instance = self.state.instances.get(task.instance_id)
+        if instance is None:
+            return
+        nodes = tuple(instance.shard_assignments.node_to_runner)
+        if len(nodes) == 1:
+            self._music_output_sources[task.command_id] = nodes[0]
+
     def _video_output_source(self, command_id: CommandId) -> NodeId | None:
         """Return the single node the master placed a video command on."""
 
@@ -11916,6 +12440,16 @@ class API:
                     "the finished video was never delivered to the API node",
                 )
             self._video_store.cleanup_expired()
+            for command_id, deadline in list(self._music_job_media_deadlines.items()):
+                if deadline > now:
+                    continue
+                self._music_job_media_deadlines.pop(command_id, None)
+                job = self._music_jobs.get(command_id)
+                if job is not None and not job.is_terminal:
+                    self._finish_music_job(
+                        command_id, "the finished music was never delivered to the API node"
+                    )
+            self._music_store.cleanup_expired()
 
     async def _apply_vision_media_transport(self) -> None:
         """Apply worker verification or failure to the source image request."""
@@ -12307,6 +12841,7 @@ class API:
             self._text_generation_queues,
             self._image_generation_queues,
             self._video_generation_queues,
+            self._music_generation_queues,
             self._embedding_queues,
             self._audio_speech_queues,
             self._audio_transcription_queues,
@@ -12345,6 +12880,16 @@ class API:
                 await queue.send(chunk)
             except (BrokenResourceError, ClosedResourceError):
                 self._video_generation_queues.pop(command_id, None)
+        if queue := self._music_generation_queues.get(command_id, None):
+            if not isinstance(chunk, (MusicChunk, ErrorChunk)):
+                logger.warning(
+                    f"Dropping unsupported {type(chunk).__name__} for music command {command_id}"
+                )
+                return
+            try:
+                await queue.send(chunk)
+            except (BrokenResourceError, ClosedResourceError):
+                self._music_generation_queues.pop(command_id, None)
         if queue := self._text_generation_queues.get(command_id, None):
             if not isinstance(
                 chunk, (TokenChunk, ErrorChunk, ToolCallChunk, PrefillProgressChunk)
@@ -12431,6 +12976,7 @@ class API:
                 task_types.ImageGeneration,
                 task_types.ImageEdits,
                 task_types.VideoGeneration,
+                task_types.MusicGeneration,
                 task_types.TextEmbedding,
                 task_types.SpeechSynthesis,
                 task_types.AudioTranscription,
@@ -12461,6 +13007,7 @@ class API:
             self._text_generation_queues,
             self._image_generation_queues,
             self._video_generation_queues,
+            self._music_generation_queues,
             self._embedding_queues,
             self._audio_speech_queues,
             self._audio_transcription_queues,
@@ -12479,6 +13026,14 @@ class API:
             # job is ended here instead.
             if self._video_jobs.get(task.command_id) is not None:
                 self._finish_video_job(
+                    task.command_id,
+                    error_message,
+                    cancelled=task.task_status == task_types.TaskStatus.Cancelled,
+                )
+            return
+        if isinstance(task, task_types.MusicGeneration) and not delivered:
+            if self._music_jobs.get(task.command_id) is not None:
+                self._finish_music_job(
                     task.command_id,
                     error_message,
                     cancelled=task.task_status == task_types.TaskStatus.Cancelled,

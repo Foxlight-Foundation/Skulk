@@ -86,6 +86,7 @@ _BUILTIN_CARD_DIRS = [
     Path(RESOURCES_DIR) / "image_model_cards",
     Path(RESOURCES_DIR) / "embedding_model_cards",
     Path(RESOURCES_DIR) / "speech_model_cards",
+    Path(RESOURCES_DIR) / "music_model_cards",
     Path(RESOURCES_DIR) / "video_model_cards",
     # Cards the synthetic test engines serve. They name no downloadable
     # artifact, so they live apart from the corpus the signed registry
@@ -1037,6 +1038,7 @@ class ModelTask(str, Enum):
     TextToSpeech = "TextToSpeech"
     SpeechToText = "SpeechToText"
     SpeechTranslation = "SpeechTranslation"
+    TextToMusic = "TextToMusic"
     TextToVideo = "TextToVideo"
     ImageToVideo = "ImageToVideo"
     ReferenceToVideo = "ReferenceToVideo"
@@ -1066,6 +1068,94 @@ class AudioCardKind(str, Enum):
 
     TextToSpeech = "tts"
     SpeechToText = "stt"
+
+
+class MusicModelFamily(str, Enum):
+    """Music-generation family whose options are translated by its engine adapter."""
+
+    MiniMaxMusic3 = "minimax_music3"
+    AceStep15 = "ace_step_1_5"
+
+
+class MusicLyricRequirement(str, Enum):
+    """Whether a music model accepts or requires a caller's lyrics."""
+
+    Required = "required"
+    Optional = "optional"
+    Unsupported = "unsupported"
+
+
+class MusicCardConfig(CamelCaseModel):
+    """Model truth for bounded text-to-music generation, separate from speech."""
+
+    family: MusicModelFamily
+    """Architecture family used by the runner's fixed option translator."""
+    lyrics: MusicLyricRequirement
+    """Whether lyrics are required, permitted, or unsupported."""
+    min_seconds: PositiveInt
+    """Shortest generation target accepted for this artifact."""
+    max_seconds: PositiveInt
+    """Longest generation target accepted for this artifact, at most 120 seconds."""
+    language_model_gguf: str | None = None
+    """MiniMax language-model component selected by this exact artifact."""
+    rvq_depth_decoder_gguf: str | None = None
+    """MiniMax RVQ decoder component selected by this exact artifact."""
+    flow_transformer_gguf: str | None = None
+    """MiniMax flow-transformer component selected by this exact artifact."""
+
+    @field_validator(
+        "language_model_gguf", "rvq_depth_decoder_gguf", "flow_transformer_gguf"
+    )
+    @classmethod
+    def _validate_component_path(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        path = PurePosixPath(value)
+        if path.is_absolute() or value != path.as_posix() or ".." in path.parts:
+            raise ValueError("music component paths must be canonical and relative")
+        return value
+
+    @field_validator("family", mode="before")
+    @classmethod
+    def _coerce_family(cls, value: str | MusicModelFamily) -> MusicModelFamily:
+        return value if isinstance(value, MusicModelFamily) else MusicModelFamily(value)
+
+    @field_validator("lyrics", mode="before")
+    @classmethod
+    def _coerce_lyrics(
+        cls, value: str | MusicLyricRequirement
+    ) -> MusicLyricRequirement:
+        return (
+            value
+            if isinstance(value, MusicLyricRequirement)
+            else MusicLyricRequirement(value)
+        )
+
+    @model_validator(mode="after")
+    def _validate_bounds(self) -> "MusicCardConfig":
+        if self.min_seconds > self.max_seconds:
+            raise ValueError("music min_seconds cannot exceed max_seconds")
+        if self.max_seconds > 120:
+            raise ValueError("music max_seconds cannot exceed 120")
+        if (
+            self.family == MusicModelFamily.MiniMaxMusic3
+            and self.lyrics != MusicLyricRequirement.Required
+        ):
+            raise ValueError("MiniMax Music 3 requires lyrics")
+        components = (
+            self.language_model_gguf,
+            self.rvq_depth_decoder_gguf,
+            self.flow_transformer_gguf,
+        )
+        if self.family == MusicModelFamily.MiniMaxMusic3 and any(
+            component is None for component in components
+        ):
+            raise ValueError("MiniMax Music 3 requires three selected GGUF components")
+        if self.family == MusicModelFamily.AceStep15 and any(
+            component is not None for component in components
+        ):
+            raise ValueError("ACE-Step does not use MiniMax components")
+        return self
 
 
 class AudioVoiceConfig(FrozenModel):
@@ -2419,7 +2509,7 @@ class ModelCard(CamelCaseModel):
     tasks: list[ModelTask]
     """The task types this model serves (``TextGeneration``, ``TextEmbedding``,
     ``TextToImage``, ``ImageToImage``, ``TextToSpeech``, ``SpeechToText``,
-    ``SpeechTranslation``, ``TextToVideo``, ``ImageToVideo``,
+    ``SpeechTranslation``, ``TextToMusic``, ``TextToVideo``, ``ImageToVideo``,
     ``ReferenceToVideo``); selects which runner handles it."""
     components: list[ComponentInfo] | None = None
     """For multi-component models (e.g. a diffusion stack), the per-component
@@ -2500,6 +2590,8 @@ class ModelCard(CamelCaseModel):
     """Optional speech-serving configuration (TTS/STT kind, audio formats,
     streaming/realtime support, voices, reference audio, translation, sample
     rates); ``None`` for non-speech models."""
+    music: MusicCardConfig | None = None
+    """Text-to-music family, lyric requirement, and qualified target-duration bounds."""
     video: VideoCardConfig | None = None
     """Optional audio-video generation contract (modes, duration and frame
     grid, canvas rules, audio output, reference bounds, sampling defaults,
@@ -2716,6 +2808,25 @@ class ModelCard(CamelCaseModel):
             raise ValueError(
                 "placement.max_pipeline_split_layer must be smaller than n_layers"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_music_task(self) -> "ModelCard":
+        """Require the music task and its typed section to agree."""
+        has_task = ModelTask.TextToMusic in self.tasks
+        if has_task != (self.music is not None):
+            raise ValueError("TextToMusic requires a [music] section and vice versa")
+        if self.music is not None and self.audio is not None:
+            raise ValueError("music and speech [audio] sections must remain separate")
+        if self.music is not None and self.artifact_bundle is not None:
+            bundle_paths = {item.path for item in self.artifact_bundle.files}
+            selected = (
+                self.music.language_model_gguf,
+                self.music.rvq_depth_decoder_gguf,
+                self.music.flow_transformer_gguf,
+            )
+            if any(path is not None and path not in bundle_paths for path in selected):
+                raise ValueError("selected music components must be in artifact_bundle")
         return self
 
     @model_validator(mode="after")

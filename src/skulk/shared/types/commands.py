@@ -19,6 +19,7 @@ from skulk.shared.types.audio import (
 from skulk.shared.types.chunks import InputChunk
 from skulk.shared.types.common import CommandId, NodeId, SystemId
 from skulk.shared.types.embedding import TextEmbeddingTaskParams
+from skulk.shared.types.music import MusicGenerationTaskParams
 from skulk.shared.types.steward_actions import (
     StewardActionProposal,
     StewardActionProposalId,
@@ -77,6 +78,20 @@ class VideoGeneration(BaseCommand):
     owner_node: NodeId | None = None
     """API node that owns the job, receives progress on DATA, and receives the
     finished container on OUTPUT_MEDIA."""
+
+
+class MusicGeneration(BaseCommand):
+    """Command to generate one WAV on a mounted music model."""
+
+    task_params: MusicGenerationTaskParams
+    owner_node: NodeId
+
+
+class PrepareAudioCpp(BaseCommand):
+    """Ask one chosen worker to prepare its pinned music engine package."""
+
+    target_node: NodeId
+    owner_node: NodeId
 
 
 class TextEmbedding(BaseCommand):
@@ -335,6 +350,8 @@ Command = (
     | ImageGeneration
     | ImageEdits
     | VideoGeneration
+    | MusicGeneration
+    | PrepareAudioCpp
     | TextEmbedding
     | SpeechSynthesis
     | AudioTranscription

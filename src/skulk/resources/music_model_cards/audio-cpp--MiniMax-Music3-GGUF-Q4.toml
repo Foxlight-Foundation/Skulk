@@ -1,0 +1,105 @@
+# MiniMax Music 3 Q4: exact 13-file audio.cpp bundle from the immutable Hub revision.
+# Candidate only; public offering and support claims require legal and hardware qualification.
+model_id = "audio-cpp/MiniMax-Music3-GGUF-Q4"
+source_repository = "audio-cpp/MiniMax-Music3-GGUF"
+source_revision = "9634a1e1364f94f1ac85a38c114ef105c678f824"
+gguf_file = "language_model_q4_0.gguf"
+n_layers = 1
+hidden_size = 1
+supports_tensor = false
+tasks = ["TextToMusic"]
+family = "minimax_music3"
+quantization = "Q4_0"
+base_model = "MiniMaxAI/MiniMax-Music3"
+trust_remote_code = false
+
+[storage_size]
+in_bytes = 8446096592
+
+[license]
+name = "MiniMax-Music3 Community License"
+url = "https://huggingface.co/MiniMaxAI/MiniMax-Music3/raw/main/LICENSE"
+notice = "Product and legal review required before public offering; attribution, commercial threshold, third-party service, safeguard, and generated-content terms apply."
+display_name = "MiniMax-Music3"
+
+[placement]
+compatible_backends = []
+backend_preference = ["audio_cpp-cuda", "audio_cpp-metal", "audio_cpp-rocm", "audio_cpp-vulkan", "audio_cpp-cpu"]
+
+[music]
+family = "minimax_music3"
+lyrics = "required"
+min_seconds = 10
+max_seconds = 60
+language_model_gguf = "language_model_q4_0.gguf"
+rvq_depth_decoder_gguf = "rvq_depth_decoder_q8_0.gguf"
+flow_transformer_gguf = "transformer_q4_0.gguf"
+
+[artifact_bundle]
+bundle_id = "bundle_3cvs4h75iypgio6jzr7hqsf73mafprdtug2nbzvwkb4lqundl2aq"
+download_size = 8446096592
+
+[[artifact_bundle.files]]
+path = "condition_encoder.gguf"
+size_bytes = 100677184
+object_id = "sha256:7f9414097b1f6ad154dae08ed69ce88fd0db6d7fd422f4d1a847216ca28ba1bf"
+
+[[artifact_bundle.files]]
+path = "config.json"
+size_bytes = 107
+object_id = "git-sha1:2b673e6ef0e8bc328be6af1a8cedfae50e89250a"
+
+[[artifact_bundle.files]]
+path = "config/condition_encoder.json"
+size_bytes = 292
+object_id = "git-sha1:a51f209c4f914061b5b7ff2272c05cbce4764e87"
+
+[[artifact_bundle.files]]
+path = "config/language_model.json"
+size_bytes = 1596
+object_id = "git-sha1:ff464e670afc4b54ccd7ccab9e45f0b8ce81c950"
+
+[[artifact_bundle.files]]
+path = "config/rvq_depth_decoder.json"
+size_bytes = 274
+object_id = "git-sha1:3b9e35a49f6cf4bf168753eebf7382c805528468"
+
+[[artifact_bundle.files]]
+path = "config/transformer.json"
+size_bytes = 294
+object_id = "git-sha1:5e8073e8558b209170cfc1d3b191f68d85d61252"
+
+[[artifact_bundle.files]]
+path = "config/vocoder.json"
+size_bytes = 251
+object_id = "git-sha1:bc056a8465fd8116f4df46a70f203c6df1c6ad4d"
+
+[[artifact_bundle.files]]
+path = "language_model_q4_0.gguf"
+size_bytes = 6006866496
+object_id = "sha256:6f621dd636320403c03e9f755b3e2047f5754d055e0fcc6c0c444ae52ffbfa90"
+
+[[artifact_bundle.files]]
+path = "rvq_depth_decoder_q8_0.gguf"
+size_bytes = 714028960
+object_id = "sha256:d5b7495fb1a7845abfeab13df829510de442fd4ea0fd55467fe9895fe8ec5db6"
+
+[[artifact_bundle.files]]
+path = "tokenizer/tokenizer.json"
+size_bytes = 11423801
+object_id = "sha256:b1537fa9e59a537276ecbc2e12d0438edff635a1f4a4948e679774b5feb3e610"
+
+[[artifact_bundle.files]]
+path = "tokenizer/tokenizer_config.json"
+size_bytes = 377
+object_id = "git-sha1:9158804bfff9329ed49a867d691553315871282d"
+
+[[artifact_bundle.files]]
+path = "transformer_q4_0.gguf"
+size_bytes = 1396392768
+object_id = "sha256:18d3b2461a2988f59e197ccf05dc3931663099290b42443baa2a30e4fd15e506"
+
+[[artifact_bundle.files]]
+path = "vocoder.gguf"
+size_bytes = 216704192
+object_id = "sha256:0a768b596516678fc850da1aff36556b8bc6bafcb7b42bc7ba7cb46cb9927a42"

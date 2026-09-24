@@ -6,6 +6,8 @@ from loguru import logger
 
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.events import (
+    AudioCppPreparationCompleted,
+    AudioCppPreparationRequested,
     ChunkGenerated,
     CustomModelCardAdded,
     CustomModelCardDeleted,
@@ -83,6 +85,8 @@ def event_apply(event: Event, state: State) -> State:
     match event:
         case (
             TestEvent()
+            | AudioCppPreparationRequested()
+            | AudioCppPreparationCompleted()
             | ChunkGenerated()
             | TaskAcknowledged()
             | InputChunkReceived()

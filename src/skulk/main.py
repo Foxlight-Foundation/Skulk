@@ -936,6 +936,7 @@ class Node:
                 download_command_sender=router.sender(topics.DOWNLOAD_COMMANDS),
                 telemetry_sender=router.telemetry_sender(),
                 telemetry_view=telemetry_view,
+                offline=args.offline,
                 api_available=args.spawn_api,
                 data_transport="zenoh" if _zenoh_on else "gossipsub",
                 zenoh_peer_sampler=zenoh_peer_sampler,
@@ -1733,6 +1734,7 @@ class Node:
                             # management/edge node as eligible (#279 review).
                             telemetry_sender=self.router.telemetry_sender(),
                             telemetry_view=self.telemetry_view,
+                            offline=self.offline,
                             api_available=self.api is not None,
                             data_transport=(
                                 "zenoh" if self.data_plane_zenoh else "gossipsub"

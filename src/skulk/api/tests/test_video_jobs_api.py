@@ -122,6 +122,7 @@ def _make_api(monkeypatch: pytest.MonkeyPatch) -> Any:
     api._text_generation_queues = {}
     api._image_generation_queues = {}
     api._video_generation_queues = {}
+    api._music_generation_queues = {}
     api._embedding_queues = {}
     api._audio_speech_queues = {}
     api._audio_transcription_queues = {}

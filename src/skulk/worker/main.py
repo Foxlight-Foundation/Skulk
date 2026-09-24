@@ -40,6 +40,7 @@ from skulk.shared.apply import apply
 from skulk.shared.constants import (
     SKULK_IMAGE_TRANSPORT_DEBUG,
     SKULK_MAX_CHUNK_SIZE,
+    SKULK_MUSIC_OUTPUT_DIR,
     SKULK_VIDEO_INPUT_DIR,
     SKULK_VIDEO_OUTPUT_DIR,
 )
@@ -67,7 +68,7 @@ from skulk.shared.models.remote_code_approval import (
 )
 from skulk.shared.types.audio import RealtimeAudioInputFrame
 from skulk.shared.types.capability_nodes import CapabilityNodeSummary
-from skulk.shared.types.chunks import DataChunk, InputImageChunk, VideoChunk
+from skulk.shared.types.chunks import DataChunk, InputImageChunk, MusicChunk, VideoChunk
 from skulk.shared.types.commands import (
     FailInstance,
     ForwarderCommand,
@@ -83,6 +84,8 @@ from skulk.shared.types.diagnostics import (
     VisionMediaIngressDiagnostics,
 )
 from skulk.shared.types.events import (
+    AudioCppPreparationCompleted,
+    AudioCppPreparationRequested,
     CustomModelCardAdded,
     CustomModelCardDeleted,
     Event,
@@ -103,7 +106,7 @@ from skulk.shared.types.events import (
 )
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.multiaddr import Multiaddr
-from skulk.shared.types.profiling import MemoryUsage, NodeDataTransport
+from skulk.shared.types.profiling import MemoryUsage, NodeDataTransport, NodeResources
 from skulk.shared.types.state import State
 from skulk.shared.types.tasks import (
     AudioTranscription,
@@ -759,7 +762,7 @@ async def _provision_test_video_engine() -> None:
 def _purge_stale_video_directories() -> None:
     """Delete task-local video media left behind by an earlier worker process."""
 
-    for root in (SKULK_VIDEO_INPUT_DIR, SKULK_VIDEO_OUTPUT_DIR):
+    for root in (SKULK_VIDEO_INPUT_DIR, SKULK_VIDEO_OUTPUT_DIR, SKULK_MUSIC_OUTPUT_DIR):
         try:
             entries = list(root.iterdir())
         except OSError:
@@ -919,6 +922,7 @@ class Worker:
         download_command_sender: Sender[ForwarderDownloadCommand],
         telemetry_sender: TelemetrySender | Sender[NodeTelemetry] | None = None,
         telemetry_view: TelemetryView | None = None,
+        offline: bool = False,
         api_available: bool = True,
         data_transport: NodeDataTransport = "gossipsub",
         zenoh_peer_sampler: ZenohPeerSampler | None = None,
@@ -944,6 +948,7 @@ class Worker:
         self.command_sender = command_sender
         self.download_command_sender = download_command_sender
         self._telemetry_sender = telemetry_sender
+        self._offline = offline
         self._api_available = api_available
         self._data_transport: NodeDataTransport = data_transport
         # Data-plane connectivity sampler threaded into the InfoGatherer so
@@ -1071,6 +1076,58 @@ class Worker:
         )
         self._model_trust_failures_handled: set[InstanceId] = set()
         self._stopped: anyio.Event = anyio.Event()
+
+    async def _prepare_audio_cpp_engine(
+        self, request: AudioCppPreparationRequested
+    ) -> None:
+        """Prepare and verify the chosen node's pinned engine, then publish facts."""
+
+        if request.expires_at <= time.time():
+            return
+        from skulk.facts import refresh_node_facts
+        from skulk.provisioning.audio_cpp import prepare_audio_cpp
+
+        success = False
+        error: str | None = None
+        try:
+            await to_thread.run_sync(
+                lambda: prepare_audio_cpp(allow_download=not self._offline)
+            )
+            await to_thread.run_sync(refresh_node_facts)
+            peers = (
+                await self._zenoh_peer_sampler.advertised_count()
+                if self._zenoh_peer_sampler is not None
+                else None
+            )
+            resources = await NodeResources.gather(
+                api_available=self._api_available,
+                data_transport=self._data_transport,
+                zenoh_connected_peers=peers,
+            )
+            if "audio_cpp-cpu" not in resources.backends:
+                details = "; ".join(
+                    conflict.message for conflict in resources.capability_conflicts
+                    if "audio.cpp" in conflict.message.lower()
+                )
+                raise RuntimeError(details or "prepared audio.cpp did not pass node facts probe")
+            if "audio_cpp-cpu" not in resources.engine_builds:
+                raise RuntimeError("prepared audio.cpp has no verified build inventory")
+            if self._telemetry_sender is None:
+                raise RuntimeError("node resources telemetry is unavailable")
+            await self._telemetry_sender.send(
+                NodeTelemetry(node_id=self.node_id, info=resources)
+            )
+            success = True
+        except Exception as failure:  # noqa: BLE001 - report preparation boundary
+            error = str(failure)[:1024]
+            logger.warning(f"audio.cpp preparation failed: {error}")
+        await self.event_sender.send(AudioCppPreparationCompleted(
+            request_id=request.request_id,
+            target_node=self.node_id,
+            owner_node=request.owner_node,
+            success=success,
+            error=error,
+        ))
 
     def _effective_downloads(self) -> dict[NodeId, list[DownloadProgress]]:
         """Return durable outcomes overlaid with live download telemetry."""
@@ -2041,6 +2098,97 @@ class Worker:
             self._send_video_output, command_id, owner_node, chunk.model, manifest
         )
 
+    def _schedule_music_output_transfer(
+        self, command_id: CommandId, owner_node: NodeId | None, chunk: MusicChunk
+    ) -> None:
+        """Send one completed WAV to its owning API over OUTPUT_MEDIA."""
+
+        manifest = chunk.output
+        if manifest is None:
+            return
+        if owner_node is None or self._output_media_packet_sender is None:
+            logger.error(f"Cannot deliver music output for {command_id}: no owner or transport")
+            shutil.rmtree(SKULK_MUSIC_OUTPUT_DIR / str(command_id), ignore_errors=True)
+            return
+        self._output_media_pending[command_id] = (
+            owner_node,
+            time.monotonic() + _OUTPUT_MEDIA_ACK_TIMEOUT_SECONDS,
+            {"music"},
+        )
+        self._tg.start_soon(
+            self._send_music_output, command_id, owner_node, chunk.model,
+            manifest.size_bytes, manifest.sha256,
+        )
+
+    async def _send_music_output(
+        self,
+        command_id: CommandId,
+        owner_node: NodeId,
+        model: ModelId,
+        size_bytes: int,
+        sha256: str,
+    ) -> None:
+        """Verify and stream one WAV as bounded, acknowledged raw frames."""
+
+        sender = self._output_media_packet_sender
+        assert sender is not None
+        path = SKULK_MUSIC_OUTPUT_DIR / str(command_id) / "output.wav"
+        try:
+            verified = await to_thread.run_sync(_verify_file_digest, path, sha256)
+            if verified != size_bytes or size_bytes > 64 * 1024 * 1024:
+                raise ValueError("music WAV does not match its bounded manifest")
+            total_chunks = max(1, -(-size_bytes // SKULK_MAX_CHUNK_SIZE))
+            await self._send_output_packet(
+                sender,
+                OutputMediaPacket(
+                    source_node=self.node_id, target_node=owner_node,
+                    command_id=command_id, model=model, purpose="music",
+                    sequence=0, kind="opened", total_chunks=total_chunks,
+                    total_bytes=size_bytes, content_type="audio/wav",
+                ),
+            )
+            sequence = 0
+            with path.open("rb") as handle:
+                while data := await to_thread.run_sync(handle.read, SKULK_MAX_CHUNK_SIZE):
+                    if command_id in self._output_media_aborted:
+                        return
+                    sequence += 1
+                    await self._send_output_packet(
+                        sender,
+                        OutputMediaPacket(
+                            source_node=self.node_id, target_node=owner_node,
+                            command_id=command_id, model=model, purpose="music",
+                            sequence=sequence, kind="chunk", data=data,
+                            total_chunks=total_chunks,
+                        ),
+                    )
+            if sequence != total_chunks:
+                raise ValueError("music WAV changed while streaming")
+            await self._send_output_packet(
+                sender,
+                OutputMediaPacket(
+                    source_node=self.node_id, target_node=owner_node,
+                    command_id=command_id, model=model, purpose="music",
+                    sequence=total_chunks + 1, kind="completed",
+                    total_chunks=total_chunks, total_bytes=size_bytes, sha256=sha256,
+                ),
+            )
+        except anyio.get_cancelled_exc_class():
+            raise
+        except Exception as error:  # noqa: BLE001 - transport boundary
+            logger.opt(exception=error).warning(f"Music output delivery failed for {command_id}")
+            with suppress(BrokenResourceError, ClosedResourceError, WouldBlock):
+                with anyio.move_on_after(2, shield=True):
+                    await sender.send(OutputMediaPacket(
+                        source_node=self.node_id, target_node=owner_node,
+                        command_id=command_id, model=model, purpose="music",
+                        sequence=0, kind="transport_failed",
+                        error_message=f"music output delivery failed: {error}"[:1024],
+                    ))
+            self._finish_video_output(command_id)
+        finally:
+            self._output_media_aborted.discard(command_id)
+
     async def _send_video_output(
         self,
         command_id: CommandId,
@@ -2184,6 +2332,7 @@ class Worker:
 
         self._output_media_pending.pop(command_id, None)
         shutil.rmtree(SKULK_VIDEO_OUTPUT_DIR / str(command_id), ignore_errors=True)
+        shutil.rmtree(SKULK_MUSIC_OUTPUT_DIR / str(command_id), ignore_errors=True)
 
     async def _output_media_packet_ingress(self) -> None:
         """Consume the owning API's verification of delivered video output."""
@@ -2568,6 +2717,13 @@ class Worker:
                 previous_tasks = self.state.tasks
                 self.state = apply(self.state, event=event)
                 event = event.event
+
+                if (
+                    isinstance(event, AudioCppPreparationRequested)
+                    and event.target_node == self.node_id
+                    and event.expires_at > time.time()
+                ):
+                    self._tg.start_soon(self._prepare_audio_cpp_engine, event)
 
                 if isinstance(
                     event, (ModelTrustApprovalChanged, StateSnapshotHydrated)
@@ -3460,6 +3616,7 @@ class Worker:
             if self._trace_data_sender is not None
             else None,
             on_video_output=self._schedule_video_output_transfer,
+            on_music_output=self._schedule_music_output_transfer,
         )
         self.runners[task.bound_instance.bound_runner_id] = runner
         self._tg.start_soon(runner.run)

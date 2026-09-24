@@ -20,6 +20,7 @@ from typing import Literal, cast, final
 from loguru import logger
 
 from skulk.shared.types.node_facts import (
+    AudioCppProbe,
     EngineBinaryFact,
     EngineBinaryState,
     GpuDeviceFact,
@@ -66,6 +67,60 @@ _DEVICE_PREFIX_TO_COMPUTE = {
     "rocm": "rocm",
     "hip": "rocm",
 }
+
+_AUDIO_CPP_SOURCE_PREFIX = "4d88768"
+_AUDIO_CPP_DEVICE_COMPUTES = {
+    "MTL": "metal",
+    "VK": "vulkan",
+    "VULKAN": "vulkan",
+    "CUDA": "cuda",
+    "HIP": "rocm",
+    "CPU": "cpu",
+}
+_AUDIO_CPP_DEVICE_LINE = re.compile(r"^\s*([A-Za-z]+):\d+\s+", re.MULTILINE)
+
+
+def probe_audio_cpp(binary: str) -> AudioCppProbe:
+    """Verify the pinned audio.cpp server answers version and device probes.
+
+    A compiled backend is advertised only when its device actually enumerates.
+    A loader error, bad source revision, or timeout leaves the engine absent.
+    """
+    try:
+        version = subprocess.run(  # noqa: S603 - configured executable
+            [binary, "--version"], capture_output=True, text=True, timeout=20
+        )
+        devices = subprocess.run(  # noqa: S603 - configured executable
+            [binary, "--list-devices"], capture_output=True, text=True, timeout=30
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        return AudioCppProbe(outcome="failed", detail=str(error)[:400])
+    if version.returncode or devices.returncode:
+        detail = (version.stderr + devices.stderr).strip() or "probe exited nonzero"
+        return AudioCppProbe(outcome="failed", detail=detail[:400])
+    if f"git: {_AUDIO_CPP_SOURCE_PREFIX}" not in version.stdout:
+        return AudioCppProbe(outcome="failed", detail="audio.cpp source revision differs from the pinned v0.8.2 build")
+    compiled = {
+        token.strip().lower()
+        for line in version.stdout.splitlines()
+        if line.startswith("backends:")
+        for token in line.removeprefix("backends:").split(",")
+    }
+    observed = {
+        compute
+        for prefix in cast(
+            "list[str]", _AUDIO_CPP_DEVICE_LINE.findall(devices.stdout + devices.stderr)
+        )
+        if (compute := _AUDIO_CPP_DEVICE_COMPUTES.get(prefix.upper())) is not None
+    }
+    computes = tuple(
+        compute
+        for compute in ("cpu", "metal", "vulkan", "cuda", "rocm")
+        if compute in observed and (compute if compute != "rocm" else "hip") in compiled
+    )
+    if not computes:
+        return AudioCppProbe(outcome="failed", detail="audio.cpp reported no usable compute device")
+    return AudioCppProbe(outcome="ready", computes=computes)
 
 
 def _nvidia_gpu_facts(nvml: NvmlLike | None) -> tuple[GpuDeviceFact, ...]:
@@ -278,6 +333,8 @@ def gather_node_facts(
     # back into this package (function-level import on both sides keeps the
     # module graph acyclic).
     from skulk.shared.backends import (
+        AUDIO_CPP_BACKENDS_ENV,
+        AUDIO_CPP_BIN_ENV,
         COMFY_BACKENDS_ENV,
         COMFY_BIN_ENV,
         COMFY_ROOT_ENV,
@@ -365,6 +422,11 @@ def gather_node_facts(
             "ok" if os.path.isfile(os.path.join(comfy_root, "main.py")) else "missing"
         )
     declared_comfy = env.get(COMFY_BACKENDS_ENV)
+    audio_cpp_binary = _binary_fact(AUDIO_CPP_BIN_ENV, env)
+    audio_cpp_probe = AudioCppProbe()
+    if audio_cpp_binary.state == "ok":
+        assert audio_cpp_binary.configured_path is not None
+        audio_cpp_probe = probe_audio_cpp(audio_cpp_binary.configured_path)
     test_video_engine = (env.get(TEST_VIDEO_ENGINE_ENV, "").strip().lower() in ("1", "true", "yes", "on"))
 
     # Probe the binary's own device list only when there is a usable binary
@@ -398,4 +460,7 @@ def gather_node_facts(
         comfy_root=comfy_root,
         comfy_root_state=comfy_root_state,
         declared_comfy_backends=declared_comfy,
+        audio_cpp_binary=audio_cpp_binary,
+        audio_cpp_probe=audio_cpp_probe,
+        declared_audio_cpp_backends=env.get(AUDIO_CPP_BACKENDS_ENV),
     )

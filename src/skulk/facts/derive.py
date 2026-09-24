@@ -556,6 +556,61 @@ def _derive_test_video(facts: NodeFacts) -> tuple[set[str], list[CapabilityConfl
     )
 
 
+def _derive_audio_cpp(
+    facts: NodeFacts,
+) -> tuple[set[str], list[CapabilityConflict], list[str]]:
+    """Advertise only audio.cpp compute lanes verified by its own device probe."""
+
+    binary = facts.audio_cpp_binary
+    if binary.state == "not_configured":
+        return set(), [], []
+    if binary.state != "ok" or facts.audio_cpp_probe.outcome != "ready":
+        detail = (
+            binary.state.replace("_", " ")
+            if binary.state != "ok"
+            else facts.audio_cpp_probe.detail
+        )
+        return (
+            set(),
+            [
+                CapabilityConflict(
+                    code="invalid_engine_binary",
+                    message=f"audio.cpp is unavailable: {detail}",
+                    remediation=(
+                        "Use the pinned audio.cpp v0.8.2 engine package on this "
+                        "architecture, verify its shared libraries and device "
+                        "driver, then refresh node resources."
+                    ),
+                )
+            ],
+            [],
+        )
+    verified = set(facts.audio_cpp_probe.computes)
+    declared = _declared_tokens(facts.declared_audio_cpp_backends)
+    invalid = declared - verified
+    conflicts = (
+        [
+            CapabilityConflict(
+                code="backend_override_conflict",
+                message=(
+                    "SKULK_AUDIO_CPP_BACKENDS names unavailable audio.cpp "
+                    f"compute lanes: {sorted(invalid)}"
+                ),
+                remediation=(
+                    "Remove unsupported lanes from SKULK_AUDIO_CPP_BACKENDS or "
+                    "install a qualified build and driver that probes them."
+                ),
+            )
+        ]
+        if invalid
+        else []
+    )
+    selected = verified & declared if declared else verified
+    if not selected:
+        return set(), conflicts, []
+    return {"audio_cpp"} | {f"audio_cpp-{compute}" for compute in selected}, conflicts, []
+
+
 def derive_node_backends(facts: NodeFacts) -> BackendDerivation:
     """Derive the backend tags a node advertises, plus every loud conflict.
 
@@ -585,6 +640,7 @@ def derive_node_backends(facts: NodeFacts) -> BackendDerivation:
         _derive_vllm,
         _derive_comfy,
         _derive_test_video,
+        _derive_audio_cpp,
     ):
         engine_tags, engine_conflicts, engine_notes = derive(facts)
         tags |= engine_tags

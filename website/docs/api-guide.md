@@ -1714,6 +1714,67 @@ it. Returns `{ "id": ..., "object": "video.deleted", "deleted": true }`.
   `reference_fidelity`, `styles`, `codec`) extensions.
 - There is no remix route; submit a new job with the changed prompt.
 
+## Music generation
+
+Music generation is an asynchronous job API for a mounted `TextToMusic` card.
+The model's `/v1/models` `music` object identifies its family, lyric rule,
+accepted `min_seconds` and `max_seconds`, and `wav` output format. Music uses
+the existing API authentication policy. Jobs and WAV content belong to the
+API node that accepted the request; poll and download from that node.
+
+### Create a music job
+
+**POST** `/v1/music`
+
+Send JSON with these fields:
+
+| Field | Type | Behavior |
+|-------|------|----------|
+| `model` | string, required | Mounted text-to-music model id |
+| `prompt` | string, required | Musical description, 1 to 8000 characters |
+| `lyrics` | string or null | Model dependent; required for MiniMax Music 3, up to 20,000 characters |
+| `seconds` | integer, required | Target or generation budget within the card's range and the global 120-second ceiling. MiniMax output can have a different actual duration |
+| `seed` | integer or null | Optional 0 to 4294967295 |
+
+Unknown fields are rejected. The response is a `music` object with a job `id`,
+`model`, `prompt`, requested `seconds`, `status: "queued"`, `created_at`, and
+null terminal/output fields. One API node admits at most 32 active music jobs.
+The model runner admits one generation at a time. A failed job includes an
+`error`; cancellation produces `status: "cancelled"`.
+
+### List and retrieve music jobs
+
+**GET** `/v1/music` accepts `limit` (1 to 100, default 20) and `after` (the
+last job id of the previous page). It returns `object: "list"`, `data`,
+`first_id`, `last_id`, and `has_more`, newest first. The node retains the
+newest 256 job records.
+
+**GET** `/v1/music/{music_id}` returns the current `music` object. On
+completion, `output` reports the measured WAV `duration_seconds`, `sample_rate`,
+`channels`, `size_bytes`, and `sha256`. The job reaches `completed` only after
+both the runner's terminal report and the verified WAV arrive. If delivery
+does not finish within ten minutes, it fails. In-flight jobs become failed
+after an API restart; previously completed content remains available until
+its expiration.
+
+### Download music
+
+**GET** `/v1/music/{music_id}/content` returns `audio/wav` for a completed
+job. It returns **409** before completion and **404** if the job or content
+is absent or has expired. A result exceeding 64 MiB fails instead of being
+truncated. Completed WAV content is retained for up to 24 hours; storage
+pressure may evict older content sooner.
+
+### Cancel or delete music
+
+**POST** `/v1/music/{music_id}/cancel` cancels a queued or running job,
+terminates its model server if it is generating, and removes partial output.
+Calling it on a terminal job returns that job unchanged.
+
+**DELETE** `/v1/music/{music_id}` cancels a live job, removes its WAV, and
+forgets its record. It returns
+`{ "id": "...", "object": "music.deleted", "deleted": true }`.
+
 ## Benchmark Endpoints
 
 Benchmark variants of the generation endpoints run the same admission and
@@ -3087,6 +3148,7 @@ Important fields:
 | `remote_code_approved_on_this_node` | boolean | Deprecated compatibility alias for `remote_code_approved_for_cluster` |
 | `remote_code_automatically_trusted` | boolean | Whether repository code is authorized by signed publication, explicit addition, or bundled distribution for this exact card |
 | `audio` | object | Declared speech metadata from the model card, including `kind`, audio response formats, streaming/realtime flags, built-in `voices`, `default_voice`, voice/reference-audio flags, translation support, and sample rates |
+| `music` | object or null | Text-to-music family, lyric requirement, qualified duration bounds, and WAV output format; null for non-music cards |
 | `video` | object or null | Declared video generation contract from a video model card: `modes` (`t2va`, `fl2va`, `ref2va`), `min_seconds`/`max_seconds`, `fps`, frame grid (`frame_grid_multiple`, `frame_grid_offset`), `canvas_multiple`, `default_short_edge`, `max_pixels`, `aspect_ratios`, `audio_output` with `audio_sample_rate`/`audio_channels`, `default_steps`, `reference_limits`, `adapters` (named LoRAs with `modes`, `steps`, `strength`, and the `video_shift`/`audio_shift` a render with the adapter uses when the request sets none, selectable through the video job `lora` field), `styles` (the card's style embeddings with `modes`, selectable through the video job `styles` field), and every engine setting the job accepts with its default: `samplers` and `default_sampler`, `schedulers` and `default_scheduler`, the card's trained `video_shift`/`audio_shift` (null keeps the model's built-in value) with `shift_bounds`, `reference_fidelities` and `default_reference_fidelity` (empty and null unless the card serves `ref2va`), and `codecs` and `default_codec`. The lists are the engine's own, not a recommendation. Null for non-video cards |
 | `license` | object or null | Operator-facing license facts from the card: `name`, `url`, `spdx_id`, `notice`, and `display_name` (a product name the license requires in a UI). Informational; nothing is enforced |
 | `resolved_capabilities.supports_speech_synthesis` | boolean | Whether clients should treat the model as a text-to-speech model |

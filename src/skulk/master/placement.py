@@ -502,6 +502,7 @@ def _card_platform_backends(
         frozenset(compatible),
         card_serves_vision=card.vision is not None,
         card_serves_speech=card_serves_speech(card),
+        card_serves_music=card.music is not None,
         card_has_pinned_projector=(
             card.vision is not None and card.vision.has_pinned_projector
         ),

@@ -17,7 +17,7 @@ The design choices that shape almost everything else:
 - **Event-sourced decisions.** Correctness-critical cluster facts (instances, runners, terminal download outcomes, tracing toggles) flow through an ordered event log. Observational latest-value readings stay outside it. State is the result of `apply()`-ing events to a Pydantic model that is treated as immutable by convention (replaced wholesale by `apply()` rather than mutated in place).
 - **One master at a time.** A bully election picks the master; only the master indexes events. Failover is automatic, and the promoted node seeds the new session from its replicated state, so placed instances and bounded steward-action recovery truth survive a master restart: workers rebuild their runners and serving resumes after a model-reload-sized gap, while the new master resumes actionable approved or dispatched proposals. Instances with a rank on the dead master are cleaned up once live topology confirms the node is gone.
 - **libp2p pub/sub for transport.** Topics carry commands, events, telemetry, and connection updates between nodes. Election and telemetry each use dedicated Python egress plus their own gossipsub behavior, protocol, and per-peer handler queues on the same libp2p swarm, so telemetry pressure cannot consume control or election capacity. Election alone retains its temporary legacy-protocol compatibility copy.
-- **Capability-aware inference engines.** MLX supports Apple Silicon text, vision, embeddings and image workloads, with pipeline and tensor parallelism on `mlx.distributed` ring or jaccl/RDMA. GGUF text uses in-process llama.cpp or managed llama-server; GPU text can use vLLM. Dedicated MLX Audio and ComfyUI runners serve speech and video. Model cards, exact engine support, live node evidence and runner limitations jointly determine admission. See [Inference and media](inference.md).
+- **Capability-aware inference engines.** MLX supports Apple Silicon text, vision, embeddings and image workloads, with pipeline and tensor parallelism on `mlx.distributed` ring or jaccl/RDMA. GGUF text uses in-process llama.cpp or managed llama-server; GPU text can use vLLM. Dedicated MLX Audio, ComfyUI, and separately installed audio.cpp engines serve speech, video, and music. Model cards, exact engine support, live node evidence and runner limitations jointly determine admission. See [Inference and media](inference.md).
 - **Subprocess isolation for runners.** Each model instance runs in its own `mp.Process` with its own engine context, so a crash or hang in one runner can't bring down the rest of the node. The shipped systemd unit sets `OOMPolicy=continue` for the same boundary: if Linux OOM-kills a runner child, systemd leaves the Skulk parent, API, and co-hosted model store alive while the supervisor and crash breaker handle the failed runner.
 
 ## The shape of a node
@@ -928,6 +928,31 @@ hardware restrictions. Launchable placement previews expose the same complete
 the API/master card checks and resource-derived context ceiling still apply.
 Exact-instance creation does not atomically revalidate topology or backend/build
 support, so controllers must check live node support before and after submission.
+
+## Music engine admission
+
+Text-to-music cards use `TextToMusic` and a typed `[music]` section, separate
+from speech's `[audio]` section. The initial MiniMax Music 3 Q4 and ACE-Step
+1.5 Turbo BF16 cards pin every required artifact at an immutable upstream
+revision. They declare no legacy compatible backend: each architecture,
+hardware class, and exact audio.cpp build needs a signed `supported` claim
+after a model load and generation qualification. An installable engine package
+alone never satisfies placement. The node advertises `audio_cpp` and only
+the compute lanes that its pinned executable reports through version and
+device probes; its SHA-256 is the live build identity. Music WAV bytes are
+bounded and belong on the node-addressed output media plane, outside State
+and the event log.
+
+Music mounting first sends a targeted `PrepareAudioCpp` command to an eligible
+worker. `AudioCppPreparationRequested` and `AudioCppPreparationCompleted`
+report the preparation lifecycle; the worker verifies the package and publishes
+fresh `NodeResources` before reporting success. Ordinary signed placement then
+selects only ready backends. A `MusicGeneration` command creates a distinct
+task; its runner owns one loopback audio.cpp server per mounted model and emits
+only a terminal `MusicChunk` manifest through the control path. Bounded WAV
+bytes use `OUTPUT_MEDIA` with purpose `music`, and the accepting API node
+settles the job after both manifest and verified media arrive. The node-local
+music store retains completed content for up to 24 hours.
 
 ## Speech serving
 

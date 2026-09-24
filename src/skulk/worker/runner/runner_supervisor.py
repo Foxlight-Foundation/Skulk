@@ -25,6 +25,7 @@ from skulk.shared.types.chunks import (
     EmbeddingChunk,
     ErrorChunk,
     GenerationChunk,
+    MusicChunk,
     VideoChunk,
 )
 from skulk.shared.types.common import CommandId, NodeId
@@ -54,6 +55,7 @@ from skulk.shared.types.tasks import (
     AudioTranscription,
     ImageEdits,
     ImageGeneration,
+    MusicGeneration,
     RealtimeAudioTranscription,
     SpeechSynthesis,
     Task,
@@ -150,6 +152,7 @@ class RunnerSupervisor:
     # independently rejects payload events if a malformed participant sends one.
     _data_sender: "Sender[DataChunk] | None" = None
     _on_video_output: "Callable[[CommandId, NodeId | None, VideoChunk], None] | None" = None
+    _on_music_output: "Callable[[CommandId, NodeId | None, MusicChunk], None] | None" = None
     _trace_sender: "Sender[TraceDataPacket] | None" = None
     _tg: TaskGroup = field(default_factory=TaskGroup, init=False)
     status: RunnerStatus = field(default_factory=RunnerIdle, init=False)
@@ -249,6 +252,7 @@ class RunnerSupervisor:
         data_sender: "Sender[DataChunk] | None" = None,
         trace_sender: "Sender[TraceDataPacket] | None" = None,
         on_video_output: "Callable[[CommandId, NodeId | None, VideoChunk], None] | None" = None,
+        on_music_output: "Callable[[CommandId, NodeId | None, MusicChunk], None] | None" = None,
     ) -> Self:
         """Spawn the runner subprocess for one shard of a placed instance.
 
@@ -299,6 +303,7 @@ class RunnerSupervisor:
             _data_sender=data_sender,
             _trace_sender=trace_sender,
             _on_video_output=on_video_output,
+            _on_music_output=on_music_output,
         )
 
         return self
@@ -353,6 +358,16 @@ class RunnerSupervisor:
                     self._command_owner.get(event.command_id),
                     event.chunk,
                 )
+            if (
+                isinstance(event.chunk, MusicChunk)
+                and event.chunk.output is not None
+                and self._on_music_output is not None
+            ):
+                self._on_music_output(
+                    event.command_id,
+                    self._command_owner.get(event.command_id),
+                    event.chunk,
+                )
             await self._send_data_frame(
                 event.command_id,
                 _stream_frame_kind(event.chunk),
@@ -399,6 +414,7 @@ class RunnerSupervisor:
                     ImageGeneration,
                     ImageEdits,
                     VideoGeneration,
+                    MusicGeneration,
                     TextEmbedding,
                     SpeechSynthesis,
                     AudioTranscription,
@@ -577,6 +593,7 @@ class RunnerSupervisor:
                     ImageGeneration,
                     ImageEdits,
                     VideoGeneration,
+                    MusicGeneration,
                     TextEmbedding,
                     SpeechSynthesis,
                     AudioTranscription,
@@ -594,6 +611,7 @@ class RunnerSupervisor:
                 ImageGeneration,
                 ImageEdits,
                 VideoGeneration,
+                MusicGeneration,
                 TextEmbedding,
                 SpeechSynthesis,
                 AudioTranscription,
@@ -739,6 +757,7 @@ class RunnerSupervisor:
                                 ImageGeneration,
                                 ImageEdits,
                                 VideoGeneration,
+                                MusicGeneration,
                                 TextEmbedding,
                                 SpeechSynthesis,
                                 AudioTranscription,
@@ -842,6 +861,7 @@ class RunnerSupervisor:
                     ImageGeneration,
                     ImageEdits,
                     VideoGeneration,
+                    MusicGeneration,
                     TextEmbedding,
                     SpeechSynthesis,
                     AudioTranscription,
@@ -991,6 +1011,7 @@ class RunnerSupervisor:
                 ImageGeneration,
                 ImageEdits,
                 VideoGeneration,
+                MusicGeneration,
                 TextEmbedding,
                 SpeechSynthesis,
                 AudioTranscription,

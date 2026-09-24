@@ -13,6 +13,7 @@ from skulk.shared.types.audio import (
 )
 from skulk.shared.types.common import CommandId, Id, NodeId
 from skulk.shared.types.embedding import TextEmbeddingTaskParams
+from skulk.shared.types.music import MusicGenerationTaskParams
 from skulk.shared.types.text_generation import TextGenerationTaskParams
 from skulk.shared.types.video import VideoGenerationTaskParams
 from skulk.shared.types.worker.instances import BoundInstance, InstanceId
@@ -113,6 +114,17 @@ class VideoGeneration(BaseTask):  # emitted by Master
     error_message: str | None = Field(default=None)
 
 
+class MusicGeneration(BaseTask):
+    """One single-host music generation placed by the master."""
+
+    command_id: CommandId
+    owner_node: NodeId
+    task_params: MusicGenerationTaskParams
+    trace_enabled: bool = False
+    error_type: str | None = Field(default=None)
+    error_message: str | None = Field(default=None)
+
+
 class TextEmbedding(BaseTask):  # emitted by Master
     command_id: CommandId
     owner_node: NodeId | None = None  # owning API node (#279 Phase 2; see TextGeneration)
@@ -174,6 +186,7 @@ Task = (
     | ImageGeneration
     | ImageEdits
     | VideoGeneration
+    | MusicGeneration
     | TextEmbedding
     | SpeechSynthesis
     | AudioTranscription

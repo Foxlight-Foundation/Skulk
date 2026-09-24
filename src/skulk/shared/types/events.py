@@ -75,6 +75,27 @@ class TaskFailed(BaseEvent):
     error_message: str
 
 
+class AudioCppPreparationRequested(BaseEvent):
+    """Master-ordered request for a single worker to prepare the music engine."""
+
+    request_id: CommandId
+    target_node: NodeId
+    owner_node: NodeId
+    expires_at: float = Field(
+        description="Unix deadline after which replay must not trigger package acquisition."
+    )
+
+
+class AudioCppPreparationCompleted(BaseEvent):
+    """Target worker's outcome, used to unblock the requesting API."""
+
+    request_id: CommandId
+    target_node: NodeId
+    owner_node: NodeId
+    success: bool
+    error: str | None = Field(default=None, max_length=1024)
+
+
 class InstanceCreated(BaseEvent):
     instance: Instance
 
@@ -266,6 +287,8 @@ Event = (
     | TaskCreated
     | TaskStatusUpdated
     | TaskFailed
+    | AudioCppPreparationRequested
+    | AudioCppPreparationCompleted
     | TaskDeleted
     | TaskAcknowledged
     | InstanceCreated
@@ -293,6 +316,8 @@ Event = (
 
 _PERSISTED_CONTROL_EVENT_TYPES: tuple[type[BaseEvent], ...] = (
     TestEvent,
+    AudioCppPreparationRequested,
+    AudioCppPreparationCompleted,
     TaskCreated,
     TaskStatusUpdated,
     TaskFailed,

@@ -47,6 +47,7 @@ def _make_api() -> Any:
     api._text_generation_queues = {}
     api._image_generation_queues = {}
     api._video_generation_queues = {}
+    api._music_generation_queues = {}
     api._video_jobs = VideoJobRegistry(None)
     api._video_store = VideoStore(Path(tempfile.mkdtemp()))
     api._video_job_media_deadlines = {}

@@ -1,0 +1,42 @@
+# ACE-Step 1.5 Turbo BF16: one exact GGUF from the immutable Hub revision.
+# Candidate only; support claims require hardware load and generation qualification.
+model_id = "audio-cpp/ACE-Step1.5-Turbo-BF16"
+source_repository = "audio-cpp/audio.cpp-gguf"
+source_revision = "a776907b362419343f4b9996bdd899619efcf3f8"
+gguf_file = "ACE-Step1.5-GGUF/turbo/ace-step-1.5-turbo-bf16.gguf"
+n_layers = 1
+hidden_size = 1
+supports_tensor = false
+tasks = ["TextToMusic"]
+family = "ace_step_1_5"
+quantization = "BF16"
+base_model = "ACE-Step/Ace-Step1.5"
+trust_remote_code = false
+
+[storage_size]
+in_bytes = 10090398272
+
+[license]
+name = "MIT"
+url = "https://huggingface.co/ACE-Step/Ace-Step1.5/blob/main/LICENSE"
+spdx_id = "MIT"
+
+[placement]
+compatible_backends = []
+backend_preference = ["audio_cpp-cuda", "audio_cpp-metal", "audio_cpp-rocm", "audio_cpp-vulkan", "audio_cpp-cpu"]
+
+[music]
+family = "ace_step_1_5"
+lyrics = "optional"
+min_seconds = 10
+max_seconds = 60
+
+[artifact_bundle]
+bundle_id = "bundle_5t7melkxcaacy5qbrhd2cfsomuiwdopocbwrjykzg4cyk22ebtmq"
+root = "ACE-Step1.5-GGUF/turbo"
+download_size = 10090398272
+
+[[artifact_bundle.files]]
+path = "ACE-Step1.5-GGUF/turbo/ace-step-1.5-turbo-bf16.gguf"
+size_bytes = 10090398272
+object_id = "sha256:93974239a29a1a821b3cc1b1ca7e1c6229b1a900a0e44a1a9770bb2271d2be5f"

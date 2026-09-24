@@ -242,6 +242,22 @@ never advance casually. `install.sh` is the one-command fresh-box installer
 dependency: nothing optional may be load-bearing.
 
 ### Inference engines
+
+The `audio_cpp` music backend uses a separately installed, pinned audio.cpp
+v0.8.2 server package, absent from Skulk's base environment. Node Facts probe
+its source revision and actual devices before advertising any compute lane;
+`NodeResources.engine_builds` hashes the executable. `TextToMusic` cards have
+their own `[music]` section and require exact signed support claims. The
+`audio-cpp-engine-wheel` workflow builds the CPU-capable package for Apple
+Silicon macOS and Linux amd64/arm64 from the pinned source. Music model weights
+are separate immutable downloads.
+Music mounting uses targeted `PrepareAudioCpp` and indexed
+`AudioCppPreparationRequested`/`AudioCppPreparationCompleted` events; the
+worker verifies the package and publishes a fresh `NodeResources` (including
+host architecture) before ordinary signed placement. `MusicGeneration` tasks
+produce a bounded `MusicChunk` manifest, while WAV bytes use `OUTPUT_MEDIA`
+purpose `music` and a separate node-local 24-hour store. The music API exposes
+asynchronous `/v1/music` jobs with cancellation and content retrieval.
 A model card's `placement.compatible_backends` selects which engine serves it
 (`bootstrap._resolve_text_engine`, backend tags in `src/skulk/shared/backends.py`):
 - **`mlx`** (`worker/engines/mlx/`): in-process MLX on Apple Silicon; owns the

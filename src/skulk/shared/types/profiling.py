@@ -1,4 +1,5 @@
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -314,6 +315,10 @@ class NodeResources(CamelCaseModel):
     """
 
     backends: frozenset[str] = frozenset({"mlx"})
+    architecture: str | None = Field(
+        default=None,
+        description="Observed host CPU architecture for exact engine package selection.",
+    )
     engine_builds: dict[str, str] = Field(
         default_factory=dict,
         description="Exact installed build identities keyed by engine and backend tag.",
@@ -440,6 +445,7 @@ class NodeResources(CamelCaseModel):
         )
         return cls(
             backends=derivation.backends,
+            architecture=platform.machine().lower(),
             engine_builds=engine_builds,
             llama_server_settings=(
                 resolve_llama_server_settings(os.environ)

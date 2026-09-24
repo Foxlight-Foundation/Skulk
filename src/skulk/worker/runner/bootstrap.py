@@ -455,6 +455,7 @@ def _resolve_text_engine(bound_instance: BoundInstance) -> str | None:
             compatible_backends,
             card_serves_vision=shard.model_card.vision is not None,
             card_serves_speech=card_serves_speech(shard.model_card),
+            card_serves_music=shard.model_card.music is not None,
             card_has_pinned_projector=(
                 shard.model_card.vision is not None
                 and shard.model_card.vision.has_pinned_projector
@@ -546,6 +547,26 @@ def entrypoint(
         # failure-reporting boundary so a denied card becomes an actionable
         # RunnerFailed state rather than an unreported process-exit retry loop.
         require_remote_code_approval(shard.model_card)
+        if bound_instance.is_music_model:
+            from skulk.shared.backends import engine_of
+            from skulk.worker.runner.audio_cpp.runner import Runner as AudioCppRunner
+
+            resolved = shard.resolved_backend
+            music_engine = (
+                engine_of(resolved)
+                if resolved is not None
+                else _resolve_text_engine(bound_instance)
+            )
+            if music_engine != "audio_cpp":
+                raise RuntimeError(
+                    "no audio.cpp engine serves this music placement on this node "
+                    f"(resolved backend {resolved!r})"
+                )
+            runner = AudioCppRunner(
+                bound_instance, event_sender, task_receiver, cancel_receiver
+            )
+            runner.main()
+            return
         if bound_instance.is_video_model:
             # Video placements are single-host. The master normally stamps
             # the resolved backend; an unstamped shard (telemetry still

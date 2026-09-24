@@ -24,11 +24,12 @@ from pydantic import BaseModel, ConfigDict
 
 from skulk.shared.types.common import CommandId
 
-VideoArtifactPurpose = Literal["video", "thumbnail"]
+VideoArtifactPurpose = Literal["video", "thumbnail", "music"]
 
 _ARTIFACT_FILENAMES: dict[VideoArtifactPurpose, str] = {
     "video": "output.mp4",
     "thumbnail": "thumbnail.jpg",
+    "music": "output.wav",
 }
 _MAX_ARTIFACT_BYTES = 4 * 1024 * 1024 * 1024
 """Absolute ceiling on one artifact, well above any 15 s 768p container."""
@@ -221,6 +222,8 @@ class VideoStore:
 
         if total_bytes <= 0 or total_bytes > _MAX_ARTIFACT_BYTES:
             raise ValueError("artifact size is outside the accepted range")
+        if purpose == "music" and (total_bytes > 64 * 1024 * 1024 or content_type != "audio/wav"):
+            raise ValueError("music output must be audio/wav and at most 64 MiB")
         self.abort_assembly(command_id, purpose)
         evicted = self._make_room(command_id, total_bytes, keep)
         directory = self._storage_dir / str(command_id)
