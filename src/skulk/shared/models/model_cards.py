@@ -1471,6 +1471,16 @@ class VideoCardConfig(CamelCaseModel):
             # The engine loads one set of weights per preprocessing step; two
             # candidates for a role would leave the choice to file order.
             raise ValueError("each preprocessor role may appear at most once")
+        revisions: dict[str, str | None] = {}
+        for item in self.companions:
+            if item.repo is None:
+                continue
+            # A companion repository is staged and verified once per card, so
+            # every file taken from it must come from the same revision.
+            if revisions.setdefault(str(item.repo), item.revision) != item.revision:
+                raise ValueError(
+                    f"companions from {item.repo} must all pin one revision"
+                )
         return self
 
     @property
