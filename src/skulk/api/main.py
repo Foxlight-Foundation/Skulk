@@ -383,6 +383,7 @@ from skulk.shared.models.capabilities import resolve_model_capability_profile
 from skulk.shared.models.memory_estimate import (
     GPU_VRAM_WORKING_SET_FRACTION,
     GPU_WORKING_SET_FRACTION,
+    backend_offloads_to_vram,
     estimate_shard_footprint,
     per_token_kv_bytes,
     shard_fraction_of_model,
@@ -3662,6 +3663,25 @@ class API:
 
         if ModelTask.TextToMusic not in card.tasks:
             return
+        node_vram = usable_vram_by_node(
+            self._telemetry_view.node_system,
+            node_memory=self._telemetry_view.node_memory,
+            current_instances=self.state.instances,
+        )
+
+        def supports_with_capacity(node_id: NodeId, backends: frozenset[str]) -> bool:
+            """Check signed lanes against the pool their runner actually allocates."""
+            memory = self._telemetry_view.node_memory[node_id]
+            vram = node_vram.get(node_id)
+            return any(
+                (
+                    vram is not None and vram.in_bytes >= card.storage_size.in_bytes
+                    if backend_offloads_to_vram(backend)
+                    else memory.ram_available.in_bytes >= card.storage_size.in_bytes
+                )
+                for backend in backends
+            )
+
         candidates: list[tuple[bool, int, NodeId]] = []
         for node_id in self.state.topology.list_nodes():
             if node_id in excluded_nodes or (
@@ -3672,7 +3692,11 @@ class API:
             memory = self._telemetry_view.node_memory.get(node_id)
             if resources is None or memory is None or resources.participation != "full":
                 continue
-            if memory.ram_available.in_bytes < card.storage_size.in_bytes:
+            available = max(
+                memory.ram_available.in_bytes,
+                node_vram[node_id].in_bytes if node_id in node_vram else 0,
+            )
+            if available < card.storage_size.in_bytes:
                 continue
             architecture = (resources.architecture or "").lower()
             platform_classes = resources.hardware_classes
@@ -3688,7 +3712,7 @@ class API:
                 backend.startswith("audio_cpp-") and backend in resources.engine_builds
                 for backend in resources.backends
             )
-            candidates.append((ready, memory.ram_available.in_bytes, node_id))
+            candidates.append((ready, available, node_id))
         candidates.sort(key=lambda item: (item[0], item[1], str(item[2])), reverse=True)
         if not candidates:
             raise HTTPException(
@@ -3703,13 +3727,19 @@ class API:
         for ready, _memory, node_id in candidates:
             if ready:
                 resources = self._telemetry_view.node_resources.get(node_id)
-                if resources is None or not registry_supported_backends_for_node(
-                    card,
-                    node_backends=resources.backends,
-                    engine_builds=resources.engine_builds,
-                    hardware_classes=resources.hardware_classes,
-                ):
+                supported: frozenset[str] = frozenset()
+                if resources is not None:
+                    supported = registry_supported_backends_for_node(
+                        card,
+                        node_backends=resources.backends,
+                        engine_builds=resources.engine_builds,
+                        hardware_classes=resources.hardware_classes,
+                    )
+                if not supported:
                     errors.append(f"{node_id}: no supported signed music claim matches its ready engine build and hardware")
+                    continue
+                if not supports_with_capacity(node_id, supported):
+                    errors.append(f"{node_id}: supported music backend lacks available model memory")
                     continue
             request_id = CommandId()
             waiter = anyio.Event()
@@ -3735,14 +3765,18 @@ class API:
                 ):
                     errors.append(f"{node_id}: preparation returned no verified ready resources")
                     continue
-                if registry_supported_backends_for_node(
+                supported = registry_supported_backends_for_node(
                     card,
                     node_backends=fresh.backends,
                     engine_builds=fresh.engine_builds,
                     hardware_classes=fresh.hardware_classes,
-                ):
+                )
+                if not supported:
+                    errors.append(f"{node_id}: no supported signed music claim matches the prepared build and hardware")
+                    continue
+                if supports_with_capacity(node_id, supported):
                     return
-                errors.append(f"{node_id}: no supported signed music claim matches the prepared build and hardware")
+                errors.append(f"{node_id}: supported music backend lacks available model memory")
             finally:
                 self._audio_cpp_prepare_events.pop(request_id, None)
                 self._audio_cpp_prepare_results.pop(request_id, None)
@@ -3873,6 +3907,11 @@ class API:
                 raise HTTPException(
                     status_code=400,
                     detail="Music instances cannot use llama.cpp RPC placement",
+                )
+            if len(instance.shard_assignments.runner_to_shard) != 1:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Music instances require exactly one runner shard",
                 )
             music_nodes = set(instance.shard_assignments.node_to_runner)
             if len(music_nodes) != 1:
@@ -11773,8 +11812,12 @@ class API:
 
         queue = self._music_generation_queues.get(command_id)
         if queue is not None:
-            await self._send(TaskCancelled(cancelled_command_id=command_id))
             self._cancelled_command_ids.add(command_id)
+            try:
+                await self._send(TaskCancelled(cancelled_command_id=command_id))
+            except BaseException:
+                self._cancelled_command_ids.discard(command_id)
+                raise
             queue.close()
         job = self._music_jobs.get(command_id)
         source = self._music_output_sources.get(command_id)

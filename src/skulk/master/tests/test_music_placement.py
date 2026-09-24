@@ -69,6 +69,32 @@ def test_music_exact_command_rejects_two_node_instance() -> None:
         add_instance_to_placements(CreateInstance(instance=instance), Topology(), {}, {})
 
 
+def test_music_exact_command_rejects_two_runners_on_one_node() -> None:
+    """One host must still contain only one complete music model runner."""
+    card = _music_card()
+    node = NodeId("music-node")
+    runners = (RunnerId("runner-a"), RunnerId("runner-b"))
+    instance = MlxRingInstance(
+        instance_id=InstanceId(),
+        shard_assignments=ShardAssignments(
+            model_id=card.model_id,
+            runner_to_shard={
+                runner: PipelineShardMetadata(
+                    model_card=card, device_rank=rank, world_size=2,
+                    start_layer=rank * 18, end_layer=(rank + 1) * 18,
+                    n_layers=36,
+                )
+                for rank, runner in enumerate(runners)
+            },
+            node_to_runner={node: runners[0]},
+        ),
+        hosts_by_node={node: []},
+        ephemeral_port=52415,
+    )
+    with pytest.raises(PlacementError, match="exactly one runner shard"):
+        add_instance_to_placements(CreateInstance(instance=instance), Topology(), {}, {})
+
+
 def test_music_exact_command_rejects_stamped_unclaimed_build() -> None:
     """An internal caller cannot bypass preparation with a client backend stamp."""
     card = _music_card()

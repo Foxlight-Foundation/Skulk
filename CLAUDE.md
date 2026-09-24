@@ -265,8 +265,9 @@ broadcasting success so signed placement cannot race its telemetry view.
 The API reads that ordered snapshot instead of waiting for telemetry. Placement
 stamps the exact engine build on music shards; the runner rehashes and probes
 the executable and selected lane before every sidecar start. CUDA, ROCm, and
-Vulkan audio.cpp lanes admit against GPU memory; Metal and CPU use system RAM.
-Exact music placement rejects RPC shaped instances. `MusicGeneration` tasks
+Vulkan audio.cpp lanes admit against GPU memory in API preflight and placement;
+Metal and CPU use system RAM. Exact music placement rejects RPC shaped and
+multi-runner instances. `MusicGeneration` tasks
 produce a bounded `MusicChunk` manifest, while WAV bytes use `OUTPUT_MEDIA`
 purpose `music` and a separate node-local 24-hour store. The music API exposes
 asynchronous `/v1/music` jobs with cancellation and content retrieval.

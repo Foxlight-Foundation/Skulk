@@ -29,7 +29,12 @@ from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.events import AudioCppPreparationCompleted
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.music import MusicGenerationTaskParams, MusicOutputManifest
-from skulk.shared.types.profiling import MemoryUsage, NodeResources
+from skulk.shared.types.profiling import (
+    AcceleratorMetrics,
+    MemoryUsage,
+    NodeResources,
+    SystemPerformanceProfile,
+)
 from skulk.shared.types.tasks import MusicGeneration as MusicGenerationTask
 from skulk.shared.types.worker.instances import (
     InstanceId,
@@ -77,10 +82,11 @@ async def test_mount_preflight_skips_ready_build_without_signed_music_support(
     )
     api: Any = object.__new__(API)
     api.node_id = NodeId("api-node")
-    api.state = SimpleNamespace(topology=topology)
+    api.state = SimpleNamespace(topology=topology, instances={})
     api._telemetry_view = SimpleNamespace(
         node_resources=resources,
         node_memory={node: memory for node in resources},
+        node_system={},
     )
     api._audio_cpp_prepare_events = {}
     api._audio_cpp_prepare_results = {}
@@ -142,9 +148,9 @@ async def test_mount_preflight_uses_ordered_preparation_resources(
     )
     api: Any = object.__new__(API)
     api.node_id = NodeId("api-node")
-    api.state = SimpleNamespace(topology=topology)
+    api.state = SimpleNamespace(topology=topology, instances={})
     api._telemetry_view = SimpleNamespace(
-        node_resources={node: stale}, node_memory={node: memory},
+        node_resources={node: stale}, node_memory={node: memory}, node_system={},
     )
     api._audio_cpp_prepare_events = {}
     api._audio_cpp_prepare_results = {}
@@ -176,6 +182,59 @@ async def test_mount_preflight_uses_ordered_preparation_resources(
     await api._prepare_music_engine_for_mount(_card(), set())
     api._send.assert_awaited_once()
     assert api._telemetry_view.node_resources[node] is stale
+
+
+async def test_mount_preflight_uses_vram_for_cuda_music(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A music GPU node with little system RAM remains eligible to prepare."""
+    node = NodeId("gpu-music-node")
+    topology = Topology()
+    topology.add_node(node)
+    resources = NodeResources(
+        backends=frozenset({"audio_cpp", "audio_cpp-cuda"}),
+        architecture="x86_64", hardware_classes=frozenset({"platform:linux"}),
+        engine_builds={"audio_cpp-cuda": "qualified-build"},
+    )
+    memory = MemoryUsage.from_bytes(
+        ram_total=1 << 30, ram_available=64 << 20,
+        swap_total=0, swap_available=0,
+    )
+    api: Any = object.__new__(API)
+    api.node_id = NodeId("api-node")
+    api.state = SimpleNamespace(topology=topology, instances={})
+    api._telemetry_view = SimpleNamespace(
+        node_resources={node: resources},
+        node_memory={node: memory},
+        node_system={node: SystemPerformanceProfile(accelerator=AcceleratorMetrics(
+            vendor="nvidia", vram_total_bytes=1 << 30,
+        ))},
+    )
+    api._audio_cpp_prepare_events = {}
+    api._audio_cpp_prepare_results = {}
+
+    async def complete_preparation(command: PrepareAudioCpp) -> None:
+        api._audio_cpp_prepare_results[command.command_id] = AudioCppPreparationCompleted(
+            request_id=command.command_id,
+            target_node=node,
+            owner_node=command.owner_node,
+            success=True,
+            resources=resources,
+        )
+        api._audio_cpp_prepare_events[command.command_id].set()
+
+    api._send = AsyncMock(side_effect=complete_preparation)
+
+    def supported_backends(
+        _card: ModelCard, *, node_backends: frozenset[str],
+        engine_builds: dict[str, str], hardware_classes: frozenset[str],
+    ) -> frozenset[str]:
+        assert node_backends and engine_builds and hardware_classes
+        return frozenset({"audio_cpp-cuda"})
+
+    monkeypatch.setattr(api_module, "registry_supported_backends_for_node", supported_backends)
+    await api._prepare_music_engine_for_mount(_card(), set())
+    api._send.assert_awaited_once()
 
 
 async def test_exact_music_instance_prepares_its_specified_node_before_send(
@@ -506,3 +565,42 @@ def test_cancel_discards_partial_music_output(
     assert response.json()["status"] == "cancelled"
     assert isinstance(api._send.call_args.args[0], TaskCancelled)
     assert api._music_store.get(command_id, "music") is None
+
+
+async def test_music_cancel_marker_cannot_outlive_terminal_stream(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A completion during the awaited cancel send leaves no retained ID."""
+    api = _api(tmp_path, monkeypatch)
+    command_id = CommandId("music-cancel-race")
+    _job(api, command_id, _wav())
+    sender, _receiver = channel[MusicChunk]()
+    api._music_generation_queues[command_id] = sender
+
+    async def finish_during_send(command: TaskCancelled) -> None:
+        assert command.cancelled_command_id == command_id
+        assert command_id in api._cancelled_command_ids
+        api._music_generation_queues.pop(command_id)
+        api._cancelled_command_ids.discard(command_id)
+
+    api._send = AsyncMock(side_effect=finish_during_send)
+    await api._cancel_music_job(command_id)
+    assert command_id not in api._cancelled_command_ids
+    assert api._music_jobs.get(command_id).status == "cancelled"
+
+
+async def test_music_cancel_send_failure_removes_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed control send does not retain a permanent cancellation ID."""
+    api = _api(tmp_path, monkeypatch)
+    command_id = CommandId("music-cancel-send-failed")
+    _job(api, command_id, _wav())
+    sender, _receiver = channel[MusicChunk]()
+    api._music_generation_queues[command_id] = sender
+    api._send = AsyncMock(side_effect=RuntimeError("send failed"))
+
+    with pytest.raises(RuntimeError, match="send failed"):
+        await api._cancel_music_job(command_id)
+
+    assert command_id not in api._cancelled_command_ids
