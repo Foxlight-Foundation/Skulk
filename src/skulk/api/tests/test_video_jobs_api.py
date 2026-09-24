@@ -925,6 +925,10 @@ def test_models_list_the_guides_a_video_card_derives() -> None:
     ]
     assert guides[1]["weights"] == []
     assert payload["video"]["default_guide"] == "pose"
+    # The ControlNet's own settings, so a client can build a valid request.
+    assert payload["video"]["control_strength_bounds"] == [0.0, 10.0]
+    assert payload["video"]["default_control_strength"] == 1.0
+    assert payload["video"]["default_control_window"] == [0.0, 1.0]
 
 
 def test_create_refuses_a_control_input_the_card_cannot_read(

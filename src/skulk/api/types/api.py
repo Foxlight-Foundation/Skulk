@@ -849,6 +849,24 @@ class VideoCapabilitySection(BaseModel):
         default=None,
         description="The guide a `control` clip gives when `control_kind` is omitted.",
     )
+    control_strength_bounds: list[float] = Field(
+        default_factory=lambda: [0.0, VIDEO_CONTROL_STRENGTH_MAX],
+        description="Inclusive range the job `control_strength` field accepts.",
+    )
+    default_control_strength: float | None = Field(
+        default=None,
+        description=(
+            "ControlNet strength a render uses when `control_strength` is omitted: "
+            "the card's ControlNet's own, else 1; null when the card has no ControlNet."
+        ),
+    )
+    default_control_window: list[float] = Field(
+        default_factory=lambda: [0.0, 1.0],
+        description=(
+            "Schedule fractions `control_start` and `control_end` take when omitted: "
+            "the ControlNet steers across the whole schedule."
+        ),
+    )
 
     @classmethod
     def from_model_card(cls, model_card: ModelCard) -> "VideoCapabilitySection | None":
@@ -919,6 +937,14 @@ class VideoCapabilitySection(BaseModel):
                 VIDEO_DEFAULT_GUIDE
                 if any(guide.kind == VIDEO_DEFAULT_GUIDE for guide in guides)
                 else None
+            ),
+            default_control_strength=next(
+                (
+                    companion.strength if companion.strength is not None else 1.0
+                    for companion in config.companions
+                    if companion.kind == VideoCompanionKind.ModelPatch
+                ),
+                None,
             ),
         )
 
