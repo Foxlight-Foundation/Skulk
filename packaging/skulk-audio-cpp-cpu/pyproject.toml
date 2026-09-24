@@ -1,6 +1,6 @@
 [project]
 name = "skulk-audio-cpp-cpu"
-version = "0.8.2.post0"
+version = "0.8.2.post1"
 description = "Pinned audio.cpp music server for Skulk on supported CPU hosts"
 readme = "README.md"
 requires-python = ">=3.13"

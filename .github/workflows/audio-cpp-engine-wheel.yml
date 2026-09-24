@@ -1,5 +1,6 @@
 # Build the separately installed audio.cpp music engine from one immutable source.
-# Publication is a separate release gate after hardware and model qualification.
+# Publication supplies immutable packages; model support claims have separate
+# hardware and generation qualification gates.
 name: audio-cpp-engine-wheel
 
 permissions:
@@ -96,6 +97,16 @@ jobs:
                   'skulk_audio_cpp_cpu/model_specs/ace_step.json',
                   'skulk_audio_cpp_cpu/model_specs/minimax_music3.json',
                   'skulk_audio_cpp_cpu/licenses/AUDIO_CPP_LICENSE.txt',
+                  'skulk_audio_cpp_cpu/licenses/THIRD_PARTY_NOTICES.txt',
+                  'skulk_audio_cpp_cpu/licenses/ABSL_LICENSE.txt',
+                  'skulk_audio_cpp_cpu/licenses/CJSON_LICENSE.txt',
+                  'skulk_audio_cpp_cpu/licenses/CPP_HTTPLIB_LICENSE.txt',
+                  'skulk_audio_cpp_cpu/licenses/DARTS_CLONE_LICENSE.txt',
+                  'skulk_audio_cpp_cpu/licenses/ESAXX_LICENSE.txt',
+                  'skulk_audio_cpp_cpu/licenses/GGML_LICENSE.txt',
+                  'skulk_audio_cpp_cpu/licenses/LIBYAML_LICENSE.txt',
+                  'skulk_audio_cpp_cpu/licenses/PROTOBUF_LITE_LICENSE.txt',
+                  'skulk_audio_cpp_cpu/licenses/SENTENCEPIECE_LICENSE.txt',
               }
               assert required <= names, required - names
           print(f'{wheel.name} sha256:{hashlib.sha256(wheel.read_bytes()).hexdigest()}')
