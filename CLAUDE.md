@@ -50,6 +50,11 @@ runtime libraries from their official Python packages.
 For a CUDA-only packaging revision, the engine-wheel workflow's
 `publish_variant=cuda` publishes both CUDA architectures while preserving the
 unchanged Vulkan package.
+The llama-server engine wheel workflow runs on `dev` pushes only when its CUDA
+or Vulkan package or workflow changes. The separate audio.cpp wheel workflow
+runs on music-package changes in PRs and on `dev`; both workflows refresh Linux
+APT metadata and retry once when a security mirror retires a package revision.
+Wheel publication in either workflow remains an explicit manual dispatch.
 
 `uv` is the canonical Skulk runtime path on macOS, including the official
 `mlx` + `mlx-metal` wheel stack. Nix is kept for formatting, flake-based
