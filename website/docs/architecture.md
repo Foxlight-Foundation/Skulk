@@ -816,7 +816,11 @@ launches ComfyUI with `--bf16-vae --disable-mmap --cache-none`, the flags
 validated for MiniMax H3 on Strix Halo (memory-mapping a checkpoint above 64
 GB through unified memory is pathologically slow, the fp32 VAE decode does
 not fit beside the transformer, and node outputs are not worth retaining on
-a host whose GPU memory is the system's). The AMD channel is the one whose
+a host whose GPU memory is the system's). The CUDA lane launches ComfyUI
+with `--disable-cuda-malloc`: on the async allocator backend ComfyUI would
+otherwise choose, a render that applies the Fun ControlNet patch aborts the
+server on its first sampling step on the GB10, while PyTorch's own allocator
+renders it and costs a plain render nothing. The AMD channel is the one whose
 gfx1151 BLAS libraries are complete for H3: the rocm7.2 torch wheel from the
 PyTorch index, the lane's first wheel set, shipped a gfx1151 rocBLAS without
 the single-precision batched GEMM the Qwen3-VL text encoder's vision tower

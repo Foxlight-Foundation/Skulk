@@ -106,6 +106,21 @@ kernel on gfx1151 (measured against the math path on the hardware).
 """
 
 
+CUDA_LAUNCH_FLAGS: Final[tuple[str, ...]] = ("--disable-cuda-malloc",)
+"""ComfyUI flags for the CUDA lane: PyTorch's own caching allocator.
+
+ComfyUI defaults CUDA devices to the ``cudaMallocAsync`` allocator backend.
+With it, a MiniMax H3 render that applies the Fun ControlNet patch aborts
+the server on its first sampling step on the GB10 (``cuMemFreeAsync``
+returns ``CUDA_ERROR_INVALID_VALUE`` inside the model's forward, where
+ComfyUI's allocation graph hands back memory the async backend did not
+record). The native allocator renders the same graph, and a plain render
+measured the same on both (43.2 s against 42.1 s for 480x480 at four
+steps), so the CUDA lane uses it for every render rather than only for
+guided ones: one server serves consecutive renders.
+"""
+
+
 def _local_comfy_backend() -> str | None:
     """The node's own advertised ``comfy-<compute>`` tag, for an unstamped shard."""
     from skulk.shared.backends import probe_node_backends
@@ -130,10 +145,10 @@ def _is_rocm_lane(resolved_backend: str | None) -> bool:
 def launch_flags(resolved_backend: str | None) -> tuple[str, ...]:
     """Extra ComfyUI flags for the node's compute backend.
 
-    CUDA needs nothing beyond the headless defaults; the ROCm lane adds
-    ``ROCM_LAUNCH_FLAGS``.
+    The ROCm lane adds ``ROCM_LAUNCH_FLAGS`` and every other lane, CUDA,
+    adds ``CUDA_LAUNCH_FLAGS``.
     """
-    return ROCM_LAUNCH_FLAGS if _is_rocm_lane(resolved_backend) else ()
+    return ROCM_LAUNCH_FLAGS if _is_rocm_lane(resolved_backend) else CUDA_LAUNCH_FLAGS
 
 
 def _configured_install() -> tuple[Path, Path]:

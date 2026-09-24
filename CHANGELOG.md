@@ -42,7 +42,10 @@ This project records release notes here and mirrors public-facing notes in
   or `edges`). `GET /v1/models` lists the guides each video card derives and
   the weights they load. A card without a ControlNet for the mode, or
   without the weights for a guide, refuses them, and `stats.engine` records
-  what the ControlNet ran with.
+  what the ControlNet ran with. On CUDA the ComfyUI engine runs on PyTorch's
+  own allocator (`--disable-cuda-malloc`): on the async allocator ComfyUI
+  would otherwise choose, a ControlNet render aborted the engine on the
+  GB10.
 
 - Video cards can pin companions hosted in other repositories. A new
   `preprocessor` companion kind carries the weights that derive a guide video
