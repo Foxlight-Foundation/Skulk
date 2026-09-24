@@ -40,6 +40,8 @@ from skulk.shared.types.worker.runners import (
     RunnerLoading,
     RunnerReady,
     RunnerRunning,
+    RunnerShutdown,
+    RunnerShuttingDown,
     RunnerStatus,
     RunnerWarmingUp,
 )
@@ -127,11 +129,20 @@ class Runner(ServedConcurrentDispatch):
 
     def _ensure_server_alive(self) -> None:
         server = self.server
+        with self._status_lock:
+            generation_active = self._inflight > 0
         if server is None:
+            if generation_active:
+                return
             if isinstance(self.current_status, (RunnerReady, RunnerRunning)):
                 raise RuntimeError("audio.cpp server stopped; runner restart is required")
             return
         if not server.alive():
+            # Cancellation stops this sidecar while the active generation is
+            # still unwinding. Its worker restores the sidecar before releasing
+            # the serial dispatch permit; do not crash the dispatch loop here.
+            if generation_active:
+                return
             tail = server.log_tail()
             self._teardown_server()
             raise RuntimeError(f"audio.cpp server exited: {tail}")
@@ -212,6 +223,15 @@ class Runner(ServedConcurrentDispatch):
             shutil.rmtree(output_dir, ignore_errors=True)
             self._teardown_server()
             raise
+        if (
+            self._is_cancelled(task.task_id)
+            and not isinstance(self.current_status, (RunnerShuttingDown, RunnerShutdown))
+            and not server.alive()
+        ):
+            # Restore readiness before the completion callback releases the
+            # permit to a generation already admitted behind this one.
+            self._teardown_server()
+            self._load_model()
 
     def _render(
         self,

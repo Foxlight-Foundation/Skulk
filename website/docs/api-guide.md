@@ -2382,6 +2382,10 @@ The API requires every embedded shard card's `modelId` to match the assignment's
 canonical `modelId` before acknowledging creation. An inconsistent shard card
 returns HTTP 400 with `X-Skulk-Placement-Failure:
 model_card_identity_mismatch`, and no instance state is created.
+For a text-to-music instance, the placement must name exactly one node. The API
+prepares audio.cpp on that node and verifies a ready build and signed support
+claim before accepting the command. If the node cannot be prepared, the request
+returns HTTP 503 with the node's preparation or compatibility diagnostic.
 
 Persist the submitted instance identity before sending. HTTP acceptance is not
 download or runner readiness. If the response is lost, reconcile that exact ID

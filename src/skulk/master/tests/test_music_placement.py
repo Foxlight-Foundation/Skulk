@@ -1,0 +1,99 @@
+"""Music placements remain single-host through both master command paths."""
+
+import tomllib
+from pathlib import Path
+
+import pytest
+
+from skulk.master.placement import (
+    PlacementError,
+    add_instance_to_placements,
+    place_instance,
+)
+from skulk.shared.constants import RESOURCES_DIR
+from skulk.shared.models.model_cards import ModelCard
+from skulk.shared.topology import Topology
+from skulk.shared.types.commands import CreateInstance, PlaceInstance
+from skulk.shared.types.common import NodeId
+from skulk.shared.types.profiling import NodeResources
+from skulk.shared.types.worker.instances import (
+    InstanceId,
+    InstanceMeta,
+    MlxRingInstance,
+)
+from skulk.shared.types.worker.runners import RunnerId, ShardAssignments
+from skulk.shared.types.worker.shards import PipelineShardMetadata, Sharding
+
+
+def _music_card() -> ModelCard:
+    """Use the shipped immutable MiniMax card as placement truth."""
+    path = Path(RESOURCES_DIR) / "music_model_cards" / "audio-cpp--MiniMax-Music3-GGUF-Q4.toml"
+    return ModelCard.model_validate(tomllib.loads(path.read_text()))
+
+
+def test_music_place_command_rejects_requested_multi_node_width() -> None:
+    """An ordinary placement must not mint a two-node music instance."""
+    command = PlaceInstance(
+        model_card=_music_card(), sharding=Sharding.Pipeline,
+        instance_meta=InstanceMeta.MlxRing, min_nodes=2,
+    )
+    with pytest.raises(PlacementError, match="exactly one node"):
+        place_instance(command, Topology(), {}, {}, {})
+
+
+def test_music_exact_command_rejects_two_node_instance() -> None:
+    """Internal exact commands enforce the same host count as the API."""
+    card = _music_card()
+    nodes = (NodeId("music-a"), NodeId("music-b"))
+    runners = (RunnerId("runner-a"), RunnerId("runner-b"))
+    instance = MlxRingInstance(
+        instance_id=InstanceId(),
+        shard_assignments=ShardAssignments(
+            model_id=card.model_id,
+            runner_to_shard={
+                runner: PipelineShardMetadata(
+                    model_card=card, device_rank=rank, world_size=2,
+                    start_layer=rank * 18, end_layer=(rank + 1) * 18,
+                    n_layers=36,
+                )
+                for rank, runner in enumerate(runners)
+            },
+            node_to_runner=dict(zip(nodes, runners, strict=True)),
+        ),
+        hosts_by_node={node: [] for node in nodes},
+        ephemeral_port=52415,
+    )
+    with pytest.raises(PlacementError, match="exactly one node"):
+        add_instance_to_placements(CreateInstance(instance=instance), Topology(), {}, {})
+
+
+def test_music_exact_command_rejects_stamped_unclaimed_build() -> None:
+    """An internal caller cannot bypass preparation with a client backend stamp."""
+    card = _music_card()
+    node = NodeId("music-node")
+    runner = RunnerId("music-runner")
+    instance = MlxRingInstance(
+        instance_id=InstanceId(),
+        shard_assignments=ShardAssignments(
+            model_id=card.model_id,
+            runner_to_shard={runner: PipelineShardMetadata(
+                model_card=card, device_rank=0, world_size=1,
+                start_layer=0, end_layer=36, n_layers=36,
+                resolved_backend="audio_cpp-cpu",
+            )},
+            node_to_runner={node: runner},
+        ),
+        hosts_by_node={node: []},
+        ephemeral_port=52415,
+    )
+    resources = NodeResources(
+        backends=frozenset({"audio_cpp", "audio_cpp-cpu"}),
+        architecture="arm64",
+        hardware_classes=frozenset({"platform:darwin"}),
+        engine_builds={"audio_cpp-cpu": "unqualified-build"},
+    )
+    with pytest.raises(PlacementError, match="matching signed support claim"):
+        add_instance_to_placements(
+            CreateInstance(instance=instance), Topology(), {}, {},
+            node_resources={node: resources},
+        )

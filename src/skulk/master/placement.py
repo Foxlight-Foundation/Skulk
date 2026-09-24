@@ -242,6 +242,11 @@ def add_instance_to_placements(
     # than None (review catch on #292).
     assignments = command.instance.shard_assignments
     require_instance_model_card_identity(command.instance)
+    if (
+        len(assignments.node_to_runner) != 1
+        and any(shard.model_card.music is not None for shard in assignments.runner_to_shard.values())
+    ):
+        raise PlacementError("Music instances require exactly one node")
     require_instance_model_code_approval(
         command.instance,
         approved_remote_code_identities,
@@ -250,6 +255,18 @@ def add_instance_to_placements(
         resolved_shards = dict(assignments.runner_to_shard)
         for node_id, runner_id in assignments.node_to_runner.items():
             shard = resolved_shards[runner_id]
+            if shard.model_card.music is not None:
+                resources = (node_resources or {}).get(node_id)
+                if resources is None:
+                    raise PlacementError("Ready audio.cpp backend telemetry is required for exact music placement")
+                supported = _card_platform_backends(shard.model_card, resources)
+                if not supported or (
+                    shard.resolved_backend is not None
+                    and shard.resolved_backend not in supported
+                ):
+                    raise PlacementError(
+                        "Exact music placement requires a ready audio.cpp build and matching signed support claim"
+                    )
             if shard.resolved_backend is not None:
                 continue
             resources = (node_resources or {}).get(node_id)
@@ -487,7 +504,11 @@ def _card_platform_backends(
     ``compatible_backends`` goes through this helper so eligibility, the
     common-engine cycle rule, and backend stamping all agree.
     """
-    compatible = set(card.placement.compatible_backends)
+    # Music is admitted only by an exact signed build/hardware claim, even if
+    # an old embedded card carries a legacy compatible_backends declaration.
+    compatible: set[str] = (
+        set() if card.music is not None else set(card.placement.compatible_backends)
+    )
     if node_resources is not None:
         compatible.update(
             registry_supported_backends_for_node(
@@ -754,6 +775,8 @@ def place_instance(
     approved_remote_code_identities: AbstractSet[str] | None = None,
     served_context_default: int | None = None,
 ) -> dict[InstanceId, Instance]:
+    if command.model_card.music is not None and command.min_nodes != 1:
+        raise PlacementError("Music instances require exactly one node")
     if remote_code_approval_required(
         command.model_card, approved_remote_code_identities
     ):
@@ -761,7 +784,13 @@ def place_instance(
 
     cycles = topology.get_cycles()
     candidate_cycles = list(filter(lambda it: len(it) >= command.min_nodes, cycles))
+    if command.model_card.music is not None:
+        # audio.cpp runs one complete model on one host; a larger cycle could
+        # otherwise be selected when no single node passes memory admission.
+        candidate_cycles = [cycle for cycle in candidate_cycles if len(cycle) == 1]
     if not candidate_cycles:
+        if command.model_card.music is not None:
+            raise PlacementError("No single-node placement is available for this music model")
         known_nodes = sum(1 for _ in topology.list_nodes())
         if known_nodes >= command.min_nodes:
             # Enough nodes exist for this placement — they just aren't

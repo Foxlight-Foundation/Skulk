@@ -2478,6 +2478,9 @@ class API:
                 "requires observed VRAM for concrete GPU shards and accounts for "
                 "existing placements. Omitted non-RPC backends resolve from node "
                 "engine telemetry before admission; missing evidence is refused. "
+                "Text-to-music placements require one specified node; the API "
+                "prepares audio.cpp there and verifies a ready signed build "
+                "claim before accepting the command. "
                 "A refused acknowledged command retains "
                 "placement_failed evidence in the instance failure history."
             ),
@@ -3652,15 +3655,18 @@ class API:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     async def _prepare_music_engine_for_mount(
-        self, card: ModelCard, excluded_nodes: set[NodeId]
+        self, card: ModelCard, excluded_nodes: set[NodeId],
+        *, required_nodes: set[NodeId] | None = None,
     ) -> None:
-        """Prepare one hardware-eligible node before ordinary signed placement."""
+        """Prepare an eligible node, optionally pinned by an exact placement."""
 
         if ModelTask.TextToMusic not in card.tasks:
             return
         candidates: list[tuple[bool, int, NodeId]] = []
         for node_id in self.state.topology.list_nodes():
-            if node_id in excluded_nodes:
+            if node_id in excluded_nodes or (
+                required_nodes is not None and node_id not in required_nodes
+            ):
                 continue
             resources = self._telemetry_view.node_resources.get(node_id)
             memory = self._telemetry_view.node_memory.get(node_id)
@@ -3687,7 +3693,11 @@ class API:
         if not candidates:
             raise HTTPException(
                 status_code=503,
-                detail="No healthy Apple Silicon macOS or Linux amd64/arm64 node has enough available memory for this music model",
+                detail=(
+                    "No healthy Apple Silicon macOS or Linux amd64/arm64 node has enough available memory for this music model"
+                    if required_nodes is None
+                    else "The specified music node is unavailable, ineligible, or lacks enough available memory"
+                ),
             )
         errors: list[str] = []
         for ready, _memory, node_id in candidates:
@@ -3869,6 +3879,16 @@ class API:
                 detail=str(exc),
                 headers={"X-Skulk-Placement-Failure": exc.code},
             ) from exc
+        if ModelTask.TextToMusic in model_card.tasks:
+            music_nodes = set(instance.shard_assignments.node_to_runner)
+            if len(music_nodes) != 1:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Music instances require exactly one specified node",
+                )
+            await self._prepare_music_engine_for_mount(
+                model_card, set(), required_nodes=music_nodes,
+            )
         required_memory = model_card.storage_size
         available_memory = self._calculate_total_available_memory()
 

@@ -15,6 +15,7 @@ from skulk.shared.types.audio import (
 )
 from skulk.shared.types.common import CommandId, ModelId, NodeId
 from skulk.shared.types.memory import Memory
+from skulk.shared.types.music import MusicGenerationTaskParams
 from skulk.shared.types.state import State
 from skulk.shared.types.tasks import (
     AudioTranscription as AudioTranscriptionTask,
@@ -24,6 +25,9 @@ from skulk.shared.types.tasks import (
     Task,
     TaskId,
     TaskStatus,
+)
+from skulk.shared.types.tasks import (
+    MusicGeneration as MusicGenerationTask,
 )
 from skulk.shared.types.tasks import (
     SpeechSynthesis as SpeechSynthesisTask,
@@ -171,6 +175,27 @@ def test_audio_transcription_task_with_missing_instance_is_failed() -> None:
     instance_id = InstanceId()
     task_id = TaskId()
     state = _state({task_id: _transcription_task(task_id, instance_id)}, {})
+    events = orphaned_task_failure_events(state, frozenset())
+    assert len(events) == 1
+    assert events[0].task_id == task_id
+    assert events[0].error_type == "instance_lost"
+
+
+def test_music_task_with_missing_instance_is_failed() -> None:
+    """A lost music instance must terminate its job and release admission."""
+    instance_id = InstanceId()
+    task_id = TaskId()
+    task = MusicGenerationTask(
+        task_id=task_id,
+        instance_id=instance_id,
+        task_status=TaskStatus.Running,
+        command_id=CommandId(),
+        owner_node=NodeId("api-node"),
+        task_params=MusicGenerationTaskParams(
+            model="test-model", prompt="ambient piano", seconds=20,
+        ),
+    )
+    state = _state({task_id: task}, {})
     events = orphaned_task_failure_events(state, frozenset())
     assert len(events) == 1
     assert events[0].task_id == task_id

@@ -12,12 +12,13 @@ from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 import skulk.api.main as api_module
 from skulk.api.main import API
 from skulk.api.music_jobs import MusicJob, MusicJobRegistry
+from skulk.api.types.api import CreateInstanceParams
 from skulk.api.video_store import VideoStore
 from skulk.routing.output_media import OutputMediaPacket
 from skulk.shared.models.model_cards import ModelCard, ModelId
@@ -29,7 +30,9 @@ from skulk.shared.types.memory import Memory
 from skulk.shared.types.music import MusicGenerationTaskParams, MusicOutputManifest
 from skulk.shared.types.profiling import MemoryUsage, NodeResources
 from skulk.shared.types.tasks import MusicGeneration as MusicGenerationTask
-from skulk.shared.types.worker.instances import InstanceId
+from skulk.shared.types.worker.instances import InstanceId, MlxRingInstance
+from skulk.shared.types.worker.runners import RunnerId, ShardAssignments
+from skulk.shared.types.worker.shards import PipelineShardMetadata
 from skulk.utils.channels import channel
 
 MODEL = ModelId("audio-cpp/test-music")
@@ -91,6 +94,61 @@ async def test_mount_preflight_skips_ready_build_without_signed_music_support(
     monkeypatch.setattr(api_module, "registry_supported_backends_for_node", supported_backends)
     await api._prepare_music_engine_for_mount(_card(), set())
     api._send.assert_not_called()
+
+    # An exact placement must not silently prepare the other eligible node.
+    with pytest.raises(HTTPException, match="audio.cpp could not be prepared"):
+        await api._prepare_music_engine_for_mount(
+            _card(), set(), required_nodes={unsupported},
+        )
+    api._send.assert_not_called()
+
+
+async def test_exact_music_instance_prepares_its_specified_node_before_send(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The direct create route cannot bypass on-demand package preparation."""
+    card = _card()
+    node = NodeId("music-node")
+    runner = RunnerId("music-runner")
+    instance = MlxRingInstance(
+        instance_id=InstanceId(),
+        shard_assignments=ShardAssignments(
+            model_id=card.model_id,
+            runner_to_shard={runner: PipelineShardMetadata(
+                model_card=card, device_rank=0, world_size=1,
+                start_layer=0, end_layer=1, n_layers=1,
+            )},
+            node_to_runner={node: runner},
+        ),
+        hosts_by_node={node: []},
+        ephemeral_port=52415,
+    )
+    api: Any = object.__new__(API)
+    api._send = AsyncMock()
+    api._prepare_music_engine_for_mount = AsyncMock()
+    monkeypatch.setattr(API, "_load_authorized_model_card", AsyncMock(return_value=card))
+    def no_remote_code_approvals(_api: API) -> frozenset[str]:
+        return frozenset()
+
+    def sufficient_memory(_api: API) -> Memory:
+        return Memory.from_gb(10)
+
+    monkeypatch.setattr(API, "_cluster_remote_code_approvals", no_remote_code_approvals)
+    monkeypatch.setattr(API, "_calculate_total_available_memory", sufficient_memory)
+
+    await api.create_instance(CreateInstanceParams(instance=instance))
+    api._prepare_music_engine_for_mount.assert_awaited_once_with(
+        card, set(), required_nodes={node},
+    )
+    api._send.assert_awaited_once()
+
+    api._send.reset_mock()
+    api._prepare_music_engine_for_mount.side_effect = HTTPException(
+        status_code=503, detail="package unavailable",
+    )
+    with pytest.raises(HTTPException, match="package unavailable"):
+        await api.create_instance(CreateInstanceParams(instance=instance))
+    api._send.assert_not_awaited()
 
 
 def _wav() -> bytes:

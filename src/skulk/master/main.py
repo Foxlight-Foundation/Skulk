@@ -312,6 +312,7 @@ _COMMAND_TASK_TYPES = (
     SpeechSynthesisTask,
     AudioTranscriptionTask,
     RealtimeAudioTranscriptionTask,
+    MusicGenerationTask,
 )
 
 
