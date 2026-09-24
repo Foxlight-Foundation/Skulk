@@ -57,5 +57,7 @@ async def test_prepared_gpu_only_lane_requires_matching_build(
     assert completed.success is expected_success
     if expected_success:
         worker._telemetry_sender.send.assert_awaited_once()
+        assert completed.resources == resources
     else:
         worker._telemetry_sender.send.assert_not_awaited()
+        assert completed.resources is None

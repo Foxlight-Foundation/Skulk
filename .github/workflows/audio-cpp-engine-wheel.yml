@@ -81,7 +81,7 @@ jobs:
           packaging/skulk-audio-cpp-cpu/src/skulk_audio_cpp_cpu/bin/audiocpp_server --list-devices
       - uses: astral-sh/setup-uv@v6
       - name: Build wheel
-        run: uv build --wheel packaging/skulk-audio-cpp-cpu
+        run: uv build --wheel packaging/skulk-audio-cpp-cpu --out-dir packaging/skulk-audio-cpp-cpu/dist
       - name: Verify wheel payload and record digest
         run: |
           python3 - <<'PY'

@@ -3703,15 +3703,14 @@ class API:
         for ready, _memory, node_id in candidates:
             if ready:
                 resources = self._telemetry_view.node_resources.get(node_id)
-                if resources is not None and registry_supported_backends_for_node(
+                if resources is None or not registry_supported_backends_for_node(
                     card,
                     node_backends=resources.backends,
                     engine_builds=resources.engine_builds,
                     hardware_classes=resources.hardware_classes,
                 ):
-                    return
-                errors.append(f"{node_id}: no supported signed music claim matches its ready engine build and hardware")
-                continue
+                    errors.append(f"{node_id}: no supported signed music claim matches its ready engine build and hardware")
+                    continue
             request_id = CommandId()
             waiter = anyio.Event()
             self._audio_cpp_prepare_events[request_id] = waiter
@@ -3880,6 +3879,11 @@ class API:
                 headers={"X-Skulk-Placement-Failure": exc.code},
             ) from exc
         if ModelTask.TextToMusic in model_card.tasks:
+            if isinstance(instance, LlamaRpcInstance):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Music instances cannot use llama.cpp RPC placement",
+                )
             music_nodes = set(instance.shard_assignments.node_to_runner)
             if len(music_nodes) != 1:
                 raise HTTPException(

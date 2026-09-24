@@ -1063,6 +1063,33 @@ class Master:
         elif isinstance(indexed.event, InstanceDeleted):
             self._pending_instance_reservations.pop(indexed.event.instance_id, None)
         record_membership_from_event(self._telemetry_view, indexed.event)
+        if isinstance(indexed.event, AudioCppPreparationCompleted):
+            self._record_audio_cpp_preparation(indexed.event)
+
+    def _record_audio_cpp_preparation(
+        self, event: AudioCppPreparationCompleted
+    ) -> None:
+        """Make verified resources visible to placement before broadcasting success."""
+
+        resources = event.resources
+        if (
+            not event.success
+            or resources is None
+            or event.target_node not in self.state.topology.list_nodes()
+        ):
+            return
+        if not any(
+            backend.startswith("audio_cpp-")
+            and backend in resources.engine_builds
+            for backend in resources.backends
+        ):
+            return
+        # Telemetry is lossy and can reach API and master in either order. The
+        # worker's fresh verified snapshot rides the ordered completion event,
+        # so the master's planner has the exact build before the API can send
+        # its following placement command. Ordinary telemetry continues to
+        # refresh these facts after the preparation barrier.
+        self._telemetry_view.node_resources[event.target_node] = resources
 
     def _record_runner_loaded_transitions(
         self, before: Mapping[RunnerId, RunnerStatus]

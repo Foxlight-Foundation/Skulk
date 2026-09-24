@@ -242,11 +242,17 @@ def add_instance_to_placements(
     # than None (review catch on #292).
     assignments = command.instance.shard_assignments
     require_instance_model_card_identity(command.instance)
+    music_instance = any(
+        shard.model_card.music is not None
+        for shard in assignments.runner_to_shard.values()
+    )
     if (
         len(assignments.node_to_runner) != 1
-        and any(shard.model_card.music is not None for shard in assignments.runner_to_shard.values())
+        and music_instance
     ):
         raise PlacementError("Music instances require exactly one node")
+    if music_instance and isinstance(command.instance, LlamaRpcInstance):
+        raise PlacementError("Music instances cannot use llama.cpp RPC placement")
     require_instance_model_code_approval(
         command.instance,
         approved_remote_code_identities,

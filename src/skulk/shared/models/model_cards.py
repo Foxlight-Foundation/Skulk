@@ -1091,6 +1091,13 @@ class MusicLyricRequirement(str, Enum):
     Unsupported = "unsupported"
 
 
+def _music_component_matches_role(component_path: str, role: str) -> bool:
+    """Keep a selected GGUF tied to its MiniMax component role."""
+    name = PurePosixPath(component_path).name
+    stem = name.removesuffix(".gguf")
+    return name.endswith(".gguf") and (stem == role or stem.startswith(f"{role}_"))
+
+
 class MusicCardConfig(CamelCaseModel):
     """Model truth for bounded text-to-music generation, separate from speech."""
 
@@ -1157,6 +1164,15 @@ class MusicCardConfig(CamelCaseModel):
             component is None for component in components
         ):
             raise ValueError("MiniMax Music 3 requires three selected GGUF components")
+        if self.family == MusicModelFamily.MiniMaxMusic3 and any(
+            component is not None and not _music_component_matches_role(component, role)
+            for component, role in zip(
+                components,
+                ("language_model", "rvq_depth_decoder", "transformer"),
+                strict=True,
+            )
+        ):
+            raise ValueError("MiniMax component paths must match their declared roles")
         if self.family == MusicModelFamily.AceStep15 and any(
             component is not None for component in components
         ):
@@ -2929,6 +2945,14 @@ class ModelCard(CamelCaseModel):
             if any(path is not None and path not in bundle_paths for path in selected):
                 raise ValueError("selected music components must be in artifact_bundle")
             if self.music.family == MusicModelFamily.MiniMaxMusic3:
+                language_model = self.music.language_model_gguf
+                if (
+                    language_model is None
+                    or self.gguf_file != f"{root_prefix}{language_model}"
+                ):
+                    raise ValueError(
+                        "MiniMax gguf_file must select its language_model_gguf"
+                    )
                 required = frozenset(
                     (
                         "condition_encoder.gguf",
@@ -2961,7 +2985,11 @@ class ModelCard(CamelCaseModel):
                     if self.gguf_file is not None
                     else None
                 )
-                if chosen is None or bundle_paths != {chosen}:
+                if (
+                    chosen is None
+                    or not chosen.endswith(".gguf")
+                    or bundle_paths != {chosen}
+                ):
                     raise ValueError(
                         "ACE-Step artifact_bundle must contain only its selected GGUF"
                     )

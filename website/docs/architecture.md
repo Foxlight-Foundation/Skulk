@@ -964,11 +964,15 @@ The facts probe checks both pinned model specs; a standalone binary may name
 its specs through `SKULK_AUDIO_CPP_SPECS_DIR`. Only then can the node publish
 ready audio.cpp lanes for restored instances.
 
-Music mounting first sends a targeted `PrepareAudioCpp` command to an eligible
-worker. `AudioCppPreparationRequested` and `AudioCppPreparationCompleted`
-report the preparation lifecycle; the worker verifies the package and publishes
-fresh `NodeResources` before reporting success. Ordinary signed placement then
-selects only ready backends. A `MusicGeneration` command creates a distinct
+Music mounting sends a targeted `PrepareAudioCpp` command to an eligible worker,
+including when the API already sees a ready package. `AudioCppPreparationRequested`
+and `AudioCppPreparationCompleted` report the lifecycle; the worker verifies
+the package, publishes fresh `NodeResources`, and includes that verified snapshot
+in the ordered completion. The master applies the snapshot to its live resource
+view before broadcasting success, so placement sees the exact build even when
+ordinary telemetry arrives later. Exact placements reject RPC shaped music
+instances and require a matching ready build and signed support claim.
+Ordinary signed placement selects only ready backends. A `MusicGeneration` command creates a distinct
 task; its runner owns one loopback audio.cpp server per mounted model and emits
 only a terminal `MusicChunk` manifest through the control path. Bounded WAV
 bytes use `OUTPUT_MEDIA` with purpose `music`, and the accepting API node

@@ -1089,6 +1089,7 @@ class Worker:
 
         success = False
         error: str | None = None
+        resources: NodeResources | None = None
         try:
             await to_thread.run_sync(
                 lambda: prepare_audio_cpp(allow_download=not self._offline)
@@ -1132,6 +1133,7 @@ class Worker:
             owner_node=request.owner_node,
             success=success,
             error=error,
+            resources=resources if success else None,
         ))
 
     def _effective_downloads(self) -> dict[NodeId, list[DownloadProgress]]:

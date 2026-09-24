@@ -25,6 +25,7 @@ def _card(**overrides: object) -> ModelCard:
         "n_layers": 1,
         "hidden_size": 1,
         "source_revision": "a" * 40,
+        "gguf_file": "language_model_q4_0.gguf",
         "supports_tensor": False,
         "tasks": ["TextToMusic"],
         "music": {
@@ -142,7 +143,16 @@ def test_minimax_bundle_checks_paths_relative_to_loader_root() -> None:
             ),
         }
     )
-    assert _card(artifact_bundle=rooted).music == card.music
+    assert _card(
+        artifact_bundle=rooted,
+        gguf_file="models/language_model_q4_0.gguf",
+    ).music == card.music
+
+
+def test_minimax_selected_file_matches_language_model() -> None:
+    """Generic GGUF readers must see the same MiniMax component as the runner."""
+    with pytest.raises(ValidationError, match="must select its language_model_gguf"):
+        _card(gguf_file="vocoder.gguf")
 
 
 def test_music_bundles_reject_unselected_quant_weights() -> None:
@@ -177,6 +187,17 @@ def test_music_bundles_reject_unselected_quant_weights() -> None:
         ModelCard.model_validate({**ace.model_dump(), "artifact_bundle": ace_bundle.model_dump()})
 
 
+def test_ace_step_selected_file_must_be_gguf() -> None:
+    """A static sidecar file cannot become the selected model payload."""
+    path = Path(RESOURCES_DIR) / "music_model_cards" / "audio-cpp--ACE-Step1.5-Turbo-BF16.toml"
+    body = tomllib.loads(path.read_text())
+    selected = "ACE-Step1.5-GGUF/turbo/config.json"
+    body["gguf_file"] = selected
+    body["artifact_bundle"]["files"][0]["path"] = selected
+    with pytest.raises(ValidationError, match="only its selected GGUF"):
+        ModelCard.model_validate(body)
+
+
 def test_music_bounds_and_minimax_lyrics_are_validated() -> None:
     components = {
         "language_model_gguf": "language_model_q4_0.gguf",
@@ -191,6 +212,18 @@ def test_music_bounds_and_minimax_lyrics_are_validated() -> None:
                 "min_seconds": 5,
                 "max_seconds": 60,
                 **components,
+            }
+        )
+    with pytest.raises(ValidationError, match="declared roles"):
+        MusicCardConfig.model_validate(
+            {
+                "family": "minimax_music3",
+                "lyrics": "required",
+                "min_seconds": 5,
+                "max_seconds": 60,
+                **components,
+                "language_model_gguf": components["rvq_depth_decoder_gguf"],
+                "rvq_depth_decoder_gguf": components["language_model_gguf"],
             }
         )
     with pytest.raises(ValidationError, match="cannot exceed 120"):

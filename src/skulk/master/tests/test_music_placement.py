@@ -19,6 +19,7 @@ from skulk.shared.types.profiling import NodeResources
 from skulk.shared.types.worker.instances import (
     InstanceId,
     InstanceMeta,
+    LlamaRpcInstance,
     MlxRingInstance,
 )
 from skulk.shared.types.worker.runners import RunnerId, ShardAssignments
@@ -96,4 +97,28 @@ def test_music_exact_command_rejects_stamped_unclaimed_build() -> None:
         add_instance_to_placements(
             CreateInstance(instance=instance), Topology(), {}, {},
             node_resources={node: resources},
+        )
+
+
+def test_music_exact_command_rejects_rpc_instance() -> None:
+    """A one-host RPC shape cannot skip the music engine readiness check."""
+    card = _music_card()
+    node = NodeId("music-node")
+    runner = RunnerId("music-runner")
+    instance = LlamaRpcInstance(
+        instance_id=InstanceId(),
+        shard_assignments=ShardAssignments(
+            model_id=card.model_id,
+            runner_to_shard={runner: PipelineShardMetadata(
+                model_card=card, device_rank=0, world_size=1,
+                start_layer=0, end_layer=36, n_layers=36,
+            )},
+            node_to_runner={node: runner},
+        ),
+        driver_node=node,
+        donor_endpoints={},
+    )
+    with pytest.raises(PlacementError, match="cannot use llama.cpp RPC"):
+        add_instance_to_placements(
+            CreateInstance(instance=instance), Topology(), {}, {},
         )

@@ -256,10 +256,13 @@ their own `[music]` section and require exact signed support claims. The
 `audio-cpp-engine-wheel` workflow builds the CPU-capable package for Apple
 Silicon macOS and Linux amd64/arm64 from the pinned source. Music model weights
 are separate immutable downloads.
-Music mounting uses targeted `PrepareAudioCpp` and indexed
-`AudioCppPreparationRequested`/`AudioCppPreparationCompleted` events; the
-worker verifies the package and publishes a fresh `NodeResources` (including
-host architecture) before ordinary signed placement. `MusicGeneration` tasks
+Music mounting uses targeted `PrepareAudioCpp` even for a package already
+observed ready, and indexed `AudioCppPreparationRequested`/
+`AudioCppPreparationCompleted` events. The worker verifies the package and
+publishes fresh `NodeResources` (including host architecture); the successful
+completion also carries those verified facts, which the master applies before
+broadcasting success so signed placement cannot race its telemetry view.
+Exact music placement rejects RPC shaped instances. `MusicGeneration` tasks
 produce a bounded `MusicChunk` manifest, while WAV bytes use `OUTPUT_MEDIA`
 purpose `music` and a separate node-local 24-hour store. The music API exposes
 asynchronous `/v1/music` jobs with cancellation and content retrieval.

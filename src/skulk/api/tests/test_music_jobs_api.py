@@ -24,13 +24,18 @@ from skulk.routing.output_media import OutputMediaPacket
 from skulk.shared.models.model_cards import ModelCard, ModelId
 from skulk.shared.topology import Topology
 from skulk.shared.types.chunks import MusicChunk
-from skulk.shared.types.commands import MusicGeneration, TaskCancelled
+from skulk.shared.types.commands import MusicGeneration, PrepareAudioCpp, TaskCancelled
 from skulk.shared.types.common import CommandId, NodeId
+from skulk.shared.types.events import AudioCppPreparationCompleted
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.music import MusicGenerationTaskParams, MusicOutputManifest
 from skulk.shared.types.profiling import MemoryUsage, NodeResources
 from skulk.shared.types.tasks import MusicGeneration as MusicGenerationTask
-from skulk.shared.types.worker.instances import InstanceId, MlxRingInstance
+from skulk.shared.types.worker.instances import (
+    InstanceId,
+    LlamaRpcInstance,
+    MlxRingInstance,
+)
 from skulk.shared.types.worker.runners import RunnerId, ShardAssignments
 from skulk.shared.types.worker.shards import PipelineShardMetadata
 from skulk.utils.channels import channel
@@ -71,6 +76,7 @@ async def test_mount_preflight_skips_ready_build_without_signed_music_support(
         swap_total=0, swap_available=0,
     )
     api: Any = object.__new__(API)
+    api.node_id = NodeId("api-node")
     api.state = SimpleNamespace(topology=topology)
     api._telemetry_view = SimpleNamespace(
         node_resources=resources,
@@ -78,7 +84,18 @@ async def test_mount_preflight_skips_ready_build_without_signed_music_support(
     )
     api._audio_cpp_prepare_events = {}
     api._audio_cpp_prepare_results = {}
-    api._send = AsyncMock()
+    async def complete_preparation(command: PrepareAudioCpp) -> None:
+        assert command.target_node == supported
+        api._audio_cpp_prepare_results[command.command_id] = AudioCppPreparationCompleted(
+            request_id=command.command_id,
+            target_node=supported,
+            owner_node=command.owner_node,
+            success=True,
+            resources=resources[supported],
+        )
+        api._audio_cpp_prepare_events[command.command_id].set()
+
+    api._send = AsyncMock(side_effect=complete_preparation)
 
     def supported_backends(
         _card: ModelCard, *, node_backends: frozenset[str],
@@ -93,7 +110,8 @@ async def test_mount_preflight_skips_ready_build_without_signed_music_support(
 
     monkeypatch.setattr(api_module, "registry_supported_backends_for_node", supported_backends)
     await api._prepare_music_engine_for_mount(_card(), set())
-    api._send.assert_not_called()
+    api._send.assert_awaited_once()
+    api._send.reset_mock()
 
     # An exact placement must not silently prepare the other eligible node.
     with pytest.raises(HTTPException, match="audio.cpp could not be prepared"):
@@ -151,6 +169,42 @@ async def test_exact_music_instance_prepares_its_specified_node_before_send(
     api._send.assert_not_awaited()
 
 
+async def test_exact_music_rpc_instance_is_rejected_before_preparation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The API rejects an RPC shape before any package or mount side effect."""
+    card = _card()
+    node = NodeId("music-node")
+    runner = RunnerId("music-runner")
+    instance = LlamaRpcInstance(
+        instance_id=InstanceId(),
+        shard_assignments=ShardAssignments(
+            model_id=card.model_id,
+            runner_to_shard={runner: PipelineShardMetadata(
+                model_card=card, device_rank=0, world_size=1,
+                start_layer=0, end_layer=1, n_layers=1,
+            )},
+            node_to_runner={node: runner},
+        ),
+        driver_node=node,
+        donor_endpoints={},
+    )
+    api: Any = object.__new__(API)
+    api._send = AsyncMock()
+    api._prepare_music_engine_for_mount = AsyncMock()
+    monkeypatch.setattr(API, "_load_authorized_model_card", AsyncMock(return_value=card))
+    def no_remote_code_approvals(_api: API) -> frozenset[str]:
+        return frozenset()
+
+    monkeypatch.setattr(API, "_cluster_remote_code_approvals", no_remote_code_approvals)
+
+    with pytest.raises(HTTPException, match="cannot use llama.cpp RPC"):
+        await api.create_instance(CreateInstanceParams(instance=instance))
+
+    api._prepare_music_engine_for_mount.assert_not_awaited()
+    api._send.assert_not_awaited()
+
+
 def _wav() -> bytes:
     stream = io.BytesIO()
     with wave.open(stream, "wb") as writer:
@@ -172,6 +226,7 @@ def _card() -> ModelCard:
     return ModelCard.model_validate({
         "model_id": MODEL, "storage_size": Memory.from_mb(128),
         "source_revision": "a" * 40,
+        "gguf_file": "language_model_q4_0.gguf",
         "n_layers": 1, "hidden_size": 1, "supports_tensor": False,
         "tasks": ["TextToMusic"],
         "music": {
