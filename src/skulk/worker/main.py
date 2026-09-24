@@ -507,28 +507,15 @@ def _local_usable_vram() -> Memory | None:
         # NVIDIA fallthrough (rented CUDA nodes): same discrete-VRAM sizing so
         # the worker's last-minute guard agrees with the master's admission.
         # NVIDIA reports no UMA/GTT signature, so the discrete path applies.
-        # Gated on the node actually ADVERTISING a CUDA llama.cpp backend:
-        # with pynvml present but only llama_cpp-cpu advertised (env unset,
-        # or the GPU wheel clobbered so the probe dropped the tag), the
-        # master admits against system RAM, and sizing the local guard
-        # against VRAM would falsely refuse CPU placements that fit.
+        # Require an advertised GPU offload lane: pynvml can be present even
+        # when every ready engine is CPU-only, in which case the master admits
+        # against system RAM.
         from skulk.shared.backends import probe_node_backends
 
-        # Gated on the node advertising a CUDA GPU-offload backend. All three CUDA
-        # served/in-process engines allocate weights + KV from VRAM (they join the
-        # GPU-offload prefixes in placement, so the master admits them against VRAM):
-        # the in-process llama.cpp runner (`llama_cpp-cuda`), the served llama-server
-        # engine (`llama_server-cuda`, launched `-ngl 99`), and vLLM (`vllm-cuda`).
-        # A node advertising any of them -- even a SERVED-only CUDA node that lacks
-        # the in-process llama_cpp binding -- must size the local guard against VRAM,
-        # else it would refuse the very placement the master admitted against VRAM
-        # (made worse now that the guard sizes to the full stamped context). A node
-        # advertising only `*-cpu` was admitted against system RAM and keeps it.
+        # Use the same offload classifier as placement so a standalone
+        # audio.cpp CUDA or Vulkan lane can use its NVIDIA VRAM budget.
         backends = probe_node_backends()
-        if not any(
-            tag in backends
-            for tag in ("llama_cpp-cuda", "llama_server-cuda", "vllm-cuda")
-        ):
+        if not any(backend_offloads_to_vram(tag) for tag in backends):
             return None
         nvml = load_nvml()
         if nvml is None or not has_nvidia_gpu(nvml):
