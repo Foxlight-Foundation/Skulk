@@ -651,6 +651,38 @@ def same_repo_served_draft_files(model_card: ModelCard) -> list[str]:
     return []
 
 
+def installed_artifact_in_path(model_card: ModelCard) -> Path | None:
+    """The card's artifact on ``SKULK_MODELS_PATH`` when nothing is left to fetch.
+
+    A base found on the search path is installed only if every companion the
+    card declares is on disk too. A card that gains a companion after its base
+    was staged (video preprocessors, an MTP sidecar) finds the old base
+    complete; answering with it would skip the download that fetches the
+    companion and the runner would then refuse the card. ``None`` sends the
+    caller down the download path, where the coordinator fetches what is
+    missing and, offline, decides which companions are load-bearing.
+
+    Args:
+        model_card: The card whose artifact and companions must be present.
+
+    Returns:
+        The complete matching model directory, or ``None``.
+    """
+    found = resolve_model_in_path(
+        ModelId(model_card.model_id),
+        model_card.source_revision,
+        expected_card=model_card,
+        artifact_root=(
+            model_card.artifact_bundle.root
+            if model_card.artifact_bundle is not None
+            else None
+        ),
+    )
+    if found is None or not model_companions_present_on_disk(model_card):
+        return None
+    return found
+
+
 def model_companions_present_on_disk(
     model_card: ModelCard, required_only: bool = False
 ) -> bool:
