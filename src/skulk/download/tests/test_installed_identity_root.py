@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-import skulk.download.impl_shard_downloader as downloader_module
+import skulk.store.installed_cards as installed_cards_module
 from skulk.download.download_utils import RepoDownloadProgress
 from skulk.download.impl_shard_downloader import ResumableShardDownloader
 from skulk.shared.models.model_cards import ModelCard, ModelTask
@@ -99,7 +99,7 @@ async def test_nested_gguf_download_records_identity_at_repository_root(
         overall_eta=timedelta(0),
         status="complete",
     )
-    monkeypatch.setattr(downloader_module, "SKULK_MODELS_DIR", tmp_path)
+    monkeypatch.setattr(installed_cards_module, "SKULK_MODELS_DIR", tmp_path)
     downloader = ResumableShardDownloader()
     with patch.object(
         downloader,

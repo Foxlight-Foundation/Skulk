@@ -32,6 +32,7 @@ from skulk.store.installed_cards import (
     build_installed_card_record,
     companion_artifact_role,
     companion_owner_matches,
+    installed_artifact_directory,
     read_installed_card_with_fallback,
     write_installed_card,
 )
@@ -133,24 +134,6 @@ def _has_local_download_state(model_card: ModelCard) -> bool:
     if not model_directory.is_dir():
         return False
     return any(path.is_file() for path in model_directory.rglob("*"))
-
-
-def _installed_artifact_directory(model_id: ModelId, downloaded_path: Path) -> Path:
-    """Find the repository root holding revision and installed-card identity.
-
-    A GGUF download returns the selected file, which may be several directories
-    below the repository root. The revision marker and loader both use the
-    canonical root, so writing the signed record beside the file loses trust.
-    """
-
-    canonical_directory = SKULK_MODELS_DIR / model_id.normalize()
-    if (
-        downloaded_path == canonical_directory
-        or canonical_directory in downloaded_path.parents
-    ):
-        return canonical_directory
-    # Some callers stage external artifacts outside the managed model cache.
-    return downloaded_path.parent if downloaded_path.is_file() else downloaded_path
 
 
 def skulk_shard_downloader(
@@ -359,7 +342,7 @@ class ResumableShardDownloader(ShardDownloader):
                             f"{companion_progress.status!r})"
                         )
                     if companion_progress.status == "complete":
-                        companion_directory = _installed_artifact_directory(
+                        companion_directory = installed_artifact_directory(
                             companion_shard.model_card.model_id,
                             companion_path,
                         )
@@ -415,7 +398,7 @@ class ResumableShardDownloader(ShardDownloader):
             )
 
         if not config_only:
-            artifact_directory = _installed_artifact_directory(
+            artifact_directory = installed_artifact_directory(
                 shard.model_card.model_id, target_dir
             )
             record = await asyncio.to_thread(

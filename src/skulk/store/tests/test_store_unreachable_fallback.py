@@ -10,10 +10,23 @@ import pytest
 
 from skulk.download.download_utils import RepoDownloadProgress
 from skulk.download.shard_downloader import ShardDownloader
-from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
+from skulk.shared.models.model_cards import (
+    ModelCard,
+    ModelId,
+    ModelTask,
+    RuntimeCapabilityCardConfig,
+)
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.worker.shards import PipelineShardMetadata, ShardMetadata
+from skulk.store import installed_cards
 from skulk.store.config import StagingNodeConfig
+from skulk.store.installed_cards import (
+    InstalledCardRecord,
+    build_installed_card_record,
+    read_installed_card,
+    require_registry_installed_artifact,
+    write_installed_card,
+)
 from skulk.store.model_store_client import (
     ModelNotInStoreError,
     ModelStoreClient,
@@ -168,6 +181,115 @@ async def test_unreachable_store_falls_back_to_direct_hf(tmp_path: Path) -> None
     assert path == inner.dest
     assert store.availability_checks == 1
     assert inner.ensure_calls == [(_MODEL_ID, False)]
+
+
+@pytest.mark.anyio
+async def test_nested_gguf_store_fallback_keeps_signed_identity_at_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The store wrapper must preserve the inner downloader's root record."""
+
+    revision = "a" * 40
+    selected_name = "nested/weights/model.gguf"
+    card = _shard().model_card.model_copy(
+        update={
+            "source_revision": revision,
+            "gguf_file": selected_name,
+            "registry_card_id": f"card_{'a' * 52}",
+        }
+    )
+    shard = _shard().model_copy(update={"model_card": card})
+    model_root = tmp_path / "models" / card.model_id.normalize()
+    selected_file = model_root / selected_name
+
+    class _NestedGgufInner(_RecordingInnerDownloader):
+        async def ensure_shard(
+            self, shard: ShardMetadata, config_only: bool = False
+        ) -> Path:
+            self.ensure_calls.append((str(shard.model_card.model_id), config_only))
+            selected_file.parent.mkdir(parents=True, exist_ok=True)
+            selected_file.write_bytes(b"gguf bytes")
+            (model_root / ".skulk-source-revision").write_text(f"{revision}\n")
+            write_installed_card(
+                model_root,
+                build_installed_card_record(model_root, shard.model_card),
+            )
+            return selected_file
+
+    monkeypatch.setattr(installed_cards, "SKULK_MODELS_DIR", tmp_path / "models")
+    installed_records: list[InstalledCardRecord] = []
+    downloader = ModelStoreDownloader(
+        inner=_NestedGgufInner(selected_file),
+        store_client=cast(ModelStoreClient, cast(object, _UnreachableStoreClient())),
+        staging_config=StagingNodeConfig(
+            enabled=True, node_cache_path=str(tmp_path / "staging")
+        ),
+        allow_hf_fallback=True,
+        installed_card_callback=installed_records.append,
+    )
+
+    assert await downloader.ensure_shard(shard) == selected_file
+    root_record = read_installed_card(model_root)
+    assert root_record is not None
+    assert installed_records == [root_record]
+    assert root_record.verification == "registry_verified"
+    assert not (selected_file.parent / ".skulk/installed-card.json").exists()
+    require_registry_installed_artifact(model_root, card)
+
+
+@pytest.mark.anyio
+async def test_nested_companion_store_fallback_records_owner_at_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A nested companion fallback binds the owner's identity at its root."""
+
+    companion_id = ModelId("org/nested-sidecar")
+    revision = "b" * 40
+    card = _shard().model_card.model_copy(
+        update={
+            "runtime": RuntimeCapabilityCardConfig(
+                mtp_heads=True,
+                mtp_sidecar_repo=str(companion_id),
+                mtp_sidecar_revision=revision,
+            )
+        }
+    )
+    shard = _shard().model_copy(update={"model_card": card})
+    model_cache = tmp_path / "models"
+    base_root = model_cache / card.model_id.normalize()
+    companion_root = model_cache / companion_id.normalize()
+    companion_file = companion_root / "nested/weights/sidecar.gguf"
+
+    class _NestedCompanionInner(_RecordingInnerDownloader):
+        async def ensure_shard(
+            self, shard: ShardMetadata, config_only: bool = False
+        ) -> Path:
+            self.ensure_calls.append((str(shard.model_card.model_id), config_only))
+            if shard.model_card.model_id == companion_id:
+                companion_file.parent.mkdir(parents=True, exist_ok=True)
+                companion_file.write_bytes(b"sidecar bytes")
+                (companion_root / ".skulk-source-revision").write_text(
+                    f"{revision}\n"
+                )
+                return companion_file
+            base_root.mkdir(parents=True, exist_ok=True)
+            (base_root / "weights.safetensors").write_bytes(b"base bytes")
+            return base_root
+
+    monkeypatch.setattr(installed_cards, "SKULK_MODELS_DIR", model_cache)
+    downloader = _downloader(
+        _UnreachableStoreClient(), _NestedCompanionInner(base_root), tmp_path
+    )
+
+    assert await downloader.ensure_shard(shard) == base_root
+    companion_record = read_installed_card(companion_root)
+    assert companion_record is not None
+    assert companion_record.artifact_role == "mtp_sidecar"
+    assert companion_record.owner_model_id == str(card.model_id)
+    assert [entry.path for entry in companion_record.files] == [
+        "nested/weights/sidecar.gguf"
+    ]
+    assert not (companion_file.parent / ".skulk/installed-card.json").exists()
 
 
 @pytest.mark.anyio
