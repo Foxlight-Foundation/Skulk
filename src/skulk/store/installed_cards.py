@@ -21,12 +21,29 @@ from typing import Literal, final
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from skulk.shared.constants import SKULK_INSTALLED_CARD_RECORDS_DIR
+from skulk.shared.constants import SKULK_INSTALLED_CARD_RECORDS_DIR, SKULK_MODELS_DIR
 from skulk.shared.models.model_cards import ModelCard, ModelId
 from skulk.shared.models.remote_code_approval import MODEL_TRUST_FAILURE_MARKER
 
 INSTALLED_CARD_RELATIVE_PATH = Path(".skulk") / "installed-card.json"
 """Reserved sidecar path copied with canonical and staged artifacts."""
+
+
+def installed_artifact_directory(model_id: ModelId, downloaded_path: Path) -> Path:
+    """Return the identity root for a completed direct or staged download.
+
+    Direct GGUF downloads return the selected file, possibly nested below the
+    canonical repository directory. Its revision marker and runner load path
+    use that directory. Store-staged artifacts already return their own root.
+    """
+
+    canonical_directory = SKULK_MODELS_DIR / model_id.normalize()
+    if (
+        downloaded_path == canonical_directory
+        or canonical_directory in downloaded_path.parents
+    ):
+        return canonical_directory
+    return downloaded_path.parent if downloaded_path.is_file() else downloaded_path
 
 _SOURCE_REVISION_MARKER = ".skulk-source-revision"
 _IGNORED_MANIFEST_NAMES = {
@@ -361,7 +378,9 @@ def build_file_manifest(
         if not candidate.is_file():
             continue
         relative = candidate.relative_to(model_directory)
-        if relative == INSTALLED_CARD_RELATIVE_PATH:
+        # A prior downloader wrote this sidecar next to nested GGUF files.
+        # It is still runtime metadata, not a model artifact to pin forever.
+        if relative.parts[-2:] == INSTALLED_CARD_RELATIVE_PATH.parts:
             continue
         if candidate.name in _IGNORED_MANIFEST_NAMES or candidate.name.endswith(
             ".partial"

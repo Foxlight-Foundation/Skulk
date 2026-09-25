@@ -32,6 +32,7 @@ from skulk.store.installed_cards import (
     build_installed_card_record,
     companion_artifact_role,
     companion_owner_matches,
+    installed_artifact_directory,
     read_installed_card_with_fallback,
     write_installed_card,
 )
@@ -315,7 +316,8 @@ class ResumableShardDownloader(ShardDownloader):
                     repository = str(companion_shard.model_card.model_id)
                     role = companion_artifact_role(shard.model_card, repository)
                     replacement_identity = _replacement_identity_for_installed_card(
-                        SKULK_MODELS_DIR / companion_shard.model_card.model_id.normalize(),
+                        SKULK_MODELS_DIR
+                        / companion_shard.model_card.model_id.normalize(),
                         shard.model_card,
                         artifact_model_id=repository,
                         artifact_role=role,
@@ -340,10 +342,9 @@ class ResumableShardDownloader(ShardDownloader):
                             f"{companion_progress.status!r})"
                         )
                     if companion_progress.status == "complete":
-                        companion_directory = (
-                            companion_path.parent
-                            if companion_path.is_file()
-                            else companion_path
+                        companion_directory = installed_artifact_directory(
+                            companion_shard.model_card.model_id,
+                            companion_path,
                         )
                         record = await asyncio.to_thread(
                             build_installed_card_record,
@@ -397,7 +398,9 @@ class ResumableShardDownloader(ShardDownloader):
             )
 
         if not config_only:
-            artifact_directory = target_dir.parent if target_dir.is_file() else target_dir
+            artifact_directory = installed_artifact_directory(
+                shard.model_card.model_id, target_dir
+            )
             record = await asyncio.to_thread(
                 build_installed_card_record,
                 artifact_directory,

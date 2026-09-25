@@ -103,6 +103,7 @@ from skulk.store.installed_cards import (
     VerifiedDetachedInstalledCardCache,
     build_installed_card_record,
     companion_artifact_role,
+    installed_artifact_directory,
     installed_card_matches,
     installed_companion_matches,
     read_installed_card_with_fallback,
@@ -2082,7 +2083,9 @@ class ModelStoreDownloader(ShardDownloader):
                     installed_owner_card is None
                     and self._installed_card_callback is not None
                 ):
-                    model_directory = path.parent if path.is_file() else path
+                    model_directory = installed_artifact_directory(
+                        shard.model_card.model_id, path
+                    )
                     record = await asyncio.to_thread(
                         read_installed_card_with_fallback,
                         model_directory,
@@ -2152,8 +2155,8 @@ class ModelStoreDownloader(ShardDownloader):
                     installed_owner_card=shard.model_card,
                     installed_artifact_role=role,
                 )
-                companion_directory = (
-                    companion_path.parent if companion_path.is_file() else companion_path
+                companion_directory = installed_artifact_directory(
+                    companion_id, companion_path
                 )
                 if not installed_companion_matches(
                     companion_directory,
