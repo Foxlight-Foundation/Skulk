@@ -361,7 +361,9 @@ def build_file_manifest(
         if not candidate.is_file():
             continue
         relative = candidate.relative_to(model_directory)
-        if relative == INSTALLED_CARD_RELATIVE_PATH:
+        # A prior downloader wrote this sidecar next to nested GGUF files.
+        # It is still runtime metadata, not a model artifact to pin forever.
+        if relative.parts[-2:] == INSTALLED_CARD_RELATIVE_PATH.parts:
             continue
         if candidate.name in _IGNORED_MANIFEST_NAMES or candidate.name.endswith(
             ".partial"

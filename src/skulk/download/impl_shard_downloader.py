@@ -135,6 +135,24 @@ def _has_local_download_state(model_card: ModelCard) -> bool:
     return any(path.is_file() for path in model_directory.rglob("*"))
 
 
+def _installed_artifact_directory(model_id: ModelId, downloaded_path: Path) -> Path:
+    """Find the repository root holding revision and installed-card identity.
+
+    A GGUF download returns the selected file, which may be several directories
+    below the repository root. The revision marker and loader both use the
+    canonical root, so writing the signed record beside the file loses trust.
+    """
+
+    canonical_directory = SKULK_MODELS_DIR / model_id.normalize()
+    if (
+        downloaded_path == canonical_directory
+        or canonical_directory in downloaded_path.parents
+    ):
+        return canonical_directory
+    # Some callers stage external artifacts outside the managed model cache.
+    return downloaded_path.parent if downloaded_path.is_file() else downloaded_path
+
+
 def skulk_shard_downloader(
     max_parallel_downloads: int = 8, offline: bool = False
 ) -> ShardDownloader:
@@ -315,7 +333,8 @@ class ResumableShardDownloader(ShardDownloader):
                     repository = str(companion_shard.model_card.model_id)
                     role = companion_artifact_role(shard.model_card, repository)
                     replacement_identity = _replacement_identity_for_installed_card(
-                        SKULK_MODELS_DIR / companion_shard.model_card.model_id.normalize(),
+                        SKULK_MODELS_DIR
+                        / companion_shard.model_card.model_id.normalize(),
                         shard.model_card,
                         artifact_model_id=repository,
                         artifact_role=role,
@@ -340,10 +359,9 @@ class ResumableShardDownloader(ShardDownloader):
                             f"{companion_progress.status!r})"
                         )
                     if companion_progress.status == "complete":
-                        companion_directory = (
-                            companion_path.parent
-                            if companion_path.is_file()
-                            else companion_path
+                        companion_directory = _installed_artifact_directory(
+                            companion_shard.model_card.model_id,
+                            companion_path,
                         )
                         record = await asyncio.to_thread(
                             build_installed_card_record,
@@ -397,7 +415,9 @@ class ResumableShardDownloader(ShardDownloader):
             )
 
         if not config_only:
-            artifact_directory = target_dir.parent if target_dir.is_file() else target_dir
+            artifact_directory = _installed_artifact_directory(
+                shard.model_card.model_id, target_dir
+            )
             record = await asyncio.to_thread(
                 build_installed_card_record,
                 artifact_directory,
