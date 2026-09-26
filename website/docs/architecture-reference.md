@@ -1383,7 +1383,7 @@ bench/                  # benchmark + repro harnesses
 docs/                   # operator guides (this file in website/docs/)
 website/                # Docusaurus site
 resources/*_model_cards/  # built-in TOML cards per family (the registry imports these)
-resources/test_engine_cards/  # cards the synthetic test engines serve; never imported
+src/skulk/worker/runner/test_video/foxlight--test-video.toml  # the test engine's card; never in the registry
 rust/                   # libp2p (networking), PyO3 bindings, system_custodian
 ```
 
