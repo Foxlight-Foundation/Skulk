@@ -19,6 +19,11 @@ This project records release notes here and mirrors public-facing notes in
   the worker's event loop.
 ### Added
 
+- `kill -USR1 <pid>` makes any Skulk node or runner process write every
+  thread's Python stack to its log and keep running. A runner stuck in
+  native code shows only C frames to an OS sampler, and a Python profiler
+  needs root on macOS.
+
 - `GET /v1/models` publishes every engine setting a video card's jobs
   accept, with its default: the sampler and scheduler lists, the card's
   trained video and audio shifts (and each adapter's own) with the accepted

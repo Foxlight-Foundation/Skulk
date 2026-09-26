@@ -328,6 +328,21 @@ dying. Treat counting-only mode as a signal to **free disk on that node.**
 Check free disk per node via `GET /store/storage` (it reports event-log
 bytes and disk free alongside the staged models).
 
+### When a process looks stuck
+
+Every Skulk node process and every runner process writes its threads'
+Python stacks to stderr when it receives `SIGUSR1`, and keeps running:
+
+```bash
+kill -USR1 <pid>
+tail -n 200 ~/.skulk/logs/skulk.stderr.log   # macOS service; journalctl --user -u skulk on Linux
+```
+
+A runner's process id is in `GET /v1/diagnostics/node` under the runner's
+diagnostics. This needs no root and no profiler, unlike `py-spy`. An OS
+sampler such as `sample` sees only C frames, because the whole Python call
+chain collapses into one evaluation frame.
+
 ## Tracing
 
 Runtime tracing is a **debugging** feature, not an always-on mode. Leave it
