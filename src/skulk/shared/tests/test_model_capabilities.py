@@ -790,26 +790,20 @@ def test_is_gemma4_family_resource_cards_all_match() -> None:
 
 
 def test_is_gemma4_family_resource_cards_other_families_dont_match() -> None:
-    """Sanity: non-Gemma-4 cards under resources/ must not detect as gemma4."""
+    """Sanity: non-Gemma-4 curated cards must not detect as gemma4."""
     import tomllib
-    from pathlib import Path
 
     from skulk.shared.models.capabilities import is_gemma4_family
+    from skulk.shared.tests.model_card_fixtures import fixture_card_paths
 
-    cards_dir = (
-        Path(__file__).resolve().parents[4]
-        / "resources"
-        / "inference_model_cards"
-    )
     non_gemma4_paths = [
         path
-        for path in cards_dir.glob("*.toml")
+        for path in fixture_card_paths()
         if "gemma-4" not in path.name
         and "gemma_4" not in path.name
         and "gemma4" not in path.name
     ]
-    if not non_gemma4_paths:
-        return  # No control set; skip silently rather than fail
+    assert non_gemma4_paths, "expected non-Gemma-4 fixture cards as the control set"
     for path in non_gemma4_paths:
         with path.open("rb") as fp:
             data = tomllib.load(fp)
