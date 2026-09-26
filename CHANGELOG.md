@@ -19,6 +19,13 @@ This project records release notes here and mirrors public-facing notes in
 - The synthetic test video engine's card ships beside the engine instead
   of among the model cards, since the registry can never supply it.
 
+- `skulk --offline` keeps the model registry out of reach, as
+  `SKULK_OFFLINE=true` does. Before, the flag only logged the mode, and the
+  card catalog still tried the network.
+- On the model store host, the node's own association pass gives a legacy
+  model in the canonical store its card record, instead of waiting for
+  reconciliation to scan the store.
+
 - A node that cannot reach the model registry, however long it has been
   offline, gives a model downloaded before card records existed its record
   from the last verified registry catalog it cached. Before, only the

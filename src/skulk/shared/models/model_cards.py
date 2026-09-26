@@ -44,7 +44,7 @@ from skulk.shared.constants import (
     SKULK_MODEL_REGISTRY_TIMEOUT_SECONDS,
     SKULK_MODEL_REGISTRY_URL,
     SKULK_MODELS_DIRS,
-    SKULK_OFFLINE,
+    offline_mode,
 )
 from skulk.shared.models.gguf_memory import GgufCacheGeometry, qwen35_cache_geometry
 from skulk.shared.models.registry import (
@@ -164,7 +164,7 @@ def _registry_enabled() -> bool:
     """Return whether this process should contact the external registry."""
     return (
         SKULK_MODEL_REGISTRY_ENABLED
-        and not SKULK_OFFLINE
+        and not offline_mode()
         and os.environ.get("SKULK_TESTS") != "1"
     )
 
@@ -366,7 +366,7 @@ async def _load_cards_from_registry() -> bool:
     if not _registry_enabled():
         _registry_current_cards.clear()
         _registry_engine_support = ()
-        if SKULK_OFFLINE and os.environ.get("SKULK_TESTS") != "1":
+        if offline_mode() and os.environ.get("SKULK_TESTS") != "1":
             try:
                 support = await to_thread.run_sync(
                     _registry_client.load_cached_engine_support

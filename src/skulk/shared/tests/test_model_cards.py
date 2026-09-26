@@ -675,3 +675,25 @@ async def test_an_empty_catalog_does_not_refresh_on_every_read(
     await model_cards_module.get_all_model_cards()
     assert len(refreshes) == 2
 
+
+def test_offline_flag_keeps_the_registry_out_of_reach(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``skulk --offline`` alone keeps the catalog off the network.
+
+    ``SKULK_OFFLINE`` is read once at import; the flag is set after that, so
+    the registry check asks ``offline_mode()`` each time.
+    """
+    from skulk.shared import constants
+
+    monkeypatch.setenv("SKULK_TESTS", "0")
+    monkeypatch.setattr(model_cards_module, "SKULK_MODEL_REGISTRY_ENABLED", True)
+    monkeypatch.setattr(constants, "SKULK_OFFLINE", False)
+    monkeypatch.setattr(constants, "_offline_flag", False)
+    assert model_cards_module._registry_enabled()
+
+    constants.set_offline_mode()
+
+    assert constants.offline_mode()
+    assert not model_cards_module._registry_enabled()
+
