@@ -21,6 +21,7 @@ from skulk.store.installed_cards import (
     VerifiedDetachedInstalledCardCache,
     associate_installed_card,
     build_installed_card_record,
+    find_unrecorded_artifacts,
     installed_card_matches,
     installed_companion_matches,
     read_installed_card,
@@ -1095,3 +1096,35 @@ async def test_completed_legacy_import_with_matching_revision_becomes_verified(
     assert refreshed.installed_card.verification == "registry_verified"
     assert refreshed.installed_card.installed_identity == card.registry_card_id
     assert refreshed.installed_card.manifest_sha256 == legacy.manifest_sha256
+
+
+def test_unrecorded_artifacts_are_sorted_by_completeness(tmp_path: Path) -> None:
+    """Recorded, complete-but-unrecorded and incomplete directories are told apart."""
+
+    root = tmp_path / "models"
+    root.mkdir()
+    recorded = _artifact(root)
+    write_installed_card(recorded, build_installed_card_record(recorded, _card()))
+    legacy = root / "org--legacy"
+    legacy.mkdir()
+    (legacy / "config.json").write_text("{}")
+    (legacy / "model.safetensors").write_bytes(b"weights")
+    drifted = root / "org--drifted"
+    drifted.mkdir()
+    (drifted / "config.json").write_text("{}")
+    (drifted / "model.safetensors").write_bytes(b"weights")
+    write_installed_card(drifted, build_installed_card_record(drifted, _card()))
+    (drifted / "model.safetensors").write_bytes(b"other weights")
+    partial = root / "org--partial"
+    partial.mkdir()
+    (partial / "config.json").write_text("{}")
+    (partial / "model.safetensors.partial").write_bytes(b"half")
+    (root / ".hidden").mkdir()
+
+    found = find_unrecorded_artifacts([root, tmp_path / "absent"])
+
+    assert found.recorded == 1
+    # A record whose files changed is no record; the bytes still look complete.
+    assert [path.name for path in found.complete] == ["org--drifted", "org--legacy"]
+    assert [path.name for path in found.incomplete] == ["org--partial"]
+

@@ -793,3 +793,59 @@ def test_comfy_engine_check_verdicts(monkeypatch: pytest.MonkeyPatch, tmp_path: 
 
     no_wheels = make_facts().model_copy(update={"platform": "linux"})
     assert checks_module._check_comfy_engine(no_wheels)[0].fix_available is False
+
+
+def test_installed_card_records_flag_complete_models_without_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import skulk.doctor.checks as checks_module
+
+    root = tmp_path / "models"
+    root.mkdir()
+    def only_this_root(_staging_root: Path | None) -> tuple[Path, ...]:
+        return (root,)
+
+    monkeypatch.setattr(
+        "skulk.store.artifact_inventory.installed_artifact_roots", only_this_root
+    )
+    for index in range(7):
+        legacy = root / f"org--legacy-{index}"
+        legacy.mkdir()
+        (legacy / "config.json").write_text("{}")
+        (legacy / "model.safetensors").write_bytes(b"weights")
+    partial = root / "org--partial"
+    partial.mkdir()
+    (partial / "model.safetensors.partial").write_bytes(b"half")
+
+    results = checks_module._check_installed_card_records(
+        make_facts(platform="darwin")
+    )
+
+    assert [r.verdict for r in results] == ["degraded"]
+    assert "7 complete models without a card record" in results[0].detail
+    assert "org--legacy-0" in results[0].detail and "and 2 more" in results[0].detail
+    assert "1 incomplete download ignored" in results[0].detail
+    assert "network access" in results[0].remediation
+
+
+def test_installed_card_records_pass_when_nothing_is_unrecorded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import skulk.doctor.checks as checks_module
+
+    root = tmp_path / "models"
+    root.mkdir()
+    def only_this_root(_staging_root: Path | None) -> tuple[Path, ...]:
+        return (root,)
+
+    monkeypatch.setattr(
+        "skulk.store.artifact_inventory.installed_artifact_roots", only_this_root
+    )
+
+    results = checks_module._check_installed_card_records(
+        make_facts(platform="darwin")
+    )
+
+    assert [r.verdict for r in results] == ["ok"]
+    assert results[0].detail == "0 installed models, each with its card record"
+

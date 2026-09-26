@@ -1259,6 +1259,62 @@ def _legacy_companion_artifact_is_complete(
     return _legacy_base_artifact_is_complete(model_directory)
 
 
+@final
+@dataclass(frozen=True)
+class UnrecordedArtifacts:
+    """Model directories under the search roots, by whether their card is recorded."""
+
+    complete: tuple[Path, ...]
+    """Complete artifacts with no card record, or a record their files no
+    longer match. Offline, Skulk can serve these only from a shipped card."""
+
+    incomplete: tuple[Path, ...]
+    """Directories without a record that are not a complete artifact, such
+    as an interrupted download."""
+
+    recorded: int
+    """Directories whose card record matches their files."""
+
+
+def find_unrecorded_artifacts(roots: Iterable[Path]) -> UnrecordedArtifacts:
+    """Sort every model directory under ``roots`` by whether its card is recorded.
+
+    A record is checked against the file sizes it lists, not their hashes, so
+    this stays cheap on a node that holds hundreds of gigabytes. Hidden
+    directories are skipped, as discovery skips them.
+
+    Args:
+        roots: Model-search roots to inspect.
+
+    Returns:
+        The complete and incomplete directories without a usable record, and
+        the number with one.
+    """
+
+    complete: list[Path] = []
+    incomplete: list[Path] = []
+    recorded = 0
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for model_directory in sorted(root.iterdir()):
+            if not model_directory.is_dir() or model_directory.name.startswith("."):
+                continue
+            try:
+                record = read_installed_card_with_fallback(model_directory)
+            except (OSError, ValueError):
+                record = None
+            if record is not None and verify_installed_card(model_directory, record):
+                recorded += 1
+            elif _legacy_base_artifact_is_complete(model_directory):
+                complete.append(model_directory)
+            else:
+                incomplete.append(model_directory)
+    return UnrecordedArtifacts(
+        complete=tuple(complete), incomplete=tuple(incomplete), recorded=recorded
+    )
+
+
 def ensure_installed_cards(
     root: Path,
     cards: Iterable[ModelCard],
