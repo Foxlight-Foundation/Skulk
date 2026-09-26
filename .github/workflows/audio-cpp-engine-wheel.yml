@@ -96,6 +96,9 @@ jobs:
           glslc_path=$(find /tmp/vulkan-sdk -type f -path '*/bin/glslc' -print -quit)
           test -n "$glslc_path"
           "$glslc_path" --version
+          sdk_root=$(dirname "$(dirname "$glslc_path")")
+          test -f "$sdk_root/include/vulkan/vulkan.hpp"
+          echo "VULKAN_SDK_ROOT=$sdk_root" >> "$GITHUB_ENV"
           echo "$(dirname "$glslc_path")" >> "$GITHUB_PATH"
       - name: Fetch pinned audio.cpp source
         run: |
@@ -104,6 +107,12 @@ jobs:
           test "$(git -C /tmp/audio-cpp-src rev-parse HEAD)" = "$AUDIO_CPP_REF"
       - name: Build only the music server and two families
         run: |
+          vulkan_include_args=()
+          if [ "${{ matrix.variant }}" = vulkan ]; then
+            # Jammy's libvulkan loader is usable, but its 1.3.204 headers lack
+            # the ggml extension types; compile against the pinned SDK headers.
+            vulkan_include_args=(-DVulkan_INCLUDE_DIR="$VULKAN_SDK_ROOT/include")
+          fi
           cmake -S /tmp/audio-cpp-src -B /tmp/audio-cpp-build \
             -DCMAKE_BUILD_TYPE=Release \
             -DAUDIOCPP_MODEL_SET=custom \
@@ -115,7 +124,8 @@ jobs:
             -DENGINE_ENABLE_OPENMP=${{ matrix.openmp }} \
             -DENGINE_ENABLE_CUDA=OFF \
             -DENGINE_ENABLE_HIP=OFF \
-            -DENGINE_ENABLE_VULKAN=${{ matrix.vulkan }}
+            -DENGINE_ENABLE_VULKAN=${{ matrix.vulkan }} \
+            "${vulkan_include_args[@]}"
           cmake --build /tmp/audio-cpp-build --target audiocpp_server --parallel 4
       - name: Assemble and smoke-test wheel
         run: |
