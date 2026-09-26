@@ -29,6 +29,14 @@ on:
         type: choice
         options: [cpu, vulkan]
         default: vulkan
+      publish_run_id:
+        description: "Successful prior run holding the hardware-qualified Vulkan artifact"
+        type: string
+        default: ""
+      publish_sha256:
+        description: "Exact SHA-256 of that prior run's Vulkan wheel"
+        type: string
+        default: ""
 
 env:
   AUDIO_CPP_REF: 4d88768fbcae4e6eb3352c6ab1422dabb7d90b58
@@ -188,6 +196,10 @@ jobs:
     needs: build
     if: github.event_name == 'workflow_dispatch' && inputs.publish
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
     concurrency:
       group: foxlight-engine-wheel-index-publication
       cancel-in-progress: false
@@ -198,6 +210,24 @@ jobs:
           pattern: audio-cpp-*
           merge-multiple: true
           path: dist
+          run-id: ${{ inputs.publish_run_id || github.run_id }}
+          github-token: ${{ github.token }}
+      - name: Verify hardware-qualified source artifact
+        if: inputs.publish_variant == 'vulkan' || inputs.publish_run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ inputs.publish_run_id }}
+          EXPECTED_SHA256: ${{ inputs.publish_sha256 }}
+          PUBLISH_VARIANT: ${{ inputs.publish_variant }}
+        run: |
+          test "$PUBLISH_VARIANT" = vulkan
+          [[ "$SOURCE_RUN_ID" =~ ^[0-9]+$ ]]
+          [[ "$EXPECTED_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          test "$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" --jq '.conclusion')" = success
+          wheels=(dist/skulk_audio_cpp_vulkan-*.whl)
+          test "${#wheels[@]}" -eq 1
+          printf '%s  %s\n' "$EXPECTED_SHA256" "${wheels[0]}" | sha256sum --check
+          gh attestation verify "${wheels[0]}" --repo "$GITHUB_REPOSITORY" > /dev/null
       - uses: astral-sh/setup-uv@v6
       - name: Publish exact wheels to the Foxlight index
         env:
