@@ -816,9 +816,12 @@ launches ComfyUI with `--bf16-vae`, validated for MiniMax H3 on Strix Halo
 (the fp32 VAE decode does not fit beside the transformer), plus
 `--disable-mmap` only when a weight file exceeds 64 GB, since memory-mapping
 one that large through unified memory is pathologically slow. Models stay
-resident between renders under ComfyUI's RAM-pressure cache, which cuts a
-warm render on gfx1151 from about 210 s to about 120 s for a repeated prompt
-and 180 to 200 s for a new one. The CUDA lane launches ComfyUI
+resident between renders under ComfyUI's RAM-pressure cache with 40% of
+host RAM kept free (`--cache-ram`, sized from the host at launch; HIP
+allocations on the APU come out of host RAM, and the default 10% headroom
+made the text encoder and transformer evict each other on each new prompt),
+which cuts a warm render with a new prompt on gfx1151 from about 210 s to
+about 105 s. The CUDA lane launches ComfyUI
 with `--disable-cuda-malloc`: on the async allocator backend ComfyUI would
 otherwise choose, a render that applies the Fun ControlNet patch aborts the
 server on its first sampling step on the GB10, while PyTorch's own allocator

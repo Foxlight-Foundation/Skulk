@@ -21,6 +21,7 @@ from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
 from typing import Any, Final, cast, final
 
+import psutil
 from loguru import logger
 from PIL import Image
 
@@ -98,18 +99,27 @@ ROCM_LAUNCH_FLAGS: Final[tuple[str, ...]] = ("--bf16-vae",)
 """ComfyUI flags for the ROCm lane, validated for H3 on Strix Halo (gfx1151).
 
 ``--bf16-vae`` because the fp32 VAE decode of a 768p clip does not fit beside
-the transformer. Models stay resident between renders: ComfyUI's default
-RAM-pressure cache keeps the loaded text encoder, transformer and VAEs, and
-drops them when free memory falls under its headroom (10% of system RAM),
-while memory-mapped weights stay reclaimable page cache. On gfx1151
-(480x480, four turbo steps) a warm render takes about 120 s when the prompt
-repeats and 180 to 200 s when it changes, against about 210 s with every
-model rebuilt per prompt (``--cache-none``, ``--disable-mmap``): a new prompt
-swaps the text encoder back in where host memory cannot hold it beside the
-transformer. Outputs agree with the rebuilt path as closely as that path
-agrees with itself run to run. No attention flag: ComfyUI's default SDPA path
-already selects the wheel set's flash-class kernel on gfx1151 (measured
-against the math path on the hardware).
+the transformer. Weights are memory-mapped (below ``ROCM_MMAP_CEILING_BYTES``)
+and models stay resident between renders under ComfyUI's RAM-pressure cache,
+with the headroom from ``ROCM_CACHE_RAM_HEADROOM_FRACTION`` added at launch.
+No attention flag: ComfyUI's default SDPA path already selects the wheel
+set's flash-class kernel on gfx1151 (measured against the math path on the
+hardware).
+"""
+
+
+ROCM_CACHE_RAM_HEADROOM_FRACTION: Final = 0.4
+"""Share of host RAM ComfyUI's cache keeps free on the ROCm lane (``--cache-ram``).
+
+A HIP allocation on a unified-memory APU comes out of host RAM, so the cached
+models and the running render compete for it. At ComfyUI's default headroom
+(10%) a new prompt made the text encoder and the transformer evict each other:
+on gfx1151 with 61 GiB of host RAM a warm 480x480 four-step H3 render took 180
+to 300 s, worse than rebuilding every model per prompt (about 210 s). Keeping
+40% free (24 GiB there) holds the models resident without that fight: a warm
+render with a new prompt takes about 105 s, the turbo LoRA is applied once
+rather than every step, and host memory peaks lower. Outputs agree with the
+rebuilt path as closely as that path agrees with itself run to run.
 """
 
 
@@ -158,18 +168,27 @@ def _is_rocm_lane(resolved_backend: str | None) -> bool:
     return backend is not None and backend.endswith("-rocm")
 
 
-def launch_flags(resolved_backend: str | None, weight_files: Iterable[Path] = ()) -> tuple[str, ...]:
+def launch_flags(
+    resolved_backend: str | None,
+    weight_files: Iterable[Path] = (),
+    total_ram_bytes: int | None = None,
+) -> tuple[str, ...]:
     """Extra ComfyUI flags for the node's compute backend and the card's weights.
 
-    The ROCm lane adds ``ROCM_LAUNCH_FLAGS``, plus ``--disable-mmap`` when any
-    of ``weight_files`` is larger than ``ROCM_MMAP_CEILING_BYTES``; every other
+    The ROCm lane adds ``ROCM_LAUNCH_FLAGS``, the RAM-pressure cache headroom
+    (``ROCM_CACHE_RAM_HEADROOM_FRACTION`` of ``total_ram_bytes``, the host's
+    RAM when omitted, in whole GiB), and ``--disable-mmap`` when any of
+    ``weight_files`` is larger than ``ROCM_MMAP_CEILING_BYTES``; every other
     lane, CUDA, adds ``CUDA_LAUNCH_FLAGS``.
     """
     if not _is_rocm_lane(resolved_backend):
         return CUDA_LAUNCH_FLAGS
+    ram = total_ram_bytes if total_ram_bytes is not None else psutil.virtual_memory().total
+    headroom_gib = max(1, int(ram * ROCM_CACHE_RAM_HEADROOM_FRACTION / 1024**3))
+    flags = (*ROCM_LAUNCH_FLAGS, "--cache-ram", str(headroom_gib))
     if any(path.stat().st_size > ROCM_MMAP_CEILING_BYTES for path in weight_files):
-        return (*ROCM_LAUNCH_FLAGS, "--disable-mmap")
-    return ROCM_LAUNCH_FLAGS
+        return (*flags, "--disable-mmap")
+    return flags
 
 
 def _configured_install() -> tuple[Path, Path]:

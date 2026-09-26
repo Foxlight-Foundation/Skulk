@@ -355,11 +355,13 @@ decode does not fit beside the transformer, and adds `--disable-mmap` only
 for a card with a weight file above 64 GB, since memory-mapping one that
 large through unified memory is pathologically slow (the pruned H3 files
 map). One server stays warm across renders and keeps its models resident
-under ComfyUI's RAM-pressure cache, so only the first render after placement
-pays the model load. On gfx1151 a warm 480x480 four-step render takes about
-120 s when the prompt repeats and 180 to 200 s when it changes (the text
-encoder is swapped back in when host memory cannot hold it beside the
-transformer), against about 210 s when every model is rebuilt per prompt. The
+under ComfyUI's RAM-pressure cache, told to keep 40% of host RAM free
+(`--cache-ram`, 24 GiB on a node with 61 GiB of host RAM), so only the first
+render after placement pays the model load. That headroom matters: a HIP
+allocation on this APU comes out of host RAM, and at ComfyUI's default 10%
+the text encoder and the transformer evicted each other on every new prompt.
+On gfx1151 a warm 480x480 four-step render with a new prompt takes about
+105 s, against about 210 s when every model is rebuilt per prompt. The
 wheel set matters here: the rocm7.2 torch wheel from the PyTorch index, the
 lane's first set, shipped gfx1151 BLAS libraries missing GEMM kernels that
 keyframe and reference prompts reach (a single-precision batched GEMM in
