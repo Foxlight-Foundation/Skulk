@@ -104,7 +104,12 @@ AUDIO_CPP_CPU_WHEELS: Final[dict[tuple[str, str], AudioCppWheel]] = {
 # The Vulkan package is separate so preparing it cannot replace an in-use CPU
 # executable. Its exact wheel pin is added after the CI artifact passes separate
 # target-GPU qualification; no unpinned URL is a preparation candidate.
-AUDIO_CPP_VULKAN_WHEELS: Final[dict[tuple[str, str], AudioCppWheel]] = {}
+AUDIO_CPP_VULKAN_WHEELS: Final[dict[tuple[str, str], AudioCppWheel]] = {
+    ("linux", "x86_64"): AudioCppWheel(
+        filename="skulk_audio_cpp_vulkan-0.8.2.post1-py3-none-manylinux_2_35_x86_64.whl",
+        sha256="72f0a600cff38d65640254e24c7c7b4271effbb49bf9e948ecdebcb2bb210930",
+    ),
+}
 
 
 def audio_cpp_wheel_for_host(
