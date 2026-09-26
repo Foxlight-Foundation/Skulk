@@ -1102,7 +1102,10 @@ class Worker:
             requested_ready = bool(
                 ready_lanes
                 & {
-                    "cpu": {"audio_cpp-cpu", "audio_cpp-metal"},
+                    "cpu": {
+                        "audio_cpp-cpu", "audio_cpp-metal",
+                        "audio_cpp-cuda", "audio_cpp-rocm",
+                    },
                     "vulkan": {"audio_cpp-vulkan"},
                 }[request.variant]
             )

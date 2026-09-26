@@ -22,6 +22,8 @@ from skulk.worker.main import Worker
     ("variant", "lane", "builds", "expected_success"),
     [
         ("cpu", "audio_cpp-metal", {"audio_cpp-metal": "verified-build"}, True),
+        ("cpu", "audio_cpp-cuda", {"audio_cpp-cuda": "verified-build"}, True),
+        ("cpu", "audio_cpp-rocm", {"audio_cpp-rocm": "verified-build"}, True),
         ("cpu", "audio_cpp-metal", {}, False),
         ("vulkan", "audio_cpp-vulkan", {"audio_cpp-vulkan": "verified-build"}, True),
         ("vulkan", "audio_cpp-cpu", {"audio_cpp-cpu": "verified-build"}, False),

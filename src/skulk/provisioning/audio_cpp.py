@@ -351,6 +351,29 @@ def prepare_audio_cpp(
     env = os.environ if environ is None else environ
     variable = AUDIO_CPP_BIN_ENV if variant == "cpu" else AUDIO_CPP_VULKAN_BIN_ENV
     explicit = env.get(variable, "").strip()
+    if variant == "vulkan" and not explicit:
+        # Before the dedicated wheel, operators could supply a pinned Vulkan
+        # build through the primary override. Preserve that route when its
+        # executable and device probe still pass; managed CPU cache paths do
+        # not take precedence over the dedicated Vulkan package.
+        primary = env.get(AUDIO_CPP_BIN_ENV, "").strip()
+        primary_path = Path(primary) if primary else None
+        if (
+            primary_path is not None
+            and primary_path.is_file()
+            and os.access(primary_path, os.X_OK)
+            and not verified_cached_audio_cpp_binary(primary_path)
+        ):
+            try:
+                audio_cpp_model_specs(primary_path, environ=env)
+                from skulk.facts.probe import probe_audio_cpp
+
+                if "vulkan" in probe_audio_cpp(str(primary_path)).computes:
+                    return primary_path
+            except RuntimeError:
+                # An invalid primary override must not prevent the pinned
+                # Vulkan package from being prepared for a valid claim.
+                pass
     if explicit:
         path = Path(explicit)
         if not path.is_file() or not os.access(path, os.X_OK):

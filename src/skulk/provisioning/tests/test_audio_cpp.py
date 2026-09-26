@@ -110,7 +110,8 @@ def test_vulkan_variant_coexists_with_cpu_and_rehydrates_offline(
     monkeypatch.delenv("SKULK_AUDIO_CPP_VULKAN_BIN", raising=False)
     cpu = audio_cpp.prepare_audio_cpp(allow_download=True, environ={})
     vulkan = audio_cpp.prepare_audio_cpp(
-        allow_download=True, variant="vulkan", environ={}
+        allow_download=True, variant="vulkan",
+        environ={"SKULK_AUDIO_CPP_BIN": str(cpu)},
     )
     assert cpu != vulkan
     assert cpu.is_file() and vulkan.is_file()
@@ -208,6 +209,45 @@ def test_standalone_override_requires_pinned_model_specs(
     (specs / "ace_step.json").write_text("{}")
     with pytest.raises(RuntimeError, match="differs from the pin"):
         audio_cpp.prepare_audio_cpp(allow_download=False, environ=env)
+
+
+@pytest.mark.parametrize("compute", ["vulkan", "cpu"])
+def test_primary_override_preserves_qualified_vulkan_route(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, compute: str,
+) -> None:
+    """A standalone primary Vulkan build remains usable after adding the GPU wheel."""
+    binary = tmp_path / "operator" / "bin" / "audiocpp_server"
+    binary.parent.mkdir(parents=True)
+    specs = binary.parent.parent / "model_specs"
+    specs.mkdir()
+    for source in _SPECS_SOURCE.glob("*.json"):
+        (specs / source.name).write_bytes(source.read_bytes())
+    device = "VK:0 Radeon" if compute == "vulkan" else "CPU:0 Host"
+    binary.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "--version" ]; then\n'
+        f"  echo 'git: {audio_cpp.AUDIO_CPP_SOURCE_REVISION}'\n"
+        f"  echo 'backends: {compute}'\n"
+        'elif [ "$1" = "--list-devices" ]; then\n'
+        f"  echo '{device}'\n"
+        "fi\n"
+    )
+    binary.chmod(0o755)
+
+    def managed_fallback(**_kwargs: object) -> Path:
+        raise RuntimeError("managed Vulkan fallback invoked")
+
+    monkeypatch.setattr(audio_cpp, "_prepare_pinned_audio_cpp", managed_fallback)
+    environment = {"SKULK_AUDIO_CPP_BIN": str(binary)}
+    if compute == "vulkan":
+        assert audio_cpp.prepare_audio_cpp(
+            allow_download=False, variant="vulkan", environ=environment,
+        ) == binary
+    else:
+        with pytest.raises(RuntimeError, match="managed Vulkan fallback invoked"):
+            audio_cpp.prepare_audio_cpp(
+                allow_download=False, variant="vulkan", environ=environment,
+            )
 
 
 def test_cached_spec_mutation_invalidates_even_selected_binary(

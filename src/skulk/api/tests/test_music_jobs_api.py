@@ -8,7 +8,7 @@ import io
 import wave
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, Literal, cast
 from unittest.mock import AsyncMock
 
 import anyio
@@ -283,6 +283,11 @@ async def test_strix_vulkan_preparation_failure_uses_signed_cpu_fallback(
     api._send = AsyncMock(side_effect=complete_preparation)
     assert await api._prepare_music_engine_for_mount(_card(), set()) == (node, resources)
     assert requested == ["vulkan", "cpu"]
+    requested.clear()
+    assert await api._prepare_music_engine_for_mount(
+        _card(), set(), required_nodes={node}, requested_backend="audio_cpp-cpu",
+    ) == (node, resources)
+    assert requested == ["cpu"]
 
 
 @pytest.mark.parametrize("lane", ["audio_cpp-cpu", "audio_cpp-metal"])
@@ -318,8 +323,9 @@ async def test_mount_preflight_rejects_weights_only_system_memory_fit(
     api._send.assert_not_awaited()
 
 
+@pytest.mark.parametrize("claim_engine", ["audio_cpp-metal", "audio_cpp"])
 async def test_mount_preflight_uses_ordered_preparation_resources(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, claim_engine: str,
 ) -> None:
     """A dropped telemetry update cannot undo a completed preparation."""
     node = NodeId("music-node")
@@ -372,7 +378,7 @@ async def test_mount_preflight_uses_ordered_preparation_resources(
     monkeypatch.setattr(api_module, "registry_supported_backends_for_node", supported_backends)
     def signed_claims(_card: ModelCard) -> tuple[SimpleNamespace, ...]:
         return (
-            SimpleNamespace(status="supported", engine="audio_cpp-metal", hardware_classes=()),
+            SimpleNamespace(status="supported", engine=claim_engine, hardware_classes=()),
         )
 
     monkeypatch.setattr(api_module, "get_model_engine_support", signed_claims)
@@ -436,17 +442,26 @@ async def test_music_place_dry_run_uses_ordered_preparation_resources(
     assert api._send.call_args.args[0].prepared_node_resources == {node: ready}
 
 
-async def test_mount_preflight_uses_vram_for_vulkan_music(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    ("lane", "vendor", "hardware", "variant"),
+    [
+        ("audio_cpp-vulkan", "amd", "amd:pci-1002-1586", "vulkan"),
+        ("audio_cpp-rocm", "amd", "amd:pci-1002-1586", "cpu"),
+        ("audio_cpp-cuda", "nvidia", "nvidia:sm-12.1", "cpu"),
+    ],
+)
+async def test_mount_preflight_uses_vram_for_gpu_music(
+    monkeypatch: pytest.MonkeyPatch, lane: str, vendor: Literal["amd", "nvidia"],
+    hardware: str, variant: str,
 ) -> None:
-    """A music GPU node with little system RAM remains eligible to prepare."""
+    """Signed GPU lanes use VRAM, including explicit primary-binary overrides."""
     node = NodeId("gpu-music-node")
     topology = Topology()
     topology.add_node(node)
     resources = NodeResources(
-        backends=frozenset({"audio_cpp", "audio_cpp-vulkan"}),
-        architecture="x86_64", hardware_classes=frozenset({"platform:linux", "amd:pci-1002-1586"}),
-        engine_builds={"audio_cpp-vulkan": "qualified-build"},
+        backends=frozenset({"audio_cpp", lane}),
+        architecture="x86_64", hardware_classes=frozenset({"platform:linux", hardware}),
+        engine_builds={lane: "qualified-build"},
     )
     memory = MemoryUsage.from_bytes(
         ram_total=1 << 30, ram_available=64 << 20,
@@ -459,13 +474,14 @@ async def test_mount_preflight_uses_vram_for_vulkan_music(
         node_resources={node: resources},
         node_memory={node: memory},
         node_system={node: SystemPerformanceProfile(accelerator=AcceleratorMetrics(
-            vendor="amd", vram_total_bytes=1 << 30,
+            vendor=vendor, vram_total_bytes=1 << 30,
         ))},
     )
     api._audio_cpp_prepare_events = {}
     api._audio_cpp_prepare_results = {}
 
     async def complete_preparation(command: PrepareAudioCpp) -> None:
+        assert command.variant == variant
         api._audio_cpp_prepare_results[command.command_id] = AudioCppPreparationCompleted(
             request_id=command.command_id,
             target_node=node,
@@ -482,12 +498,12 @@ async def test_mount_preflight_uses_vram_for_vulkan_music(
         engine_builds: dict[str, str], hardware_classes: frozenset[str],
     ) -> frozenset[str]:
         assert node_backends and engine_builds and hardware_classes
-        return frozenset({"audio_cpp-vulkan"})
+        return frozenset({lane})
 
     monkeypatch.setattr(api_module, "registry_supported_backends_for_node", supported_backends)
     def signed_claims(_card: ModelCard) -> tuple[SimpleNamespace, ...]:
         return (
-            SimpleNamespace(status="supported", engine="audio_cpp-vulkan", hardware_classes=("amd:pci-1002-1586",)),
+            SimpleNamespace(status="supported", engine=lane, hardware_classes=(hardware,)),
         )
 
     monkeypatch.setattr(api_module, "get_model_engine_support", signed_claims)
@@ -509,6 +525,7 @@ async def test_exact_music_instance_prepares_its_specified_node_before_send(
             runner_to_shard={runner: PipelineShardMetadata(
                 model_card=card, device_rank=0, world_size=1,
                 start_layer=0, end_layer=1, n_layers=1,
+                resolved_backend="audio_cpp-cpu",
             )},
             node_to_runner={node: runner},
         ),
@@ -534,7 +551,7 @@ async def test_exact_music_instance_prepares_its_specified_node_before_send(
 
     await api.create_instance(CreateInstanceParams(instance=instance))
     api._prepare_music_engine_for_mount.assert_awaited_once_with(
-        card, set(), required_nodes={node},
+        card, set(), required_nodes={node}, requested_backend="audio_cpp-cpu",
     )
     api._send.assert_awaited_once()
     assert api._send.call_args.args[0].prepared_node_resources == {node: ready}

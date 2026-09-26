@@ -977,7 +977,12 @@ ready audio.cpp lanes for restored instances.
 
 Music mounting ranks package variants with signed support claims for the
 observed hardware. If accelerator preparation fails, a separately claimed CPU
-variant on that node remains eligible. The API sends a targeted `PrepareAudioCpp` command carrying
+variant on that node remains eligible. An operator-provided primary audio.cpp
+binary can also qualify as CUDA or ROCm when its device probe and signed claim
+match. A standalone primary Vulkan override remains usable when its pinned
+revision, model specs, and device probe pass. Exact instance creation prepares
+the shard's requested compute lane.
+The API sends a targeted `PrepareAudioCpp` command carrying
 that variant to an eligible worker,
 including when the API already sees a ready package. `AudioCppPreparationRequested`
 and `AudioCppPreparationCompleted` report the lifecycle; the worker verifies

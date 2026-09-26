@@ -361,7 +361,7 @@ from skulk.routing.speech_media import SpeechMediaPacket
 from skulk.routing.trace_data import TraceDataPacket
 from skulk.routing.vision_media import VisionMediaPacket
 from skulk.shared.apply import apply
-from skulk.shared.backends import engine_of
+from skulk.shared.backends import AUDIO_CPP_COMPUTE_BACKENDS, engine_of
 from skulk.shared.constants import (
     DASHBOARD_DIR,
     SKULK_CACHE_HOME,
@@ -3662,11 +3662,17 @@ class API:
     async def _prepare_music_engine_for_mount(
         self, card: ModelCard, excluded_nodes: set[NodeId],
         *, required_nodes: set[NodeId] | None = None,
+        requested_backend: str | None = None,
     ) -> tuple[NodeId, NodeResources] | None:
         """Prepare an eligible node and return its ordered verified resources."""
 
         if ModelTask.TextToMusic not in card.tasks:
             return
+        if requested_backend is not None and requested_backend not in AUDIO_CPP_COMPUTE_BACKENDS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Music instance requested an invalid audio.cpp backend: {requested_backend}",
+            )
         node_vram = usable_vram_by_node(
             self._telemetry_view.node_system,
             node_memory=self._telemetry_view.node_memory,
@@ -3710,7 +3716,7 @@ class API:
         def claim_matches(lane: str, classes: frozenset[str]) -> bool:
             """Limit preparation to lanes supported by signed hardware claims."""
             return any(
-                claim.engine == lane
+                claim.engine in {lane, "audio_cpp"}
                 and (
                     not claim.hardware_classes
                     or bool(set(claim.hardware_classes) & classes)
@@ -3719,7 +3725,11 @@ class API:
             )
 
         variant_lanes: dict[Literal["cpu", "vulkan"], frozenset[str]] = {
-            "cpu": frozenset({"audio_cpp-cpu", "audio_cpp-metal"}),
+            # An explicit primary-binary override can probe as CUDA or ROCm
+            # even though the downloadable primary wheel is CPU-capable.
+            "cpu": frozenset({
+                "audio_cpp-cpu", "audio_cpp-metal", "audio_cpp-cuda", "audio_cpp-rocm",
+            }),
             "vulkan": frozenset({"audio_cpp-vulkan"}),
         }
         candidates: list[tuple[int, bool, int, NodeId, Literal["cpu", "vulkan"]]] = []
@@ -3761,9 +3771,16 @@ class API:
             ):
                 variants.append("cpu")
             for variant in variants:
+                lanes = variant_lanes[variant]
+                if requested_backend is not None:
+                    lanes &= {requested_backend}
+                if not lanes or not any(
+                    claim_matches(lane, platform_classes) for lane in lanes
+                ):
+                    continue
                 ready = any(
                     backend in resources.engine_builds
-                    for backend in resources.backends & variant_lanes[variant]
+                    for backend in resources.backends & lanes
                 )
                 candidates.append((2 if variant == "vulkan" else 1, ready, available, node_id, variant))
         candidates.sort(key=lambda item: (item[0], item[1], item[2], str(item[3])), reverse=True)
@@ -3778,6 +3795,9 @@ class API:
             )
         errors: list[str] = []
         for _priority, ready, _memory, node_id, variant in candidates:
+            lanes = variant_lanes[variant]
+            if requested_backend is not None:
+                lanes &= {requested_backend}
             if ready:
                 resources = self._telemetry_view.node_resources.get(node_id)
                 supported: frozenset[str] = frozenset()
@@ -3787,7 +3807,7 @@ class API:
                         node_backends=resources.backends,
                         engine_builds=resources.engine_builds,
                         hardware_classes=resources.hardware_classes,
-                    ) & variant_lanes[variant]
+                    ) & lanes
                 if not supported:
                     errors.append(f"{node_id}: no supported signed music claim matches its ready engine build and hardware")
                     continue
@@ -3814,7 +3834,7 @@ class API:
                 fresh = result.resources
                 if result.target_node != node_id or fresh is None or not any(
                     backend in fresh.engine_builds
-                    for backend in fresh.backends & variant_lanes[variant]
+                    for backend in fresh.backends & lanes
                 ):
                     errors.append(f"{node_id}: preparation returned no verified ready resources")
                     continue
@@ -3823,7 +3843,7 @@ class API:
                     node_backends=fresh.backends,
                     engine_builds=fresh.engine_builds,
                     hardware_classes=fresh.hardware_classes,
-                ) & variant_lanes[variant]
+                ) & lanes
                 if not supported:
                     errors.append(f"{node_id}: no supported signed music claim matches the prepared build and hardware")
                     continue
@@ -3988,6 +4008,9 @@ class API:
                 )
             prepared = await self._prepare_music_engine_for_mount(
                 model_card, set(), required_nodes=music_nodes,
+                requested_backend=next(iter(
+                    instance.shard_assignments.runner_to_shard.values()
+                )).resolved_backend,
             )
         else:
             prepared = None
