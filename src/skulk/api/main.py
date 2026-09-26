@@ -406,8 +406,8 @@ from skulk.shared.models.model_cards import (
     delete_custom_card,
     get_all_model_cards,
     get_association_cards,
-    get_bundled_card,
     get_card,
+    get_curated_baseline_card,
     get_current_registry_card,
     get_current_registry_card_id,
     get_custom_card_storage_collision,
@@ -10354,15 +10354,16 @@ class API:
         self._require_operator_mutation(request)
         # Load curated truth before generating the override. A generated card
         # is a metadata cache, not operator-authored placement policy, and must
-        # retain architecture safety constraints from an exact bundled match.
-        bundled_card = await get_bundled_card(payload.model_id)
+        # retain the architecture safety constraints of the signed card for the
+        # same repository.
+        curated_card = await get_curated_baseline_card(payload.model_id)
         try:
             card = await ModelCard.fetch_from_hf(
                 payload.model_id,
                 gguf_file=payload.gguf_file,
                 source_revision=payload.source_revision,
             )
-            card = preserve_generated_card_constraints(card, bundled_card)
+            card = preserve_generated_card_constraints(card, curated_card)
         except Exception as exc:
             raise HTTPException(
                 status_code=400,

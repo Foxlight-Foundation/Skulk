@@ -590,3 +590,88 @@ async def test_gemma4_builtin_card_declares_context_length() -> None:
     card = await ModelCard.load_from_path(card_path)
 
     assert card.context_length == 262144
+
+
+def _constrained(model_id: str, split: int | None, source: str | None = None) -> ModelCard:
+    return ModelCard(
+        model_id=ModelId(model_id),
+        source_repository=ModelId(source) if source is not None else None,
+        storage_size=model_cards_module.Memory(in_bytes=1024),
+        n_layers=8,
+        hidden_size=64,
+        supports_tensor=False,
+        tasks=[model_cards_module.ModelTask.TextGeneration],
+        placement=PlacementCardConfig(max_pipeline_split_layer=split),
+    )
+
+
+async def _no_refresh() -> None:
+    return None
+
+
+@pytest.mark.anyio
+async def test_curated_baseline_is_the_signed_card_for_the_repository(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A generated card keeps the signed constraint, not only a shipped one.
+
+    The exact signed card wins. Otherwise the signed aliases of the
+    repository (one per quant) share the architecture, and the strictest
+    split limit among them is kept.
+    """
+    repository = "testorg/quantized-GGUF"
+    aliases = {
+        ModelId(f"{repository}@q8"): _constrained(f"{repository}@q8", 3, repository),
+        ModelId(f"{repository}@q4"): _constrained(f"{repository}@q4", 2, repository),
+        ModelId("otherorg/model"): _constrained("otherorg/model", 1),
+    }
+    monkeypatch.setattr(model_cards_module, "_refresh_card_cache_if_due", _no_refresh)
+    monkeypatch.setattr(model_cards_module, "_registry_current_cards", aliases)
+    monkeypatch.setattr(model_cards_module, "_BUILTIN_CARD_DIRS", [])
+
+    baseline = await model_cards_module.get_curated_baseline_card(ModelId(repository))
+    assert baseline is not None
+    assert baseline.placement.max_pipeline_split_layer == 2
+
+    exact = _constrained(repository, 5)
+    monkeypatch.setattr(
+        model_cards_module,
+        "_registry_current_cards",
+        {**aliases, ModelId(repository): exact},
+    )
+    assert await model_cards_module.get_curated_baseline_card(ModelId(repository)) is exact
+    assert (
+        await model_cards_module.get_curated_baseline_card(ModelId("nobody/unknown"))
+        is None
+    )
+
+
+@pytest.mark.anyio
+async def test_an_empty_catalog_does_not_refresh_on_every_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With nothing installed and no registry, reads do not keep refreshing.
+
+    Emptiness is a legitimate result once a refresh has completed; only a
+    dirty cache, or the registry interval, starts another.
+    """
+    refreshes: list[int] = []
+
+    async def counting_refresh() -> None:
+        refreshes.append(1)
+        model_cards_module._card_cache_loaded = True
+
+    monkeypatch.setattr(model_cards_module, "_refresh_card_cache", counting_refresh)
+    monkeypatch.setattr(model_cards_module, "_card_cache", {})
+    monkeypatch.setattr(model_cards_module, "_card_cache_dirty", False)
+    monkeypatch.setattr(model_cards_module, "_card_cache_loaded", False)
+    monkeypatch.setattr(model_cards_module, "_registry_enabled", lambda: False)
+
+    for _ in range(3):
+        assert await model_cards_module.get_all_model_cards() == []
+    assert len(refreshes) == 1
+
+    model_cards_module._card_cache_dirty = True
+    await model_cards_module.get_all_model_cards()
+    assert len(refreshes) == 2
+
