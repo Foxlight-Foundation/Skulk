@@ -574,6 +574,112 @@ def _fix_models_storage(facts: NodeFacts) -> str | None:
     return f"created models directory {models_dir}"
 
 
+# --- installed card records ------------------------------------------------
+
+
+_UNRECORDED_NAMES_SHOWN = 5
+
+
+def _configured_store_roots() -> tuple[Path, ...]:
+    """Every model-store directory this node's config names.
+
+    Store-staged models live in the staging cache, which by default sits
+    outside the model directories, and a store host keeps its canonical
+    copies under ``store_path``; a card audit that skipped either would miss
+    them. The running node resolves staging by its libp2p ID, which doctor
+    does not have, so every staging path the config names is included rather
+    than guessing which override applies. A named directory absent on this
+    machine is skipped by the audit, so including another node's path costs
+    nothing.
+    """
+    from skulk.store.config import (
+        StagingNodeConfig,
+        load_skulk_config,
+        resolve_config_path,
+    )
+
+    if not resolve_config_path().exists():
+        return ()
+    try:
+        config = load_skulk_config()
+    except Exception:  # noqa: BLE001 - a broken config is another check's job
+        return ()
+    store = config.model_store if config is not None else None
+    if store is None or not store.enabled:
+        return ()
+    stagings = [store.staging]
+    for override in store.node_overrides.values():
+        if override.staging is not None:
+            # Overrides are partial: resolve_node_staging merges the fields an
+            # override sets over the base config, and so does this.
+            merged = store.staging.model_dump()
+            merged.update(override.staging.model_dump(exclude_unset=True))
+            stagings.append(StagingNodeConfig.model_validate(merged))
+    return (
+        Path(store.store_path).expanduser(),
+        *(
+            Path(staging.node_cache_path).expanduser()
+            for staging in stagings
+            if staging.enabled
+        ),
+    )
+
+
+def _check_installed_card_records(facts: NodeFacts) -> Sequence[CheckResult]:
+    """Every complete installed model should carry its card record."""
+    del facts
+    check_id = "installed-card-records"
+    title = "Installed model cards"
+    from skulk.store.artifact_inventory import installed_artifact_roots
+    from skulk.store.installed_cards import find_unrecorded_artifacts
+
+    roots_by_path: dict[Path, Path] = {}
+    for root in (*installed_artifact_roots(None), *_configured_store_roots()):
+        roots_by_path.setdefault(root.resolve(), root)
+    found = find_unrecorded_artifacts(roots_by_path.values())
+    ignored = (
+        f"; {len(found.incomplete)} incomplete download"
+        f"{'' if len(found.incomplete) == 1 else 's'} ignored"
+        if found.incomplete
+        else ""
+    )
+    if not found.complete:
+        return [
+            _ok(
+                check_id,
+                title,
+                f"{found.recorded} installed model"
+                f"{'' if found.recorded == 1 else 's'}, each with its card "
+                f"record{ignored}",
+            )
+        ]
+    names = ", ".join(path.name for path in found.complete[:_UNRECORDED_NAMES_SHOWN])
+    more = len(found.complete) - _UNRECORDED_NAMES_SHOWN
+    return [
+        CheckResult(
+            check_id=check_id,
+            title=title,
+            verdict="degraded",
+            detail=(
+                f"{len(found.complete)} complete model"
+                f"{'' if len(found.complete) == 1 else 's'} without a card record: "
+                f"{names}{f' and {more} more' if more > 0 else ''}{ignored}"
+            ),
+            consequence=(
+                "offline, this node serves these only from the cards shipped "
+                "with Skulk; a model's own card record is what keeps it "
+                "servable without the network"
+            ),
+            remediation=(
+                "start Skulk once with network access: it records the card "
+                "for every complete model it recognizes. A model no current "
+                "card recognizes can be downloaded again or added as a custom "
+                "card"
+            ),
+        )
+    ]
+
+
 # --- dashboard -------------------------------------------------------------
 
 
@@ -976,6 +1082,23 @@ REGISTRY: tuple[DoctorCheck, ...] = (
         ),
         run=_check_models_storage,
         fix=_fix_models_storage,
+    ),
+    DoctorCheck(
+        check_id="installed-card-records",
+        title="Installed model cards",
+        docs=(
+            "Verifies every complete model in the model directories and in "
+            "the model store's canonical and staging directories carries its "
+            "card record "
+            "(`.skulk/installed-card.json`, or the detached record kept for a "
+            "read-only model directory), the record that keeps a downloaded "
+            "model servable without the network. Records are checked by file "
+            "size, never hashed, so the check stays fast on large stores. A model "
+            "downloaded before these records existed gets one when Skulk "
+            "starts with network access and recognizes it. Incomplete "
+            "downloads are counted, not flagged."
+        ),
+        run=_check_installed_card_records,
     ),
     DoctorCheck(
         check_id="dashboard-assets",

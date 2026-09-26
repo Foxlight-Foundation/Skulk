@@ -19,6 +19,15 @@ This project records release notes here and mirrors public-facing notes in
   the worker's event loop.
 ### Added
 
+- `skulk doctor` reports installed models that lack their card record
+  (`installed-card-records`). A downloaded model's own card record is what
+  keeps it servable without the network; a model downloaded before those
+  records existed gets one when Skulk starts with network access and
+  recognizes it. Incomplete downloads are counted, not flagged. The audit
+  covers the model directories and the model store's canonical and staging
+  directories. `GET /v1/diagnostics/node` now runs the doctor checks off
+  the event loop, so a slow check no longer stalls the API.
+
 - `GET /v1/models` publishes every engine setting a video card's jobs
   accept, with its default: the sampler and scheduler lists, the card's
   trained video and audio shifts (and each adapter's own) with the accepted
