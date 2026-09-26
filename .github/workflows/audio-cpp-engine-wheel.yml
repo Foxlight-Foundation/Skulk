@@ -11,12 +11,14 @@ on:
     paths:
       - "packaging/skulk-audio-cpp-cpu/**"
       - "packaging/skulk-audio-cpp-vulkan/**"
+      - "packaging/skulk-audio-cpp-cuda/**"
       - ".github/workflows/audio-cpp-engine-wheel.yml"
   push:
     branches: [dev]
     paths:
       - "packaging/skulk-audio-cpp-cpu/**"
       - "packaging/skulk-audio-cpp-vulkan/**"
+      - "packaging/skulk-audio-cpp-cuda/**"
       - ".github/workflows/audio-cpp-engine-wheel.yml"
   workflow_dispatch:
     inputs:
@@ -27,14 +29,14 @@ on:
       publish_variant:
         description: "Variant to publish after all build jobs pass"
         type: choice
-        options: [cpu, vulkan]
+        options: [cpu, vulkan, cuda]
         default: vulkan
       publish_run_id:
-        description: "Successful prior run holding the hardware-qualified Vulkan artifact"
+        description: "Successful prior run holding the hardware-qualified artifact"
         type: string
         default: ""
       publish_sha256:
-        description: "Exact SHA-256 of that prior run's Vulkan wheel"
+        description: "Exact SHA-256 of that prior run's selected wheel"
         type: string
         default: ""
 
@@ -192,8 +194,110 @@ jobs:
           path: ${{ env.AUDIO_CPP_PACKAGE_DIR }}/dist/*.whl
           if-no-files-found: error
 
+  build-cuda-arm64:
+    runs-on: ubuntu-22.04-arm
+    container: nvidia/cuda:12.9.1-devel-ubuntu22.04
+    defaults:
+      run:
+        shell: bash
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      AUDIO_CPP_PACKAGE_DIR: packaging/skulk-audio-cpp-cuda
+      AUDIO_CPP_PACKAGE_MODULE: skulk_audio_cpp_cuda
+    steps:
+      - name: Install Linux build prerequisites
+        run: |
+          set -euo pipefail
+          apt-get update -qq -o APT::Update::Error-Mode=any -o Acquire::Retries=3
+          apt-get install -y -qq -o Acquire::Retries=3 \
+            git build-essential cmake libcurl4-openssl-dev python3 ca-certificates
+      - uses: actions/checkout@v4
+      - name: Fetch pinned audio.cpp source
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none https://github.com/0xShug0/audio.cpp /tmp/audio-cpp-src
+          git -C /tmp/audio-cpp-src checkout --detach "$AUDIO_CPP_REF"
+          test "$(git -C /tmp/audio-cpp-src rev-parse HEAD)" = "$AUDIO_CPP_REF"
+      - name: Build GB10 CUDA server and two music families
+        run: |
+          set -euo pipefail
+          # audio.cpp upgrades 121-real to 121a-real for Blackwell's
+          # architecture-specific instructions. Never infer the CI runner's
+          # CPU or absent GPU as a portable target.
+          cmake -S /tmp/audio-cpp-src -B /tmp/audio-cpp-build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_ARCHITECTURES=121-real \
+            -DAUDIOCPP_MODEL_SET=custom \
+            -DAUDIOCPP_MODELS=ace_step,minimax_music3 \
+            -DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=OFF \
+            -DAUDIOCPP_BUILD_SERVER_FRONTENDS=OFF \
+            -DAUDIOCPP_DEPLOYMENT_BUILD=OFF \
+            -DENGINE_ENABLE_NATIVE_CPU=OFF \
+            -DENGINE_ENABLE_OPENMP=ON \
+            -DENGINE_ENABLE_CUDA=ON \
+            -DENGINE_ENABLE_HIP=OFF \
+            -DENGINE_ENABLE_VULKAN=OFF \
+            -DCMAKE_EXE_LINKER_FLAGS=-Wl,--allow-shlib-undefined
+          cmake --build /tmp/audio-cpp-build --target audiocpp_server --parallel 4
+      - name: Assemble and smoke-test CUDA wheel
+        run: |
+          set -euo pipefail
+          bin="$AUDIO_CPP_PACKAGE_DIR/src/$AUDIO_CPP_PACKAGE_MODULE/bin"
+          mkdir -p "$bin"
+          cp /tmp/audio-cpp-build/bin/audiocpp_server "$bin/"
+          "$bin/audiocpp_server" --version | grep -q 'backends:.*cuda'
+          "$bin/audiocpp_server" --list-devices
+          ldd "$bin/audiocpp_server"
+      - uses: astral-sh/setup-uv@v6
+      - name: Build and verify wheel
+        run: |
+          set -euo pipefail
+          uv build --wheel "$AUDIO_CPP_PACKAGE_DIR" --out-dir "$AUDIO_CPP_PACKAGE_DIR/dist"
+          python3 - <<'PY'
+          import hashlib
+          import os
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          root = Path(os.environ['AUDIO_CPP_PACKAGE_DIR'])
+          module = os.environ['AUDIO_CPP_PACKAGE_MODULE']
+          wheel, = root.joinpath('dist').glob('*.whl')
+          with ZipFile(wheel) as archive:
+              names = set(archive.namelist())
+              required = {
+                  f'{module}/bin/audiocpp_server',
+                  f'{module}/model_specs/ace_step.json',
+                  f'{module}/model_specs/minimax_music3.json',
+                  *(f'{module}/licenses/{name}' for name in (
+                      'AUDIO_CPP_LICENSE.txt', 'THIRD_PARTY_NOTICES.txt',
+                      'ABSL_LICENSE.txt', 'CJSON_LICENSE.txt',
+                      'CPP_HTTPLIB_LICENSE.txt', 'DARTS_CLONE_LICENSE.txt',
+                      'ESAXX_LICENSE.txt', 'GGML_LICENSE.txt',
+                      'LIBYAML_LICENSE.txt', 'PROTOBUF_LITE_LICENSE.txt',
+                      'SENTENCEPIECE_LICENSE.txt',
+                  )),
+              }
+              assert required <= names, required - names
+          print(f'{wheel.name} sha256:{hashlib.sha256(wheel.read_bytes()).hexdigest()}')
+          PY
+          uv venv /tmp/audio-cpp-smoke --python 3.13
+          uv pip install --python /tmp/audio-cpp-smoke/bin/python "$AUDIO_CPP_PACKAGE_DIR"/dist/*.whl
+          /tmp/audio-cpp-smoke/bin/skulk-audio-cpp-cuda --version
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ env.AUDIO_CPP_PACKAGE_DIR }}/dist/*.whl
+      - uses: actions/upload-artifact@v4
+        with:
+          name: audio-cpp-linux-arm64-cuda
+          path: ${{ env.AUDIO_CPP_PACKAGE_DIR }}/dist/*.whl
+          if-no-files-found: error
+
   publish-index:
-    needs: build
+    needs: [build, build-cuda-arm64]
     if: github.event_name == 'workflow_dispatch' && inputs.publish
     runs-on: ubuntu-latest
     permissions:
@@ -213,18 +317,18 @@ jobs:
           run-id: ${{ inputs.publish_run_id || github.run_id }}
           github-token: ${{ github.token }}
       - name: Verify hardware-qualified source artifact
-        if: inputs.publish_variant == 'vulkan' || inputs.publish_run_id != ''
+        if: inputs.publish_variant != 'cpu' || inputs.publish_run_id != ''
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_RUN_ID: ${{ inputs.publish_run_id }}
           EXPECTED_SHA256: ${{ inputs.publish_sha256 }}
           PUBLISH_VARIANT: ${{ inputs.publish_variant }}
         run: |
-          test "$PUBLISH_VARIANT" = vulkan
+          test "$PUBLISH_VARIANT" = vulkan -o "$PUBLISH_VARIANT" = cuda
           [[ "$SOURCE_RUN_ID" =~ ^[0-9]+$ ]]
           [[ "$EXPECTED_SHA256" =~ ^[0-9a-f]{64}$ ]]
           test "$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" --jq '.conclusion')" = success
-          wheels=(dist/skulk_audio_cpp_vulkan-*.whl)
+          wheels=(dist/skulk_audio_cpp_${PUBLISH_VARIANT}-*.whl)
           test "${#wheels[@]}" -eq 1
           printf '%s  %s\n' "$EXPECTED_SHA256" "${wheels[0]}" | sha256sum --check
           gh attestation verify "${wheels[0]}" --repo "$GITHUB_REPOSITORY" > /dev/null
