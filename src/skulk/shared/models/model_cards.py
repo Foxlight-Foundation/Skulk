@@ -31,7 +31,11 @@ from pydantic import (
 )
 from tomlkit.exceptions import TOMLKitError
 
-from skulk.shared.backends import AUDIO_CPP_COMPUTE_BACKENDS, engine_of
+from skulk.shared.backends import (
+    AUDIO_CPP_COMPUTE_BACKENDS,
+    GB10_AUDIO_CPP_CUDA_BUILD,
+    engine_of,
+)
 from skulk.shared.constants import (
     RESOURCES_DIR,
     SKULK_CUSTOM_MODEL_CARDS_DIR,
@@ -829,6 +833,18 @@ def registry_supported_backends_for_node(
         supported_capabilities: set[str] = set()
         for claim in support_claims:
             if claim.status != "supported":
+                continue
+            if (
+                backend == "audio_cpp-cuda"
+                and engine_builds.get(backend, engine_builds.get("audio_cpp"))
+                == GB10_AUDIO_CPP_CUDA_BUILD
+                and (
+                    "nvidia:sm-12.1" not in hardware_classes
+                    or "nvidia:sm-12.1" not in claim.hardware_classes
+                )
+            ):
+                # This published wheel contains only SM 12.1 kernels. A broad
+                # claim must not authorize it through the CPU/override path.
                 continue
             if claim.hardware_classes and not (
                 set(claim.hardware_classes) & hardware_classes

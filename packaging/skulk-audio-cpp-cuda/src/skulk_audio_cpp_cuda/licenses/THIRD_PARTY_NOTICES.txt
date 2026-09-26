@@ -1,0 +1,17 @@
+This package includes a server built from audio.cpp source commit
+4d88768fbcae4e6eb3352c6ab1422dabb7d90b58. Its upstream Apache-2.0
+license is AUDIO_CPP_LICENSE.txt. The following licenses are copied from that
+same source commit for third-party code incorporated into the server build:
+
+ABSL_LICENSE.txt           external/sentencepiece/third_party/absl/LICENSE
+CJSON_LICENSE.txt          external/cJSON/LICENSE
+CPP_HTTPLIB_LICENSE.txt    external/cpp-httplib/LICENSE
+DARTS_CLONE_LICENSE.txt    external/sentencepiece/third_party/darts_clone/LICENSE
+ESAXX_LICENSE.txt          external/sentencepiece/third_party/esaxx/LICENSE
+GGML_LICENSE.txt           external/ggml/LICENSE
+LIBYAML_LICENSE.txt        external/libyaml/License
+PROTOBUF_LITE_LICENSE.txt  external/sentencepiece/third_party/protobuf-lite/LICENSE
+SENTENCEPIECE_LICENSE.txt  external/sentencepiece/LICENSE
+
+Model weights are not contained in this package. They retain their original
+licenses, identified by the separately downloaded Skulk model cards.

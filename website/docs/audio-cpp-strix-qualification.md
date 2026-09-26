@@ -27,19 +27,42 @@ during generation.
 
 | Card | Immutable model revision | Qualification result |
 | --- | --- | --- |
-| `audio-cpp/ACE-Step1.5-Turbo-BF16` | `a776907b362419343f4b9996bdd899619efcf3f8` | Stereo 48 kHz WAV; eight completed digest-verified, non-silent soak jobs; 30-minute soak; generation latency 60.74–74.87 seconds |
-| `audio-cpp/MiniMax-Music3-GGUF-Q4` | `9634a1e1364f94f1ac85a38c114ef105c678f824` | Stereo 44.1 kHz WAV; eight completed digest-verified, non-silent soak jobs; 30-minute soak; generation latency 58.74–62.79 seconds; missing lyrics rejected |
+| `audio-cpp/ACE-Step1.5-Turbo-BF16` | `a776907b362419343f4b9996bdd899619efcf3f8` | Stereo 48 kHz WAV; eight completed digest-verified, non-silent jobs in a paced 30-minute stability run; generation latency 60.74–74.87 seconds |
+| `audio-cpp/MiniMax-Music3-GGUF-Q4` | `9634a1e1364f94f1ac85a38c114ef105c678f824` | Stereo 44.1 kHz WAV; eight completed digest-verified, non-silent jobs in a paced 30-minute stability run; generation latency 58.74–62.79 seconds; missing lyrics rejected |
 
-The soak admitted work for both cards concurrently. Cancellation during active
-generation terminated and replaced the affected model server through runner
-supervision. Queued cancellation did not interrupt the active job. An API
-restart preserved completed result bytes and digests; both models remounted
+The paced runs admitted work for both cards concurrently. They included idle
+intervals and do not satisfy the release plan's 30-minute continuous generation
+gate. A subsequent run kept both mounted models generating concurrently with
+no intentional pause between requests. Every job completed with a valid,
+digest-matched stereo WAV under the 64 MiB output limit.
+
+| Card | Jobs / wall time | Busy fraction / longest request gap | Latency, min–median–max | Minimum sampled PCM16 RMS | Server RSS, beginning / high-water / ending |
+| --- | --- | --- | --- | ---: | --- |
+| ACE-Step 1.5 Turbo BF16 | 28 / 1,805.67 seconds | 99.98% / 0.067 seconds | 57.21 / 66.23 / 94.42 seconds | 3,044 | 124,096 / 5,526,504 / 4,019,448 KiB |
+| MiniMax Music 3 Q4 | 29 / 1,803.93 seconds | 99.99% / 0.010 seconds | 58.27 / 62.24 / 64.22 seconds | 71.63 | 93,892 / 1,941,020 / 340,952 KiB |
+
+The middle RSS value is the Linux process high-water mark, with the larger
+MiniMax mark observed by the independent sampler. Across 369 five-second
+samples, the model processes' DRM fdinfo reported up to 15,137,104 KiB and
+6,769,036 KiB of resident Vulkan memory respectively. These are sampled GPU maxima, not
+lifetime peaks. One MiniMax result was unusually quiet (full-wave RMS 73.55
+PCM16, peak 565; SHA-256
+`b9acbb53fe0b1bf77c440ed0b6ec128ebed06f32d218587f4100d83f4261bb5b`).
+It met the signal gate but needs listening review before making a quality
+judgment. Both servers remained alive, and removing the temporary mounts left
+the original runners ready, all three nodes healthy, and configuration unchanged.
+
+Cancellation during active generation terminated and replaced the affected
+model server through runner supervision. Queued cancellation did not interrupt
+the active job. An API restart preserved completed result bytes and digests; both models remounted
 from cached artifacts and generated again. A subsequent isolated run with the
 current candidate reader also mounted and generated from both models.
 
-Measured peak server resident memory was 5,254,484 KiB for ACE-Step and
-511,356 KiB for MiniMax. Sampled GPU memory use was 9,973,000 KiB and
-1,650,852 KiB respectively; these GPU samples are not peak measurements.
+The earlier paced run did not record beginning and ending RSS for each model;
+the continuous run above supplies that evidence.
+Human listening of an exact output from each card is still needed for the
+release plan's subjective quality gate; PCM measurements establish only that
+the WAVs are non-silent.
 These claims apply only to the exact cards, build identity, capability, and
 hardware class listed here. Other audio.cpp builds and GPUs need their own
 qualification.

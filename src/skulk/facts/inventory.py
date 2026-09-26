@@ -254,6 +254,13 @@ def engine_build_inventory(
                 and "vulkan" in facts.audio_cpp_vulkan_probe.computes
             ):
                 binary = facts.audio_cpp_vulkan_binary
+            if (
+                (backend == "audio_cpp-cuda" or (backend == "audio_cpp" and binary.state != "ok"))
+                and facts.audio_cpp_cuda_binary.state == "ok"
+                and facts.audio_cpp_cuda_probe.outcome == "ready"
+                and "cuda" in facts.audio_cpp_cuda_probe.computes
+            ):
+                binary = facts.audio_cpp_cuda_binary
             build = _binary_build("audio.cpp", binary, fresh=True)
         else:
             build = declared.get(backend) or declared.get(engine) or discovered.get(engine)

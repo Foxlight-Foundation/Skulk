@@ -7,7 +7,7 @@ import os
 import zipfile
 from collections.abc import Callable
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 import pytest
 
@@ -37,14 +37,17 @@ def _wheel(tmp_path: Path) -> tuple[audio_cpp.AudioCppWheel, Path]:
     return wheel, wheel_path
 
 
-def _vulkan_wheel(tmp_path: Path) -> tuple[audio_cpp.AudioCppWheel, Path]:
-    """Make a complete independent Vulkan payload for cache isolation tests."""
-    wheel_path = tmp_path / "skulk_audio_cpp_vulkan-0.8.2.post1-py3-none-manylinux_2_35_x86_64.whl"
+def _gpu_wheel(
+    tmp_path: Path, variant: Literal["vulkan", "cuda"]
+) -> tuple[audio_cpp.AudioCppWheel, Path]:
+    """Make an independent GPU payload for cache isolation tests."""
+    architecture = "x86_64" if variant == "vulkan" else "aarch64"
+    wheel_path = tmp_path / f"skulk_audio_cpp_{variant}-0.8.2.post1-py3-none-manylinux_2_35_{architecture}.whl"
     provisional = audio_cpp.AudioCppWheel(filename=wheel_path.name, sha256="0" * 64)
     with zipfile.ZipFile(wheel_path, "w") as archive:
         for member in audio_cpp._required_members(provisional):
             if member.endswith("audiocpp_server"):
-                payload = b"#!/bin/sh\n# vulkan\n"
+                payload = f"#!/bin/sh\n# {variant}\n".encode()
             elif "/model_specs/" in member:
                 payload = (_SPECS_SOURCE / Path(member).name).read_bytes()
             else:
@@ -94,7 +97,7 @@ def test_vulkan_variant_coexists_with_cpu_and_rehydrates_offline(
 ) -> None:
     """Preparing the GPU wheel cannot replace a pinned executable in use by CPU."""
     cpu_wheel, cpu_source = _wheel(tmp_path)
-    vulkan_wheel, vulkan_source = _vulkan_wheel(tmp_path)
+    vulkan_wheel, vulkan_source = _gpu_wheel(tmp_path, "vulkan")
     monkeypatch.setattr(audio_cpp, "SKULK_ENGINES_DIR", tmp_path / "cache")
     monkeypatch.setattr(audio_cpp, "audio_cpp_wheel_for_host", lambda: cpu_wheel)
     monkeypatch.setattr(
@@ -125,6 +128,52 @@ def test_vulkan_variant_coexists_with_cpu_and_rehydrates_offline(
     assert audio_cpp.prepare_audio_cpp(
         allow_download=False, variant="vulkan", environ={}
     ) == vulkan
+
+
+def test_cuda_variant_coexists_and_rehydrates_offline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The GB10 package has its own immutable cache and CUDA declaration."""
+    cpu_wheel, cpu_source = _wheel(tmp_path)
+    cuda_wheel, cuda_source = _gpu_wheel(tmp_path, "cuda")
+    monkeypatch.setattr(audio_cpp, "SKULK_ENGINES_DIR", tmp_path / "cache")
+    monkeypatch.setattr(audio_cpp, "audio_cpp_wheel_for_host", lambda: cpu_wheel)
+    monkeypatch.setattr(audio_cpp, "audio_cpp_cuda_wheel_for_host", lambda: cuda_wheel)
+    sources = {cpu_wheel.filename: cpu_source, cuda_wheel.filename: cuda_source}
+
+    def download(wheel: audio_cpp.AudioCppWheel, destination: Path) -> None:
+        destination.write_bytes(sources[wheel.filename].read_bytes())
+
+    monkeypatch.setattr(audio_cpp, "_download_wheel", download)
+    monkeypatch.delenv("SKULK_AUDIO_CPP_BIN", raising=False)
+    monkeypatch.delenv("SKULK_AUDIO_CPP_CUDA_BIN", raising=False)
+    cpu = audio_cpp.prepare_audio_cpp(allow_download=True, environ={})
+    cuda = audio_cpp.prepare_audio_cpp(allow_download=True, variant="cuda", environ={})
+    assert cpu != cuda
+    assert audio_cpp.verified_cached_audio_cpp_binary(cpu)
+    assert audio_cpp.verified_cached_audio_cpp_binary(cuda)
+    monkeypatch.delenv("SKULK_AUDIO_CPP_BIN", raising=False)
+    monkeypatch.delenv("SKULK_AUDIO_CPP_CUDA_BIN", raising=False)
+    assert audio_cpp.rehydrate_cached_audio_cpp(environ={}) == cpu
+    assert os.environ["SKULK_AUDIO_CPP_CUDA_BIN"] == str(cuda)
+    assert audio_cpp.prepare_audio_cpp(
+        allow_download=False, variant="cuda", environ={}
+    ) == cuda
+
+
+def test_cuda_unsupported_host_fails_before_download() -> None:
+    """An unrelated CPU architecture cannot reuse a CUDA package."""
+    with pytest.raises(RuntimeError, match="No SHA-256-pinned audio.cpp CUDA"):
+        audio_cpp.audio_cpp_cuda_wheel_for_host(system="linux", machine="ppc64le")
+
+
+def test_gb10_cuda_wheel_uses_exact_hardware_tested_artifact() -> None:
+    """The arm64 CUDA lane selects only the GB10-tested wheel bytes."""
+    wheel = audio_cpp.audio_cpp_cuda_wheel_for_host(system="linux", machine="aarch64")
+    assert wheel.filename == (
+        "skulk_audio_cpp_cuda-0.8.2.post1-py3-none-manylinux_2_35_aarch64.whl"
+    )
+    assert wheel.sha256 == "39d9f4e2f037ac808ba3588119e3d11a2437e3eb2d85e8bf5eecf63cc3c4c772"
 
 
 def test_offline_miss_and_tampered_cache_fail_closed(
@@ -254,7 +303,7 @@ def test_standalone_vulkan_override_outweighs_cached_vulkan_wheel(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Startup must not mask an explicit Vulkan build with a cached package."""
-    wheel, source = _vulkan_wheel(tmp_path)
+    wheel, source = _gpu_wheel(tmp_path, "vulkan")
     monkeypatch.setattr(audio_cpp, "SKULK_ENGINES_DIR", tmp_path / "cache")
     monkeypatch.setattr(audio_cpp, "audio_cpp_vulkan_wheel_for_host", lambda: wheel)
     monkeypatch.setattr(audio_cpp, "_download_wheel", _fixture_downloader(source))

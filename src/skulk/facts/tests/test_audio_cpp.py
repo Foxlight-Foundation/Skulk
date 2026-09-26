@@ -8,7 +8,7 @@ import pytest
 
 from skulk.facts.derive import derive_node_backends
 from skulk.facts.inventory import engine_build_inventory
-from skulk.facts.probe import gather_node_facts
+from skulk.facts.probe import gather_node_facts, probe_audio_cpp
 from skulk.provisioning.audio_cpp import AUDIO_CPP_SOURCE_REVISION
 
 
@@ -48,6 +48,37 @@ def test_installed_package_is_not_ready_until_selected(tmp_path: Path) -> None:
     assert not any(
         tag.startswith("audio_cpp") for tag in derive_node_backends(facts).backends
     )
+
+
+def test_missing_cuda_libraries_have_actionable_probe_diagnostic(tmp_path: Path) -> None:
+    """A missing CUDA loader library keeps the engine unavailable with a fix hint."""
+    binary = tmp_path / "audiocpp_server"
+    binary.write_text(
+        "#!/bin/sh\n"
+        "echo 'error while loading shared libraries: libcublas.so.12: "
+        "cannot open shared object file' >&2\n"
+        "exit 127\n"
+    )
+    binary.chmod(0o755)
+    probe = probe_audio_cpp(str(binary))
+    assert probe.outcome == "failed"
+    assert "install the host CUDA 12 runtime, cuBLAS, and NCCL" in (probe.detail or "")
+
+
+def test_non_cuda_loader_failure_keeps_its_original_diagnostic(tmp_path: Path) -> None:
+    """A CPU or Vulkan loader error must not suggest installing CUDA."""
+    binary = tmp_path / "audiocpp_server"
+    binary.write_text(
+        "#!/bin/sh\n"
+        "echo 'error while loading shared libraries: libcurl.so.4: "
+        "cannot open shared object file' >&2\n"
+        "exit 127\n"
+    )
+    binary.chmod(0o755)
+    probe = probe_audio_cpp(str(binary))
+    assert probe.outcome == "failed"
+    assert "libcurl.so.4" in (probe.detail or "")
+    assert "CUDA loader" not in (probe.detail or "")
 
 
 def test_pinned_binary_probe_and_build_inventory(tmp_path: Path) -> None:
@@ -99,6 +130,47 @@ def test_cpu_and_vulkan_binaries_advertise_distinct_exact_builds(
         "audio.cpp@sha256:" + hashlib.sha256(vulkan.read_bytes()).hexdigest()
     )
     assert inventory["audio_cpp-cpu"] != inventory["audio_cpp-vulkan"]
+
+
+def test_cuda_binary_needs_a_real_cuda_device_and_has_its_own_build(
+    tmp_path: Path,
+) -> None:
+    """A CUDA package cannot borrow CPU readiness or another executable hash."""
+    cpu = _fake_server(
+        tmp_path / "cpu/bin/audiocpp_server",
+        backends="cpu", devices="CPU:0 Arm CPU",
+    )
+    cuda = _fake_server(
+        tmp_path / "cuda/bin/audiocpp_server",
+        backends="cpu,cuda", devices="CUDA:0 NVIDIA GB10\nCPU:0 Arm CPU",
+    )
+    facts = gather_node_facts(
+        env={
+            "SKULK_AUDIO_CPP_BIN": str(cpu),
+            "SKULK_AUDIO_CPP_CUDA_BIN": str(cuda),
+        },
+        platform="linux", drm_root=tmp_path,
+    )
+    backends = derive_node_backends(facts).backends
+    assert {"audio_cpp-cpu", "audio_cpp-cuda"} <= backends
+    inventory = engine_build_inventory(backends, facts, environ={})
+    assert inventory["audio_cpp-cuda"] == (
+        "audio.cpp@sha256:" + hashlib.sha256(cuda.read_bytes()).hexdigest()
+    )
+    assert inventory["audio_cpp-cuda"] != inventory["audio_cpp-cpu"]
+
+    no_device = _fake_server(
+        cuda, backends="cpu,cuda", devices="CPU:0 Arm CPU",
+    )
+    missing = gather_node_facts(
+        env={"SKULK_AUDIO_CPP_CUDA_BIN": str(no_device)},
+        platform="linux", drm_root=tmp_path,
+    )
+    assert "audio_cpp-cuda" not in derive_node_backends(missing).backends
+    assert any(
+        "CUDA" in conflict.message
+        for conflict in derive_node_backends(missing).conflicts
+    )
 
 
 def test_missing_model_specs_prevent_ready_advertisement(tmp_path: Path) -> None:
