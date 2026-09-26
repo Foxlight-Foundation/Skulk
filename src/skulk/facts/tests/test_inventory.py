@@ -92,6 +92,7 @@ def test_hardware_classes_preserve_vendor_model_and_compute() -> None:
             "nvidia:sm-8.6",
             "amd",
             "amd:amd-gpu",
+            "amd:pci-1002-1586",
         }
     )
 

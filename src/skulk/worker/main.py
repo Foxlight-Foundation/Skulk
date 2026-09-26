@@ -1079,7 +1079,9 @@ class Worker:
         resources: NodeResources | None = None
         try:
             await to_thread.run_sync(
-                lambda: prepare_audio_cpp(allow_download=not self._offline)
+                lambda: prepare_audio_cpp(
+                    allow_download=not self._offline, variant=request.variant
+                )
             )
             await to_thread.run_sync(refresh_node_facts)
             peers = (
@@ -1097,13 +1099,18 @@ class Worker:
                 if backend.startswith("audio_cpp-")
                 and backend in resources.engine_builds
             }
-            if not ready_lanes:
+            requested_ready = (
+                "audio_cpp-vulkan" in ready_lanes
+                if request.variant == "vulkan"
+                else bool(ready_lanes)
+            )
+            if not requested_ready:
                 details = "; ".join(
                     conflict.message for conflict in resources.capability_conflicts
                     if "audio.cpp" in conflict.message.lower()
                 )
                 raise RuntimeError(
-                    details or "prepared audio.cpp has no verified ready backend and build"
+                    details or f"prepared audio.cpp {request.variant} has no verified ready backend and build"
                 )
             if self._telemetry_sender is None:
                 raise RuntimeError("node resources telemetry is unavailable")

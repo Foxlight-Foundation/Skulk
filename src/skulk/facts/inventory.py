@@ -234,7 +234,7 @@ def engine_build_inventory(
         elif engine == "comfy":
             build = _comfy_build(facts)
         elif engine == "audio_cpp":
-            build = _binary_build("audio.cpp", facts.audio_cpp_binary, fresh=True)
+            continue  # each audio.cpp lane may have a different executable digest
         if build is not None:
             discovered[engine] = build
 
@@ -245,15 +245,26 @@ def engine_build_inventory(
             continue
         # A declared build string cannot stand in for this engine's measured
         # executable digest when registry support is exact-build bound.
-        build = (
-            discovered.get(engine)
-            if engine == "audio_cpp"
-            else declared.get(backend) or declared.get(engine) or discovered.get(engine)
-        )
+        if engine == "audio_cpp":
+            binary = facts.audio_cpp_binary
+            if (
+                (backend == "audio_cpp-vulkan" or (backend == "audio_cpp" and binary.state != "ok"))
+                and facts.audio_cpp_vulkan_binary.state == "ok"
+                and facts.audio_cpp_vulkan_probe.outcome == "ready"
+                and "vulkan" in facts.audio_cpp_vulkan_probe.computes
+            ):
+                binary = facts.audio_cpp_vulkan_binary
+            build = _binary_build("audio.cpp", binary, fresh=True)
+        else:
+            build = declared.get(backend) or declared.get(engine) or discovered.get(engine)
         if build is None:
             continue
         inventory[backend] = build
         inventory.setdefault(engine, build)
+    if "audio_cpp" in backends:
+        primary = _binary_build("audio.cpp", facts.audio_cpp_binary, fresh=True)
+        if primary is not None:
+            inventory["audio_cpp"] = primary
     return dict(sorted(inventory.items()))
 
 
@@ -266,6 +277,8 @@ def hardware_class_inventory(facts: NodeFacts) -> frozenset[str]:
         name = _HARDWARE_TOKEN.sub("-", gpu.name.lower()).strip("-")
         if name and name != "unknown":
             classes.add(f"{vendor}:{name}")
+        if gpu.pci_device_id is not None:
+            classes.add(f"{vendor}:pci-{gpu.pci_device_id.replace(':', '-')}")
         if vendor == "nvidia" and gpu.compute_capability:
             classes.add(f"nvidia:sm-{gpu.compute_capability}")
     return frozenset(classes)

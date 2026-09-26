@@ -82,6 +82,10 @@ class AudioCppPreparationRequested(BaseEvent):
     request_id: CommandId
     target_node: NodeId
     owner_node: NodeId
+    variant: Literal["cpu", "vulkan"] = Field(
+        default="cpu",
+        description="Pinned engine package variant selected by the requesting API node.",
+    )
     expires_at: float = Field(
         description="Unix deadline after which replay must not trigger package acquisition."
     )

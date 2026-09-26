@@ -561,35 +561,47 @@ def _derive_audio_cpp(
 ) -> tuple[set[str], list[CapabilityConflict], list[str]]:
     """Advertise only audio.cpp compute lanes verified by its own device probe."""
 
-    binary = facts.audio_cpp_binary
-    if binary.state == "not_configured":
-        return set(), [], []
-    if binary.state != "ok" or facts.audio_cpp_probe.outcome != "ready":
-        detail = (
-            binary.state.replace("_", " ")
-            if binary.state != "ok"
-            else facts.audio_cpp_probe.detail
+    verified: set[str] = set()
+    conflicts: list[CapabilityConflict] = []
+    for label, binary, probe, required_lane in (
+        ("audio.cpp", facts.audio_cpp_binary, facts.audio_cpp_probe, None),
+        (
+            "audio.cpp Vulkan",
+            facts.audio_cpp_vulkan_binary,
+            facts.audio_cpp_vulkan_probe,
+            "vulkan",
+        ),
+    ):
+        if binary.state == "not_configured":
+            continue
+        if binary.state != "ok" or probe.outcome != "ready":
+            detail = (
+                binary.state.replace("_", " ")
+                if binary.state != "ok"
+                else probe.detail
+            )
+        elif required_lane is not None and required_lane not in probe.computes:
+            detail = f"the pinned build has no usable {required_lane} device"
+        else:
+            verified.update(
+                probe.computes if required_lane is None else (required_lane,)
+            )
+            continue
+        conflicts.append(
+            CapabilityConflict(
+                code="invalid_engine_binary",
+                message=f"{label} is unavailable: {detail}",
+                remediation=(
+                    "Use the pinned audio.cpp v0.8.2 engine package on this "
+                    "architecture, verify its shared libraries and device "
+                    "driver, then refresh node resources."
+                ),
+            )
         )
-        return (
-            set(),
-            [
-                CapabilityConflict(
-                    code="invalid_engine_binary",
-                    message=f"audio.cpp is unavailable: {detail}",
-                    remediation=(
-                        "Use the pinned audio.cpp v0.8.2 engine package on this "
-                        "architecture, verify its shared libraries and device "
-                        "driver, then refresh node resources."
-                    ),
-                )
-            ],
-            [],
-        )
-    verified = set(facts.audio_cpp_probe.computes)
     declared = _declared_tokens(facts.declared_audio_cpp_backends)
     invalid = declared - verified
-    conflicts = (
-        [
+    if invalid:
+        conflicts.append(
             CapabilityConflict(
                 code="backend_override_conflict",
                 message=(
@@ -601,10 +613,7 @@ def _derive_audio_cpp(
                     "install a qualified build and driver that probes them."
                 ),
             )
-        ]
-        if invalid
-        else []
-    )
+        )
     selected = verified & declared if declared else verified
     if not selected:
         return set(), conflicts, []
