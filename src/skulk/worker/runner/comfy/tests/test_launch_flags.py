@@ -13,11 +13,11 @@ from skulk.worker.runner.comfy.runner import (
     ROCM_MMAP_CEILING_BYTES,
     launch_flags,
 )
+from skulk.worker.runner.comfy.server import server_environment
 
 _GIB = 1024**3
 _STRIX_RAM = 64 * _GIB
 _STRIX_FLAGS = (*ROCM_LAUNCH_FLAGS, "--cache-ram", "25")
-from skulk.worker.runner.comfy.server import server_environment
 
 
 def test_rocm_backends_get_the_validated_strix_flags() -> None:
