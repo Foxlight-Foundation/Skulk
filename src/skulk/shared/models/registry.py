@@ -839,8 +839,14 @@ class TufRegistryClient:
             self._gguf_cache_record_path, record.model_dump_json().encode()
         )
 
-    def _attach_cached_gguf_metadata(self, catalog: RegistryCatalog) -> RegistryCatalog:
-        """Recover only auxiliary facts tied to this exact cached catalog."""
+    def _attach_cached_gguf_metadata(
+        self, catalog: RegistryCatalog, *, enforce_freshness: bool = True
+    ) -> RegistryCatalog:
+        """Recover only auxiliary facts tied to this exact cached catalog.
+
+        Every refresh rewrites this record beside the catalog's, so it ages
+        with the catalog and follows the catalog's freshness choice.
+        """
         if (
             not self._gguf_cache_record_path.exists()
             and not self._gguf_metadata_path.exists()
@@ -852,9 +858,9 @@ class TufRegistryClient:
         )
         if record.snapshot_id != catalog.snapshot_id:
             raise ValueError("cached GGUF metadata snapshot mismatch")
-        if datetime.now(UTC) - record.verified_at.astimezone(UTC) > timedelta(
-            days=self._max_stale_days
-        ):
+        if enforce_freshness and datetime.now(UTC) - record.verified_at.astimezone(
+            UTC
+        ) > timedelta(days=self._max_stale_days):
             raise ValueError("cached GGUF metadata is too old")
         payload = self._gguf_metadata_path.read_bytes()
         if hashlib.sha256(payload).hexdigest() != record.sha256:
@@ -929,7 +935,9 @@ class TufRegistryClient:
         catalog = RegistryCatalog.model_validate_json(payload, strict=False)
         if catalog.snapshot_id != record.snapshot_id:
             raise ValueError("last-known-good snapshot identity mismatch")
-        catalog = self._attach_cached_gguf_metadata(catalog)
+        catalog = self._attach_cached_gguf_metadata(
+            catalog, enforce_freshness=enforce_freshness
+        )
         if catalog_validator is not None:
             catalog_validator(catalog)
         return catalog

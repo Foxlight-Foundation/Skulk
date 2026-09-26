@@ -1828,8 +1828,10 @@ complete installed generations and using bundled cards only for the remaining
 catalog. Whenever the registry cannot be read, the last verified catalog is
 also read without its age limit, but only to associate installed artifacts
 that predate their card records with the signed card they were downloaded
-with; those cards are never listed or placed. Custom cards still load last and
-override every other source.
+with. The cached catalog is never listed or placed from; an artifact it
+matches gains its own installed-card record and from then on is listed and
+served like any installed model. Custom cards still load last and override
+every other source.
 
 A registry card separates its selectable `model_id` alias from
 `source_repository`. The alias is the fabric/store identity; metadata and byte

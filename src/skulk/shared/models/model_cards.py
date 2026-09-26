@@ -104,8 +104,10 @@ _registry_engine_support: tuple[RegistryEngineSupportClaim, ...] = ()
 _registry_current_cards: dict[ModelId, "ModelCard"] = {}
 # Cards from the last verified catalog, loaded when the registry cannot be
 # read (offline, or unreachable past the freshness window). They are never
-# listed or placed; they only let installed artifacts that predate card
-# records be associated with their signed card while the node is offline.
+# listed or placed from this map; they only let installed artifacts that
+# predate card records be associated with their signed card while the node is
+# offline. An artifact so associated gains its own installed-card record, and
+# that record, not this map, then lists it like any installed model.
 _offline_catalog_cards: dict[ModelId, "ModelCard"] = {}
 _POSITIVE_REGISTRY_CAPABILITY_STATUSES: Final[frozenset[str]] = frozenset(
     {"claimed", "observed", "complete"}

@@ -1003,11 +1003,14 @@ def test_cached_catalog_outlives_the_freshness_window_for_association(
     )
     assert client.load_catalog(registry_model_cards).snapshot_id == "snapshot_1_test"
 
-    # Six months offline: the record says the bytes were verified long ago.
-    record_path = tmp_path / "cache/last-known-good.json"
-    record = cast("dict[str, object]", json.loads(record_path.read_text()))
-    record["verified_at"] = "2026-03-01T00:00:00Z"
-    record_path.write_text(json.dumps(record))
+    # Six months offline: the records say the bytes were verified long ago.
+    # Every refresh writes the auxiliary GGUF record beside the catalog's, so
+    # it ages with it and must not expire the association path either.
+    for name in ("last-known-good.json", "last-known-good-gguf-record.json"):
+        record_path = tmp_path / "cache" / name
+        record = cast("dict[str, object]", json.loads(record_path.read_text()))
+        record["verified_at"] = "2026-03-01T00:00:00Z"
+        record_path.write_text(json.dumps(record))
 
     class FailingUpdater(WorkingUpdater):
         def refresh(self) -> None:
