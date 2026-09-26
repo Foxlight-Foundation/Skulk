@@ -14,8 +14,11 @@ from skulk.master.placement import (
     replacement_command_for_refused_instance,
 )
 from skulk.master.placement_utils import (
+    carve_first_gpu_node_ids,
     reserve_instance_system_ram,
     reserve_system_ram_usage,
+    unified_memory_gpu_node_ids,
+    usable_vram_by_node,
 )
 from skulk.master.tests.conftest import (
     create_node_memory,
@@ -52,10 +55,12 @@ from skulk.shared.types.events import (
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.multiaddr import Multiaddr
 from skulk.shared.types.profiling import (
+    AcceleratorMetrics,
     MemoryUsage,
     NetworkInterfaceInfo,
     NodeNetworkInfo,
     NodeResources,
+    SystemPerformanceProfile,
 )
 from skulk.shared.types.tasks import TaskId, TaskStatus, TextGeneration
 from skulk.shared.types.text_generation import InputMessage, TextGenerationTaskParams
@@ -1068,6 +1073,138 @@ def test_reserve_instance_system_ram_charges_only_ram_backed_shards() -> None:
     )
     assert not_reflected[ram_node] == Memory.from_gb(30) - footprint
     assert not_reflected[ram_node] < reflected[ram_node]
+
+
+def _served_instance_on(
+    node_id: NodeId, backend: str, card: ModelCard, window: int
+) -> MlxRingInstance:
+    """One single-node served placement stamped with ``backend`` and ``window``."""
+    runner_id = RunnerId()
+    return MlxRingInstance(
+        instance_id=InstanceId(),
+        shard_assignments=ShardAssignments(
+            model_id=card.model_id,
+            runner_to_shard={
+                runner_id: _make_shard_metadata(card).model_copy(
+                    update={"resolved_backend": backend}
+                )
+            },
+            node_to_runner={node_id: runner_id},
+        ),
+        hosts_by_node={},
+        ephemeral_port=50000,
+        context_token_limit=window,
+    )
+
+
+def test_a_loaded_vulkan_shard_in_a_strix_carve_is_not_charged_to_host_ram() -> None:
+    """The carve holds it and the GPU pool already nets it out; charging host
+    RAM as well counted it twice. While it loads it is still charged."""
+    node = NodeId()
+    card = _served_gguf_card()
+    window = 32768
+    node_memory = {
+        node: create_node_memory(
+            Memory.from_gb(60).in_bytes, ram_total=Memory.from_gb(64).in_bytes
+        )
+    }
+    node_vram = {node: Memory.from_gb(90)}
+    steward_id = InstanceId()
+    steward = {steward_id: _served_instance_on(node, "llama_server-vulkan", card, window)}
+    footprint = estimate_shard_footprint(
+        card, 1.0, resolved_backend="llama_server-vulkan", context_budget=window
+    )
+
+    loaded = reserve_instance_system_ram(
+        node_memory,
+        steward,
+        node_vram,
+        unified_memory_gpu_nodes={node},
+        carve_first_nodes={node},
+    )
+    assert loaded[node] == Memory.from_gb(60)
+
+    loading = reserve_instance_system_ram(
+        node_memory,
+        steward,
+        node_vram,
+        unified_memory_gpu_nodes={node},
+        carve_first_nodes={node},
+        unreflected=frozenset({steward_id}),
+    )
+    assert loading[node] == Memory.from_gb(48) - footprint
+
+    # A unified node outside the carve-first set (GB10, or no vendor proof)
+    # keeps the charge it had before.
+    uncarved = reserve_instance_system_ram(
+        node_memory, steward, node_vram, unified_memory_gpu_nodes={node}
+    )
+    assert uncarved[node] == Memory.from_gb(48) - footprint
+
+    # A HIP engine on the same APU allocates from GTT, which is host RAM.
+    rocm = reserve_instance_system_ram(
+        node_memory,
+        {InstanceId(): _served_instance_on(node, "llama_cpp-rocm", card, window)},
+        node_vram,
+        unified_memory_gpu_nodes={node},
+        carve_first_nodes={node},
+    )
+    assert rocm[node] < Memory.from_gb(60)
+
+
+def test_a_strix_apu_keeps_its_pool_beside_a_loaded_vulkan_steward() -> None:
+    """Regression from a Strix Halo node: with a Vulkan steward loaded in the
+    carve, admission offered about 48 GB and refused a 40 GB video engine the
+    node held beside it all afternoon. The pool is the free carve plus host
+    RAM past the OS headroom, with the steward counted once, in the carve."""
+    node = NodeId()
+    gib = 1024**3
+    node_system = {
+        node: SystemPerformanceProfile(
+            accelerator=AcceleratorMetrics(
+                vendor="amd",
+                vram_total_bytes=64 * gib,
+                vram_used_bytes=23_636_774_912,
+                gtt_total_bytes=124 * gib,
+            )
+        )
+    }
+    memory = {
+        node: create_node_memory(61_988_380_672, ram_total=65_957_404_672)
+    }
+    resources = {
+        node: NodeResources(
+            backends=frozenset(
+                {"llama_server", "llama_server-vulkan", "comfy", "comfy-rocm"}
+            )
+        )
+    }
+    steward = {
+        InstanceId(): _served_instance_on(
+            node,
+            "llama_server-vulkan",
+            _served_gguf_card("steward", context_length=262144),
+            65536,
+        )
+    }
+    reserved = reserve_system_ram_usage(
+        memory,
+        steward,
+        usable_vram_by_node(node_system, resources, node_memory=memory),
+        unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
+            node_system, resources, node_memory=memory
+        ),
+        carve_first_nodes=carve_first_gpu_node_ids(
+            node_system, resources, node_memory=memory
+        ),
+    )
+    pool = usable_vram_by_node(
+        node_system, resources, node_memory=reserved, current_instances=steward
+    )
+    free_carve = 64 * gib - 23_636_774_912
+    host_share = 61_988_380_672 - Memory.from_gb(16).in_bytes
+    assert pool[node].in_bytes == free_carve + host_share
+    assert pool[node] > Memory.from_gb(80)
 
 
 def test_legacy_instance_backfills_context_token_limit_from_card() -> None:

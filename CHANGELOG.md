@@ -93,6 +93,12 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- On an AMD Strix Halo node, placing a model next to a loaded Vulkan
+  model (such as the resident steward) no longer counts the Vulkan model's
+  memory twice. Admission subtracted it from the VRAM carve it occupies and
+  again from host RAM, so a node with room refused the placement (a MiniMax
+  H3 video engine beside the steward was offered about 48 GB of a 128 GB
+  node). A Vulkan model still loading is charged as before.
 - A single-node placement whose runner dies is relaunched, and given up
   with a recorded failure if it keeps dying, instead of staying dead behind
   a live instance. Only a peer's failure used to shut a runner down, so a

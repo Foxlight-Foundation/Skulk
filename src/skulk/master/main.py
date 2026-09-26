@@ -27,6 +27,7 @@ from skulk.master.placement import (
     require_instance_model_card_identity,
 )
 from skulk.master.placement_utils import (
+    carve_first_gpu_node_ids,
     reserve_instance_vram,
     reserve_system_ram_usage,
     unified_memory_gpu_node_ids,
@@ -1512,6 +1513,11 @@ class Master:
             placements,
             vram_membership,
             unified_memory_gpu_nodes=unified_nodes,
+            carve_first_nodes=carve_first_gpu_node_ids(
+                self._telemetry_view.node_system,
+                resources,
+                node_memory=node_memory,
+            ),
             unreflected=self._unreflected_placements(placements),
         )
         vram = usable_vram_by_node(
@@ -3938,6 +3944,11 @@ class Master:
                 node_memory=memory,
             ),
             unified_memory_gpu_nodes=unified_nodes,
+            carve_first_nodes=carve_first_gpu_node_ids(
+                self._telemetry_view.node_system,
+                self._telemetry_view.node_resources,
+                node_memory=memory,
+            ),
             unreflected=self._unreflected_placements(remaining),
         )
         vram = dict(

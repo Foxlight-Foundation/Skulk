@@ -3,6 +3,7 @@ import pytest
 from skulk.master.placement_utils import (
     allocate_layers_proportionally,
     allocate_pipeline_layers,
+    carve_first_gpu_node_ids,
     filter_cycles_by_memory,
     get_mlx_jaccl_coordinators,
     get_shard_assignments,
@@ -1453,3 +1454,52 @@ def test_comfy_gpu_tags_count_as_vram_offload() -> None:
 
     assert _has_gpu_offload_backend(frozenset({"comfy", "comfy-cuda"}))
     assert not _has_gpu_offload_backend(frozenset({"comfy"}))
+
+
+def test_carve_first_nodes_are_the_amd_apus_only() -> None:
+    """GB10 is unified but has no carve; a discrete card is not unified at all."""
+    strix, gb10, discrete = NodeId("strix"), NodeId("gb10"), NodeId("discrete")
+    node_system = {
+        strix: SystemPerformanceProfile(
+            accelerator=AcceleratorMetrics(
+                vendor="amd",
+                vram_total_bytes=Memory.from_gb(64).in_bytes,
+                gtt_total_bytes=Memory.from_gb(124).in_bytes,
+            )
+        ),
+        gb10: SystemPerformanceProfile(
+            accelerator=AcceleratorMetrics(
+                vendor="nvidia", name="NVIDIA GB10", compute_capability="12.1",
+                vram_total_bytes=Memory.from_gb(128).in_bytes,
+                vram_used_bytes=Memory.from_gb(48).in_bytes,
+            )
+        ),
+        discrete: SystemPerformanceProfile(
+            accelerator=AcceleratorMetrics(
+                vendor="amd",
+                vram_total_bytes=Memory.from_gb(32).in_bytes,
+                gtt_total_bytes=Memory.from_gb(16).in_bytes,
+            )
+        ),
+    }
+    memory = {
+        strix: create_node_memory(
+            Memory.from_gb(59).in_bytes, ram_total=Memory.from_gb(61).in_bytes
+        ),
+        gb10: create_node_memory(
+            Memory.from_gb(96).in_bytes, ram_total=Memory.from_gb(128).in_bytes
+        ),
+        discrete: create_node_memory(
+            Memory.from_gb(60).in_bytes, ram_total=Memory.from_gb(64).in_bytes
+        ),
+    }
+    resources = {
+        strix: NodeResources(backends=frozenset({"llama_server-vulkan"})),
+        gb10: NodeResources(backends=frozenset({"audio_cpp", "audio_cpp-cuda"})),
+        discrete: NodeResources(backends=frozenset({"llama_server-vulkan"})),
+    }
+    unified = unified_memory_gpu_node_ids(node_system, resources, node_memory=memory)
+    assert unified == frozenset({strix, gb10})
+    assert carve_first_gpu_node_ids(
+        node_system, resources, node_memory=memory
+    ) == frozenset({strix})
