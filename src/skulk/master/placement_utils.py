@@ -21,6 +21,7 @@ from skulk.shared.models.memory_estimate import (
     per_token_kv_bytes,
     shard_fraction_of_model,
     shard_preallocates_kv_upfront,
+    vulkan_fills_carve_first,
 )
 from skulk.shared.models.memory_estimate import (
     KV_CONTEXT_BUDGET_TOKENS as PLACEMENT_KV_CONTEXT_BUDGET_TOKENS,
@@ -388,7 +389,7 @@ def reserve_instance_system_ram(
             if (
                 node_id in carve_first_nodes
                 and instance_id not in unreflected
-                and _allocates_carve_first(shard.resolved_backend)
+                and vulkan_fills_carve_first(shard.resolved_backend)
             ):
                 # Charging this shard against host RAM too would count it
                 # twice: the pool already subtracts the carve it occupies.
@@ -548,11 +549,6 @@ def carve_first_gpu_node_ids(
         and profile.accelerator.vendor == "amd"
         and profile.accelerator.vram_used_bytes is not None
     )
-
-
-def _allocates_carve_first(resolved_backend: str | None) -> bool:
-    """Whether a shard's engine allocates through Vulkan, which fills the carve first."""
-    return resolved_backend is not None and resolved_backend.endswith("-vulkan")
 
 
 def _per_node_required_memory(

@@ -654,7 +654,10 @@ node's GPU working-set ceiling and at the static fit, and never below the
 floor; a node without a live reading keeps the floor. The worker's own
 pre-spawn guard checks that stamped window against its current free memory
 before loading, so a reading that has gone stale by load time is refused
-rather than committed. An uncomputable fit (a card without KV-head metadata,
+rather than committed. On a unified-memory AMD APU a Vulkan engine's window
+is checked against the combined pool only, because it fills the carve before
+it takes host pages; a HIP engine there, which allocates from host RAM, is
+also checked against host RAM. An uncomputable fit (a card without KV-head metadata,
 or a pooled RPC placement) also clamps back to the floor rather than
 committing a fictitious window that would fail at load. MLX is unaffected
 either way: it grows its KV cache lazily per request and keeps the full

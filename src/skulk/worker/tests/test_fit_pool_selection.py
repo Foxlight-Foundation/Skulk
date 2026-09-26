@@ -194,3 +194,82 @@ def test_guard_checks_a_fixed_window_against_host_ram_on_unified_memory(
     )
 
     assert (error is not None) is refused
+
+
+@pytest.mark.parametrize(
+    ("backend", "carve_first", "refused"),
+    [
+        # A Vulkan window on an AMD APU fills the carve the pool nets out.
+        ("llama_server-vulkan", True, False),
+        # Without carve-first proof (GB10, or no carve reading) host RAM decides.
+        ("llama_server-vulkan", False, True),
+        # A HIP engine on the same APU allocates from GTT, which is host RAM.
+        ("llama_server-rocm", True, True),
+    ],
+)
+def test_guard_lets_a_vulkan_window_fill_the_carve_on_an_amd_apu(
+    monkeypatch: pytest.MonkeyPatch, backend: str, carve_first: bool, refused: bool
+) -> None:
+    """Regression: a steward refused beside a video engine holding host RAM
+    while the carve sat empty (host RAM 20 of 128 GB free, pool 100 GB)."""
+    monkeypatch.setattr(worker_main, "_local_usable_vram", lambda: Memory.from_gb(100))
+    monkeypatch.setattr(worker_main, "_local_unified_memory_gpu", lambda: True)
+    monkeypatch.setattr(worker_main, "_local_carve_first_gpu", lambda: carve_first)
+
+    def wireable(_cls: type[MemoryUsage]) -> MemoryUsage:
+        return MemoryUsage.from_bytes(
+            ram_total=Memory.from_gb(128).in_bytes,
+            ram_available=Memory.from_gb(20).in_bytes,
+            swap_total=0,
+            swap_available=0,
+        )
+
+    monkeypatch.setattr(MemoryUsage, "from_local_gpu_wireable", classmethod(wireable))
+    worker = object.__new__(Worker)
+    worker.node_id = NodeId("worker-under-test")
+
+    error = worker._local_shard_fit_error(  # pyright: ignore[reportPrivateUsage]
+        _shard(backend), context_token_limit=131072
+    )
+
+    assert (error is not None) is refused
+
+
+@pytest.mark.parametrize(
+    ("vram_used", "gtt_gb", "expected"),
+    [
+        (Memory.from_gb(22).in_bytes, 124, True),
+        # No carve reading: the pool would read the carve as empty.
+        (None, 124, False),
+        # GTT not spanning host RAM: a discrete card, not an APU.
+        (Memory.from_gb(4).in_bytes, 16, False),
+    ],
+)
+def test_local_carve_first_gpu_needs_an_amd_apu_with_a_carve_reading(
+    monkeypatch: pytest.MonkeyPatch, vram_used: int | None, gtt_gb: int, expected: bool
+) -> None:
+    monkeypatch.setattr(worker_main.sys, "platform", "linux")
+    monkeypatch.setattr(nvidia_gpu, "prefer_nvidia_telemetry", lambda: False)
+    monkeypatch.setattr(linux_gpu, "find_amd_gpu_device", lambda: object())
+
+    def amd_metrics(_device: object) -> AcceleratorMetrics:
+        return AcceleratorMetrics(
+            vendor="amd",
+            vram_total_bytes=Memory.from_gb(64).in_bytes,
+            vram_used_bytes=vram_used,
+            gtt_total_bytes=Memory.from_gb(gtt_gb).in_bytes,
+        )
+
+    monkeypatch.setattr(linux_gpu, "read_accelerator_metrics", amd_metrics)
+
+    def local_memory(_cls: type[MemoryUsage]) -> MemoryUsage:
+        return MemoryUsage.from_bytes(
+            ram_total=Memory.from_gb(61).in_bytes,
+            ram_available=Memory.from_gb(20).in_bytes,
+            swap_total=0,
+            swap_available=0,
+        )
+
+    monkeypatch.setattr(MemoryUsage, "from_local_gpu_wireable", classmethod(local_memory))
+
+    assert worker_main._local_carve_first_gpu() is expected  # pyright: ignore[reportPrivateUsage]
