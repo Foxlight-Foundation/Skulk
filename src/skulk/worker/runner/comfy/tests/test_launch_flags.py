@@ -10,6 +10,7 @@ import skulk.shared.backends as backends
 from skulk.worker.runner.comfy.runner import (
     CUDA_LAUNCH_FLAGS,
     ROCM_LAUNCH_FLAGS,
+    ROCM_MMAP_CEILING_BYTES,
     launch_flags,
 )
 from skulk.worker.runner.comfy.server import server_environment
@@ -17,7 +18,37 @@ from skulk.worker.runner.comfy.server import server_environment
 
 def test_rocm_backends_get_the_validated_strix_flags() -> None:
     assert launch_flags("comfy-rocm") == ROCM_LAUNCH_FLAGS
-    assert ROCM_LAUNCH_FLAGS == ("--bf16-vae", "--disable-mmap", "--cache-none")
+    assert ROCM_LAUNCH_FLAGS == ("--bf16-vae",)
+
+
+def test_rocm_keeps_models_resident_between_renders() -> None:
+    """Rebuilding every model per prompt doubled a warm render on gfx1151."""
+    assert "--cache-none" not in ROCM_LAUNCH_FLAGS
+
+
+def test_rocm_maps_weights_up_to_the_ceiling(tmp_path: Path) -> None:
+    """The pruned H3 files map; mapping stays off only past the 64 GB ceiling."""
+    small = tmp_path / "transformer.safetensors"
+    small.write_bytes(b"x")
+    assert launch_flags("comfy-rocm", [small]) == ROCM_LAUNCH_FLAGS
+
+
+def test_rocm_disables_mmap_for_a_file_past_the_ceiling(tmp_path: Path) -> None:
+    """A sparse file stands in for an unpruned checkpoint larger than 64 GB."""
+    small = tmp_path / "vae.safetensors"
+    small.write_bytes(b"x")
+    large = tmp_path / "transformer.safetensors"
+    with large.open("wb") as handle:
+        handle.truncate(ROCM_MMAP_CEILING_BYTES + 1)
+    assert launch_flags("comfy-rocm", [small, large]) == (*ROCM_LAUNCH_FLAGS, "--disable-mmap")
+
+
+def test_the_mmap_ceiling_never_touches_the_cuda_lane(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(backends, "probe_node_backends", lambda: {"comfy", "comfy-cuda"})
+    large = tmp_path / "transformer.safetensors"
+    with large.open("wb") as handle:
+        handle.truncate(ROCM_MMAP_CEILING_BYTES + 1)
+    assert launch_flags("comfy-cuda", [large]) == CUDA_LAUNCH_FLAGS
 
 
 def test_cuda_backends_launch_on_the_native_allocator(monkeypatch: pytest.MonkeyPatch) -> None:

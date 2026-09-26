@@ -812,11 +812,12 @@ and x86_64), and for x86_64 AMD nodes AMD's own stable ROCm 10.0.0 channel,
 where torch is a host wheel plus a gfx1151 device package on top of the
 `rocm` runtime packages, all bundling the HIP runtime so the host needs
 only the amdgpu kernel driver; the ROCm lane
-launches ComfyUI with `--bf16-vae --disable-mmap --cache-none`, the flags
-validated for MiniMax H3 on Strix Halo (memory-mapping a checkpoint above 64
-GB through unified memory is pathologically slow, the fp32 VAE decode does
-not fit beside the transformer, and node outputs are not worth retaining on
-a host whose GPU memory is the system's). The CUDA lane launches ComfyUI
+launches ComfyUI with `--bf16-vae`, validated for MiniMax H3 on Strix Halo
+(the fp32 VAE decode does not fit beside the transformer), plus
+`--disable-mmap` only when a weight file exceeds 64 GB, since memory-mapping
+one that large through unified memory is pathologically slow. Models stay
+resident between renders under ComfyUI's RAM-pressure cache, which cuts a
+warm render on gfx1151 from about 210 s to about 122 s. The CUDA lane launches ComfyUI
 with `--disable-cuda-malloc`: on the async allocator backend ComfyUI would
 otherwise choose, a render that applies the Fun ControlNet patch aborts the
 server on its first sampling step on the GB10, while PyTorch's own allocator
