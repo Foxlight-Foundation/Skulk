@@ -1095,3 +1095,32 @@ async def test_completed_legacy_import_with_matching_revision_becomes_verified(
     assert refreshed.installed_card.verification == "registry_verified"
     assert refreshed.installed_card.installed_identity == card.registry_card_id
     assert refreshed.installed_card.manifest_sha256 == legacy.manifest_sha256
+
+
+def test_association_returns_the_records_it_writes(tmp_path: Path) -> None:
+    """The async caller registers exactly what a scan wrote, once."""
+
+    from skulk.store.artifact_inventory import (
+        associate_installed_artifacts,
+        inventory_installed_artifacts,
+    )
+
+    card = _card()
+    assert card.source_revision is not None
+    root = tmp_path / "models"
+    artifact = root / f"org--model--revision-{card.source_revision}"
+    artifact.mkdir(parents=True)
+    (artifact / "config.json").write_text("{}")
+    (artifact / "model.safetensors").write_bytes(b"weights")
+    (artifact / ".skulk-source-revision").write_text(f"{card.source_revision}\n")
+
+    written = associate_installed_artifacts([root, tmp_path / "absent"], [card])
+
+    assert [record.installed_identity for record in written] == [card.registry_card_id]
+    assert read_installed_card(artifact) == written[0]
+    # A recorded artifact is not written, or reported, again.
+    assert associate_installed_artifacts([root], [card]) == ()
+    materialized: list[InstalledCardRecord] = []
+    inventory_installed_artifacts([root], [card], materialized=materialized)
+    assert materialized == []
+

@@ -418,6 +418,7 @@ from skulk.shared.models.model_cards import (
     get_model_required_capabilities,
     preserve_generated_card_constraints,
     record_custom_card_mutation_applied,
+    register_installed_card_record,
     registry_supported_backends_for_node,
     same_authorized_model_card,
 )
@@ -640,6 +641,7 @@ from skulk.store.installed_cards import (
 )
 from skulk.store.model_store import read_reconciliation_tombstones
 from skulk.store.peer_exports import ArtifactExportManager
+from skulk.store.staging_eviction import StagedModelInfo
 
 JsonObject = dict[str, object]
 _DEFAULT_OPTIMIZER_CANDIDATE_BITS = [4, 8]
@@ -13482,6 +13484,7 @@ class API:
 
         in_use = self._store_models_in_use()
         cards = await get_association_cards()
+        materialized: list[InstalledCardRecord] = []
 
         def _collect() -> NodeStorageSummary:
             staged = _inventory_installed_artifacts(
@@ -13491,6 +13494,7 @@ class API:
                 self._store_client.local_store_path
                 if self._store_client is not None
                 else None,
+                materialized=materialized,
             )
             event_log_bytes = 0
             for file_path in SKULK_EVENT_LOG_DIR.rglob("*"):
@@ -13522,7 +13526,10 @@ class API:
                 disk_free_bytes=disk_free_bytes,
             )
 
-        return await to_thread.run_sync(_collect)
+        summary = await to_thread.run_sync(_collect)
+        for record in materialized:
+            register_installed_card_record(record)
+        return summary
 
     @staticmethod
     def _get_trace_path(task_id: str) -> Path:
@@ -15875,11 +15882,18 @@ class API:
         self._require_artifact_export_target(request, payload.target_node_id)
         staging_root = self._configured_staging_root()
         cards = await get_association_cards()
-        staged = await to_thread.run_sync(
-            _inventory_installed_artifacts,
-            _installed_artifact_roots(staging_root),
-            cards,
-        )
+        materialized: list[InstalledCardRecord] = []
+
+        def _inventory() -> list[StagedModelInfo]:
+            return _inventory_installed_artifacts(
+                _installed_artifact_roots(staging_root),
+                cards,
+                materialized=materialized,
+            )
+
+        staged = await to_thread.run_sync(_inventory)
+        for record in materialized:
+            register_installed_card_record(record)
         selected = next(
             (
                 item
