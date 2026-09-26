@@ -34,10 +34,10 @@ from skulk.shared.models.model_cards import (
     VideoReferenceLimits,
     card_serves_video,
 )
+from skulk.shared.tests.model_card_fixtures import FIXTURE_CARDS_DIR
 from skulk.shared.types.memory import Memory
 
-RESOURCES = Path(__file__).resolve().parents[5] / "resources"
-CARD_DIRECTORY = RESOURCES / "video_model_cards"
+CARD_DIRECTORY = FIXTURE_CARDS_DIR
 TEST_ENGINE_DIRECTORY = (
     Path(__file__).resolve().parents[3] / "worker" / "runner" / "test_video"
 )
@@ -274,7 +274,9 @@ def test_profile_projects_video_output() -> None:
 
 
 def _load_bundled() -> list[tuple[Path, dict[str, object]]]:
-    paths = sorted(CARD_DIRECTORY.glob("*.toml")) + sorted(TEST_ENGINE_DIRECTORY.glob("*.toml"))
+    paths = sorted(CARD_DIRECTORY.glob("Comfy-Org--MiniMax-H3-*.toml")) + sorted(
+        TEST_ENGINE_DIRECTORY.glob("*.toml")
+    )
     return [(path, tomllib.loads(path.read_text())) for path in paths]
 
 

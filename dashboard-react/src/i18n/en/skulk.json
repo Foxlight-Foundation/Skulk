@@ -485,6 +485,8 @@
   "modelInfo.registryCard": "Registry card",
   "modelInfo.remoteCode": "Repository code",
   "modelInfo.signedRegistry": "Signed registry",
+  "modelInfo.installedCard": "Installed card",
+  "modelInfo.customCard": "Custom card",
   "modelInfo.signedTrust": "Authorized by signed Foxlight card",
   "modelInfo.speechSynthesis": "Speech synthesis",
   "modelInfo.tensorParallel": "Tensor parallel",

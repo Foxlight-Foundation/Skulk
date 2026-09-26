@@ -20,8 +20,8 @@ from skulk.shared.models.model_cards import (
     ModelCard,
     ModelId,
     ModelTask,
-    get_model_cards,
 )
+from skulk.shared.tests.model_card_fixtures import fixture_cards
 from skulk.worker.engines.mlx.utils_mlx import (
     get_eos_token_ids_for_model,
     load_tokenizer_for_model_id,
@@ -82,7 +82,7 @@ def get_test_models() -> list[ModelCard]:
     """Get a representative sample of models to test."""
     # Pick one model from each family to test
     families: dict[str, ModelCard] = {}
-    for card in asyncio.run(get_model_cards()):
+    for card in fixture_cards():
         # Extract family name (e.g., "llama-3.1" from "llama-3.1-8b")
         parts = card.model_id.short().split("-")
         family = "-".join(parts[:2]) if len(parts) >= 2 else parts[0]
@@ -306,7 +306,7 @@ async def test_tokenizer_special_tokens(model_card: ModelCard) -> None:
 async def test_kimi_tokenizer_specifically():
     """Test Kimi tokenizer with its specific patches and quirks."""
     kimi_models = [
-        card for card in await get_model_cards() if "kimi" in card.model_id.lower()
+        card for card in fixture_cards() if "kimi" in card.model_id.lower()
     ]
 
     if not kimi_models:
@@ -358,7 +358,7 @@ async def test_glm_tokenizer_specifically():
 
     glm_model_cards = [
         card
-        for card in await get_model_cards()
+        for card in fixture_cards()
         if contains(card, "glm")
         and not contains(card, "-5")
         and not contains(card, "4.7")

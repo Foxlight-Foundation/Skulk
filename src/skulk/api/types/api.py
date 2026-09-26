@@ -307,9 +307,13 @@ class ModelListModel(BaseModel):
         default_factory=list,
         description="Active signed warnings affecting this installed or current card.",
     )
-    catalog_source: Literal["registry", "bundled", "custom"] = Field(
-        default="bundled",
-        description="Trust and precedence source for this catalog entry.",
+    catalog_source: Literal["registry", "installed", "custom"] = Field(
+        default="installed",
+        description=(
+            "Trust and precedence source for this catalog entry: the signed "
+            "registry, a card recorded with an installed model that carries "
+            "no registry identity, or an operator's custom card."
+        ),
     )
     remote_code_approval_required: bool = Field(
         default=False,

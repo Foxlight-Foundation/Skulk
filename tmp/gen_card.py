@@ -1,5 +1,7 @@
 """
-Generates inference model cards for Skulk.
+Generates inference model cards from Hugging Face metadata, into the current
+directory. Skulk ships no cards: curated cards belong in the model registry's
+seed, so move a generated card there after review.
 Usage:
     uv run tmp/gen_card.py mlx-community/my_cool_model-8bit [repo-id/model-id-2] [...]
 
@@ -21,12 +23,7 @@ async def main():
     for arg in sys.argv[1:]:
         mid = ModelId(arg)
         mc = await ModelCard.fetch_from_hf(mid)
-        await mc.save(
-            anyio.Path(__file__).parent.parent
-            / "resources"
-            / "inference_model_cards"
-            / (mid.normalize() + ".toml")
-        )
+        await mc.save((await anyio.Path.cwd()) / (mid.normalize() + ".toml"))
 
 
 if __name__ == "__main__":

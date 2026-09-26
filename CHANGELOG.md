@@ -9,6 +9,24 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Changed
 
+- Skulk no longer ships model cards. A node's catalog is the signed
+  registry's cards, each installed model's own card record (kept with the
+  model and valid offline indefinitely), and custom cards. Curated card edits
+  go to the model registry's seed.
+  - Offline, a node lists its installed and custom models.
+  - A node that has never reached the registry and holds neither logs why
+    its catalog is empty.
+  - `/v1/models` reports `catalog_source` as `registry`, `installed` or
+    `custom`; `bundled` is gone.
+  - `scripts/fetch_kv_heads.py` takes `--cards-dir`.
+  - Tests carry fixture copies of the few registry cards they exercise.
+  - A test refuses any model card under `src/skulk/resources`.
+  - The frozen PyInstaller build collects the test video engine's card from
+    its new home.
+  - A generated custom card keeps its signed split limit on every catalog
+    reload, including from a repository the registry carries only as quant
+    aliases.
+
 - A model added from the Hugging Face search keeps the pipeline-split limit
   of the signed registry card for its repository, taking the strictest
   among the repository's quant aliases. Before, only a card shipped inside

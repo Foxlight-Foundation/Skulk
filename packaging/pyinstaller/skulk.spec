@@ -12,6 +12,8 @@ ENTRYPOINT = SOURCE_ROOT / "skulk" / "__main__.py"
 DASHBOARD_DIR = PROJECT_ROOT / "dashboard" / "build"
 RESOURCES_DIR = PROJECT_ROOT / "resources"
 SKULK_SHARED_MODELS_DIR = SOURCE_ROOT / "skulk" / "shared" / "models"
+# The test video engine reads its card from beside its module.
+TEST_VIDEO_CARD = SOURCE_ROOT / "skulk" / "worker" / "runner" / "test_video" / "foxlight--test-video.toml"
 
 if not ENTRYPOINT.is_file():
     raise SystemExit(f"Unable to locate Skulk entrypoint: {ENTRYPOINT}")
@@ -65,6 +67,7 @@ DATAS: list[tuple[str, str]] = [
     (str(RESOURCES_DIR), "resources"),
     (str(MLX_LIB_DIR), "mlx/lib"),
     (str(SKULK_SHARED_MODELS_DIR), "skulk/shared/models"),
+    (str(TEST_VIDEO_CARD), "skulk/worker/runner/test_video"),
 ]
 
 MACTOP_PATH = shutil.which("mactop")

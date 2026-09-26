@@ -117,7 +117,7 @@ export interface ModelInfo {
   registry_architecture?: string | null;
   capability_claims?: RegistryCapabilityClaim[];
   engine_support?: RegistryEngineSupportClaim[];
-  catalog_source?: 'registry' | 'bundled' | 'custom';
+  catalog_source?: 'registry' | 'installed' | 'custom';
   /** @deprecated Current cards are authorized by publication, addition, or bundled distribution. */
   remote_code_approval_required?: boolean;
   /** @deprecated Identity from the retired secondary approval ceremony. */
