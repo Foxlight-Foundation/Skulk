@@ -298,7 +298,16 @@ jobs:
           PY
           uv venv /tmp/audio-cpp-smoke --python 3.13
           uv pip install --python /tmp/audio-cpp-smoke/bin/python "$AUDIO_CPP_PACKAGE_DIR"/dist/*.whl
-          /tmp/audio-cpp-smoke/bin/skulk-audio-cpp-cuda --version
+          /tmp/audio-cpp-smoke/bin/python - <<'PY'
+          from importlib.resources import files
+          from pathlib import Path
+
+          binary = Path(str(files('skulk_audio_cpp_cuda').joinpath('bin/audiocpp_server')))
+          assert binary.is_file() and binary.stat().st_size > 0
+          PY
+          if ! ldd /tmp/audio-cpp-smoke/lib/python3.13/site-packages/skulk_audio_cpp_cuda/bin/audiocpp_server | grep -q 'libcuda.so.1 => not found'; then
+            /tmp/audio-cpp-smoke/bin/skulk-audio-cpp-cuda --version
+          fi
       - name: Attest build provenance
         uses: actions/attest-build-provenance@v2
         with:
