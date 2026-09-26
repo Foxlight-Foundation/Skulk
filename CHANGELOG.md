@@ -93,6 +93,15 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- On an AMD Strix Halo node, a Vulkan model (such as the resident steward)
+  is no longer counted against host RAM as well as the VRAM carve it
+  occupies. Admission subtracted a loaded one from both, so a node with room
+  refused a MiniMax H3 video engine beside the steward (about 48 GB offered
+  of a 128 GB node). The worker's pre-load check did the same to a Vulkan
+  model being loaded, and refused the steward beside a video engine holding
+  host RAM while the carve sat empty. A Vulkan model still loading is
+  charged as before, and a ROCm (HIP) model, which does allocate host RAM,
+  is unchanged.
 - A single-node placement whose runner dies is relaunched, and given up
   with a recorded failure if it keeps dying, instead of staying dead behind
   a live instance. Only a peer's failure used to shut a runner down, so a

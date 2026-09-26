@@ -56,6 +56,7 @@ from skulk.shared.models.memory_estimate import (
     gpu_working_set_ceiling,
     is_gb10_accelerator,
     shard_preallocates_kv_upfront,
+    vulkan_fills_carve_first,
 )
 from skulk.shared.models.model_cards import (
     ModelCard,
@@ -607,6 +608,38 @@ def _local_unified_memory_gpu() -> bool:
     if not total or total <= 0 or gtt_total is None or gtt_total <= total:
         return False
     return gtt_total >= MemoryUsage.from_local_gpu_wireable().ram_total.in_bytes
+
+
+def _local_carve_first_gpu() -> bool:
+    """Whether this node is a unified-memory AMD APU that reports its carve usage.
+
+    On such a node a Vulkan engine fills the BIOS VRAM carve before it takes
+    host pages, so the combined pool (free carve plus host share) bounds its
+    load. GB10 has no carve and is excluded, as is an AMD node whose carve
+    usage is unreported, since the pool would then read the carve as empty.
+    """
+    if sys.platform != "linux":
+        return False
+    from skulk.utils.info_gatherer.linux_gpu import (
+        find_amd_gpu_device,
+        read_accelerator_metrics,
+    )
+    from skulk.utils.info_gatherer.nvidia_gpu import prefer_nvidia_telemetry
+
+    if prefer_nvidia_telemetry():
+        return False
+    device = find_amd_gpu_device()
+    if device is None:
+        return False
+    accelerator = read_accelerator_metrics(device)
+    total = accelerator.vram_total_bytes
+    gtt_total = accelerator.gtt_total_bytes
+    if not total or total <= 0 or gtt_total is None or gtt_total <= total:
+        return False
+    return (
+        accelerator.vram_used_bytes is not None
+        and gtt_total >= MemoryUsage.from_local_gpu_wireable().ram_total.in_bytes
+    )
 
 
 def _summarize_worker_task(task: Task) -> str:
@@ -1246,8 +1279,20 @@ class Worker:
             # in its figure even as host RAM falls, but a fixed-window engine's
             # KV allocation takes host pages and its window was sized from host
             # RAM; check that window against host RAM as well, or the guard
-            # could pass an allocation host memory no longer holds.
-            if shard_preallocates_kv_upfront(shard) and _local_unified_memory_gpu():
+            # could pass an allocation host memory no longer holds. A Vulkan
+            # engine on an AMD APU is the exception: it fills the carve first,
+            # which the combined pool already nets out, and a host-only check
+            # refused a steward beside a video engine holding host RAM while
+            # the carve sat empty.
+            carve_resident = (
+                vulkan_fills_carve_first(shard.resolved_backend)
+                and _local_carve_first_gpu()
+            )
+            if (
+                shard_preallocates_kv_upfront(shard)
+                and _local_unified_memory_gpu()
+                and not carve_resident
+            ):
                 local = MemoryUsage.from_local_gpu_wireable()
                 host = min(
                     local.ram_available, gpu_working_set_ceiling(local.ram_total)

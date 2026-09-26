@@ -335,6 +335,18 @@ def shard_preallocates_kv_upfront(shard: ShardMetadata) -> bool:
     )
 
 
+def vulkan_fills_carve_first(resolved_backend: str | None) -> bool:
+    """Whether a shard's engine allocates through Vulkan.
+
+    On a unified-memory AMD APU the Vulkan driver places device-local memory,
+    weights and a fixed KV window alike, in the BIOS VRAM carve and spills to
+    GTT (host RAM) only past it; a HIP engine on the same APU allocates from
+    GTT. Measured on Strix Halo: a llama-server-vulkan steward with its fixed
+    window loaded entirely into the carve and left host RAM untouched.
+    """
+    return resolved_backend is not None and resolved_backend.endswith("-vulkan")
+
+
 def backend_offloads_to_vram(resolved_backend: str | None) -> bool:
     """Whether a resolved backend allocates weights + KV from DISCRETE GPU VRAM.
 
