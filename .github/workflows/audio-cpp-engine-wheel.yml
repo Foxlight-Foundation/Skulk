@@ -10,18 +10,33 @@ on:
   pull_request:
     paths:
       - "packaging/skulk-audio-cpp-cpu/**"
+      - "packaging/skulk-audio-cpp-vulkan/**"
       - ".github/workflows/audio-cpp-engine-wheel.yml"
   push:
     branches: [dev]
     paths:
       - "packaging/skulk-audio-cpp-cpu/**"
+      - "packaging/skulk-audio-cpp-vulkan/**"
       - ".github/workflows/audio-cpp-engine-wheel.yml"
   workflow_dispatch:
     inputs:
       publish:
-        description: "Publish all three attested wheels to the Foxlight engine index"
+        description: "Publish the selected attested variant to the Foxlight engine index"
         type: boolean
         default: false
+      publish_variant:
+        description: "Variant to publish after all build jobs pass"
+        type: choice
+        options: [cpu, vulkan]
+        default: vulkan
+      publish_run_id:
+        description: "Successful prior run holding the hardware-qualified Vulkan artifact"
+        type: string
+        default: ""
+      publish_sha256:
+        description: "Exact SHA-256 of that prior run's Vulkan wheel"
+        type: string
+        default: ""
 
 env:
   AUDIO_CPP_REF: 4d88768fbcae4e6eb3352c6ab1422dabb7d90b58
@@ -34,14 +49,28 @@ jobs:
         include:
           - runner: macos-15
             platform: macos-arm64
+            variant: cpu
             openmp: OFF
+            vulkan: OFF
           - runner: ubuntu-22.04
             platform: linux-amd64
+            variant: cpu
             openmp: ON
+            vulkan: OFF
           - runner: ubuntu-22.04-arm
             platform: linux-arm64
+            variant: cpu
             openmp: ON
+            vulkan: OFF
+          - runner: ubuntu-22.04
+            platform: linux-amd64
+            variant: vulkan
+            openmp: ON
+            vulkan: ON
     runs-on: ${{ matrix.runner }}
+    env:
+      AUDIO_CPP_PACKAGE_DIR: packaging/skulk-audio-cpp-${{ matrix.variant }}
+      AUDIO_CPP_PACKAGE_MODULE: skulk_audio_cpp_${{ matrix.variant }}
     permissions:
       contents: read
       id-token: write
@@ -60,6 +89,25 @@ jobs:
           }
           install_prerequisites build-essential cmake libcurl4-openssl-dev \
             || install_prerequisites build-essential cmake libcurl4-openssl-dev
+      - name: Install Vulkan build prerequisites
+        if: matrix.variant == 'vulkan'
+        run: |
+          sudo apt-get install -y -qq libvulkan-dev xz-utils
+          # Jammy has no glslc package. Keep its glibc 2.35 wheel baseline by
+          # using a SHA-pinned LunarG build-time compiler that supports Jammy.
+          curl --fail --location --retry 3 --output /tmp/vulkan-sdk.tar.xz \
+            https://sdk.lunarg.com/sdk/download/1.3.296.0/linux/vulkansdk-linux-x86_64-1.3.296.0.tar.xz
+          echo '79b0a1593dadc46180526250836f3e53688a9a5fb42a0e5859eb72316dc4d53e  /tmp/vulkan-sdk.tar.xz' \
+            | sha256sum --check
+          mkdir -p /tmp/vulkan-sdk
+          tar -xf /tmp/vulkan-sdk.tar.xz -C /tmp/vulkan-sdk
+          glslc_path=$(find /tmp/vulkan-sdk -type f -path '*/bin/glslc' -print -quit)
+          test -n "$glslc_path"
+          "$glslc_path" --version
+          sdk_root=$(dirname "$(dirname "$glslc_path")")
+          test -f "$sdk_root/include/vulkan/vulkan.hpp"
+          echo "VULKAN_SDK_ROOT=$sdk_root" >> "$GITHUB_ENV"
+          echo "$(dirname "$glslc_path")" >> "$GITHUB_PATH"
       - name: Fetch pinned audio.cpp source
         run: |
           git clone --filter=blob:none https://github.com/0xShug0/audio.cpp /tmp/audio-cpp-src
@@ -67,6 +115,12 @@ jobs:
           test "$(git -C /tmp/audio-cpp-src rev-parse HEAD)" = "$AUDIO_CPP_REF"
       - name: Build only the music server and two families
         run: |
+          vulkan_include_args=()
+          if [ "${{ matrix.variant }}" = vulkan ]; then
+            # Jammy's libvulkan loader is usable, but its 1.3.204 headers lack
+            # the ggml extension types; compile against the pinned SDK headers.
+            vulkan_include_args=(-DVulkan_INCLUDE_DIR="$VULKAN_SDK_ROOT/include")
+          fi
           cmake -S /tmp/audio-cpp-src -B /tmp/audio-cpp-build \
             -DCMAKE_BUILD_TYPE=Release \
             -DAUDIOCPP_MODEL_SET=custom \
@@ -78,42 +132,47 @@ jobs:
             -DENGINE_ENABLE_OPENMP=${{ matrix.openmp }} \
             -DENGINE_ENABLE_CUDA=OFF \
             -DENGINE_ENABLE_HIP=OFF \
-            -DENGINE_ENABLE_VULKAN=OFF
+            -DENGINE_ENABLE_VULKAN=${{ matrix.vulkan }} \
+            "${vulkan_include_args[@]}"
           cmake --build /tmp/audio-cpp-build --target audiocpp_server --parallel 4
       - name: Assemble and smoke-test wheel
         run: |
-          mkdir -p packaging/skulk-audio-cpp-cpu/src/skulk_audio_cpp_cpu/bin
-          cp /tmp/audio-cpp-build/bin/audiocpp_server packaging/skulk-audio-cpp-cpu/src/skulk_audio_cpp_cpu/bin/
-          packaging/skulk-audio-cpp-cpu/src/skulk_audio_cpp_cpu/bin/audiocpp_server --version
-          packaging/skulk-audio-cpp-cpu/src/skulk_audio_cpp_cpu/bin/audiocpp_server --list-devices
+          mkdir -p "$AUDIO_CPP_PACKAGE_DIR/src/$AUDIO_CPP_PACKAGE_MODULE/bin"
+          cp /tmp/audio-cpp-build/bin/audiocpp_server "$AUDIO_CPP_PACKAGE_DIR/src/$AUDIO_CPP_PACKAGE_MODULE/bin/"
+          "$AUDIO_CPP_PACKAGE_DIR/src/$AUDIO_CPP_PACKAGE_MODULE/bin/audiocpp_server" --version
+          "$AUDIO_CPP_PACKAGE_DIR/src/$AUDIO_CPP_PACKAGE_MODULE/bin/audiocpp_server" --list-devices
+          if [ "${{ matrix.variant }}" = vulkan ]; then
+            "$AUDIO_CPP_PACKAGE_DIR/src/$AUDIO_CPP_PACKAGE_MODULE/bin/audiocpp_server" --version | grep -q 'backends:.*vulkan'
+            ldd "$AUDIO_CPP_PACKAGE_DIR/src/$AUDIO_CPP_PACKAGE_MODULE/bin/audiocpp_server"
+          fi
       - uses: astral-sh/setup-uv@v6
       - name: Build wheel
-        run: uv build --wheel packaging/skulk-audio-cpp-cpu --out-dir packaging/skulk-audio-cpp-cpu/dist
+        run: uv build --wheel "$AUDIO_CPP_PACKAGE_DIR" --out-dir "$AUDIO_CPP_PACKAGE_DIR/dist"
       - name: Verify wheel payload and record digest
         run: |
           python3 - <<'PY'
           import hashlib
+          import os
           from pathlib import Path
           from zipfile import ZipFile
 
-          wheel, = Path('packaging/skulk-audio-cpp-cpu/dist').glob('*.whl')
+          package_dir = Path(os.environ['AUDIO_CPP_PACKAGE_DIR'])
+          package_module = os.environ['AUDIO_CPP_PACKAGE_MODULE']
+          wheel, = package_dir.joinpath('dist').glob('*.whl')
           with ZipFile(wheel) as archive:
               names = set(archive.namelist())
               required = {
-                  'skulk_audio_cpp_cpu/bin/audiocpp_server',
-                  'skulk_audio_cpp_cpu/model_specs/ace_step.json',
-                  'skulk_audio_cpp_cpu/model_specs/minimax_music3.json',
-                  'skulk_audio_cpp_cpu/licenses/AUDIO_CPP_LICENSE.txt',
-                  'skulk_audio_cpp_cpu/licenses/THIRD_PARTY_NOTICES.txt',
-                  'skulk_audio_cpp_cpu/licenses/ABSL_LICENSE.txt',
-                  'skulk_audio_cpp_cpu/licenses/CJSON_LICENSE.txt',
-                  'skulk_audio_cpp_cpu/licenses/CPP_HTTPLIB_LICENSE.txt',
-                  'skulk_audio_cpp_cpu/licenses/DARTS_CLONE_LICENSE.txt',
-                  'skulk_audio_cpp_cpu/licenses/ESAXX_LICENSE.txt',
-                  'skulk_audio_cpp_cpu/licenses/GGML_LICENSE.txt',
-                  'skulk_audio_cpp_cpu/licenses/LIBYAML_LICENSE.txt',
-                  'skulk_audio_cpp_cpu/licenses/PROTOBUF_LITE_LICENSE.txt',
-                  'skulk_audio_cpp_cpu/licenses/SENTENCEPIECE_LICENSE.txt',
+                  f'{package_module}/bin/audiocpp_server',
+                  f'{package_module}/model_specs/ace_step.json',
+                  f'{package_module}/model_specs/minimax_music3.json',
+                  *(f'{package_module}/licenses/{name}' for name in (
+                      'AUDIO_CPP_LICENSE.txt', 'THIRD_PARTY_NOTICES.txt',
+                      'ABSL_LICENSE.txt', 'CJSON_LICENSE.txt',
+                      'CPP_HTTPLIB_LICENSE.txt', 'DARTS_CLONE_LICENSE.txt',
+                      'ESAXX_LICENSE.txt', 'GGML_LICENSE.txt',
+                      'LIBYAML_LICENSE.txt', 'PROTOBUF_LITE_LICENSE.txt',
+                      'SENTENCEPIECE_LICENSE.txt',
+                  )),
               }
               assert required <= names, required - names
           print(f'{wheel.name} sha256:{hashlib.sha256(wheel.read_bytes()).hexdigest()}')
@@ -121,22 +180,26 @@ jobs:
       - name: Smoke-test installed entry point
         run: |
           uv venv /tmp/audio-cpp-smoke --python 3.13
-          uv pip install --python /tmp/audio-cpp-smoke/bin/python packaging/skulk-audio-cpp-cpu/dist/*.whl
-          /tmp/audio-cpp-smoke/bin/skulk-audio-cpp-cpu --version
+          uv pip install --python /tmp/audio-cpp-smoke/bin/python "$AUDIO_CPP_PACKAGE_DIR"/dist/*.whl
+          /tmp/audio-cpp-smoke/bin/skulk-audio-cpp-${{ matrix.variant }} --version
       - name: Attest build provenance
         uses: actions/attest-build-provenance@v2
         with:
-          subject-path: packaging/skulk-audio-cpp-cpu/dist/*.whl
+          subject-path: ${{ env.AUDIO_CPP_PACKAGE_DIR }}/dist/*.whl
       - uses: actions/upload-artifact@v4
         with:
-          name: audio-cpp-${{ matrix.platform }}
-          path: packaging/skulk-audio-cpp-cpu/dist/*.whl
+          name: audio-cpp-${{ matrix.platform }}-${{ matrix.variant }}
+          path: ${{ env.AUDIO_CPP_PACKAGE_DIR }}/dist/*.whl
           if-no-files-found: error
 
   publish-index:
     needs: build
     if: github.event_name == 'workflow_dispatch' && inputs.publish
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
     concurrency:
       group: foxlight-engine-wheel-index-publication
       cancel-in-progress: false
@@ -147,6 +210,24 @@ jobs:
           pattern: audio-cpp-*
           merge-multiple: true
           path: dist
+          run-id: ${{ inputs.publish_run_id || github.run_id }}
+          github-token: ${{ github.token }}
+      - name: Verify hardware-qualified source artifact
+        if: inputs.publish_variant == 'vulkan' || inputs.publish_run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ inputs.publish_run_id }}
+          EXPECTED_SHA256: ${{ inputs.publish_sha256 }}
+          PUBLISH_VARIANT: ${{ inputs.publish_variant }}
+        run: |
+          test "$PUBLISH_VARIANT" = vulkan
+          [[ "$SOURCE_RUN_ID" =~ ^[0-9]+$ ]]
+          [[ "$EXPECTED_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          test "$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" --jq '.conclusion')" = success
+          wheels=(dist/skulk_audio_cpp_vulkan-*.whl)
+          test "${#wheels[@]}" -eq 1
+          printf '%s  %s\n' "$EXPECTED_SHA256" "${wheels[0]}" | sha256sum --check
+          gh attestation verify "${wheels[0]}" --repo "$GITHUB_REPOSITORY" > /dev/null
       - uses: astral-sh/setup-uv@v6
       - name: Publish exact wheels to the Foxlight index
         env:
@@ -154,4 +235,4 @@ jobs:
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
-        run: uv run --no-project --with boto3 python scripts/publish_wheel_index.py dist/skulk_audio_cpp_cpu-*.whl
+        run: uv run --no-project --with boto3 python scripts/publish_wheel_index.py dist/skulk_audio_cpp_${{ inputs.publish_variant }}-*.whl

@@ -77,6 +77,9 @@ class GpuDeviceFact(CamelCaseModel):
     compute_capability: str | None = None
     """NVIDIA SM level as ``"<major>.<minor>"``; ``None`` for other vendors."""
 
+    pci_device_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{4}:[0-9a-f]{4}$")
+    """Observed PCI vendor and device IDs, when sysfs exposes both values."""
+
 
 EngineBinaryState = Literal["not_configured", "ok", "missing", "not_executable"]
 """Usability of a configured engine binary path.
@@ -279,6 +282,14 @@ class NodeFacts(CamelCaseModel):
 
     audio_cpp_probe: AudioCppProbe = AudioCppProbe()
     """The binary's own version and device report, required for readiness."""
+
+    audio_cpp_vulkan_binary: EngineBinaryFact = Field(
+        default_factory=lambda: EngineBinaryFact(env_var="SKULK_AUDIO_CPP_VULKAN_BIN")
+    )
+    """Independently prepared Vulkan executable; CPU mounts retain their binary."""
+
+    audio_cpp_vulkan_probe: AudioCppProbe = AudioCppProbe()
+    """Version and device report for the independently prepared Vulkan wheel."""
 
     declared_audio_cpp_backends: str | None = None
     """Optional operator restriction, checked against the binary's usable lanes."""

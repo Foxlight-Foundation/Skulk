@@ -24,6 +24,7 @@ from skulk.shared.types.worker.runners import RunnerRunning
 from skulk.utils.channels import MpSender
 from skulk.worker.runner.audio_cpp.runner import (
     Runner,
+    audio_cpp_binary_for_lane,
     model_directory,
     verify_audio_cpp_launch,
 )
@@ -50,6 +51,37 @@ def test_sidecar_launch_rechecks_stamped_build_and_lane(
     binary.write_bytes(b"different build")
     with pytest.raises(RuntimeError, match="changed since music placement"):
         verify_audio_cpp_launch(binary, expected, "cpu")
+
+
+def test_placed_vulkan_build_selects_its_own_executable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """The GPU mount survives a separate CPU package and rejects a changed GPU binary."""
+    cpu = tmp_path / "cpu" / "audiocpp_server"
+    vulkan = tmp_path / "vulkan" / "audiocpp_server"
+    cpu.parent.mkdir()
+    vulkan.parent.mkdir()
+    cpu.write_bytes(b"cpu build")
+    vulkan.write_bytes(b"vulkan build")
+    monkeypatch.setenv("SKULK_AUDIO_CPP_BIN", str(cpu))
+    monkeypatch.setenv("SKULK_AUDIO_CPP_VULKAN_BIN", str(vulkan))
+
+    def ready_probe(binary: str) -> AudioCppProbe:
+        return AudioCppProbe(
+            outcome="ready",
+            computes=("vulkan",) if binary == str(vulkan) else ("cpu",),
+        )
+
+    monkeypatch.setattr(
+        "skulk.worker.runner.audio_cpp.runner.probe_audio_cpp", ready_probe,
+    )
+    cpu_build = f"audio.cpp@sha256:{sha256(cpu.read_bytes()).hexdigest()}"
+    vulkan_build = f"audio.cpp@sha256:{sha256(vulkan.read_bytes()).hexdigest()}"
+    assert audio_cpp_binary_for_lane("cpu", cpu_build) == cpu
+    assert audio_cpp_binary_for_lane("vulkan", vulkan_build) == vulkan
+    vulkan.write_bytes(b"different vulkan build")
+    with pytest.raises(RuntimeError, match="no prepared audio.cpp executable matches"):
+        audio_cpp_binary_for_lane("vulkan", vulkan_build)
 
 
 def test_ace_step_server_uses_nested_loader_root(

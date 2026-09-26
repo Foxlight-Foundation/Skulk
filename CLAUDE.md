@@ -252,18 +252,31 @@ The `audio_cpp` music backend uses a separately installed, pinned audio.cpp
 v0.8.2 server package, absent from Skulk's base environment. Node Facts probe
 its source revision and actual devices before advertising any compute lane.
 
-Startup rehydrates a previously verified cached package without a download.
+Startup rehydrates previously verified CPU and Vulkan cached packages without
+a download. `SKULK_AUDIO_CPP_BIN` and `SKULK_AUDIO_CPP_VULKAN_BIN` name separate
+executables, so preparing Vulkan cannot replace an in-use CPU build.
 The cache retains and rehashes the pinned wheel, then compares extracted runtime
 files with its archive members. Upstream's short revision output is accepted
 only for that verified wheel; standalone overrides need the full pinned revision.
 Standalone binary overrides may use `SKULK_AUDIO_CPP_SPECS_DIR`; facts and the
 runner require both pinned model specs before readiness or load.
 
-`NodeResources.engine_builds` hashes the executable. `TextToMusic` is the sole
+`NodeResources.engine_builds` hashes the executable for each concrete lane.
+`TextToMusic` is the sole
 task on a music card. The cards have
 their own `[music]` section and require exact signed support claims. The
 `audio-cpp-engine-wheel` workflow builds the CPU-capable package for Apple
-Silicon macOS and Linux amd64/arm64 from the pinned source. Music model weights
+Silicon macOS and Linux amd64/arm64 plus a separate Linux amd64 Vulkan package
+from the pinned source. `PrepareAudioCpp` carries the selected package variant;
+the API chooses Vulkan only when a matching signed support claim applies to
+the node's hardware, and can fall back to CPU only with its own signed claim.
+An explicit primary-binary override may probe as CUDA or ROCm; exact instance
+creation filters preparation to the shard's requested compute lane.
+A standalone primary Vulkan override remains eligible after the dedicated
+wheel is introduced when its pinned revision, specs, and device probe pass.
+AMD sysfs PCI IDs produce stable chip-class identifiers
+(`amd:pci-1002-1586` on Strix Halo) for claim selection before preparation.
+Music model weights
 are separate immutable downloads.
 The bare `audio_cpp` tag reports availability; music support claims and runner
 placement select a concrete compute lane so memory and device choice agree.

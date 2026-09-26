@@ -954,14 +954,19 @@ revision. They declare no legacy compatible backend: each architecture,
 hardware class, and exact audio.cpp build needs a signed `supported` claim
 after a model load and generation qualification. An installable engine package
 alone never satisfies placement. The node advertises `audio_cpp` and only
-the compute lanes that its pinned executable reports through version and
-device probes; its SHA-256 is the live build identity. Music WAV bytes are
+the compute lanes that its prepared executables report through version and
+device probes; each lane's SHA-256 is its live build identity. Music WAV bytes are
 bounded and belong on the node-addressed output media plane, outside State
 and the event log.
+AMD PCI vendor/device IDs from sysfs provide a stable chip-class identifier,
+such as `amd:pci-1002-1586` for Strix Halo, so a Vulkan claim can apply to a
+hardware class without naming an individual node.
 The bare `audio_cpp` tag reports engine availability; model placement and
 memory admission use only a concrete probed compute lane.
-Before initial facts are gathered at startup, a verified cached audio.cpp
-package may restore its executable path without contacting the package channel.
+Before initial facts are gathered at startup, verified cached CPU and Vulkan
+packages may restore their separate executable paths without contacting the
+package channel. Preparing Vulkan leaves an existing CPU mount's executable
+and build identity intact.
 The cache retains the SHA-256-pinned wheel and compares every extracted runtime
 file with its archive member; an editable cache record cannot establish integrity.
 Upstream's short revision output is accepted only for this verified wheel;
@@ -970,7 +975,15 @@ The facts probe checks both pinned model specs; a standalone binary may name
 its specs through `SKULK_AUDIO_CPP_SPECS_DIR`. Only then can the node publish
 ready audio.cpp lanes for restored instances.
 
-Music mounting sends a targeted `PrepareAudioCpp` command to an eligible worker,
+Music mounting ranks package variants with signed support claims for the
+observed hardware. If accelerator preparation fails, a separately claimed CPU
+variant on that node remains eligible. An operator-provided primary audio.cpp
+binary can also qualify as CUDA or ROCm when its device probe and signed claim
+match. A standalone primary Vulkan override remains usable when its pinned
+revision, model specs, and device probe pass. Exact instance creation prepares
+the shard's requested compute lane.
+The API sends a targeted `PrepareAudioCpp` command carrying
+that variant to an eligible worker,
 including when the API already sees a ready package. `AudioCppPreparationRequested`
 and `AudioCppPreparationCompleted` report the lifecycle; the worker verifies
 the package, publishes fresh `NodeResources`, and includes that verified snapshot
@@ -984,7 +997,8 @@ and master constrain ordinary placement to the prepared node. Exact placements r
 RPC shaped music instances and require a matching ready build and signed support
 claim.
 Placement stamps the selected audio.cpp build on the music shard. At each
-sidecar launch, the runner checks the executable digest and selected device
+sidecar launch, the runner selects the executable for that lane and checks its
+digest and selected device
 against that stamp. Linux ties the sidecar to its runner with a parent-death
 signal; on macOS, a small watchdog terminates the server process group if
 its runner exits unexpectedly. CUDA, ROCm, and Vulkan music lanes consume the reported
