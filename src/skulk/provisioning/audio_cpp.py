@@ -19,7 +19,7 @@ import threading
 import zipfile
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Final, Literal, cast, final
+from typing import Final, Literal, TypeAlias, cast, final
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
@@ -27,6 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from skulk.provisioning.llama_server import AUTOPROVISION_OPT_OUT_ENV
 from skulk.shared.backends import (
     AUDIO_CPP_BIN_ENV,
+    AUDIO_CPP_CUDA_BIN_ENV,
     AUDIO_CPP_SPECS_DIR_ENV,
     AUDIO_CPP_VULKAN_BIN_ENV,
 )
@@ -34,6 +35,7 @@ from skulk.shared.constants import SKULK_ENGINES_DIR
 
 AUDIO_CPP_SOURCE_REVISION: Final = "4d88768fbcae4e6eb3352c6ab1422dabb7d90b58"
 AUDIO_CPP_PACKAGE_VERSION: Final = "0.8.2.post1"
+AudioCppVariant: TypeAlias = Literal["cpu", "vulkan", "cuda"]
 _MAX_WHEEL_BYTES: Final = 256 * 1024 * 1024
 _MAX_EXPANDED_BYTES: Final = 512 * 1024 * 1024
 _PACKAGE_PREFIX: Final = "skulk_audio_cpp_cpu/"
@@ -74,7 +76,7 @@ class AudioCppWheel(BaseModel):
 
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
-    filename: str = Field(pattern=r"^skulk_audio_cpp_(?:cpu|vulkan)-0\.8\.2\.post1-.+\.whl$")
+    filename: str = Field(pattern=r"^skulk_audio_cpp_(?:cpu|vulkan|cuda)-0\.8\.2\.post1-.+\.whl$")
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
     @property
@@ -108,6 +110,16 @@ AUDIO_CPP_VULKAN_WHEELS: Final[dict[tuple[str, str], AudioCppWheel]] = {
     ("linux", "x86_64"): AudioCppWheel(
         filename="skulk_audio_cpp_vulkan-0.8.2.post1-py3-none-manylinux_2_35_x86_64.whl",
         sha256="72f0a600cff38d65640254e24c7c7b4271effbb49bf9e948ecdebcb2bb210930",
+    ),
+}
+
+# The attested arm64 CUDA artifact was verified against the real GB10 driver
+# and generated valid WAV output with both initial cards before publication.
+# No other CUDA host architecture can reuse this binary.
+AUDIO_CPP_CUDA_WHEELS: Final[dict[tuple[str, str], AudioCppWheel]] = {
+    ("linux", "aarch64"): AudioCppWheel(
+        filename="skulk_audio_cpp_cuda-0.8.2.post1-py3-none-manylinux_2_35_aarch64.whl",
+        sha256="39d9f4e2f037ac808ba3588119e3d11a2437e3eb2d85e8bf5eecf63cc3c4c772",
     ),
 }
 
@@ -147,22 +159,46 @@ def audio_cpp_vulkan_wheel_for_host(
     return wheel
 
 
-def _wheel_for_variant(variant: Literal["cpu", "vulkan"]) -> AudioCppWheel:
+def audio_cpp_cuda_wheel_for_host(
+    *, system: str | None = None, machine: str | None = None
+) -> AudioCppWheel:
+    """Return an exact published CUDA wheel for a supported Linux host."""
+    target = (system or sys.platform, (machine or platform.machine()).lower())
+    if target[0] == "linux":
+        target = ("linux", {"amd64": "x86_64", "arm64": "aarch64"}.get(target[1], target[1]))
+    wheel = AUDIO_CPP_CUDA_WHEELS.get(target)
+    if wheel is None:
+        raise RuntimeError(
+            "No SHA-256-pinned audio.cpp CUDA engine package has been published "
+            f"for {target[0]}/{target[1]}"
+        )
+    return wheel
+
+
+def _wheel_for_variant(variant: AudioCppVariant) -> AudioCppWheel:
     """Resolve the immutable package for the requested compute variant."""
-    return (
-        audio_cpp_wheel_for_host()
-        if variant == "cpu"
-        else audio_cpp_vulkan_wheel_for_host()
-    )
+    if variant == "cpu":
+        return audio_cpp_wheel_for_host()
+    if variant == "vulkan":
+        return audio_cpp_vulkan_wheel_for_host()
+    return audio_cpp_cuda_wheel_for_host()
+
+
+def _bin_env_var_for_variant(variant: AudioCppVariant) -> str:
+    """Select the process-local declaration for one independently cached wheel."""
+    return {
+        "cpu": AUDIO_CPP_BIN_ENV,
+        "vulkan": AUDIO_CPP_VULKAN_BIN_ENV,
+        "cuda": AUDIO_CPP_CUDA_BIN_ENV,
+    }[variant]
 
 
 def _package_prefix(wheel: AudioCppWheel) -> str:
     """Return the fixed payload root selected by the pinned distribution name."""
-    return (
-        "skulk_audio_cpp_vulkan/"
-        if wheel.filename.startswith("skulk_audio_cpp_vulkan-")
-        else _PACKAGE_PREFIX
-    )
+    for variant in ("vulkan", "cuda"):
+        if wheel.filename.startswith(f"skulk_audio_cpp_{variant}-"):
+            return f"skulk_audio_cpp_{variant}/"
+    return _PACKAGE_PREFIX
 
 
 def _required_members(wheel: AudioCppWheel) -> frozenset[str]:
@@ -231,7 +267,7 @@ def _cached_binary(root: Path, wheel: AudioCppWheel) -> Path | None:
 
 def verified_cached_audio_cpp_binary(binary: Path) -> bool:
     """Return whether this executable belongs to this host's pinned wheel cache."""
-    for variant in ("cpu", "vulkan"):
+    for variant in ("cpu", "vulkan", "cuda"):
         try:
             wheel = _wheel_for_variant(variant)
         except RuntimeError:
@@ -294,9 +330,10 @@ def rehydrate_cached_audio_cpp(
     """Restore a previously verified package without network or a new download."""
     env = os.environ if environ is None else environ
     selected: Path | None = None
-    variants: tuple[tuple[Literal["cpu", "vulkan"], str], ...] = (
+    variants: tuple[tuple[AudioCppVariant, str], ...] = (
         ("cpu", AUDIO_CPP_BIN_ENV),
         ("vulkan", AUDIO_CPP_VULKAN_BIN_ENV),
+        ("cuda", AUDIO_CPP_CUDA_BIN_ENV),
     )
     primary_vulkan = _primary_vulkan_override(env)
     for variant, variable in variants:
@@ -365,7 +402,7 @@ def _extract_wheel(wheel_path: Path, staging: Path) -> str:
 
 def prepare_audio_cpp(
     *, allow_download: bool,
-    variant: Literal["cpu", "vulkan"] = "cpu",
+    variant: AudioCppVariant = "cpu",
     environ: Mapping[str, str] | None = None,
 ) -> Path:
     """Wire an explicit binary or install one verified package for this host.
@@ -376,7 +413,7 @@ def prepare_audio_cpp(
     the node's advertised backends or health.
     """
     env = os.environ if environ is None else environ
-    variable = AUDIO_CPP_BIN_ENV if variant == "cpu" else AUDIO_CPP_VULKAN_BIN_ENV
+    variable = _bin_env_var_for_variant(variant)
     explicit = env.get(variable, "").strip()
     # Before the dedicated wheel, operators could supply a pinned Vulkan
     # build through the primary override. Preserve that route when its
@@ -403,12 +440,12 @@ def prepare_audio_cpp(
 
 
 def _prepare_pinned_audio_cpp(
-    *, allow_download: bool, env: Mapping[str, str], variant: Literal["cpu", "vulkan"]
+    *, allow_download: bool, env: Mapping[str, str], variant: AudioCppVariant
 ) -> Path:
     """Serialize cache verification and installation within one worker process."""
 
     wheel = _wheel_for_variant(variant)
-    variable = AUDIO_CPP_BIN_ENV if variant == "cpu" else AUDIO_CPP_VULKAN_BIN_ENV
+    variable = _bin_env_var_for_variant(variant)
     root = _cache_root(wheel)
     cached = _cached_binary(root, wheel)
     if cached is not None:

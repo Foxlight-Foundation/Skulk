@@ -1107,6 +1107,7 @@ class Worker:
                         "audio_cpp-cuda", "audio_cpp-rocm",
                     },
                     "vulkan": {"audio_cpp-vulkan"},
+                    "cuda": {"audio_cpp-cuda"},
                 }[request.variant]
             )
             if not requested_ready:

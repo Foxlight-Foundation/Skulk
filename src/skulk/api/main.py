@@ -3724,15 +3724,18 @@ class API:
                 for claim in claims
             )
 
-        variant_lanes: dict[Literal["cpu", "vulkan"], frozenset[str]] = {
-            # An explicit primary-binary override can probe as CUDA or ROCm
-            # even though the downloadable primary wheel is CPU-capable.
+        variant_lanes: dict[Literal["cpu", "vulkan", "cuda"], frozenset[str]] = {
+            # Primary-binary overrides can expose CUDA or ROCm through the
+            # CPU preparation path; the dedicated CUDA wheel is independent.
             "cpu": frozenset({
                 "audio_cpp-cpu", "audio_cpp-metal", "audio_cpp-cuda", "audio_cpp-rocm",
             }),
             "vulkan": frozenset({"audio_cpp-vulkan"}),
+            "cuda": frozenset({"audio_cpp-cuda"}),
         }
-        candidates: list[tuple[int, bool, int, NodeId, Literal["cpu", "vulkan"]]] = []
+        candidates: list[
+            tuple[int, bool, int, NodeId, Literal["cpu", "vulkan", "cuda"]]
+        ] = []
         for node_id in self.state.topology.list_nodes():
             if node_id in excluded_nodes or (
                 required_nodes is not None and node_id not in required_nodes
@@ -3758,7 +3761,14 @@ class API:
             )
             if not supported_host:
                 continue
-            variants: list[Literal["cpu", "vulkan"]] = []
+            variants: list[Literal["cpu", "vulkan", "cuda"]] = []
+            if (
+                "platform:linux" in platform_classes
+                and architecture in {"aarch64", "arm64"}
+                and "nvidia" in platform_classes
+                and claim_matches("audio_cpp-cuda", platform_classes)
+            ):
+                variants.append("cuda")
             if (
                 "platform:linux" in platform_classes
                 and architecture in {"x86_64", "amd64"}
@@ -3782,7 +3792,8 @@ class API:
                     backend in resources.engine_builds
                     for backend in resources.backends & lanes
                 )
-                candidates.append((2 if variant == "vulkan" else 1, ready, available, node_id, variant))
+                priority = {"cuda": 3, "vulkan": 2, "cpu": 1}[variant]
+                candidates.append((priority, ready, available, node_id, variant))
         candidates.sort(key=lambda item: (item[0], item[1], item[2], str(item[3])), reverse=True)
         if not candidates:
             raise HTTPException(

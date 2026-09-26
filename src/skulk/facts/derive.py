@@ -571,6 +571,12 @@ def _derive_audio_cpp(
             facts.audio_cpp_vulkan_probe,
             "vulkan",
         ),
+        (
+            "audio.cpp CUDA",
+            facts.audio_cpp_cuda_binary,
+            facts.audio_cpp_cuda_probe,
+            "cuda",
+        ),
     ):
         if binary.state == "not_configured":
             continue

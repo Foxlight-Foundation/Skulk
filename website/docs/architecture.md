@@ -963,10 +963,12 @@ such as `amd:pci-1002-1586` for Strix Halo, so a Vulkan claim can apply to a
 hardware class without naming an individual node.
 The bare `audio_cpp` tag reports engine availability; model placement and
 memory admission use only a concrete probed compute lane.
-Before initial facts are gathered at startup, verified cached CPU and Vulkan
-packages may restore their separate executable paths without contacting the
-package channel. Preparing Vulkan leaves an existing CPU mount's executable
-and build identity intact.
+Before initial facts are gathered at startup, verified cached CPU, Vulkan, and
+CUDA packages may restore their separate executable paths without contacting
+the package channel. Preparing a GPU package leaves existing CPU and other GPU
+mounts' executables and build identities intact. The CUDA wheel targets the
+NVIDIA compute architecture compiled into that package; installing it does
+not qualify a model for every NVIDIA GPU.
 The cache retains the SHA-256-pinned wheel and compares every extracted runtime
 file with its archive member; an editable cache record cannot establish integrity.
 Upstream's short revision output is accepted only for this verified wheel;
@@ -976,13 +978,14 @@ its specs through `SKULK_AUDIO_CPP_SPECS_DIR`. Only then can the node publish
 ready audio.cpp lanes for restored instances.
 
 Music mounting ranks package variants with signed support claims for the
-observed hardware. If accelerator preparation fails, a separately claimed CPU
-variant on that node remains eligible. An operator-provided primary audio.cpp
-binary can also qualify as CUDA or ROCm when its device probe and signed claim
-match. A standalone primary Vulkan override remains usable when its pinned
-revision, model specs, and device probe pass. Exact instance creation prepares
-the shard's requested compute lane.
-The API sends a targeted `PrepareAudioCpp` command carrying
+observed hardware, preferring CUDA or Vulkan when a qualified package is
+available. If accelerator preparation fails, a separately claimed CPU variant
+on that node remains eligible. An operator-provided primary audio.cpp binary
+can also qualify as CUDA or ROCm when its device probe and signed claim match.
+A standalone primary Vulkan override remains usable when its pinned revision,
+model specs, and device probe pass. Exact instance creation prepares the
+shard's requested compute lane. The API sends a targeted `PrepareAudioCpp`
+command carrying
 that variant to an eligible worker,
 including when the API already sees a ready package. `AudioCppPreparationRequested`
 and `AudioCppPreparationCompleted` report the lifecycle; the worker verifies

@@ -117,15 +117,17 @@ Skulk ships without the audio.cpp engine package. When you mount a music card,
 the API chooses a hardware-eligible node, asks that worker to fetch and verify
 the pinned engine package, then waits for fresh node resources before ordinary
 placement. Apple Silicon macOS, Linux `amd64`, and Linux `arm64` have CPU-capable
-packages. Linux `amd64` also has a separate Vulkan package, selected only when
-a signed claim covers the exact card, engine build, and hardware class. The
+packages. Linux `amd64` has a separate Vulkan package, and Linux `arm64` has a
+CUDA package compiled for NVIDIA GB10 compute 12.1. A GPU package is selected
+only when a signed claim covers the exact card, engine build, and hardware class. The
 package contains the server, model specs, and licenses; model
 weights download separately. An offline node can use a verified cached package
 but cannot fetch one. A failed preparation returns a mount error and leaves the
-node serving its other workloads. `SKULK_AUDIO_CPP_BIN` and
-`SKULK_AUDIO_CPP_VULKAN_BIN` can point to separate operator-installed builds,
-each of which must pass the same source and device probes. Preparing Vulkan
-does not replace a CPU model instance's executable or build identity.
+node serving its other workloads. `SKULK_AUDIO_CPP_BIN`,
+`SKULK_AUDIO_CPP_VULKAN_BIN`, and `SKULK_AUDIO_CPP_CUDA_BIN` can point to
+separate operator-installed builds, each of which must pass the same source
+and device probes. Preparing a GPU wheel does not replace another music
+instance's executable or build identity.
 For AMD, node resources include a PCI chip class such as
 `amd:pci-1002-1586`, allowing a claim to cover the qualified hardware class
 without identifying a specific node.

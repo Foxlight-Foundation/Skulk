@@ -252,9 +252,10 @@ The `audio_cpp` music backend uses a separately installed, pinned audio.cpp
 v0.8.2 server package, absent from Skulk's base environment. Node Facts probe
 its source revision and actual devices before advertising any compute lane.
 
-Startup rehydrates previously verified CPU and Vulkan cached packages without
-a download. `SKULK_AUDIO_CPP_BIN` and `SKULK_AUDIO_CPP_VULKAN_BIN` name separate
-executables, so preparing Vulkan cannot replace an in-use CPU build.
+Startup rehydrates previously verified CPU, Vulkan, and CUDA cached packages
+without a download. `SKULK_AUDIO_CPP_BIN`, `SKULK_AUDIO_CPP_VULKAN_BIN`, and
+`SKULK_AUDIO_CPP_CUDA_BIN` name separate executables, so preparing one compute
+variant cannot replace an in-use build from another.
 The cache retains and rehashes the pinned wheel, then compares extracted runtime
 files with its archive members. Upstream's short revision output is accepted
 only for that verified wheel; standalone overrides need the full pinned revision.
@@ -266,15 +267,15 @@ runner require both pinned model specs before readiness or load.
 task on a music card. The cards have
 their own `[music]` section and require exact signed support claims. The
 `audio-cpp-engine-wheel` workflow builds the CPU-capable package for Apple
-Silicon macOS and Linux amd64/arm64 plus a separate Linux amd64 Vulkan package
-from the pinned source. `PrepareAudioCpp` carries the selected package variant;
-the API chooses Vulkan only when a matching signed support claim applies to
-the node's hardware, and can fall back to CPU only with its own signed claim.
-An explicit primary-binary override may probe as CUDA or ROCm; exact instance
-creation filters preparation to the shard's requested compute lane.
-A standalone primary Vulkan override remains eligible after the dedicated
-wheel is introduced when its pinned revision, specs, and device probe pass.
-AMD sysfs PCI IDs produce stable chip-class identifiers
+Silicon macOS and Linux amd64/arm64 plus separate Linux amd64 Vulkan and Linux
+arm64 CUDA packages from the pinned source. `PrepareAudioCpp` carries the
+selected package variant; the API chooses CUDA or Vulkan only when a matching
+signed support claim applies to the node's hardware, and can try a separately
+claimed CPU fallback. An explicit primary-binary override may probe as CUDA
+or ROCm; exact instance creation filters preparation to the requested compute
+lane. A standalone primary Vulkan override remains eligible when its pinned
+revision, specs, and device probe pass. AMD sysfs PCI IDs produce stable
+chip-class identifiers
 (`amd:pci-1002-1586` on Strix Halo) for claim selection before preparation.
 Music model weights
 are separate immutable downloads.
