@@ -21,6 +21,7 @@ from skulk.shared.models.memory_estimate import (
     per_token_kv_bytes,
     shard_fraction_of_model,
     shard_preallocates_kv_upfront,
+    vulkan_fills_carve_first,
 )
 from skulk.shared.models.memory_estimate import (
     KV_CONTEXT_BUDGET_TOKENS as PLACEMENT_KV_CONTEXT_BUDGET_TOKENS,
@@ -316,6 +317,7 @@ def reserve_instance_system_ram(
     node_vram: Mapping[NodeId, Memory] | None = None,
     *,
     unified_memory_gpu_nodes: AbstractSet[NodeId] = frozenset(),
+    carve_first_nodes: AbstractSet[NodeId] = frozenset(),
     unreflected: AbstractSet[InstanceId] = frozenset(),
 ) -> dict[NodeId, Memory]:
     """Live system RAM per node, net of placements telemetry may not show yet.
@@ -349,6 +351,13 @@ def reserve_instance_system_ram(
             them (that is not a unified-memory APU) lives in VRAM, not here.
         unified_memory_gpu_nodes: APUs whose GPU allocations also take host
             pages; their shards charge system RAM.
+        carve_first_nodes: Unified-memory AMD APUs (see
+            ``carve_first_gpu_node_ids``). A loaded Vulkan shard on one of
+            them sits in the BIOS carve, which the observed ``vram_used``
+            already nets out of the GPU pool, so it is not charged here as
+            well; while it is still loading it is charged as before. Only a
+            caller that also supplies ``unreflected`` may pass this set:
+            without it every shard reads as loaded.
         unreflected: Placements whose load telemetry has not shown yet; their
             footprints also come off the observed figure.
 
@@ -376,6 +385,16 @@ def reserve_instance_system_ram(
                 )
             )
             if in_discrete_vram:
+                continue
+            if (
+                node_id in carve_first_nodes
+                and instance_id not in unreflected
+                and vulkan_fills_carve_first(shard.resolved_backend)
+            ):
+                # Charging this shard against host RAM too would count it
+                # twice: the pool already subtracts the carve it occupies.
+                # On Strix Halo that refused a ROCm video engine beside a
+                # loaded Vulkan steward the node demonstrably holds.
                 continue
             fraction = shard_fraction_of_model(shard)
             if fraction is None:
@@ -413,6 +432,7 @@ def reserve_system_ram_usage(
     node_vram: Mapping[NodeId, Memory] | None = None,
     *,
     unified_memory_gpu_nodes: AbstractSet[NodeId] = frozenset(),
+    carve_first_nodes: AbstractSet[NodeId] = frozenset(),
     unreflected: AbstractSet[InstanceId] = frozenset(),
 ) -> dict[NodeId, MemoryUsage]:
     """``node_memory`` with each ``ram_available`` net of committed placements.
@@ -426,6 +446,7 @@ def reserve_system_ram_usage(
         current_instances,
         node_vram,
         unified_memory_gpu_nodes=unified_memory_gpu_nodes,
+        carve_first_nodes=carve_first_nodes,
         unreflected=unreflected,
     )
     return {
@@ -494,6 +515,40 @@ def unified_memory_gpu_node_ids(
         ):
             unified.add(node_id)
     return frozenset(unified)
+
+
+def carve_first_gpu_node_ids(
+    node_system: Mapping[NodeId, SystemPerformanceProfile],
+    node_resources: Mapping[NodeId, NodeResources] | None = None,
+    node_memory: Mapping[NodeId, MemoryUsage] | None = None,
+) -> frozenset[NodeId]:
+    """Unified-memory AMD APUs, whose Vulkan allocations fill the BIOS carve first.
+
+    On a Strix-class APU the Vulkan driver places device-local allocations in
+    the VRAM carve-out and spills to GTT only past it, and ``vram_used``
+    reports the carve's occupancy, while a HIP engine on the same node
+    allocates from GTT, which is host RAM. GB10 is unified too but has no
+    carve, so it is not in this set. A node must report ``vram_used``: the
+    pool reads a missing reading as an empty carve, so a loaded Vulkan shard
+    there keeps its host-RAM charge rather than going uncounted.
+
+    Args:
+        node_system: Per-node accelerator telemetry.
+        node_resources: Optional backend telemetry, as for
+            ``unified_memory_gpu_node_ids``.
+        node_memory: Per-node system-memory telemetry.
+
+    Returns:
+        Immutable IDs of unified-memory AMD GPU-offload nodes.
+    """
+    return frozenset(
+        node_id
+        for node_id in unified_memory_gpu_node_ids(node_system, node_resources, node_memory)
+        if (profile := node_system.get(node_id)) is not None
+        and profile.accelerator is not None
+        and profile.accelerator.vendor == "amd"
+        and profile.accelerator.vram_used_bytes is not None
+    )
 
 
 def _per_node_required_memory(

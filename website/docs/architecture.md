@@ -643,13 +643,21 @@ telemetry cannot have shown yet (awaiting its indexed echo, still
 loading, or loaded for less than a short settle period, since memory
 telemetry is sampled on its own cadence) is also taken off the observed
 figure, and the GPU pool of a
-unified-memory APU is derived from the reserved figure. That live figure is
+unified-memory APU is derived from the reserved figure. On a unified-memory
+AMD APU a Vulkan shard is charged only until its load has shown: once
+loaded it sits in the BIOS VRAM carve, which the observed carve usage
+already takes off the pool, so charging host RAM as well would count it
+twice (a ROCm video engine was refused beside a loaded Vulkan steward that
+way). That live figure is
 reduced by the worker guard's fit tolerance as headroom, then capped at the
 node's GPU working-set ceiling and at the static fit, and never below the
 floor; a node without a live reading keeps the floor. The worker's own
 pre-spawn guard checks that stamped window against its current free memory
 before loading, so a reading that has gone stale by load time is refused
-rather than committed. An uncomputable fit (a card without KV-head metadata,
+rather than committed. On a unified-memory AMD APU a Vulkan engine's window
+is checked against the combined pool only, because it fills the carve before
+it takes host pages; a HIP engine there, which allocates from host RAM, is
+also checked against host RAM. An uncomputable fit (a card without KV-head metadata,
 or a pooled RPC placement) also clamps back to the floor rather than
 committing a fictitious window that would fail at load. MLX is unaffected
 either way: it grows its KV cache lazily per request and keeps the full
