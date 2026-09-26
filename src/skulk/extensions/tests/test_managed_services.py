@@ -933,8 +933,14 @@ async def test_runtime_removal_runs_once_per_selected_generation(
     assert services.runtimes_pruned_for is None
     services._schedule_runtime_prune(root, "f" * 64)  # pyright: ignore[reportPrivateUsage]
     await services.runtime_prune
-    # One generation would not go: the pass is not done, so it runs again.
+    # One generation would not go: the pass is not done, so it runs again,
+    # but not before the retry wait: refreshes inside it start nothing.
     assert services.runtimes_pruned_for is None
+    assert services.runtime_prune_retry_at > 0
+    services._schedule_runtime_prune(root, "f" * 64)  # pyright: ignore[reportPrivateUsage]
+    await services.runtime_prune
+    assert calls == [root, root]
+    services.runtime_prune_retry_at = 0.0
     services._schedule_runtime_prune(root, "f" * 64)  # pyright: ignore[reportPrivateUsage]
     await services.runtime_prune
     assert services.runtimes_pruned_for == "3" * 32

@@ -233,6 +233,14 @@ def staged_generation_for(root: Path, build: str) -> ServiceSnapshot | None:
     return None
 
 
+RUNTIME_PRUNE_RETRY_SECONDS: Final = 300.0
+"""Wait before retrying a prune that could not remove every superseded runtime.
+
+The inventory refresh runs every second; retrying a persistent failure (a
+permission problem, say) at that rate would re-walk gigabytes and log each
+time.
+"""
+
 RETAINED_PREVIOUS_GENERATIONS: Final = 1
 """Complete manager runtimes kept beside the selected one, newest first.
 
@@ -476,6 +484,8 @@ class ManagedServices:
         # and the inventory refresh must not wait for its removal.
         self.runtime_prune: asyncio.Task[None] | None = None
         self.runtimes_pruned_for: str | None = None
+        # Monotonic time before which a failed or partial prune is not retried.
+        self.runtime_prune_retry_at = 0.0
         self.guard = asyncio.Lock()
         self.closed = False
 
@@ -719,6 +729,8 @@ class ManagedServices:
         selected = selected_generation_for(root, build)
         if selected is None or self.runtimes_pruned_for == selected.generation:
             return
+        if time.monotonic() < self.runtime_prune_retry_at:
+            return
         self.runtime_prune = asyncio.create_task(
             self._prune_runtimes(root, selected.generation)
         )
@@ -727,9 +739,11 @@ class ManagedServices:
         try:
             outcome = await asyncio.to_thread(prune_superseded_generations, root)
         except (OSError, ValueError) as error:
+            self.runtime_prune_retry_at = time.monotonic() + RUNTIME_PRUNE_RETRY_SECONDS
             logger.warning(
                 "superseded plugin manager runtimes not removed: "
-                f"{type(error).__name__}; tried again on a later refresh"
+                f"{type(error).__name__}; tried again in "
+                f"{RUNTIME_PRUNE_RETRY_SECONDS / 60:.0f} minutes"
             )
             return
         if outcome is None:
@@ -742,12 +756,14 @@ class ManagedServices:
                 f"({outcome.freed_bytes / 2**30:.1f} GiB)"
             )
         if outcome.remaining:
-            # A partial removal is not done: leaving the latch unset makes the
-            # next refresh try the rest instead of waiting for a restart.
+            # A partial removal is not done: leaving the latch unset retries the
+            # rest without a restart, after a wait so a persistent failure does
+            # not re-walk gigabytes on every one-second refresh.
+            self.runtime_prune_retry_at = time.monotonic() + RUNTIME_PRUNE_RETRY_SECONDS
             logger.warning(
                 f"{outcome.remaining} superseded plugin manager runtime"
                 f"{'' if outcome.remaining == 1 else 's'} could not be removed "
-                "fully; tried again on a later refresh"
+                f"fully; tried again in {RUNTIME_PRUNE_RETRY_SECONDS / 60:.0f} minutes"
             )
             return
         self.runtimes_pruned_for = generation
