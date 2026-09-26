@@ -29,6 +29,8 @@ This project records release notes here and mirrors public-facing notes in
     repository supply that limit.
   - The empty-catalog warning names a disabled registry
     (`SKULK_MODEL_REGISTRY_ENABLED=false`) as its own cause.
+  - `skulk doctor`'s installed-card check says an unrecorded model cannot be
+    served offline, since no shipped card stands in for it any more.
   - Association never re-derives a card record over an existing one. A
     model directory whose record no longer matches its files has drifted,
     and it stays unresolved until a download repairs it; before, the

@@ -666,15 +666,16 @@ def _check_installed_card_records(facts: NodeFacts) -> Sequence[CheckResult]:
                 f"{names}{f' and {more} more' if more > 0 else ''}{ignored}"
             ),
             consequence=(
-                "offline, this node serves these only from the cards shipped "
-                "with Skulk; a model's own card record is what keeps it "
+                "offline, this node cannot serve these: Skulk ships no model "
+                "cards, so a model's own card record is what keeps it "
                 "servable without the network"
             ),
             remediation=(
-                "start Skulk once with network access: it records the card "
-                "for every complete model it recognizes. A model no current "
-                "card recognizes can be downloaded again or added as a custom "
-                "card"
+                "start Skulk once with network access, or offline with a "
+                "cached registry catalog: it records the card for every "
+                "complete model a current or cached signed card recognizes. A "
+                "model no card recognizes can be downloaded again or added as "
+                "a custom card"
             ),
         )
     ]
