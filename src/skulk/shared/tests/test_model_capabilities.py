@@ -772,23 +772,16 @@ def test_is_gemma4_family_handles_no_inputs_at_all() -> None:
 
 
 def test_is_gemma4_family_resource_cards_all_match() -> None:
-    """Every Gemma 4 model card shipped under resources/ must be detected."""
+    """Every curated Gemma 4 card the fixtures carry must be detected."""
     import tomllib
-    from pathlib import Path
 
     from skulk.shared.models.capabilities import is_gemma4_family
+    from skulk.shared.tests.model_card_fixtures import fixture_card_paths
 
-    cards_dir = (
-        Path(__file__).resolve().parents[4]
-        / "resources"
-        / "inference_model_cards"
+    gemma4_paths = fixture_card_paths("*gemma-4*.toml") + fixture_card_paths(
+        "*gemma_4*.toml"
     )
-    gemma4_paths = list(cards_dir.glob("*gemma-4*.toml")) + list(
-        cards_dir.glob("*gemma_4*.toml")
-    )
-    assert gemma4_paths, (
-        "expected gemma-4 cards under resources/inference_model_cards/"
-    )
+    assert gemma4_paths, "expected gemma-4 fixture cards"
     for path in gemma4_paths:
         with path.open("rb") as fp:
             data = tomllib.load(fp)

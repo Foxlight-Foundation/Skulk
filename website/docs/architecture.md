@@ -545,8 +545,9 @@ The add response waits for its exact ordered mutation to appear in the local
 catalog before acknowledging success. Historical executable custom cards with
 no immutable revision are not grandfathered into this authorization model;
 they fail closed until an operator re-adds them and thereby pins current truth.
-Bundled cards are authorized by the Skulk release that ships them. The planner
-therefore applies backend preference, locality, and capacity normally without a
+An installed card without a registry identity (recorded from a card an earlier
+Skulk release shipped) stays authorized, as that release authorized it. The
+planner therefore applies backend preference, locality, and capacity normally without a
 trust-based node or model filter. Historical `model_trust` configuration and
 approval endpoints remain inert compatibility surfaces for rolling upgrades.
 Card lookup is deliberately non-mutating: read and launch paths may refresh the
@@ -558,13 +559,13 @@ caller-selected executable content. The elected master repeats that exact-card
 comparison against its command-ordered card view immediately before accepting
 either a quick or caller-specified exact placement, so a concurrent card
 replacement or deletion wins before stale repository code can launch.
-Bundled fallback cards that execute repository code require an immutable source
-revision. Installed custom-card sidecars remain artifact-integrity records, but
-only the durable custom-card definition keeps an unsigned model selectable; a
+Installed cards without a registry identity that execute repository code
+require an immutable source revision. Installed custom-card sidecars remain
+artifact-integrity records, but only the durable custom-card definition keeps an unsigned model selectable; a
 deleted custom card therefore cannot be recreated from retained model bytes.
 Separately hosted processor, vision-weight, assistant, MTP, and speculative
 draft repositories require their own immutable companion revisions for signed,
-custom, and bundled cards alike.
+custom, and installed cards alike.
 The low-level explicit-download route is operator-authenticated and compares
 its embedded shard card with the same authorized catalog before admitting bytes
 to a node. Exact comparison ignores only the TUF snapshot publication stamp;
@@ -578,7 +579,7 @@ reaches the nodes that download; an absent-or-blank incoming token never
 erases a recipient's local one, each write atomically replaces the owner-only
 config file, and the HTTP config surface never returns the token. `POST /place_instance` re-evaluates current facts at launch.
 
-For GGUF text models the bundled cards use that preference order deliberately:
+For GGUF text models the curated registry cards use that preference order deliberately:
 they list both llama.cpp engines as compatible but rank the served
 `llama_server` tags ahead of the in-process `llama_cpp` tags. The in-process
 runner serves one request at a time, so under concurrent load its aggregate
@@ -762,11 +763,9 @@ carry a `[license]` section with operator-facing facts, including a
 requires attribution; Skulk surfaces it and never enforces it. Video cards
 stay out of the catalog until `SKULK_ENABLE_VIDEO_MODELS=true`, mirroring the
 image gate, so a fleet without a video engine does not advertise models it
-cannot serve. The bundled MiniMax H3 cards under
-`resources/video_model_cards/` are the transition fallback for the signed
-registry cards and pin every file of the ComfyUI repack by size and content
-identity. The test engine's card ships beside the engine in
-`worker/runner/test_video/` instead: it names no artifact, so the registry can
+cannot serve. The registry's MiniMax H3 cards pin every file of the ComfyUI
+repack by size and content identity. The test engine's card ships beside the
+engine in `worker/runner/test_video/`: it names no artifact, so the registry can
 never supply it.
 
 ### Video jobs
@@ -1027,8 +1026,8 @@ the data plane. Non-streaming requests collect the chunks into one raw audio
 response. Cards that declare `audio.supports_streaming = true` also stream: the
 runner emits independently encoded MP3 segments or headerless mono
 signed-16-bit PCM, and the API describes the PCM framing through response
-headers before it commits the body. (The bundled Qwen3 TTS card declares MP3
-and PCM streaming after live validation; the remaining bundled speech cards
+headers before it commits the body. (The registry's Qwen3 TTS card declares MP3
+and PCM streaming after live validation; the remaining curated speech cards
 stay batch-only.) Cards can declare `audio.voices`, a validated default voice,
 and ordered `audio.voice_catalog` display/language metadata. Entries may be
 model-native speakers or bundled reference profiles. The Skulk
@@ -1808,7 +1807,7 @@ Companion repos follow a single download contract: `companion_download_specs()` 
 
 ### Custom model cards
 
-User-added model cards live under `SKULK_CUSTOM_MODEL_CARDS_DIR` (default `SKULK_DATA_HOME/custom_model_cards`) as TOML files. On Linux that resolves to `~/.local/share/skulk/custom_model_cards`; on macOS/Windows to `~/.skulk/custom_model_cards`. They load after installed, registry, and bundled sources and therefore remain the final operator-owned override for the same `model_id`.
+User-added model cards live under `SKULK_CUSTOM_MODEL_CARDS_DIR` (default `SKULK_DATA_HOME/custom_model_cards`) as TOML files. On Linux that resolves to `~/.local/share/skulk/custom_model_cards`; on macOS/Windows to `~/.skulk/custom_model_cards`. They load after the registry and installed sources and therefore remain the final operator-owned override for the same `model_id`. Deleting one rebuilds the catalog: the signed or installed card for that `model_id` takes its place, or the model leaves the catalog when neither exists.
 
 ### Signed external model-card registry
 
@@ -1821,17 +1820,22 @@ once per 60 seconds. A successful refresh also writes a hash-bound
 last-known-good copy; when the registry is unreachable, that copy is accepted
 for at most 30 days. Complete installed-card sidecars load before any registry
 work and remain active indefinitely while their manifests verify, so that age
-limit never expires an installed artifact. If registry access and its acceptable
-cache are unavailable, bundled cards fill the non-installed fallback catalog.
-`SKULK_OFFLINE=true` suppresses registry network refreshes entirely, retaining
-complete installed generations and using bundled cards only for the remaining
-catalog. Whenever the registry cannot be read, the last verified catalog is
-also read without its age limit, but only to associate installed artifacts
+limit never expires an installed artifact. Skulk ships no model cards; when a
+model is downloaded, so is its card. The catalog is the signed registry cards,
+the installed cards, and the custom cards. `SKULK_OFFLINE=true` (equivalently
+`skulk --offline`) suppresses registry network refreshes entirely, leaving
+complete installed generations and custom cards as the catalog. Whenever the
+registry cannot be read, the last verified catalog is also read without its
+age limit, but only to associate installed artifacts
 that predate their card records with the signed card they were downloaded
 with. The cached catalog is never listed or placed from; an artifact it
 matches gains its own installed-card record and from then on is listed and
 served like any installed model. Custom cards still load last and override
-every other source.
+every other source. A node that has never reached the registry and has no
+installed or custom card has an empty catalog and logs a warning naming the
+remedies: connect once, copy a model directory together with its
+`.skulk/installed-card.json`, or add a custom card. Curated cards are maintained
+in the `foxlight-model-registry` repository's `seed/cards/`, never in Skulk.
 
 A registry card separates its selectable `model_id` alias from
 `source_repository`. The alias is the fabric/store identity; metadata and byte
@@ -2511,6 +2515,7 @@ src/skulk/
 ├── shared/             # types, capability resolver, tracing, election
 │   ├── types/          # Pydantic models (events, commands, tasks, chunks, state, diagnostics)
 │   ├── models/         # ModelCard, ResolvedCapabilityProfile, capability resolution
+│   ├── tests/fixtures/model_cards/  # copies of registry cards, for tests only
 │   └── apply.py        # (State, IndexedEvent) → State
 ├── store/              # config, model store, custom card management
 ├── utils/              # event log, channels, dashboard path, common helpers
@@ -2521,8 +2526,9 @@ deployment/             # Vector + VictoriaLogs + Grafana docker-compose
 bench/                  # benchmark + repro harnesses
 docs/                   # operator guides, design docs, this file
 website/                # Docusaurus site that publishes the docs
-resources/
-└── inference_model_cards/  # built-in TOML model cards (gemma-4, qwen, etc.)
+resources/              # no model cards (curated cards live in foxlight-model-registry seed/cards/)
+├── model_registry/     # embedded TUF root for the signed card registry
+└── speech_reference_voices/  # packaged reference voice profiles
 rust/                   # Rust crates: networking (libp2p), skulk_pyo3_bindings, system_custodian
 ```
 

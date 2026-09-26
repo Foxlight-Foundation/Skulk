@@ -9708,7 +9708,7 @@ class API:
                 if card.is_custom
                 else "registry"
                 if card.registry_card_id is not None
-                else "bundled"
+                else "installed"
             ),
             remote_code_approval_required=remote_code_approval_required,
             remote_code_trust_identity=(

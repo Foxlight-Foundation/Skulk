@@ -323,7 +323,7 @@ function ModelGroupInfo({ group, title }: { group: ModelGroup; title: string }) 
           </>
         )}
         <span style={{ color: theme.colors.textMuted }}>{t('modelInfo.catalogSource', 'Catalog source')}</span>
-        <span>{v.catalog_source === 'registry' ? t('modelInfo.signedRegistry', 'Signed registry') : (v.catalog_source ?? 'bundled')}</span>
+        <span>{v.catalog_source === 'registry' ? t('modelInfo.signedRegistry', 'Signed registry') : v.catalog_source === 'custom' ? t('modelInfo.customCard', 'Custom card') : t('modelInfo.installedCard', 'Installed card')}</span>
         {v.registry_card_id && (
           <>
             <span style={{ color: theme.colors.textMuted }}>{t('modelInfo.registryCard', 'Registry card')}</span>
