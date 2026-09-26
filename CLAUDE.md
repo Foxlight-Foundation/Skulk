@@ -516,8 +516,10 @@ A model card's `placement.compatible_backends` selects which engine serves it
   runner itself rather than dispatched against nothing. Teardown
   signals the process group; worker startup sweeps init-parented servers
   launched with Skulk's `--user-directory`. Tags `comfy-cuda` and
-  `comfy-rocm` (the ROCm lane launches with `ROCM_LAUNCH_FLAGS`:
-  `--bf16-vae --disable-mmap --cache-none`); GPU-only, single-host. The
+  `comfy-rocm` (the ROCm lane launches with `ROCM_LAUNCH_FLAGS`
+  `--bf16-vae` plus `--cache-ram N`, N = 40% of host RAM, keeping models
+  resident without host-memory thrash, and `--disable-mmap` only for a
+  weight file above 64 GiB); GPU-only, single-host. The
   runner treats ComfyUI's `execution_success` socket event as success but
   reads the outputs from `/history` only once the entry exists: ComfyUI
   sends the event from inside its executor and records history after the
