@@ -901,8 +901,8 @@ def test_superseded_runtimes_are_removed_only_under_the_installer_fence(
         held.close()
     outcome = managed_services.prune_superseded_generations(root)
     assert outcome is not None
-    removed, freed = outcome
-    assert removed == 3 and freed >= 2048
+    assert outcome.removed == 3 and outcome.freed_bytes >= 2048
+    assert outcome.remaining == 0
     remaining = sorted(path.name for path in (root / "core-runtimes").iterdir())
     assert remaining == ["2" * 32, "3" * 32, "not-a-generation", "notes.txt"]
 
@@ -913,10 +913,14 @@ async def test_runtime_removal_runs_once_per_selected_generation(
     from skulk.extensions import managed_services
 
     root = _service_root_with_generations(tmp_path)
-    outcomes: list[tuple[int, int] | None] = [None, (2, 4096)]
+    outcomes: list[managed_services.RuntimePruneOutcome | None] = [
+        None,
+        managed_services.RuntimePruneOutcome(removed=1, freed_bytes=2048, remaining=1),
+        managed_services.RuntimePruneOutcome(removed=1, freed_bytes=2048, remaining=0),
+    ]
     calls: list[Path] = []
 
-    def prune(path: Path) -> tuple[int, int] | None:
+    def prune(path: Path) -> managed_services.RuntimePruneOutcome | None:
         calls.append(path)
         return outcomes.pop(0)
 
@@ -929,16 +933,26 @@ async def test_runtime_removal_runs_once_per_selected_generation(
     assert services.runtimes_pruned_for is None
     services._schedule_runtime_prune(root, "f" * 64)  # pyright: ignore[reportPrivateUsage]
     await services.runtime_prune
+    # One generation would not go: the pass is not done, so it runs again,
+    # but not before the retry wait: refreshes inside it start nothing.
+    assert services.runtimes_pruned_for is None
+    assert services.runtime_prune_retry_at > 0
+    services._schedule_runtime_prune(root, "f" * 64)  # pyright: ignore[reportPrivateUsage]
+    await services.runtime_prune
+    assert calls == [root, root]
+    services.runtime_prune_retry_at = 0.0
+    services._schedule_runtime_prune(root, "f" * 64)  # pyright: ignore[reportPrivateUsage]
+    await services.runtime_prune
     assert services.runtimes_pruned_for == "3" * 32
     # Once done for the selected generation, later refreshes do nothing.
     services._schedule_runtime_prune(root, "f" * 64)  # pyright: ignore[reportPrivateUsage]
     await services.runtime_prune
-    assert calls == [root, root]
+    assert calls == [root, root, root]
     # A build with no selected generation is not this manager's; nothing runs.
     services.runtimes_pruned_for = None
     services._schedule_runtime_prune(root, "0" * 64)  # pyright: ignore[reportPrivateUsage]
     await services.runtime_prune
-    assert calls == [root, root]
+    assert calls == [root, root, root]
 
 
 def test_a_legacy_manager_is_detected_from_its_selected_generation(
