@@ -118,7 +118,7 @@ export interface ModelInfo {
   capability_claims?: RegistryCapabilityClaim[];
   engine_support?: RegistryEngineSupportClaim[];
   catalog_source?: 'registry' | 'installed' | 'custom';
-  /** @deprecated Current cards are authorized by publication, addition, or bundled distribution. */
+  /** @deprecated Current cards are authorized by signed publication, explicit addition, or an installed card recorded from an earlier release. */
   remote_code_approval_required?: boolean;
   /** @deprecated Identity from the retired secondary approval ceremony. */
   remote_code_trust_identity?: string | null;

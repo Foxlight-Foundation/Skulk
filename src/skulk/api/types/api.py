@@ -260,7 +260,7 @@ class ModelListModel(BaseModel):
     registry_provenance: Literal["foxlight", "agent", "community"] | None = Field(
         default=None,
         description=(
-            "Audited signed-registry origin, or null for bundled and custom cards."
+            "Audited signed-registry origin, or null for custom cards and installed cards without a registry identity."
         ),
     )
     registry_architecture: str | None = Field(
@@ -351,7 +351,8 @@ class ModelListModel(BaseModel):
         default=False,
         description=(
             "Whether repository code is authorized by the card's signed "
-            "publication, explicit addition, or bundled distribution boundary."
+            "publication, its explicit addition, or an installed card recorded "
+            "from an earlier release."
         ),
     )
     source_revision: str | None = Field(

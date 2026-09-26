@@ -1371,14 +1371,22 @@ def ensure_installed_cards(
     root: Path,
     cards: Iterable[ModelCard],
     verified_detached_cache: VerifiedDetachedInstalledCardCache | None = None,
+    *,
+    fallback_root: Path = SKULK_INSTALLED_CARD_RECORDS_DIR,
 ) -> tuple[InstalledCardRecord, ...]:
     """Materialize missing sidecars for trusted, complete legacy directories.
+
+    Only a directory with no record at all is associated. One whose record no
+    longer matches its files has drifted: re-deriving a record from the
+    changed bytes would bless corruption or tampering, so it stays unresolved
+    until a download repairs it.
 
     Args:
         root: Launchable model-search root to inspect.
         cards: Trusted cards used to associate complete legacy artifacts.
         verified_detached_cache: Optional operator-inventory cache for detached
             records on read-only roots.
+        fallback_root: Directory holding detached records for read-only roots.
 
     Returns:
         The records written by this call, so an async caller can converge the
@@ -1389,21 +1397,28 @@ def ensure_installed_cards(
         return ()
     written: list[InstalledCardRecord] = []
     card_list = tuple(cards)
+    detached = _detached_records_by_path(fallback_root)
     for model_directory in root.iterdir():
         if not model_directory.is_dir() or model_directory.name.startswith("."):
             continue
         try:
-            existing = read_installed_card_with_fallback(
+            if installed_card_path(model_directory).exists() or detached.get(
+                str(model_directory.resolve())
+            ):
+                # Recorded, whether it still verifies or has drifted: never
+                # re-derive a record over an existing one.
+                continue
+            if read_installed_card_with_fallback(
                 model_directory,
                 verified_detached_cache=verified_detached_cache,
-            )
-            if existing is not None and verify_installed_card(
-                model_directory, existing
+                fallback_root=fallback_root,
             ):
                 continue
             record = associate_installed_card(model_directory, card_list)
             if record is not None:
-                write_installed_card_with_fallback(model_directory, record)
+                write_installed_card_with_fallback(
+                    model_directory, record, fallback_root=fallback_root
+                )
                 written.append(record)
         except (OSError, ValueError):
             continue
