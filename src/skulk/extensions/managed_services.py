@@ -4,12 +4,14 @@ import asyncio
 import contextlib
 import json
 import os
+import re
 import shutil
 import signal
 import sys
 import time
+from collections.abc import Set as AbstractSet
 from pathlib import Path
-from typing import Literal, final
+from typing import Final, Literal, final
 
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
@@ -19,6 +21,7 @@ from skulk.extensions.managed_attachment import (
     ManagedAttachment,
     manager_pids,
     manager_processes,
+    running_generations,
     runs_generation,
 )
 from skulk.extensions.runtime_artifacts import Digest, ProtocolUnsupportedError
@@ -27,7 +30,7 @@ from skulk.extensions.runtime_attachment import (
     ProfileIdentifier,
     ServiceConnection,
 )
-from skulk.extensions.runtime_files import read_private
+from skulk.extensions.runtime_files import RuntimeLock, read_private
 from skulk.extensions.runtime_manager import (
     CatalogInstallRequest,
     CatalogRegistration,
@@ -229,6 +232,110 @@ def staged_generation_for(root: Path, build: str) -> ServiceSnapshot | None:
     return None
 
 
+RETAINED_PREVIOUS_GENERATIONS: Final = 1
+"""Complete manager runtimes kept beside the selected one, newest first.
+
+Each generation is a full copy of the host's Skulk environment (about 1.7 GB
+on macOS), staged again on every Skulk update, so without a bound the
+service volume fills. One previous generation is kept for going back to the
+previous build by hand.
+"""
+
+_GENERATION_NAME = re.compile(r"[a-f0-9]{32}")
+
+
+def _staged_at(generation: Path) -> float:
+    try:
+        return (generation / "staged.json").stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def superseded_generations(root: Path, running: AbstractSet[str]) -> list[Path]:
+    """Manager runtime generations nothing uses any more, oldest first.
+
+    Kept: the selected generation, every generation a manager process still
+    runs from, and the newest ``RETAINED_PREVIOUS_GENERATIONS`` other complete
+    generations (a ``staged.json`` marks one complete). Everything else goes,
+    interrupted copies included: staging never activates them. Entries that
+    are not generation directories are left alone.
+
+    Args:
+        root: The manager's service root.
+        running: Generations running managers use (``running_generations``).
+
+    Returns:
+        The generation directories that may be removed.
+    """
+    generations = root / "core-runtimes"
+    try:
+        entries = [
+            path
+            for path in generations.iterdir()
+            if _GENERATION_NAME.fullmatch(path.name)
+            and path.is_dir()
+            and not path.is_symlink()
+        ]
+    except OSError:
+        return []
+    keep = set(running)
+    selected = selected_generation(root)
+    if selected is not None:
+        keep.add(selected)
+    previous = sorted(
+        (
+            path
+            for path in entries
+            if path.name not in keep and (path / "staged.json").is_file()
+        ),
+        key=_staged_at,
+        reverse=True,
+    )
+    keep.update(path.name for path in previous[:RETAINED_PREVIOUS_GENERATIONS])
+    return sorted((path for path in entries if path.name not in keep), key=_staged_at)
+
+
+def _tree_bytes(path: Path) -> int:
+    total = 0
+    for directory, _, files in os.walk(path):
+        for name in files:
+            with contextlib.suppress(OSError):
+                total += os.lstat(os.path.join(directory, name)).st_size
+    return total
+
+
+def prune_superseded_generations(root: Path) -> tuple[int, int] | None:
+    """Remove superseded manager runtimes under the installer fence.
+
+    Staging holds the same fence, so a copy in progress is never touched.
+    Removal is best effort: a generation that cannot be removed fully stays
+    and is tried again later.
+
+    Args:
+        root: The manager's service root.
+
+    Returns:
+        The number of generations removed and the bytes freed, or ``None``
+        when the fence is held elsewhere and nothing was examined.
+    """
+    try:
+        fence = RuntimeLock(root)
+    except BlockingIOError:
+        return None
+    try:
+        removed = 0
+        freed = 0
+        for generation in superseded_generations(root, running_generations(root)):
+            size = _tree_bytes(generation)
+            shutil.rmtree(generation, ignore_errors=True)
+            if not generation.exists():
+                removed += 1
+                freed += size
+        return removed, freed
+    finally:
+        fence.close()
+
+
 class ManagedInstallation(BaseModel):
     """Bounded local desired state and process observation, with no paths or secrets."""
 
@@ -345,6 +452,11 @@ class ManagedServices:
         # The selected generation the setup state was last reconciled with,
         # so an attached manager costs no file reads on every poll.
         self.setup_reconciled: str | None = None
+        # Superseded runtimes are removed once per selected generation, after
+        # a manager has attached on it, in the background: a copy is large,
+        # and the inventory refresh must not wait for its removal.
+        self.runtime_prune: asyncio.Task[None] | None = None
+        self.runtimes_pruned_for: str | None = None
         self.guard = asyncio.Lock()
         self.closed = False
 
@@ -579,6 +691,45 @@ class ManagedServices:
             return
         self.setup_reconciled = selected.generation
 
+    def _schedule_runtime_prune(self, root: Path, build: str) -> None:
+        """Remove superseded runtimes once the manager runs this build's selection."""
+        if self.closed or (
+            self.runtime_prune is not None and not self.runtime_prune.done()
+        ):
+            return
+        selected = selected_generation_for(root, build)
+        if selected is None or self.runtimes_pruned_for == selected.generation:
+            return
+        self.runtime_prune = asyncio.create_task(
+            self._prune_runtimes(root, selected.generation)
+        )
+
+    async def _prune_runtimes(self, root: Path, generation: str) -> None:
+        try:
+            outcome = await asyncio.to_thread(prune_superseded_generations, root)
+        except (OSError, ValueError) as error:
+            logger.warning(
+                "superseded plugin manager runtimes not removed: "
+                f"{type(error).__name__}; tried again on a later refresh"
+            )
+            return
+        if outcome is None:
+            # Staging or an install holds the fence; the next refresh retries.
+            return
+        self.runtimes_pruned_for = generation
+        removed, freed = outcome
+        if removed:
+            logger.info(
+                f"removed {removed} superseded plugin manager runtime"
+                f"{'' if removed == 1 else 's'} ({freed / 2**30:.1f} GiB)"
+            )
+
+    async def _settle_runtime_prune(self) -> None:
+        """Let a removal in its worker thread finish rather than abandon it."""
+        task, self.runtime_prune = self.runtime_prune, None
+        if task is not None and not task.done():
+            await asyncio.gather(task, return_exceptions=True)
+
     async def request(self, request: ManagementRequest) -> dict[str, JsonValue]:
         """Send one typed local management request; never accept an attachment override.
 
@@ -617,6 +768,9 @@ class ManagedServices:
                 assert self.attachment is not None
                 if self.attachment.build is not None:
                     await self._reconcile_setup_state(
+                        Path(self.connection.manager_root), self.attachment.build
+                    )
+                    self._schedule_runtime_prune(
                         Path(self.connection.manager_root), self.attachment.build
                     )
                 result = await manager_request(
@@ -710,6 +864,7 @@ class ManagedServices:
 
     async def _detach(self) -> None:
         await self._settle_runtime_refresh()
+        await self._settle_runtime_prune()
         owners, self.owners = tuple(self.owners.values()), {}
         await asyncio.gather(*(owner.on_stop() for owner in owners))
         if self.attachment is not None:
@@ -727,5 +882,6 @@ class ManagedServices:
             await asyncio.gather(self.task, return_exceptions=True)
             self.task = None
         await self._settle_runtime_refresh()
+        await self._settle_runtime_prune()
         async with self.guard:
             await self._detach()
