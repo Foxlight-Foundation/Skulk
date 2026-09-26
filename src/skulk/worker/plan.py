@@ -4,6 +4,7 @@ from collections.abc import Mapping, Sequence, Set
 
 from skulk.shared.models.capabilities import is_gemma4_family
 from skulk.shared.models.model_cards import same_model_artifact
+from skulk.shared.models.remote_code_approval import MODEL_TRUST_FAILURE_MARKER
 from skulk.shared.types.chunks import InputImageChunk
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.tasks import (
@@ -53,6 +54,7 @@ from skulk.shared.types.worker.runners import (
     RunnerWarmingUp,
 )
 from skulk.shared.types.worker.shards import RpcDonorShardMetadata, ShardMetadata
+from skulk.worker.runner.bootstrap import WEDGE_FAILURE_MARKER
 from skulk.worker.runner.runner_supervisor import RunnerSupervisor
 
 
@@ -99,6 +101,21 @@ def plan(
     )
 
 
+def _retried_on_failure(status: RunnerStatus) -> bool:
+    """Whether a local runner's failure goes through shutdown and relaunch.
+
+    A GPU wedge and a model-trust refusal are terminal for the instance: the
+    worker gives the instance up as soon as it observes them, because
+    relaunching into either repeats the failure (a wedge also leaks wired GPU
+    memory each time). Every other failure is a crash the worker's circuit
+    breaker relaunches and, past its threshold, gives up.
+    """
+    if not isinstance(status, RunnerFailed):
+        return False
+    message = status.error_message or ""
+    return WEDGE_FAILURE_MARKER not in message and MODEL_TRUST_FAILURE_MARKER not in message
+
+
 def _kill_runner(
     runners: Mapping[RunnerId, RunnerSupervisor],
     all_runners: Mapping[RunnerId, RunnerStatus],
@@ -107,6 +124,13 @@ def _kill_runner(
     for runner in runners.values():
         runner_id = runner.bound_instance.bound_runner_id
         if (instance_id := runner.bound_instance.instance.instance_id) not in instances:
+            return Shutdown(instance_id=instance_id, runner_id=runner_id)
+
+        # This node's own runner failed. Nothing else would shut it down: the
+        # peer check below skips the runner itself, so a single-node instance
+        # whose runner died kept a dead supervisor behind a live instance,
+        # never relaunched and never failed.
+        if _retried_on_failure(runner.status):
             return Shutdown(instance_id=instance_id, runner_id=runner_id)
 
         for (

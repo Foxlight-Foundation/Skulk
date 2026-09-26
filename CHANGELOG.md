@@ -90,6 +90,14 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- A single-node placement whose runner dies is relaunched, and given up
+  with a recorded failure if it keeps dying, instead of staying dead behind
+  a live instance. Only a peer's failure used to shut a runner down, so a
+  one-node runner killed or crashed outside a GPU wedge left the placement
+  serving nothing, never retried and never failed, until someone deleted it.
+  The shutdown of a runner that already died no longer waits out its
+  15-second acknowledgement deadline.
+
 - The plugin service no longer keeps a full copy of Skulk for every update.
   Each Skulk update stages a new manager runtime of about 1.7 GB, and none
   was ever removed; one capability host held eleven. Once the manager runs
