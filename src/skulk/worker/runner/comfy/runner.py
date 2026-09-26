@@ -17,9 +17,11 @@ import hashlib
 import os
 import shutil
 import time
+from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
 from typing import Any, Final, cast, final
 
+import psutil
 from loguru import logger
 from PIL import Image
 
@@ -93,16 +95,40 @@ _HASH_CHUNK: Final = 1 << 20
 _THUMBNAIL_QUALITY: Final = 85
 
 
-ROCM_LAUNCH_FLAGS: Final[tuple[str, ...]] = ("--bf16-vae", "--disable-mmap", "--cache-none")
+ROCM_LAUNCH_FLAGS: Final[tuple[str, ...]] = ("--bf16-vae",)
 """ComfyUI flags for the ROCm lane, validated for H3 on Strix Halo (gfx1151).
 
-``--disable-mmap`` because safetensors memory-mapping of a checkpoint above
-64 GB is pathologically slow through the unified-memory path; ``--bf16-vae``
-because the fp32 VAE decode of a 768p clip does not fit beside the
-transformer; ``--cache-none`` so node outputs are not retained between
-renders on a host whose GPU memory is the system's. No attention flag:
-ComfyUI's default SDPA path already selects the wheel set's flash-class
-kernel on gfx1151 (measured against the math path on the hardware).
+``--bf16-vae`` because the fp32 VAE decode of a 768p clip does not fit beside
+the transformer. Weights are memory-mapped (below ``ROCM_MMAP_CEILING_BYTES``)
+and models stay resident between renders under ComfyUI's RAM-pressure cache,
+with the headroom from ``ROCM_CACHE_RAM_HEADROOM_FRACTION`` added at launch.
+No attention flag: ComfyUI's default SDPA path already selects the wheel
+set's flash-class kernel on gfx1151 (measured against the math path on the
+hardware).
+"""
+
+
+ROCM_CACHE_RAM_HEADROOM_FRACTION: Final = 0.4
+"""Share of host RAM ComfyUI's cache keeps free on the ROCm lane (``--cache-ram``).
+
+A HIP allocation on a unified-memory APU comes out of host RAM, so the cached
+models and the running render compete for it. At ComfyUI's default headroom
+(10%) a new prompt made the text encoder and the transformer evict each other:
+on gfx1151 with 61 GiB of host RAM a warm 480x480 four-step H3 render took 180
+to 300 s, worse than rebuilding every model per prompt (about 210 s). Keeping
+40% free (24 GiB there) holds the models resident without that fight: a warm
+render with a new prompt takes about 105 s, the turbo LoRA is applied once
+rather than every step, and host memory peaks lower. Outputs agree with the
+rebuilt path as closely as that path agrees with itself run to run.
+"""
+
+
+ROCM_MMAP_CEILING_BYTES: Final = 64 * 1024**3
+"""Largest weight file the ROCm lane memory-maps.
+
+Memory-mapping a safetensors file above 64 GB through the unified-memory
+path is pathologically slow, so a card with such a file launches with
+``--disable-mmap``; the pruned H3 files (the largest is 21 GB) map.
 """
 
 
@@ -142,13 +168,27 @@ def _is_rocm_lane(resolved_backend: str | None) -> bool:
     return backend is not None and backend.endswith("-rocm")
 
 
-def launch_flags(resolved_backend: str | None) -> tuple[str, ...]:
-    """Extra ComfyUI flags for the node's compute backend.
+def launch_flags(
+    resolved_backend: str | None,
+    weight_files: Iterable[Path] = (),
+    total_ram_bytes: int | None = None,
+) -> tuple[str, ...]:
+    """Extra ComfyUI flags for the node's compute backend and the card's weights.
 
-    The ROCm lane adds ``ROCM_LAUNCH_FLAGS`` and every other lane, CUDA,
-    adds ``CUDA_LAUNCH_FLAGS``.
+    The ROCm lane adds ``ROCM_LAUNCH_FLAGS``, the RAM-pressure cache headroom
+    (``ROCM_CACHE_RAM_HEADROOM_FRACTION`` of ``total_ram_bytes``, the host's
+    RAM when omitted, in whole GiB), and ``--disable-mmap`` when any of
+    ``weight_files`` is larger than ``ROCM_MMAP_CEILING_BYTES``; every other
+    lane, CUDA, adds ``CUDA_LAUNCH_FLAGS``.
     """
-    return ROCM_LAUNCH_FLAGS if _is_rocm_lane(resolved_backend) else CUDA_LAUNCH_FLAGS
+    if not _is_rocm_lane(resolved_backend):
+        return CUDA_LAUNCH_FLAGS
+    ram = total_ram_bytes if total_ram_bytes is not None else psutil.virtual_memory().total
+    headroom_gib = max(1, int(ram * ROCM_CACHE_RAM_HEADROOM_FRACTION / 1024**3))
+    flags = (*ROCM_LAUNCH_FLAGS, "--cache-ram", str(headroom_gib))
+    if any(path.stat().st_size > ROCM_MMAP_CEILING_BYTES for path in weight_files):
+        return (*flags, "--disable-mmap")
+    return flags
 
 
 def _configured_install() -> tuple[Path, Path]:
@@ -392,14 +432,18 @@ class Runner(ServedConcurrentDispatch):
         interpreter, root = _configured_install()
         model_dir = _model_directory(self.card)
         files = resolve_model_files(self.card)
+        weight_files: list[Path] = []
         for folder, name in (
             ("diffusion_models", files.diffusion_model),
             ("text_encoders", files.text_encoder),
             ("vae", files.video_vae),
             ("vae", files.audio_vae),
         ):
-            if name is not None and not (model_dir / folder / name).is_file():
+            if name is None:
+                continue
+            if not (model_dir / folder / name).is_file():
                 raise RuntimeError(f"{self.model_id}: {folder}/{name} is missing from {model_dir}")
+            weight_files.append(model_dir / folder / name)
         self.work_dir.mkdir(parents=True, exist_ok=True)
         extra_paths = self.work_dir / "extra_model_paths.yaml"
         extra_paths.write_text(extra_model_paths_yaml(model_dir, _companion_directories(self.card)))
@@ -412,7 +456,7 @@ class Runner(ServedConcurrentDispatch):
             temp_dir=self.work_dir / "temp",
             user_dir=self.work_dir / "user",
             log_path=self.work_dir / "server.log",
-            extra_args=launch_flags(self.shard_metadata.resolved_backend),
+            extra_args=launch_flags(self.shard_metadata.resolved_backend, weight_files),
         )
         server.start()
         self.server = server

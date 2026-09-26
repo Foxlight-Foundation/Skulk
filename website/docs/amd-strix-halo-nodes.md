@@ -350,11 +350,18 @@ that no engine is expected and provisions nothing). Those wheels bundle their ow
 runtime, so unlike the Vulkan path above nothing from a system ROCm install is
 used; the amdgpu kernel driver and membership in the `render` and `video`
 groups are enough. The node then advertises `comfy-rocm` and H3 cards place
-on it. The runner launches ComfyUI with `--bf16-vae --disable-mmap
---cache-none`, the flags validated on gfx1151: memory-mapping a checkpoint
-above 64 GB through unified memory is pathologically slow, and the fp32 VAE
-decode does not fit beside the transformer. One server stays warm across
-renders, so only the first render after placement pays the model load. The
+on it. The runner launches ComfyUI with `--bf16-vae`, because the fp32 VAE
+decode does not fit beside the transformer, and adds `--disable-mmap` only
+for a card with a weight file above 64 GB, since memory-mapping one that
+large through unified memory is pathologically slow (the pruned H3 files
+map). One server stays warm across renders and keeps its models resident
+under ComfyUI's RAM-pressure cache, told to keep 40% of host RAM free
+(`--cache-ram`, 24 GiB on a node with 61 GiB of host RAM), so only the first
+render after placement pays the model load. That headroom matters: a HIP
+allocation on this APU comes out of host RAM, and at ComfyUI's default 10%
+the text encoder and the transformer evicted each other on every new prompt.
+On gfx1151 a warm 480x480 four-step render with a new prompt takes about
+105 s, against about 210 s when every model is rebuilt per prompt. The
 wheel set matters here: the rocm7.2 torch wheel from the PyTorch index, the
 lane's first set, shipped gfx1151 BLAS libraries missing GEMM kernels that
 keyframe and reference prompts reach (a single-precision batched GEMM in
