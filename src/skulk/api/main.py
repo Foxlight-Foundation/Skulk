@@ -3702,11 +3702,27 @@ class API:
                     return True
             return False
 
-        vulkan_claims = tuple(
+        claims = tuple(
             claim for claim in get_model_engine_support(card)
-            if claim.status == "supported" and claim.engine == "audio_cpp-vulkan"
+            if claim.status == "supported"
         )
-        candidates: list[tuple[bool, int, NodeId, Literal["cpu", "vulkan"]]] = []
+
+        def claim_matches(lane: str, classes: frozenset[str]) -> bool:
+            """Limit preparation to lanes supported by signed hardware claims."""
+            return any(
+                claim.engine == lane
+                and (
+                    not claim.hardware_classes
+                    or bool(set(claim.hardware_classes) & classes)
+                )
+                for claim in claims
+            )
+
+        variant_lanes: dict[Literal["cpu", "vulkan"], frozenset[str]] = {
+            "cpu": frozenset({"audio_cpp-cpu", "audio_cpp-metal"}),
+            "vulkan": frozenset({"audio_cpp-vulkan"}),
+        }
+        candidates: list[tuple[int, bool, int, NodeId, Literal["cpu", "vulkan"]]] = []
         for node_id in self.state.topology.list_nodes():
             if node_id in excluded_nodes or (
                 required_nodes is not None and node_id not in required_nodes
@@ -3732,26 +3748,25 @@ class API:
             )
             if not supported_host:
                 continue
-            vulkan_claim_matches = (
+            variants: list[Literal["cpu", "vulkan"]] = []
+            if (
                 "platform:linux" in platform_classes
                 and architecture in {"x86_64", "amd64"}
-                and any(
-                    not claim.hardware_classes
-                    or bool(set(claim.hardware_classes) & platform_classes)
-                    for claim in vulkan_claims
+                and claim_matches("audio_cpp-vulkan", platform_classes)
+            ):
+                variants.append("vulkan")
+            if any(
+                claim_matches(lane, platform_classes)
+                for lane in variant_lanes["cpu"]
+            ):
+                variants.append("cpu")
+            for variant in variants:
+                ready = any(
+                    backend in resources.engine_builds
+                    for backend in resources.backends & variant_lanes[variant]
                 )
-            )
-            variant: Literal["cpu", "vulkan"] = (
-                "vulkan" if vulkan_claim_matches else "cpu"
-            )
-            ready = any(
-                backend.startswith("audio_cpp-")
-                and backend in resources.engine_builds
-                and (variant != "vulkan" or backend == "audio_cpp-vulkan")
-                for backend in resources.backends
-            )
-            candidates.append((ready, available, node_id, variant))
-        candidates.sort(key=lambda item: (item[0], item[1], str(item[2])), reverse=True)
+                candidates.append((2 if variant == "vulkan" else 1, ready, available, node_id, variant))
+        candidates.sort(key=lambda item: (item[0], item[1], item[2], str(item[3])), reverse=True)
         if not candidates:
             raise HTTPException(
                 status_code=503,
@@ -3762,7 +3777,7 @@ class API:
                 ),
             )
         errors: list[str] = []
-        for ready, _memory, node_id, variant in candidates:
+        for _priority, ready, _memory, node_id, variant in candidates:
             if ready:
                 resources = self._telemetry_view.node_resources.get(node_id)
                 supported: frozenset[str] = frozenset()
@@ -3772,7 +3787,7 @@ class API:
                         node_backends=resources.backends,
                         engine_builds=resources.engine_builds,
                         hardware_classes=resources.hardware_classes,
-                    )
+                    ) & variant_lanes[variant]
                 if not supported:
                     errors.append(f"{node_id}: no supported signed music claim matches its ready engine build and hardware")
                     continue
@@ -3798,10 +3813,8 @@ class API:
                     continue
                 fresh = result.resources
                 if result.target_node != node_id or fresh is None or not any(
-                    backend.startswith("audio_cpp-")
-                    and backend in fresh.engine_builds
-                    and (variant != "vulkan" or backend == "audio_cpp-vulkan")
-                    for backend in fresh.backends
+                    backend in fresh.engine_builds
+                    for backend in fresh.backends & variant_lanes[variant]
                 ):
                     errors.append(f"{node_id}: preparation returned no verified ready resources")
                     continue
@@ -3810,7 +3823,7 @@ class API:
                     node_backends=fresh.backends,
                     engine_builds=fresh.engine_builds,
                     hardware_classes=fresh.hardware_classes,
-                )
+                ) & variant_lanes[variant]
                 if not supported:
                     errors.append(f"{node_id}: no supported signed music claim matches the prepared build and hardware")
                     continue

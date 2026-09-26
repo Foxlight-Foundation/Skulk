@@ -975,8 +975,9 @@ The facts probe checks both pinned model specs; a standalone binary may name
 its specs through `SKULK_AUDIO_CPP_SPECS_DIR`. Only then can the node publish
 ready audio.cpp lanes for restored instances.
 
-Music mounting chooses a package variant from the signed support claim and
-observed hardware, then sends a targeted `PrepareAudioCpp` command carrying
+Music mounting ranks package variants with signed support claims for the
+observed hardware. If accelerator preparation fails, a separately claimed CPU
+variant on that node remains eligible. The API sends a targeted `PrepareAudioCpp` command carrying
 that variant to an eligible worker,
 including when the API already sees a ready package. `AudioCppPreparationRequested`
 and `AudioCppPreparationCompleted` report the lifecycle; the worker verifies

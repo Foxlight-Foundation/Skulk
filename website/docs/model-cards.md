@@ -389,6 +389,9 @@ will place it. Installing the audio.cpp package alone grants no model support.
 Music placement resolves a concrete `audio_cpp-cpu`, `audio_cpp-metal`,
 `audio_cpp-vulkan`, `audio_cpp-cuda`, or `audio_cpp-rocm` lane. The bare
 `audio_cpp` tag reports engine availability but cannot select a music runner.
+The [Strix Vulkan qualification record](audio-cpp-strix-qualification.md)
+documents the exact build, hardware class, and initial card results behind
+that lane's claims.
 
 ### `[video]`
 

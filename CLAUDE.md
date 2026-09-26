@@ -269,7 +269,8 @@ their own `[music]` section and require exact signed support claims. The
 Silicon macOS and Linux amd64/arm64 plus a separate Linux amd64 Vulkan package
 from the pinned source. `PrepareAudioCpp` carries the selected package variant;
 the API chooses Vulkan only when a matching signed support claim applies to
-the node's hardware. AMD sysfs PCI IDs produce stable chip-class identifiers
+the node's hardware, and can fall back to CPU only with its own signed claim.
+AMD sysfs PCI IDs produce stable chip-class identifiers
 (`amd:pci-1002-1586` on Strix Halo) for claim selection before preparation.
 Music model weights
 are separate immutable downloads.
