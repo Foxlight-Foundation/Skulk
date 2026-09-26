@@ -65,6 +65,22 @@ def test_missing_cuda_libraries_have_actionable_probe_diagnostic(tmp_path: Path)
     assert "install the host CUDA 12 runtime, cuBLAS, and NCCL" in (probe.detail or "")
 
 
+def test_non_cuda_loader_failure_keeps_its_original_diagnostic(tmp_path: Path) -> None:
+    """A CPU or Vulkan loader error must not suggest installing CUDA."""
+    binary = tmp_path / "audiocpp_server"
+    binary.write_text(
+        "#!/bin/sh\n"
+        "echo 'error while loading shared libraries: libcurl.so.4: "
+        "cannot open shared object file' >&2\n"
+        "exit 127\n"
+    )
+    binary.chmod(0o755)
+    probe = probe_audio_cpp(str(binary))
+    assert probe.outcome == "failed"
+    assert "libcurl.so.4" in (probe.detail or "")
+    assert "CUDA loader" not in (probe.detail or "")
+
+
 def test_pinned_binary_probe_and_build_inventory(tmp_path: Path) -> None:
     """Ready tags and exact build identity come from the same executable."""
     binary = _fake_server(tmp_path / "bin" / "audiocpp_server")

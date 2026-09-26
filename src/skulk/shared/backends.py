@@ -173,6 +173,10 @@ AUDIO_CPP_VULKAN_BIN_ENV: Final = "SKULK_AUDIO_CPP_VULKAN_BIN"
 AUDIO_CPP_CUDA_BIN_ENV: Final = "SKULK_AUDIO_CPP_CUDA_BIN"
 AUDIO_CPP_SPECS_DIR_ENV: Final = "SKULK_AUDIO_CPP_SPECS_DIR"
 AUDIO_CPP_BACKENDS_ENV: Final = "SKULK_AUDIO_CPP_BACKENDS"
+GB10_AUDIO_CPP_CUDA_BUILD: Final = (
+    "audio.cpp@sha256:21db727c1f2ec030b93cabffbd09e3c522ceb77fa2ae1092cd96a0f4b0120c9c"
+)
+"""Exact SM 12.1 package build; broad CUDA claims cannot authorize this binary."""
 
 # ComfyUI compute backends Skulk advertises: NVIDIA CUDA and AMD ROCm.
 _COMFY_COMPUTE_BACKENDS: Final[tuple[ComputeBackend, ...]] = ("cuda", "rocm")

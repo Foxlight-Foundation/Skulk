@@ -8,7 +8,11 @@ from pydantic import ValidationError
 
 import skulk.shared.models.model_cards as model_cards_module
 from skulk.api.types.api import MusicCapabilitySection
-from skulk.shared.backends import platform_compatible_backends, resolve_node_backend
+from skulk.shared.backends import (
+    GB10_AUDIO_CPP_CUDA_BUILD,
+    platform_compatible_backends,
+    resolve_node_backend,
+)
 from skulk.shared.constants import RESOURCES_DIR
 from skulk.shared.models.model_cards import (
     ModelCard,
@@ -290,3 +294,41 @@ def test_music_signed_support_omits_aggregate_engine_tag(
         },
         hardware_classes=frozenset(),
     ) == frozenset({"audio_cpp-cuda", "audio_cpp-cpu"})
+
+
+@pytest.mark.parametrize(
+    ("claim_classes", "node_classes", "supported"),
+    [
+        ((), ("nvidia:sm-12.1",), False),
+        (("nvidia",), ("nvidia:sm-12.1", "nvidia"), False),
+        (("nvidia:sm-12.1",), ("nvidia:sm-9.0",), False),
+        (("nvidia:sm-12.1",), ("nvidia:sm-12.1",), True),
+    ],
+)
+def test_managed_gb10_build_requires_exact_signed_sm_even_for_ready_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    claim_classes: tuple[str, ...],
+    node_classes: tuple[str, ...],
+    supported: bool,
+) -> None:
+    """Normal placement cannot use a broad claim for the cached SM 12.1 wheel."""
+    claim = RegistryEngineSupportClaim.model_construct(
+        status="supported", engine="audio_cpp-cuda",
+        engine_build=GB10_AUDIO_CPP_CUDA_BUILD,
+        capability_id="music.generate", hardware_classes=claim_classes,
+    )
+
+    def required(_card: ModelCard) -> frozenset[str]:
+        return frozenset({"music.generate"})
+
+    def claims(_card: ModelCard) -> tuple[RegistryEngineSupportClaim, ...]:
+        return (claim,)
+
+    monkeypatch.setattr(model_cards_module, "get_model_required_capabilities", required)
+    monkeypatch.setattr(model_cards_module, "get_model_engine_support", claims)
+    resolved = registry_supported_backends_for_node(
+        _card(), node_backends=frozenset({"audio_cpp", "audio_cpp-cuda"}),
+        engine_builds={"audio_cpp-cuda": GB10_AUDIO_CPP_CUDA_BUILD},
+        hardware_classes=frozenset(node_classes),
+    )
+    assert ("audio_cpp-cuda" in resolved) is supported

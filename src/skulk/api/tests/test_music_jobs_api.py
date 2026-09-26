@@ -26,6 +26,7 @@ from skulk.api.types.api import (
 )
 from skulk.api.video_store import VideoStore
 from skulk.routing.output_media import OutputMediaPacket
+from skulk.shared.backends import GB10_AUDIO_CPP_CUDA_BUILD
 from skulk.shared.models.model_cards import ModelCard, ModelId
 from skulk.shared.topology import Topology
 from skulk.shared.types.chunks import MusicChunk
@@ -281,16 +282,18 @@ async def test_gb10_cuda_claim_prepares_arm64_gpu_variant(
 
 
 @pytest.mark.parametrize(
-    ("live_sm", "claim_class", "expected_variant"),
+    ("live_sm", "claim_class", "cached_build", "expected_variant"),
     [
-        ("nvidia:sm-12.1", "nvidia", "cpu"),
-        ("nvidia:sm-9.0", "nvidia:sm-12.1", None),
+        ("nvidia:sm-12.1", "nvidia", False, "cpu"),
+        ("nvidia:sm-12.1", "nvidia", True, None),
+        ("nvidia:sm-9.0", "nvidia:sm-12.1", False, None),
     ],
 )
 async def test_dedicated_gb10_wheel_requires_exact_signed_sm(
     monkeypatch: pytest.MonkeyPatch,
     live_sm: str,
     claim_class: str,
+    cached_build: bool,
     expected_variant: str | None,
 ) -> None:
     """A broad or mismatched claim cannot select the SM 12.1 CUDA package."""
@@ -298,7 +301,15 @@ async def test_dedicated_gb10_wheel_requires_exact_signed_sm(
     topology = Topology()
     topology.add_node(node)
     resources = NodeResources(
-        backends=frozenset(), architecture="aarch64",
+        backends=(
+            frozenset({"audio_cpp", "audio_cpp-cuda"})
+            if cached_build else frozenset()
+        ),
+        engine_builds=(
+            {"audio_cpp-cuda": GB10_AUDIO_CPP_CUDA_BUILD}
+            if cached_build else {}
+        ),
+        architecture="aarch64",
         hardware_classes=frozenset({"platform:linux", "nvidia", live_sm}),
     )
     memory = MemoryUsage.from_bytes(

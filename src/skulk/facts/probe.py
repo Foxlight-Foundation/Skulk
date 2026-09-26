@@ -96,7 +96,16 @@ def probe_audio_cpp(binary: str) -> AudioCppProbe:
         return AudioCppProbe(outcome="failed", detail=str(error)[:400])
     if version.returncode or devices.returncode:
         detail = (version.stderr + devices.stderr).strip() or "probe exited nonzero"
-        if "error while loading shared libraries" in detail:
+        if "error while loading shared libraries" in detail and any(
+            library in detail
+            for library in (
+                "libcudart.so",
+                "libcublas.so",
+                "libcublasLt.so",
+                "libnccl.so",
+                "libcuda.so",
+            )
+        ):
             detail = (
                 "audio.cpp CUDA loader failed; install the host CUDA 12 runtime, "
                 "cuBLAS, and NCCL libraries: " + detail

@@ -281,7 +281,9 @@ Music model weights are separate immutable downloads. The dedicated arm64 CUDA w
 for GB10 SM 12.1 and requires both that observed hardware class and a signed
 claim naming it. CUDA 12 runtime, cuBLAS, NCCL, and NVIDIA driver libraries
 must be on the host loader path; the binary probe reports missing libraries
-before advertising the lane.
+before advertising the lane. Signed support resolution also requires the
+exact class for this build after cache restore; CPU preparation does not
+reuse the dedicated CUDA wheel as a primary override.
 The bare `audio_cpp` tag reports availability; music support claims and runner
 placement select a concrete compute lane so memory and device choice agree.
 Music mounting uses targeted `PrepareAudioCpp` even for a package already

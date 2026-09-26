@@ -361,7 +361,11 @@ from skulk.routing.speech_media import SpeechMediaPacket
 from skulk.routing.trace_data import TraceDataPacket
 from skulk.routing.vision_media import VisionMediaPacket
 from skulk.shared.apply import apply
-from skulk.shared.backends import AUDIO_CPP_COMPUTE_BACKENDS, engine_of
+from skulk.shared.backends import (
+    AUDIO_CPP_COMPUTE_BACKENDS,
+    GB10_AUDIO_CPP_CUDA_BUILD,
+    engine_of,
+)
 from skulk.shared.constants import (
     DASHBOARD_DIR,
     SKULK_CACHE_HOME,
@@ -3742,6 +3746,19 @@ class API:
             "vulkan": frozenset({"audio_cpp-vulkan"}),
             "cuda": frozenset({"audio_cpp-cuda"}),
         }
+
+        def candidate_lanes(
+            variant: Literal["cpu", "vulkan", "cuda"], resources: NodeResources
+        ) -> frozenset[str]:
+            """Keep the dedicated SM 12.1 wheel out of primary CPU preparation."""
+            lanes = variant_lanes[variant]
+            if (
+                variant == "cpu"
+                and resources.engine_builds.get("audio_cpp-cuda")
+                == GB10_AUDIO_CPP_CUDA_BUILD
+            ):
+                return lanes - {"audio_cpp-cuda"}
+            return lanes
         candidates: list[
             tuple[int, bool, int, NodeId, Literal["cpu", "vulkan", "cuda"]]
         ] = []
@@ -3790,7 +3807,7 @@ class API:
             ):
                 variants.append("cpu")
             for variant in variants:
-                lanes = variant_lanes[variant]
+                lanes = candidate_lanes(variant, resources)
                 if requested_backend is not None:
                     lanes &= {requested_backend}
                 if not lanes or not any(
@@ -3815,7 +3832,10 @@ class API:
             )
         errors: list[str] = []
         for _priority, ready, _memory, node_id, variant in candidates:
-            lanes = variant_lanes[variant]
+            resources = self._telemetry_view.node_resources.get(node_id)
+            if resources is None:
+                continue
+            lanes = candidate_lanes(variant, resources)
             if requested_backend is not None:
                 lanes &= {requested_backend}
             if ready:
@@ -3852,6 +3872,10 @@ class API:
                     errors.append(f"{node_id}: {result.error or 'preparation failed'}")
                     continue
                 fresh = result.resources
+                if fresh is not None:
+                    lanes = candidate_lanes(variant, fresh)
+                    if requested_backend is not None:
+                        lanes &= {requested_backend}
                 if result.target_node != node_id or fresh is None or not any(
                     backend in fresh.engine_builds
                     for backend in fresh.backends & lanes

@@ -972,6 +972,8 @@ not qualify a model for every NVIDIA GPU. Its GB10 variant requires an
 observed `nvidia:sm-12.1` class and a signed claim explicitly naming that
 class before preparation. CUDA 12 runtime, cuBLAS, NCCL, and the NVIDIA driver
 must be on the host loader path; the binary probe exposes missing libraries.
+Signed support resolution applies the same exact class rule to a restored
+wheel, so a generic claim cannot reuse it through the CPU preparation path.
 The cache retains the SHA-256-pinned wheel and compares every extracted runtime
 file with its archive member; an editable cache record cannot establish integrity.
 Upstream's short revision output is accepted only for this verified wheel;
