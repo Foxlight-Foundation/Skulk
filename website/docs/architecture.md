@@ -1825,7 +1825,11 @@ limit never expires an installed artifact. If registry access and its acceptable
 cache are unavailable, bundled cards fill the non-installed fallback catalog.
 `SKULK_OFFLINE=true` suppresses registry network refreshes entirely, retaining
 complete installed generations and using bundled cards only for the remaining
-catalog. Custom cards still load last and override every other source.
+catalog. Whenever the registry cannot be read, the last verified catalog is
+also read without its age limit, but only to associate installed artifacts
+that predate their card records with the signed card they were downloaded
+with; those cards are never listed or placed. Custom cards still load last and
+override every other source.
 
 A registry card separates its selectable `model_id` alias from
 `source_repository`. The alias is the fabric/store identity; metadata and byte
