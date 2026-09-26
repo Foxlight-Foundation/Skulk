@@ -14227,6 +14227,10 @@ class API:
         # standalone connectivity endpoint reports whichever node served the
         # HTTP request, which is wrong when browsing another node).
         tailscale = await self._tailscale_diagnostics()
+        # Doctor checks read the filesystem (the installed-card audit walks
+        # every model directory) and some run subprocesses, so they run off
+        # the event loop rather than stalling inference and control traffic.
+        doctor_results = await to_thread.run_sync(run_checks, current_node_facts())
 
         supervisor_runners = self._collect_runner_supervisor_diagnostics()
         placements = self._placement_diagnostics()
@@ -14288,7 +14292,7 @@ class API:
                 DoctorCheckDiagnostics.model_validate(
                     result.model_dump(mode="json", by_alias=False)
                 )
-                for result in run_checks(current_node_facts())[:64]
+                for result in doctor_results[:64]
             ],
             warnings=sorted(warnings),
             tailscale=tailscale,
