@@ -1194,3 +1194,57 @@ def test_unrecorded_artifacts_count_a_detached_record_without_hashing(
     # Without the detached record the same directory is unrecorded.
     bare = find_unrecorded_artifacts([root], fallback_root=tmp_path / "none")
     assert [path.name for path in bare.complete] == ["org--model"]
+
+
+def test_association_never_re_derives_a_drifted_record(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A record that no longer matches its files is drift, not a missing record.
+
+    Re-deriving one from the changed bytes would bless corruption, even with
+    the revision marker intact; the directory stays unresolved instead.
+    """
+
+    from skulk.store.artifact_inventory import associate_installed_artifacts
+
+    card = _card()
+    assert card.source_revision is not None
+    root = tmp_path / "models"
+    artifact = root / f"org--model--revision-{card.source_revision}"
+    artifact.mkdir(parents=True)
+    (artifact / "config.json").write_text("{}")
+    (artifact / "model.safetensors").write_bytes(b"weights")
+    (artifact / ".skulk-source-revision").write_text(f"{card.source_revision}\n")
+    fallback_root = tmp_path / "records"
+    original = build_installed_card_record(artifact, card)
+    write_installed_card(artifact, original)
+    (artifact / "model.safetensors").write_bytes(b"altered weights")
+
+    assert associate_installed_artifacts([root], [card]) == ()
+    assert read_installed_card(artifact) == original
+
+    # The same for a detached record on a read-only root.
+    detached_root = tmp_path / "readonly"
+    detached = detached_root / f"org--model--revision-{card.source_revision}"
+    detached.mkdir(parents=True)
+    (detached / "config.json").write_text("{}")
+    (detached / "model.safetensors").write_bytes(b"weights")
+    (detached / ".skulk-source-revision").write_text(f"{card.source_revision}\n")
+
+    def _deny_adjacent_write(_directory: Path, _record: InstalledCardRecord) -> Path:
+        raise PermissionError("read-only model root")
+
+    monkeypatch.setattr(installed_cards, "write_installed_card", _deny_adjacent_write)
+    write_installed_card_with_fallback(
+        detached, build_installed_card_record(detached, card), fallback_root=fallback_root
+    )
+    (detached / "model.safetensors").write_bytes(b"altered weights")
+
+    assert (
+        installed_cards.ensure_installed_cards(
+            detached_root, [card], fallback_root=fallback_root
+        )
+        == ()
+    )
+
