@@ -101,10 +101,13 @@ ROCM_LAUNCH_FLAGS: Final[tuple[str, ...]] = ("--bf16-vae",)
 the transformer. Models stay resident between renders: ComfyUI's default
 RAM-pressure cache keeps the loaded text encoder, transformer and VAEs, and
 drops them when free memory falls under its headroom (10% of system RAM),
-while memory-mapped weights stay reclaimable page cache. On gfx1151 a warm
-render (480x480, four turbo steps) takes 122 s resident against 210 s with
-every model rebuilt per prompt (``--cache-none``, ``--disable-mmap``), and
-the two agree as closely as the rebuilt path agrees with itself run to run. No attention flag: ComfyUI's default SDPA path
+while memory-mapped weights stay reclaimable page cache. On gfx1151
+(480x480, four turbo steps) a warm render takes about 120 s when the prompt
+repeats and 180 to 200 s when it changes, against about 210 s with every
+model rebuilt per prompt (``--cache-none``, ``--disable-mmap``): a new prompt
+swaps the text encoder back in where host memory cannot hold it beside the
+transformer. Outputs agree with the rebuilt path as closely as that path
+agrees with itself run to run. No attention flag: ComfyUI's default SDPA path
 already selects the wheel set's flash-class kernel on gfx1151 (measured
 against the math path on the hardware).
 """

@@ -12,8 +12,9 @@ This project records release notes here and mirrors public-facing notes in
 - Video renders on AMD (the ComfyUI engine's ROCm lane) keep their models
   loaded between renders, and memory-map weight files up to 64 GB. Before,
   every render rebuilt the text encoder, transformer and VAEs. On Strix Halo
-  a repeat 480x480 four-step MiniMax H3 render drops from about 210 s to
-  about 122 s, and the first render from about 215 s to about 182 s. The
+  a 480x480 four-step MiniMax H3 render drops from about 210 s to about
+  120 s when the prompt repeats and to 180 to 200 s when it changes, and the
+  first render from about 215 s to 150 to 180 s. The
   output matches the old path as closely as two runs of the old path match
   each other. A card with a weight file above 64 GB still loads without
   memory mapping.

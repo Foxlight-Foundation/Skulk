@@ -356,8 +356,10 @@ for a card with a weight file above 64 GB, since memory-mapping one that
 large through unified memory is pathologically slow (the pruned H3 files
 map). One server stays warm across renders and keeps its models resident
 under ComfyUI's RAM-pressure cache, so only the first render after placement
-pays the model load: a warm 480x480 four-step render takes about 122 s on
-gfx1151, against about 210 s when every model is rebuilt per prompt. The
+pays the model load. On gfx1151 a warm 480x480 four-step render takes about
+120 s when the prompt repeats and 180 to 200 s when it changes (the text
+encoder is swapped back in when host memory cannot hold it beside the
+transformer), against about 210 s when every model is rebuilt per prompt. The
 wheel set matters here: the rocm7.2 torch wheel from the PyTorch index, the
 lane's first set, shipped gfx1151 BLAS libraries missing GEMM kernels that
 keyframe and reference prompts reach (a single-precision batched GEMM in
