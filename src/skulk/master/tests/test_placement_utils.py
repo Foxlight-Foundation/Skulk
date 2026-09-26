@@ -1457,10 +1457,20 @@ def test_comfy_gpu_tags_count_as_vram_offload() -> None:
 
 
 def test_carve_first_nodes_are_the_amd_apus_only() -> None:
-    """GB10 is unified but has no carve; a discrete card is not unified at all."""
+    """GB10 is unified but has no carve; a discrete card is not unified at all;
+    a Strix that does not report carve usage keeps the conservative charge."""
     strix, gb10, discrete = NodeId("strix"), NodeId("gb10"), NodeId("discrete")
+    unmeasured = NodeId("strix-unmeasured")
     node_system = {
         strix: SystemPerformanceProfile(
+            accelerator=AcceleratorMetrics(
+                vendor="amd",
+                vram_total_bytes=Memory.from_gb(64).in_bytes,
+                vram_used_bytes=Memory.from_gb(22).in_bytes,
+                gtt_total_bytes=Memory.from_gb(124).in_bytes,
+            )
+        ),
+        unmeasured: SystemPerformanceProfile(
             accelerator=AcceleratorMetrics(
                 vendor="amd",
                 vram_total_bytes=Memory.from_gb(64).in_bytes,
@@ -1486,6 +1496,9 @@ def test_carve_first_nodes_are_the_amd_apus_only() -> None:
         strix: create_node_memory(
             Memory.from_gb(59).in_bytes, ram_total=Memory.from_gb(61).in_bytes
         ),
+        unmeasured: create_node_memory(
+            Memory.from_gb(59).in_bytes, ram_total=Memory.from_gb(61).in_bytes
+        ),
         gb10: create_node_memory(
             Memory.from_gb(96).in_bytes, ram_total=Memory.from_gb(128).in_bytes
         ),
@@ -1495,11 +1508,12 @@ def test_carve_first_nodes_are_the_amd_apus_only() -> None:
     }
     resources = {
         strix: NodeResources(backends=frozenset({"llama_server-vulkan"})),
+        unmeasured: NodeResources(backends=frozenset({"llama_server-vulkan"})),
         gb10: NodeResources(backends=frozenset({"audio_cpp", "audio_cpp-cuda"})),
         discrete: NodeResources(backends=frozenset({"llama_server-vulkan"})),
     }
     unified = unified_memory_gpu_node_ids(node_system, resources, node_memory=memory)
-    assert unified == frozenset({strix, gb10})
+    assert unified == frozenset({strix, unmeasured, gb10})
     assert carve_first_gpu_node_ids(
         node_system, resources, node_memory=memory
     ) == frozenset({strix})

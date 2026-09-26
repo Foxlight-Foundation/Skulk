@@ -348,7 +348,6 @@ from skulk.master.placement import (
 )
 from skulk.master.placement import place_instance as get_instance_placements
 from skulk.master.placement_utils import (
-    carve_first_gpu_node_ids,
     reserve_system_ram_usage,
     unified_memory_gpu_node_ids,
     usable_vram_by_node,
@@ -3688,11 +3687,6 @@ class API:
             self.state.instances,
             node_vram,
             unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
-                self._telemetry_view.node_system,
-                self._telemetry_view.node_resources,
-                node_memory=self._telemetry_view.node_memory,
-            ),
-            carve_first_nodes=carve_first_gpu_node_ids(
                 self._telemetry_view.node_system,
                 self._telemetry_view.node_resources,
                 node_memory=self._telemetry_view.node_memory,

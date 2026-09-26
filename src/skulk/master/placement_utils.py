@@ -354,7 +354,9 @@ def reserve_instance_system_ram(
             ``carve_first_gpu_node_ids``). A loaded Vulkan shard on one of
             them sits in the BIOS carve, which the observed ``vram_used``
             already nets out of the GPU pool, so it is not charged here as
-            well; while it is still loading it is charged as before.
+            well; while it is still loading it is charged as before. Only a
+            caller that also supplies ``unreflected`` may pass this set:
+            without it every shard reads as loaded.
         unreflected: Placements whose load telemetry has not shown yet; their
             footprints also come off the observed figure.
 
@@ -525,7 +527,9 @@ def carve_first_gpu_node_ids(
     the VRAM carve-out and spills to GTT only past it, and ``vram_used``
     reports the carve's occupancy, while a HIP engine on the same node
     allocates from GTT, which is host RAM. GB10 is unified too but has no
-    carve, so it is not in this set.
+    carve, so it is not in this set. A node must report ``vram_used``: the
+    pool reads a missing reading as an empty carve, so a loaded Vulkan shard
+    there keeps its host-RAM charge rather than going uncounted.
 
     Args:
         node_system: Per-node accelerator telemetry.
@@ -542,6 +546,7 @@ def carve_first_gpu_node_ids(
         if (profile := node_system.get(node_id)) is not None
         and profile.accelerator is not None
         and profile.accelerator.vendor == "amd"
+        and profile.accelerator.vram_used_bytes is not None
     )
 
 
