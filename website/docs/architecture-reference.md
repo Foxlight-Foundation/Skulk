@@ -1277,7 +1277,7 @@ The table also identifies upstream engine variables that Skulk configures.
 | `--no-api` | Disable API server |
 | `--no-batch` | Disable continuous batching |
 | `--fast-synch` / `--no-fast-synch` | Force MLX_METAL_FAST_SYNCH on/off |
-| `--offline` | Offline mode |
+| `--offline` | Offline mode: the same as `SKULK_OFFLINE=true` (`constants.offline_mode()`); no registry, engine, or model downloads |
 | `--bootstrap-peers` | Comma-separated libp2p multiaddrs |
 | `--libp2p-port` | Fixed TCP port for libp2p |
 
