@@ -2984,11 +2984,13 @@ class Worker:
                     # be retried), keep the files so the next runner can find them.
                     instance_deleted = task.instance_id not in self.state.instances
                     try:
-                        if not runner.runner_process.is_alive():
+                        if not runner.process_alive():
                             # A runner that already died cannot acknowledge its
                             # shutdown; record the task done rather than waiting
                             # out the deadline, and go straight to the retry or
-                            # give-up decision below.
+                            # give-up decision below. Supervisor teardown may
+                            # already have closed the process object, which
+                            # process_alive() reads as dead rather than raising.
                             await self.event_sender.send(
                                 TaskStatusUpdated(
                                     task_id=task.task_id,

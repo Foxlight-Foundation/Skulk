@@ -1029,6 +1029,18 @@ class RunnerSupervisor:
             model_id=model_id,
         )
 
+    def process_alive(self) -> bool:
+        """Return whether the runner subprocess is still running.
+
+        Teardown closes the process object once a finished runner is reaped,
+        after which ``is_alive()`` raises; a closed process is dead.
+        """
+
+        try:
+            return self.runner_process.is_alive()
+        except ValueError:
+            return False
+
     def diagnostics(self) -> RunnerSupervisorDiagnostics:
         """Return live read-only diagnostics for this runner supervisor."""
 
