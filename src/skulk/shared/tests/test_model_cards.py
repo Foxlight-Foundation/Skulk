@@ -657,14 +657,16 @@ async def test_an_empty_catalog_does_not_refresh_on_every_read(
     """
     refreshes: list[int] = []
 
+    empty: dict[ModelId, ModelCard] = {}
+
     async def counting_refresh() -> None:
         refreshes.append(1)
-        model_cards_module._card_cache_loaded = True
+        model_cards_module._card_cache_loaded_for = empty
 
     monkeypatch.setattr(model_cards_module, "_refresh_card_cache", counting_refresh)
-    monkeypatch.setattr(model_cards_module, "_card_cache", {})
+    monkeypatch.setattr(model_cards_module, "_card_cache", empty)
     monkeypatch.setattr(model_cards_module, "_card_cache_dirty", False)
-    monkeypatch.setattr(model_cards_module, "_card_cache_loaded", False)
+    monkeypatch.setattr(model_cards_module, "_card_cache_loaded_for", None)
     monkeypatch.setattr(model_cards_module, "_registry_enabled", lambda: False)
 
     for _ in range(3):

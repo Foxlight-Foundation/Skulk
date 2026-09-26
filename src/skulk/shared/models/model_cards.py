@@ -111,11 +111,12 @@ _POSITIVE_REGISTRY_CAPABILITY_STATUSES: Final[frozenset[str]] = frozenset(
 _registry_refresh_lock = asyncio.Lock()
 _last_registry_refresh = 0.0
 _card_cache_dirty = False
-# Whether a full catalog refresh has completed in this process. An empty
-# catalog is a legitimate result (a node with nothing installed and no
-# registry), so emptiness must not stand in for "never loaded": that would
-# refresh, and wait on an unreachable registry, on every catalog read.
-_card_cache_loaded = False
+# The catalog object a completed refresh filled. An empty catalog is a
+# legitimate result (a node with nothing installed and no registry), so
+# emptiness must not stand in for "never loaded": that would refresh, and wait
+# on an unreachable registry, on every catalog read. Holding the object rather
+# than a flag keeps the mark honest when the catalog object is replaced.
+_card_cache_loaded_for: "dict[ModelId, ModelCard] | None" = None
 _last_registry_miss_refresh = 0.0
 _REGISTRY_MISS_REFRESH_SECONDS: Final[float] = 1.0
 _CUSTOM_CARD_MUTATION_CONFIRMATION_LIMIT: Final[int] = 4096
@@ -525,7 +526,7 @@ async def _load_cards_from_dir(directory: Path, *, is_custom: bool) -> None:
 
 
 async def _refresh_card_cache() -> None:
-    global _card_cache_dirty, _card_cache_loaded, _last_registry_refresh  # noqa: PLW0603
+    global _card_cache_dirty, _card_cache_loaded_for, _last_registry_refresh  # noqa: PLW0603
     # Clear at refresh start so a concurrent artifact deletion can mark the
     # cache dirty again while awaited registry or custom-card work is running.
     _card_cache_dirty = False
@@ -545,7 +546,7 @@ async def _refresh_card_cache() -> None:
     await _refresh_installed_cards()
     await _load_cards_from_dir(_custom_cards_dir, is_custom=True)
     _last_registry_refresh = time.monotonic()
-    _card_cache_loaded = True
+    _card_cache_loaded_for = _card_cache
 
 
 async def _refresh_installed_cards() -> None:
@@ -937,7 +938,7 @@ async def _refresh_card_cache_if_due() -> None:
     """Refresh catalog state at most once per configured interval."""
     refresh_due = (
         _card_cache_dirty
-        or not _card_cache_loaded
+        or _card_cache_loaded_for is not _card_cache
         or (
             _registry_enabled()
             and time.monotonic() - _last_registry_refresh
@@ -948,7 +949,7 @@ async def _refresh_card_cache_if_due() -> None:
         async with _registry_refresh_lock:
             refresh_still_due = (
                 _card_cache_dirty
-                or not _card_cache_loaded
+                or _card_cache_loaded_for is not _card_cache
                 or (
                     _registry_enabled()
                     and time.monotonic() - _last_registry_refresh
