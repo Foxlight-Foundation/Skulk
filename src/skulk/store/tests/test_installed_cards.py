@@ -21,6 +21,7 @@ from skulk.store.installed_cards import (
     VerifiedDetachedInstalledCardCache,
     associate_installed_card,
     build_installed_card_record,
+    find_unrecorded_artifacts,
     installed_card_matches,
     installed_companion_matches,
     read_installed_card,
@@ -1124,3 +1125,72 @@ def test_association_returns_the_records_it_writes(tmp_path: Path) -> None:
     inventory_installed_artifacts([root], [card], materialized=materialized)
     assert materialized == []
 
+
+def test_unrecorded_artifacts_are_sorted_by_completeness(tmp_path: Path) -> None:
+    """Recorded, complete-but-unrecorded and incomplete directories are told apart."""
+
+    root = tmp_path / "models"
+    root.mkdir()
+    recorded = _artifact(root)
+    write_installed_card(recorded, build_installed_card_record(recorded, _card()))
+    legacy = root / "org--legacy"
+    legacy.mkdir()
+    (legacy / "config.json").write_text("{}")
+    (legacy / "model.safetensors").write_bytes(b"weights")
+    drifted = root / "org--drifted"
+    drifted.mkdir()
+    (drifted / "config.json").write_text("{}")
+    (drifted / "model.safetensors").write_bytes(b"weights")
+    write_installed_card(drifted, build_installed_card_record(drifted, _card()))
+    (drifted / "model.safetensors").write_bytes(b"other weights")
+    partial = root / "org--partial"
+    partial.mkdir()
+    (partial / "config.json").write_text("{}")
+    (partial / "model.safetensors.partial").write_bytes(b"half")
+    (root / ".hidden").mkdir()
+    # The downloader's file-list metadata cache is not a download.
+    (root / "caches" / "org--legacy").mkdir(parents=True)
+
+    found = find_unrecorded_artifacts(
+        [root, tmp_path / "absent"], fallback_root=tmp_path / "records"
+    )
+
+    assert found.recorded == 1
+    # A record whose files changed is no record; the bytes still look complete.
+    assert [path.name for path in found.complete] == ["org--drifted", "org--legacy"]
+    assert [path.name for path in found.incomplete] == ["org--partial"]
+
+
+def test_unrecorded_artifacts_count_a_detached_record_without_hashing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A read-only root's detached record counts, checked by size alone."""
+
+    root = tmp_path / "models"
+    root.mkdir()
+    artifact = _artifact(root)
+    fallback_root = tmp_path / "data" / "installed-cards"
+
+    def _deny_adjacent_write(_directory: Path, _record: InstalledCardRecord) -> Path:
+        raise PermissionError("read-only model root")
+
+    monkeypatch.setattr(installed_cards, "write_installed_card", _deny_adjacent_write)
+    write_installed_card_with_fallback(
+        artifact,
+        build_installed_card_record(artifact, _card()),
+        fallback_root=fallback_root,
+    )
+
+    def _no_hashing(path: Path) -> str:
+        raise AssertionError(f"the report hashed {path}")
+
+    monkeypatch.setattr(installed_cards, "_sha256_file", _no_hashing)
+
+    found = find_unrecorded_artifacts([root], fallback_root=fallback_root)
+
+    assert found.recorded == 1
+    assert found.complete == ()
+    # Without the detached record the same directory is unrecorded.
+    bare = find_unrecorded_artifacts([root], fallback_root=tmp_path / "none")
+    assert [path.name for path in bare.complete] == ["org--model"]
