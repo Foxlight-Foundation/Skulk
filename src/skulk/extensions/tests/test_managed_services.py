@@ -823,6 +823,124 @@ def test_a_generation_staged_for_the_live_build_is_reused_not_restaged(
     assert staged_generation_for(tmp_path, "0" * 64) is None
 
 
+def _service_root_with_generations(tmp_path: Path) -> Path:
+    """A service root with a selected, a running, two previous and a partial copy."""
+    from skulk.extensions.runtime_files import private_directory, write_private
+    from skulk.extensions.service_snapshot import ServiceSnapshot
+
+    root = tmp_path / "service"
+    private_directory(root)
+    generations = root / "core-runtimes"
+    private_directory(generations)
+    for age, name in enumerate(("0" * 32, "1" * 32, "2" * 32, "3" * 32)):
+        private_directory(generations / name)
+        private_directory(generations / name / "runtime")
+        write_private(generations / name / "runtime" / "payload", b"x" * 1024)
+        write_private(
+            generations / name / "staged.json",
+            ServiceSnapshot(
+                generation=name,
+                manifest_sha256="e" * 64,
+                skulk_build_sha256="f" * 64,
+                copied_files=1,
+                copied_bytes=1024,
+            )
+            .model_dump_json()
+            .encode(),
+        )
+        # "0" is the oldest copy, "3" the newest.
+        os.utime(generations / name / "staged.json", (1000 + age, 1000 + age))
+    # An interrupted copy: staging never completed, so it has no staged.json.
+    private_directory(generations / ("a" * 32))
+    private_directory(generations / ("a" * 32) / "runtime")
+    # Entries that are not generations are never touched.
+    private_directory(generations / "not-a-generation")
+    write_private(generations / "notes.txt", b"kept")
+    write_private(
+        root / "core-runtime.json",
+        b'{"generation": "' + b"3" * 32 + b'", "manifest_sha256": "x"}',
+    )
+    return root
+
+
+def test_superseded_runtimes_keep_the_selected_the_running_and_one_previous(
+    tmp_path: Path,
+) -> None:
+    """Every Skulk update stages a full copy; only what may still run is kept."""
+    from skulk.extensions.managed_services import superseded_generations
+
+    root = _service_root_with_generations(tmp_path)
+    # "3" is selected, a manager still runs "1", and "2" is the newest previous.
+    superseded = superseded_generations(root, {"1" * 32})
+    assert [path.name for path in superseded] == ["a" * 32, "0" * 32]
+    # With nothing running, the newest previous copy is still kept.
+    assert {path.name for path in superseded_generations(root, set())} == {
+        "a" * 32,
+        "0" * 32,
+        "1" * 32,
+    }
+
+
+def test_superseded_runtimes_are_removed_only_under_the_installer_fence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skulk.extensions import managed_services
+    from skulk.extensions.runtime_files import RuntimeLock
+
+    root = _service_root_with_generations(tmp_path)
+    def no_managers(_root: Path) -> set[str]:
+        return set()
+
+    monkeypatch.setattr(managed_services, "running_generations", no_managers)
+    held = RuntimeLock(root)
+    try:
+        # A copy in progress holds the fence: nothing is examined or removed.
+        assert managed_services.prune_superseded_generations(root) is None
+        assert (root / "core-runtimes" / ("0" * 32)).exists()
+    finally:
+        held.close()
+    outcome = managed_services.prune_superseded_generations(root)
+    assert outcome is not None
+    removed, freed = outcome
+    assert removed == 3 and freed >= 2048
+    remaining = sorted(path.name for path in (root / "core-runtimes").iterdir())
+    assert remaining == ["2" * 32, "3" * 32, "not-a-generation", "notes.txt"]
+
+
+async def test_runtime_removal_runs_once_per_selected_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skulk.extensions import managed_services
+
+    root = _service_root_with_generations(tmp_path)
+    outcomes: list[tuple[int, int] | None] = [None, (2, 4096)]
+    calls: list[Path] = []
+
+    def prune(path: Path) -> tuple[int, int] | None:
+        calls.append(path)
+        return outcomes.pop(0)
+
+    monkeypatch.setattr(managed_services, "prune_superseded_generations", prune)
+    services = ManagedServices(tmp_path / "connection.json")
+    # The fence was busy: nothing is recorded, so the next refresh tries again.
+    services._schedule_runtime_prune(root, "f" * 64)  # pyright: ignore[reportPrivateUsage]
+    assert services.runtime_prune is not None
+    await services.runtime_prune
+    assert services.runtimes_pruned_for is None
+    services._schedule_runtime_prune(root, "f" * 64)  # pyright: ignore[reportPrivateUsage]
+    await services.runtime_prune
+    assert services.runtimes_pruned_for == "3" * 32
+    # Once done for the selected generation, later refreshes do nothing.
+    services._schedule_runtime_prune(root, "f" * 64)  # pyright: ignore[reportPrivateUsage]
+    await services.runtime_prune
+    assert calls == [root, root]
+    # A build with no selected generation is not this manager's; nothing runs.
+    services.runtimes_pruned_for = None
+    services._schedule_runtime_prune(root, "0" * 64)  # pyright: ignore[reportPrivateUsage]
+    await services.runtime_prune
+    assert calls == [root, root]
+
+
 def test_a_legacy_manager_is_detected_from_its_selected_generation(
     tmp_path: Path,
 ) -> None:

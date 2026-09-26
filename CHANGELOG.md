@@ -93,6 +93,13 @@ This project records release notes here and mirrors public-facing notes in
   The shutdown of a runner that already died no longer waits out its
   15-second acknowledgement deadline.
 
+- The plugin service no longer keeps a full copy of Skulk for every update.
+  Each Skulk update stages a new manager runtime of about 1.7 GB, and none
+  was ever removed; one capability host held eleven. Once the manager runs
+  the runtime staged for the current build, the host removes the others. It
+  keeps that runtime, any a running manager still uses, and the one before
+  it, for going back to the previous build.
+
 - A managed plugin's owner that exits unexpectedly is started again. The
   plugin manager restarts it after growing waits (5 s to 300 s, then every
   five minutes while it keeps failing), so an owner stopped by a condition
