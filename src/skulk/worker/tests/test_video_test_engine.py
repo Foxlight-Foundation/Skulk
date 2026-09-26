@@ -19,7 +19,7 @@ from skulk.download.download_utils import (
 )
 from skulk.shared import constants
 from skulk.shared.backends import engine_of, resolve_node_backend
-from skulk.shared.models.model_cards import ModelCard, ModelId, get_bundled_card
+from skulk.shared.models.model_cards import ModelCard, ModelId
 from skulk.shared.types.video import (
     VIDEO_OUTPUT_FILENAME,
     VIDEO_THUMBNAIL_FILENAME,
@@ -28,10 +28,11 @@ from skulk.shared.types.video import (
 )
 from skulk.worker.runner.test_video.provision import (
     TEST_VIDEO_MODEL_ID,
-    bundled_card_path,
     install_test_video_card,
+    load_test_video_card,
     provision_test_video_model,
     register_test_video_card,
+    test_video_card_path,
 )
 from skulk.worker.runner.test_video.render import (
     RenderPlan,
@@ -42,7 +43,7 @@ from skulk.worker.runner.test_video.render import (
 
 
 def _card() -> ModelCard:
-    card = asyncio.run(get_bundled_card(TEST_VIDEO_MODEL_ID))
+    card = asyncio.run(load_test_video_card())
     assert card is not None and card.video is not None
     return card
 
@@ -301,7 +302,7 @@ def test_provision_writes_a_directory_the_resolver_accepts(tmp_path: Path) -> No
 def test_registering_the_card_copies_the_bundled_toml_once(tmp_path: Path) -> None:
     target = register_test_video_card(tmp_path / "custom")
     assert target == tmp_path / "custom" / (TEST_VIDEO_MODEL_ID.normalize() + ".toml")
-    assert target.read_bytes() == bundled_card_path().read_bytes()
+    assert target.read_bytes() == test_video_card_path().read_bytes()
     target.write_text(target.read_text() + "\n# operator edit\n")
     assert register_test_video_card(tmp_path / "custom") == target
     assert target.read_text().endswith("# operator edit\n")
@@ -484,7 +485,7 @@ async def test_runner_subprocess_renders_and_hands_the_manifest_to_the_worker(
     cache_home = tmp_path / "home"
     monkeypatch.setenv("SKULK_HOME", str(cache_home))
     monkeypatch.setenv("SKULK_TEST_VIDEO_STEP_SECONDS", "0")
-    card = await get_bundled_card(TEST_VIDEO_MODEL_ID)
+    card = await load_test_video_card()
     assert card is not None
     runner_id = RunnerId("test-video-runner")
     node = NodeId("video-node")

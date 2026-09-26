@@ -71,7 +71,7 @@ The bare `audio_cpp` tag reports engine availability, but signed music support a
 
 ### Test video engine
 
-`src/skulk/worker/runner/test_video/`: `render.py` (seeded frame and tone synthesis, minimal ISO BMFF muxer with MJPEG and `sowt` PCM tracks), `runner.py` (duck-typed `Runner` with the image runner's state machine; emits progress `VideoChunk` frames and the terminal manifest), `provision.py` (stand-in model directory so `foxlight/test-video` places without a download; the card itself is bundled under `resources/test_engine_cards/`, apart from the artifact card directories the signed registry imports). Selected in `bootstrap.entrypoint` when the shard's stamped backend resolves to the `test_video` engine; advertised by `facts.derive._derive_test_video` when `SKULK_TEST_VIDEO_ENGINE` is set.
+`src/skulk/worker/runner/test_video/`: `render.py` (seeded frame and tone synthesis, minimal ISO BMFF muxer with MJPEG and `sowt` PCM tracks), `runner.py` (duck-typed `Runner` with the image runner's state machine; emits progress `VideoChunk` frames and the terminal manifest), `provision.py` (stand-in model directory so `foxlight/test-video` places without a download; the card's TOML ships beside the engine, apart from model cards: it names no artifact, so the signed registry can never supply it; `load_test_video_card()` reads it). Selected in `bootstrap.entrypoint` when the shard's stamped backend resolves to the `test_video` engine; advertised by `facts.derive._derive_test_video` when `SKULK_TEST_VIDEO_ENGINE` is set.
 
 ### Runner subprocess
 
@@ -1383,7 +1383,7 @@ bench/                  # benchmark + repro harnesses
 docs/                   # operator guides (this file in website/docs/)
 website/                # Docusaurus site
 resources/*_model_cards/  # built-in TOML cards per family (the registry imports these)
-resources/test_engine_cards/  # cards the synthetic test engines serve; never imported
+src/skulk/worker/runner/test_video/foxlight--test-video.toml  # the test engine's card; never in the registry
 rust/                   # libp2p (networking), PyO3 bindings, system_custodian
 ```
 

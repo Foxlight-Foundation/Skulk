@@ -9,6 +9,16 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Changed
 
+- A model added from the Hugging Face search keeps the pipeline-split limit
+  of the signed registry card for its repository, taking the strictest
+  among the repository's quant aliases. Before, only a card shipped inside
+  Skulk supplied that limit.
+- A node whose catalog is legitimately empty (nothing installed and no
+  registry) no longer refreshes the catalog, and waits on the network, on
+  every catalog read.
+- The synthetic test video engine's card ships beside the engine instead
+  of among the model cards, since the registry can never supply it.
+
 - `skulk --offline` keeps the model registry out of reach, as
   `SKULK_OFFLINE=true` does. Before, the flag only logged the mode, and the
   card catalog still tried the network.

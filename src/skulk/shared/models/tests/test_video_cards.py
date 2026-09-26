@@ -38,7 +38,9 @@ from skulk.shared.types.memory import Memory
 
 RESOURCES = Path(__file__).resolve().parents[5] / "resources"
 CARD_DIRECTORY = RESOURCES / "video_model_cards"
-TEST_ENGINE_DIRECTORY = RESOURCES / "test_engine_cards"
+TEST_ENGINE_DIRECTORY = (
+    Path(__file__).resolve().parents[3] / "worker" / "runner" / "test_video"
+)
 REVISION = "a" * 40
 
 

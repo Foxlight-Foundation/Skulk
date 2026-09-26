@@ -88,10 +88,6 @@ _BUILTIN_CARD_DIRS = [
     Path(RESOURCES_DIR) / "speech_model_cards",
     Path(RESOURCES_DIR) / "music_model_cards",
     Path(RESOURCES_DIR) / "video_model_cards",
-    # Cards the synthetic test engines serve. They name no downloadable
-    # artifact, so they live apart from the corpus the signed registry
-    # imports; the registry reads only the artifact directories above.
-    Path(RESOURCES_DIR) / "test_engine_cards",
 ]
 
 _card_cache: dict[ModelId, "ModelCard"] = {}
@@ -115,6 +111,12 @@ _POSITIVE_REGISTRY_CAPABILITY_STATUSES: Final[frozenset[str]] = frozenset(
 _registry_refresh_lock = asyncio.Lock()
 _last_registry_refresh = 0.0
 _card_cache_dirty = False
+# The catalog object a completed refresh filled. An empty catalog is a
+# legitimate result (a node with nothing installed and no registry), so
+# emptiness must not stand in for "never loaded": that would refresh, and wait
+# on an unreachable registry, on every catalog read. Holding the object rather
+# than a flag keeps the mark honest when the catalog object is replaced.
+_card_cache_loaded_for: "dict[ModelId, ModelCard] | None" = None
 _last_registry_miss_refresh = 0.0
 _REGISTRY_MISS_REFRESH_SECONDS: Final[float] = 1.0
 _CUSTOM_CARD_MUTATION_CONFIRMATION_LIMIT: Final[int] = 4096
@@ -524,7 +526,7 @@ async def _load_cards_from_dir(directory: Path, *, is_custom: bool) -> None:
 
 
 async def _refresh_card_cache() -> None:
-    global _card_cache_dirty, _last_registry_refresh  # noqa: PLW0603
+    global _card_cache_dirty, _card_cache_loaded_for, _last_registry_refresh  # noqa: PLW0603
     # Clear at refresh start so a concurrent artifact deletion can mark the
     # cache dirty again while awaited registry or custom-card work is running.
     _card_cache_dirty = False
@@ -544,6 +546,7 @@ async def _refresh_card_cache() -> None:
     await _refresh_installed_cards()
     await _load_cards_from_dir(_custom_cards_dir, is_custom=True)
     _last_registry_refresh = time.monotonic()
+    _card_cache_loaded_for = _card_cache
 
 
 async def _refresh_installed_cards() -> None:
@@ -935,7 +938,7 @@ async def _refresh_card_cache_if_due() -> None:
     """Refresh catalog state at most once per configured interval."""
     refresh_due = (
         _card_cache_dirty
-        or not _card_cache
+        or _card_cache_loaded_for is not _card_cache
         or (
             _registry_enabled()
             and time.monotonic() - _last_registry_refresh
@@ -946,7 +949,7 @@ async def _refresh_card_cache_if_due() -> None:
         async with _registry_refresh_lock:
             refresh_still_due = (
                 _card_cache_dirty
-                or not _card_cache
+                or _card_cache_loaded_for is not _card_cache
                 or (
                     _registry_enabled()
                     and time.monotonic() - _last_registry_refresh
@@ -1063,6 +1066,43 @@ async def get_model_cards() -> list["ModelCard"]:
         if (SKULK_ENABLE_IMAGE_MODELS or not _is_image_card(card))
         and (SKULK_ENABLE_VIDEO_MODELS or not _is_video_card(card))
     ]
+
+
+def _split_limit(card: "ModelCard") -> int:
+    """A card's pipeline split limit, for picking the strictest of several."""
+
+    limit = card.placement.max_pipeline_split_layer
+    return limit if limit is not None else 1 << 30
+
+
+async def get_curated_baseline_card(repository: ModelId) -> "ModelCard | None":
+    """The curated card whose hard constraints a generated card must keep.
+
+    The current signed registry card is the curated truth: the one whose id
+    is ``repository``, else the signed aliases of that repository (one per
+    quant). They share the architecture, so the strictest split limit among
+    them is kept. While Skulk still ships cards, the shipped card is the
+    fallback when the registry has none.
+
+    Args:
+        repository: Hugging Face repository the generated card describes.
+
+    Returns:
+        The card to take constraints from, or ``None`` when nothing curated
+        describes the repository.
+    """
+    await _refresh_card_cache_if_due()
+    exact = _registry_current_cards.get(repository)
+    if exact is not None:
+        return exact
+    aliases = [
+        card
+        for card in _registry_current_cards.values()
+        if card.artifact_repository == repository
+    ]
+    if aliases:
+        return min(aliases, key=_split_limit)
+    return await get_bundled_card(repository)
 
 
 async def get_bundled_card(model_id: ModelId) -> "ModelCard | None":
