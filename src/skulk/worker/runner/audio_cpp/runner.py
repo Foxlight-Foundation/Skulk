@@ -13,6 +13,7 @@ from loguru import logger
 from skulk.facts.probe import probe_audio_cpp
 from skulk.shared.backends import (
     AUDIO_CPP_BIN_ENV,
+    AUDIO_CPP_CUDA_BIN_ENV,
     AUDIO_CPP_VULKAN_BIN_ENV,
     probe_node_backends,
 )
@@ -105,11 +106,10 @@ def verify_audio_cpp_launch(binary: Path, expected_build: str | None, backend: s
 
 def audio_cpp_binary_for_lane(backend: str, expected_build: str | None) -> Path:
     """Select the still-verified executable matching the placed compute build."""
-    variables = (
-        (AUDIO_CPP_VULKAN_BIN_ENV, AUDIO_CPP_BIN_ENV)
-        if backend == "vulkan"
-        else (AUDIO_CPP_BIN_ENV,)
-    )
+    variables = {
+        "vulkan": (AUDIO_CPP_VULKAN_BIN_ENV, AUDIO_CPP_BIN_ENV),
+        "cuda": (AUDIO_CPP_CUDA_BIN_ENV, AUDIO_CPP_BIN_ENV),
+    }.get(backend, (AUDIO_CPP_BIN_ENV,))
     errors: list[str] = []
     for variable in variables:
         configured = os.environ.get(variable, "").strip()

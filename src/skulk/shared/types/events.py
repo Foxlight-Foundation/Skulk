@@ -82,7 +82,7 @@ class AudioCppPreparationRequested(BaseEvent):
     request_id: CommandId
     target_node: NodeId
     owner_node: NodeId
-    variant: Literal["cpu", "vulkan"] = Field(
+    variant: Literal["cpu", "vulkan", "cuda"] = Field(
         default="cpu",
         description="Pinned engine package variant selected by the requesting API node.",
     )

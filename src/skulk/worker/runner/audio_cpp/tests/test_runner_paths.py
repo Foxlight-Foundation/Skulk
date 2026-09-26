@@ -84,6 +84,35 @@ def test_placed_vulkan_build_selects_its_own_executable(
         audio_cpp_binary_for_lane("vulkan", vulkan_build)
 
 
+def test_placed_cuda_build_selects_its_own_executable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """A GB10 mount cannot silently launch the CPU or Vulkan executable."""
+    cpu = tmp_path / "cpu" / "audiocpp_server"
+    cuda = tmp_path / "cuda" / "audiocpp_server"
+    cpu.parent.mkdir()
+    cuda.parent.mkdir()
+    cpu.write_bytes(b"cpu build")
+    cuda.write_bytes(b"cuda build")
+    monkeypatch.setenv("SKULK_AUDIO_CPP_BIN", str(cpu))
+    monkeypatch.setenv("SKULK_AUDIO_CPP_CUDA_BIN", str(cuda))
+
+    def ready_probe(binary: str) -> AudioCppProbe:
+        return AudioCppProbe(
+            outcome="ready",
+            computes=("cuda",) if binary == str(cuda) else ("cpu",),
+        )
+
+    monkeypatch.setattr(
+        "skulk.worker.runner.audio_cpp.runner.probe_audio_cpp", ready_probe,
+    )
+    cuda_build = f"audio.cpp@sha256:{sha256(cuda.read_bytes()).hexdigest()}"
+    assert audio_cpp_binary_for_lane("cuda", cuda_build) == cuda
+    cuda.write_bytes(b"changed cuda build")
+    with pytest.raises(RuntimeError, match="no prepared audio.cpp executable matches"):
+        audio_cpp_binary_for_lane("cuda", cuda_build)
+
+
 def test_ace_step_server_uses_nested_loader_root(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

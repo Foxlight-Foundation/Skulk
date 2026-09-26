@@ -117,18 +117,29 @@ Skulk ships without the audio.cpp engine package. When you mount a music card,
 the API chooses a hardware-eligible node, asks that worker to fetch and verify
 the pinned engine package, then waits for fresh node resources before ordinary
 placement. Apple Silicon macOS, Linux `amd64`, and Linux `arm64` have CPU-capable
-packages. Linux `amd64` also has a separate Vulkan package, selected only when
-a signed claim covers the exact card, engine build, and hardware class. The
-package contains the server, model specs, and licenses; model
-weights download separately. An offline node can use a verified cached package
+packages. Linux `amd64` has a separate Vulkan package, and Linux `arm64` has a
+CUDA package compiled for NVIDIA GB10 compute 12.1. A GPU package is selected
+only when a signed claim covers the exact card, engine build, and hardware class.
+The GB10 CUDA package requires CUDA 12 runtime, cuBLAS, and NCCL libraries in
+the host loader path; its probe reports missing libraries before the lane can
+be advertised. The package contains the server, model specs, and licenses;
+model weights download separately. An offline node can use a verified cached package
 but cannot fetch one. A failed preparation returns a mount error and leaves the
-node serving its other workloads. `SKULK_AUDIO_CPP_BIN` and
-`SKULK_AUDIO_CPP_VULKAN_BIN` can point to separate operator-installed builds,
-each of which must pass the same source and device probes. Preparing Vulkan
-does not replace a CPU model instance's executable or build identity.
+node serving its other workloads. `SKULK_AUDIO_CPP_BIN`,
+`SKULK_AUDIO_CPP_VULKAN_BIN`, and `SKULK_AUDIO_CPP_CUDA_BIN` can point to
+separate operator-installed builds, each of which must pass the same source
+and device probes. Preparing a GPU wheel does not replace another music
+instance's executable or build identity.
 For AMD, node resources include a PCI chip class such as
 `amd:pci-1002-1586`, allowing a claim to cover the qualified hardware class
 without identifying a specific node.
+On GB10, the NVML memory reading may be unavailable. Skulk uses CUDA's live
+device-memory reading and admits the shared CPU/GPU pool only within host-RAM
+headroom and its unified-memory working-set limit. If neither memory query
+succeeds, GPU music placement waits for usable capacity instead of guessing.
+The [GB10 CUDA qualification record](audio-cpp-gb10-qualification.md) identifies
+the exact package, model cards, hardware class, and music API checks required
+before publishing signed support claims.
 
 `SKULK_AUDIO_CPP_SPECS_DIR` points to its v0.8.2 model specs when they are not
 beside the binary in the package layout. Skulk checks both required spec
