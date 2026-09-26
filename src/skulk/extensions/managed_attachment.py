@@ -133,6 +133,25 @@ def runs_generation(cmdline: list[str], root: Path, generation: str) -> bool:
     return bool(cmdline) and cmdline[0].startswith(prefix)
 
 
+def running_generations(root: Path) -> set[str]:
+    """Generations any manager serving ``root`` runs from.
+
+    The OS service starts the manager through a generation's interpreter, so
+    the interpreter path of every running manager names the generation it
+    still needs, including a manager that has not yet restarted onto a newer
+    selection.
+    """
+    prefix = str(root / "core-runtimes") + os.sep
+    found: set[str] = set()
+    for _, cmdline in manager_processes(root):
+        if not cmdline or not cmdline[0].startswith(prefix):
+            continue
+        generation = cmdline[0][len(prefix) :].split(os.sep, 1)[0]
+        if re.fullmatch(r"[a-f0-9]{32}", generation):
+            found.add(generation)
+    return found
+
+
 def stale_manager_pids(root: Path, generation: str) -> list[int]:
     """Managers at ``root`` not running from ``generation``.
 

@@ -30,6 +30,7 @@ from skulk.shared.types.worker.instances import BoundInstance
 from skulk.shared.types.worker.runners import RunnerFailed
 from skulk.shared.types.worker.shards import RpcDonorShardMetadata
 from skulk.utils.channels import ClosedResourceError, MpReceiver, MpSender
+from skulk.utils.stack_dump import install_stack_dump_signal
 from skulk.worker.runner.diagnostics import (
     configure_runner_diagnostics,
     record_runner_phase,
@@ -506,6 +507,9 @@ def entrypoint(
     # triggers Metal cleanup instead of an abrupt death that leaks wired RAM.
     signal.signal(signal.SIGTERM, _metal_cleanup_signal_handler)
     signal.signal(signal.SIGINT, _metal_cleanup_signal_handler)
+    # `kill -USR1 <runner pid>` writes this runner's Python stacks to the node
+    # log: a runner wedged in native code shows only C frames to the sampler.
+    install_stack_dump_signal()
 
     # Backstop for SIGKILL of the supervisor: signal handlers above only fire
     # for graceful agent shutdown. If the agent is SIGKILLed we get reparented

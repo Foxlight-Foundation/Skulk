@@ -1079,7 +1079,9 @@ class Worker:
         resources: NodeResources | None = None
         try:
             await to_thread.run_sync(
-                lambda: prepare_audio_cpp(allow_download=not self._offline)
+                lambda: prepare_audio_cpp(
+                    allow_download=not self._offline, variant=request.variant
+                )
             )
             await to_thread.run_sync(refresh_node_facts)
             peers = (
@@ -1097,13 +1099,23 @@ class Worker:
                 if backend.startswith("audio_cpp-")
                 and backend in resources.engine_builds
             }
-            if not ready_lanes:
+            requested_ready = bool(
+                ready_lanes
+                & {
+                    "cpu": {
+                        "audio_cpp-cpu", "audio_cpp-metal",
+                        "audio_cpp-cuda", "audio_cpp-rocm",
+                    },
+                    "vulkan": {"audio_cpp-vulkan"},
+                }[request.variant]
+            )
+            if not requested_ready:
                 details = "; ".join(
                     conflict.message for conflict in resources.capability_conflicts
                     if "audio.cpp" in conflict.message.lower()
                 )
                 raise RuntimeError(
-                    details or "prepared audio.cpp has no verified ready backend and build"
+                    details or f"prepared audio.cpp {request.variant} has no verified ready backend and build"
                 )
             if self._telemetry_sender is None:
                 raise RuntimeError("node resources telemetry is unavailable")
@@ -2984,13 +2996,28 @@ class Worker:
                     # be retried), keep the files so the next runner can find them.
                     instance_deleted = task.instance_id not in self.state.instances
                     try:
-                        # Acknowledgement only means the subprocess received the
-                        # shutdown task. Wait for its terminal status before
-                        # cancelling the supervisor; otherwise cancellation can
-                        # close the event pipe between ACK and Complete, leaving
-                        # a permanently running lifecycle task in cluster state.
-                        with fail_after(15):
-                            await runner.start_task(task, wait_for_terminal=True)
+                        if not runner.process_alive():
+                            # A runner that already died cannot acknowledge its
+                            # shutdown; record the task done rather than waiting
+                            # out the deadline, and go straight to the retry or
+                            # give-up decision below. Supervisor teardown may
+                            # already have closed the process object, which
+                            # process_alive() reads as dead rather than raising.
+                            await self.event_sender.send(
+                                TaskStatusUpdated(
+                                    task_id=task.task_id,
+                                    task_status=TaskStatus.Complete,
+                                )
+                            )
+                        else:
+                            # Acknowledgement only means the subprocess received
+                            # the shutdown task. Wait for its terminal status
+                            # before cancelling the supervisor; otherwise
+                            # cancellation can close the event pipe between ACK
+                            # and Complete, leaving a permanently running
+                            # lifecycle task in cluster state.
+                            with fail_after(15):
+                                await runner.start_task(task, wait_for_terminal=True)
                     except TimeoutError:
                         await self.event_sender.send(
                             TaskStatusUpdated(

@@ -104,6 +104,7 @@ from skulk.utils.info_gatherer.info_gatherer import (
     NodeCapabilityNodes,
 )
 from skulk.utils.pydantic_ext import CamelCaseModel
+from skulk.utils.stack_dump import install_stack_dump_signal
 from skulk.utils.task_group import TaskGroup
 from skulk.worker.main import Worker
 
@@ -1855,6 +1856,8 @@ def main():
     resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
 
     mp.set_start_method("spawn", force=True)
+    # `kill -USR1 <pid>` writes every thread's Python stack to the log.
+    install_stack_dump_signal()
 
     # Load config early so the logging section is available before anything
     # else runs.  The full config is loaded again inside Node.create() for

@@ -12,7 +12,13 @@ from skulk.facts.probe import gather_node_facts
 from skulk.provisioning.audio_cpp import AUDIO_CPP_SOURCE_REVISION
 
 
-def _fake_server(path: Path, *, revision: str = AUDIO_CPP_SOURCE_REVISION) -> Path:
+def _fake_server(
+    path: Path,
+    *,
+    revision: str = AUDIO_CPP_SOURCE_REVISION,
+    backends: str = "cpu,metal",
+    devices: str = "MTL:0 Apple GPU\nCPU:0 Apple CPU",
+) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     specs = path.parent.parent / "model_specs"
     specs.mkdir(parents=True, exist_ok=True)
@@ -27,11 +33,10 @@ def _fake_server(path: Path, *, revision: str = AUDIO_CPP_SOURCE_REVISION) -> Pa
         'if [ "$1" = "--version" ]; then\n'
         "  echo 'audio.cpp dev'\n"
         f"  echo 'git: {revision} 2026-09-23'\n"
-        "  echo 'backends: cpu,metal'\n"
+        f"  echo 'backends: {backends}'\n"
         'elif [ "$1" = "--list-devices" ]; then\n'
-        "  echo 'MTL:0 Apple GPU'\n"
-        "  echo 'CPU:0 Apple CPU'\n"
-        "fi\n"
+        + "".join(f"  echo '{line}'\n" for line in devices.splitlines())
+        + "fi\n"
     )
     path.chmod(0o755)
     return path
@@ -60,6 +65,40 @@ def test_pinned_binary_probe_and_build_inventory(tmp_path: Path) -> None:
     expected = "audio.cpp@sha256:" + hashlib.sha256(binary.read_bytes()).hexdigest()
     inventory = engine_build_inventory(backends, facts, environ={})
     assert inventory["audio_cpp-metal"] == expected
+
+
+def test_cpu_and_vulkan_binaries_advertise_distinct_exact_builds(
+    tmp_path: Path,
+) -> None:
+    """Preparing a Vulkan variant does not relabel an existing CPU mount's build."""
+    cpu = _fake_server(
+        tmp_path / "cpu/bin/audiocpp_server",
+        backends="cpu",
+        devices="CPU:0 AMD CPU",
+    )
+    vulkan = _fake_server(
+        tmp_path / "vulkan/bin/audiocpp_server",
+        backends="cpu,vulkan",
+        devices="VK:0 Radeon 8060S\nCPU:0 AMD CPU",
+    )
+    facts = gather_node_facts(
+        env={
+            "SKULK_AUDIO_CPP_BIN": str(cpu),
+            "SKULK_AUDIO_CPP_VULKAN_BIN": str(vulkan),
+        },
+        platform="linux",
+        drm_root=tmp_path,
+    )
+    backends = derive_node_backends(facts).backends
+    assert {"audio_cpp-cpu", "audio_cpp-vulkan"} <= backends
+    inventory = engine_build_inventory(backends, facts, environ={})
+    assert inventory["audio_cpp-cpu"] == (
+        "audio.cpp@sha256:" + hashlib.sha256(cpu.read_bytes()).hexdigest()
+    )
+    assert inventory["audio_cpp-vulkan"] == (
+        "audio.cpp@sha256:" + hashlib.sha256(vulkan.read_bytes()).hexdigest()
+    )
+    assert inventory["audio_cpp-cpu"] != inventory["audio_cpp-vulkan"]
 
 
 def test_missing_model_specs_prevent_ready_advertisement(tmp_path: Path) -> None:

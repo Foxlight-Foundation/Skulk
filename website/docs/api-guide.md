@@ -2276,7 +2276,9 @@ silently failing on the master:
   15 seconds for the info to arrive before giving up, so retry shortly on 503.
 
 For text-to-music, Skulk prepares audio.cpp on one eligible node and verifies
-its ready build and signed model support before placement. The API dry-run and
+its ready build and signed model support before placement. On Linux `amd64`, a
+matching signed Vulkan claim selects the separately installed Vulkan package;
+CPU and Vulkan executable identities stay distinct. The API dry-run and
 master then place on that prepared node; if preparation fails, the request
 returns **503** with a diagnostic and leaves the node healthy.
 
@@ -2408,7 +2410,8 @@ returns HTTP 400 with `X-Skulk-Placement-Failure:
 model_card_identity_mismatch`, and no instance state is created.
 For a text-to-music instance, the placement must name exactly one node. The API
 prepares audio.cpp on that node and verifies a ready build and signed support
-claim before accepting the command. Music admission checks the selected
+claim before accepting the command. A matching Linux `amd64` Vulkan claim
+prepares the separate Vulkan package. Music admission checks the selected
 backend's memory pool; GPU lanes use their accelerator memory budget. If the
 node cannot be prepared, the request returns HTTP 503 with the node's
 preparation or compatibility diagnostic.

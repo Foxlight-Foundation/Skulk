@@ -21,7 +21,7 @@ automatically compatible with every model or workload.
 | Speech recognition and translation | `/v1/audio/transcriptions`, `/v1/audio/translations` | A placed STT card; translation requires declared translation support. |
 | Realtime speech | `/v1/realtime` WebSocket and Fabric speech chain | Ready realtime STT capacity; optional VAD, chat and TTS compose the voice loop. |
 | Video with optional synchronized audio | `/v1/videos` jobs | Video models enabled, a compatible video card and ComfyUI capacity. |
-| Text-to-music | `/v1/music` jobs | A mounted `TextToMusic` card, a verified audio.cpp engine build, and an exact signed support claim for that node's hardware. |
+| Text-to-music | `/v1/music` jobs | A mounted `TextToMusic` card, a verified audio.cpp engine build, and an exact signed support claim for its hardware class. |
 
 See the [API guide](api-guide.md) for request schemas, streaming events, limits and
 examples. Compatibility adapters expose supported subsets of their upstream APIs;
@@ -117,11 +117,18 @@ Skulk ships without the audio.cpp engine package. When you mount a music card,
 the API chooses a hardware-eligible node, asks that worker to fetch and verify
 the pinned engine package, then waits for fresh node resources before ordinary
 placement. Apple Silicon macOS, Linux `amd64`, and Linux `arm64` have CPU-capable
-packages. The package contains the server, model specs, and licenses; model
+packages. Linux `amd64` also has a separate Vulkan package, selected only when
+a signed claim covers the exact card, engine build, and hardware class. The
+package contains the server, model specs, and licenses; model
 weights download separately. An offline node can use a verified cached package
 but cannot fetch one. A failed preparation returns a mount error and leaves the
-node serving its other workloads. `SKULK_AUDIO_CPP_BIN` can point to an
-operator-installed build, which must pass the same source and device probes.
+node serving its other workloads. `SKULK_AUDIO_CPP_BIN` and
+`SKULK_AUDIO_CPP_VULKAN_BIN` can point to separate operator-installed builds,
+each of which must pass the same source and device probes. Preparing Vulkan
+does not replace a CPU model instance's executable or build identity.
+For AMD, node resources include a PCI chip class such as
+`amd:pci-1002-1586`, allowing a claim to cover the qualified hardware class
+without identifying a specific node.
 
 `SKULK_AUDIO_CPP_SPECS_DIR` points to its v0.8.2 model specs when they are not
 beside the binary in the package layout. Skulk checks both required spec

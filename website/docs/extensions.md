@@ -802,7 +802,19 @@ when the registered service invokes this host's interpreter, since the staged
 generation is sealed to it; otherwise the host leaves the service running and
 asks for `skulk-plugin-service setup`. A refresh
 that succeeds records the new generation in the setup state, so
-`skulk-plugin-service status` verifies the copy the service runs on. `skulk-plugin-service setup` takes the
+`skulk-plugin-service status` verifies the copy the service runs on.
+Each generation is a full copy of the host's Skulk environment, so once a
+manager has attached on the generation selected for this host's build, the
+host removes the generations nothing uses any more. It keeps:
+
+- the selected generation;
+- every generation a running manager still starts from;
+- the newest other complete generation, for going back to the previous
+  build by hand.
+
+Interrupted copies go too; staging never activates them. Removal holds the
+installer fence that staging holds, so a copy in progress is never touched,
+and a busy fence defers removal to a later refresh. `skulk-plugin-service setup` takes the
 reload path when the service is registered and answering and its registered
 definition still names the current interpreter (the Skulk build or its
 dependencies moved); a moved interpreter takes the ordinary re-registration

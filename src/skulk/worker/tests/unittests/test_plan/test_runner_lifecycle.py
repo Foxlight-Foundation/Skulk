@@ -237,3 +237,58 @@ def test_plan_does_not_create_runner_for_unassigned_node():
     )
 
     assert result is None
+
+
+def _single_node_runner(status: RunnerStatus) -> tuple[FakeRunnerSupervisor, Instance]:
+    shard = get_pipeline_shard_metadata(model_id=MODEL_A_ID, device_rank=0)
+    instance = get_mlx_ring_instance(
+        instance_id=INSTANCE_1_ID,
+        model_id=MODEL_A_ID,
+        node_to_runner={NODE_A: RUNNER_1_ID},
+        runner_to_shard={RUNNER_1_ID: shard},
+    )
+    bound_instance = BoundInstance(
+        instance=instance, bound_runner_id=RUNNER_1_ID, bound_node_id=NODE_A
+    )
+    return FakeRunnerSupervisor(bound_instance=bound_instance, status=status), instance
+
+
+def _plan_single_node(status: RunnerStatus) -> object:
+    runner, instance = _single_node_runner(status)
+    return plan_mod.plan(
+        node_id=NODE_A,
+        runners={RUNNER_1_ID: runner},  # type: ignore[arg-type]
+        global_download_status={NODE_A: []},
+        instances={INSTANCE_1_ID: instance},
+        all_runners={RUNNER_1_ID: status},
+        tasks={},
+    )
+
+
+def test_plan_shuts_down_a_single_node_runner_that_died() -> None:
+    """A dead runner behind a live single-node instance is shut down.
+
+    Nothing else would: the sibling check skips the runner itself, so the
+    instance kept a dead supervisor, never relaunched and never failed. The
+    shutdown hands the decision to the worker's crash breaker.
+    """
+    result = _plan_single_node(RunnerFailed(error_message="Terminated (signal=9)"))
+
+    assert isinstance(result, Shutdown)
+    assert result.instance_id == INSTANCE_1_ID
+    assert result.runner_id == RUNNER_1_ID
+
+
+def test_plan_leaves_terminal_failures_to_the_worker() -> None:
+    """A GPU wedge or a trust refusal is given up directly, never relaunched."""
+    from skulk.shared.models.remote_code_approval import MODEL_TRUST_FAILURE_MARKER
+    from skulk.worker.runner.bootstrap import WEDGE_FAILURE_MARKER
+
+    for marker in (WEDGE_FAILURE_MARKER, MODEL_TRUST_FAILURE_MARKER):
+        result = _plan_single_node(RunnerFailed(error_message=f"Terminated ({marker})"))
+        assert not isinstance(result, Shutdown), marker
+
+
+def test_plan_does_not_shut_down_a_healthy_single_node_runner() -> None:
+    assert not isinstance(_plan_single_node(RunnerReady()), Shutdown)
+
