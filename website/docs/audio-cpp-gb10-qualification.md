@@ -6,7 +6,9 @@ title: audio.cpp GB10 CUDA qualification
 This record captures the technical qualification for exact `music.generate`
 claims for the two music cards below on the `nvidia:sm-12.1` hardware class.
 The class describes GPU compute compatibility, not an individual Skulk node.
-Human listening and production-signed activation are separate gates.
+Both cards passed human listening and production-signed activation on this
+exact build and hardware class. Other CUDA builds and hardware classes need
+their own qualification.
 
 | Contract | Qualified value |
 | --- | --- |
@@ -38,8 +40,8 @@ lyrics returned HTTP 400. Active and queued cancellation reached terminal
 `cancelled` for both families, and their runners returned to ready. Parallel
 ACE and MiniMax requests completed with digest-matched WAV content while both
 models were mounted.
-Human listening of an exact output from each card remains a separate release
-gate; these signal measurements do not establish subjective music quality.
+These signal measurements did not establish subjective music quality; the
+separate listening set below closed that gate.
 
 Both models then completed concurrent, paced stability runs on the same isolated node.
 Every result was a stereo WAV with the expected sample rate and a matching
@@ -106,3 +108,40 @@ identity above, and `nvidia:sm-12.1`. A generic NVIDIA class or another
 audio.cpp executable does not inherit this result. The package needs host
 CUDA 12 runtime, cuBLAS, NCCL, and NVIDIA driver libraries; the binary probe
 reports missing libraries before advertising the lane.
+
+## Music quality and production-signed activation
+
+Each card generated eight reviewed outputs: four different music prompts and
+lyric settings at two seeds, including longer requests. ACE-Step produced two
+25-second results; MiniMax produced one 22.18-second result and one additional
+24.96-second result with longer lyrics. One MiniMax request targeted 25
+seconds but ended at 9.15 seconds, consistent with the API's generation-target
+contract. All reviewed outputs were accepted as music. The listener preferred
+ACE-Step's quality in this set; acceptance does not imply equal quality.
+
+The registry then published exact `supported` claims for `music.generate`,
+`audio_cpp-cuda`, the executable build above, and `nvidia:sm-12.1`:
+
+| Card | Support claim |
+| --- | --- |
+| ACE-Step 1.5 Turbo BF16 | `support_y5ukbrwmdmmcl53pgwfqzaj5rpe2c7gzlgchg6csxd2nz4o56paq` |
+| MiniMax Music 3 Q4 | `support_lnm5obsbwkld4icrzsi7ccviwvxlj2l6vpa45dz4lyvmz2cvir2a` |
+
+A stock TUF reader verified signed snapshot
+`snapshot_141_309aa14cac11c76a45238f5c` with both claims. The normal
+three-node Skulk service discovered both cards, prepared the pinned engine
+package on demand, advertised the matching live build, and mounted each card
+to `RunnerReady` on the GB10. A MiniMax placement explicitly selected this
+CUDA hardware class because unconstrained placement also had a supported
+Metal option. Both ordinary `/v1/music` requests returned non-silent stereo
+WAV content matching their job metadata and SHA-256 digests:
+
+| Card | Actual duration | Sample rate | Bytes | WAV SHA-256 |
+| --- | ---: | ---: | ---: | --- |
+| ACE-Step 1.5 Turbo BF16 | 10.00 s | 48 kHz | 1,920,044 | `c6d0b4b0b07256e8444e25805034fb11e78dd492b0b0a1bda3e4f980698412a3` |
+| MiniMax Music 3 Q4 | 9.985 s | 44.1 kHz | 1,761,324 | `00680569c79bebef0f8d2a93dd61dd7d959336adea577e4661148b89ff731f1a` |
+
+The test jobs and placements were removed. The three nodes finished healthy
+with their two original runners ready. This qualification is for these exact
+cards, build, and hardware class; it does not extend to every Linux arm64 CPU
+or NVIDIA CUDA combination.

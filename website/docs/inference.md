@@ -138,8 +138,8 @@ device-memory reading and admits the shared CPU/GPU pool only within host-RAM
 headroom and its unified-memory working-set limit. If neither memory query
 succeeds, GPU music placement waits for usable capacity instead of guessing.
 The [GB10 CUDA qualification record](audio-cpp-gb10-qualification.md) identifies
-the exact package, model cards, hardware class, and music API checks required
-before publishing signed support claims.
+the exact package, model cards, hardware class, music API checks, and published
+signed support claims for ACE-Step and MiniMax.
 
 `SKULK_AUDIO_CPP_SPECS_DIR` points to its v0.8.2 model specs when they are not
 beside the binary in the package layout. Skulk checks both required spec
