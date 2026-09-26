@@ -2984,13 +2984,26 @@ class Worker:
                     # be retried), keep the files so the next runner can find them.
                     instance_deleted = task.instance_id not in self.state.instances
                     try:
-                        # Acknowledgement only means the subprocess received the
-                        # shutdown task. Wait for its terminal status before
-                        # cancelling the supervisor; otherwise cancellation can
-                        # close the event pipe between ACK and Complete, leaving
-                        # a permanently running lifecycle task in cluster state.
-                        with fail_after(15):
-                            await runner.start_task(task, wait_for_terminal=True)
+                        if not runner.runner_process.is_alive():
+                            # A runner that already died cannot acknowledge its
+                            # shutdown; record the task done rather than waiting
+                            # out the deadline, and go straight to the retry or
+                            # give-up decision below.
+                            await self.event_sender.send(
+                                TaskStatusUpdated(
+                                    task_id=task.task_id,
+                                    task_status=TaskStatus.Complete,
+                                )
+                            )
+                        else:
+                            # Acknowledgement only means the subprocess received
+                            # the shutdown task. Wait for its terminal status
+                            # before cancelling the supervisor; otherwise
+                            # cancellation can close the event pipe between ACK
+                            # and Complete, leaving a permanently running
+                            # lifecycle task in cluster state.
+                            with fail_after(15):
+                                await runner.start_task(task, wait_for_terminal=True)
                     except TimeoutError:
                         await self.event_sender.send(
                             TaskStatusUpdated(

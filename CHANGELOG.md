@@ -85,6 +85,14 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- A single-node placement whose runner dies is relaunched, and given up
+  with a recorded failure if it keeps dying, instead of staying dead behind
+  a live instance. Only a peer's failure used to shut a runner down, so a
+  one-node runner killed or crashed outside a GPU wedge left the placement
+  serving nothing, never retried and never failed, until someone deleted it.
+  The shutdown of a runner that already died no longer waits out its
+  15-second acknowledgement deadline.
+
 - A managed plugin's owner that exits unexpectedly is started again. The
   plugin manager restarts it after growing waits (5 s to 300 s, then every
   five minutes while it keeps failing), so an owner stopped by a condition
