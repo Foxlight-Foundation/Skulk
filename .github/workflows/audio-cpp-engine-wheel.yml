@@ -248,22 +248,22 @@ jobs:
           bin="$AUDIO_CPP_PACKAGE_DIR/src/$AUDIO_CPP_PACKAGE_MODULE/bin"
           mkdir -p "$bin"
           cp /tmp/audio-cpp-build/bin/audiocpp_server "$bin/"
-          # Hosted builders have a CUDA toolkit but no NVIDIA driver. Supply
-          # only the toolkit's CI stub for version/loader smoke tests; the
-          # published wheel still requires the real host libcuda.so.1.
-          driver_stub=$(find /usr/local/cuda -name libcuda.so -print -quit)
-          test -n "$driver_stub"
-          mkdir -p /tmp/cuda-driver-stub
-          ln -s "$driver_stub" /tmp/cuda-driver-stub/libcuda.so.1
-          export LD_LIBRARY_PATH="/tmp/cuda-driver-stub:${LD_LIBRARY_PATH:-}"
-          echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
+          # Hosted builders have no NVIDIA driver; the toolkit image may also
+          # omit its link-only driver stub. Real loader/device smoke is required
+          # on the GB10 before this wheel can receive a qualified pin.
           ldd "$bin/audiocpp_server" | tee /tmp/audio-cpp-cuda-ldd.txt
-          if grep -q 'not found' /tmp/audio-cpp-cuda-ldd.txt; then
-            echo 'CUDA wheel has an unresolved library beyond the driver stub' >&2
+          missing=$(awk '/not found/ {print $1}' /tmp/audio-cpp-cuda-ldd.txt)
+          if [[ -n "$missing" && "$missing" != 'libcuda.so.1' ]]; then
+            echo "CUDA wheel has an unresolved library beyond the host driver: $missing" >&2
             exit 1
           fi
-          "$bin/audiocpp_server" --version | grep -q 'backends:.*cuda'
-          "$bin/audiocpp_server" --list-devices || true
+          driver_stub=$(find /usr/local/cuda -name libcuda.so -print -quit)
+          if [[ -n "$driver_stub" ]]; then
+            mkdir -p /tmp/cuda-driver-stub
+            ln -s "$driver_stub" /tmp/cuda-driver-stub/libcuda.so.1
+            export LD_LIBRARY_PATH="/tmp/cuda-driver-stub:${LD_LIBRARY_PATH:-}"
+            "$bin/audiocpp_server" --version | grep -q 'backends:.*cuda'
+          fi
       - uses: astral-sh/setup-uv@v6
       - name: Build and verify wheel
         run: |
