@@ -849,3 +849,56 @@ def test_installed_card_records_pass_when_nothing_is_unrecorded(
     assert [r.verdict for r in results] == ["ok"]
     assert results[0].detail == "0 installed models, each with its card record"
 
+
+def test_installed_card_records_include_the_configured_staging_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Store-staged models live outside the model directories and still count."""
+    import skulk.doctor.checks as checks_module
+    from skulk.store.config import ModelStoreConfig, SkulkConfig, StagingNodeConfig
+
+    staging = tmp_path / "staging"
+    staged = staging / "org--staged"
+    staged.mkdir(parents=True)
+    (staged / "config.json").write_text("{}")
+    (staged / "model.safetensors").write_bytes(b"weights")
+    monkeypatch.setattr(
+        "skulk.shared.constants.SKULK_MODELS_DIR", tmp_path / "models"
+    )
+    monkeypatch.setattr("skulk.shared.constants.SKULK_MODELS_PATH", None)
+    _present_config(monkeypatch, tmp_path)
+    config = SkulkConfig(
+        model_store=ModelStoreConfig(
+            store_host="some-other-machine",
+            store_path=str(tmp_path / "store"),
+            staging=StagingNodeConfig(node_cache_path=str(staging)),
+        )
+    )
+    monkeypatch.setattr("skulk.store.config.load_skulk_config", lambda: config)
+
+    results = checks_module._check_installed_card_records(
+        make_facts(platform="darwin")
+    )
+
+    assert [r.verdict for r in results] == ["degraded"]
+    assert "org--staged" in results[0].detail
+
+    # With the store off, the staging cache is not a model root.
+    monkeypatch.setattr(
+        "skulk.store.config.load_skulk_config",
+        lambda: SkulkConfig(
+            model_store=ModelStoreConfig(
+                enabled=False,
+                store_host="some-other-machine",
+                store_path=str(tmp_path / "store"),
+                staging=StagingNodeConfig(node_cache_path=str(staging)),
+            )
+        ),
+    )
+    assert [
+        r.verdict
+        for r in checks_module._check_installed_card_records(
+            make_facts(platform="darwin")
+        )
+    ] == ["ok"]
+

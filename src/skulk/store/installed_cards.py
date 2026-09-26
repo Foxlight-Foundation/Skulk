@@ -1276,21 +1276,53 @@ class UnrecordedArtifacts:
     """Directories whose card record matches their files."""
 
 
-def find_unrecorded_artifacts(roots: Iterable[Path]) -> UnrecordedArtifacts:
+def _detached_records_by_path(
+    fallback_root: Path,
+) -> dict[str, tuple[InstalledCardRecord, ...]]:
+    """Index the detached records under ``fallback_root`` by artifact path.
+
+    Only records whose outer manifest digest matches the inner record are
+    kept, the same binding :func:`read_installed_card_with_fallback` applies.
+    """
+
+    if not fallback_root.is_dir():
+        return {}
+    by_path: dict[str, list[InstalledCardRecord]] = {}
+    for path in fallback_root.glob("*.json"):
+        try:
+            external = ExternalInstalledCardRecord.model_validate_json(
+                path.read_bytes(), strict=False
+            )
+        except (OSError, ValueError):
+            continue
+        if external.manifest_sha256 == external.record.manifest_sha256:
+            by_path.setdefault(external.artifact_path, []).append(external.record)
+    return {artifact: tuple(records) for artifact, records in by_path.items()}
+
+
+def find_unrecorded_artifacts(
+    roots: Iterable[Path],
+    *,
+    fallback_root: Path = SKULK_INSTALLED_CARD_RECORDS_DIR,
+) -> UnrecordedArtifacts:
     """Sort every model directory under ``roots`` by whether its card is recorded.
 
-    A record is checked against the file sizes it lists, not their hashes, so
-    this stays cheap on a node that holds hundreds of gigabytes. Hidden
-    directories are skipped, as discovery skips them.
+    A record, adjacent or detached, is checked against the file sizes it
+    lists and never against their hashes, so this stays cheap on a node that
+    holds hundreds of gigabytes. That is enough for a report: the question is
+    whether a record exists, and launch still hashes a detached record before
+    trusting it. Hidden directories are skipped, as discovery skips them.
 
     Args:
         roots: Model-search roots to inspect.
+        fallback_root: Directory holding detached records for read-only roots.
 
     Returns:
         The complete and incomplete directories without a usable record, and
         the number with one.
     """
 
+    detached = _detached_records_by_path(fallback_root)
     complete: list[Path] = []
     incomplete: list[Path] = []
     recorded = 0
@@ -1301,10 +1333,19 @@ def find_unrecorded_artifacts(roots: Iterable[Path]) -> UnrecordedArtifacts:
             if not model_directory.is_dir() or model_directory.name.startswith("."):
                 continue
             try:
-                record = read_installed_card_with_fallback(model_directory)
+                adjacent = read_installed_card(model_directory)
+                candidates = (
+                    (adjacent,)
+                    if adjacent is not None
+                    else detached.get(str(model_directory.resolve()), ())
+                )
+                has_record = any(
+                    verify_installed_card(model_directory, record)
+                    for record in candidates
+                )
             except (OSError, ValueError):
-                record = None
-            if record is not None and verify_installed_card(model_directory, record):
+                has_record = False
+            if has_record:
                 recorded += 1
             elif _legacy_base_artifact_is_complete(model_directory):
                 complete.append(model_directory)

@@ -1121,10 +1121,46 @@ def test_unrecorded_artifacts_are_sorted_by_completeness(tmp_path: Path) -> None
     (partial / "model.safetensors.partial").write_bytes(b"half")
     (root / ".hidden").mkdir()
 
-    found = find_unrecorded_artifacts([root, tmp_path / "absent"])
+    found = find_unrecorded_artifacts(
+        [root, tmp_path / "absent"], fallback_root=tmp_path / "records"
+    )
 
     assert found.recorded == 1
     # A record whose files changed is no record; the bytes still look complete.
     assert [path.name for path in found.complete] == ["org--drifted", "org--legacy"]
     assert [path.name for path in found.incomplete] == ["org--partial"]
 
+
+def test_unrecorded_artifacts_count_a_detached_record_without_hashing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A read-only root's detached record counts, checked by size alone."""
+
+    root = tmp_path / "models"
+    root.mkdir()
+    artifact = _artifact(root)
+    fallback_root = tmp_path / "data" / "installed-cards"
+
+    def _deny_adjacent_write(_directory: Path, _record: InstalledCardRecord) -> Path:
+        raise PermissionError("read-only model root")
+
+    monkeypatch.setattr(installed_cards, "write_installed_card", _deny_adjacent_write)
+    write_installed_card_with_fallback(
+        artifact,
+        build_installed_card_record(artifact, _card()),
+        fallback_root=fallback_root,
+    )
+
+    def _no_hashing(path: Path) -> str:
+        raise AssertionError(f"the report hashed {path}")
+
+    monkeypatch.setattr(installed_cards, "_sha256_file", _no_hashing)
+
+    found = find_unrecorded_artifacts([root], fallback_root=fallback_root)
+
+    assert found.recorded == 1
+    assert found.complete == ()
+    # Without the detached record the same directory is unrecorded.
+    bare = find_unrecorded_artifacts([root], fallback_root=tmp_path / "none")
+    assert [path.name for path in bare.complete] == ["org--model"]

@@ -55,7 +55,7 @@ Verifies the models directory exists, is writable, and has download headroom (wa
 
 ### Installed model cards (`installed-card-records`)
 
-Verifies every complete model in the model directories carries its card record (`.skulk/installed-card.json`), the record that keeps a downloaded model servable without the network. A model downloaded before these records existed gets one when Skulk starts with network access and recognizes it. Incomplete downloads are counted, not flagged.
+Verifies every complete model in the model directories and the node's model-store staging cache carries its card record (`.skulk/installed-card.json`, or the detached record kept for a read-only model directory), the record that keeps a downloaded model servable without the network. Records are checked by file size, never hashed, so the check stays fast on large stores. A model downloaded before these records existed gets one when Skulk starts with network access and recognizes it. Incomplete downloads are counted, not flagged.
 
 ### Dashboard assets (`dashboard-assets`)
 

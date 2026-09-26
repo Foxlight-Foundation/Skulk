@@ -580,6 +580,33 @@ def _fix_models_storage(facts: NodeFacts) -> str | None:
 _UNRECORDED_NAMES_SHOWN = 5
 
 
+def _staging_root() -> Path | None:
+    """This node's configured staging cache, when the model store stages here.
+
+    Store-staged models live in this cache, which by default sits outside the
+    model directories, so a card audit that skipped it would miss them.
+    Doctor has no runtime node ID, so a staging override keyed by one cannot
+    match; an override keyed by hostname, and the base staging config, do.
+    """
+    from skulk.store.config import (
+        load_skulk_config,
+        resolve_config_path,
+        resolve_node_staging,
+    )
+
+    if not resolve_config_path().exists():
+        return None
+    try:
+        config = load_skulk_config()
+    except Exception:  # noqa: BLE001 - a broken config is another check's job
+        return None
+    store = config.model_store if config is not None else None
+    if store is None or not store.enabled:
+        return None
+    staging = resolve_node_staging(store, "")
+    return Path(staging.node_cache_path).expanduser() if staging.enabled else None
+
+
 def _check_installed_card_records(facts: NodeFacts) -> Sequence[CheckResult]:
     """Every complete installed model should carry its card record."""
     del facts
@@ -588,7 +615,7 @@ def _check_installed_card_records(facts: NodeFacts) -> Sequence[CheckResult]:
     from skulk.store.artifact_inventory import installed_artifact_roots
     from skulk.store.installed_cards import find_unrecorded_artifacts
 
-    found = find_unrecorded_artifacts(installed_artifact_roots(None))
+    found = find_unrecorded_artifacts(installed_artifact_roots(_staging_root()))
     ignored = (
         f"; {len(found.incomplete)} incomplete download"
         f"{'' if len(found.incomplete) == 1 else 's'} ignored"
@@ -1039,9 +1066,12 @@ REGISTRY: tuple[DoctorCheck, ...] = (
         check_id="installed-card-records",
         title="Installed model cards",
         docs=(
-            "Verifies every complete model in the model directories carries "
-            "its card record (`.skulk/installed-card.json`), the record that "
-            "keeps a downloaded model servable without the network. A model "
+            "Verifies every complete model in the model directories and the "
+            "node's model-store staging cache carries its card record "
+            "(`.skulk/installed-card.json`, or the detached record kept for a "
+            "read-only model directory), the record that keeps a downloaded "
+            "model servable without the network. Records are checked by file "
+            "size, never hashed, so the check stays fast on large stores. A model "
             "downloaded before these records existed gets one when Skulk "
             "starts with network access and recognizes it. Incomplete "
             "downloads are counted, not flagged."
