@@ -11,7 +11,11 @@ from typing import final
 from loguru import logger
 
 from skulk.facts.probe import probe_audio_cpp
-from skulk.shared.backends import AUDIO_CPP_BIN_ENV, probe_node_backends
+from skulk.shared.backends import (
+    AUDIO_CPP_BIN_ENV,
+    AUDIO_CPP_VULKAN_BIN_ENV,
+    probe_node_backends,
+)
 from skulk.shared.constants import SKULK_CACHE_HOME, SKULK_MUSIC_OUTPUT_DIR
 from skulk.shared.models.model_cards import ModelCard, ModelId
 from skulk.shared.types.chunks import ErrorChunk, MusicChunk
@@ -97,6 +101,31 @@ def verify_audio_cpp_launch(binary: Path, expected_build: str | None, backend: s
     observed = f"audio.cpp@sha256:{digest.hexdigest()}"
     if observed != expected_build:
         raise RuntimeError("audio.cpp executable changed since music placement")
+
+
+def audio_cpp_binary_for_lane(backend: str, expected_build: str | None) -> Path:
+    """Select the still-verified executable matching the placed compute build."""
+    variables = (
+        (AUDIO_CPP_VULKAN_BIN_ENV, AUDIO_CPP_BIN_ENV)
+        if backend == "vulkan"
+        else (AUDIO_CPP_BIN_ENV,)
+    )
+    errors: list[str] = []
+    for variable in variables:
+        configured = os.environ.get(variable, "").strip()
+        if not configured:
+            continue
+        binary = Path(configured)
+        try:
+            verify_audio_cpp_launch(binary, expected_build, backend)
+        except RuntimeError as error:
+            errors.append(f"{variable}: {error}")
+            continue
+        return binary
+    raise RuntimeError(
+        "no prepared audio.cpp executable matches the placed build and "
+        f"{backend} device" + (": " + "; ".join(errors) if errors else "")
+    )
 
 
 @final
@@ -198,12 +227,10 @@ class Runner(ServedConcurrentDispatch):
         bundle = self.card.artifact_bundle
         if music is None or bundle is None:
             raise RuntimeError("music runner requires a typed [music] artifact card")
-        binary_value = os.environ.get(AUDIO_CPP_BIN_ENV, "").strip()
-        if not binary_value:
-            raise RuntimeError("audio.cpp package has not been prepared on this node")
-        binary = Path(binary_value)
-        if not binary.is_file():
-            raise RuntimeError("audio.cpp package is missing its server")
+        backend = _compute_backend(self.shard_metadata.resolved_backend)
+        binary = audio_cpp_binary_for_lane(
+            backend, self.shard_metadata.resolved_engine_build
+        )
         from skulk.provisioning.audio_cpp import audio_cpp_model_specs
 
         specs = audio_cpp_model_specs(binary)
@@ -212,10 +239,6 @@ class Runner(ServedConcurrentDispatch):
 
         for component in bundle.files:
             resolve_artifact_file(model_dir, bundle.root, component.path)
-        backend = _compute_backend(self.shard_metadata.resolved_backend)
-        verify_audio_cpp_launch(
-            binary, self.shard_metadata.resolved_engine_build, backend,
-        )
         server = AudioCppServer(
             binary=binary,
             model_specs=specs,

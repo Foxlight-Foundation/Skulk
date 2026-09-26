@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import time
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Literal
 from unittest.mock import AsyncMock
 
 import pytest
@@ -19,20 +19,29 @@ from skulk.worker.main import Worker
 
 
 @pytest.mark.parametrize(
-    ("builds", "expected_success"),
-    [({"audio_cpp-metal": "verified-build"}, True), ({}, False)],
+    ("variant", "lane", "builds", "expected_success"),
+    [
+        ("cpu", "audio_cpp-metal", {"audio_cpp-metal": "verified-build"}, True),
+        ("cpu", "audio_cpp-metal", {}, False),
+        ("vulkan", "audio_cpp-vulkan", {"audio_cpp-vulkan": "verified-build"}, True),
+        ("vulkan", "audio_cpp-cpu", {"audio_cpp-cpu": "verified-build"}, False),
+    ],
 )
 async def test_prepared_gpu_only_lane_requires_matching_build(
-    monkeypatch: pytest.MonkeyPatch, builds: dict[str, str], expected_success: bool,
+    monkeypatch: pytest.MonkeyPatch, variant: Literal["cpu", "vulkan"], lane: str,
+    builds: dict[str, str], expected_success: bool,
 ) -> None:
     """A GPU-only override can mount, while an unverified lane cannot."""
-    def prepared(*, allow_download: bool) -> None:
+    def prepared(*, allow_download: bool, variant: Literal["cpu", "vulkan"]) -> None:
         assert allow_download
+        assert variant == requested_variant
+
+    requested_variant = variant
 
     monkeypatch.setattr(provisioning, "prepare_audio_cpp", prepared)
     monkeypatch.setattr(facts, "refresh_node_facts", lambda: None)
     resources = NodeResources(
-        backends=frozenset({"audio_cpp", "audio_cpp-metal"}),
+        backends=frozenset({"audio_cpp", lane}),
         engine_builds=builds,
     )
     monkeypatch.setattr(NodeResources, "gather", AsyncMock(return_value=resources))
@@ -48,6 +57,7 @@ async def test_prepared_gpu_only_lane_requires_matching_build(
         request_id=CommandId("prepare-music"),
         target_node=worker.node_id,
         owner_node=NodeId("api-node"),
+        variant=variant,
         expires_at=time.time() + 60,
     )
 

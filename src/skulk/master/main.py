@@ -2317,6 +2317,7 @@ class Master:
                                     request_id=command.command_id,
                                     target_node=command.target_node,
                                     owner_node=command.owner_node,
+                                    variant=command.variant,
                                     expires_at=time.time() + 300,
                                 ))
                         case TextGeneration():

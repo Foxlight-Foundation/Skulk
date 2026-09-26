@@ -84,7 +84,19 @@ jobs:
       - name: Install Vulkan build prerequisites
         if: matrix.variant == 'vulkan'
         run: |
-          sudo apt-get install -y -qq libvulkan-dev glslc
+          sudo apt-get install -y -qq libvulkan-dev xz-utils
+          # Jammy has no glslc package. Keep its glibc 2.35 wheel baseline by
+          # using a SHA-pinned LunarG build-time compiler that supports Jammy.
+          curl --fail --location --retry 3 --output /tmp/vulkan-sdk.tar.xz \
+            https://sdk.lunarg.com/sdk/download/1.3.296.0/linux/vulkansdk-linux-x86_64-1.3.296.0.tar.xz
+          echo '79b0a1593dadc46180526250836f3e53688a9a5fb42a0e5859eb72316dc4d53e  /tmp/vulkan-sdk.tar.xz' \
+            | sha256sum --check
+          mkdir -p /tmp/vulkan-sdk
+          tar -xf /tmp/vulkan-sdk.tar.xz -C /tmp/vulkan-sdk
+          glslc_path=$(find /tmp/vulkan-sdk -type f -path '*/bin/glslc' -print -quit)
+          test -n "$glslc_path"
+          "$glslc_path" --version
+          echo "$(dirname "$glslc_path")" >> "$GITHUB_PATH"
       - name: Fetch pinned audio.cpp source
         run: |
           git clone --filter=blob:none https://github.com/0xShug0/audio.cpp /tmp/audio-cpp-src

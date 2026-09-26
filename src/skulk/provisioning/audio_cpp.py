@@ -19,13 +19,17 @@ import threading
 import zipfile
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Final, cast, final
+from typing import Final, Literal, cast, final
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from skulk.provisioning.llama_server import AUTOPROVISION_OPT_OUT_ENV
-from skulk.shared.backends import AUDIO_CPP_BIN_ENV, AUDIO_CPP_SPECS_DIR_ENV
+from skulk.shared.backends import (
+    AUDIO_CPP_BIN_ENV,
+    AUDIO_CPP_SPECS_DIR_ENV,
+    AUDIO_CPP_VULKAN_BIN_ENV,
+)
 from skulk.shared.constants import SKULK_ENGINES_DIR
 
 AUDIO_CPP_SOURCE_REVISION: Final = "4d88768fbcae4e6eb3352c6ab1422dabb7d90b58"
@@ -70,7 +74,7 @@ class AudioCppWheel(BaseModel):
 
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
-    filename: str = Field(pattern=r"^skulk_audio_cpp_cpu-0\.8\.2\.post1-.+\.whl$")
+    filename: str = Field(pattern=r"^skulk_audio_cpp_(?:cpu|vulkan)-0\.8\.2\.post1-.+\.whl$")
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
     @property
@@ -97,6 +101,11 @@ AUDIO_CPP_CPU_WHEELS: Final[dict[tuple[str, str], AudioCppWheel]] = {
     ),
 }
 
+# The Vulkan package is separate so preparing it cannot replace an in-use CPU
+# executable. Its exact wheel pin is added after the CI artifact passes separate
+# target-GPU qualification; no unpinned URL is a preparation candidate.
+AUDIO_CPP_VULKAN_WHEELS: Final[dict[tuple[str, str], AudioCppWheel]] = {}
+
 
 def audio_cpp_wheel_for_host(
     *, system: str | None = None, machine: str | None = None
@@ -117,6 +126,46 @@ def audio_cpp_wheel_for_host(
     return wheel
 
 
+def audio_cpp_vulkan_wheel_for_host(
+    *, system: str | None = None, machine: str | None = None
+) -> AudioCppWheel:
+    """Return the exact Linux Vulkan wheel for a supported host architecture."""
+    target = (system or sys.platform, (machine or platform.machine()).lower())
+    if target[0] == "linux" and target[1] == "amd64":
+        target = ("linux", "x86_64")
+    wheel = AUDIO_CPP_VULKAN_WHEELS.get(target)
+    if wheel is None:
+        raise RuntimeError(
+            "No SHA-256-pinned audio.cpp Vulkan engine package has been published "
+            f"for {target[0]}/{target[1]}"
+        )
+    return wheel
+
+
+def _wheel_for_variant(variant: Literal["cpu", "vulkan"]) -> AudioCppWheel:
+    """Resolve the immutable package for the requested compute variant."""
+    return (
+        audio_cpp_wheel_for_host()
+        if variant == "cpu"
+        else audio_cpp_vulkan_wheel_for_host()
+    )
+
+
+def _package_prefix(wheel: AudioCppWheel) -> str:
+    """Return the fixed payload root selected by the pinned distribution name."""
+    return (
+        "skulk_audio_cpp_vulkan/"
+        if wheel.filename.startswith("skulk_audio_cpp_vulkan-")
+        else _PACKAGE_PREFIX
+    )
+
+
+def _required_members(wheel: AudioCppWheel) -> frozenset[str]:
+    """Return the complete pinned runtime payload for one package variant."""
+    prefix = _package_prefix(wheel)
+    return frozenset(member.replace(_PACKAGE_PREFIX, prefix, 1) for member in _REQUIRED_MEMBERS)
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -131,7 +180,8 @@ def _cache_root(wheel: AudioCppWheel) -> Path:
 
 def _cached_binary(root: Path, wheel: AudioCppWheel) -> Path | None:
     """Verify cached runtime files against the independently pinned wheel."""
-    binary = root / _BINARY_MEMBER
+    members_required = _required_members(wheel)
+    binary = root / _package_prefix(wheel) / "bin/audiocpp_server"
     wheel_path = root / wheel.filename
     try:
         raw = cast("object", json.loads((root / "provisioned.json").read_text()))
@@ -154,11 +204,11 @@ def _cached_binary(root: Path, wheel: AudioCppWheel) -> Path | None:
         hashes = cast("dict[str, object]", member_hashes)
         with zipfile.ZipFile(wheel_path) as archive:
             members = {item.filename: item for item in archive.infolist()}
-            if not members.keys() >= _REQUIRED_MEMBERS or sum(
-                members[member].file_size for member in _REQUIRED_MEMBERS
+            if not members.keys() >= members_required or sum(
+                members[member].file_size for member in members_required
             ) > _MAX_EXPANDED_BYTES:
                 return None
-            for member in _REQUIRED_MEMBERS:
+            for member in members_required:
                 expected = hashes.get(member)
                 path = root / member
                 if not isinstance(expected, str) or not path.is_file():
@@ -176,12 +226,18 @@ def _cached_binary(root: Path, wheel: AudioCppWheel) -> Path | None:
 
 def verified_cached_audio_cpp_binary(binary: Path) -> bool:
     """Return whether this executable belongs to this host's pinned wheel cache."""
-    try:
-        wheel = audio_cpp_wheel_for_host()
-    except RuntimeError:
-        return False
-    root = _cache_root(wheel)
-    return binary == root / _BINARY_MEMBER and _cached_binary(root, wheel) == binary
+    for variant in ("cpu", "vulkan"):
+        try:
+            wheel = _wheel_for_variant(variant)
+        except RuntimeError:
+            continue
+        root = _cache_root(wheel)
+        if (
+            binary == root / _package_prefix(wheel) / "bin/audiocpp_server"
+            and _cached_binary(root, wheel) == binary
+        ):
+            return True
+    return False
 
 
 def audio_cpp_model_specs(
@@ -208,17 +264,24 @@ def rehydrate_cached_audio_cpp(
 ) -> Path | None:
     """Restore a previously verified package without network or a new download."""
     env = os.environ if environ is None else environ
-    if env.get(AUDIO_CPP_BIN_ENV, "").strip():
-        return None  # an explicit operator path remains authoritative
-    try:
-        wheel = audio_cpp_wheel_for_host()
-        cached = _cached_binary(_cache_root(wheel), wheel)
-        if cached is None:
-            return None
-    except (OSError, RuntimeError):
-        return None
-    os.environ[AUDIO_CPP_BIN_ENV] = str(cached)
-    return cached
+    selected: Path | None = None
+    variants: tuple[tuple[Literal["cpu", "vulkan"], str], ...] = (
+        ("cpu", AUDIO_CPP_BIN_ENV),
+        ("vulkan", AUDIO_CPP_VULKAN_BIN_ENV),
+    )
+    for variant, variable in variants:
+        if env.get(variable, "").strip():
+            continue  # an explicit operator path remains authoritative
+        try:
+            wheel = _wheel_for_variant(variant)
+            cached = _cached_binary(_cache_root(wheel), wheel)
+        except (OSError, RuntimeError):
+            continue
+        if cached is not None:
+            os.environ[variable] = str(cached)
+            if selected is None:
+                selected = cached
+    return selected
 
 
 def _download_wheel(wheel: AudioCppWheel, destination: Path) -> None:
@@ -243,15 +306,18 @@ def _download_wheel(wheel: AudioCppWheel, destination: Path) -> None:
 
 def _extract_wheel(wheel_path: Path, staging: Path) -> str:
     """Extract only the fixed runtime payload from a verified wheel."""
+    wheel = AudioCppWheel(filename=wheel_path.name, sha256=_sha256(wheel_path))
+    required = _required_members(wheel)
+    prefix = _package_prefix(wheel)
     with zipfile.ZipFile(wheel_path) as archive:
         members = {item.filename: item for item in archive.infolist()}
-        if not members.keys() >= _REQUIRED_MEMBERS:
+        if not members.keys() >= required:
             raise RuntimeError("audio.cpp engine package lacks required runtime files")
         wanted = {
             name: item
             for name, item in members.items()
-            if name.startswith(_PACKAGE_PREFIX)
-            and name in _REQUIRED_MEMBERS
+            if name.startswith(prefix)
+            and name in required
         }
         if sum(item.file_size for item in wanted.values()) > _MAX_EXPANDED_BYTES:
             raise RuntimeError("audio.cpp engine package expands beyond its limit")
@@ -260,13 +326,14 @@ def _extract_wheel(wheel_path: Path, staging: Path) -> str:
             target.parent.mkdir(parents=True, exist_ok=True)
             with archive.open(item) as source, target.open("wb") as destination:
                 shutil.copyfileobj(source, destination, length=1024 * 1024)
-    binary = staging / _BINARY_MEMBER
+    binary = staging / prefix / "bin/audiocpp_server"
     binary.chmod(0o755)
     return _sha256(binary)
 
 
 def prepare_audio_cpp(
     *, allow_download: bool,
+    variant: Literal["cpu", "vulkan"] = "cpu",
     environ: Mapping[str, str] | None = None,
 ) -> Path:
     """Wire an explicit binary or install one verified package for this host.
@@ -277,31 +344,35 @@ def prepare_audio_cpp(
     the node's advertised backends or health.
     """
     env = os.environ if environ is None else environ
-    explicit = env.get(AUDIO_CPP_BIN_ENV, "").strip()
+    variable = AUDIO_CPP_BIN_ENV if variant == "cpu" else AUDIO_CPP_VULKAN_BIN_ENV
+    explicit = env.get(variable, "").strip()
     if explicit:
         path = Path(explicit)
         if not path.is_file() or not os.access(path, os.X_OK):
             raise RuntimeError(
-                f"{AUDIO_CPP_BIN_ENV} names no executable audio.cpp server: {explicit}"
+                f"{variable} names no executable audio.cpp server: {explicit}"
             )
-        wheel = audio_cpp_wheel_for_host()
+        wheel = _wheel_for_variant(variant)
         root = _cache_root(wheel)
-        if path == root / _BINARY_MEMBER and _cached_binary(root, wheel) is None:
+        if path == root / _package_prefix(wheel) / "bin/audiocpp_server" and _cached_binary(root, wheel) is None:
             raise RuntimeError("the cached audio.cpp package failed integrity verification")
         audio_cpp_model_specs(path, environ=env)
         return path
     with _INSTALL_LOCK:
-        return _prepare_pinned_audio_cpp(allow_download=allow_download, env=env)
+        return _prepare_pinned_audio_cpp(allow_download=allow_download, env=env, variant=variant)
 
 
-def _prepare_pinned_audio_cpp(*, allow_download: bool, env: Mapping[str, str]) -> Path:
+def _prepare_pinned_audio_cpp(
+    *, allow_download: bool, env: Mapping[str, str], variant: Literal["cpu", "vulkan"]
+) -> Path:
     """Serialize cache verification and installation within one worker process."""
 
-    wheel = audio_cpp_wheel_for_host()
+    wheel = _wheel_for_variant(variant)
+    variable = AUDIO_CPP_BIN_ENV if variant == "cpu" else AUDIO_CPP_VULKAN_BIN_ENV
     root = _cache_root(wheel)
     cached = _cached_binary(root, wheel)
     if cached is not None:
-        os.environ[AUDIO_CPP_BIN_ENV] = str(cached)
+        os.environ[variable] = str(cached)
         return cached
     if not allow_download or env.get(AUTOPROVISION_OPT_OUT_ENV) == "1":
         raise RuntimeError(
@@ -324,7 +395,7 @@ def _prepare_pinned_audio_cpp(*, allow_download: bool, env: Mapping[str, str]) -
                     "binary_sha256": binary_sha256,
                     "member_sha256": {
                         member: _sha256(staging / member)
-                        for member in sorted(_REQUIRED_MEMBERS)
+                        for member in sorted(_required_members(wheel))
                     },
                 }
             )
@@ -335,5 +406,5 @@ def _prepare_pinned_audio_cpp(*, allow_download: bool, env: Mapping[str, str]) -
     cached = _cached_binary(root, wheel)
     if cached is None:
         raise RuntimeError("audio.cpp engine package failed post-install verification")
-    os.environ[AUDIO_CPP_BIN_ENV] = str(cached)
+    os.environ[variable] = str(cached)
     return cached

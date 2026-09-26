@@ -3702,7 +3702,11 @@ class API:
                     return True
             return False
 
-        candidates: list[tuple[bool, int, NodeId]] = []
+        vulkan_claims = tuple(
+            claim for claim in get_model_engine_support(card)
+            if claim.status == "supported" and claim.engine == "audio_cpp-vulkan"
+        )
+        candidates: list[tuple[bool, int, NodeId, Literal["cpu", "vulkan"]]] = []
         for node_id in self.state.topology.list_nodes():
             if node_id in excluded_nodes or (
                 required_nodes is not None and node_id not in required_nodes
@@ -3728,11 +3732,25 @@ class API:
             )
             if not supported_host:
                 continue
+            vulkan_claim_matches = (
+                "platform:linux" in platform_classes
+                and architecture in {"x86_64", "amd64"}
+                and any(
+                    not claim.hardware_classes
+                    or bool(set(claim.hardware_classes) & platform_classes)
+                    for claim in vulkan_claims
+                )
+            )
+            variant: Literal["cpu", "vulkan"] = (
+                "vulkan" if vulkan_claim_matches else "cpu"
+            )
             ready = any(
-                backend.startswith("audio_cpp-") and backend in resources.engine_builds
+                backend.startswith("audio_cpp-")
+                and backend in resources.engine_builds
+                and (variant != "vulkan" or backend == "audio_cpp-vulkan")
                 for backend in resources.backends
             )
-            candidates.append((ready, available, node_id))
+            candidates.append((ready, available, node_id, variant))
         candidates.sort(key=lambda item: (item[0], item[1], str(item[2])), reverse=True)
         if not candidates:
             raise HTTPException(
@@ -3744,7 +3762,7 @@ class API:
                 ),
             )
         errors: list[str] = []
-        for ready, _memory, node_id in candidates:
+        for ready, _memory, node_id, variant in candidates:
             if ready:
                 resources = self._telemetry_view.node_resources.get(node_id)
                 supported: frozenset[str] = frozenset()
@@ -3767,7 +3785,7 @@ class API:
             try:
                 await self._send(PrepareAudioCpp(
                     command_id=request_id, target_node=node_id,
-                    owner_node=self.node_id,
+                    owner_node=self.node_id, variant=variant,
                 ))
                 with anyio.move_on_after(300):
                     await waiter.wait()
@@ -3780,7 +3798,9 @@ class API:
                     continue
                 fresh = result.resources
                 if result.target_node != node_id or fresh is None or not any(
-                    backend.startswith("audio_cpp-") and backend in fresh.engine_builds
+                    backend.startswith("audio_cpp-")
+                    and backend in fresh.engine_builds
+                    and (variant != "vulkan" or backend == "audio_cpp-vulkan")
                     for backend in fresh.backends
                 ):
                     errors.append(f"{node_id}: preparation returned no verified ready resources")
