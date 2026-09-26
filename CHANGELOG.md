@@ -61,6 +61,9 @@ This project records release notes here and mirrors public-facing notes in
   on every node, with or without a model store, and a model it records is
   listed at once rather than after the next restart.
 
+- A superseded plugin manager runtime that could not be fully removed is
+  retried after five minutes. Before, a partial removal was recorded as
+  done, and the rest waited for a restart.
 - The ComfyUI engine's build identity in `NodeResources.engine_builds` names
   the torch build beside the checkout commit
   (`comfy@<commit>/torch@<version>`): the same checkout on cu130 and on ROCm
