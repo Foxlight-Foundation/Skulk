@@ -25,7 +25,10 @@ This project records release notes here and mirrors public-facing notes in
     its new home.
   - A generated custom card keeps its signed split limit on every catalog
     reload, including from a repository the registry carries only as quant
-    aliases.
+    aliases. While the registry cannot be read, the installed cards for the
+    repository supply that limit.
+  - The empty-catalog warning names a disabled registry
+    (`SKULK_MODEL_REGISTRY_ENABLED=false`) as its own cause.
 
 - A model added from the Hugging Face search keeps the pipeline-split limit
   of the signed registry card for its repository, taking the strictest

@@ -476,7 +476,7 @@ async def _load_cards_from_dir(directory: Path, *, is_custom: bool) -> None:
                     card,
                     existing
                     if existing is not None and not existing.is_custom
-                    else _signed_baseline_card(card.artifact_repository),
+                    else _curated_baseline_card(card.artifact_repository),
                 )
             stale_generated = (
                 card.generator_revision is not None
@@ -565,16 +565,19 @@ def _explain_an_empty_catalog(registry_loaded: bool) -> None:
     if _empty_catalog_explained:
         return
     _empty_catalog_explained = True
-    reason = (
-        "offline mode is on"
-        if offline_mode()
-        else "the signed model registry could not be reached"
-    )
+    if offline_mode():
+        reason, reach = "offline mode is on", "Reach the registry once"
+    elif not SKULK_MODEL_REGISTRY_ENABLED:
+        reason = "the model registry is disabled (SKULK_MODEL_REGISTRY_ENABLED=false)"
+        reach = "Enable the registry"
+    else:
+        reason = "the signed model registry could not be reached"
+        reach = "Connect once to reach the registry"
     logger.warning(
         f"the model catalog is empty: {reason}, and this node has no installed "
-        "model with its card record and no custom card. Connect once to reach "
-        "the registry, copy a model directory together with its "
-        ".skulk/installed-card.json, or add a custom card."
+        f"model with its card record and no custom card. {reach}, copy a model "
+        "directory together with its .skulk/installed-card.json, or add a "
+        "custom card."
     )
 
 
@@ -1110,7 +1113,9 @@ async def get_curated_baseline_card(repository: ModelId) -> "ModelCard | None":
     The current signed registry card is the curated truth: the one whose id
     is ``repository``, else the signed aliases of that repository (one per
     quant). They share the architecture, so the strictest split limit among
-    them is kept.
+    them is kept. While the registry cannot be read, the installed cards for
+    the repository stand in, since they are the signed cards the models were
+    downloaded with.
 
     Args:
         repository: Hugging Face repository the generated card describes.
@@ -1120,25 +1125,32 @@ async def get_curated_baseline_card(repository: ModelId) -> "ModelCard | None":
         describes the repository.
     """
     await _refresh_card_cache_if_due()
-    return _signed_baseline_card(repository)
+    return _curated_baseline_card(repository)
 
 
-def _signed_baseline_card(repository: ModelId) -> "ModelCard | None":
-    """The signed card a generated card for ``repository`` takes limits from.
+def _curated_baseline_card(repository: ModelId) -> "ModelCard | None":
+    """The curated card a generated card for ``repository`` takes limits from.
 
-    The exact signed card, else the strictest of the repository's signed
-    aliases; reads the registry cards already loaded, without refreshing.
+    Signed cards first, then the installed ones: in each, the exact card for
+    the repository, else the strictest of its aliases. Reads the cards
+    already loaded, without refreshing.
     """
 
-    exact = _registry_current_cards.get(repository)
-    if exact is not None:
-        return exact
-    aliases = [
-        card
-        for card in _registry_current_cards.values()
-        if card.artifact_repository == repository
-    ]
-    return min(aliases, key=_split_limit) if aliases else None
+    for candidates in (
+        list(_registry_current_cards.values()),
+        [
+            record.model_card
+            for record in _installed_card_cache.values()
+            if not record.model_card.is_custom
+        ],
+    ):
+        exact = next((card for card in candidates if card.model_id == repository), None)
+        if exact is not None:
+            return exact
+        aliases = [card for card in candidates if card.artifact_repository == repository]
+        if aliases:
+            return min(aliases, key=_split_limit)
+    return None
 
 
 class ModelTask(str, Enum):

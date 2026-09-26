@@ -684,3 +684,65 @@ async def test_reloaded_generated_card_keeps_a_signed_alias_limit(
     assert loaded.is_custom
     assert loaded.placement.max_pipeline_split_layer == 2
 
+
+@pytest.mark.anyio
+async def test_curated_baseline_falls_back_to_installed_cards(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """While the registry cannot be read, installed cards carry the limit.
+
+    They are the signed cards the models were downloaded with, so re-adding
+    an installed repository during an outage keeps its split limit.
+    """
+    from types import SimpleNamespace
+    from typing import cast
+
+    from skulk.store.installed_cards import InstalledCardRecord
+
+    repository = "testorg/quantized-GGUF"
+    installed = {
+        ModelId(f"{repository}@q8"): _constrained(f"{repository}@q8", 3, repository),
+        ModelId(f"{repository}@q4"): _constrained(f"{repository}@q4", 2, repository),
+    }
+    monkeypatch.setattr(model_cards_module, "_refresh_card_cache_if_due", _no_refresh)
+    monkeypatch.setattr(model_cards_module, "_registry_current_cards", {})
+    monkeypatch.setattr(
+        model_cards_module,
+        "_installed_card_cache",
+        {
+            model_id: cast("InstalledCardRecord", cast(object, SimpleNamespace(model_card=card)))
+            for model_id, card in installed.items()
+        },
+    )
+
+    baseline = await model_cards_module.get_curated_baseline_card(ModelId(repository))
+
+    assert baseline is not None
+    assert baseline.placement.max_pipeline_split_layer == 2
+
+
+def test_empty_catalog_names_a_disabled_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A disabled registry is its own cause, with its own remedy."""
+    from skulk.shared import constants
+
+    warnings: list[str] = []
+
+    class _Recorder:
+        def warning(self, message: str) -> None:
+            warnings.append(message)
+
+    monkeypatch.setattr(model_cards_module, "logger", _Recorder())
+    monkeypatch.setattr(model_cards_module, "_card_cache", {})
+    monkeypatch.setattr(model_cards_module, "_empty_catalog_explained", False)
+    monkeypatch.setattr(model_cards_module, "SKULK_MODEL_REGISTRY_ENABLED", False)
+    monkeypatch.setattr(constants, "SKULK_OFFLINE", False)
+    monkeypatch.setattr(constants, "_offline_flag", False)
+
+    model_cards_module._explain_an_empty_catalog(registry_loaded=False)
+
+    assert len(warnings) == 1
+    assert "SKULK_MODEL_REGISTRY_ENABLED=false" in warnings[0]
+    assert "Enable the registry" in warnings[0]
+
