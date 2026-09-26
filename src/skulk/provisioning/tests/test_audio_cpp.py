@@ -250,6 +250,47 @@ def test_primary_override_preserves_qualified_vulkan_route(
             )
 
 
+def test_standalone_vulkan_override_outweighs_cached_vulkan_wheel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Startup must not mask an explicit Vulkan build with a cached package."""
+    wheel, source = _vulkan_wheel(tmp_path)
+    monkeypatch.setattr(audio_cpp, "SKULK_ENGINES_DIR", tmp_path / "cache")
+    monkeypatch.setattr(audio_cpp, "audio_cpp_vulkan_wheel_for_host", lambda: wheel)
+    monkeypatch.setattr(audio_cpp, "_download_wheel", _fixture_downloader(source))
+    monkeypatch.delenv("SKULK_AUDIO_CPP_BIN", raising=False)
+    monkeypatch.delenv("SKULK_AUDIO_CPP_VULKAN_BIN", raising=False)
+    cached = audio_cpp.prepare_audio_cpp(
+        allow_download=True, variant="vulkan", environ={}
+    )
+    assert cached.is_file()
+    monkeypatch.delenv("SKULK_AUDIO_CPP_VULKAN_BIN", raising=False)
+
+    binary = tmp_path / "operator" / "bin" / "audiocpp_server"
+    binary.parent.mkdir(parents=True)
+    specs = binary.parent.parent / "model_specs"
+    specs.mkdir()
+    for pinned in _SPECS_SOURCE.glob("*.json"):
+        (specs / pinned.name).write_bytes(pinned.read_bytes())
+    binary.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "--version" ]; then\n'
+        f"  echo 'git: {audio_cpp.AUDIO_CPP_SOURCE_REVISION}'\n"
+        "  echo 'backends: vulkan'\n"
+        'elif [ "$1" = "--list-devices" ]; then\n'
+        "  echo 'VK:0 Radeon'\n"
+        "fi\n"
+    )
+    binary.chmod(0o755)
+    environment = {"SKULK_AUDIO_CPP_BIN": str(binary)}
+
+    assert audio_cpp.rehydrate_cached_audio_cpp(environ=environment) is None
+    assert "SKULK_AUDIO_CPP_VULKAN_BIN" not in os.environ
+    assert audio_cpp.prepare_audio_cpp(
+        allow_download=False, variant="vulkan", environ=environment,
+    ) == binary
+
+
 def test_cached_spec_mutation_invalidates_even_selected_binary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
