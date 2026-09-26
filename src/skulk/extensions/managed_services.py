@@ -10,6 +10,7 @@ import signal
 import sys
 import time
 from collections.abc import Set as AbstractSet
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal, final
 
@@ -304,19 +305,32 @@ def _tree_bytes(path: Path) -> int:
     return total
 
 
-def prune_superseded_generations(root: Path) -> tuple[int, int] | None:
+@final
+@dataclass(frozen=True)
+class RuntimePruneOutcome:
+    """What one pass over superseded manager runtimes did."""
+
+    removed: int
+    """Generations removed completely."""
+    freed_bytes: int
+    """Bytes those generations held."""
+    remaining: int
+    """Superseded generations still present, to be tried again later."""
+
+
+def prune_superseded_generations(root: Path) -> RuntimePruneOutcome | None:
     """Remove superseded manager runtimes under the installer fence.
 
     Staging holds the same fence, so a copy in progress is never touched.
-    Removal is best effort: a generation that cannot be removed fully stays
-    and is tried again later.
+    Removal is best effort: a generation that cannot be removed fully stays,
+    counts as remaining, and is tried again later.
 
     Args:
         root: The manager's service root.
 
     Returns:
-        The number of generations removed and the bytes freed, or ``None``
-        when the fence is held elsewhere and nothing was examined.
+        What the pass removed and what remains, or ``None`` when the fence is
+        held elsewhere and nothing was examined.
     """
     try:
         fence = RuntimeLock(root)
@@ -325,13 +339,18 @@ def prune_superseded_generations(root: Path) -> tuple[int, int] | None:
     try:
         removed = 0
         freed = 0
+        remaining = 0
         for generation in superseded_generations(root, running_generations(root)):
             size = _tree_bytes(generation)
             shutil.rmtree(generation, ignore_errors=True)
-            if not generation.exists():
+            if generation.exists():
+                remaining += 1
+            else:
                 removed += 1
                 freed += size
-        return removed, freed
+        return RuntimePruneOutcome(
+            removed=removed, freed_bytes=freed, remaining=remaining
+        )
     finally:
         fence.close()
 
@@ -716,13 +735,22 @@ class ManagedServices:
         if outcome is None:
             # Staging or an install holds the fence; the next refresh retries.
             return
-        self.runtimes_pruned_for = generation
-        removed, freed = outcome
-        if removed:
+        if outcome.removed:
             logger.info(
-                f"removed {removed} superseded plugin manager runtime"
-                f"{'' if removed == 1 else 's'} ({freed / 2**30:.1f} GiB)"
+                f"removed {outcome.removed} superseded plugin manager runtime"
+                f"{'' if outcome.removed == 1 else 's'} "
+                f"({outcome.freed_bytes / 2**30:.1f} GiB)"
             )
+        if outcome.remaining:
+            # A partial removal is not done: leaving the latch unset makes the
+            # next refresh try the rest instead of waiting for a restart.
+            logger.warning(
+                f"{outcome.remaining} superseded plugin manager runtime"
+                f"{'' if outcome.remaining == 1 else 's'} could not be removed "
+                "fully; tried again on a later refresh"
+            )
+            return
+        self.runtimes_pruned_for = generation
 
     async def _settle_runtime_prune(self) -> None:
         """Let a removal in its worker thread finish rather than abandon it."""
