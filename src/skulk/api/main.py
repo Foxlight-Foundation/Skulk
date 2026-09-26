@@ -361,7 +361,11 @@ from skulk.routing.speech_media import SpeechMediaPacket
 from skulk.routing.trace_data import TraceDataPacket
 from skulk.routing.vision_media import VisionMediaPacket
 from skulk.shared.apply import apply
-from skulk.shared.backends import AUDIO_CPP_COMPUTE_BACKENDS, engine_of
+from skulk.shared.backends import (
+    AUDIO_CPP_COMPUTE_BACKENDS,
+    GB10_AUDIO_CPP_CUDA_BUILD,
+    engine_of,
+)
 from skulk.shared.constants import (
     DASHBOARD_DIR,
     SKULK_CACHE_HOME,
@@ -3727,15 +3731,40 @@ class API:
                 for claim in claims
             )
 
-        variant_lanes: dict[Literal["cpu", "vulkan"], frozenset[str]] = {
-            # An explicit primary-binary override can probe as CUDA or ROCm
-            # even though the downloadable primary wheel is CPU-capable.
+        def gb10_cuda_wheel_claim_matches(classes: frozenset[str]) -> bool:
+            """Require the compiled SM in both live facts and the signed claim."""
+            required_class = "nvidia:sm-12.1"
+            return required_class in classes and any(
+                claim.engine in {"audio_cpp-cuda", "audio_cpp"}
+                and required_class in claim.hardware_classes
+                for claim in claims
+            )
+
+        variant_lanes: dict[Literal["cpu", "vulkan", "cuda"], frozenset[str]] = {
+            # Primary-binary overrides can expose CUDA or ROCm through the
+            # CPU preparation path; the dedicated CUDA wheel is independent.
             "cpu": frozenset({
                 "audio_cpp-cpu", "audio_cpp-metal", "audio_cpp-cuda", "audio_cpp-rocm",
             }),
             "vulkan": frozenset({"audio_cpp-vulkan"}),
+            "cuda": frozenset({"audio_cpp-cuda"}),
         }
-        candidates: list[tuple[int, bool, int, NodeId, Literal["cpu", "vulkan"]]] = []
+
+        def candidate_lanes(
+            variant: Literal["cpu", "vulkan", "cuda"], resources: NodeResources
+        ) -> frozenset[str]:
+            """Keep the dedicated SM 12.1 wheel out of primary CPU preparation."""
+            lanes = variant_lanes[variant]
+            if (
+                variant == "cpu"
+                and resources.engine_builds.get("audio_cpp-cuda")
+                == GB10_AUDIO_CPP_CUDA_BUILD
+            ):
+                return lanes - {"audio_cpp-cuda"}
+            return lanes
+        candidates: list[
+            tuple[int, bool, int, NodeId, Literal["cpu", "vulkan", "cuda"]]
+        ] = []
         for node_id in self.state.topology.list_nodes():
             if node_id in excluded_nodes or (
                 required_nodes is not None and node_id not in required_nodes
@@ -3761,7 +3790,14 @@ class API:
             )
             if not supported_host:
                 continue
-            variants: list[Literal["cpu", "vulkan"]] = []
+            variants: list[Literal["cpu", "vulkan", "cuda"]] = []
+            if (
+                "platform:linux" in platform_classes
+                and architecture in {"aarch64", "arm64"}
+                and "nvidia" in platform_classes
+                and gb10_cuda_wheel_claim_matches(platform_classes)
+            ):
+                variants.append("cuda")
             if (
                 "platform:linux" in platform_classes
                 and architecture in {"x86_64", "amd64"}
@@ -3774,7 +3810,7 @@ class API:
             ):
                 variants.append("cpu")
             for variant in variants:
-                lanes = variant_lanes[variant]
+                lanes = candidate_lanes(variant, resources)
                 if requested_backend is not None:
                     lanes &= {requested_backend}
                 if not lanes or not any(
@@ -3785,7 +3821,8 @@ class API:
                     backend in resources.engine_builds
                     for backend in resources.backends & lanes
                 )
-                candidates.append((2 if variant == "vulkan" else 1, ready, available, node_id, variant))
+                priority = {"cuda": 3, "vulkan": 2, "cpu": 1}[variant]
+                candidates.append((priority, ready, available, node_id, variant))
         candidates.sort(key=lambda item: (item[0], item[1], item[2], str(item[3])), reverse=True)
         if not candidates:
             raise HTTPException(
@@ -3798,7 +3835,10 @@ class API:
             )
         errors: list[str] = []
         for _priority, ready, _memory, node_id, variant in candidates:
-            lanes = variant_lanes[variant]
+            resources = self._telemetry_view.node_resources.get(node_id)
+            if resources is None:
+                continue
+            lanes = candidate_lanes(variant, resources)
             if requested_backend is not None:
                 lanes &= {requested_backend}
             if ready:
@@ -3835,6 +3875,10 @@ class API:
                     errors.append(f"{node_id}: {result.error or 'preparation failed'}")
                     continue
                 fresh = result.resources
+                if fresh is not None:
+                    lanes = candidate_lanes(variant, fresh)
+                    if requested_backend is not None:
+                        lanes &= {requested_backend}
                 if result.target_node != node_id or fresh is None or not any(
                     backend in fresh.engine_builds
                     for backend in fresh.backends & lanes

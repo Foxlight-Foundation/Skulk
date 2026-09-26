@@ -101,6 +101,30 @@ def test_full_metrics_normalize() -> None:
     assert metrics.native_fp4 is False
 
 
+def test_gb10_uses_cuda_memory_when_nvml_does_not_report_it() -> None:
+    """GB10 has a working CUDA pool even when its NVML memory call is unsupported."""
+    total = 128 * 1024**3
+    free = 80 * 1024**3
+    metrics = read_accelerator_metrics(
+        _FakeNvml(broken={"memory"}, name="NVIDIA GB10", cc=(12, 1)),
+        cuda_memory_info=lambda: (free, total),
+    )
+    assert metrics.vram_total_bytes == total
+    assert metrics.vram_used_bytes == total - free
+
+
+def test_cuda_memory_fallback_does_not_hide_other_nvml_failures() -> None:
+    """A non-GB10 device with no NVML memory stays unmeasured."""
+    def unexpected_cuda_read() -> tuple[int, int] | None:
+        raise AssertionError("CUDA fallback is GB10-specific")
+
+    metrics = read_accelerator_metrics(
+        _FakeNvml(broken={"memory"}), cuda_memory_info=unexpected_cuda_read
+    )
+    assert metrics.vram_total_bytes is None
+    assert metrics.vram_used_bytes is None
+
+
 @pytest.mark.parametrize(
     ("cc", "capability", "fp4", "fp8"),
     [

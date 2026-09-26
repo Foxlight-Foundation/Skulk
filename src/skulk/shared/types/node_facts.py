@@ -291,6 +291,14 @@ class NodeFacts(CamelCaseModel):
     audio_cpp_vulkan_probe: AudioCppProbe = AudioCppProbe()
     """Version and device report for the independently prepared Vulkan wheel."""
 
+    audio_cpp_cuda_binary: EngineBinaryFact = Field(
+        default_factory=lambda: EngineBinaryFact(env_var="SKULK_AUDIO_CPP_CUDA_BIN")
+    )
+    """Independently prepared CUDA executable for an NVIDIA compute lane."""
+
+    audio_cpp_cuda_probe: AudioCppProbe = AudioCppProbe()
+    """Version and device report for the independently prepared CUDA wheel."""
+
     declared_audio_cpp_backends: str | None = None
     """Optional operator restriction, checked against the binary's usable lanes."""
 

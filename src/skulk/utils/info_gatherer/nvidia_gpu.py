@@ -20,9 +20,10 @@ never need a GPU.
 
 from __future__ import annotations
 
+import ctypes
 import os
 from functools import cache
-from typing import Protocol, cast, final
+from typing import Callable, Protocol, cast, final
 
 from loguru import logger
 
@@ -169,7 +170,29 @@ def _compute_capability(
     return (capability, version >= (10, 0), version >= (8, 9))
 
 
-def read_accelerator_metrics(nvml: NvmlLike) -> AcceleratorMetrics:
+def _cuda_memory_info() -> tuple[int, int] | None:
+    """Read free and total device memory when GB10's NVML memory API is absent."""
+    try:
+        runtime = ctypes.CDLL("libcudart.so.12")
+        available = ctypes.c_size_t()
+        total = ctypes.c_size_t()
+        status = cast(
+            "int", runtime.cudaMemGetInfo(ctypes.byref(available), ctypes.byref(total))
+        )
+    except (OSError, AttributeError) as error:
+        logger.debug(f"GB10 CUDA memory query unavailable: {error}")
+        return None
+    if status != 0 or total.value <= 0 or available.value > total.value:
+        logger.debug(f"GB10 CUDA memory query returned invalid result: {status}")
+        return None
+    return available.value, total.value
+
+
+def read_accelerator_metrics(
+    nvml: NvmlLike,
+    *,
+    cuda_memory_info: Callable[[], tuple[int, int] | None] = _cuda_memory_info,
+) -> AcceleratorMetrics:
     """Read normalized metrics from NVML device 0.
 
     Every field degrades independently to its unmeasured form: one failing
@@ -198,6 +221,8 @@ def read_accelerator_metrics(nvml: NvmlLike) -> AcceleratorMetrics:
     except Exception as exc:  # noqa: BLE001
         logger.debug(f"NVML utilization query failed: {exc}")
 
+    compute_capability, native_fp4, native_fp8 = _compute_capability(nvml, handle)
+
     vram_total: int | None = None
     vram_used: int | None = None
     try:
@@ -206,6 +231,22 @@ def read_accelerator_metrics(nvml: NvmlLike) -> AcceleratorMetrics:
         vram_used = int(memory.used)
     except Exception as exc:  # noqa: BLE001
         logger.debug(f"NVML memory query failed: {exc}")
+    if (
+        vram_total is None
+        and name.startswith("NVIDIA GB10")
+        and compute_capability == "12.1"
+    ):
+        # GB10 exposes one unified CPU/GPU pool but its current NVML driver
+        # reports memory as unsupported. CUDA returns actual free capacity;
+        # without it GPU placement wrongly treats this working device as 0 B.
+        try:
+            observed = cuda_memory_info()
+        except Exception as error:  # noqa: BLE001 - optional telemetry degrades independently
+            logger.debug(f"GB10 CUDA memory query failed: {error}")
+            observed = None
+        if observed is not None:
+            available, vram_total = observed
+            vram_used = vram_total - available
 
     power_watts: float | None = None
     try:
@@ -226,8 +267,6 @@ def read_accelerator_metrics(nvml: NvmlLike) -> AcceleratorMetrics:
         clock_mhz = int(nvml.nvmlDeviceGetClockInfo(handle, _NVML_CLOCK_SM))
     except Exception as exc:  # noqa: BLE001
         logger.debug(f"NVML clock query failed: {exc}")
-
-    compute_capability, native_fp4, native_fp8 = _compute_capability(nvml, handle)
 
     return AcceleratorMetrics(
         vendor="nvidia",

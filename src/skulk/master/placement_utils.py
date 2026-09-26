@@ -14,7 +14,9 @@ from skulk.shared.models.memory_estimate import (
     backend_offloads_to_vram,
     estimate_recurrent_cache_bytes,
     estimate_shard_footprint,
+    gb10_unified_memory_pool,
     gpu_working_set_ceiling,
+    is_gb10_accelerator,
     memory_overhead_factor,
     per_token_kv_bytes,
     shard_fraction_of_model,
@@ -183,6 +185,13 @@ def usable_vram_by_node(
         vram_usable = min(vram_avail, ceiling)
         gtt_total = accelerator.gtt_total_bytes
         memory = node_memory.get(node_id)
+        if is_gb10_accelerator(accelerator):
+            # GB10 is one shared pool, so an absent host-memory reading or a
+            # mismatched CUDA total must never fall through to discrete VRAM.
+            gb10_pool = gb10_unified_memory_pool(accelerator, memory)
+            if gb10_pool is not None:
+                usable[node_id] = gb10_pool
+            continue
         # UMA signature: the GTT aperture spans the WHOLE system, i.e. it both
         # exceeds the VRAM carve-out AND covers all of system RAM. A discrete AMD
         # GPU also exposes ``mem_info_gtt_total`` (its default can equal VRAM), so
@@ -276,9 +285,21 @@ def reserve_instance_vram(
         profile = node_system.get(node_id)
         accelerator = profile.accelerator if profile is not None else None
         total = accelerator.vram_total_bytes if accelerator is not None else None
-        if node_id in unified_memory_gpu_nodes or total is None or total <= 0:
+        if (
+            accelerator is None
+            or total is None
+            or total <= 0
+            or (node_id in unified_memory_gpu_nodes and accelerator.vendor == "amd")
+        ):
             continue
-        ceiling = int(total * GPU_VRAM_WORKING_SET_FRACTION)
+        ceiling = int(
+            total
+            * (
+                GPU_WORKING_SET_FRACTION
+                if node_id in unified_memory_gpu_nodes
+                else GPU_VRAM_WORKING_SET_FRACTION
+            )
+        )
         # Observed usage includes loaded instances already. Bound against the
         # remaining static budget instead of subtracting from observed free
         # memory, which would count those allocations twice. After deletion,
@@ -447,6 +468,13 @@ def unified_memory_gpu_node_ids(
     for node_id, profile in node_system.items():
         accelerator = profile.accelerator
         memory = node_memory.get(node_id)
+        if accelerator is not None and gb10_unified_memory_pool(accelerator, memory) is not None:
+            if node_resources is None or (
+                (resources := node_resources.get(node_id)) is not None
+                and _has_gpu_offload_backend(resources.backends)
+            ):
+                unified.add(node_id)
+            continue
         if (
             accelerator is None
             or accelerator.vendor != "amd"

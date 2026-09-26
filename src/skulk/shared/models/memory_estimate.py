@@ -26,6 +26,7 @@ from skulk.shared.models.llama_server_settings import (
 from skulk.shared.models.model_cards import ModelCard
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.memory import Memory
+from skulk.shared.types.profiling import AcceleratorMetrics, MemoryUsage
 from skulk.shared.types.worker.runners import ShardAssignments
 from skulk.shared.types.worker.shards import (
     CfgShardMetadata,
@@ -75,6 +76,38 @@ through GTT, so a model larger than the carve-out runs there; this reserve keeps
 the OS + worker + download staging from being squeezed out of the shared pool.
 16 GB is generous for a headless inference node; the worker's local pre-spawn
 guard backstops it with current free memory."""
+
+
+def is_gb10_accelerator(accelerator: AcceleratorMetrics) -> bool:
+    """Identify the GB10 CUDA device whose NVML memory query is unsupported."""
+    return (
+        accelerator.vendor == "nvidia"
+        and accelerator.name.startswith("NVIDIA GB10")
+        and accelerator.compute_capability == "12.1"
+    )
+
+
+def gb10_unified_memory_pool(
+    accelerator: AcceleratorMetrics, memory: MemoryUsage | None
+) -> Memory | None:
+    """Return GB10 usable shared GPU memory when both live pools are measured."""
+    total = accelerator.vram_total_bytes
+    used = accelerator.vram_used_bytes
+    if (
+        not is_gb10_accelerator(accelerator)
+        or total is None
+        or used is None
+        or memory is None
+        or not 9 * memory.ram_total.in_bytes <= 10 * total <= 11 * memory.ram_total.in_bytes
+    ):
+        return None
+    return Memory.from_bytes(
+        min(
+            max(0, total - used),
+            max(0, memory.ram_available.in_bytes - UMA_GPU_OS_HEADROOM.in_bytes),
+            gpu_working_set_ceiling(memory.ram_total).in_bytes,
+        )
+    )
 
 LLAMA_CPP_MEMORY_OVERHEAD_FACTOR: float = 1.10
 """``MEMORY_OVERHEAD_FACTOR`` for the llama.cpp (GGUF) engine. The 1.30 default
