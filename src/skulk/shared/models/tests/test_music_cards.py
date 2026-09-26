@@ -1,7 +1,6 @@
 """The music task and its model truth remain separate from speech."""
 
 import tomllib
-from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -13,7 +12,6 @@ from skulk.shared.backends import (
     platform_compatible_backends,
     resolve_node_backend,
 )
-from skulk.shared.constants import RESOURCES_DIR
 from skulk.shared.models.model_cards import (
     ModelCard,
     ModelId,
@@ -22,6 +20,7 @@ from skulk.shared.models.model_cards import (
     registry_supported_backends_for_node,
 )
 from skulk.shared.models.registry import RegistryEngineSupportClaim
+from skulk.shared.tests.model_card_fixtures import FIXTURE_CARDS_DIR, fixture_card_path
 from skulk.shared.types.memory import Memory
 
 
@@ -107,7 +106,7 @@ def test_music_task_and_section_must_agree() -> None:
 
 def test_curated_music_cards_have_verified_generator_geometry() -> None:
     """Prevent synthetic layer and width placeholders in signed music cards."""
-    directory = Path(RESOURCES_DIR) / "music_model_cards"
+    directory = FIXTURE_CARDS_DIR
     expected = {
         "audio-cpp--ACE-Step1.5-Turbo-BF16.toml": (24, 2048),
         "audio-cpp--MiniMax-Music3-GGUF-Q4.toml": (36, 4096),
@@ -180,7 +179,7 @@ def test_music_bundles_reject_unselected_quant_weights() -> None:
     with pytest.raises(ValidationError, match="contains unselected files"):
         _card(artifact_bundle=minimax_bundle)
 
-    path = Path(RESOURCES_DIR) / "music_model_cards" / "audio-cpp--ACE-Step1.5-Turbo-BF16.toml"
+    path = fixture_card_path("audio-cpp/ACE-Step1.5-Turbo-BF16")
     ace = ModelCard.model_validate(tomllib.loads(path.read_text()))
     assert ace.artifact_bundle is not None
     extra_ace = ace.artifact_bundle.files[0].model_copy(
@@ -198,7 +197,7 @@ def test_music_bundles_reject_unselected_quant_weights() -> None:
 
 def test_ace_step_selected_file_must_be_gguf() -> None:
     """A static sidecar file cannot become the selected model payload."""
-    path = Path(RESOURCES_DIR) / "music_model_cards" / "audio-cpp--ACE-Step1.5-Turbo-BF16.toml"
+    path = fixture_card_path("audio-cpp/ACE-Step1.5-Turbo-BF16")
     body = tomllib.loads(path.read_text())
     selected = "ACE-Step1.5-GGUF/turbo/config.json"
     body["gguf_file"] = selected

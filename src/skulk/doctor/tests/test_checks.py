@@ -793,3 +793,169 @@ def test_comfy_engine_check_verdicts(monkeypatch: pytest.MonkeyPatch, tmp_path: 
 
     no_wheels = make_facts().model_copy(update={"platform": "linux"})
     assert checks_module._check_comfy_engine(no_wheels)[0].fix_available is False
+
+
+def test_installed_card_records_flag_complete_models_without_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import skulk.doctor.checks as checks_module
+
+    root = tmp_path / "models"
+    root.mkdir()
+    def only_this_root(_staging_root: Path | None) -> tuple[Path, ...]:
+        return (root,)
+
+    monkeypatch.setattr(
+        "skulk.store.artifact_inventory.installed_artifact_roots", only_this_root
+    )
+    monkeypatch.setattr(checks_module, "_configured_store_roots", tuple)
+    for index in range(7):
+        legacy = root / f"org--legacy-{index}"
+        legacy.mkdir()
+        (legacy / "config.json").write_text("{}")
+        (legacy / "model.safetensors").write_bytes(b"weights")
+    partial = root / "org--partial"
+    partial.mkdir()
+    (partial / "model.safetensors.partial").write_bytes(b"half")
+
+    results = checks_module._check_installed_card_records(
+        make_facts(platform="darwin")
+    )
+
+    assert [r.verdict for r in results] == ["degraded"]
+    assert "7 complete models without a card record" in results[0].detail
+    assert "org--legacy-0" in results[0].detail and "and 2 more" in results[0].detail
+    assert "1 incomplete download ignored" in results[0].detail
+    assert "network access" in results[0].remediation
+
+
+def test_installed_card_records_pass_when_nothing_is_unrecorded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import skulk.doctor.checks as checks_module
+
+    root = tmp_path / "models"
+    root.mkdir()
+    def only_this_root(_staging_root: Path | None) -> tuple[Path, ...]:
+        return (root,)
+
+    monkeypatch.setattr(
+        "skulk.store.artifact_inventory.installed_artifact_roots", only_this_root
+    )
+    monkeypatch.setattr(checks_module, "_configured_store_roots", tuple)
+
+    results = checks_module._check_installed_card_records(
+        make_facts(platform="darwin")
+    )
+
+    assert [r.verdict for r in results] == ["ok"]
+    assert results[0].detail == "0 installed models, each with its card record"
+
+
+def test_installed_card_records_include_the_configured_staging_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Store-staged models live outside the model directories and still count."""
+    import skulk.doctor.checks as checks_module
+    from skulk.store.config import ModelStoreConfig, SkulkConfig, StagingNodeConfig
+
+    staging = tmp_path / "staging"
+    staged = staging / "org--staged"
+    staged.mkdir(parents=True)
+    (staged / "config.json").write_text("{}")
+    (staged / "model.safetensors").write_bytes(b"weights")
+    monkeypatch.setattr(
+        "skulk.shared.constants.SKULK_MODELS_DIR", tmp_path / "models"
+    )
+    monkeypatch.setattr("skulk.shared.constants.SKULK_MODELS_PATH", None)
+    _present_config(monkeypatch, tmp_path)
+    config = SkulkConfig(
+        model_store=ModelStoreConfig(
+            store_host="some-other-machine",
+            store_path=str(tmp_path / "store"),
+            staging=StagingNodeConfig(node_cache_path=str(staging)),
+        )
+    )
+    monkeypatch.setattr("skulk.store.config.load_skulk_config", lambda: config)
+
+    results = checks_module._check_installed_card_records(
+        make_facts(platform="darwin")
+    )
+
+    assert [r.verdict for r in results] == ["degraded"]
+    assert "org--staged" in results[0].detail
+
+    # With the store off, the staging cache is not a model root.
+    monkeypatch.setattr(
+        "skulk.store.config.load_skulk_config",
+        lambda: SkulkConfig(
+            model_store=ModelStoreConfig(
+                enabled=False,
+                store_host="some-other-machine",
+                store_path=str(tmp_path / "store"),
+                staging=StagingNodeConfig(node_cache_path=str(staging)),
+            )
+        ),
+    )
+    assert [
+        r.verdict
+        for r in checks_module._check_installed_card_records(
+            make_facts(platform="darwin")
+        )
+    ] == ["ok"]
+
+
+def test_installed_card_records_include_the_canonical_store_and_every_staging_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A store host's canonical copies and a node-ID-keyed cache are audited.
+
+    Doctor cannot match an override keyed by the node's libp2p ID, so every
+    configured staging path is audited rather than only the base one.
+    """
+    import skulk.doctor.checks as checks_module
+    from skulk.store.config import (
+        ModelStoreConfig,
+        NodeOverrideConfig,
+        SkulkConfig,
+        StagingNodeConfig,
+    )
+
+    def legacy(root: Path, name: str) -> None:
+        directory = root / name
+        directory.mkdir(parents=True)
+        (directory / "config.json").write_text("{}")
+        (directory / "model.safetensors").write_bytes(b"weights")
+
+    store = tmp_path / "store"
+    override_cache = tmp_path / "override-cache"
+    legacy(store, "org--canonical")
+    legacy(override_cache, "org--overridden")
+    monkeypatch.setattr(
+        "skulk.shared.constants.SKULK_MODELS_DIR", tmp_path / "models"
+    )
+    monkeypatch.setattr("skulk.shared.constants.SKULK_MODELS_PATH", None)
+    _present_config(monkeypatch, tmp_path)
+    config = SkulkConfig(
+        model_store=ModelStoreConfig(
+            store_host="this-machine",
+            store_path=str(store),
+            staging=StagingNodeConfig(node_cache_path=str(tmp_path / "base")),
+            node_overrides={
+                "12D3KooWExamplePeerIdentifierForThisNode": NodeOverrideConfig(
+                    staging=StagingNodeConfig(node_cache_path=str(override_cache))
+                )
+            },
+        )
+    )
+    monkeypatch.setattr("skulk.store.config.load_skulk_config", lambda: config)
+
+    results = checks_module._check_installed_card_records(
+        make_facts(platform="darwin")
+    )
+
+    assert [r.verdict for r in results] == ["degraded"]
+    assert "2 complete models without a card record" in results[0].detail
+    assert "org--canonical" in results[0].detail
+    assert "org--overridden" in results[0].detail
+

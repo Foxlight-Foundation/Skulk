@@ -75,12 +75,9 @@ Skulk is built with a mix of Rust, Python, TypeScript (React for the dashboard),
 - `src/skulk/` — Python backend (inference, API, store, worker, routing)
 - `dashboard-react/` — React dashboard (Skulk UI)
 - `rust/` — Rust components (networking, libp2p, PyO3 bindings)
-- `resources/inference_model_cards/` — Text generation model metadata TOML files
-- `resources/image_model_cards/` — Image model metadata TOML files
-- `resources/embedding_model_cards/` — Embedding model metadata TOML files
-- `resources/speech_model_cards/` — Speech model metadata TOML files
-- `resources/video_model_cards/`: audio-video generation model metadata TOML files (downloadable artifacts only; the signed registry imports this directory)
-- `resources/test_engine_cards/`: cards served by the synthetic test engines, such as `foxlight/test-video`; they name no artifact and stay out of the registry corpus
+- `Foxlight-Foundation/foxlight-model-registry/seed/cards/`: curated model cards, in the model registry repository; Skulk ships no model cards
+- `resources/model_registry/`: the embedded TUF root for the signed model-card registry
+- `src/skulk/worker/runner/test_video/foxlight--test-video.toml`: the synthetic test video engine's card, beside the engine; it names no artifact, so the registry can never supply it
 - `resources/speech_reference_voices/` — Checksummed bundled TTS conditioning audio and exact transcripts
 - `deployment/logging/` — VictoriaLogs + Grafana stack and Vector config
 - `docs/` — Technical documentation
@@ -116,7 +113,7 @@ This starts a Vite dev server on port 3000 with hot reload. The dev server proxi
 - `packaging/skulk-audio-cpp-cpu/`: separately installed audio.cpp music server wheel; `.github/workflows/audio-cpp-engine-wheel.yml` builds CPU-capable packages for the three supported OS/CPU architectures from the pinned upstream source
 - `packaging/skulk-audio-cpp-vulkan/`: separate Linux amd64 Vulkan music server wheel, built by the same pinned workflow; its cache and executable digest remain distinct from the CPU package
 - `packaging/skulk-audio-cpp-cuda/`: separate Linux arm64 CUDA music server wheel for the pinned GB10 compute target; hardware and model claims still require qualification
-- `src/skulk/resources/music_model_cards/`: immutable music artifact cards and their registry architecture sidecars
+- `src/skulk/shared/tests/fixtures/model_cards/`: fixture copies of a few registry cards (and their architecture sidecars), for tests only; tests load them through `src/skulk/shared/tests/model_card_fixtures.py`
 - `src/skulk/store/` — Model store (registry, downloads, config, model optimizer)
 - `src/skulk/operator/` — Stable operator identity, quorum certification,
   crash-fault consensus, bounded dormant proposal lifecycle, and
@@ -176,26 +173,24 @@ For the React dashboard:
 ## Model Cards
 
 Skulk uses TOML-based model cards to define model metadata and capabilities.
-The signed external registry is the curated source of truth; bundled cards are
-retained only as a transition fallback, and local custom cards remain explicit
-operator overrides. Model-card locations are:
-- `Foxlight-Foundation/foxlight-model-registry/seed/cards/` for the pinned migration seed and registry candidate workflow
-- `resources/inference_model_cards/` for text generation models
-- `resources/image_model_cards/` for image generation models
-- `resources/embedding_model_cards/` for embedding models
-- `resources/speech_model_cards/` for TTS/STT speech models
-- `resources/video_model_cards/` for audio-video generation models
-- `resources/test_engine_cards/` for the synthetic test engines' cards
+Skulk ships no model cards: when a model is downloaded, so is its card. The
+signed external registry is the curated source of truth, and local custom cards
+remain explicit operator overrides. Model-card locations are:
+- `Foxlight-Foundation/foxlight-model-registry/seed/cards/` for curated cards and the registry candidate workflow
+- `src/skulk/worker/runner/test_video/` for the synthetic test video engine's card
+- `src/skulk/shared/tests/fixtures/model_cards/` for fixture copies of registry cards, used by tests only
 - `~/.skulk/custom_model_cards/` for user-added custom models
 
 ### Adding a Model Card
 
-Do not add a new curated card only to Skulk's bundled resources. Submit it to
+Do not add a model card to Skulk. Submit it to
 the private registry as one exact artifact (one card per quant/file), pin a full
 40-character source revision and exact GGUF file where applicable, then attach
 runtime qualification evidence. Structural validation alone must leave it a
-candidate. Bundled edits during the transition must mirror the registry and
-state why fallback compatibility requires them.
+candidate. Card edits also go to the registry, never into Skulk:
+`test_skulk_ships_no_model_cards` fails on any TOML declaring a `model_id` under
+`src/skulk/resources`. A test that needs a real card uses a fixture copy under
+`src/skulk/shared/tests/fixtures/model_cards/`.
 
 To add a new model, create a TOML file with the following structure:
 

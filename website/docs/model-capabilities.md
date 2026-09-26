@@ -169,7 +169,7 @@ Cards with a fixed speaker inventory may declare `default_voice`; Skulk applies
 it only when the caller omits `voice`, and schema validation requires it to be
 one of the card's `voices`.
 When the card declares `audio.supports_streaming = true`, clients can pass
-`stream=true` for stable chunked HTTP MP3 output; bundled cards keep that flag
+`stream=true` for stable chunked HTTP MP3 output; curated cards keep that flag
 off until a real MLX model has passed streaming validation. Mounted
 `supports_transcription` models serve
 non-streaming `/v1/audio/transcriptions`.

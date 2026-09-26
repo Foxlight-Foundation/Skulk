@@ -135,7 +135,7 @@ def test_unpinned_executable_bundled_card_is_blocked() -> None:
 
     assert not card.is_custom
     assert not remote_code_is_automatically_trusted(card)
-    with pytest.raises(PermissionError, match="executable bundled model card"):
+    with pytest.raises(PermissionError, match="executable installed model card"):
         require_remote_code_approval(card, frozenset())
 
 

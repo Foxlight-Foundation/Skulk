@@ -228,6 +228,34 @@ SKULK_VIDEO_STORE_MAX_BYTES = int(
 
 SKULK_OFFLINE = (_env("SKULK_OFFLINE", "false") or "false").lower() == "true"
 
+# ``skulk --offline`` switches this on at startup. The environment variable is
+# read once at import, so modules that ask ``offline_mode()`` at call time see
+# either way of going offline.
+_offline_flag = False
+
+
+def offline_mode() -> bool:
+    """Whether this node runs air-gapped: ``SKULK_OFFLINE`` or ``--offline``.
+
+    Returns:
+        ``True`` when either the environment variable or the command-line
+        flag asked for offline operation.
+    """
+
+    return SKULK_OFFLINE or _offline_flag
+
+
+def set_offline_mode() -> None:
+    """Put this process in offline mode, as ``skulk --offline`` does.
+
+    Side effects:
+        Every later ``offline_mode()`` call returns ``True``; nothing reaches
+        for the model registry after this.
+    """
+
+    global _offline_flag  # noqa: PLW0603
+    _offline_flag = True
+
 SKULK_TRACING_ENABLED = (
     _env("SKULK_TRACING_ENABLED", "false") or "false"
 ).lower() == "true"

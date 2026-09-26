@@ -1,7 +1,6 @@
 """Music placements remain single-host through both master command paths."""
 
 import tomllib
-from pathlib import Path
 
 import pytest
 
@@ -11,8 +10,8 @@ from skulk.master.placement import (
     add_instance_to_placements,
     place_instance,
 )
-from skulk.shared.constants import RESOURCES_DIR
 from skulk.shared.models.model_cards import ModelCard
+from skulk.shared.tests.model_card_fixtures import fixture_card_path
 from skulk.shared.topology import Topology
 from skulk.shared.types.commands import CreateInstance, PlaceInstance
 from skulk.shared.types.common import NodeId
@@ -29,8 +28,8 @@ from skulk.shared.types.worker.shards import PipelineShardMetadata, Sharding
 
 
 def _music_card() -> ModelCard:
-    """Use the shipped immutable MiniMax card as placement truth."""
-    path = Path(RESOURCES_DIR) / "music_model_cards" / "audio-cpp--MiniMax-Music3-GGUF-Q4.toml"
+    """Use the curated immutable MiniMax card as placement truth."""
+    path = fixture_card_path("audio-cpp/MiniMax-Music3-GGUF-Q4")
     return ModelCard.model_validate(tomllib.loads(path.read_text()))
 
 

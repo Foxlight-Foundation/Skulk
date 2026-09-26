@@ -133,11 +133,11 @@ async def test_ordinary_model_add_waits_for_catalog_convergence(
     async def fetch_card(*_args: object, **_kwargs: object) -> ModelCard:
         return card
 
-    async def no_bundled_card(_model_id: ModelId) -> None:
+    async def no_curated_card(_model_id: ModelId) -> None:
         return None
 
     monkeypatch.setattr(ModelCard, "fetch_from_hf", fetch_card)
-    monkeypatch.setattr(api_main, "get_bundled_card", no_bundled_card)
+    monkeypatch.setattr(api_main, "get_curated_baseline_card", no_curated_card)
     monkeypatch.setattr(
         api,
         "_wait_for_exact_custom_card_convergence",

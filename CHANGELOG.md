@@ -9,6 +9,60 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Changed
 
+- Skulk no longer ships model cards. A node's catalog is the signed
+  registry's cards, each installed model's own card record (kept with the
+  model and valid offline indefinitely), and custom cards. Curated card edits
+  go to the model registry's seed.
+  - Offline, a node lists its installed and custom models.
+  - A node that has never reached the registry and holds neither logs why
+    its catalog is empty.
+  - `/v1/models` reports `catalog_source` as `registry`, `installed` or
+    `custom`; `bundled` is gone.
+  - `scripts/fetch_kv_heads.py` takes `--cards-dir`.
+  - Tests carry fixture copies of the few registry cards they exercise.
+  - A test refuses any model card under `src/skulk/resources`.
+  - The frozen PyInstaller build collects the test video engine's card from
+    its new home.
+  - A generated custom card keeps its signed split limit on every catalog
+    reload, including from a repository the registry carries only as quant
+    aliases. While the registry cannot be read, the installed cards for the
+    repository supply that limit.
+  - The empty-catalog warning names a disabled registry
+    (`SKULK_MODEL_REGISTRY_ENABLED=false`) as its own cause.
+  - `skulk doctor`'s installed-card check says an unrecorded model cannot be
+    served offline, since no shipped card stands in for it any more.
+  - Association never re-derives a card record over an existing one. A
+    model directory whose record no longer matches its files has drifted,
+    and it stays unresolved until a download repairs it; before, the
+    association scan could write a fresh verified record from the changed
+    bytes.
+
+- A model added from the Hugging Face search keeps the pipeline-split limit
+  of the signed registry card for its repository, taking the strictest
+  among the repository's quant aliases. Before, only a card shipped inside
+  Skulk supplied that limit.
+- A node whose catalog is legitimately empty (nothing installed and no
+  registry) no longer refreshes the catalog, and waits on the network, on
+  every catalog read.
+- The synthetic test video engine's card ships beside the engine instead
+  of among the model cards, since the registry can never supply it.
+
+- `skulk --offline` keeps the model registry out of reach, as
+  `SKULK_OFFLINE=true` does. Before, the flag only logged the mode, and the
+  card catalog still tried the network.
+- On the model store host, the node's own association pass gives a legacy
+  model in the canonical store its card record, instead of waiting for
+  reconciliation to scan the store.
+
+- A node that cannot reach the model registry, however long it has been
+  offline, gives a model downloaded before card records existed its record
+  from the last verified registry catalog it cached. Before, only the
+  cards shipped inside Skulk could. The cached catalog is never listed or
+  placed from; a model it matches gains its own card record and is then
+  listed and served like any other installed model. Association now runs
+  on every node, with or without a model store, and a model it records is
+  listed at once rather than after the next restart.
+
 - A superseded plugin manager runtime that could not be fully removed is
   retried after five minutes. Before, a partial removal was recorded as
   done, and the rest waited for a restart.
@@ -21,6 +75,15 @@ This project records release notes here and mirrors public-facing notes in
   resources are gathered, so a slow or hung engine probe no longer stalls
   the worker's event loop.
 ### Added
+
+- `skulk doctor` reports installed models that lack their card record
+  (`installed-card-records`). A downloaded model's own card record is what
+  keeps it servable without the network; a model downloaded before those
+  records existed gets one when Skulk starts with network access and
+  recognizes it. Incomplete downloads are counted, not flagged. The audit
+  covers the model directories and the model store's canonical and staging
+  directories. `GET /v1/diagnostics/node` now runs the doctor checks off
+  the event loop, so a slow check no longer stalls the API.
 
 - `kill -USR1 <pid>` makes any Skulk node or runner process write every
   thread's Python stack to its log and keep running. A runner stuck in

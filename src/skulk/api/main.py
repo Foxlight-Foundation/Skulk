@@ -409,8 +409,9 @@ from skulk.shared.models.model_cards import (
     custom_card_mutation_applied,
     delete_custom_card,
     get_all_model_cards,
-    get_bundled_card,
+    get_association_cards,
     get_card,
+    get_curated_baseline_card,
     get_current_registry_card,
     get_current_registry_card_id,
     get_custom_card_storage_collision,
@@ -421,6 +422,7 @@ from skulk.shared.models.model_cards import (
     get_model_required_capabilities,
     preserve_generated_card_constraints,
     record_custom_card_mutation_applied,
+    register_installed_card_record,
     registry_supported_backends_for_node,
     same_authorized_model_card,
 )
@@ -643,6 +645,7 @@ from skulk.store.installed_cards import (
 )
 from skulk.store.model_store import read_reconciliation_tombstones
 from skulk.store.peer_exports import ArtifactExportManager
+from skulk.store.staging_eviction import StagedModelInfo
 
 JsonObject = dict[str, object]
 _DEFAULT_OPTIMIZER_CANDIDATE_BITS = [4, 8]
@@ -9805,7 +9808,7 @@ class API:
                 if card.is_custom
                 else "registry"
                 if card.registry_card_id is not None
-                else "bundled"
+                else "installed"
             ),
             remote_code_approval_required=remote_code_approval_required,
             remote_code_trust_identity=(
@@ -10451,15 +10454,16 @@ class API:
         self._require_operator_mutation(request)
         # Load curated truth before generating the override. A generated card
         # is a metadata cache, not operator-authored placement policy, and must
-        # retain architecture safety constraints from an exact bundled match.
-        bundled_card = await get_bundled_card(payload.model_id)
+        # retain the architecture safety constraints of the signed card for the
+        # same repository.
+        curated_card = await get_curated_baseline_card(payload.model_id)
         try:
             card = await ModelCard.fetch_from_hf(
                 payload.model_id,
                 gguf_file=payload.gguf_file,
                 source_revision=payload.source_revision,
             )
-            card = preserve_generated_card_constraints(card, bundled_card)
+            card = preserve_generated_card_constraints(card, curated_card)
         except Exception as exc:
             raise HTTPException(
                 status_code=400,
@@ -13580,7 +13584,8 @@ class API:
                 staging_root = Path(staging.node_cache_path).expanduser()
 
         in_use = self._store_models_in_use()
-        cards = await get_all_model_cards()
+        cards = await get_association_cards()
+        materialized: list[InstalledCardRecord] = []
 
         def _collect() -> NodeStorageSummary:
             staged = _inventory_installed_artifacts(
@@ -13590,6 +13595,7 @@ class API:
                 self._store_client.local_store_path
                 if self._store_client is not None
                 else None,
+                materialized=materialized,
             )
             event_log_bytes = 0
             for file_path in SKULK_EVENT_LOG_DIR.rglob("*"):
@@ -13621,7 +13627,10 @@ class API:
                 disk_free_bytes=disk_free_bytes,
             )
 
-        return await to_thread.run_sync(_collect)
+        summary = await to_thread.run_sync(_collect)
+        for record in materialized:
+            register_installed_card_record(record)
+        return summary
 
     @staticmethod
     def _get_trace_path(task_id: str) -> Path:
@@ -14327,6 +14336,10 @@ class API:
         # standalone connectivity endpoint reports whichever node served the
         # HTTP request, which is wrong when browsing another node).
         tailscale = await self._tailscale_diagnostics()
+        # Doctor checks read the filesystem (the installed-card audit walks
+        # every model directory) and some run subprocesses, so they run off
+        # the event loop rather than stalling inference and control traffic.
+        doctor_results = await to_thread.run_sync(run_checks, current_node_facts())
 
         supervisor_runners = self._collect_runner_supervisor_diagnostics()
         placements = self._placement_diagnostics()
@@ -14388,7 +14401,7 @@ class API:
                 DoctorCheckDiagnostics.model_validate(
                     result.model_dump(mode="json", by_alias=False)
                 )
-                for result in run_checks(current_node_facts())[:64]
+                for result in doctor_results[:64]
             ],
             warnings=sorted(warnings),
             tailscale=tailscale,
@@ -15973,12 +15986,19 @@ class API:
 
         self._require_artifact_export_target(request, payload.target_node_id)
         staging_root = self._configured_staging_root()
-        cards = await get_all_model_cards()
-        staged = await to_thread.run_sync(
-            _inventory_installed_artifacts,
-            _installed_artifact_roots(staging_root),
-            cards,
-        )
+        cards = await get_association_cards()
+        materialized: list[InstalledCardRecord] = []
+
+        def _inventory() -> list[StagedModelInfo]:
+            return _inventory_installed_artifacts(
+                _installed_artifact_roots(staging_root),
+                cards,
+                materialized=materialized,
+            )
+
+        staged = await to_thread.run_sync(_inventory)
+        for record in materialized:
+            register_installed_card_record(record)
         selected = next(
             (
                 item

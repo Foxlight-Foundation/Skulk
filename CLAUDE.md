@@ -532,8 +532,8 @@ A model card's `placement.compatible_backends` selects which engine serves it
 - **`test_video`** (`worker/runner/test_video/`): deterministic test video
   engine for the audio-video substrate. Advertised as `test_video` /
   `test_video-cpu` only when `SKULK_TEST_VIDEO_ENGINE` is set; serves only the
-  bundled `foxlight/test-video` card (under `resources/test_engine_cards/`,
-  apart from the artifact card directories the registry imports), for which
+  `foxlight/test-video` card (its TOML ships beside the engine, since it names
+  no artifact and the registry can never supply it), for which
   the worker provisions a stand-in model directory at startup. Renders a seeded synthetic clip
   (MJPEG video plus 16-bit PCM audio in a hand-muxed MP4, JPEG thumbnail)
   through the real card rules, progress frames, terminal manifest,
@@ -700,9 +700,9 @@ The system uses event sourcing for state management:
     honoring them (searching with intent-plus-failed-nodes but stamping
     only the original intent, #658)
 - `src/skulk/shared/models/`: persisted model metadata and capability resolution
-  - `model_cards.py`: declarative model cards plus remote-first signed-catalog loading (a snapshot's integrity checks are atomic; a card this build's `ModelCard` cannot parse is skipped with a warning so a newer card class never takes the whole catalog away); `ModelCard.load` is catalog-only so API reads and launches cannot implicitly authorize an unknown Hub repository, while trusted local tools opt into `load_or_fetch_from_hf`; registry artifact aliases are distinct from `source_repository`, bundled cards are transition fallback, and custom cards remain final overrides
+  - `model_cards.py`: declarative model cards plus remote-first signed-catalog loading (a snapshot's integrity checks are atomic; a card this build's `ModelCard` cannot parse is skipped with a warning so a newer card class never takes the whole catalog away); `ModelCard.load` is catalog-only so API reads and launches cannot implicitly authorize an unknown Hub repository, while trusted local tools opt into `load_or_fetch_from_hf`; registry artifact aliases are distinct from `source_repository`; Skulk ships no cards (catalog = signed registry + installed `.skulk/installed-card.json` records + custom overrides; an empty catalog logs one warning naming the remedies)
   - `registry.py`: python-tuf client, embedded root trust, serialized 60-second refresh, and hash-bound last-known-good catalog
-  - `remote_code_approval.py`: repository-code authorization and immutable execution checks; signed publication, explicit addition, or bundled distribution authorizes the exact pinned card regardless of evidence provenance, legacy executable custom cards without immutable revisions fail closed until re-added, and installed artifact identity remains independently verified
+  - `remote_code_approval.py`: repository-code authorization and immutable execution checks; signed publication or explicit addition authorizes the exact pinned card regardless of evidence provenance, an installed card without a registry identity (recorded from a card an earlier release shipped) stays authorized, legacy executable custom cards without immutable revisions fail closed until re-added, and installed artifact identity remains independently verified
   - `capabilities.py`: normalized runtime capability profiles derived from model cards plus conservative family defaults
 - `src/skulk/operator/`: stable operator identity, deterministic quorum
   certification, crash-fault consensus and recovery, bounded dormant proposal
@@ -962,7 +962,8 @@ For signed cards, the store request carries the immutable card ID and the store
 host independently validates the same signed, revision-pinned execution
 identity before downloading. Signed publication authorizes repository code for
 every registry provenance class; explicitly adding a pinned external card is
-the operator authorization, and bundled distribution is the release decision.
+the operator authorization, and an installed card without a registry identity
+keeps the authorization of the earlier release that shipped it.
 The historical `model_trust` configuration, commands, events, and replicated
 state remain inert rolling-upgrade compatibility surfaces. Authorization is
 never a placement axis. Placement still
@@ -986,7 +987,8 @@ deprecated `model_trust` snapshots; the historical approval endpoints remain
 inert for older clients. Quick and exact placement commands are also compared
 with the master's command-ordered card view immediately before placement,
 closing catalog replacement and deletion races after API-side validation. An
-executable bundled fallback card must pin its source revision, and an installed
+executable installed card without a registry identity must pin its source
+revision (error names the "installed model card"), and an installed
 custom-card sidecar retains artifact truth without independently authorizing a
 card whose durable custom TOML was deleted. The low-level `/download/start`
 operator route likewise rejects any shard card that is not exact catalog truth.
@@ -1027,15 +1029,35 @@ qualification evidence governs verified and recommended policy. Each card uses a
 content-derived immutable identity; signed provenance metadata does not alter
 that identity. Skulk verifies its static TUF feed from the package-embedded
 root, refreshes at most every 60 seconds, uses a hash-bound 30-day
-last-known-good cache during outages, and retains bundled cards only as the
-transition fallback. `SKULK_OFFLINE=true` suppresses registry network refreshes
-and uses bundled cards. `model_id` may be an artifact alias while
+last-known-good cache during outages. Skulk ships NO model cards: the catalog
+is signed registry cards, installed cards (the model's own
+`.skulk/installed-card.json`, or a detached record for a read-only root; local,
+no expiry), and custom cards (final override; deleting one rebuilds the catalog
+so the signed or installed card returns, or the model leaves). When the registry
+and its acceptable cache cannot be read, the cached catalog is read without its
+age limit ONLY to associate legacy installed artifacts that predate card
+records; it is never listed or placed from. `SKULK_OFFLINE=true` and
+`skulk --offline` are equivalent: no registry refresh, catalog = installed plus
+custom. A node that never reached the registry, with nothing installed and no
+custom card, has an empty catalog and logs a warning naming the remedies.
+`/v1/models` `catalog_source` is `registry`, `installed`, or `custom`.
+`POST /models/add` keeps `max_pipeline_split_layer` from the signed card for
+the repository (exact id, else the strictest signed quant alias). Curated
+cards live in the `foxlight-model-registry` seed (`seed/cards/`); card edits go
+there, never into Skulk. Tests use fixture copies under
+`src/skulk/shared/tests/fixtures/model_cards/` via
+`src/skulk/shared/tests/model_card_fixtures.py`;
+`test_skulk_ships_no_model_cards` refuses any TOML declaring a `model_id` under
+`src/skulk/resources` (reference voices and the TUF root stay there).
+`scripts/fetch_kv_heads.py` requires `--cards-dir` (for example the registry
+seed). `model_id` may be an artifact alias while
 `source_repository` is the byte origin. Signed registry publication authorizes
 repository code for the exact immutable card regardless of whether provenance
 is Foxlight, agent, or community. Explicitly adding a pinned external card is
 the operator decision; when the caller omits a Hugging Face revision, Skulk
-resolves `main` once before creating the card. Bundled cards are authorized by
-the release that ships them. There is no secondary approval ceremony, and
+resolves `main` once before creating the card. An installed card without a
+registry identity stays authorized by the earlier release that shipped it.
+There is no secondary approval ceremony, and
 registry vision cards follow the same entry-path rule while the MLX processor
 path may enable repository code internally. Historical approval configuration
 and state remain inert for rolling compatibility. Before download and runner

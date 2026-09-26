@@ -1183,8 +1183,8 @@ requests `mp3` instead of the model card's non-streaming default. Skulk returns
 instance of the requested model lacks a ready runner. This is TTS output streaming, not a
 realtime session: the request text is still a complete bounded input,
 cancellation closes the command stream, and each chunk follows the mounted
-model's generation cadence. The bundled Qwen3 TTS card declares MP3 and PCM streaming
-support after live validation; Fish Audio and the other bundled speech cards
+model's generation cadence. The registry's Qwen3 TTS card declares MP3 and PCM streaming
+support after live validation; Fish Audio and the other curated speech cards
 remain non-streaming. Streaming support is enabled card-by-card only when
 the runtime can provide the encoder and the model has passed streaming
 validation.
@@ -1309,7 +1309,7 @@ curl -X POST http://localhost:52415/v1/audio/translations \
 |-------|------|-------|
 | `file` | file | Required bounded audio upload |
 | `model` | string | Required mounted translation-capable STT model id |
-| `language` | string or null | Optional source-language hint; required by the bundled Canary model |
+| `language` | string or null | Optional source-language hint; required by the Canary model |
 | `prompt` | string or null | Optional model-specific translation context |
 | `response_format` | string | `json`, `text`, `verbose_json`, `srt`, `vtt`, or `ndjson`; default `json` |
 | `temperature` | number or null | Optional model-specific sampling temperature |
@@ -1317,7 +1317,7 @@ curl -X POST http://localhost:52415/v1/audio/translations \
 Translation target is English. The only gates are model truth and instance
 availability: the mounted card must declare `audio.supports_translation =
 true`, matching every other speech endpoint. Skulk maps the generic request to
-model-family arguments inside the speech runner. The bundled
+model-family arguments inside the speech runner. The registry's
 `CogniSoftOrg/canary-1b-v2-mlx-bf16` card is the initial supported model;
 requests for that model return **400 Bad Request** when `language` is omitted.
 Its upstream CC-BY-4.0 terms and NVIDIA attribution continue to apply.
@@ -1423,7 +1423,7 @@ Skulk also serves alias routes that map onto the same handlers:
 ## Image Generation and Editing
 
 Skulk serves OpenAI-style image generation and editing from placed image
-models (for example the bundled FLUX cards).
+models (for example the registry's FLUX cards).
 
 Availability note: these routes are always registered, but they return
 **404 No instance found** until an instance of the requested image model is
@@ -1878,8 +1878,9 @@ not use the retained qualification record to claim that signed generation is
 installed. The current supported catalog comes from the external TUF-signed
 registry and refreshes at most every 60 seconds; a previously verified catalog
 may be used for up to 30 days during an outage. That age limit does not apply to
-complete installed artifacts. Bundled cards fill non-installed catalog entries
-only when registry access and its acceptable cache are unavailable or disabled.
+complete installed artifacts. Skulk ships no model cards: without the registry
+or its acceptable cache (or with `SKULK_OFFLINE=true`), the catalog is the
+installed and custom cards, and a node with neither lists no models.
 Registry entries include immutable card and snapshot identities; local custom
 cards retain final override precedence.
 
@@ -1961,8 +1962,9 @@ A registry alias can change between planning and execution. See
 
 Deprecated compatibility endpoint. It lists approval identities retained from
 older deployments, but those values no longer participate in model execution.
-Signed publication, explicit model addition, and bundled distribution are the
-active repository-code authorization boundaries.
+Signed publication and explicit model addition are the active repository-code
+authorization boundaries. An installed card without a registry identity stays
+authorized by the earlier Skulk release that shipped it.
 
 Ordinary reads and launch endpoints never fetch an unknown Hugging Face
 repository or persist a card implicitly. An external repository must first
@@ -1977,7 +1979,7 @@ redundant approval entry.
 **DELETE** `/models/remote-code-approvals/{card_id}`
 
 Removes an inert approval retained from an older deployment. It does not revoke
-a published, bundled, or explicitly added card.
+a published, installed, or explicitly added card.
 
 ### Search Hugging Face
 
@@ -2077,10 +2079,11 @@ compatible with both llama.cpp engines and prefers
 the served `llama_server` tags, so on a node running llama-server it gets
 that engine's concurrency slots and is eligible for multi-node pooling via
 RPC; nodes without a served binary fall through to the in-process engine.
-When the repository exactly matches a bundled card, generated metadata retains
-the bundled card's hard pipeline-split constraint; adding a curated model through
-the dashboard therefore cannot erase an architecture safety boundary. A
-hand-authored card remains an explicit operator override.
+When the signed registry has a card for the repository (its own id, or any
+signed alias of it such as one per quant), generated metadata retains that
+card's hard pipeline-split constraint, the strictest among the aliases; adding
+a curated model through the dashboard therefore cannot erase an architecture
+safety boundary. A hand-authored card remains an explicit operator override.
 The
 `model_id` field is required. `gguf_file` is optional; when supplied it must be
 an exact repo-relative GGUF weight path and the card pins that quant instead of
@@ -2194,6 +2197,14 @@ uses those fields to select one current generation per artifact alias.
 Directories that cannot be associated with trusted card truth appear with an
 `unresolved` verification state and are not imported or launched automatically.
 
+The request has one side effect. A complete directory that predates card
+records, and that a current card recognizes, gets its card record written
+(`.skulk/installed-card.json`, or a detached record for a read-only root).
+The model then joins this node's live catalog at once. While the registry
+cannot be read, the last verified registry catalog is also used for that
+match. The node runs the same association on its own, at start and about
+once a minute, whether or not a model store is configured.
+
 ```bash
 curl http://localhost:52415/store/storage
 ```
@@ -2240,7 +2251,7 @@ curl -X POST http://localhost:52415/place_instance \
 
 | Field | Meaning |
 |-------|---------|
-| `model_id` | Exact alias already present in the signed, bundled, installed, or operator-added catalog |
+| `model_id` | Exact alias already present in the signed, installed, or operator-added catalog |
 | `sharding` | `Pipeline` or `Tensor` |
 | `instance_meta` | `MlxRing`, `MlxJaccl`, or `LlamaRpc` (multi-node GGUF pooling: one driver node holds the model and each donor node lends GPU memory over the network) |
 | `min_nodes` | Minimum nodes required for the placement |
@@ -2598,7 +2609,7 @@ Semantics of the reserved id:
   (a repair starting at exactly the wrong moment) still surfaces as an error
   chunk in the normal chat-completions error shape, because the response has
   already begun by then.
-- The underlying model card id (for example the bundled Qwen3.6-35B-A3B)
+- The underlying model card id (for example the registry's Qwen3.6-35B-A3B)
   remains addressable as an ordinary model and answers WITHOUT tools or
   cluster access: only the reserved id selects model-plus-harness.
 
@@ -2930,7 +2941,7 @@ The optional JSON body accepts the following fields:
   required for non-`base` roles and must be an `owner/model` identifier no longer
   than 512 characters.
 - `owner_registry_card_id`: immutable signed identity of that owning base card.
-  Omit it only for bundled or custom owner cards without a registry identity.
+  Omit it only for installed or custom owner cards without a registry identity.
 - `artifact_role`: one of `base`, `vision_weights`, `mtp_sidecar`, `assistant`,
   `served_draft`, `vllm_draft`, or `video_companion` (a video card's externally
   hosted companion, such as guide preprocessor weights); defaults to `base`.
@@ -3006,6 +3017,9 @@ Creates a random short-lived capability bound to one installed identity,
 manifest digest, target store node, byte ceiling, and expiry. The caller's
 socket address must also match an advertised interface of the claimed store
 node; the node-id field and header are not accepted as self-asserted identity.
+Finding the artifact runs the same inventory as `GET /store/storage`, with
+the same side effect: a recognized legacy directory gets its card record and
+joins the live catalog.
 
 **GET** `/store/internal/exports/{capability_token}/{relative_path}`
 
@@ -3167,21 +3181,21 @@ Important fields:
 | `base_model` | string | Base family or upstream source model when known |
 | `artifact_repository` | string | Upstream repository containing the artifact bytes; may differ from `id` when several exact files or quants share one repository |
 | `artifact_file` | string or null | Exact selected file for file-addressed artifacts such as GGUF |
-| `catalog_source` | string | `registry`, `bundled`, or `custom` |
+| `catalog_source` | string | `registry` (signed registry card), `installed` (a card recorded with an installed model that carries no registry identity), or `custom` (operator-added card) |
 | `registry_card_id` | string or null | Immutable content-derived identity of the active installed card, or the effective catalog card when not installed |
 | `registry_snapshot_id` | string or null | Signed catalog snapshot that supplied the card |
-| `registry_provenance` | string or null | Audited signed-registry origin (`foxlight`, `agent`, or `community`); null for bundled/custom cards |
+| `registry_provenance` | string or null | Audited signed-registry origin (`foxlight`, `agent`, or `community`); null for `installed` and `custom` entries |
 | `installed` | boolean | Whether the authoritative cluster store has a complete active generation, falling back to the API node's local sidecar when the store has no record |
 | `active_installed_identity` | string or null | Durable identity of that cluster-store generation, or the node-local fallback generation |
 | `installed_verification` | string or null | `registry_verified`, `local_legacy`, `custom`, or `unresolved` |
 | `current_registry_identity` | string or null | Current signed identity for the alias, which may differ from the active install |
 | `update_available` | boolean | A newer signed generation exists but is not active until transfer commits |
 | `advisories` | array | Active signed warn-only security notices affecting the installed or current card |
-| `remote_code_approval_required` | boolean | Deprecated compatibility field; current cards return `false` because publication, explicit addition, or bundled distribution is the authorization boundary |
+| `remote_code_approval_required` | boolean | Deprecated compatibility field; current cards return `false` because publication, explicit addition, or the earlier Skulk release that shipped an installed card is the authorization boundary |
 | `remote_code_trust_identity` | string or null | Deprecated identity from the retired secondary approval ceremony; current cards return `null` |
 | `remote_code_approved_for_cluster` | boolean | Deprecated compatibility state; current cards return `false` |
 | `remote_code_approved_on_this_node` | boolean | Deprecated compatibility alias for `remote_code_approved_for_cluster` |
-| `remote_code_automatically_trusted` | boolean | Whether repository code is authorized by signed publication, explicit addition, or bundled distribution for this exact card |
+| `remote_code_automatically_trusted` | boolean | Whether repository code is authorized by signed publication, explicit addition, or the earlier Skulk release that shipped an installed card, for this exact card |
 | `audio` | object | Declared speech metadata from the model card, including `kind`, audio response formats, streaming/realtime flags, built-in `voices`, `default_voice`, voice/reference-audio flags, translation support, and sample rates |
 | `music` | object or null | Text-to-music family, lyric requirement, qualified duration bounds, and WAV output format; null for non-music cards |
 | `video` | object or null | Declared video generation contract from a video model card: `modes` (`t2va`, `fl2va`, `ref2va`), `min_seconds`/`max_seconds`, `fps`, frame grid (`frame_grid_multiple`, `frame_grid_offset`), `canvas_multiple`, `default_short_edge`, `max_pixels`, `aspect_ratios`, `audio_output` with `audio_sample_rate`/`audio_channels`, `default_steps`, `reference_limits`, `adapters` (named LoRAs with `modes`, `steps`, `strength`, and the `video_shift`/`audio_shift` a render with the adapter uses when the request sets none, selectable through the video job `lora` field), `styles` (the card's style embeddings with `modes`, selectable through the video job `styles` field), and every engine setting the job accepts with its default: `samplers` and `default_sampler`, `schedulers` and `default_scheduler`, the card's trained `video_shift`/`audio_shift` (null keeps the model's built-in value) with `shift_bounds`, `reference_fidelities` and `default_reference_fidelity` (empty and null unless the card serves `ref2va`), `codecs` and `default_codec`, `guides` (each guide the card derives from a `control` clip: `kind`, the `modes` it applies to, and the preprocessor `weights` it loads with their `repository` and `license`; empty without a ControlNet), `default_guide` (the guide a `control` clip gives when `control_kind` is omitted), and the ControlNet's own settings: `control_strength_bounds`, `default_control_strength` (the card's ControlNet's strength, else 1; null without a ControlNet), and `default_control_window` (the `control_start`/`control_end` a render takes when omitted). The lists are the engine's own, not a recommendation. Null for non-video cards |
