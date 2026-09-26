@@ -968,7 +968,10 @@ CUDA packages may restore their separate executable paths without contacting
 the package channel. Preparing a GPU package leaves existing CPU and other GPU
 mounts' executables and build identities intact. The CUDA wheel targets the
 NVIDIA compute architecture compiled into that package; installing it does
-not qualify a model for every NVIDIA GPU.
+not qualify a model for every NVIDIA GPU. Its GB10 variant requires an
+observed `nvidia:sm-12.1` class and a signed claim explicitly naming that
+class before preparation. CUDA 12 runtime, cuBLAS, NCCL, and the NVIDIA driver
+must be on the host loader path; the binary probe exposes missing libraries.
 The cache retains the SHA-256-pinned wheel and compares every extracted runtime
 file with its archive member; an editable cache record cannot establish integrity.
 Upstream's short revision output is accepted only for this verified wheel;
@@ -976,6 +979,11 @@ standalone binaries must report the full pinned source revision.
 The facts probe checks both pinned model specs; a standalone binary may name
 its specs through `SKULK_AUDIO_CPP_SPECS_DIR`. Only then can the node publish
 ready audio.cpp lanes for restored instances.
+On NVIDIA GB10, NVML can report device memory as unsupported even while CUDA
+can allocate from its shared CPU/GPU pool. Skulk reads CUDA's free and total
+device bytes in that case. Placement also checks live host RAM, reserves 16 GB
+for the OS, and applies the 75% unified-memory working-set ceiling. A failed
+CUDA query leaves capacity unmeasured and prevents GPU admission.
 
 Music mounting ranks package variants with signed support claims for the
 observed hardware, preferring CUDA or Vulkan when a qualified package is

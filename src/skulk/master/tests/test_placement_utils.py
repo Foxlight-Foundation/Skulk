@@ -694,6 +694,31 @@ def test_usable_vram_by_node_uma_counts_gtt():
     assert len(fitting) == 1, diagnostics.rejection_reasons
 
 
+def test_gb10_unified_cuda_pool_uses_live_gpu_and_host_free_memory() -> None:
+    """GB10 admission honors both CUDA free bytes and shared host headroom."""
+    node = NodeId("gb10")
+    total = Memory.from_gb(128).in_bytes
+    profile = SystemPerformanceProfile(
+        accelerator=AcceleratorMetrics(
+            vendor="nvidia", name="NVIDIA GB10", compute_capability="12.1",
+            vram_total_bytes=total, vram_used_bytes=Memory.from_gb(48).in_bytes,
+        )
+    )
+    memory = create_node_memory(
+        Memory.from_gb(96).in_bytes, ram_total=total
+    )
+    resources = NodeResources(backends=frozenset({"audio_cpp", "audio_cpp-cuda"}))
+    observed = usable_vram_by_node(
+        {node: profile}, {node: resources}, node_memory={node: memory}
+    )
+    assert observed[node].in_bytes == Memory.from_gb(80).in_bytes
+    assert unified_memory_gpu_node_ids(
+        {node: profile}, {node: resources}, node_memory={node: memory}
+    ) == frozenset({node})
+    assert usable_vram_by_node(
+        {node: profile}, {node: resources}, node_memory={}
+    ) == {}
+
 def test_unified_memory_gpu_node_ids_requires_uma_and_gpu_backend():
     """Only an AMD APU with host-spanning GTT and GPU offload is classified UMA."""
     uma = NodeId()

@@ -1,7 +1,5 @@
 """The pre-load guard checks a shard against the pool its stamped backend uses."""
 
-from types import SimpleNamespace
-
 import pytest
 
 import skulk.shared.backends as backends
@@ -9,7 +7,7 @@ import skulk.worker.main as worker_main
 from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.memory import Memory
-from skulk.shared.types.profiling import MemoryUsage
+from skulk.shared.types.profiling import AcceleratorMetrics, MemoryUsage
 from skulk.shared.types.worker.shards import PipelineShardMetadata
 from skulk.utils.info_gatherer import linux_gpu, nvidia_gpu
 from skulk.worker.main import Worker
@@ -40,8 +38,10 @@ def test_nvidia_vram_probe_uses_the_placement_offload_classes(
     def has_nvidia_gpu(_nvml: object) -> bool:
         return True
 
-    def accelerator_metrics(_nvml: object) -> SimpleNamespace:
-        return SimpleNamespace(
+    def accelerator_metrics(_nvml: object) -> AcceleratorMetrics:
+        return AcceleratorMetrics(
+            vendor="nvidia",
+            name="NVIDIA test GPU",
             vram_total_bytes=Memory.from_gb(16).in_bytes,
             vram_used_bytes=Memory.from_gb(4).in_bytes,
         )
@@ -54,6 +54,50 @@ def test_nvidia_vram_probe_uses_the_placement_offload_classes(
     usable = worker_main._local_usable_vram()  # pyright: ignore[reportPrivateUsage]
 
     assert (usable is not None) is uses_vram
+
+
+def test_gb10_local_fit_uses_shared_cuda_and_host_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The worker applies the same GB10 admission bound as the master."""
+    total = Memory.from_gb(128).in_bytes
+    monkeypatch.setattr(worker_main.sys, "platform", "linux")
+    monkeypatch.setattr(linux_gpu, "find_amd_gpu_device", lambda: None)
+    monkeypatch.setattr(nvidia_gpu, "prefer_nvidia_telemetry", lambda: True)
+    monkeypatch.setattr(backends, "probe_node_backends", lambda: frozenset({"audio_cpp-cuda"}))
+    monkeypatch.setattr(nvidia_gpu, "load_nvml", lambda: object())
+    def has_nvidia_gpu(_nvml: object) -> bool:
+        return True
+
+    def gb10_metrics(_nvml: object) -> AcceleratorMetrics:
+        return AcceleratorMetrics(
+            vendor="nvidia",
+            name="NVIDIA GB10",
+            compute_capability="12.1",
+            vram_total_bytes=total,
+            vram_used_bytes=Memory.from_gb(48).in_bytes,
+        )
+
+    monkeypatch.setattr(nvidia_gpu, "has_nvidia_gpu", has_nvidia_gpu)
+    monkeypatch.setattr(
+        nvidia_gpu,
+        "read_accelerator_metrics",
+        gb10_metrics,
+    )
+
+    def local_memory(_cls: type[MemoryUsage]) -> MemoryUsage:
+        return MemoryUsage.from_bytes(
+            ram_total=total,
+            ram_available=Memory.from_gb(80).in_bytes,
+            swap_total=0,
+            swap_available=0,
+        )
+
+    monkeypatch.setattr(MemoryUsage, "from_local_gpu_wireable", classmethod(local_memory))
+    usable = worker_main._local_usable_vram()  # pyright: ignore[reportPrivateUsage]
+    assert usable is not None
+    assert usable.in_bytes == Memory.from_gb(64).in_bytes
+    assert worker_main._local_unified_memory_gpu()  # pyright: ignore[reportPrivateUsage]
 
 
 def _shard(backend: str | None) -> PipelineShardMetadata:

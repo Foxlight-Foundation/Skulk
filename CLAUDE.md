@@ -277,8 +277,11 @@ lane. A standalone primary Vulkan override remains eligible when its pinned
 revision, specs, and device probe pass. AMD sysfs PCI IDs produce stable
 chip-class identifiers
 (`amd:pci-1002-1586` on Strix Halo) for claim selection before preparation.
-Music model weights
-are separate immutable downloads.
+Music model weights are separate immutable downloads. The dedicated arm64 CUDA wheel is compiled
+for GB10 SM 12.1 and requires both that observed hardware class and a signed
+claim naming it. CUDA 12 runtime, cuBLAS, NCCL, and NVIDIA driver libraries
+must be on the host loader path; the binary probe reports missing libraries
+before advertising the lane.
 The bare `audio_cpp` tag reports availability; music support claims and runner
 placement select a concrete compute lane so memory and device choice agree.
 Music mounting uses targeted `PrepareAudioCpp` even for a package already
@@ -297,6 +300,11 @@ the executable and selected lane before every sidecar start. Linux uses a
 parent-death signal and macOS uses a detached watchdog to end the server when
 its runner disappears. CUDA, ROCm, and
 Vulkan audio.cpp lanes admit against GPU memory in API preflight and placement;
+Metal and CPU use system RAM.
+On GB10, NVML may not report memory even when CUDA is available. The NVIDIA
+collector then reads CUDA free and total bytes; placement bounds that shared
+CPU/GPU pool by live host RAM, 16 GB of OS headroom, and the 75% working-set
+ceiling. A failed CUDA query leaves GPU capacity unmeasured.
 Metal and CPU use system RAM. Preparation and exact music placement check the
 full estimated footprint against the corresponding memory pool and reject RPC shaped and
 multi-runner instances. The exact API route skips its generic RAM-only

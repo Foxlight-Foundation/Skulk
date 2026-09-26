@@ -52,7 +52,9 @@ from skulk.shared.models.memory_estimate import (
     UMA_GPU_OS_HEADROOM,
     backend_offloads_to_vram,
     estimate_shard_footprint,
+    gb10_unified_memory_pool,
     gpu_working_set_ceiling,
+    is_gb10_accelerator,
     shard_preallocates_kv_upfront,
 )
 from skulk.shared.models.model_cards import (
@@ -478,8 +480,9 @@ def _local_usable_vram() -> Memory | None:
       GPU's GTT-mapped system RAM counts toward the pool. The live GPU-wireable
       snapshot matches the ceiling the master derives from gossiped telemetry.
 
-    NVIDIA nodes (no amdgpu sysfs, NVML present) take the same discrete-GPU
-    path from NVML readings; NVIDIA exposes no UMA/GTT signature here.
+    NVIDIA GB10 nodes use the CUDA-memory fallback when NVML lacks memory and
+    bound their shared pool by current host RAM. Other NVIDIA GPUs take the
+    discrete-GPU path from NVML readings.
     Returns ``None`` on Apple unified-memory nodes (no amdgpu device), which keep
     the system-RAM path. The master is the backend authority that decides a shard
     belongs on this GPU node in the first place.
@@ -521,6 +524,10 @@ def _local_usable_vram() -> Memory | None:
         if nvml is None or not has_nvidia_gpu(nvml):
             return None
         nvidia = read_nvidia_accelerator_metrics(nvml)
+        if is_gb10_accelerator(nvidia):
+            return gb10_unified_memory_pool(
+                nvidia, MemoryUsage.from_local_gpu_wireable()
+            )
         if not nvidia.vram_total_bytes or nvidia.vram_total_bytes <= 0:
             return None
         nvidia_available = max(
@@ -559,13 +566,12 @@ def _local_usable_vram() -> Memory | None:
 
 
 def _local_unified_memory_gpu() -> bool:
-    """Whether THIS node is a unified-memory APU (the GTT spans the whole system).
+    """Whether this node's GPU pool shares physical memory with host RAM.
 
-    The same signature ``_local_usable_vram`` and the master's
-    ``usable_vram_by_node`` use: an amdgpu device whose GTT aperture exceeds
-    the VRAM carve-out and covers all of system RAM. On such a node a
-    fixed-window engine's KV allocation takes host pages, so its stamped
-    window is sized from host RAM and must be checked against host RAM too.
+    AMD APUs qualify when their GTT aperture spans host RAM. NVIDIA GB10
+    qualifies when CUDA and host memory measurements confirm one shared pool.
+    A fixed-window engine's KV allocation takes host pages on either device,
+    so its stamped window must also fit current host RAM.
     """
     if sys.platform != "linux":
         return False
@@ -577,7 +583,24 @@ def _local_unified_memory_gpu() -> bool:
 
     device = None if prefer_nvidia_telemetry() else find_amd_gpu_device()
     if device is None:
-        return False
+        from skulk.utils.info_gatherer.nvidia_gpu import (
+            has_nvidia_gpu,
+            load_nvml,
+        )
+        from skulk.utils.info_gatherer.nvidia_gpu import (
+            read_accelerator_metrics as read_nvidia_accelerator_metrics,
+        )
+
+        nvml = load_nvml()
+        if nvml is None or not has_nvidia_gpu(nvml):
+            return False
+        accelerator = read_nvidia_accelerator_metrics(nvml)
+        return (
+            gb10_unified_memory_pool(
+                accelerator, MemoryUsage.from_local_gpu_wireable()
+            )
+            is not None
+        )
     accelerator = read_accelerator_metrics(device)
     total = accelerator.vram_total_bytes
     gtt_total = accelerator.gtt_total_bytes

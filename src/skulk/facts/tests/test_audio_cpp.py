@@ -8,7 +8,7 @@ import pytest
 
 from skulk.facts.derive import derive_node_backends
 from skulk.facts.inventory import engine_build_inventory
-from skulk.facts.probe import gather_node_facts
+from skulk.facts.probe import gather_node_facts, probe_audio_cpp
 from skulk.provisioning.audio_cpp import AUDIO_CPP_SOURCE_REVISION
 
 
@@ -48,6 +48,21 @@ def test_installed_package_is_not_ready_until_selected(tmp_path: Path) -> None:
     assert not any(
         tag.startswith("audio_cpp") for tag in derive_node_backends(facts).backends
     )
+
+
+def test_missing_cuda_libraries_have_actionable_probe_diagnostic(tmp_path: Path) -> None:
+    """A missing CUDA loader library keeps the engine unavailable with a fix hint."""
+    binary = tmp_path / "audiocpp_server"
+    binary.write_text(
+        "#!/bin/sh\n"
+        "echo 'error while loading shared libraries: libcublas.so.12: "
+        "cannot open shared object file' >&2\n"
+        "exit 127\n"
+    )
+    binary.chmod(0o755)
+    probe = probe_audio_cpp(str(binary))
+    assert probe.outcome == "failed"
+    assert "install the host CUDA 12 runtime, cuBLAS, and NCCL" in (probe.detail or "")
 
 
 def test_pinned_binary_probe_and_build_inventory(tmp_path: Path) -> None:

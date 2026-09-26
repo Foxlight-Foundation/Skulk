@@ -3724,6 +3724,15 @@ class API:
                 for claim in claims
             )
 
+        def gb10_cuda_wheel_claim_matches(classes: frozenset[str]) -> bool:
+            """Require the compiled SM in both live facts and the signed claim."""
+            required_class = "nvidia:sm-12.1"
+            return required_class in classes and any(
+                claim.engine in {"audio_cpp-cuda", "audio_cpp"}
+                and required_class in claim.hardware_classes
+                for claim in claims
+            )
+
         variant_lanes: dict[Literal["cpu", "vulkan", "cuda"], frozenset[str]] = {
             # Primary-binary overrides can expose CUDA or ROCm through the
             # CPU preparation path; the dedicated CUDA wheel is independent.
@@ -3766,7 +3775,7 @@ class API:
                 "platform:linux" in platform_classes
                 and architecture in {"aarch64", "arm64"}
                 and "nvidia" in platform_classes
-                and claim_matches("audio_cpp-cuda", platform_classes)
+                and gb10_cuda_wheel_claim_matches(platform_classes)
             ):
                 variants.append("cuda")
             if (

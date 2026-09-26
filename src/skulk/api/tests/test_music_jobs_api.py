@@ -280,6 +280,64 @@ async def test_gb10_cuda_claim_prepares_arm64_gpu_variant(
     api._send.assert_awaited_once()
 
 
+@pytest.mark.parametrize(
+    ("live_sm", "claim_class", "expected_variant"),
+    [
+        ("nvidia:sm-12.1", "nvidia", "cpu"),
+        ("nvidia:sm-9.0", "nvidia:sm-12.1", None),
+    ],
+)
+async def test_dedicated_gb10_wheel_requires_exact_signed_sm(
+    monkeypatch: pytest.MonkeyPatch,
+    live_sm: str,
+    claim_class: str,
+    expected_variant: str | None,
+) -> None:
+    """A broad or mismatched claim cannot select the SM 12.1 CUDA package."""
+    node = NodeId("nvidia-node")
+    topology = Topology()
+    topology.add_node(node)
+    resources = NodeResources(
+        backends=frozenset(), architecture="aarch64",
+        hardware_classes=frozenset({"platform:linux", "nvidia", live_sm}),
+    )
+    memory = MemoryUsage.from_bytes(
+        ram_total=Memory.from_gb(128).in_bytes,
+        ram_available=Memory.from_gb(96).in_bytes,
+        swap_total=0, swap_available=0,
+    )
+    api: Any = object.__new__(API)
+    api.node_id = NodeId("api-node")
+    api.state = SimpleNamespace(topology=topology, instances={})
+    api._telemetry_view = SimpleNamespace(
+        node_resources={node: resources}, node_memory={node: memory}, node_system={},
+    )
+    api._audio_cpp_prepare_events = {}
+    api._audio_cpp_prepare_results = {}
+    def broad_or_mismatched_claims(_card: ModelCard) -> tuple[SimpleNamespace, ...]:
+        return (SimpleNamespace(
+            status="supported", engine="audio_cpp-cuda",
+            hardware_classes=(claim_class,),
+        ),)
+
+    monkeypatch.setattr(api_module, "get_model_engine_support", broad_or_mismatched_claims)
+
+    async def reject_preparation(command: PrepareAudioCpp) -> None:
+        assert command.variant == expected_variant
+        api._audio_cpp_prepare_results[command.command_id] = AudioCppPreparationCompleted(
+            request_id=command.command_id, target_node=node,
+            owner_node=command.owner_node, success=False,
+            error="test fixture stopped preparation",
+        )
+        api._audio_cpp_prepare_events[command.command_id].set()
+
+    api._send = AsyncMock(side_effect=reject_preparation)
+    with pytest.raises(HTTPException) as error:
+        await api._prepare_music_engine_for_mount(_card(), set())
+    assert error.value.status_code == 503
+    assert api._send.await_count == (1 if expected_variant else 0)
+
+
 async def test_strix_vulkan_preparation_failure_uses_signed_cpu_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
