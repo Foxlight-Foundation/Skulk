@@ -1371,7 +1371,7 @@ def ensure_installed_cards(
     root: Path,
     cards: Iterable[ModelCard],
     verified_detached_cache: VerifiedDetachedInstalledCardCache | None = None,
-) -> None:
+) -> tuple[InstalledCardRecord, ...]:
     """Materialize missing sidecars for trusted, complete legacy directories.
 
     Args:
@@ -1379,10 +1379,15 @@ def ensure_installed_cards(
         cards: Trusted cards used to associate complete legacy artifacts.
         verified_detached_cache: Optional operator-inventory cache for detached
             records on read-only roots.
+
+    Returns:
+        The records written by this call, so an async caller can converge the
+        process's live catalog on its event loop.
     """
 
     if not root.is_dir():
-        return
+        return ()
+    written: list[InstalledCardRecord] = []
     card_list = tuple(cards)
     for model_directory in root.iterdir():
         if not model_directory.is_dir() or model_directory.name.startswith("."):
@@ -1399,5 +1404,7 @@ def ensure_installed_cards(
             record = associate_installed_card(model_directory, card_list)
             if record is not None:
                 write_installed_card_with_fallback(model_directory, record)
+                written.append(record)
         except (OSError, ValueError):
             continue
+    return tuple(written)

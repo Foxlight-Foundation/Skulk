@@ -2194,6 +2194,14 @@ uses those fields to select one current generation per artifact alias.
 Directories that cannot be associated with trusted card truth appear with an
 `unresolved` verification state and are not imported or launched automatically.
 
+The request has one side effect. A complete directory that predates card
+records, and that a current card recognizes, gets its card record written
+(`.skulk/installed-card.json`, or a detached record for a read-only root).
+The model then joins this node's live catalog at once. While the registry
+cannot be read, the last verified registry catalog is also used for that
+match. The node runs the same association on its own, at start and about
+once a minute, whether or not a model store is configured.
+
 ```bash
 curl http://localhost:52415/store/storage
 ```
@@ -3003,6 +3011,9 @@ Creates a random short-lived capability bound to one installed identity,
 manifest digest, target store node, byte ceiling, and expiry. The caller's
 socket address must also match an advertised interface of the claimed store
 node; the node-id field and header are not accepted as self-asserted identity.
+Finding the artifact runs the same inventory as `GET /store/storage`, with
+the same side effect: a recognized legacy directory gets its card record and
+joins the live catalog.
 
 **GET** `/store/internal/exports/{capability_token}/{relative_path}`
 

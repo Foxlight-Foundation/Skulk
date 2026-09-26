@@ -50,6 +50,7 @@ from skulk.shared.logging import (
 )
 from skulk.shared.models.model_cards import (
     get_all_model_cards,
+    get_association_cards,
     get_current_registry_cards,
     register_installed_card_record,
 )
@@ -81,6 +82,7 @@ from skulk.shared.types.state_sync import StateSyncMessage
 from skulk.shared.types.telemetry import NodeTelemetry, TelemetryView
 from skulk.startup_recovery import preflight_api_port
 from skulk.store.artifact_inventory import (
+    associate_installed_artifacts,
     installed_artifact_roots,
     inventory_installed_artifacts,
 )
@@ -1228,21 +1230,28 @@ class Node:
         )
         artifacts: list[NodeArtifactAvailability] = []
         truncated = False
+        canonical_resolved = (
+            canonical_root.expanduser().resolve() if canonical_root is not None else None
+        )
+        roots = tuple(
+            root
+            for root in installed_artifact_roots(self._configured_artifact_cache_root())
+            if canonical_resolved is None
+            or not root.expanduser().resolve().is_relative_to(canonical_resolved)
+        )
+        cards = await get_association_cards()
+        # Association runs on every node, with or without a model store: a
+        # model downloaded before card records existed must get its record
+        # wherever it lives. The scan runs in a thread; the records it writes
+        # are registered here, on the loop, so the model lists at once.
+        for record in await to_thread.run_sync(
+            associate_installed_artifacts,
+            roots,
+            cards,
+            self._artifact_inventory_detached_cache,
+        ):
+            register_installed_card_record(record)
         if store_enabled:
-            canonical_resolved = (
-                canonical_root.expanduser().resolve()
-                if canonical_root is not None
-                else None
-            )
-            roots = tuple(
-                root
-                for root in installed_artifact_roots(
-                    self._configured_artifact_cache_root()
-                )
-                if canonical_resolved is None
-                or not root.expanduser().resolve().is_relative_to(canonical_resolved)
-            )
-            cards = await get_all_model_cards()
             discovered = await to_thread.run_sync(
                 inventory_installed_artifacts,
                 roots,

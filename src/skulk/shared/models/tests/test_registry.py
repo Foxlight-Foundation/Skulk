@@ -966,6 +966,69 @@ def test_client_uses_hash_bound_last_known_good(
         client.load_catalog()
 
 
+def test_cached_catalog_outlives_the_freshness_window_for_association(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An offline node reads its last verified catalog however old it is.
+
+    The freshness window still refuses the stale catalog for listing and
+    download; only the association path reads it without the limit, and
+    tampered bytes are refused either way.
+    """
+    payload_path = tmp_path / "downloaded.json"
+    payload_path.write_bytes(_catalog_payload())
+    embedded_root = tmp_path / "embedded-root.json"
+    embedded_root.write_text("{}")
+
+    class WorkingUpdater:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def refresh(self) -> None:
+            pass
+
+        def get_targetinfo(self, target_path: str) -> object | None:
+            return object() if target_path == "v1/catalog.json" else None
+
+        def download_target(self, _: object) -> str:
+            return str(payload_path)
+
+    monkeypatch.setattr(registry_module, "Updater", WorkingUpdater)
+    client = TufRegistryClient(
+        base_url="https://registry.example/",
+        cache_dir=tmp_path / "cache",
+        embedded_root=embedded_root,
+        timeout_seconds=1,
+        max_stale_days=30,
+    )
+    assert client.load_catalog(registry_model_cards).snapshot_id == "snapshot_1_test"
+
+    # Six months offline: the records say the bytes were verified long ago.
+    # Every refresh writes the auxiliary GGUF record beside the catalog's, so
+    # it ages with it and must not expire the association path either.
+    for name in ("last-known-good.json", "last-known-good-gguf-record.json"):
+        record_path = tmp_path / "cache" / name
+        record = cast("dict[str, object]", json.loads(record_path.read_text()))
+        record["verified_at"] = "2026-03-01T00:00:00Z"
+        record_path.write_text(json.dumps(record))
+
+    class FailingUpdater(WorkingUpdater):
+        def refresh(self) -> None:
+            raise OSError("offline")
+
+    monkeypatch.setattr(registry_module, "Updater", FailingUpdater)
+    with pytest.raises(RegistryUnavailableError):
+        client.load_catalog(registry_model_cards)
+    assert (
+        client.load_cached_catalog(registry_model_cards).snapshot_id
+        == "snapshot_1_test"
+    )
+
+    (tmp_path / "cache/last-known-good-catalog.json").write_bytes(b"tampered")
+    with pytest.raises(ValueError, match="hash mismatch"):
+        client.load_cached_catalog(registry_model_cards)
+
+
 def test_client_uses_hash_bound_last_known_good_advisories(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1708,3 +1771,64 @@ def test_installed_same_card_keeps_current_signed_geometry(tmp_path: Path) -> No
         model_cards_module._installed_card_cache.update(prior_installed)
         model_cards_module._installed_current_registry_ids.clear()
         model_cards_module._installed_current_registry_ids.update(prior_current_ids)
+
+
+def _plain_card(model_id: str) -> ModelCard:
+    return ModelCard(
+        model_id=ModelId(model_id),
+        source_revision="c" * 40,
+        storage_size=Memory.from_bytes(1),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+    )
+
+
+async def test_offline_association_uses_the_cached_catalog_without_listing_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Offline, installed artifacts can still reach their signed card.
+
+    The last verified catalog's cards are offered to association only; the
+    listing is unchanged, and a listed card wins over a cached one.
+    """
+    listed = _plain_card("org/listed")
+    cached_only = _plain_card("org/cached-only")
+    cached_copy_of_listed = _plain_card("org/listed").model_copy(
+        update={"source_revision": "d" * 40}
+    )
+    sentinel = object()
+
+    class CachedClient:
+        def load_cached_catalog(self, _validator: object) -> object:
+            return sentinel
+
+    def cards_from(catalog: object) -> list[ModelCard]:
+        assert catalog is sentinel
+        return [cached_only, cached_copy_of_listed]
+
+    async def no_refresh() -> None:
+        return None
+
+    monkeypatch.setenv("SKULK_TESTS", "0")
+    monkeypatch.setattr(model_cards_module, "_registry_client", CachedClient())
+    monkeypatch.setattr(model_cards_module, "registry_model_cards", cards_from)
+    monkeypatch.setattr(model_cards_module, "_refresh_card_cache_if_due", no_refresh)
+    monkeypatch.setattr(model_cards_module, "_card_cache", {listed.model_id: listed})
+    monkeypatch.setattr(model_cards_module, "_offline_catalog_cards", {})
+
+    await model_cards_module._load_offline_catalog_cards()
+
+    association = await model_cards_module.get_association_cards()
+    assert association == [listed, cached_only]
+    assert await model_cards_module.get_all_model_cards() == [listed]
+
+    class EmptyCache:
+        def load_cached_catalog(self, _validator: object) -> object:
+            raise FileNotFoundError("never cached")
+
+    monkeypatch.setattr(model_cards_module, "_registry_client", EmptyCache())
+    await model_cards_module._load_offline_catalog_cards()
+    assert await model_cards_module.get_association_cards() == [listed]
+

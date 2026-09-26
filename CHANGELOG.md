@@ -9,6 +9,15 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Changed
 
+- A node that cannot reach the model registry, however long it has been
+  offline, gives a model downloaded before card records existed its record
+  from the last verified registry catalog it cached. Before, only the
+  cards shipped inside Skulk could. The cached catalog is never listed or
+  placed from; a model it matches gains its own card record and is then
+  listed and served like any other installed model. Association now runs
+  on every node, with or without a model store, and a model it records is
+  listed at once rather than after the next restart.
+
 - The ComfyUI engine's build identity in `NodeResources.engine_builds` names
   the torch build beside the checkout commit
   (`comfy@<commit>/torch@<version>`): the same checkout on cu130 and on ROCm

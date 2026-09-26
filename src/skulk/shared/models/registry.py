@@ -675,6 +675,35 @@ class TufRegistryClient:
                         "last-known-good matrix exists"
                     ) from error
 
+    def load_cached_catalog(
+        self,
+        catalog_validator: Callable[[RegistryCatalog], object] | None = None,
+    ) -> RegistryCatalog:
+        """Load the last verified catalog without network or freshness expiry.
+
+        For associating installed artifacts with their cards on a node that
+        cannot reach the registry, however long it has been offline. The
+        bytes are hash-bound to what was verified when they were cached; the
+        freshness limit guards what a node lists and downloads, which the
+        caller does not use these cards for.
+
+        Args:
+            catalog_validator: Optional consumer-level validator for the
+                recovered catalog.
+
+        Returns:
+            The last verified catalog.
+
+        Raises:
+            OSError: When no catalog has ever been cached.
+            ValueError: When the cached bytes fail their hash or validation.
+        """
+        self._cache_dir.mkdir(parents=True, exist_ok=True)
+        with self._lock:
+            return self._load_last_known_good(
+                catalog_validator, enforce_freshness=False
+            )
+
     def load_cached_engine_support(self) -> RegistryEngineSupport:
         """Load hash-bound support data without network or freshness expiry."""
         self._cache_dir.mkdir(parents=True, exist_ok=True)
@@ -810,8 +839,14 @@ class TufRegistryClient:
             self._gguf_cache_record_path, record.model_dump_json().encode()
         )
 
-    def _attach_cached_gguf_metadata(self, catalog: RegistryCatalog) -> RegistryCatalog:
-        """Recover only auxiliary facts tied to this exact cached catalog."""
+    def _attach_cached_gguf_metadata(
+        self, catalog: RegistryCatalog, *, enforce_freshness: bool = True
+    ) -> RegistryCatalog:
+        """Recover only auxiliary facts tied to this exact cached catalog.
+
+        Every refresh rewrites this record beside the catalog's, so it ages
+        with the catalog and follows the catalog's freshness choice.
+        """
         if (
             not self._gguf_cache_record_path.exists()
             and not self._gguf_metadata_path.exists()
@@ -823,9 +858,9 @@ class TufRegistryClient:
         )
         if record.snapshot_id != catalog.snapshot_id:
             raise ValueError("cached GGUF metadata snapshot mismatch")
-        if datetime.now(UTC) - record.verified_at.astimezone(UTC) > timedelta(
-            days=self._max_stale_days
-        ):
+        if enforce_freshness and datetime.now(UTC) - record.verified_at.astimezone(
+            UTC
+        ) > timedelta(days=self._max_stale_days):
             raise ValueError("cached GGUF metadata is too old")
         payload = self._gguf_metadata_path.read_bytes()
         if hashlib.sha256(payload).hexdigest() != record.sha256:
@@ -880,24 +915,29 @@ class TufRegistryClient:
     def _load_last_known_good(
         self,
         catalog_validator: Callable[[RegistryCatalog], object] | None,
+        *,
+        enforce_freshness: bool = True,
     ) -> RegistryCatalog:
-        """Load only hash-bound, previously verified, sufficiently fresh bytes."""
-        if self._max_stale_days == 0:
+        """Load only hash-bound, previously verified bytes, fresh unless told otherwise."""
+        if enforce_freshness and self._max_stale_days == 0:
             raise ValueError("last-known-good registry fallback is disabled")
         record = _VerifiedCacheRecord.model_validate_json(
             self._cache_record_path.read_bytes(), strict=False
         )
-        now = datetime.now(UTC)
-        verified_at = record.verified_at.astimezone(UTC)
-        if now - verified_at > timedelta(days=self._max_stale_days):
-            raise ValueError("last-known-good registry catalog is too old")
+        if enforce_freshness:
+            now = datetime.now(UTC)
+            verified_at = record.verified_at.astimezone(UTC)
+            if now - verified_at > timedelta(days=self._max_stale_days):
+                raise ValueError("last-known-good registry catalog is too old")
         payload = self._last_known_good_path.read_bytes()
         if hashlib.sha256(payload).hexdigest() != record.sha256:
             raise ValueError("last-known-good registry catalog hash mismatch")
         catalog = RegistryCatalog.model_validate_json(payload, strict=False)
         if catalog.snapshot_id != record.snapshot_id:
             raise ValueError("last-known-good snapshot identity mismatch")
-        catalog = self._attach_cached_gguf_metadata(catalog)
+        catalog = self._attach_cached_gguf_metadata(
+            catalog, enforce_freshness=enforce_freshness
+        )
         if catalog_validator is not None:
             catalog_validator(catalog)
         return catalog
