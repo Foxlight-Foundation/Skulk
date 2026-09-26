@@ -120,7 +120,7 @@ jobs:
           test "$(git -C /tmp/audio-cpp-src rev-parse HEAD)" = "$AUDIO_CPP_REF"
       - name: Build only the music server and two families
         run: |
-          set -euo pipefail
+          set -eo pipefail
           vulkan_include_args=()
           if [ "${{ matrix.variant }}" = vulkan ]; then
             # Jammy's libvulkan loader is usable, but its 1.3.204 headers lack
