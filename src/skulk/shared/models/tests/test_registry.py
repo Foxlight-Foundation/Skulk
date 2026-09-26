@@ -724,9 +724,11 @@ def test_offline_mode_disables_registry_network_refresh(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Air-gapped nodes use bundled cards without contacting public TUF."""
+    from skulk.shared import constants
+
     monkeypatch.delenv("SKULK_TESTS", raising=False)
     monkeypatch.setattr(model_cards_module, "SKULK_MODEL_REGISTRY_ENABLED", True)
-    monkeypatch.setattr(model_cards_module, "SKULK_OFFLINE", True)
+    monkeypatch.setattr(constants, "SKULK_OFFLINE", True)
 
     assert not model_cards_module._registry_enabled()
 
