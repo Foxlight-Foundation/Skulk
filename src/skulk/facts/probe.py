@@ -212,6 +212,18 @@ def _read_sysfs_int(path: Path) -> int | None:
         return None
 
 
+def _amd_pci_device_id(device: Path) -> str | None:
+    """Read the stable AMD PCI chip identity without relying on marketing names."""
+    try:
+        vendor = int((device / "vendor").read_text().strip(), 16)
+        chip = int((device / "device").read_text().strip(), 16)
+    except (OSError, ValueError):
+        return None
+    if vendor != 0x1002 or not 0 <= chip <= 0xFFFF:
+        return None
+    return f"{vendor:04x}:{chip:04x}"
+
+
 def _amd_gpu_facts(drm_root: Path) -> tuple[GpuDeviceFact, ...]:
     """Observe every amdgpu render device under ``drm_root`` (passive sysfs)."""
     try:
@@ -232,6 +244,7 @@ def _amd_gpu_facts(drm_root: Path) -> tuple[GpuDeviceFact, ...]:
                 detection_source="amdgpu_sysfs",
                 vram_total_bytes=_read_sysfs_int(device / "mem_info_vram_total"),
                 gtt_total_bytes=_read_sysfs_int(device / "mem_info_gtt_total"),
+                pci_device_id=_amd_pci_device_id(device),
             )
         )
     return tuple(facts)
@@ -348,6 +361,7 @@ def gather_node_facts(
     from skulk.shared.backends import (
         AUDIO_CPP_BACKENDS_ENV,
         AUDIO_CPP_BIN_ENV,
+        AUDIO_CPP_VULKAN_BIN_ENV,
         COMFY_BACKENDS_ENV,
         COMFY_BIN_ENV,
         COMFY_ROOT_ENV,
@@ -447,6 +461,22 @@ def gather_node_facts(
                 audio_cpp_model_specs(Path(audio_cpp_binary.configured_path), environ=env)
             except (OSError, RuntimeError) as error:
                 audio_cpp_probe = AudioCppProbe(outcome="failed", detail=str(error)[:400])
+    audio_cpp_vulkan_binary = _binary_fact(AUDIO_CPP_VULKAN_BIN_ENV, env)
+    audio_cpp_vulkan_probe = AudioCppProbe()
+    if audio_cpp_vulkan_binary.state == "ok":
+        assert audio_cpp_vulkan_binary.configured_path is not None
+        audio_cpp_vulkan_probe = probe_audio_cpp(audio_cpp_vulkan_binary.configured_path)
+        if audio_cpp_vulkan_probe.outcome == "ready":
+            from skulk.provisioning.audio_cpp import audio_cpp_model_specs
+
+            try:
+                audio_cpp_model_specs(
+                    Path(audio_cpp_vulkan_binary.configured_path), environ=env
+                )
+            except (OSError, RuntimeError) as error:
+                audio_cpp_vulkan_probe = AudioCppProbe(
+                    outcome="failed", detail=str(error)[:400]
+                )
     test_video_engine = (env.get(TEST_VIDEO_ENGINE_ENV, "").strip().lower() in ("1", "true", "yes", "on"))
 
     # Probe the binary's own device list only when there is a usable binary
@@ -482,5 +512,7 @@ def gather_node_facts(
         declared_comfy_backends=declared_comfy,
         audio_cpp_binary=audio_cpp_binary,
         audio_cpp_probe=audio_cpp_probe,
+        audio_cpp_vulkan_binary=audio_cpp_vulkan_binary,
+        audio_cpp_vulkan_probe=audio_cpp_vulkan_probe,
         declared_audio_cpp_backends=env.get(AUDIO_CPP_BACKENDS_ENV),
     )

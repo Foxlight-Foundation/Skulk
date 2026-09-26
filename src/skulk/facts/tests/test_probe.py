@@ -117,6 +117,8 @@ def test_amd_sysfs_devices_gathered(tmp_path: Path) -> None:
     (device / "gpu_busy_percent").write_text("3\n")
     (device / "mem_info_vram_total").write_text(str(8 * 2**30))
     (device / "mem_info_gtt_total").write_text(str(120 * 2**30))
+    (device / "vendor").write_text("0x1002\n")
+    (device / "device").write_text("0x1586\n")
     facts = gather_node_facts(
         env={}, platform="linux", nvidia_presence=False, drm_root=tmp_path
     )
@@ -124,6 +126,7 @@ def test_amd_sysfs_devices_gathered(tmp_path: Path) -> None:
     assert len(amd) == 1
     assert amd[0].vram_total_bytes == 8 * 2**30
     assert amd[0].gtt_total_bytes == 120 * 2**30
+    assert amd[0].pci_device_id == "1002:1586"
 
 
 def test_declarations_recorded_verbatim(tmp_path: Path) -> None:

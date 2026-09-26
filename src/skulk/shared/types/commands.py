@@ -93,6 +93,10 @@ class PrepareAudioCpp(BaseCommand):
 
     target_node: NodeId
     owner_node: NodeId
+    variant: Literal["cpu", "vulkan"] = Field(
+        default="cpu",
+        description="Pinned engine package variant to prepare before placement.",
+    )
 
 
 class TextEmbedding(BaseCommand):

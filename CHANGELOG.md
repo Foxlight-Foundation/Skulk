@@ -75,6 +75,11 @@ This project records release notes here and mirrors public-facing notes in
   directories. `GET /v1/diagnostics/node` now runs the doctor checks off
   the event loop, so a slow check no longer stalls the API.
 
+- `kill -USR1 <pid>` makes any Skulk node or runner process write every
+  thread's Python stack to its log and keep running. A runner stuck in
+  native code shows only C frames to an OS sampler, and a Python profiler
+  needs root on macOS.
+
 - `GET /v1/models` publishes every engine setting a video card's jobs
   accept, with its default: the sampler and scheduler lists, the card's
   trained video and audio shifts (and each adapter's own) with the accepted
@@ -140,6 +145,21 @@ This project records release notes here and mirrors public-facing notes in
   catalog video card can be filtered and badged.
 
 ### Fixed
+
+- A single-node placement whose runner dies is relaunched, and given up
+  with a recorded failure if it keeps dying, instead of staying dead behind
+  a live instance. Only a peer's failure used to shut a runner down, so a
+  one-node runner killed or crashed outside a GPU wedge left the placement
+  serving nothing, never retried and never failed, until someone deleted it.
+  The shutdown of a runner that already died no longer waits out its
+  15-second acknowledgement deadline.
+
+- The plugin service no longer keeps a full copy of Skulk for every update.
+  Each Skulk update stages a new manager runtime of about 1.7 GB, and none
+  was ever removed; one capability host held eleven. Once the manager runs
+  the runtime staged for the current build, the host removes the others. It
+  keeps that runtime, any a running manager still uses, and the one before
+  it, for going back to the previous build.
 
 - A managed plugin's owner that exits unexpectedly is started again. The
   plugin manager restarts it after growing waits (5 s to 300 s, then every
