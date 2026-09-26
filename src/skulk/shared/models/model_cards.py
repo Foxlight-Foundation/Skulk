@@ -102,6 +102,11 @@ _installed_card_mutation_versions: dict[ModelId, int] = {}
 _registry_advisories: tuple[RegistryAdvisory, ...] = ()
 _registry_engine_support: tuple[RegistryEngineSupportClaim, ...] = ()
 _registry_current_cards: dict[ModelId, "ModelCard"] = {}
+# Cards from the last verified catalog, loaded when the registry cannot be
+# read (offline, or unreachable past the freshness window). They are never
+# listed or placed; they only let installed artifacts that predate card
+# records be associated with their signed card while the node is offline.
+_offline_catalog_cards: dict[ModelId, "ModelCard"] = {}
 _POSITIVE_REGISTRY_CAPABILITY_STATUSES: Final[frozenset[str]] = frozenset(
     {"claimed", "observed", "complete"}
 )
@@ -527,6 +532,10 @@ async def _refresh_card_cache() -> None:
     # while retaining the newer signed card as update information.
     await _refresh_installed_cards()
     registry_loaded = await _load_cards_from_registry()
+    if registry_loaded:
+        _offline_catalog_cards.clear()
+    else:
+        await _load_offline_catalog_cards()
     if not registry_loaded:
         for path in _BUILTIN_CARD_DIRS:
             await _load_cards_from_dir(path, is_custom=False)
@@ -950,6 +959,45 @@ async def get_all_model_cards() -> list["ModelCard"]:
     """Return the complete verified/custom catalog without UI task filtering."""
     await _refresh_card_cache_if_due()
     return list(_card_cache.values())
+
+
+async def _load_offline_catalog_cards() -> None:
+    """Load the last verified catalog's cards for offline association.
+
+    Runs when the registry is not authoritative. A node that has never
+    cached a catalog, or whose cache fails verification, simply has none;
+    installed and custom cards are unaffected either way. Tests never read
+    the real cache.
+    """
+    if os.environ.get("SKULK_TESTS") == "1":
+        return
+    try:
+        catalog = await to_thread.run_sync(
+            _registry_client.load_cached_catalog, registry_model_cards
+        )
+        cards = registry_model_cards(catalog)
+    except (OSError, ValueError) as error:
+        _offline_catalog_cards.clear()
+        logger.info(f"no cached signed catalog for offline association ({error})")
+        return
+    _offline_catalog_cards.clear()
+    _offline_catalog_cards.update({card.model_id: card for card in cards})
+
+
+async def get_association_cards() -> list["ModelCard"]:
+    """Cards that may associate installed artifacts with a card record.
+
+    The listed catalog, plus, while the registry cannot be read, the last
+    verified catalog's cards for models the listing does not carry. An
+    artifact that predates card records thus gets its record offline from
+    the signed card it was downloaded with, rather than only from cards
+    shipped inside Skulk.
+    """
+    listed = await get_all_model_cards()
+    known = {card.model_id for card in listed}
+    return listed + [
+        card for model_id, card in _offline_catalog_cards.items() if model_id not in known
+    ]
 
 
 async def get_registry_card_by_id(

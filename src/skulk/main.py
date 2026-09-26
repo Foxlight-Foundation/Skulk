@@ -50,6 +50,7 @@ from skulk.shared.logging import (
 )
 from skulk.shared.models.model_cards import (
     get_all_model_cards,
+    get_association_cards,
     get_current_registry_cards,
     register_installed_card_record,
 )
@@ -1242,7 +1243,7 @@ class Node:
                 if canonical_resolved is None
                 or not root.expanduser().resolve().is_relative_to(canonical_resolved)
             )
-            cards = await get_all_model_cards()
+            cards = await get_association_cards()
             discovered = await to_thread.run_sync(
                 inventory_installed_artifacts,
                 roots,

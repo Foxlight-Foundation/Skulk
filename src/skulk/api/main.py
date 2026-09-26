@@ -405,6 +405,7 @@ from skulk.shared.models.model_cards import (
     custom_card_mutation_applied,
     delete_custom_card,
     get_all_model_cards,
+    get_association_cards,
     get_bundled_card,
     get_card,
     get_current_registry_card,
@@ -13480,7 +13481,7 @@ class API:
                 staging_root = Path(staging.node_cache_path).expanduser()
 
         in_use = self._store_models_in_use()
-        cards = await get_all_model_cards()
+        cards = await get_association_cards()
 
         def _collect() -> NodeStorageSummary:
             staged = _inventory_installed_artifacts(
@@ -15873,7 +15874,7 @@ class API:
 
         self._require_artifact_export_target(request, payload.target_node_id)
         staging_root = self._configured_staging_root()
-        cards = await get_all_model_cards()
+        cards = await get_association_cards()
         staged = await to_thread.run_sync(
             _inventory_installed_artifacts,
             _installed_artifact_roots(staging_root),
