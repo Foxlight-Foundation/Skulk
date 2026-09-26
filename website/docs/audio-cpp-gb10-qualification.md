@@ -141,6 +141,16 @@ WAV content matching their job metadata and SHA-256 digests:
 | ACE-Step 1.5 Turbo BF16 | 10.00 s | 48 kHz | 1,920,044 | `c6d0b4b0b07256e8444e25805034fb11e78dd492b0b0a1bda3e4f980698412a3` |
 | MiniMax Music 3 Q4 | 9.985 s | 44.1 kHz | 1,761,324 | `00680569c79bebef0f8d2a93dd61dd7d959336adea577e4661148b89ff731f1a` |
 
+The normal-service MiniMax mount reused a verified model cache. A separate
+isolated Skulk process then repeated that exact production-signed path with
+empty engine and model caches. It read snapshot 141, prepared and verified the
+pinned CUDA package, downloaded the complete MiniMax bundle, reached
+`DownloadCompleted` and `RunnerReady`, and returned a 9.985-second stereo
+44.1 kHz WAV of 1,761,324 bytes. The content matched the job's SHA-256
+`d9f6390c6294f0c05f0dbbaa5c92c37f7ca5eafceade18db0048ce7b5fa48e78`
+and contained non-silent PCM. This closes the signed clean-install gate for
+MiniMax on the exact GB10 class.
+
 The test jobs and placements were removed. The three nodes finished healthy
 with their two original runners ready. This qualification is for these exact
 cards, build, and hardware class; it does not extend to every Linux arm64 CPU
