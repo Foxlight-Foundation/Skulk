@@ -120,7 +120,11 @@ async def test_mount_preflight_skips_ready_build_without_signed_music_support(
             else frozenset()
         )
 
+    def signed_claims(_card: ModelCard) -> tuple[SimpleNamespace, ...]:
+        return (SimpleNamespace(status="supported", engine=lane, hardware_classes=()),)
+
     monkeypatch.setattr(api_module, "registry_supported_backends_for_node", supported_backends)
+    monkeypatch.setattr(api_module, "get_model_engine_support", signed_claims)
     await api._prepare_music_engine_for_mount(_card(), set())
     api._send.assert_awaited_once()
     api._send.reset_mock()
@@ -207,6 +211,149 @@ async def test_strix_vulkan_claim_prepares_gpu_variant_before_placement(
     api._send.assert_awaited_once()
 
 
+async def test_gb10_cuda_claim_prepares_arm64_gpu_variant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A signed GB10 claim prepares CUDA before the exact build can place."""
+    node = NodeId("gb10-node")
+    topology = Topology()
+    topology.add_node(node)
+    hardware = frozenset({"platform:linux", "nvidia", "nvidia:sm-12.1"})
+    initial = NodeResources(
+        backends=frozenset(), architecture="aarch64", hardware_classes=hardware,
+    )
+    ready = initial.model_copy(update={
+        "backends": frozenset({"audio_cpp", "audio_cpp-cuda"}),
+        "engine_builds": {"audio_cpp-cuda": "gb10-build"},
+    })
+    memory = MemoryUsage.from_bytes(
+        ram_total=2**30, ram_available=2**30,
+        swap_total=0, swap_available=0,
+    )
+    api: Any = object.__new__(API)
+    api.node_id = NodeId("api-node")
+    api.state = SimpleNamespace(topology=topology, instances={})
+    api._telemetry_view = SimpleNamespace(
+        node_resources={node: initial}, node_memory={node: memory}, node_system={},
+    )
+    api._audio_cpp_prepare_events = {}
+    api._audio_cpp_prepare_results = {}
+    def gpu_memory(*_args: object, **_kwargs: object) -> dict[NodeId, Memory]:
+        return {node: Memory.from_gb(8)}
+
+    def signed_claims(_card: ModelCard) -> tuple[SimpleNamespace, ...]:
+        return (
+            SimpleNamespace(
+                status="supported", engine="audio_cpp-cuda",
+                hardware_classes=("nvidia:sm-12.1",),
+            ),
+        )
+
+    monkeypatch.setattr(api_module, "usable_vram_by_node", gpu_memory)
+    monkeypatch.setattr(api_module, "get_model_engine_support", signed_claims)
+
+    def supported_backends(
+        _card: ModelCard, *, node_backends: frozenset[str],
+        engine_builds: dict[str, str], hardware_classes: frozenset[str],
+    ) -> frozenset[str]:
+        assert hardware_classes == hardware
+        return (
+            frozenset({"audio_cpp-cuda"})
+            if "audio_cpp-cuda" in node_backends
+            and engine_builds.get("audio_cpp-cuda") == "gb10-build"
+            else frozenset()
+        )
+
+    monkeypatch.setattr(api_module, "registry_supported_backends_for_node", supported_backends)
+
+    async def complete_preparation(command: PrepareAudioCpp) -> None:
+        assert command.target_node == node
+        assert command.variant == "cuda"
+        api._audio_cpp_prepare_results[command.command_id] = AudioCppPreparationCompleted(
+            request_id=command.command_id, target_node=node,
+            owner_node=command.owner_node, success=True, resources=ready,
+        )
+        api._audio_cpp_prepare_events[command.command_id].set()
+
+    api._send = AsyncMock(side_effect=complete_preparation)
+    assert await api._prepare_music_engine_for_mount(_card(), set()) == (node, ready)
+    api._send.assert_awaited_once()
+
+
+async def test_strix_vulkan_preparation_failure_uses_signed_cpu_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed accelerator download leaves the node healthy for a CPU claim."""
+    node = NodeId("strix-node")
+    topology = Topology()
+    topology.add_node(node)
+    hardware = frozenset({"platform:linux", "amd:pci-1002-1586"})
+    resources = NodeResources(
+        backends=frozenset({"audio_cpp", "audio_cpp-cpu"}),
+        architecture="x86_64", hardware_classes=hardware,
+        engine_builds={"audio_cpp-cpu": "cpu-build"},
+    )
+    memory = MemoryUsage.from_bytes(
+        ram_total=Memory.from_gb(2).in_bytes,
+        ram_available=Memory.from_gb(2).in_bytes,
+        swap_total=0, swap_available=0,
+    )
+    api: Any = object.__new__(API)
+    api.node_id = NodeId("api-node")
+    api.state = SimpleNamespace(topology=topology, instances={})
+    api._telemetry_view = SimpleNamespace(
+        node_resources={node: resources}, node_memory={node: memory}, node_system={},
+    )
+    api._audio_cpp_prepare_events = {}
+    api._audio_cpp_prepare_results = {}
+    def gpu_memory(*_args: object, **_kwargs: object) -> dict[NodeId, Memory]:
+        return {node: Memory.from_gb(8)}
+
+    def signed_claims(_card: ModelCard) -> tuple[SimpleNamespace, ...]:
+        return (
+            SimpleNamespace(
+                status="supported", engine="audio_cpp-vulkan",
+                hardware_classes=("amd:pci-1002-1586",),
+            ),
+            SimpleNamespace(
+                status="supported", engine="audio_cpp-cpu", hardware_classes=(),
+            ),
+        )
+
+    monkeypatch.setattr(api_module, "usable_vram_by_node", gpu_memory)
+    monkeypatch.setattr(api_module, "get_model_engine_support", signed_claims)
+
+    def supported_backends(
+        _card: ModelCard, *, node_backends: frozenset[str],
+        engine_builds: dict[str, str], hardware_classes: frozenset[str],
+    ) -> frozenset[str]:
+        assert hardware_classes == hardware
+        return (
+            frozenset({"audio_cpp-cpu"})
+            if "audio_cpp-cpu" in node_backends
+            and engine_builds.get("audio_cpp-cpu") == "cpu-build"
+            else frozenset()
+        )
+
+    monkeypatch.setattr(api_module, "registry_supported_backends_for_node", supported_backends)
+    requested: list[str] = []
+
+    async def complete_preparation(command: PrepareAudioCpp) -> None:
+        requested.append(command.variant)
+        api._audio_cpp_prepare_results[command.command_id] = AudioCppPreparationCompleted(
+            request_id=command.command_id, target_node=node,
+            owner_node=command.owner_node,
+            success=command.variant == "cpu",
+            error="GPU package unavailable" if command.variant == "vulkan" else None,
+            resources=resources if command.variant == "cpu" else None,
+        )
+        api._audio_cpp_prepare_events[command.command_id].set()
+
+    api._send = AsyncMock(side_effect=complete_preparation)
+    assert await api._prepare_music_engine_for_mount(_card(), set()) == (node, resources)
+    assert requested == ["vulkan", "cpu"]
+
+
 @pytest.mark.parametrize("lane", ["audio_cpp-cpu", "audio_cpp-metal"])
 async def test_mount_preflight_rejects_weights_only_system_memory_fit(
     lane: str,
@@ -291,7 +438,13 @@ async def test_mount_preflight_uses_ordered_preparation_resources(
             else frozenset()
         )
 
+    def signed_claims(_card: ModelCard) -> tuple[SimpleNamespace, ...]:
+        return (
+            SimpleNamespace(status="supported", engine="audio_cpp-metal", hardware_classes=()),
+        )
+
     monkeypatch.setattr(api_module, "registry_supported_backends_for_node", supported_backends)
+    monkeypatch.setattr(api_module, "get_model_engine_support", signed_claims)
     prepared = await api._prepare_music_engine_for_mount(_card(), set())
     api._send.assert_awaited_once()
     assert api._telemetry_view.node_resources[node] is stale
@@ -361,7 +514,7 @@ async def test_mount_preflight_uses_vram_for_cuda_music(
     topology.add_node(node)
     resources = NodeResources(
         backends=frozenset({"audio_cpp", "audio_cpp-cuda"}),
-        architecture="x86_64", hardware_classes=frozenset({"platform:linux"}),
+        architecture="x86_64", hardware_classes=frozenset({"platform:linux", "nvidia"}),
         engine_builds={"audio_cpp-cuda": "qualified-build"},
     )
     memory = MemoryUsage.from_bytes(
@@ -382,6 +535,7 @@ async def test_mount_preflight_uses_vram_for_cuda_music(
     api._audio_cpp_prepare_results = {}
 
     async def complete_preparation(command: PrepareAudioCpp) -> None:
+        assert command.variant == "cuda"
         api._audio_cpp_prepare_results[command.command_id] = AudioCppPreparationCompleted(
             request_id=command.command_id,
             target_node=node,
@@ -400,7 +554,13 @@ async def test_mount_preflight_uses_vram_for_cuda_music(
         assert node_backends and engine_builds and hardware_classes
         return frozenset({"audio_cpp-cuda"})
 
+    def signed_claims(_card: ModelCard) -> tuple[SimpleNamespace, ...]:
+        return (
+            SimpleNamespace(status="supported", engine="audio_cpp-cuda", hardware_classes=("nvidia",)),
+        )
+
     monkeypatch.setattr(api_module, "registry_supported_backends_for_node", supported_backends)
+    monkeypatch.setattr(api_module, "get_model_engine_support", signed_claims)
     await api._prepare_music_engine_for_mount(_card(), set())
     api._send.assert_awaited_once()
 

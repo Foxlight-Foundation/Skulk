@@ -963,10 +963,12 @@ such as `amd:pci-1002-1586` for Strix Halo, so a Vulkan claim can apply to a
 hardware class without naming an individual node.
 The bare `audio_cpp` tag reports engine availability; model placement and
 memory admission use only a concrete probed compute lane.
-Before initial facts are gathered at startup, verified cached CPU and Vulkan
-packages may restore their separate executable paths without contacting the
-package channel. Preparing Vulkan leaves an existing CPU mount's executable
-and build identity intact.
+Before initial facts are gathered at startup, verified cached CPU, Vulkan, and
+CUDA packages may restore their separate executable paths without contacting
+the package channel. Preparing a GPU package leaves existing CPU and other GPU
+mounts' executables and build identities intact. The CUDA wheel targets the
+NVIDIA compute architecture compiled into that package; installing it does
+not qualify a model for every NVIDIA GPU.
 The cache retains the SHA-256-pinned wheel and compares every extracted runtime
 file with its archive member; an editable cache record cannot establish integrity.
 Upstream's short revision output is accepted only for this verified wheel;
@@ -976,7 +978,8 @@ its specs through `SKULK_AUDIO_CPP_SPECS_DIR`. Only then can the node publish
 ready audio.cpp lanes for restored instances.
 
 Music mounting chooses a package variant from the signed support claim and
-observed hardware, then sends a targeted `PrepareAudioCpp` command carrying
+observed hardware, preferring a qualified CUDA or Vulkan lane to a separately
+claimed CPU fallback. It then sends a targeted `PrepareAudioCpp` command carrying
 that variant to an eligible worker,
 including when the API already sees a ready package. `AudioCppPreparationRequested`
 and `AudioCppPreparationCompleted` report the lifecycle; the worker verifies

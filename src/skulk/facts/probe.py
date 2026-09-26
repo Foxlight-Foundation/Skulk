@@ -361,6 +361,7 @@ def gather_node_facts(
     from skulk.shared.backends import (
         AUDIO_CPP_BACKENDS_ENV,
         AUDIO_CPP_BIN_ENV,
+        AUDIO_CPP_CUDA_BIN_ENV,
         AUDIO_CPP_VULKAN_BIN_ENV,
         COMFY_BACKENDS_ENV,
         COMFY_BIN_ENV,
@@ -477,6 +478,22 @@ def gather_node_facts(
                 audio_cpp_vulkan_probe = AudioCppProbe(
                     outcome="failed", detail=str(error)[:400]
                 )
+    audio_cpp_cuda_binary = _binary_fact(AUDIO_CPP_CUDA_BIN_ENV, env)
+    audio_cpp_cuda_probe = AudioCppProbe()
+    if audio_cpp_cuda_binary.state == "ok":
+        assert audio_cpp_cuda_binary.configured_path is not None
+        audio_cpp_cuda_probe = probe_audio_cpp(audio_cpp_cuda_binary.configured_path)
+        if audio_cpp_cuda_probe.outcome == "ready":
+            from skulk.provisioning.audio_cpp import audio_cpp_model_specs
+
+            try:
+                audio_cpp_model_specs(
+                    Path(audio_cpp_cuda_binary.configured_path), environ=env
+                )
+            except (OSError, RuntimeError) as error:
+                audio_cpp_cuda_probe = AudioCppProbe(
+                    outcome="failed", detail=str(error)[:400]
+                )
     test_video_engine = (env.get(TEST_VIDEO_ENGINE_ENV, "").strip().lower() in ("1", "true", "yes", "on"))
 
     # Probe the binary's own device list only when there is a usable binary
@@ -514,5 +531,7 @@ def gather_node_facts(
         audio_cpp_probe=audio_cpp_probe,
         audio_cpp_vulkan_binary=audio_cpp_vulkan_binary,
         audio_cpp_vulkan_probe=audio_cpp_vulkan_probe,
+        audio_cpp_cuda_binary=audio_cpp_cuda_binary,
+        audio_cpp_cuda_probe=audio_cpp_cuda_probe,
         declared_audio_cpp_backends=env.get(AUDIO_CPP_BACKENDS_ENV),
     )

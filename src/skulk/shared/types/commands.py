@@ -93,7 +93,7 @@ class PrepareAudioCpp(BaseCommand):
 
     target_node: NodeId
     owner_node: NodeId
-    variant: Literal["cpu", "vulkan"] = Field(
+    variant: Literal["cpu", "vulkan", "cuda"] = Field(
         default="cpu",
         description="Pinned engine package variant to prepare before placement.",
     )

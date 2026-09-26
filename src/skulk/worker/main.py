@@ -1099,10 +1099,13 @@ class Worker:
                 if backend.startswith("audio_cpp-")
                 and backend in resources.engine_builds
             }
-            requested_ready = (
-                "audio_cpp-vulkan" in ready_lanes
-                if request.variant == "vulkan"
-                else bool(ready_lanes)
+            requested_ready = bool(
+                ready_lanes
+                & {
+                    "cpu": {"audio_cpp-cpu", "audio_cpp-metal"},
+                    "vulkan": {"audio_cpp-vulkan"},
+                    "cuda": {"audio_cpp-cuda"},
+                }[request.variant]
             )
             if not requested_ready:
                 details = "; ".join(

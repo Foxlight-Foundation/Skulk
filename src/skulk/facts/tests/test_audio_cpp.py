@@ -101,6 +101,47 @@ def test_cpu_and_vulkan_binaries_advertise_distinct_exact_builds(
     assert inventory["audio_cpp-cpu"] != inventory["audio_cpp-vulkan"]
 
 
+def test_cuda_binary_needs_a_real_cuda_device_and_has_its_own_build(
+    tmp_path: Path,
+) -> None:
+    """A CUDA package cannot borrow CPU readiness or another executable hash."""
+    cpu = _fake_server(
+        tmp_path / "cpu/bin/audiocpp_server",
+        backends="cpu", devices="CPU:0 Arm CPU",
+    )
+    cuda = _fake_server(
+        tmp_path / "cuda/bin/audiocpp_server",
+        backends="cpu,cuda", devices="CUDA:0 NVIDIA GB10\nCPU:0 Arm CPU",
+    )
+    facts = gather_node_facts(
+        env={
+            "SKULK_AUDIO_CPP_BIN": str(cpu),
+            "SKULK_AUDIO_CPP_CUDA_BIN": str(cuda),
+        },
+        platform="linux", drm_root=tmp_path,
+    )
+    backends = derive_node_backends(facts).backends
+    assert {"audio_cpp-cpu", "audio_cpp-cuda"} <= backends
+    inventory = engine_build_inventory(backends, facts, environ={})
+    assert inventory["audio_cpp-cuda"] == (
+        "audio.cpp@sha256:" + hashlib.sha256(cuda.read_bytes()).hexdigest()
+    )
+    assert inventory["audio_cpp-cuda"] != inventory["audio_cpp-cpu"]
+
+    no_device = _fake_server(
+        cuda, backends="cpu,cuda", devices="CPU:0 Arm CPU",
+    )
+    missing = gather_node_facts(
+        env={"SKULK_AUDIO_CPP_CUDA_BIN": str(no_device)},
+        platform="linux", drm_root=tmp_path,
+    )
+    assert "audio_cpp-cuda" not in derive_node_backends(missing).backends
+    assert any(
+        "CUDA" in conflict.message
+        for conflict in derive_node_backends(missing).conflicts
+    )
+
+
 def test_missing_model_specs_prevent_ready_advertisement(tmp_path: Path) -> None:
     """A CLI-ready override must also have its pinned runtime specs."""
     binary = _fake_server(tmp_path / "bin" / "audiocpp_server")
