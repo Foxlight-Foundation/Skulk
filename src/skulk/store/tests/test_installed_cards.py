@@ -1120,6 +1120,8 @@ def test_unrecorded_artifacts_are_sorted_by_completeness(tmp_path: Path) -> None
     (partial / "config.json").write_text("{}")
     (partial / "model.safetensors.partial").write_bytes(b"half")
     (root / ".hidden").mkdir()
+    # The downloader's file-list metadata cache is not a download.
+    (root / "caches" / "org--legacy").mkdir(parents=True)
 
     found = find_unrecorded_artifacts(
         [root, tmp_path / "absent"], fallback_root=tmp_path / "records"

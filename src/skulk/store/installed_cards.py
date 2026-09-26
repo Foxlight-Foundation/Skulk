@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path, PurePosixPath
-from typing import Literal, final
+from typing import Final, Literal, final
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -1276,6 +1276,12 @@ class UnrecordedArtifacts:
     """Directories whose card record matches their files."""
 
 
+# The downloader keeps per-model file-list metadata under
+# ``<models dir>/caches``. It is not an artifact, and a model directory is
+# always ``org--name``, so the name cannot belong to one.
+_DOWNLOAD_METADATA_CACHE_NAME: Final = "caches"
+
+
 def _detached_records_by_path(
     fallback_root: Path,
 ) -> dict[str, tuple[InstalledCardRecord, ...]]:
@@ -1311,7 +1317,8 @@ def find_unrecorded_artifacts(
     lists and never against their hashes, so this stays cheap on a node that
     holds hundreds of gigabytes. That is enough for a report: the question is
     whether a record exists, and launch still hashes a detached record before
-    trusting it. Hidden directories are skipped, as discovery skips them.
+    trusting it. Hidden directories are skipped, as discovery skips them, and
+    so is the downloader's metadata cache.
 
     Args:
         roots: Model-search roots to inspect.
@@ -1330,7 +1337,11 @@ def find_unrecorded_artifacts(
         if not root.is_dir():
             continue
         for model_directory in sorted(root.iterdir()):
-            if not model_directory.is_dir() or model_directory.name.startswith("."):
+            if (
+                not model_directory.is_dir()
+                or model_directory.name.startswith(".")
+                or model_directory.name == _DOWNLOAD_METADATA_CACHE_NAME
+            ):
                 continue
             try:
                 adjacent = read_installed_card(model_directory)
