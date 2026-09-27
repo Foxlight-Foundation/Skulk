@@ -51,6 +51,7 @@ import { useAppDispatch, useAppSelector } from './store/hooks';
 import { uiActions, type ObservabilityTab } from './store/slices/uiSlice';
 import { useSkulkTranslation, type SkulkTranslate } from './i18n/tolgee';
 import { modelSupportsTextChat } from './types/models';
+import { parseBackendTag } from './utils/servingEngine';
 
 const Shell = styled.div`
   position: relative;
@@ -541,6 +542,7 @@ export function App() {
       // so default its engine to 'served' regardless of shard-card ordering;
       // the backend read below only refines the in-process MLX/llama_cpp split.
       let engine: InstanceCardData['engine'] = instanceType === 'LlamaRpc' ? 'served' : 'mlx';
+      let accelerator: string | null = null;
       let isEmbedding = false;
       let supportsTextChat = true;
       let speculation: InstanceCardData['speculation'];
@@ -560,17 +562,20 @@ export function App() {
         });
 
         // Engine: every instance is wrapped as an MlxRing/Jaccl instance on the
-        // wire, so the card's placement backends (not the wrapper) tell us which
-        // engine actually serves it: in-process MLX, in-process llama.cpp, or the
-        // served llama-server. Used for the type label instead of assuming MLX.
+        // wire, so the wrapper cannot say what serves it. The master stamps the
+        // backend it resolved for the placement on each shard; older state
+        // without that stamp falls back to the card's first compatible backend.
         const placement = mc?.placement as Record<string, unknown> | undefined;
         const backends = (placement?.compatibleBackends ?? placement?.compatible_backends) as
           | string[]
           | undefined;
-        const firstBackend = backends?.[0] ?? '';
-        if (firstBackend.startsWith('llama_server')) engine = 'served';
-        else if (firstBackend.startsWith('llama_cpp')) engine = 'llama_cpp';
-        else engine = 'mlx';
+        const resolvedBackend = (shardInner?.resolvedBackend ?? shardInner?.resolved_backend) as
+          | string
+          | undefined;
+        const serving = parseBackendTag(resolvedBackend ?? backends?.[0]);
+        // A pooled instance is always served by llama-server across the RPC pair.
+        engine = instanceType === 'LlamaRpc' ? 'served' : serving.engine;
+        accelerator = serving.accelerator;
 
         // Speculative-decoding status comes from the card's runtime section —
         // the card is the rank-invariant source of truth for whether drafting
@@ -629,6 +634,7 @@ export function App() {
         sharding,
         instanceType,
         engine,
+        accelerator,
         nodeStatuses,
         status: derived.status,
         statusMessage: derived.message,
