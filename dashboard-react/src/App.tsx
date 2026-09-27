@@ -575,7 +575,10 @@ export function App() {
         const serving = parseBackendTag(resolvedBackend ?? backends?.[0]);
         // A pooled instance is always served by llama-server across the RPC pair.
         engine = instanceType === 'LlamaRpc' ? 'served' : serving.engine;
-        accelerator = serving.accelerator;
+        // Only a stamped backend names the accelerator: the card's list is
+        // serialized alphabetically, not in resolution order, so its first
+        // entry can name a device the runtime never chose.
+        accelerator = resolvedBackend ? serving.accelerator : null;
 
         // Speculative-decoding status comes from the card's runtime section —
         // the card is the rank-invariant source of truth for whether drafting
