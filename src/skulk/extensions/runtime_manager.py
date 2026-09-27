@@ -35,8 +35,10 @@ from skulk.extensions.runtime_attachment import (
 )
 from skulk.extensions.runtime_catalog import (
     CatalogEntryReview,
+    CatalogRefusedError,
     CatalogSourceUpdate,
     HostCatalog,
+    catalog_refusal_payload,
 )
 from skulk.extensions.runtime_controller import (
     LifecycleOperation,
@@ -114,7 +116,9 @@ class InstalledRelease(BaseModel):
         description="Human-readable bundle title from the signed manifest, when it declares one.",
     )
     bundle_version: str = Field(
-        min_length=1, max_length=64, description="Bundle version from the signed manifest."
+        min_length=1,
+        max_length=64,
+        description="Bundle version from the signed manifest.",
     )
     publisher: str = Field(
         min_length=1,
@@ -721,11 +725,18 @@ class RuntimeManager:
                     writer.write(build_mismatch_payload(differs))
                     await writer.drain()
         except ProtocolUnsupportedError as refused:
-            # The one refusal named by design: a fixed vocabulary of ints, so
-            # the installer and the plugin routes can say what to do next.
+            # Named by design: a fixed vocabulary of ints, so the installer
+            # and the plugin routes can say what to do next.
             with contextlib.suppress(OSError, TimeoutError):
                 async with asyncio.timeout(1):
                     writer.write(refusal_payload(refused))
+                    await writer.drain()
+        except CatalogRefusedError as refused:
+            # Also named: a code and at most an HTTP status, never the address,
+            # the credential or the document.
+            with contextlib.suppress(OSError, TimeoutError):
+                async with asyncio.timeout(1):
+                    writer.write(catalog_refusal_payload(refused))
                     await writer.drain()
         except (OSError, ValueError, TimeoutError):
             with contextlib.suppress(OSError, TimeoutError):
@@ -848,7 +859,7 @@ class RuntimeManager:
             # A slow catalog server must not block inventory or attachment
             # renewal behind the manager-wide lock, like release inspection.
             if self.catalog_read.locked():
-                raise ValueError("catalog source is busy")
+                raise CatalogRefusedError("catalog_busy", "catalog source is busy")
             async with self.catalog_read:
                 verified = await self.catalog.fetch()
                 host = await self._measured_host()
@@ -860,7 +871,7 @@ class RuntimeManager:
             # binding cannot see catalog state change between accepting a
             # listing and configuring the release source.
             if self.catalog_read.locked():
-                raise ValueError("catalog source is busy")
+                raise CatalogRefusedError("catalog_busy", "catalog source is busy")
             async with self.catalog_read:
                 return (await self.catalog.configure(request.request)).model_dump(
                     mode="json"
@@ -1042,7 +1053,7 @@ class RuntimeManager:
         # is refused as busy rather than superseding the reviewed digest
         # between its check and the binding.
         if self.catalog_read.locked():
-            raise ValueError("catalog source is busy")
+            raise CatalogRefusedError("catalog_busy", "catalog source is busy")
         async with self.catalog_read, self.guard:
             verified = self.catalog.accepted(
                 install.catalog_sha256, now=int(time.time())

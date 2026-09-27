@@ -35,6 +35,7 @@ from skulk.extensions.runtime_attachment import (
     ProfileIdentifier,
     ServiceConnection,
 )
+from skulk.extensions.runtime_catalog import catalog_refusal, catalog_refusal_sentence
 from skulk.extensions.runtime_files import RuntimeLock, read_private, write_private
 from skulk.extensions.runtime_install import finish_runtime_work
 from skulk.extensions.runtime_manager import (
@@ -726,9 +727,10 @@ def main() -> None:
             if set(reply) != {"result"} or not isinstance(listing, dict):
                 # A refused read fails the command with its own sentence: an
                 # unconfigured, unreachable or refused catalog must not look
-                # like an empty listing, and a protocol refusal is named with
-                # the one sentence every surface uses rather than the generic
-                # failure the outer handler prints.
+                # like an empty listing, and protocol and catalog refusals are
+                # named with the one sentence every surface uses rather than
+                # the generic failure the outer handler prints.
+                catalog_refused = catalog_refusal(reply)
                 kind, offered, accepted = (
                     reply.get("kind"),
                     reply.get("offered"),
@@ -748,10 +750,17 @@ def main() -> None:
                         ),
                         file=sys.stderr,
                     )
+                elif catalog_refused is not None:
+                    print(
+                        catalog_refusal_sentence(
+                            catalog_refused.code, catalog_refused.status
+                        ),
+                        file=sys.stderr,
+                    )
                 else:
                     print(
-                        "Catalog read refused; configure the catalog source and "
-                        "discovery trust, then retry.",
+                        "The plugin manager refused the catalog read. Check that "
+                        "the plugin service is running, then retry.",
                         file=sys.stderr,
                     )
                 raise SystemExit(1)

@@ -10,11 +10,13 @@ release record itself is authenticated against installation trust.
 
 import asyncio
 import hashlib
+import json
 import re
 import time
+from collections.abc import Mapping
 from itertools import islice
 from pathlib import Path
-from typing import Annotated, Literal, Self, final
+from typing import Annotated, Final, Literal, Self, final
 from urllib.parse import quote, urlsplit
 from uuid import uuid4
 
@@ -28,6 +30,7 @@ from pydantic import (
     JsonValue,
     SecretStr,
     TypeAdapter,
+    ValidationError,
     model_validator,
 )
 
@@ -53,6 +56,182 @@ ACCEPTED_CATALOG_PROTOCOLS: tuple[int, ...] = (1,)
 one, the previous."""
 
 _OBJECT: TypeAdapter[dict[str, JsonValue]] = TypeAdapter(dict[str, JsonValue])
+
+CatalogRefusal = Literal[
+    "catalog_unconfigured",
+    "catalog_setup_incomplete",
+    "catalog_source_conflict",
+    "catalog_trust_update_refused",
+    "catalog_credential_required",
+    "catalog_credential_unavailable",
+    "catalog_unreachable",
+    "catalog_download_refused",
+    "catalog_invalid",
+    "catalog_trust_refused",
+    "catalog_signature_refused",
+    "catalog_window_refused",
+    "catalog_rollback_refused",
+    "catalog_superseded",
+    "catalog_busy",
+]
+"""Why a catalog read, source change or install was refused, as the operator acts on it."""
+
+_REFUSAL: TypeAdapter[CatalogRefusal] = TypeAdapter(CatalogRefusal)
+
+CATALOG_REFUSED: Final = "catalog_refused"
+"""Manager error naming a catalog refusal by its code."""
+
+
+class CatalogRefusedError(ValueError):
+    """A catalog refusal the operator can act on, named without disclosure.
+
+    Carries only a code from a fixed vocabulary and, when the catalog server
+    answered with something other than the catalog, that HTTP status. The
+    message is for local logs and tests; no surface shows it. Every surface
+    names the refusal with ``catalog_refusal_sentence`` instead, so the
+    catalog address, its credential and the document never leave the manager.
+    """
+
+    def __init__(
+        self, code: CatalogRefusal, message: str, *, status: int | None = None
+    ) -> None:
+        super().__init__(message)
+        self.code: CatalogRefusal = code
+        self.status = status
+
+
+_REFUSAL_SENTENCES: Final[dict[CatalogRefusal, str]] = {
+    "catalog_unconfigured": (
+        "No plugin catalog is configured on this host. Configure the catalog "
+        "source and discovery trust, then read the catalog again."
+    ),
+    "catalog_setup_incomplete": (
+        "The first catalog setup needs both the catalog address and the "
+        "discovery trust."
+    ),
+    "catalog_source_conflict": (
+        "The catalog source changed since its revision was read. Read the "
+        "catalog source status and apply the change at its current revision."
+    ),
+    "catalog_trust_update_refused": (
+        "The discovery trust is expired, or older than the trust this host "
+        "already holds. Supply the current discovery trust."
+    ),
+    "catalog_credential_required": (
+        "Moving the catalog to another address needs its credential supplied again."
+    ),
+    "catalog_credential_unavailable": (
+        "The catalog credential stored on this host cannot be read. Supply the "
+        "credential again in the catalog source."
+    ),
+    "catalog_unreachable": (
+        "This host could not reach the plugin catalog. Check that it can "
+        "resolve and connect to the catalog address, then read the catalog "
+        "again."
+    ),
+    "catalog_download_refused": (
+        "The catalog server did not return the catalog as a plain download. "
+        "Check the catalog address."
+    ),
+    "catalog_invalid": (
+        "The catalog address did not return a valid signed plugin catalog. "
+        "Check the catalog address; if it is right, the publisher must issue "
+        "a corrected catalog."
+    ),
+    "catalog_trust_refused": (
+        "This host's discovery trust does not accept the catalog's publisher, "
+        "or the trust has expired. Update the discovery trust, then read the "
+        "catalog again."
+    ),
+    "catalog_signature_refused": (
+        "The catalog's signature does not match its publisher's trusted key, "
+        "so nothing in it was used. Check the catalog address and the "
+        "discovery trust."
+    ),
+    "catalog_window_refused": (
+        "The catalog is outside its validity period: it has expired, or this "
+        "host's clock is wrong. Check the host's clock; an expired catalog "
+        "must be issued again by its publisher."
+    ),
+    "catalog_rollback_refused": (
+        "The catalog server offered an older catalog than this host has "
+        "already accepted, so it was refused. Read the catalog again later."
+    ),
+    "catalog_superseded": (
+        "This host no longer holds that catalog listing, or has read a newer "
+        "one since. Read the catalog again and review the release before "
+        "installing."
+    ),
+    "catalog_busy": (
+        "Another catalog read, install or source change is in progress on "
+        "this host. Try again when it finishes."
+    ),
+}
+
+
+def catalog_refusal_sentence(code: CatalogRefusal, status: int | None = None) -> str:
+    """The one sentence every surface uses for a named catalog refusal.
+
+    Args:
+        code: The refusal code.
+        status: The HTTP status the catalog server answered, when the refusal
+            is ``catalog_download_refused`` because of it.
+
+    Returns:
+        A sentence naming what happened and what the operator can do next.
+    """
+    if code == "catalog_download_refused" and status is not None:
+        return (
+            f"The catalog server answered HTTP {status} instead of the catalog. "
+            "Check the catalog address and its credential."
+        )
+    return _REFUSAL_SENTENCES[code]
+
+
+def catalog_refusal_payload(refused: CatalogRefusedError) -> bytes:
+    """Encode a catalog refusal as its fixed vocabulary for the manager socket.
+
+    Args:
+        refused: The refusal to encode.
+
+    Returns:
+        One JSON line with the error, the code and, when there is one, the
+        HTTP status: nothing else about the catalog.
+    """
+    body: dict[str, JsonValue] = {"error": CATALOG_REFUSED, "code": refused.code}
+    if refused.status is not None:
+        body["status"] = refused.status
+    return json.dumps(body, sort_keys=True).encode() + b"\n"
+
+
+def catalog_refusal(response: Mapping[str, JsonValue]) -> CatalogRefusedError | None:
+    """Rebuild a named catalog refusal from a manager reply, or nothing.
+
+    Only the fixed vocabulary is read: a known code and an HTTP status
+    integer. Anything else in the reply stays undisclosed.
+
+    Args:
+        response: A manager reply that carried no result.
+
+    Returns:
+        The refusal, or ``None`` when the reply names no catalog refusal.
+    """
+    if response.get("error") != CATALOG_REFUSED:
+        return None
+    try:
+        code = _REFUSAL.validate_python(response.get("code"), strict=True)
+    except ValidationError:
+        return None
+    status = response.get("status")
+    if status is None:
+        return CatalogRefusedError(code, code)
+    if (
+        isinstance(status, bool)
+        or not isinstance(status, int)
+        or not 100 <= status <= 599
+    ):
+        return None
+    return CatalogRefusedError(code, code, status=status)
 
 
 def _accepted_catalog_protocol(value: int) -> int:
@@ -332,8 +511,11 @@ def verify_catalog(
     refusal is only ever named for an authenticated catalog.
     """
     if len(document) > 262144:
-        raise ValueError("catalog document exceeds bound")
-    signed = _SignedCatalog.model_validate_json(document)
+        raise CatalogRefusedError("catalog_invalid", "catalog document exceeds bound")
+    try:
+        signed = _SignedCatalog.model_validate_json(document)
+    except ValidationError as malformed:
+        raise CatalogRefusedError("catalog_invalid", str(malformed)) from None
     payload = canonical_json(signed.catalog)
     publisher = _claimed_publisher(signed.catalog)
     public = trust.publishers.get(publisher) if publisher is not None else None
@@ -343,7 +525,9 @@ def verify_catalog(
         or publisher in trust.revoked_publishers
         or now >= trust.expires_at
     ):
-        raise ValueError("catalog publisher trust refused")
+        raise CatalogRefusedError(
+            "catalog_trust_refused", "catalog publisher trust refused"
+        )
     from cryptography.exceptions import InvalidSignature
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
@@ -352,7 +536,9 @@ def verify_catalog(
             bytes.fromhex(signed.signature), payload
         )
     except (InvalidSignature, ValueError):
-        raise ValueError("catalog signature refused") from None
+        raise CatalogRefusedError(
+            "catalog_signature_refused", "catalog signature refused"
+        ) from None
     offered = signed.catalog.get("protocol")
     if (
         isinstance(offered, int)
@@ -360,9 +546,14 @@ def verify_catalog(
         and offered not in ACCEPTED_CATALOG_PROTOCOLS
     ):
         raise ProtocolUnsupportedError("catalog", offered, ACCEPTED_CATALOG_PROTOCOLS)
-    claims = _CatalogClaims.model_validate_json(payload)
+    try:
+        claims = _CatalogClaims.model_validate_json(payload)
+    except ValidationError as invalid:
+        # Signed by a trusted publisher, yet not a catalog this host reads:
+        # the publisher's defect, named so the operator knows it is not theirs.
+        raise CatalogRefusedError("catalog_invalid", str(invalid)) from None
     if not claims.created_at <= now < claims.expires_at:
-        raise ValueError("catalog window refused")
+        raise CatalogRefusedError("catalog_window_refused", "catalog window refused")
     return VerifiedCatalog(document, claims, frozenset(trust.revoked_artifacts))
 
 
@@ -625,7 +816,7 @@ class HostCatalog:
     async def configure(self, update: CatalogSourceUpdate) -> CatalogSourceStatus:
         """Apply owner catalog address and discovery trust changes under the host fence."""
         if self.guard.locked():
-            raise ValueError("catalog source is busy")
+            raise CatalogRefusedError("catalog_busy", "catalog source is busy")
         async with self.guard:
             if self.closed:
                 raise ValueError("catalog closed")
@@ -634,7 +825,9 @@ class HostCatalog:
                 state = self._state()
                 previous = state.source
                 if (previous.revision if previous else 0) != update.expected_revision:
-                    raise ValueError("catalog source revision conflict")
+                    raise CatalogRefusedError(
+                        "catalog_source_conflict", "catalog source revision conflict"
+                    )
                 trust = state.trust
                 next_trust = update.trust if update.trust is not None else trust
                 base_url = (
@@ -652,8 +845,9 @@ class HostCatalog:
                     else "catalog.json"
                 )
                 if next_trust is None or base_url is None:
-                    raise ValueError(
-                        "initial catalog setup requires directory and discovery trust"
+                    raise CatalogRefusedError(
+                        "catalog_setup_incomplete",
+                        "initial catalog setup requires directory and discovery trust",
                     )
                 floor = state.trust_floor
                 if next_trust.expires_at <= time.time() or (
@@ -666,7 +860,10 @@ class HostCatalog:
                         )
                     )
                 ):
-                    raise ValueError("discovery trust revision conflict or expiry")
+                    raise CatalogRefusedError(
+                        "catalog_trust_update_refused",
+                        "discovery trust revision conflict or expiry",
+                    )
                 if floor is not None and (
                     next_trust.revision < floor.revision
                     or (
@@ -674,7 +871,10 @@ class HostCatalog:
                         and _trust_digest(next_trust) != floor.sha256
                     )
                 ):
-                    raise ValueError("discovery trust rollback refused")
+                    raise CatalogRefusedError(
+                        "catalog_trust_update_refused",
+                        "discovery trust rollback refused",
+                    )
                 if trust is not None and next_trust.revision > trust.revision:
                     # A trust update never silently restores a publisher or
                     # artifact the owner previously revoked.
@@ -711,8 +911,9 @@ class HostCatalog:
                 ):
                     # A stored bearer is bound to the approved address; moving
                     # the catalog must supply its credential again.
-                    raise ValueError(
-                        "catalog source change requires explicit credential replacement"
+                    raise CatalogRefusedError(
+                        "catalog_credential_required",
+                        "catalog source change requires explicit credential replacement",
                     )
                 source = CatalogSource(
                     revision=update.expected_revision + 1,
@@ -741,13 +942,18 @@ class HostCatalog:
 
     def _token(self, reference: str) -> str:
         """The stored bearer, validated the way the fetch uses it."""
-        token = (
-            read_private(self.root / "catalog-credentials" / reference, 8192)
-            .decode("ascii")
-            .strip()
-        )
+        try:
+            token = (
+                read_private(self.root / "catalog-credentials" / reference, 8192)
+                .decode("ascii")
+                .strip()
+            )
+        except (OSError, ValueError):
+            token = ""
         if not token or any(character.isspace() for character in token):
-            raise ValueError("catalog credential unavailable")
+            raise CatalogRefusedError(
+                "catalog_credential_unavailable", "catalog credential unavailable"
+            )
         return token
 
     def _client(self, source: CatalogSource) -> httpx.AsyncClient:
@@ -770,13 +976,15 @@ class HostCatalog:
     async def fetch(self, *, now: int | None = None) -> VerifiedCatalog:
         """Fetch and verify the catalog; retain the verified document by digest."""
         if self.guard.locked():
-            raise ValueError("catalog source is busy")
+            raise CatalogRefusedError("catalog_busy", "catalog source is busy")
         async with self.guard:
             if self.closed:
                 raise ValueError("catalog closed")
             state = self._state()
             if state.source is None or state.trust is None:
-                raise ValueError("catalog source unconfigured")
+                raise CatalogRefusedError(
+                    "catalog_unconfigured", "catalog source unconfigured"
+                )
             source, trust = state.source, state.trust
             try:
                 async with (
@@ -786,25 +994,37 @@ class HostCatalog:
                         "GET", source.base_url + quote(source.document_filename)
                     ) as response,
                 ):
-                    if (
-                        response.status_code != 200
-                        or response.headers.get("content-encoding", "identity")
-                        != "identity"
+                    if response.status_code != 200:
+                        raise CatalogRefusedError(
+                            "catalog_download_refused",
+                            "catalog download refused",
+                            status=response.status_code,
+                        )
+                    if response.headers.get("content-encoding", "identity") != (
+                        "identity"
                     ):
-                        raise ValueError("catalog download refused")
+                        raise CatalogRefusedError(
+                            "catalog_download_refused", "catalog download refused"
+                        )
                     raw = bytearray()
                     async for chunk in response.aiter_bytes(chunk_size=65536):
                         if len(raw) + len(chunk) > 262144:
-                            raise ValueError("catalog document exceeds bound")
+                            raise CatalogRefusedError(
+                                "catalog_invalid", "catalog document exceeds bound"
+                            )
                         raw.extend(chunk)
             except (httpx.HTTPError, TimeoutError):
-                raise ValueError("catalog unavailable") from None
+                raise CatalogRefusedError(
+                    "catalog_unreachable", "catalog unavailable"
+                ) from None
             verified = verify_catalog(
                 bytes(raw), trust, now=now if now is not None else int(time.time())
             )
             current = self._state()
             if current.source != source:
-                raise ValueError("catalog source changed")
+                # A source change landed during the read: the same remedy as a
+                # concurrent operation, read again once it is done.
+                raise CatalogRefusedError("catalog_busy", "catalog source changed")
             # A replayed older revision, or a different document at the
             # accepted revision, could hide newer releases or re-present
             # withdrawn ones; the accepted revision only moves forward, per
@@ -818,7 +1038,9 @@ class HostCatalog:
                     and verified.sha256 != floor.sha256
                 )
             ):
-                raise ValueError("catalog revision rollback refused")
+                raise CatalogRefusedError(
+                    "catalog_rollback_refused", "catalog revision rollback refused"
+                )
             destination = self.directory / (verified.sha256 + ".json")
             floors = dict(current.floors)
             floors.pop(key, None)
@@ -872,11 +1094,24 @@ class HostCatalog:
         """
         state = self._state()
         if state.source is None or state.trust is None:
-            raise FileNotFoundError("catalog source unconfigured")
-        verified = verify_catalog(self.retained(catalog_sha256), state.trust, now=now)
+            raise CatalogRefusedError(
+                "catalog_unconfigured", "catalog source unconfigured"
+            )
+        try:
+            document = self.retained(catalog_sha256)
+        except FileNotFoundError:
+            # Pruned after newer reads, or never read on this host: either
+            # way the remedy is to read the catalog again.
+            raise CatalogRefusedError(
+                "catalog_superseded", "catalog listing is not retained"
+            ) from None
+        verified = verify_catalog(document, state.trust, now=now)
         floor = state.floors.get(_floor_key(state.source, verified.claims.publisher))
         if floor is None or floor.sha256 != catalog_sha256:
-            raise ValueError("catalog listing superseded; read the catalog again")
+            raise CatalogRefusedError(
+                "catalog_superseded",
+                "catalog listing superseded; read the catalog again",
+            )
         return verified
 
     def credential_for(self, feed_url: str) -> str | None:

@@ -378,7 +378,11 @@ async def test_http_catalog_routes_read_a_verified_listing_without_disclosure(
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
     from skulk.extensions.runtime_artifacts import canonical_json
-    from skulk.extensions.runtime_catalog import CatalogReview, CatalogSourceStatus
+    from skulk.extensions.runtime_catalog import (
+        CatalogReview,
+        CatalogSourceStatus,
+        catalog_refusal_sentence,
+    )
 
     manager = manager_fixture(tmp_path / "manager", monkeypatch)
     await manager.start()
@@ -485,6 +489,12 @@ async def test_http_catalog_routes_read_a_verified_listing_without_disclosure(
             assert not CatalogSourceStatus.model_validate_json(
                 unconfigured.content
             ).configured
+            # A read before configuration says so, rather than a bare refusal.
+            unread = await client.get(prefix + "/catalog", headers=bearer)
+            assert unread.status_code == 409
+            assert unread.json() == {
+                "detail": catalog_refusal_sentence("catalog_unconfigured")
+            }
             # Configuring the address is owner administration, never a paired grant.
             body = {
                 "expected_revision": 0,
@@ -511,6 +521,25 @@ async def test_http_catalog_routes_read_a_verified_listing_without_disclosure(
             assert "releases.example.test" not in listed.text
             assert "private-catalog-test-secret" not in listed.text
             assert listed.headers["Cache-Control"] == "no-store"
+
+            # A catalog the host cannot reach, or a server that answers with
+            # something else, is named without its address or credential.
+            def unreachable(request: httpx.Request) -> httpx.Response:
+                raise httpx.ConnectError("name resolution failed", request=request)
+
+            def missing(_: httpx.Request) -> httpx.Response:
+                return httpx.Response(404)
+
+            for responder, sentence in (
+                (unreachable, catalog_refusal_sentence("catalog_unreachable")),
+                (missing, catalog_refusal_sentence("catalog_download_refused", 404)),
+            ):
+                manager.catalog.transport = httpx.MockTransport(responder)
+                failed = await client.get(prefix + "/catalog", headers=bearer)
+                assert failed.status_code == 409
+                assert failed.json() == {"detail": sentence}
+                assert "catalog.example.test" not in failed.text
+            manager.catalog.transport = httpx.MockTransport(served)
             # Binding an installation to a listing is owner administration;
             # a listing that does not fit this host is refused by the manager
             # before any installation is registered or any feed is reached.
