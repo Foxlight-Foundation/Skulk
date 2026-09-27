@@ -226,7 +226,7 @@ uv run skulk-plugin-service setup
 ```
 
 It asks for your administrator password to register the service (Apple Silicon
-macOS, or Linux x86_64 with systemd). `uv run skulk-plugin-service status`
+macOS, or Linux with systemd). `uv run skulk-plugin-service status`
 shows when it is ready. Then follow [Capabilities and Plugins](capability-nodes.md)
 to obtain, install and configure a plugin.
 

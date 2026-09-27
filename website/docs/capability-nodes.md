@@ -157,7 +157,7 @@ itself that authority.
    `uv run skulk-plugin-service setup` from the Skulk directory as the user who
    runs Skulk (see [Install](install.md#add-capabilities-optional)). It asks for
    your administrator password to register the service (Apple Silicon macOS, or
-   Linux x86_64 with systemd). Until it is ready, **Plugins** reports that local
+   Linux with systemd). Until it is ready, **Plugins** reports that local
    runtime management is unavailable; `uv run skulk-plugin-service status`
    shows its progress.
 2. In **Add plugin**, enter the supplied release source, metadata filename,
