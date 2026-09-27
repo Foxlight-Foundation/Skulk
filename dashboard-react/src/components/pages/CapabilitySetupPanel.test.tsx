@@ -81,6 +81,9 @@ it('reads a plugin that reports ready and opens its screen', async () => {
   const open = host.querySelector('a[href]') as HTMLAnchorElement;
   expect(open.href).toBe(screenUrl);
   expect(open.textContent).toContain('Open Example Studio');
+  // One node named like the plugin is its status line.
+  await contains('StatusReady.');
+  expect(button('Manage plugin')).not.toBeNull();
   // Nothing is needed, so no node asks for its settings and no checks run.
   expect(button('Open settings')).toBeNull();
   expect(button('Check setup')).toBeNull();
@@ -106,7 +109,7 @@ it('waits for a plugin the host has not reported, and shows a starting one as wa
   summaries = [];
   await render();
   await contains('Waiting for it to report…');
-  expect(button('Settings')).toBeNull();
+  expect(button('Manage plugin')).toBeNull();
   summaries = [summary({ status: 'starting', surfaces: [] })];
   preflightAvailable = false;
   await act(async () => { root.unmount(); store.dispatch(apiSlice.util.resetApiState()); });

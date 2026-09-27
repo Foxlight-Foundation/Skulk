@@ -72,6 +72,9 @@ export function CapabilitySetupPanel({ target, onManage, onBack }: CapabilitySet
     }[summary.status] ?? summary.status;
   };
   const states = summaries.map(itemState);
+  // A plugin's only node usually shares its name; saying it twice reads as noise.
+  const rowTitle = (summary: CapabilityNodeSummary): string => summaries.length === 1 && capabilityNodeTitle(summary) === target.title
+    ? t('plugins.setup.status', 'Status') : capabilityNodeTitle(summary);
   const needed = states.filter((state) => state === 'needed').length;
   const ready = summaries.length > 0 && states.every((state) => state === 'done');
   const lead = ready ? t('plugins.setup.readyLead', 'It reports ready.')
@@ -92,7 +95,7 @@ export function CapabilitySetupPanel({ target, onManage, onBack }: CapabilitySet
         return <Item key={capabilityNodeKey(summary)}>
           <Mark aria-hidden="true" $state={state}>{state === 'done' ? <FiCheck /> : state === 'waiting' ? <Spinner size={14} /> : <FiCircle />}</Mark>
           <div>
-            <h3>{capabilityNodeTitle(summary)}</h3>
+            <h3>{rowTitle(summary)}</h3>
             <p>{detail(summary)}</p>
             {state === 'needed' && withChecks.has(summary.nodeId) ? <NodePreflightPanel pluginId={summary.pluginId} nodeId={summary.nodeId} /> : null}
           </div>
@@ -109,7 +112,7 @@ export function CapabilitySetupPanel({ target, onManage, onBack }: CapabilitySet
       {surfaces.map((surface, index) => <OpenLink key={surface.url} href={surface.url} target="_blank" rel="noopener noreferrer" $primary={index === 0}>
         {t('plugins.setup.open', 'Open {surface}', { surface: surface.title })}<FiExternalLink aria-hidden="true" />
       </OpenLink>)}
-      {onManage ? <Button variant="ghost" onClick={() => onManage(target.pluginId)}>{t('plugins.setup.settings', 'Settings')}</Button> : null}
+      {onManage ? <Button variant="ghost" onClick={() => onManage(target.pluginId)}>{t('plugins.setup.managePlugin', 'Manage plugin')}</Button> : null}
       <Button variant="ghost" onClick={onBack}>{t('plugins.catalog.backToBrowse', 'Back to Browse')}</Button>
     </Actions>
     {surfaces.length === 0 && summaries.length > 0 ? <Hint>{ready ? t('plugins.setup.noScreens', 'It opens no screens of its own; its capabilities are ready for clients and tools.')
