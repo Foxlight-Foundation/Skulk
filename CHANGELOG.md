@@ -109,6 +109,26 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- The dashboard's English string catalog, the file seeded into Tolgee for
+  translation, is current again. Its exporter had failed since mid-September
+  (one key carried two different English texts, and the Integrations page
+  built tool-description keys at runtime, which the exporter cannot read),
+  so about 300 strings added since then never reached translators. Both are
+  fixed, the exporter also reads calls made through an object such as
+  `context.t(...)`, and the catalog is regenerated; nothing changes in
+  English.
+
+- A plugin request refused from an ordinary LAN address now says how
+  plugins are managed: from a browser on the node itself, the node's
+  dashboard over Tailscale, or, where a route accepts one, a paired device
+  granted plugin access. Every plugin route, reads included, used to
+  refuse a LAN browser with the text about managing pairing invitations
+  from the operator gateway. An owner-only change sent with a paired
+  credential now says to choose "Use direct host access". The
+  dashboard's release source form also suggests `release.json`, the record
+  name releases use and the terminal installer defaults to; it suggested
+  `runtime.json`.
+
 - A refused plugin catalog read, source change or install now says why.
   The catalog routes answered every refusal with "local plugin operation
   refused", and `skulk-plugin-service catalog` told the operator to
@@ -119,6 +139,16 @@ This project records release notes here and mirrors public-facing notes in
   publisher, an expired catalog, a superseded listing, and others) and
   what to do next, without the catalog address or credential. The guided
   installer also names a catalog outside the host's protocol window.
+
+- A node no longer copies the models it was serving from the store again
+  after a restart, an update or a master election it wins. The startup
+  cleanup ran before any runner existed, so every staged model competed for
+  the 40 GiB recent-use budget, and a model larger than the budget (a 45 GiB
+  video model, for one) was always deleted. In-use models now refresh their
+  last-use time every minute and the startup cleanup keeps any copy used in
+  the last 30 minutes, whatever its size. A model placed on a node is also
+  kept while its runner is retried; an RPC donor placement, which never
+  reads the model, keeps nothing.
 
 - The dashboard no longer opens to a blank page after a Skulk update. Its
   HTML shell was served without a cache policy, so browsers kept an old

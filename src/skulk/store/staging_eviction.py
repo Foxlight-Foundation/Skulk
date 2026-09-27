@@ -61,6 +61,19 @@ the host at the filesystem's hard-stop boundary.
 """
 
 
+STARTUP_RECENT_USE_GRACE_SECONDS = 30 * 60
+"""How recently a staged model must have been used to survive startup.
+
+At startup no runner exists and the node's id is new, so nothing can say
+which staged models were serving. A worker refreshes the recency marker of
+every in-use model each minute, so a model used within this window was
+almost certainly serving when the previous process stopped, and a restart or
+a master change is about to place it again. The window covers a slow
+restart, such as an update that rebuilds native bindings; a model idle for
+longer competes for the grace budget as usual.
+"""
+
+
 class StagingCapacityError(RuntimeError):
     """Raised before transfer when staging cannot preserve disk headroom."""
 
@@ -305,13 +318,16 @@ def enforce_staging_budget(
     *,
     required_free_bytes: int = 0,
     enforce_recent_budget: bool = True,
+    protect_used_since: float | None = None,
 ) -> StagingEvictionReport:
     """Evict idle staged models to enforce recency and free-space constraints.
 
     In-use models are never touched. When ``enforce_recent_budget`` is true,
     candidates are retained newest-first until the grace budget is spent and
     the older tail is deleted. With a budget of 0 this is strict
-    evict-on-deactivate.
+    evict-on-deactivate. A model last used at or after ``protect_used_since``
+    (epoch seconds) is treated as in use, whatever its size; the startup pass
+    uses it to keep what was serving when the previous process stopped.
 
     When ``required_free_bytes`` is non-zero, least-recently-used retained
     candidates are also removed until the filesystem reaches that target.
@@ -339,6 +355,10 @@ def enforce_staging_budget(
         info
         for info in list_staged_models(staging_root, in_use_model_ids)
         if not info.in_use
+        and (
+            protect_used_since is None
+            or info.last_used_epoch_seconds < protect_used_since
+        )
     ]
 
     retained: list[StagedModelInfo] = []

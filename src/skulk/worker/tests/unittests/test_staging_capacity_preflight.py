@@ -1,7 +1,9 @@
 # pyright: reportPrivateUsage=false
 """Worker tests for exact-transfer staging capacity admission."""
 
+import os
 import threading
+import time
 from pathlib import Path
 
 import anyio
@@ -23,7 +25,10 @@ from skulk.shared.types.tasks import CreateRunner
 from skulk.shared.types.worker.downloads import DownloadCompleted, DownloadPending
 from skulk.shared.types.worker.instances import InstanceId
 from skulk.shared.types.worker.runners import RunnerId
-from skulk.shared.types.worker.shards import PipelineShardMetadata
+from skulk.shared.types.worker.shards import (
+    PipelineShardMetadata,
+    RpcDonorShardMetadata,
+)
 from skulk.store.config import StagingNodeConfig
 from skulk.store.model_store_client import ModelStoreClient
 from skulk.store.staging_eviction import (
@@ -65,6 +70,8 @@ def _stage(root: Path, model_id: str, size_bytes: int) -> Path:
 
 def _worker(
     staging_root: Path,
+    *,
+    keep_recent_gb: float = 40.0,
 ) -> tuple[Worker, Receiver[Event]]:
     _, indexed_receiver = channel[IndexedEvent]()
     event_sender, event_receiver = channel[Event]()
@@ -77,7 +84,10 @@ def _worker(
         command_sender=command_sender,
         download_command_sender=download_sender,
         store_client=ModelStoreClient(store_host="store.local"),
-        staging_config=StagingNodeConfig(node_cache_path=str(staging_root)),
+        staging_config=StagingNodeConfig(
+            node_cache_path=str(staging_root),
+            staging_keep_recent_gb=keep_recent_gb,
+        ),
     )
     return worker, event_receiver
 
@@ -337,3 +347,115 @@ async def test_runner_creation_waits_for_capacity_eviction_snapshot(
         release_eviction.set()
         with anyio.fail_after(2):
             await runner_creation_started.wait()
+
+
+def _age_marker(directory: Path, seconds: float) -> None:
+    stamp = time.time() - seconds
+    os.utime(directory / LAST_USED_MARKER_FILENAME, (stamp, stamp))
+
+
+def test_startup_reconciliation_keeps_what_was_serving(tmp_path: Path) -> None:
+    """A restart or a recreated worker keeps the models that were serving.
+
+    Nothing is in use at startup and the node id is new, so the recency
+    marker decides: a model used within the window survives even though it
+    alone exceeds the grace budget, here zero; an old idle copy does not.
+    """
+    serving = _stage(tmp_path, "org/serving", size_bytes=40)
+    stale = _stage(tmp_path, "org/stale", size_bytes=40)
+    _age_marker(serving, 120)
+    _age_marker(stale, 2 * 3600)
+    worker, _event_receiver = _worker(tmp_path, keep_recent_gb=0)
+
+    worker._reconcile_staging_on_startup()
+
+    assert serving.exists()
+    assert not stale.exists()
+    assert worker._stale_downloads_pending_reset == {"org--stale"}
+
+
+def test_placed_models_are_in_use_and_donor_shards_are_not(tmp_path: Path) -> None:
+    """A placement on this node protects its model before its runner exists.
+
+    Another node's placement protects nothing here, and neither does an RPC
+    donor shard: a donor lends memory and never reads the model.
+    """
+    placed = _shard("org/placed", storage_bytes=40)
+    elsewhere = _shard("org/elsewhere", storage_bytes=40)
+    donated = _shard("org/donated", storage_bytes=40)
+    donor = RpcDonorShardMetadata(
+        model_card=donated.model_card,
+        device_rank=1,
+        world_size=2,
+        start_layer=0,
+        end_layer=0,
+        n_layers=donated.n_layers,
+    )
+    worker, _event_receiver = _worker(tmp_path)
+    here, there, lent = RunnerId(), RunnerId(), RunnerId()
+    placed_instance, elsewhere_instance, donor_instance = (
+        InstanceId(),
+        InstanceId(),
+        InstanceId(),
+    )
+    worker.state = State(
+        instances={
+            placed_instance: get_mlx_ring_instance(
+                instance_id=placed_instance,
+                model_id=placed.model_card.model_id,
+                node_to_runner={worker.node_id: here},
+                runner_to_shard={here: placed},
+            ),
+            elsewhere_instance: get_mlx_ring_instance(
+                instance_id=elsewhere_instance,
+                model_id=elsewhere.model_card.model_id,
+                node_to_runner={NodeId("other-node"): there},
+                runner_to_shard={there: elsewhere},
+            ),
+            donor_instance: get_mlx_ring_instance(
+                instance_id=donor_instance,
+                model_id=donated.model_card.model_id,
+                node_to_runner={worker.node_id: lent},
+                runner_to_shard={lent: donor},
+            ),
+        }
+    )
+
+    assert worker._models_in_use() == {"org/placed"}
+
+
+def test_in_use_markers_are_refreshed_once_a_minute(tmp_path: Path) -> None:
+    """Serving models keep a fresh marker for the next startup to read."""
+    placed = _shard("org/placed", storage_bytes=40)
+    placed_directory = _stage(tmp_path, "org/placed", size_bytes=40)
+    idle_directory = _stage(tmp_path, "org/idle", size_bytes=40)
+    _age_marker(placed_directory, 3600)
+    _age_marker(idle_directory, 3600)
+    worker, _event_receiver = _worker(tmp_path)
+    runner_id, instance_id = RunnerId(), InstanceId()
+    worker.state = State(
+        instances={
+            instance_id: get_mlx_ring_instance(
+                instance_id=instance_id,
+                model_id=placed.model_card.model_id,
+                node_to_runner={worker.node_id: runner_id},
+                runner_to_shard={runner_id: placed},
+            )
+        }
+    )
+    marker = placed_directory / LAST_USED_MARKER_FILENAME
+    idle_marker = idle_directory / LAST_USED_MARKER_FILENAME
+
+    worker._refresh_in_use_markers()
+    assert time.time() - marker.stat().st_mtime < 60
+    assert time.time() - idle_marker.stat().st_mtime > 3000
+
+    # Within the minute nothing is touched again.
+    _age_marker(placed_directory, 3600)
+    worker._refresh_in_use_markers()
+    assert time.time() - marker.stat().st_mtime > 3000
+
+    assert worker._in_use_markers_refreshed_at is not None
+    worker._in_use_markers_refreshed_at -= 61
+    worker._refresh_in_use_markers()
+    assert time.time() - marker.stat().st_mtime < 60

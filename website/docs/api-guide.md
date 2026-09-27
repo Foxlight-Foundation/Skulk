@@ -2200,7 +2200,9 @@ curl http://localhost:52415/store/storage
 
 Staged copies are managed automatically when the model store is on: when an
 instance shuts down (and at node startup, which reconciles copies orphaned
-by a crash), not-in-use staged models are kept newest-first up to the
+by a crash while keeping any copy used within the last 30 minutes), staged
+models that no live runner uses and no instance placed on the node needs are
+kept newest-first up to the
 `staging_keep_recent_gb` grace budget (default 40 GiB) and evicted beyond
 it. Set `cleanup_on_deactivate: false` in the staging config to keep every
 staged copy while disk is healthy. Independently, before each store-backed
@@ -3804,6 +3806,14 @@ be present. Forwarding headers are refused. Scoped paired operators send
 `Authorization: Bearer <access token>` over HTTPS, the authenticated relay, or
 the verified direct owner transport. An invalid bearer token never falls back
 to local owner authority. Read and mutation responses use `Cache-Control: no-store`.
+A request without a credential from anywhere else answers `403` saying how
+plugins are managed: from a browser on the node itself (localhost) or through
+Tailscale by its MagicDNS name or Tailscale IP, or, for routes that accept a
+scope, by a paired device granted plugin access. An owner-only route names only
+the direct routes. A request carrying a paired credential to an owner-only
+route is told that the change needs direct owner access: a browser on the node
+or over Tailscale chooses "Use direct host access", and an API client sends the
+request without the credential.
 
 Unknown providers or nodes return `404`. Revision/schema conflicts and provider
 validation refusals return `409`; callers must reload before retrying a stale

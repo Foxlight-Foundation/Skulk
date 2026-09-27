@@ -67,9 +67,10 @@ export function ModelStorePage({ topology, nodeResources = {}, downloads, instan
   const knownFailedDownloadsRef = useRef<Set<string> | null>(null);
   // Read through a ref so applyDownloadEntries stays referentially stable:
   // putting `t` in its dependency list would rebuild refreshStore (and
-  // re-trigger the polling effects behind it) on every render.
-  const translateRef = useRef(t);
-  translateRef.current = t;
+  // re-trigger the polling effects behind it) on every render. The ref holds
+  // `{ t }` so each call reads as `.t(...)`, which the Tolgee exporter sees.
+  const translateRef = useRef({ t });
+  translateRef.current = { t };
 
   const applyDownloadEntries = useCallback((entries: StoreDownloadProgress[]) => {
     const failedNow = entries.filter((d) => d.status === 'failed');
@@ -83,8 +84,8 @@ export function ModelStorePage({ topology, nodeResources = {}, downloads, instan
         addToast({
           type: 'error',
           message: dl.error
-            ? translateRef.current('downloads.toasts.downloadFailedWithReason', 'Download of {modelId} failed: {reason}', { modelId: dl.modelId, reason: dl.error })
-            : translateRef.current('downloads.toasts.downloadFailed', 'Download of {modelId} failed', { modelId: dl.modelId }),
+            ? translateRef.current.t('downloads.toasts.downloadFailedWithReason', 'Download of {modelId} failed: {reason}', { modelId: dl.modelId, reason: dl.error })
+            : translateRef.current.t('downloads.toasts.downloadFailed', 'Download of {modelId} failed', { modelId: dl.modelId }),
         });
       }
       // A retry that goes live again clears the entry so a repeat failure

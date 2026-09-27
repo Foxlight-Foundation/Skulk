@@ -119,7 +119,7 @@ function RuntimeControls({ runtime, unavailable, nodes, details, nodeEvidence, f
     ownership_busy: t('plugins.failureOwnershipBusy', 'Another process is using this plugin. Wait a moment, then refresh.'),
     service_failed: t('plugins.failureService', 'The plugin service could not start.'),
   } as Record<string, string>)[failure] ?? t('plugins.failureOther', 'The plugin stopped with {code}.', { code: failure });
-  const releaseNote = runtime.uninstalled ? t('plugins.cleanupRetained', 'Cleanup state retained') : failure !== null ? t('plugins.notRunning', 'Not running') : runtime.stale || unavailable ? t('plugins.releaseUnavailable', 'Release status unavailable')
+  const releaseNote = runtime.uninstalled ? t('plugins.cleanupRetained', 'Cleanup state retained') : failure !== null ? t('plugins.notRunning', 'Not running') : runtime.stale || unavailable ? t('plugins.releaseStatusUnavailable', 'Release status unavailable')
     : runtime.service?.active_digest && runtime.service.active_digest === runtime.selected_digest ? t('plugins.releaseActive', 'Active')
     : runtime.service?.active_digest ? t('plugins.differentActiveRelease', 'Different release active')
     : t('plugins.noActiveRelease', 'None active');
