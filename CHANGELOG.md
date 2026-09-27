@@ -110,8 +110,9 @@ This project records release notes here and mirrors public-facing notes in
 ### Fixed
 
 - A plugin request refused from an ordinary LAN address now says how
-  plugins are managed: from a browser on the node itself, or the node's
-  dashboard over Tailscale. Every plugin route, reads included, used to
+  plugins are managed: from a browser on the node itself, the node's
+  dashboard over Tailscale, or, where a route accepts one, a paired device
+  granted plugin access. Every plugin route, reads included, used to
   refuse a LAN browser with the text about managing pairing invitations
   from the operator gateway. An owner-only change sent with a paired
   credential now says to choose "Use direct host access". The

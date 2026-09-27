@@ -52,10 +52,17 @@ _PAIRING_AUTHORITY_DETAIL: Final = (
     "Tailscale IP, or open it through localhost. Public relay and ordinary LAN "
     "access are blocked."
 )
-_PLUGIN_OWNER_AUTHORITY_DETAIL: Final = (
+_PLUGIN_ACCESS_DETAIL: Final = (
     "Plugins are managed from a browser on this node itself (localhost) or "
-    "through Tailscale using the node's MagicDNS name or Tailscale IP. Ordinary "
+    "through Tailscale using the node's MagicDNS name or Tailscale IP, or by a "
+    "paired device granted plugin access. Without a paired credential, ordinary "
     "LAN addresses, the public relay and forwarded requests cannot manage them."
+)
+_PLUGIN_OWNER_AUTHORITY_DETAIL: Final = (
+    "This plugin change needs direct owner access: open this node's dashboard in "
+    "a browser on the node itself (localhost) or through Tailscale using its "
+    "MagicDNS name or Tailscale IP. Ordinary LAN addresses, the public relay, "
+    "forwarded requests and paired devices cannot make it."
 )
 _PAIRED_PLUGIN_OWNER_DETAIL: Final = (
     "This plugin change needs direct owner access, which a paired credential "
@@ -279,7 +286,7 @@ async def authorize_plugin_request(
     authorization = request.headers.getlist("authorization")
     if not authorization:
         await _require_direct_dashboard_authority(
-            request, tailnet_peer_verifier, _PLUGIN_OWNER_AUTHORITY_DETAIL
+            request, tailnet_peer_verifier, _PLUGIN_ACCESS_DETAIL
         )
         return "local-owner"
     if len(authorization) != 1 or service is None:

@@ -701,16 +701,20 @@ async def test_plugin_refusals_say_how_to_reach_the_node() -> None:
         )
     assert lan.value.status_code == 403
     assert isinstance(lan.value.detail, str)
-    assert lan.value.detail.startswith("Plugins are managed from a browser")
+    assert lan.value.detail.startswith("This plugin change needs direct owner access")
     assert "localhost" in lan.value.detail and "Tailscale" in lan.value.detail
     assert "Pairing invitations" not in lan.value.detail
-    # Scoped plugin routes refuse a LAN browser without a credential the same way.
+    # Scoped plugin routes also admit a paired device granted plugin access,
+    # through the relay too, so their refusal names that remedy as well.
     with pytest.raises(HTTPException) as scoped:
         await authorize_plugin_request(
             _plugin_owner_request("192.168.1.20"), None, "plugins:read", verified
         )
     assert scoped.value.status_code == 403
-    assert scoped.value.detail == lan.value.detail
+    assert isinstance(scoped.value.detail, str)
+    assert scoped.value.detail.startswith("Plugins are managed from a browser")
+    assert "paired device granted plugin access" in scoped.value.detail
+    assert "Without a paired credential" in scoped.value.detail
 
     with pytest.raises(HTTPException) as paired:
         await authorize_plugin_owner_request(

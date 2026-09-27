@@ -3806,10 +3806,12 @@ the verified direct owner transport. An invalid bearer token never falls back
 to local owner authority. Read and mutation responses use `Cache-Control: no-store`.
 A request without a credential from anywhere else answers `403` saying how
 plugins are managed: from a browser on the node itself (localhost) or through
-Tailscale by its MagicDNS name or Tailscale IP. A request carrying a paired
-credential to an owner-only route is told that the change needs direct owner
-access: a browser on the node or over Tailscale chooses "Use direct host
-access", and an API client sends the request without the credential.
+Tailscale by its MagicDNS name or Tailscale IP, or, for routes that accept a
+scope, by a paired device granted plugin access. An owner-only route names only
+the direct routes. A request carrying a paired credential to an owner-only
+route is told that the change needs direct owner access: a browser on the node
+or over Tailscale chooses "Use direct host access", and an API client sends the
+request without the credential.
 
 Unknown providers or nodes return `404`. Revision/schema conflicts and provider
 validation refusals return `409`; callers must reload before retrying a stale
