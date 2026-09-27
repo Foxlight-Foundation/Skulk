@@ -15,10 +15,23 @@ MiniMax `supported` claim. The pinned audio.cpp MiniMax depth decoder resets
 its fallback random generator to the same request seed for every autoregressive
 frame on non-CUDA backends. A source patch that also mixes in the frame's
 sample index removed the repeated-token lock in controlled Strix runs, including
-a 59.9-second clip accepted by listening. The patch is part of the next wheel
-candidate; this historical wheel does not contain it. New build identities and
-load, generation, and listening qualification are required before replacing a
-support claim. ACE-Step's results below are unaffected by this MiniMax defect.
+a 59.9-second clip accepted by listening. The historical wheel below does not
+contain it. New build identities and load, generation, and listening
+qualification are required before replacing a support claim. ACE-Step's
+results below are unaffected by this MiniMax defect.
+
+**Sampler-corrected candidate:** [CI run 36294070711](https://github.com/Foxlight-Foundation/Skulk/actions/runs/36294070711)
+built `skulk_audio_cpp_vulkan-0.8.2.post3-py3-none-manylinux_2_35_x86_64.whl`
+with wheel SHA-256
+`12297a15a1b7fd5fea6deb1ea3f431b9fa2a4efc5e695b3377ccbaf46e2980ca`
+and executable SHA-256
+`a0fe05ce8f120126a6997cfdeea7f28ca46f4ee853586ea94349509d3a333ab3`.
+The exact attested wheel loaded on Strix Vulkan and returned a 59.919-second
+structured vocal WAV and a different-seed instrumental WAV that ended naturally
+at 35.352 seconds. Both passed human listening as very good. These were direct
+engine-server requests. The isolated Skulk placement, job lifecycle, and longer
+stability gates for this build remain open, so these results do not yet qualify
+a replacement signed support claim.
 
 The sampler defect is separate from a measured Vulkan precision issue: some
 large MiniMax matrix multiplications on this hardware use 16-bit accumulation.

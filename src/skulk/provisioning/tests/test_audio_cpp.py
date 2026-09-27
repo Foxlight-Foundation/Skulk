@@ -176,6 +176,26 @@ def test_gb10_cuda_wheel_uses_exact_hardware_tested_artifact() -> None:
     assert wheel.sha256 == "39d9f4e2f037ac808ba3588119e3d11a2437e3eb2d85e8bf5eecf63cc3c4c772"
 
 
+def test_strix_vulkan_wheel_uses_exact_listening_tested_artifact() -> None:
+    """The Vulkan lane selects the sampler-corrected CI wheel heard on Strix."""
+    wheel = audio_cpp.audio_cpp_vulkan_wheel_for_host(
+        system="linux", machine="x86_64"
+    )
+    assert wheel.filename == (
+        "skulk_audio_cpp_vulkan-0.8.2.post3-py3-none-manylinux_2_35_x86_64.whl"
+    )
+    assert wheel.sha256 == "12297a15a1b7fd5fea6deb1ea3f431b9fa2a4efc5e695b3377ccbaf46e2980ca"
+
+
+def test_audio_cpp_wheel_filename_rejects_unbuilt_variant_versions() -> None:
+    """Version validation cannot accept a plausible wheel from another lane."""
+    with pytest.raises(ValueError, match="filename"):
+        audio_cpp.AudioCppWheel(
+            filename="skulk_audio_cpp_cuda-0.8.2.post3-py3-none-manylinux_2_35_aarch64.whl",
+            sha256="0" * 64,
+        )
+
+
 def test_offline_miss_and_tampered_cache_fail_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
