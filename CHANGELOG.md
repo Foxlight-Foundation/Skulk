@@ -116,6 +116,13 @@ This project records release notes here and mirrors public-facing notes in
   the content-hashed bundles under `assets/` are cached as immutable, also
   when a browser revalidates one.
 
+- Active instance cards name the engine that serves each instance, with
+  its accelerator ("ComfyUI · ROCm", "vLLM · CUDA", "llama.cpp ·
+  Vulkan"). The dashboard guessed the engine from the model card's first
+  compatible backend and labelled every engine other than llama.cpp
+  "Pipeline · MLX Ring", including video models on AMD nodes; it now
+  reads the backend the master resolved for the placement.
+
 - The Plugins page works when the dashboard is opened over plain HTTP from
   another machine on the network. Add plugin, Configure, credential
   changes, setup actions, proposal approvals, and runtime install or
