@@ -326,7 +326,7 @@ const ContextReset = styled.button`
   background: none;
   border: none;
   padding: 0;
-  color: ${({ theme }) => theme.colors.primary};
+  color: ${({ theme }) => theme.colors.accentText};
   font: inherit;
   font-size: 12px;
   cursor: pointer;
