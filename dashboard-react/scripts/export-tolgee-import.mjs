@@ -52,8 +52,17 @@ for (const filePath of sourceFiles) {
   const contents = fs.readFileSync(filePath, 'utf8');
   const sourceFile = ts.createSourceFile(filePath, contents, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
 
+  // A translator is called as `t(...)` or through an object as `something.t(...)`,
+  // such as an action context or a ref holding `{ t }`; both are read statically.
+  function isTranslatorCall(node) {
+    if (!ts.isCallExpression(node)) return false;
+    const callee = node.expression;
+    if (ts.isIdentifier(callee)) return callee.text === 't';
+    return ts.isPropertyAccessExpression(callee) && callee.name.text === 't';
+  }
+
   function visit(node) {
-    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 't') {
+    if (isTranslatorCall(node)) {
       const [keyNode, fallbackNode] = node.arguments;
       const key = keyNode ? readLiteralText(keyNode) : null;
       const fallback = fallbackNode ? readLiteralText(fallbackNode) : null;

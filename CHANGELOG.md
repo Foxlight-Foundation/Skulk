@@ -114,7 +114,9 @@ This project records release notes here and mirrors public-facing notes in
   (one key carried two different English texts, and the Integrations page
   built tool-description keys at runtime, which the exporter cannot read),
   so about 300 strings added since then never reached translators. Both are
-  fixed and the catalog is regenerated; nothing changes in English.
+  fixed, the exporter also reads calls made through an object such as
+  `context.t(...)`, and the catalog is regenerated; nothing changes in
+  English.
 
 - A refused plugin catalog read, source change or install now says why.
   The catalog routes answered every refusal with "local plugin operation
