@@ -112,7 +112,13 @@ The resulting numerical error may lower fidelity. The sound and latency effects
 of forcing 32-bit accumulation are still being measured, so that change is not
 part of the sampler correction.
 
-| Contract | Qualified value |
+### Historical post1 functional results
+
+The following post1 measurements predate the MiniMax listening failure.
+They document load and WAV mechanics; the post1 MiniMax build is now
+`unsupported` for `music.generate` on this hardware class.
+
+| Contract | Original post1 value |
 | --- | --- |
 | Engine source | audio.cpp v0.8.2, revision `4d88768fbcae4e6eb3352c6ab1422dabb7d90b58` |
 | Engine lane | `audio_cpp-vulkan`, Linux `amd64` |
@@ -130,7 +136,7 @@ retrieval. The API digest matched the downloaded bytes. Both outputs were
 non-silent when measured as PCM, and the Vulkan render device was observed
 during generation.
 
-| Card | Immutable model revision | Qualification result |
+| Card | Immutable model revision | Original functional result |
 | --- | --- | --- |
 | `audio-cpp/ACE-Step1.5-Turbo-BF16` | `a776907b362419343f4b9996bdd899619efcf3f8` | Stereo 48 kHz WAV; eight completed digest-verified, non-silent jobs in a paced 30-minute stability run; generation latency 60.74–74.87 seconds |
 | `audio-cpp/MiniMax-Music3-GGUF-Q4` | `9634a1e1364f94f1ac85a38c114ef105c678f824` | Stereo 44.1 kHz WAV; eight completed digest-verified, non-silent jobs in a paced 30-minute stability run; generation latency 58.74–62.79 seconds; missing lyrics rejected |
