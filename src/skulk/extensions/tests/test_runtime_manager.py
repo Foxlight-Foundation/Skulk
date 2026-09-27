@@ -18,10 +18,12 @@ from skulk.extensions.runtime_files import (
 from skulk.extensions.runtime_manager import (
     HostSettings,
     InstallationRequest,
+    InstalledRelease,
     InventoryRequest,
     OperationRequest,
     RuntimeManager,
     SubmitRequest,
+    installed_release,
     manager_request,
     manager_socket,
 )
@@ -112,9 +114,21 @@ async def test_socket_registration_activation_disconnect_and_reconnect(
         current = controller.selector.current()
         assert current is not None and current.revision == 2
         inventory = await manager_request(tmp_path, InventoryRequest())
-        assert json.loads(json.dumps(inventory))["result"]["installations"][0][
-            "uninstalled"
-        ] == (action == "uninstall")
+        result = inventory["result"]
+        assert isinstance(result, dict)
+        installations = result["installations"]
+        assert isinstance(installations, list)
+        listed = installations[0]
+        assert isinstance(listed, dict)
+        assert listed["uninstalled"] == (action == "uninstall")
+        # The row names the signed release it selected, not only its local ID.
+        assert listed["release"] == {
+            "bundle_id": "example.plugin",
+            "title": None,
+            "bundle_version": "1.0.0",
+            "publisher": "fixture",
+            "sequence": 1,
+        }
         assert await reader.read() == b""
         inspection = await manager_request(
             tmp_path, InstallationRequest(action="get", plugin_id=identifier)
@@ -365,3 +379,93 @@ async def test_reload_runtime_selects_the_staged_generation_and_stops(
         "manager": "a" * 64,
         "live": "b" * 64,
     }
+
+
+def _staged(
+    release: dict[str, JsonValue], manifest: dict[str, JsonValue]
+) -> dict[str, JsonValue]:
+    return {
+        "runtime": {"release": {**release, "manifest": manifest}},
+        "signature": "0" * 128,
+    }
+
+
+def test_installed_release_names_a_staged_generation(tmp_path: Path) -> None:
+    """A staged generation's signed manifest gives the inventory its name."""
+    private_directory(tmp_path)
+    staged = tmp_path / "staged.json"
+    document = _staged(
+        {"publisher": "foxlight", "sequence": 49},
+        {
+            "bundle_id": "foxlight.video-studio",
+            "bundle_version": "0.1.0",
+            "title": "Skulk Video Studio",
+        },
+    )
+    write_private(staged, json.dumps(document).encode())
+    assert installed_release(staged) == InstalledRelease(
+        bundle_id="foxlight.video-studio",
+        title="Skulk Video Studio",
+        bundle_version="0.1.0",
+        publisher="foxlight",
+        sequence=49,
+    )
+
+
+@pytest.mark.parametrize("title", [None, "", "   ", 7])
+def test_installed_release_without_a_usable_title_keeps_the_rest(
+    tmp_path: Path, title: JsonValue
+) -> None:
+    """A manifest without a usable title still names its bundle."""
+    private_directory(tmp_path)
+    staged = tmp_path / "staged.json"
+    manifest: dict[str, JsonValue] = {
+        "bundle_id": "example.plugin",
+        "bundle_version": "1.0.0",
+    }
+    if title is not None:
+        manifest["title"] = title
+    write_private(
+        staged,
+        json.dumps(_staged({"publisher": "fixture", "sequence": 1}, manifest)).encode(),
+    )
+    identity = installed_release(staged)
+    assert identity is not None
+    assert identity.title is None
+    assert identity.bundle_id == "example.plugin"
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        _staged({"publisher": "fixture", "sequence": "1"}, {"bundle_id": "x", "bundle_version": "1"}),
+        _staged({"publisher": "fixture", "sequence": 1}, {"bundle_version": "1"}),
+        _staged({"sequence": 1}, {"bundle_id": "x", "bundle_version": "1"}),
+        {"runtime": {"release": "not an object"}},
+        {"runtime": []},
+        {},
+    ],
+)
+def test_installed_release_refuses_unexpected_documents(
+    tmp_path: Path, document: JsonValue
+) -> None:
+    """Missing or mistyped claims yield no name rather than a wrong one."""
+    private_directory(tmp_path)
+    staged = tmp_path / "staged.json"
+    write_private(staged, json.dumps(document).encode())
+    assert installed_release(staged) is None
+
+
+def test_installed_release_tolerates_missing_oversized_and_invalid_files(
+    tmp_path: Path,
+) -> None:
+    """Unreadable metadata never fails the inventory."""
+    private_directory(tmp_path)
+    assert installed_release(tmp_path / "absent.json") is None
+    oversized = tmp_path / "oversized.json"
+    write_private(oversized, b" " * 131073)
+    assert installed_release(oversized) is None
+    invalid = tmp_path / "invalid.json"
+    write_private(invalid, b"{not json")
+    assert installed_release(invalid) is None
+

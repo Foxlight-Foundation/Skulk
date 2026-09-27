@@ -163,6 +163,24 @@ it('retains an uncertain uninstall across reconnect without another submission',
   expect(posts).toHaveLength(1);
 });
 
+it('names the signed release and says why a stopped plugin cannot run', async () => {
+  runtime = { ...runtime, stale: true,
+    release: { bundle_id: 'foxlight.video-studio', title: 'Skulk Video Studio', bundle_version: '0.1.0', publisher: 'foxlight', sequence: 49 },
+    service: { state: 'failed', active_digest: null, observed_at: 1, error_code: 'verification_failed' } };
+  await act(async () => { store.dispatch(apiSlice.util.invalidateTags(['Plugins'])); });
+  await contains('Skulk Video Studio');
+  await contains('built for a different Skulk build');
+  await contains('Needs attention');
+  await contains('Not running');
+  expect(host.textContent).not.toContain('Status unavailable');
+});
+
+it('falls back to the bundle identifier when the manifest declares no title', async () => {
+  runtime = { ...runtime, release: { bundle_id: 'example.plugin', title: null, bundle_version: '1.0.0', publisher: 'fixture', sequence: 1 } };
+  await act(async () => { store.dispatch(apiSlice.util.invalidateTags(['Plugins'])); });
+  await contains('example.plugin');
+});
+
 it('shows retained uninstall status and offers explicit release reinstallation', async () => {
   runtime = { ...runtime, uninstalled: true, enabled: false, service: null };
   await act(async () => { store.dispatch(apiSlice.util.invalidateTags(['Plugins'])); });

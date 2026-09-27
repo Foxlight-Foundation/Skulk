@@ -37,6 +37,7 @@ from skulk.extensions.runtime_manager import (
     CatalogRegistration,
     CatalogRequest,
     InstallationRequest,
+    InstalledRelease,
     InstallRecoveryRequest,
     InstallSubmission,
     InventoryRequest,
@@ -369,6 +370,10 @@ class ManagedInstallation(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
     plugin_id: InstallationIdentifier = Field(
         description="Stable local installed-plugin identifier."
+    )
+    release: InstalledRelease | None = Field(
+        default=None,
+        description="Name, version and publisher of the selected signed release, read from its staged metadata; absent before a release is staged or when that metadata is unreadable.",
     )
     error_code: (
         Literal[

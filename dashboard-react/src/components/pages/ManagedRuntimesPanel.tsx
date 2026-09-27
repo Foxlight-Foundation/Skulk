@@ -1,5 +1,5 @@
 import { FiPlus } from 'react-icons/fi';
-import { derivePluginHealth, type PluginFilter } from './pluginHealth';
+import { derivePluginHealth, recordedServiceFailure, type PluginFilter } from './pluginHealth';
 import type { PluginNodes } from '../../store/endpoints/plugins';
 import { useState, type ReactNode } from 'react';
 import styled from 'styled-components';
@@ -108,8 +108,17 @@ function RuntimeControls({ runtime, unavailable, nodes, details, nodeEvidence, f
   const disableBlocked = runtime.uninstalled || (!runtime.enabled && !withdrawable) || unavailable || busy || pending || (state === 'recovery_required' && !withdrawable) || (!!submitted && !confirmed);
   const uninstallBlocked = (runtime.uninstalled && !withdrawable) || (!runtime.selected_digest && !withdrawable) || unavailable || busy || pending || (state === 'recovery_required' && !withdrawable) || (!!submitted && !confirmed);
   const bundleNames = [...new Set(nodeEvidence?.nodes.map(node => node.bundleId) ?? [])];
-  const name = bundleNames.length === 1 ? bundleNames[0] : runtime.plugin_id;
-  const releaseNote = runtime.uninstalled ? t('plugins.cleanupRetained', 'Cleanup state retained') : runtime.stale || unavailable ? t('plugins.releaseUnavailable', 'Release status unavailable')
+  // The signed title names the plugin even when nothing runs to report it.
+  const release = runtime.release ?? null;
+  const name = release?.title ?? (bundleNames.length === 1 ? bundleNames[0] : null) ?? release?.bundle_id ?? runtime.plugin_id;
+  const failure = runtime.uninstalled || !runtime.enabled ? null : recordedServiceFailure(runtime);
+  const failureReason = failure === null ? null : ({
+    verification_failed: t('plugins.failureVerification', 'This release was built for a different Skulk build, platform or dependency set, so it cannot run here. Install a release built for this host.'),
+    owner_exited: t('plugins.failureOwnerExited', 'The plugin process stopped. Check its setup, then refresh.'),
+    ownership_busy: t('plugins.failureOwnershipBusy', 'Another process is using this plugin. Wait a moment, then refresh.'),
+    service_failed: t('plugins.failureService', 'The plugin service could not start.'),
+  } as Record<string, string>)[failure] ?? t('plugins.failureOther', 'The plugin stopped with {code}.', { code: failure });
+  const releaseNote = runtime.uninstalled ? t('plugins.cleanupRetained', 'Cleanup state retained') : failure !== null ? t('plugins.notRunning', 'Not running') : runtime.stale || unavailable ? t('plugins.releaseUnavailable', 'Release status unavailable')
     : runtime.service?.active_digest && runtime.service.active_digest === runtime.selected_digest ? t('plugins.releaseActive', 'Active')
     : runtime.service?.active_digest ? t('plugins.differentActiveRelease', 'Different release active')
     : t('plugins.noActiveRelease', 'None active');
@@ -124,9 +133,9 @@ function RuntimeControls({ runtime, unavailable, nodes, details, nodeEvidence, f
   return <>
     <div hidden={filter !== 'all' && filter !== category}>
     <PluginSummaryCard name={name} pluginId={runtime.plugin_id}
-      description={nodeEvidence?.nodes.length ? t('plugins.nodeCount', 'Installed capability nodes: {count}', { count: nodeEvidence.nodes.length }) : undefined}
+      description={failureReason ?? (nodeEvidence?.nodes.length ? t('plugins.nodeCount', 'Installed capability nodes: {count}', { count: nodeEvidence.nodes.length }) : undefined)}
       health={health} tone={category === 'healthy' ? 'healthy' : category === 'attention' ? 'live' : category === 'updating' ? 'live' : 'neutral'}
-      release={runtime.selected_digest?.slice(0, 12) ?? t('plugins.noRelease', 'None selected')} releaseNote={releaseNote} nodes={nodes}
+      release={release ? t('plugins.releaseIdentity', '{version} ({sequence}) from {publisher}', { version: release.bundle_version, sequence: release.sequence, publisher: release.publisher }) : runtime.selected_digest?.slice(0, 12) ?? t('plugins.noRelease', 'None selected')} releaseNote={releaseNote} nodes={nodes}
       muted={runtime.uninstalled} onOpen={openDetails} actions={[
         { id: 'configure', label: t('plugins.configureSettings', 'Configure settings'), onSelect: openDetails },
         { id: 'release', label: t('plugins.installReleaseMenu', 'Install a release…'), onSelect: openRelease },
