@@ -52,6 +52,16 @@ _PAIRING_AUTHORITY_DETAIL: Final = (
     "Tailscale IP, or open it through localhost. Public relay and ordinary LAN "
     "access are blocked."
 )
+_PLUGIN_OWNER_AUTHORITY_DETAIL: Final = (
+    "Plugin administration needs direct owner access to this node. Open its "
+    "dashboard in a browser on the node itself (localhost), or through Tailscale "
+    "using the node's MagicDNS name or Tailscale IP. Ordinary LAN addresses, the "
+    "public relay and forwarded requests cannot administer plugins."
+)
+_PAIRED_PLUGIN_OWNER_DETAIL: Final = (
+    "Paired devices cannot administer plugins. Open this node's dashboard in a "
+    "browser on the node itself (localhost), or through Tailscale."
+)
 _PAIRING_GATEWAY_DETAIL: Final = (
     "This node is not ready to manage pairing invitations. Open Settings on the "
     "configured operator gateway through Tailscale or localhost; if this is the "
@@ -182,13 +192,25 @@ def _is_tailnet_hostname(host: str) -> bool:
 async def _require_direct_dashboard_authority(
     request: Request,
     tailnet_peer_verifier: TailnetPeerVerifier,
+    detail: str = _PAIRING_AUTHORITY_DETAIL,
 ) -> None:
-    """Reject invitation management outside the direct trusted dashboard."""
+    """Reject owner administration outside the direct trusted dashboard.
+
+    Args:
+        request: The incoming dashboard request.
+        tailnet_peer_verifier: Binds a Tailscale socket address to a real peer.
+        detail: The refusal, naming what the caller tried to administer and
+            how to reach this node so it can.
+
+    Raises:
+        HTTPException: 403 when the request is not a direct loopback or
+            verified Tailscale dashboard request.
+    """
 
     if not await _direct_dashboard_authority_request(request, tailnet_peer_verifier):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=_PAIRING_AUTHORITY_DETAIL,
+            detail=detail,
         )
 
 
@@ -296,11 +318,12 @@ async def authorize_plugin_owner_request(
         request.headers.getlist("authorization")
         or request.scope.get(OPERATOR_GATEWAY_AUTHORIZED_SCOPE_KEY) is True
     ):
-        raise HTTPException(
-            status_code=403,
-            detail="this action requires direct owner authority without a paired credential",
-        )
-    await _require_direct_dashboard_authority(request, tailnet_peer_verifier)
+        raise HTTPException(status_code=403, detail=_PAIRED_PLUGIN_OWNER_DETAIL)
+    # The pairing refusal names invitations and the operator gateway; neither
+    # applies to plugins, which any node administers from a direct dashboard.
+    await _require_direct_dashboard_authority(
+        request, tailnet_peer_verifier, _PLUGIN_OWNER_AUTHORITY_DETAIL
+    )
 
 
 def create_operator_auth_router(

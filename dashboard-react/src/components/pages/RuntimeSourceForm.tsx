@@ -55,7 +55,7 @@ export function RuntimeSourceForm({ pluginId, onSaved }: { pluginId: string; onS
       const body = JSON.stringify({
         expected_revision: status.revision,
         ...(baseUrl ? { base_url: baseUrl } : {}),
-        ...(metadata ? { metadata_filename: metadata } : !status.configured ? { metadata_filename: 'runtime.json' } : {}),
+        ...(metadata ? { metadata_filename: metadata } : !status.configured ? { metadata_filename: 'release.json' } : {}),
         ...(changesTrust ? { trust: { revision: (status.trust_revision ?? 0) + 1, expires_at: expiresAt, publishers: { [publisher]: publicKey } } } : {}),
         ...(token ? { token } : {}),
         clear_token: clearToken,
@@ -96,7 +96,7 @@ export function RuntimeSourceForm({ pluginId, onSaved }: { pluginId: string; onS
     <Fields disabled={busy || source.isFetching || !!source.error || !status || changed}>
       <legend>{t('plugins.sourceSettings', 'Release source settings')}</legend>
       <label>{t('plugins.sourceDirectory', 'HTTPS release directory')}<input type="url" value={baseUrl} maxLength={2048} required={!status?.configured} placeholder="https://releases.example.com/private/" onChange={(event) => setBaseUrl(event.target.value)} /></label>
-      <label>{t('plugins.sourceMetadata', 'Signed metadata filename')}<input value={metadata} maxLength={206} placeholder={status?.configured ? '' : 'runtime.json'} onChange={(event) => setMetadata(event.target.value)} /></label>
+      <label>{t('plugins.sourceMetadata', 'Signed metadata filename')}<input value={metadata} maxLength={206} placeholder={status?.configured ? '' : 'release.json'} onChange={(event) => setMetadata(event.target.value)} /></label>
       <label>{t('plugins.sourceToken', 'Feed credential')}<input ref={tokenInput} type="password" autoComplete="new-password" maxLength={8192} disabled={clearToken} /></label>
       <label><span><input type="checkbox" checked={clearToken} onChange={(event) => { setClearToken(event.target.checked); if (tokenInput.current) tokenInput.current.value = ''; }} /> {t('plugins.sourceAnonymous', 'Use this source without a credential')}</span></label>
       <label>{t('plugins.sourcePublisher', 'Publisher identity')}<input value={publisher} onChange={(event) => { setPublisher(event.target.value); setTrustAccepted(false); }} /></label>

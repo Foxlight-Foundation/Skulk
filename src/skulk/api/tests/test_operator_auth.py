@@ -6,12 +6,16 @@ from pathlib import Path
 from typing import cast
 from uuid import UUID
 
+import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 
-from skulk.api.operator_auth import create_operator_auth_router
+from skulk.api.operator_auth import (
+    authorize_plugin_owner_request,
+    create_operator_auth_router,
+)
 from skulk.operator.authority import EncryptedAuthorityStore
 from skulk.operator.key_provider import LocalFileAuthorityKeyProvider
 from skulk.operator.pairing import (
@@ -652,3 +656,61 @@ def test_direct_dashboard_device_inventory_and_revocation(tmp_path: Path) -> Non
     assert client.delete(f"/v1/auth/devices/{paired['deviceId']}", headers=headers).status_code == 204
     remote = TestClient(app, base_url="http://127.0.0.1:52415", client=("192.0.2.1", 50000))
     assert remote.get("/v1/auth/devices", headers=headers).status_code == 403
+
+
+def _plugin_owner_request(
+    client_host: str, *, authorization: str | None = None
+) -> Request:
+    """A dashboard POST to a plugin owner route, from ``client_host``."""
+    headers = [
+        (b"host", b"kite1:52415"),
+        (b"origin", b"http://kite1:52415"),
+        (b"x-skulk-dashboard", b"pairing-v1"),
+    ]
+    if authorization is not None:
+        headers.append((b"authorization", authorization.encode()))
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/plugins/managed/catalog/source",
+            "scheme": "http",
+            "server": ("kite1", 52415),
+            "client": (client_host, 50000),
+            "headers": headers,
+            "query_string": b"",
+        }
+    )
+
+
+async def test_plugin_owner_refusals_say_how_to_reach_the_node() -> None:
+    """A LAN browser or a paired device is told how to administer plugins.
+
+    The refusal used to be the pairing-invitation text, which names the
+    operator gateway and does not say how to reach plugin administration.
+    """
+
+    async def verified(_: str) -> bool:
+        return True
+
+    with pytest.raises(HTTPException) as lan:
+        await authorize_plugin_owner_request(
+            _plugin_owner_request("192.168.1.20"), verified
+        )
+    assert lan.value.status_code == 403
+    assert isinstance(lan.value.detail, str)
+    assert lan.value.detail.startswith("Plugin administration needs direct owner")
+    assert "localhost" in lan.value.detail and "Tailscale" in lan.value.detail
+    assert "Pairing invitations" not in lan.value.detail
+
+    with pytest.raises(HTTPException) as paired:
+        await authorize_plugin_owner_request(
+            _plugin_owner_request("100.64.0.9", authorization="Bearer paired"),
+            verified,
+        )
+    assert paired.value.status_code == 403
+    assert isinstance(paired.value.detail, str)
+    assert paired.value.detail.startswith("Paired devices cannot administer plugins")
+
+    # A verified Tailscale browser on the node's MagicDNS name is the owner.
+    await authorize_plugin_owner_request(_plugin_owner_request("100.64.0.9"), verified)

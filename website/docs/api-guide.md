@@ -3804,6 +3804,10 @@ be present. Forwarding headers are refused. Scoped paired operators send
 `Authorization: Bearer <access token>` over HTTPS, the authenticated relay, or
 the verified direct owner transport. An invalid bearer token never falls back
 to local owner authority. Read and mutation responses use `Cache-Control: no-store`.
+An owner-only request from anywhere else answers `403` saying how to reach the
+node: a browser on the node itself (localhost) or through Tailscale by its
+MagicDNS name or Tailscale IP. A paired device is told that plugin
+administration is not available to paired devices.
 
 Unknown providers or nodes return `404`. Revision/schema conflicts and provider
 validation refusals return `409`; callers must reload before retrying a stale
