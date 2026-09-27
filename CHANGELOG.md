@@ -123,6 +123,13 @@ This project records release notes here and mirrors public-facing notes in
   "Pipeline · MLX Ring", including video models on AMD nodes; it now
   reads the backend the master resolved for the placement.
 
+- A node no longer crashes when a peer restart changes the master. The
+  node closes its worker's event channel before replacing the worker, and
+  a topology update sent in that window raised out of the worker and
+  stopped the whole node, taking every model instance it hosted with it.
+  Both topology tasks now end quietly when their channel closes, as the
+  worker's other senders already did.
+
 - The Plugins page works when the dashboard is opened over plain HTTP from
   another machine on the network. Add plugin, Configure, credential
   changes, setup actions, proposal approvals, and runtime install or
