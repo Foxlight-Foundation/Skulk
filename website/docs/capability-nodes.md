@@ -136,9 +136,10 @@ proof of compatible bytes or dependencies.
 
 A publisher can also give you a signed catalog: an address and the publisher
 trust to verify it. With the catalog configured on the host,
-`uv run skulk-plugin-service catalog` lists the releases that match this host,
-and `uv run skulk-plugin-service install-plugin --from-catalog BUNDLE_ID`
-installs one through the same consent steps as a single release. See
+`skulk-plugin-service catalog` lists the releases that match this host, and
+`skulk-plugin-service install-plugin --from-catalog BUNDLE_ID` installs one
+through the same consent steps as a single release (prefix both with
+`uv run` from the Skulk directory on a source install). See
 [Extensions](extensions.md#owner-configured-private-release-source).
 
 The RunPod cloud-capacity plugin is distributed privately to owners with access.
@@ -152,12 +153,13 @@ Open **Plugins** on the host that will manage the installation. Initial service
 setup and publisher trust require owner access; a paired browser cannot grant
 itself that authority.
 
-1. Set up the host's plugin-management service once. From the Skulk directory,
-   run `uv run skulk-plugin-service setup` as the user who runs Skulk. It asks
-   for your administrator password to register the service (Apple Silicon
-   macOS, or Linux x86_64 with systemd). Until it is ready, **Plugins** reports
-   that local runtime management is unavailable;
-   `uv run skulk-plugin-service status` shows its progress.
+1. Set up the host's plugin-management service once. On a source install, run
+   `uv run skulk-plugin-service setup` from the Skulk directory as the user who
+   runs Skulk (see [Install](install.md#add-capabilities-optional)). It asks for
+   your administrator password to register the service (Apple Silicon macOS, or
+   Linux x86_64 with systemd). Until it is ready, **Plugins** reports that local
+   runtime management is unavailable; `uv run skulk-plugin-service status`
+   shows its progress.
 2. In **Add plugin**, enter the supplied release source, metadata filename,
    publisher trust, and feed credential where required.
 3. Save the source and inspect the release. Review its signature, compatibility,

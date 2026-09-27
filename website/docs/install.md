@@ -214,9 +214,12 @@ covers launch environments and service configuration.
 
 ## Add capabilities (optional)
 
-Capabilities such as Skulk Video Studio are separately installed plugins. Before
-a host installs its first plugin, set up its plugin-management service once,
-from the Skulk directory, as the user who runs Skulk:
+Capabilities such as Skulk Video Studio are separately installed plugins.
+Plugin support is in the development branch and arrives in packaged installs
+with the next release. Before a host installs its first plugin, its
+plugin-management service is set up once. On a
+[source install](#source-and-development-installs), run this from the Skulk
+directory as the user who runs Skulk:
 
 ```bash
 uv run skulk-plugin-service setup
