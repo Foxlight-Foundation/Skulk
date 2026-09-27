@@ -124,10 +124,20 @@ describe('startCatalogInstall', () => {
     expect(readJourneys()).toHaveLength(1);
   });
 
-  it('returns the host\'s sentence for a decided refusal and forgets the attempt', async () => {
+  it('returns the host\'s sentence for a decided refusal, keeping only a new installation\'s identity', async () => {
     const detail = { status: 409, data: { detail: 'This host could not reach the plugin catalog.' } };
-    const refused = await startCatalogInstall({ bind: () => rejected(detail), install: () => resolved({} as RuntimeInstallation) }, fresh, listing([entry(51)]), (error) => (error as typeof detail).data.detail, ids(), statusOf);
+    const refusedStarters = { bind: () => rejected(detail), install: () => resolved({} as RuntimeInstallation) };
+    const refused = await startCatalogInstall(refusedStarters, fresh, listing([entry(51)]), (error) => (error as typeof detail).data.detail, ids('c'.repeat(32)), statusOf);
     expect(refused).toEqual({ stage: 'bind', detail: 'This host could not reach the plugin catalog.', status: 409 });
+    // The host may have registered the new installation before refusing, so the
+    // next attempt must continue it.
+    expect(readJourneys()).toMatchObject([{ pluginId: `managed.${'c'.repeat(32)}`, runtimeDigest: null }]);
+    const binds: (string | undefined)[] = [];
+    await startCatalogInstall({ bind: (request) => { binds.push(request.plugin_id); return rejected(detail); }, install: () => resolved({} as RuntimeInstallation) }, fresh, listing([entry(51)]), () => null, ids('d'.repeat(32)), statusOf);
+    expect(binds).toEqual([`managed.${'c'.repeat(32)}`]);
+    globalThis.localStorage.removeItem('skulk-plugin-install-journeys');
+    // An existing installation needs no saved identity: the attempt is forgotten.
+    await startCatalogInstall(refusedStarters, offer, listing([entry(51)]), () => null, ids(), statusOf);
     expect(readJourneys()).toEqual([]);
     // A lost download reply keeps the journey, so its operation is read back.
     const lost = await startCatalogInstall({ bind: () => resolved(bound(offer.installed!.plugin_id)), install: () => rejected(new TypeError('network')) }, offer, listing([entry(51)]), () => null, ids(), statusOf);

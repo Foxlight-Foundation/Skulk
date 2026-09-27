@@ -7,7 +7,7 @@ import { Spinner } from '../common/Spinner';
 import { Surface } from '../common/Surfaces';
 import {
   pluginRefusalDetail, pluginRequestRefused, useActivateRuntimeReleaseMutation, useLazyGetManagedOperationQuery, useLazyGetManagedRuntimesQuery,
-  useLazyGetRuntimeInstallationQuery, type ManagedRuntime,
+  useLazyGetRuntimeInstallationQuery, type ManagedOperation, type ManagedRuntime, type RuntimeInstallation,
 } from '../../store/endpoints/plugins';
 import { randomHex32 } from '../../utils/randomIds';
 import { clearJourney, formatMegabytes, isBound, readJourneys, saveJourney, type BoundJourney, type InstallStartRefusal } from './catalogJourney';
@@ -28,18 +28,23 @@ export interface CatalogInstallProgressProps {
   refusal: InstallStartRefusal | null;
   onDone: (target: SetupTarget) => void;
   onBack: () => void;
+  /** Interval between status reads, in milliseconds; tests shorten it. */
+  pollMs?: number;
 }
 
 type StepState = 'waiting' | 'active' | 'done' | 'failed';
 interface Steps { verified: StepState; downloaded: StepState; prepared: StepState; activated: StepState }
 type Failure =
   | { kind: 'detail'; step: keyof Steps; detail: string }
-  | { kind: 'code'; step: keyof Steps; code: 'recovery' | 'download-unconfirmed' | 'inventory' | 'activation-unconfirmed' | 'start-slow' }
+  | { kind: 'code'; step: keyof Steps; code: 'recovery' | 'download-unconfirmed' | 'inventory' | 'activation-unconfirmed' | 'start-slow' | 'unreadable' }
   | { kind: 'code-with-value'; step: keyof Steps; code: 'activation-failed' | 'activation-refused' | 'start-failed'; value: string };
 
 const POLL_MS = 2000;
 const CONFIRM_ATTEMPTS = 15;
 const START_ATTEMPTS = 90;
+// Consecutive failed status reads before the page stops following. A failed
+// read says nothing about the operation, so the journey is kept for later.
+const UNREADABLE_ATTEMPTS = 30;
 // Activation is submitted at most once per installation across remounts.
 const activationInFlight = new Set<string>();
 
@@ -58,7 +63,7 @@ function sleep(milliseconds: number, signal: AbortSignal): Promise<void> {
  * most once, recording its identity before sending; a lost response or a
  * page opened again reads that operation back and never sends it twice.
  */
-export function CatalogInstallProgress({ title, publisher, sequence, transferBytes, updating, journey, refusal, onDone, onBack }: CatalogInstallProgressProps) {
+export function CatalogInstallProgress({ title, publisher, sequence, transferBytes, updating, journey, refusal, onDone, onBack, pollMs = POLL_MS }: CatalogInstallProgressProps) {
   const { t } = useSkulkTranslation();
   const [activate] = useActivateRuntimeReleaseMutation();
   const [readInstall] = useLazyGetRuntimeInstallationQuery();
@@ -92,19 +97,26 @@ export function CatalogInstallProgress({ title, publisher, sequence, transferByt
       let current = saved() ?? journey;
       if (current.activationOperationId === null) {
         let unconfirmed = 0;
+        let unreadable = 0;
         for (;;) {
-          let operation;
-          try { operation = (await readInstall(pluginId, false).unwrap()).operation; } catch { operation = null; }
+          let operation: RuntimeInstallation | null = null;
+          // Only the host's answer can show the operation is missing: a 404
+          // means the installation itself is gone, any other failure is unknown.
+          let answered = false;
+          try { operation = (await readInstall(pluginId, false).unwrap()).operation; answered = true; } catch (error) { answered = pluginRequestRefused(error) === 404; }
           if (signal.aborted) return;
+          unreadable = answered ? 0 : unreadable + 1;
           if (operation && operation.request.operation_id === current.installOperationId) {
             setDownloaded(operation.downloaded_bytes);
             if (operation.state === 'staged') break;
             if (operation.state === 'recovery_required') { clearJourney(pluginId); fail({ kind: 'code', step: 'downloaded', code: 'recovery' }); return; }
             if (operation.state === 'staging') mark({ downloaded: 'done', prepared: 'active' });
-          } else if (++unconfirmed >= CONFIRM_ATTEMPTS) {
+          } else if (answered && ++unconfirmed >= CONFIRM_ATTEMPTS) {
             clearJourney(pluginId); fail({ kind: 'code', step: 'downloaded', code: 'download-unconfirmed' }); return;
+          } else if (unreadable >= UNREADABLE_ATTEMPTS) {
+            fail({ kind: 'code', step: 'downloaded', code: 'unreadable' }); return;
           }
-          try { await sleep(POLL_MS, signal); } catch { return; }
+          try { await sleep(pollMs, signal); } catch { return; }
         }
       }
       mark({ downloaded: 'done', prepared: 'done', activated: 'active' });
@@ -136,16 +148,20 @@ export function CatalogInstallProgress({ title, publisher, sequence, transferByt
       }
       if (!alreadyActive && current.activationOperationId !== null) {
         let unconfirmed = 0;
+        let unreadable = 0;
         for (;;) {
-          let operation;
-          try { operation = await readOperation({ pluginId, operationId: current.activationOperationId }, false).unwrap(); } catch { operation = null; }
+          let operation: ManagedOperation | null = null;
+          let answered = false;
+          try { operation = await readOperation({ pluginId, operationId: current.activationOperationId }, false).unwrap(); answered = true; } catch (error) { answered = pluginRequestRefused(error) === 404; }
           if (signal.aborted) return;
+          unreadable = answered ? 0 : unreadable + 1;
           if (operation?.state === 'complete') break;
           if (operation && (operation.state === 'failed' || operation.state === 'recovery_required' || operation.state === 'superseded')) {
             clearJourney(pluginId); fail({ kind: 'code-with-value', step: 'activated', code: 'activation-failed', value: operation.error_code ?? operation.state }); return;
           }
-          if (!operation && ++unconfirmed >= CONFIRM_ATTEMPTS) { clearJourney(pluginId); fail({ kind: 'code', step: 'activated', code: 'activation-unconfirmed' }); return; }
-          try { await sleep(POLL_MS, signal); } catch { return; }
+          if (!operation && answered && ++unconfirmed >= CONFIRM_ATTEMPTS) { clearJourney(pluginId); fail({ kind: 'code', step: 'activated', code: 'activation-unconfirmed' }); return; }
+          if (unreadable >= UNREADABLE_ATTEMPTS) { fail({ kind: 'code', step: 'activated', code: 'unreadable' }); return; }
+          try { await sleep(pollMs, signal); } catch { return; }
         }
       }
       // A completed activation starts the plugin; wait until it is observed running.
@@ -162,7 +178,7 @@ export function CatalogInstallProgress({ title, publisher, sequence, transferByt
         if (service?.state === 'failed' && service.error_code) {
           clearJourney(pluginId); fail({ kind: 'code-with-value', step: 'activated', code: 'start-failed', value: service.error_code }); return;
         }
-        try { await sleep(POLL_MS, signal); } catch { return; }
+        try { await sleep(pollMs, signal); } catch { return; }
       }
       fail({ kind: 'code', step: 'activated', code: 'start-slow' });
     };
@@ -187,6 +203,7 @@ export function CatalogInstallProgress({ title, publisher, sequence, transferByt
       inventory: t('plugins.catalog.inventoryUnavailable', 'The installation is not in the host’s inventory. Open Installed to check it.'),
       'activation-unconfirmed': t('plugins.catalog.activationUnconfirmed', 'The host never confirmed the activation. Nothing was repeated. Open Installed to check it.'),
       'start-slow': t('plugins.catalog.startSlow', 'It was activated but has not reported running yet. Open Installed to follow it.'),
+      unreadable: t('plugins.catalog.statusUnreadable', 'This page lost contact with the host and stopped following. The install may still be running there: come back to Browse to pick it up.'),
     }[value.code];
   };
   const refusalText = refusal?.unconfirmed ? t('plugins.catalog.bindUnconfirmed', 'The host did not confirm this release, so it may already be bound. Review and install it again to continue: the same installation is used, so nothing is duplicated.')

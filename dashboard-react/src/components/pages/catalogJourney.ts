@@ -263,10 +263,10 @@ export interface InstallStartRefusal { stage: 'bind' | 'download'; detail: strin
  *
  * The journey is saved before each request. A new installation's identity is
  * chosen here rather than by the host, so a binding whose reply was lost is
- * continued, not duplicated, by the next attempt for the same bundle. If the
- * download reply is lost the page reads the operation back instead of sending
- * it again. A decided refusal (a 4xx) clears the journey and returns the
- * host's reason.
+ * continued, not duplicated, by the next attempt for the same bundle, as is
+ * one the host registered before refusing the release. If the download reply
+ * is lost the page reads the operation back instead of sending it again. A
+ * decided refusal (a 4xx) returns the host's reason.
  */
 export async function startCatalogInstall(
   starters: InstallStarters,
@@ -293,10 +293,14 @@ export async function startCatalogInstall(
     }).unwrap();
   } catch (error) {
     // Only a 4xx is decided. Anything else may have registered and bound the
-    // installation, so its identity stays saved for the next attempt.
+    // installation, so its identity stays saved for the next attempt. So does
+    // a new installation's after a refusal: the host keeps an installation it
+    // registered before refusing the release, and the next attempt continues
+    // it rather than registering another.
     const status = refusedStatus(error);
-    if (status !== null) { clearJourney(pluginId); return { stage: 'bind', detail: refusalDetail(error), status }; }
-    return { stage: 'bind', detail: refusalDetail(error), unconfirmed: true };
+    if (status === null) return { stage: 'bind', detail: refusalDetail(error), unconfirmed: true };
+    if (offer.installed) clearJourney(pluginId);
+    return { stage: 'bind', detail: refusalDetail(error), status };
   }
   const journey: BoundJourney = {
     ...pending, pluginId: bound.plugin_id, runtimeDigest: bound.review.runtime_digest,

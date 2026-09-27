@@ -937,6 +937,7 @@
   "plugins.catalog.startFailed": "It was activated but did not start ({code}). Open Installed for the reason.",
   "plugins.catalog.starting": "starting",
   "plugins.catalog.startSlow": "It was activated but has not reported running yet. Open Installed to follow it.",
+  "plugins.catalog.statusUnreadable": "This page lost contact with the host and stopped following. The install may still be running there: come back to Browse to pick it up.",
   "plugins.catalog.stepActivated": "Activated",
   "plugins.catalog.stepDownloaded": "Downloaded",
   "plugins.catalog.stepPrepared": "Runtime prepared",
