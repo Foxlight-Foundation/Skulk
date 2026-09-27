@@ -1,9 +1,12 @@
 import { useState } from 'react';
 import styled from 'styled-components';
+import { operatorSession } from '../../auth/operatorSession';
 import { useSkulkTranslation } from '../../i18n/tolgee';
+import { apiSlice } from '../../store/api';
+import { useAppDispatch } from '../../store/hooks';
 import { Button } from '../common/Button';
 import { SectionLabel, Surface } from '../common/Surfaces';
-import { pluginRefusalDetail, useConfigureCatalogSourceMutation, type RuntimeSourceStatus } from '../../store/endpoints/plugins';
+import { pluginRefusalDetail, type CatalogSourceUpdate, type RuntimeSourceStatus } from '../../store/endpoints/plugins';
 import { decodeInvitation, isCatalogAddress, type CatalogInvitation } from './catalogJourney';
 
 /** Props for connecting this host to a capability catalog. */
@@ -25,7 +28,8 @@ const DAY_SECONDS = 86_400;
  */
 export function CatalogConnectPanel({ status, onConnected, onCancel }: CatalogConnectPanelProps) {
   const { t } = useSkulkTranslation();
-  const [configure, configuring] = useConfigureCatalogSourceMutation();
+  const dispatch = useAppDispatch();
+  const [busy, setBusy] = useState(false);
   const [code, setCode] = useState('');
   const [manual, setManual] = useState(false);
   const [address, setAddress] = useState('');
@@ -43,19 +47,40 @@ export function CatalogConnectPanel({ status, onConnected, onCancel }: CatalogCo
     : null;
   const chosen = manual ? manualInvitation : invitation;
   const connect = async () => {
-    if (!chosen) return;
+    if (!chosen || busy) return;
     setNotice('');
+    setBusy(true);
+    // An invitation may carry the catalog's credential. Like a release source's,
+    // it must not enter RTK mutation arguments, action history or cached errors,
+    // so the request goes straight to the host and only the cache is invalidated.
+    const update: CatalogSourceUpdate = {
+      expected_revision: status.revision,
+      base_url: chosen.baseUrl,
+      trust: { revision: (status.trust_revision ?? 0) + 1, expires_at: chosen.trustExpiresAt, publishers: { [chosen.publisher]: chosen.publicKey } },
+      ...(chosen.token ? { token: chosen.token } : {}),
+    };
+    let body = JSON.stringify(update);
+    let refusal: string | null = null;
     try {
-      await configure({
-        expected_revision: status.revision,
-        base_url: chosen.baseUrl,
-        trust: { revision: (status.trust_revision ?? 0) + 1, expires_at: chosen.trustExpiresAt, publishers: { [chosen.publisher]: chosen.publicKey } },
-        ...(chosen.token ? { token: chosen.token } : {}),
-      }).unwrap();
+      const response = await operatorSession.fetch('/v1/plugins/managed/catalog/source', {
+        method: 'POST', credentials: 'same-origin', cache: 'no-store', redirect: 'error',
+        headers: { 'Content-Type': 'application/json', 'X-Skulk-Dashboard': 'pairing-v1' },
+        body, signal: AbortSignal.timeout(35000),
+      });
+      body = '';
+      if (!response.ok) {
+        // The host's refusal sentence names no credential; read it for the operator.
+        refusal = pluginRefusalDetail({ status: response.status, data: await response.json().catch(() => null) });
+        throw new Error('catalog source update refused');
+      }
       setCode('');
+      dispatch(apiSlice.util.invalidateTags(['PluginCatalog']));
       onConnected();
-    } catch (error) {
-      setNotice(pluginRefusalDetail(error) ?? t('plugins.catalog.connectUnconfirmed', 'The catalog was not connected. Check the code, then try again.'));
+    } catch {
+      setNotice(refusal ?? t('plugins.catalog.connectUnconfirmed', 'The catalog was not connected. Check the code, then try again.'));
+    } finally {
+      body = '';
+      setBusy(false);
     }
   };
   return <Panel aria-labelledby="catalog-connect-title">
@@ -88,7 +113,7 @@ export function CatalogConnectPanel({ status, onConnected, onCancel }: CatalogCo
     <Note>{t('plugins.catalog.connectNote', 'The code only tells this host where to look and whose signature to accept. Every release is still verified against that key before anything installs.')}</Note>
     {notice ? <Warning role="alert">{notice}</Warning> : null}
     <Actions>
-      <Button variant="primary" disabled={!chosen || configuring.isLoading} onClick={() => void connect()}>{t('plugins.catalog.connect', 'Connect')}</Button>
+      <Button variant="primary" disabled={!chosen || busy} onClick={() => void connect()}>{t('plugins.catalog.connect', 'Connect')}</Button>
       {onCancel ? <Button variant="ghost" onClick={onCancel}>{t('common.cancel', 'Cancel')}</Button> : null}
       <Button variant="ghost" onClick={() => { setManual(!manual); setNotice(''); }}>{manual ? t('plugins.catalog.useCode', 'Use an invitation code instead') : t('plugins.catalog.enterDetails', 'Enter the catalog details instead')}</Button>
     </Actions>

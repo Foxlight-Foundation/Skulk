@@ -16,11 +16,12 @@ vi.mock('../../i18n/tolgee', () => ({
 }));
 
 const pluginId = 'managed.' + '2'.repeat(32);
-const screenUrl = 'http://127.0.0.1:54905/s/token/';
+const screenUrl = 'https://studio.example/s/token/';
 let root: Root;
 let host: HTMLDivElement;
 let store: ReturnType<typeof makeStore>;
 let summaries: CapabilityNodeSummary[];
+let hostNode: string;
 let preflightAvailable: boolean;
 
 function makeStore() {
@@ -39,13 +40,14 @@ function summary(overrides: Partial<CapabilityNodeSummary> = {}): CapabilityNode
 
 beforeEach(async () => {
   summaries = [summary()];
+  hostNode = 'host-node';
   preflightAvailable = true;
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
     const request = input instanceof Request ? input : new Request(new URL(String(input), location.href), init);
     const path = new URL(request.url).pathname;
     if (path === '/node_id') return json('host-node');
     if (path === '/node/identity') return json({ nodeId: 'host-node', friendlyName: 'host' });
-    if (path === '/state') return json({ instances: {}, runners: {}, capabilityNodes: { 'host-node': summaries } });
+    if (path === '/state') return json({ instances: {}, runners: {}, capabilityNodes: { [hostNode]: summaries } });
     if (path === '/v1/plugins') {
       return json([{ pluginId, available: true, nodes: [{ nodeId: 'studio', bundleId: 'example.studio', version: '0.1.0', status: 'configuration_invalid', configurable: true, preflightAvailable }] }]);
     }
@@ -118,4 +120,15 @@ it('waits for a plugin the host has not reported, and shows a starting one as wa
   await contains('It is starting.');
   await contains('Starting…');
   expect(button('Open settings')).toBeNull();
+});
+
+it('keeps a loopback screen closed to a browser on another machine', async () => {
+  // The plugin runs on another node and publishes its screen on loopback.
+  hostNode = 'other-node';
+  summaries = [summary({ surfaces: [{ surfaceId: 'studio', title: 'Example Studio', kind: 'link', url: 'http://127.0.0.1:54905/s/token/', ready: true }] })];
+  await render(() => undefined);
+  await contains('Example Studio is ready');
+  expect(host.querySelector('a[href]')).toBeNull();
+  expect(button('Open Example Studio')?.disabled).toBe(true);
+  await contains('Example Studio opens only from a browser running on the host that runs it.');
 });

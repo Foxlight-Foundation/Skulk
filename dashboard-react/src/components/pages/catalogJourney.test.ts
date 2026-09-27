@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import type { CatalogEntry, CatalogInstallation, CatalogListing, ManagedRuntime, RuntimeInstallation } from '../../store/endpoints/plugins';
 import {
   catalogOffers, clearJourney, decodeInvitation, encodeInvitation, isStartRefusal,
@@ -76,40 +76,66 @@ describe('invitations', () => {
 
 describe('startCatalogInstall', () => {
   const offer = catalogOffers(listing([entry(51)]), [runtime(50)])[0];
-  const bound: CatalogInstallation = {
-    plugin_id: 'managed.' + '2'.repeat(32), listing: entry(51),
+  const fresh = catalogOffers(listing([entry(51)]), [])[0];
+  const bound = (pluginId: string): CatalogInstallation => ({
+    plugin_id: pluginId, listing: entry(51),
     source: { revision: 7, configured: true, credential_reference: null, credential_ready: true, trust_revision: 1 },
     review: { runtime_digest: '9'.repeat(64), source_revision: 7, publisher: 'example', bundle_id: 'example.studio', version: '0.1.0', sequence: 51, platform: 'macos-arm64', python_requires: '>=3.13', skulk_build_sha256: 'b'.repeat(64), permissions: [], artifact_bytes: 12_000_000, expires_at: 1_900_000_000 },
-  };
+  });
   const resolved = <T,>(value: T) => ({ unwrap: () => Promise.resolve(value) });
   const rejected = (error: unknown) => ({ unwrap: () => Promise.reject(error) });
+  const statusOf = (error: unknown) => { const status = (error as { status?: unknown }).status; return typeof status === 'number' && status < 500 ? status : null; };
+  const ids = (...values: string[]) => { const queue = [...values]; return () => queue.shift() ?? 'f'.repeat(32); };
+  beforeEach(() => globalThis.localStorage.removeItem('skulk-plugin-install-journeys'));
 
-  it('upgrades the installation in place and records the journey before the download is sent', async () => {
+  it('upgrades the installation in place, saving the journey before each request', async () => {
     const bindCalls: unknown[] = [];
     const installCalls: { pluginId: string; request: RuntimeInstallation['request'] }[] = [];
-    globalThis.localStorage.removeItem('skulk-plugin-install-journeys');
     const outcome = await startCatalogInstall({
-      bind: (request) => { bindCalls.push(request); return resolved(bound); },
+      bind: (request) => {
+        bindCalls.push(request);
+        expect(readJourneys()).toMatchObject([{ pluginId: offer.installed!.plugin_id, runtimeDigest: null }]);
+        return resolved(bound(offer.installed!.plugin_id));
+      },
       install: (args) => { installCalls.push(args); expect(readJourneys().map((item) => item.installOperationId)).toContain(args.request.operation_id); return resolved({} as RuntimeInstallation); },
-    }, offer, listing([entry(51)]), () => null, () => '1'.repeat(32));
+    }, offer, listing([entry(51)]), () => null, ids('1'.repeat(32)), statusOf);
     expect(bindCalls).toEqual([{ catalog_sha256: 'c'.repeat(64), bundle_id: 'example.studio', sequence: 51, runtime_platform: 'macos-arm64', plugin_id: offer.installed!.plugin_id }]);
-    expect(installCalls).toEqual([{ pluginId: bound.plugin_id, request: { operation_id: '1'.repeat(32), runtime_digest: '9'.repeat(64), expected_source_revision: 7 } }]);
+    expect(installCalls).toEqual([{ pluginId: offer.installed!.plugin_id, request: { operation_id: '1'.repeat(32), runtime_digest: '9'.repeat(64), expected_source_revision: 7 } }]);
     expect(isStartRefusal(outcome)).toBe(false);
-    expect((outcome as InstallJourney).activationOperationId).toBeNull();
-    clearJourney(bound.plugin_id);
+    expect(outcome).toMatchObject({ runtimeDigest: '9'.repeat(64), activationOperationId: null });
+    clearJourney(offer.installed!.plugin_id);
     expect(readJourneys()).toEqual([]);
   });
 
-  it('returns the server sentence for a refused bind, and keeps a journey when the download reply is lost', async () => {
+  it('names a new installation itself, so a bind whose reply was lost is continued, not duplicated', async () => {
+    const bindCalls: { plugin_id?: string }[] = [];
+    const lost = await startCatalogInstall({
+      bind: (request) => { bindCalls.push(request); return rejected(new TypeError('network')); },
+      install: () => resolved({} as RuntimeInstallation),
+    }, fresh, listing([entry(51)]), () => null, ids('a'.repeat(32), '2'.repeat(32)), statusOf);
+    expect(lost).toEqual({ stage: 'bind', detail: null, unconfirmed: true });
+    expect(readJourneys()).toMatchObject([{ pluginId: `managed.${'a'.repeat(32)}`, runtimeDigest: null }]);
+    const again = await startCatalogInstall({
+      bind: (request) => { bindCalls.push(request); return resolved(bound(request.plugin_id!)); },
+      install: () => resolved({} as RuntimeInstallation),
+    }, fresh, listing([entry(51)]), () => null, ids('b'.repeat(32), '3'.repeat(32)), statusOf);
+    expect(bindCalls.map((call) => call.plugin_id)).toEqual([`managed.${'a'.repeat(32)}`, `managed.${'a'.repeat(32)}`]);
+    expect(again).toMatchObject({ pluginId: `managed.${'a'.repeat(32)}`, runtimeDigest: '9'.repeat(64) });
+    expect(readJourneys()).toHaveLength(1);
+  });
+
+  it('returns the host\'s sentence for a decided refusal and forgets the attempt', async () => {
     const detail = { status: 409, data: { detail: 'This host could not reach the plugin catalog.' } };
-    const refused = await startCatalogInstall({ bind: () => rejected(detail), install: () => resolved({} as RuntimeInstallation) }, offer, listing([entry(51)]), (error) => (error as typeof detail).data.detail, () => '1'.repeat(32));
-    expect(refused).toEqual({ stage: 'bind', detail: 'This host could not reach the plugin catalog.' });
-    const lost = await startCatalogInstall({ bind: () => resolved(bound), install: () => rejected(new TypeError('network')) }, offer, listing([entry(51)]), () => null, () => '1'.repeat(32));
+    const refused = await startCatalogInstall({ bind: () => rejected(detail), install: () => resolved({} as RuntimeInstallation) }, fresh, listing([entry(51)]), (error) => (error as typeof detail).data.detail, ids(), statusOf);
+    expect(refused).toEqual({ stage: 'bind', detail: 'This host could not reach the plugin catalog.', status: 409 });
+    expect(readJourneys()).toEqual([]);
+    // A lost download reply keeps the journey, so its operation is read back.
+    const lost = await startCatalogInstall({ bind: () => resolved(bound(offer.installed!.plugin_id)), install: () => rejected(new TypeError('network')) }, offer, listing([entry(51)]), () => null, ids(), statusOf);
     expect(isStartRefusal(lost)).toBe(false);
-    expect(readJourneys().map((item) => item.pluginId)).toContain(bound.plugin_id);
-    clearJourney(bound.plugin_id);
+    expect(readJourneys().map((item) => item.pluginId)).toContain(offer.installed!.plugin_id);
+    clearJourney(offer.installed!.plugin_id);
     // A 4xx without a sentence is still a decided refusal, reported with its status.
-    const invalid = await startCatalogInstall({ bind: () => resolved(bound), install: () => rejected({ status: 422, data: {} }) }, offer, listing([entry(51)]), () => null, () => '1'.repeat(32), (error) => (error as { status: number }).status);
+    const invalid = await startCatalogInstall({ bind: () => resolved(bound(offer.installed!.plugin_id)), install: () => rejected({ status: 422, data: {} }) }, offer, listing([entry(51)]), () => null, ids(), statusOf);
     expect(invalid).toEqual({ stage: 'download', detail: null, status: 422 });
     expect(readJourneys()).toEqual([]);
   });

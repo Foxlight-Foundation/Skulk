@@ -14,19 +14,21 @@ import { CatalogInstallProgress, type SetupTarget } from './CatalogInstallProgre
 import { CatalogOfferCard } from './CatalogOfferCard';
 import { CatalogReviewPanel } from './CatalogReviewPanel';
 import {
-  catalogOffers, displayTitle, isStartRefusal, readJourneys, startCatalogInstall,
-  type CatalogOffer, type InstallJourney, type InstallStartRefusal,
+  catalogOffers, displayTitle, isBound, isStartRefusal, readJourneys, startCatalogInstall,
+  type BoundJourney, type CatalogOffer, type InstallStartRefusal,
 } from './catalogJourney';
 
 type BrowseView =
   | { kind: 'list' }
   | { kind: 'connect' }
   | { kind: 'review'; offer: CatalogOffer; listing: CatalogListing }
-  | { kind: 'install'; title: string; publisher: string; sequence: number; transferBytes: number; updating: boolean; journey: InstallJourney | null; refusal: InstallStartRefusal | null }
+  | { kind: 'install'; title: string; publisher: string; sequence: number; transferBytes: number; updating: boolean; journey: BoundJourney | null; refusal: InstallStartRefusal | null }
   | { kind: 'setup'; target: SetupTarget };
 
+// Only a confirmed binding has an operation to follow; an unconfirmed one is
+// continued by installing the same bundle again.
 function resumedView(): BrowseView {
-  const [journey] = readJourneys();
+  const journey = readJourneys().find(isBound);
   return journey
     ? { kind: 'install', title: journey.title, publisher: journey.publisher, sequence: journey.sequence, transferBytes: journey.transferBytes, updating: false, journey, refusal: null }
     : { kind: 'list' };

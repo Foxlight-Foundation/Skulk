@@ -10,7 +10,7 @@ import {
   useLazyGetRuntimeInstallationQuery, type ManagedRuntime,
 } from '../../store/endpoints/plugins';
 import { randomHex32 } from '../../utils/randomIds';
-import { clearJourney, formatMegabytes, readJourneys, saveJourney, type InstallJourney, type InstallStartRefusal } from './catalogJourney';
+import { clearJourney, formatMegabytes, isBound, readJourneys, saveJourney, type BoundJourney, type InstallStartRefusal } from './catalogJourney';
 
 /** What the setup checklist needs once the release is running. */
 export interface SetupTarget { pluginId: string; title: string }
@@ -23,7 +23,7 @@ export interface CatalogInstallProgressProps {
   transferBytes: number;
   updating: boolean;
   /** The saved journey once the consent click has bound the release and asked for the download. */
-  journey: InstallJourney | null;
+  journey: BoundJourney | null;
   /** Why starting stopped, when it did. */
   refusal: InstallStartRefusal | null;
   onDone: (target: SetupTarget) => void;
@@ -83,7 +83,7 @@ export function CatalogInstallProgress({ title, publisher, sequence, transferByt
     const mark = (patch: Partial<Steps>) => { if (!signal.aborted) setSteps((current) => ({ ...current, ...patch })); };
     const fail = (value: Failure) => { if (!signal.aborted) { mark({ [value.step]: 'failed' }); setFailure(value); } };
     // Storage is the record of what was sent; read it at every decision.
-    const saved = (): InstallJourney | null => readJourneys().find((item) => item.pluginId === pluginId) ?? null;
+    const saved = (): BoundJourney | null => readJourneys().find((item): item is BoundJourney => item.pluginId === pluginId && isBound(item)) ?? null;
     const findRuntime = async (): Promise<ManagedRuntime | null> =>
       (await readRuntimes(undefined, false).unwrap()).installations.find((runtime) => runtime.plugin_id === pluginId) ?? null;
 
@@ -189,7 +189,8 @@ export function CatalogInstallProgress({ title, publisher, sequence, transferByt
       'start-slow': t('plugins.catalog.startSlow', 'It was activated but has not reported running yet. Open Installed to follow it.'),
     }[value.code];
   };
-  const refusalText = refusal ? (refusal.detail ?? (refusal.stage === 'bind'
+  const refusalText = refusal?.unconfirmed ? t('plugins.catalog.bindUnconfirmed', 'The host did not confirm this release, so it may already be bound. Review and install it again to continue: the same installation is used, so nothing is duplicated.')
+    : refusal ? (refusal.detail ?? (refusal.stage === 'bind'
     ? t('plugins.catalog.bindRefused', 'The host did not accept this release. Nothing was installed. Read the catalog again and retry.')
     : t('plugins.catalog.downloadRefused', 'The host refused the download. Nothing was installed.'))
     + (refusal.status !== undefined && !refusal.detail ? ` (HTTP ${refusal.status})` : '')) : null;

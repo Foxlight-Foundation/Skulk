@@ -24,6 +24,8 @@ let store: ReturnType<typeof makeStore>;
 let configured: boolean;
 let installed: ManagedRuntime;
 let posts: { path: string; body: Record<string, unknown> }[];
+let freshHost: boolean;
+let loseNextBind: boolean;
 
 function makeStore() { return configureStore({ reducer: { [apiSlice.reducerPath]: apiSlice.reducer }, middleware: (defaults) => defaults().concat(apiSlice.middleware) }); }
 function json(body: unknown, status = 200) { return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } }); }
@@ -41,6 +43,8 @@ const entry: CatalogEntry = {
 beforeEach(async () => {
   posts = [];
   configured = true;
+  freshHost = false;
+  loseNextBind = false;
   localStorage.removeItem('skulk-plugin-install-journeys');
   installed = {
     plugin_id: pluginId, release: { bundle_id: 'example.studio', title: 'Example Studio', bundle_version: '0.1.0', publisher: 'example', sequence: 50 },
@@ -57,7 +61,9 @@ beforeEach(async () => {
       posts.push({ path, body });
       if (path === '/v1/plugins/managed/catalog/source') { configured = true; return json({ revision: 1, configured: true, credential_reference: null, credential_ready: true, trust_revision: 1 }); }
       if (path === '/v1/plugins/managed/catalog/install') {
-        return json({ plugin_id: pluginId, listing: entry, source: { revision: 7, configured: true, credential_reference: null, credential_ready: true, trust_revision: 1 },
+        // The host acts on the request, but the reply never arrives.
+        if (loseNextBind) { loseNextBind = false; throw new TypeError('network'); }
+        return json({ plugin_id: String(body.plugin_id), listing: entry, source: { revision: 7, configured: true, credential_reference: null, credential_ready: true, trust_revision: 1 },
           review: { runtime_digest: newDigest, source_revision: 7, publisher: 'example', bundle_id: entry.bundle_id, version: '0.1.0', sequence: 51, platform: 'macos-arm64', python_requires: '>=3.13', skulk_build_sha256: 'b'.repeat(64), permissions: entry.permissions, artifact_bytes: 12_000_000, expires_at: 1_900_000_000 } });
       }
       if (path.endsWith('/install')) { installOperationId = String(body.operation_id); return json({ request: body, state: 'accepted', downloaded_bytes: 0, error_code: null }); }
@@ -70,7 +76,7 @@ beforeEach(async () => {
     }
     if (path === '/v1/plugins/managed/catalog/source') return json({ revision: configured ? 1 : 0, configured, credential_reference: null, credential_ready: configured, trust_revision: configured ? 1 : null });
     if (path === '/v1/plugins/managed/catalog') return json({ publisher: 'example', revision: 34, created_at: 1_790_000_000, expires_at: 1_800_000_000, catalog_sha256: 'c'.repeat(64), entries: [entry] });
-    if (path === '/v1/plugins/managed') return json({ installations: [installed] });
+    if (path === '/v1/plugins/managed') return json({ installations: freshHost ? [] : [installed] });
     if (path.endsWith('/install')) return json({ operation: installOperationId ? { request: { operation_id: installOperationId, runtime_digest: newDigest, expected_source_revision: 7 }, review: {}, state: 'staged', downloaded_bytes: 12_000_000, error_code: null } : null });
     if (path.includes('/operations/')) return json({ request: { operation_id: activationOperationId, action: 'activate' }, state: 'complete', error_code: null });
     return json({ detail: 'not found' }, 404);
@@ -131,4 +137,24 @@ it('connects a catalog from an invitation code before browsing it', async () => 
   await click('Connect');
   await contains('Browse capabilities');
   expect(posts[0]).toMatchObject({ path: '/v1/plugins/managed/catalog/source', body: { expected_revision: 0, base_url: 'https://catalog.example.ts.net/', trust: { revision: 1, expires_at: 4_000_000_000, publishers: { example: 'f'.repeat(64) } } } });
+});
+
+it('continues a new installation whose binding reply was lost instead of registering another', async () => {
+  freshHost = true;
+  loseNextBind = true;
+  await render();
+  await contains('Review and install');
+  await click('Review and install');
+  await act(async () => { (host.querySelector('#catalog-consent') as HTMLInputElement).click(); });
+  await click('Install');
+  await contains('The host did not confirm this release, so it may already be bound.');
+  await click('Back to Browse');
+  await contains('Review and install');
+  await click('Review and install');
+  await act(async () => { (host.querySelector('#catalog-consent') as HTMLInputElement).click(); });
+  await click('Install');
+  await act(async () => { await vi.waitFor(() => expect(posts.filter((post) => post.path === '/v1/plugins/managed/catalog/install')).toHaveLength(2), { timeout: 5000 }); });
+  const binds = posts.filter((post) => post.path === '/v1/plugins/managed/catalog/install').map((post) => post.body.plugin_id);
+  expect(binds[0]).toMatch(/^managed\.[0-9a-f]{32}$/);
+  expect(binds[1]).toBe(binds[0]);
 });

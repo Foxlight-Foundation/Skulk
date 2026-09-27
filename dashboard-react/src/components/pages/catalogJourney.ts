@@ -182,7 +182,8 @@ export interface InstallJourney {
   bundleId: string;
   sequence: number;
   publisher: string;
-  runtimeDigest: string;
+  /** Digest of the bound release; null until the host confirms the binding. */
+  runtimeDigest: string | null;
   /** Download size the listing declared, for progress. */
   transferBytes: number;
   installOperationId: string;
@@ -197,10 +198,19 @@ function isJourney(value: unknown): value is InstallJourney {
   if (!value || typeof value !== 'object') return false;
   const journey = value as Record<string, unknown>;
   return typeof journey.pluginId === 'string' && typeof journey.title === 'string' && typeof journey.bundleId === 'string'
-    && typeof journey.sequence === 'number' && typeof journey.publisher === 'string' && typeof journey.runtimeDigest === 'string'
+    && typeof journey.sequence === 'number' && typeof journey.publisher === 'string'
+    && (journey.runtimeDigest === null || typeof journey.runtimeDigest === 'string')
     && typeof journey.transferBytes === 'number' && typeof journey.installOperationId === 'string'
     && (journey.activationOperationId === null || typeof journey.activationOperationId === 'string')
     && typeof journey.startedAt === 'number';
+}
+
+/** A journey whose binding the host confirmed, so there is an operation to follow. */
+export type BoundJourney = InstallJourney & { runtimeDigest: string };
+
+/** Whether the host confirmed a journey's binding. */
+export function isBound(journey: InstallJourney): journey is BoundJourney {
+  return journey.runtimeDigest !== null;
 }
 
 /** Installs this browser started and has not finished watching. Storage may be unavailable. */
@@ -240,16 +250,23 @@ export interface InstallStarters {
   install: (args: { pluginId: string; request: RuntimeInstallation['request'] }) => Unwrappable<RuntimeInstallation>;
 }
 
-/** Why starting an install stopped: the server's own sentence and status, when it gave them. */
-export interface InstallStartRefusal { stage: 'bind' | 'download'; detail: string | null; status?: number }
+/**
+ * Why starting an install stopped: the server's own sentence and status, when
+ * it gave them. `unconfirmed` means no decided answer arrived for the binding;
+ * its installation identity stays saved, so installing again continues it.
+ */
+export interface InstallStartRefusal { stage: 'bind' | 'download'; detail: string | null; status?: number; unconfirmed?: boolean }
 
 /**
  * Bind the installation to the reviewed listing and ask the host to download
  * it, from the consent click itself so it runs exactly once.
  *
- * The journey is saved before the download request is sent. If that
- * response is lost the page reads the operation back instead of sending it
- * again; a refusal with a reason clears the journey and returns the reason.
+ * The journey is saved before each request. A new installation's identity is
+ * chosen here rather than by the host, so a binding whose reply was lost is
+ * continued, not duplicated, by the next attempt for the same bundle. If the
+ * download reply is lost the page reads the operation back instead of sending
+ * it again. A decided refusal (a 4xx) clears the journey and returns the
+ * host's reason.
  */
 export async function startCatalogInstall(
   starters: InstallStarters,
@@ -258,24 +275,34 @@ export async function startCatalogInstall(
   refusalDetail: (error: unknown) => string | null,
   newOperationId: () => string,
   refusedStatus: (error: unknown) => number | null = () => null,
-): Promise<InstallJourney | InstallStartRefusal> {
+): Promise<BoundJourney | InstallStartRefusal> {
+  const unconfirmed = readJourneys().find((item) => item.bundleId === offer.entry.bundle_id && !isBound(item));
+  const pluginId = offer.installed?.plugin_id ?? unconfirmed?.pluginId ?? `managed.${newOperationId()}`;
+  const pending: InstallJourney = {
+    pluginId, title: displayTitle(offer.entry), bundleId: offer.entry.bundle_id, sequence: offer.entry.sequence,
+    publisher: offer.entry.publisher, runtimeDigest: null, transferBytes: offer.entry.transfer_bytes,
+    installOperationId: newOperationId(), activationOperationId: null, startedAt: Date.now(),
+  };
+  saveJourney(pending);
   let bound: CatalogInstallation;
   try {
     bound = await starters.bind({
       catalog_sha256: listing.catalog_sha256, bundle_id: offer.entry.bundle_id, sequence: offer.entry.sequence,
       ...(offer.entry.runtime_platform ? { runtime_platform: offer.entry.runtime_platform } : {}),
-      ...(offer.installed ? { plugin_id: offer.installed.plugin_id } : {}),
+      plugin_id: pluginId,
     }).unwrap();
   } catch (error) {
+    // Only a 4xx is decided. Anything else may have registered and bound the
+    // installation, so its identity stays saved for the next attempt.
     const status = refusedStatus(error);
-    return { stage: 'bind', detail: refusalDetail(error), ...(status !== null ? { status } : {}) };
+    if (status !== null) { clearJourney(pluginId); return { stage: 'bind', detail: refusalDetail(error), status }; }
+    return { stage: 'bind', detail: refusalDetail(error), unconfirmed: true };
   }
-  const journey: InstallJourney = {
-    pluginId: bound.plugin_id, title: displayTitle(offer.entry), bundleId: offer.entry.bundle_id, sequence: offer.entry.sequence,
-    publisher: offer.entry.publisher, runtimeDigest: bound.review.runtime_digest,
+  const journey: BoundJourney = {
+    ...pending, pluginId: bound.plugin_id, runtimeDigest: bound.review.runtime_digest,
     transferBytes: bound.review.artifact_bytes || offer.entry.transfer_bytes,
-    installOperationId: newOperationId(), activationOperationId: null, startedAt: Date.now(),
   };
+  if (journey.pluginId !== pluginId) clearJourney(pluginId);
   saveJourney(journey);
   try {
     await starters.install({ pluginId: journey.pluginId, request: { operation_id: journey.installOperationId, runtime_digest: journey.runtimeDigest, expected_source_revision: bound.source.revision } }).unwrap();
@@ -289,6 +316,6 @@ export async function startCatalogInstall(
 }
 
 /** Whether a start result is a refusal rather than a journey. */
-export function isStartRefusal(value: InstallJourney | InstallStartRefusal): value is InstallStartRefusal {
+export function isStartRefusal(value: BoundJourney | InstallStartRefusal): value is InstallStartRefusal {
   return 'stage' in value;
 }

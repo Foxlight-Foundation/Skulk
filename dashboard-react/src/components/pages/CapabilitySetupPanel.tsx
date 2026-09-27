@@ -8,6 +8,7 @@ import { capabilityNodeKey, capabilityNodeTitle, type CapabilityNodeStatus, type
 import { Button } from '../common/Button';
 import { Spinner } from '../common/Spinner';
 import { StatusPill, Surface } from '../common/Surfaces';
+import { resolveSurfaceUrl } from '../topology/capabilityActions';
 import { NodePreflightPanel } from './NodePreflightPanel';
 import type { SetupTarget } from './CatalogInstallProgress';
 
@@ -46,16 +47,26 @@ const STATUS_STATE: Record<CapabilityNodeStatus, ItemState> = {
  */
 export function CapabilitySetupPanel({ target, onManage, onBack }: CapabilitySetupPanelProps) {
   const { t } = useSkulkTranslation();
-  const { capabilityNodes } = useClusterState();
+  const { capabilityNodes, localNodeId } = useClusterState();
   const plugins = useGetPluginNodesQuery();
-  const summaries = useMemo(() => Object.values(capabilityNodes).flat().filter((node) => node.pluginId === target.pluginId), [capabilityNodes, target.pluginId]);
+  const hosted = useMemo(() => Object.entries(capabilityNodes).flatMap(([hostNodeId, nodes]) => nodes
+    .filter((node) => node.pluginId === target.pluginId).map((summary) => ({ hostNodeId, summary }))), [capabilityNodes, target.pluginId]);
+  const summaries = useMemo(() => hosted.map((item) => item.summary), [hosted]);
   const withChecks = new Set(plugins.data?.find((plugin) => plugin.pluginId === target.pluginId)?.nodes.filter((node) => node.preflightAvailable).map((node) => node.nodeId) ?? []);
-  // The summary carries only surfaces the plugin reported ready to open.
+  // The summary carries only surfaces the plugin reported ready to open. As in
+  // the topology, a loopback one opens only from a browser on its own host.
   const surfaces = useMemo(() => {
-    const unique = new Map<string, CapabilityNodeSurface>();
-    for (const summary of summaries) for (const surface of summary.surfaces) if (surface.kind === 'link' && surface.url && !unique.has(surface.url)) unique.set(surface.url, surface);
+    const unique = new Map<string, { surface: CapabilityNodeSurface; reachable: boolean }>();
+    for (const { hostNodeId, summary } of hosted) {
+      for (const surface of summary.surfaces) {
+        if (surface.kind !== 'link' || !surface.url || unique.has(surface.url)) continue;
+        const resolved = resolveSurfaceUrl(surface.url, { isLocalHost: hostNodeId === localNodeId, dashboardHostname: window.location.hostname });
+        unique.set(surface.url, { surface: { ...surface, url: resolved.url }, reachable: resolved.reachable });
+      }
+    }
     return [...unique.values()];
-  }, [summaries]);
+  }, [hosted, localNodeId]);
+  const unreachable = surfaces.filter((item) => !item.reachable);
 
   // A status this dashboard does not know yet is shown as needing a look.
   const itemState = (summary: CapabilityNodeSummary): ItemState => summary.ownerAvailable ? STATUS_STATE[summary.status] ?? 'needed' : 'needed';
@@ -109,12 +120,15 @@ export function CapabilitySetupPanel({ target, onManage, onBack }: CapabilitySet
       })}
     </Items>
     <Actions>
-      {surfaces.map((surface, index) => <OpenLink key={surface.url} href={surface.url} target="_blank" rel="noopener noreferrer" $primary={index === 0}>
-        {t('plugins.setup.open', 'Open {surface}', { surface: surface.title })}<FiExternalLink aria-hidden="true" />
-      </OpenLink>)}
+      {surfaces.map(({ surface, reachable }, index) => reachable
+        ? <OpenLink key={surface.url} href={surface.url} target="_blank" rel="noopener noreferrer" $primary={index === 0}>
+          {t('plugins.setup.open', 'Open {surface}', { surface: surface.title })}<FiExternalLink aria-hidden="true" />
+        </OpenLink>
+        : <Button key={surface.url} variant="outline" disabled>{t('plugins.setup.open', 'Open {surface}', { surface: surface.title })}</Button>)}
       {onManage ? <Button variant="ghost" onClick={() => onManage(target.pluginId)}>{t('plugins.setup.managePlugin', 'Manage plugin')}</Button> : null}
       <Button variant="ghost" onClick={onBack}>{t('plugins.catalog.backToBrowse', 'Back to Browse')}</Button>
     </Actions>
+    {unreachable.length > 0 ? <Hint>{t('plugins.setup.onHostOnly', '{surface} opens only from a browser running on the host that runs it.', { surface: unreachable.map((item) => item.surface.title).join(', ') })}</Hint> : null}
     {surfaces.length === 0 && summaries.length > 0 ? <Hint>{ready ? t('plugins.setup.noScreens', 'It opens no screens of its own; its capabilities are ready for clients and tools.')
       : t('plugins.setup.screensLater', 'Its screens appear here once it is ready.')}</Hint> : null}
   </Panel>;
