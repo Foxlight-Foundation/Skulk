@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import styled from 'styled-components';
 import { FiCheck, FiCircle, FiExternalLink } from 'react-icons/fi';
 import { useSkulkTranslation } from '../../i18n/tolgee';
@@ -51,34 +51,33 @@ export function CapabilitySetupPanel({ target, onBack }: CapabilitySetupPanelPro
   const { localNodeId, capabilityNodes, instances, runners } = useClusterState();
   const [readiness, setReadiness] = useState<VideoReadiness | null>(null);
   const [readinessError, setReadinessError] = useState(false);
-  const [checking, setChecking] = useState(false);
-  const [chatModels, setChatModels] = useState<Set<string> | null>(null);
   const video = servesVideoReadiness(target.descriptors);
+  // True while a readiness read is under way, including the first one.
+  const [checking, setChecking] = useState(video);
+  const [chatModels, setChatModels] = useState<Set<string> | null>(null);
   const summary = useMemo(() => Object.values(capabilityNodes).flat().find((node) => node.pluginId === target.pluginId) ?? null, [capabilityNodes, target.pluginId]);
   const surface = summary?.surfaces.find((item) => item.kind === 'link') ?? null;
 
-  const mounted = useRef(true);
-  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
-  const check = useCallback(async () => {
+  // Bumped by "Check again" to start another round of readiness reads.
+  const [checkRound, setCheckRound] = useState(0);
+  useEffect(() => {
     if (!video || !localNodeId) return;
-    setChecking(true);
-    setReadinessError(false);
-    for (let attempt = 0; attempt < READINESS_ATTEMPTS && mounted.current; attempt += 1) {
-      let parsed: VideoReadiness | null = null;
-      try {
-        const reply = await runDescriptorAction(localNodeId, 'video.readiness', {});
-        parsed = reply.ok ? parseVideoReadiness(reply.result) : null;
-      } catch {
-        parsed = null;
-      }
-      if (!mounted.current) return;
-      if (parsed) { setReadiness(parsed); setChecking(false); return; }
-      await new Promise((resolve) => setTimeout(resolve, READINESS_RETRY_MS));
-    }
-    if (mounted.current) { setReadinessError(true); setChecking(false); }
-  }, [localNodeId, video]);
-
-  useEffect(() => { void check(); }, [check]);
+    let alive = true;
+    const attempt = (remaining: number): void => {
+      runDescriptorAction(localNodeId, 'video.readiness', {})
+        .then((reply) => (reply.ok ? parseVideoReadiness(reply.result) : null))
+        .catch(() => null)
+        .then((parsed) => {
+          if (!alive) return;
+          if (parsed) { setReadiness(parsed); setReadinessError(false); setChecking(false); return; }
+          if (remaining <= 1) { setReadinessError(true); setChecking(false); return; }
+          setTimeout(() => { if (alive) attempt(remaining - 1); }, READINESS_RETRY_MS);
+        });
+    };
+    attempt(READINESS_ATTEMPTS);
+    return () => { alive = false; };
+  }, [localNodeId, video, checkRound]);
+  const checkAgain = () => { setChecking(true); setReadinessError(false); setCheckRound((round) => round + 1); };
   useEffect(() => {
     let alive = true;
     fetch('/v1/models', { cache: 'no-store' })
@@ -159,7 +158,7 @@ export function CapabilitySetupPanel({ target, onBack }: CapabilitySetupPanelPro
         onClick={(event) => { if (!ready || !surface.ready) event.preventDefault(); }}>
         {t('plugins.setup.open', 'Open {surface}', { surface: surface.title })}<FiExternalLink aria-hidden="true" />
       </OpenLink> : null}
-      {video ? <Button variant="ghost" disabled={checking} onClick={() => void check()}>{t('plugins.setup.checkAgain', 'Check again')}</Button> : null}
+      {video ? <Button variant="ghost" disabled={checking} onClick={checkAgain}>{t('plugins.setup.checkAgain', 'Check again')}</Button> : null}
       <Button variant="ghost" onClick={onBack}>{t('plugins.catalog.backToBrowse', 'Back to Browse')}</Button>
     </Actions>
     {surface?.url && !ready ? <Hint>{t('plugins.setup.openHint', 'Available once the needed steps are done.')}</Hint> : null}
