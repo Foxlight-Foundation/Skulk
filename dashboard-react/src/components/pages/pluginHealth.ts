@@ -11,9 +11,9 @@ export function derivePluginHealth(runtime: ManagedRuntime, nodes: PluginNodes |
   // A recorded failure stays evidence as its observation ages: a release that
   // failed verification does not start again until something changes.
   const failed = recordedServiceFailure(runtime) !== null;
-  // An uninstalled installation has no running service to observe, so it is
-  // always stale; that does not make its state unknown.
-  if (runtime.stale && !runtime.uninstalled && !failed) return 'unknown';
+  // An uninstalled or disabled installation has no running service to
+  // observe, so it is always stale; that does not make its state unknown.
+  if (runtime.stale && !runtime.uninstalled && runtime.enabled && !failed) return 'unknown';
   if (operationState === 'failed' || operationState === 'recovery_required' || runtime.error_code) return 'attention';
   if (operationState === 'accepted' || operationState === 'applying') return 'updating';
   if (runtime.uninstalled) return 'uninstalled';
