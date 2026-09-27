@@ -58,8 +58,10 @@ _PLUGIN_OWNER_AUTHORITY_DETAIL: Final = (
     "LAN addresses, the public relay and forwarded requests cannot manage them."
 )
 _PAIRED_PLUGIN_OWNER_DETAIL: Final = (
-    "Paired devices cannot administer plugins. Open this node's dashboard in a "
-    "browser on the node itself (localhost), or through Tailscale."
+    "This plugin change needs direct owner access, which a paired credential "
+    "never grants. From a browser on this node itself (localhost) or through "
+    "Tailscale, choose \"Use direct host access\" on the Plugins page and try "
+    "again; API clients send the request without the paired credential."
 )
 _PAIRING_GATEWAY_DETAIL: Final = (
     "This node is not ready to manage pairing invitations. Open Settings on the "

@@ -719,7 +719,8 @@ async def test_plugin_refusals_say_how_to_reach_the_node() -> None:
         )
     assert paired.value.status_code == 403
     assert isinstance(paired.value.detail, str)
-    assert paired.value.detail.startswith("Paired devices cannot administer plugins")
+    assert paired.value.detail.startswith("This plugin change needs direct owner")
+    assert "Use direct host access" in paired.value.detail
 
     # A verified Tailscale browser on the node's MagicDNS name is the owner.
     await authorize_plugin_owner_request(_plugin_owner_request("100.64.0.9"), verified)

@@ -109,11 +109,12 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
-- A plugin request refused from an ordinary LAN address, or an owner-only
-  one from a paired device, now says how plugins are managed: from a browser
-  on the node itself, or the node's dashboard over Tailscale. Every plugin
-  route, reads included, used to refuse a LAN browser with the text about
-  managing pairing invitations from the operator gateway. The
+- A plugin request refused from an ordinary LAN address now says how
+  plugins are managed: from a browser on the node itself, or the node's
+  dashboard over Tailscale. Every plugin route, reads included, used to
+  refuse a LAN browser with the text about managing pairing invitations
+  from the operator gateway. An owner-only change sent with a paired
+  credential now says to choose "Use direct host access". The
   dashboard's release source form also suggests `release.json`, the record
   name releases use and the terminal installer defaults to; it suggested
   `runtime.json`.
