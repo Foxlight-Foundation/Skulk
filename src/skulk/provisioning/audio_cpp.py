@@ -105,8 +105,8 @@ AUDIO_CPP_CPU_WHEELS: Final[dict[tuple[str, str], AudioCppWheel]] = {
 }
 
 # The Vulkan package is separate so preparing it cannot replace an in-use CPU
-# executable. This exact sampler-corrected candidate passed real Strix listening;
-# a signed model support claim still requires the isolated Skulk lifecycle gate.
+# executable. This exact sampler-corrected candidate passed real Strix listening
+# and isolated Skulk lifecycle checks; signed support remains registry truth.
 AUDIO_CPP_VULKAN_WHEELS: Final[dict[tuple[str, str], AudioCppWheel]] = {
     ("linux", "x86_64"): AudioCppWheel(
         filename="skulk_audio_cpp_vulkan-0.8.2.post3-py3-none-manylinux_2_35_x86_64.whl",

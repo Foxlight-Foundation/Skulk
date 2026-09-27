@@ -29,9 +29,56 @@ and executable SHA-256
 The exact attested wheel loaded on Strix Vulkan and returned a 59.919-second
 structured vocal WAV and a different-seed instrumental WAV that ended naturally
 at 35.352 seconds. Both passed human listening as very good. These were direct
-engine-server requests. The isolated Skulk placement, job lifecycle, and longer
-stability gates for this build remain open, so these results do not yet qualify
-a replacement signed support claim.
+engine-server requests. [Publication run 36297920867](https://github.com/Foxlight-Foundation/Skulk/actions/runs/36297920867)
+verified the source run, wheel digest, and attestation, then published those
+exact wheel bytes to the engine-package index.
+
+An isolated Skulk reader with a test-signed catalog then prepared the published
+wheel on ordinary placement, verified its executable build identity, and
+mounted both exact music cards. MiniMax and ACE-Step each completed
+`POST /v1/music` jobs with bounded WAV content and matching output digests.
+MiniMax also rejected missing lyrics. A queued cancellation left active work
+running; an active cancellation stopped that model server, and a subsequent
+job completed on its supervised replacement. An ACE-Step job overlapped two
+completed MiniMax generations.
+
+The isolated MiniMax reader then completed **34 back-to-back ten-second jobs in
+1,849.11 seconds** with no failed job or intentional idle interval. All 34
+WAVs had distinct SHA-256 digests, valid stereo 44.1 kHz PCM16 headers, output
+metadata matching the delivered bytes, and measured signal. The maximum gap
+between requests was 0.014 seconds; the minimum full-wave PCM16 RMS was
+682.61. Latency was 53.20–54.20–58.21 seconds (minimum, median, maximum).
+Across 394 five-second samples of that MiniMax server, the process high-water
+RSS was 1,956,500 KiB and its maximum reported resident Vulkan memory on one
+DRM file descriptor was 6,761,408 KiB. These are sampled measurements on one
+64 GiB Strix host, not universal capacity requirements.
+
+An induced crash of only the isolated MiniMax server failed its in-flight job,
+supervision started a different server process, and a fresh job returned a
+digest-matched WAV. After removing both test mounts, the isolated reader was
+restarted offline with engine auto-provisioning disabled and the test catalog
+server stopped. It recovered a completed job's original WAV and remounted
+both music cards from verified cached engine and model artifacts. Each card
+then completed a fresh offline generation with content matching its digest.
+The normal three-node service retained its original process, code revision,
+configuration digest, two placements, and empty diagnostics warnings after
+the isolated test. The temporary reader and catalog were removed and the
+fleet lease released.
+
+These results establish the new build's MiniMax functional and stability
+path, alongside the two accepted listening samples. ACE-Step also loaded,
+generated, and ran concurrently through this build. A separate direct-server
+check of the same wheel and SHA-256-verified ACE-Step artifact completed
+**62 back-to-back ten-second jobs in 1,800.146 seconds** with no failed job.
+All 62 stereo 48 kHz PCM16 WAVs had distinct digests and measured signal;
+the minimum full-wave PCM16 RMS was 549.36. The maximum inter-request gap was
+0.002 seconds and latency was 23.14–30.30–34.00 seconds
+(minimum, median, maximum). Its server high-water RSS was 5,549,056 KiB and
+maximum sampled resident Vulkan memory on one DRM fd was 15,542,144 KiB
+across 374 five-second samples. A separate 45-second ACE-Step output had
+SHA-256 `b9b897f1f99bfdab4150db47f70a1c7a647f5567f8f9be68e49133b89e01dc6e`;
+its listening verdict is pending. No production-signed claim for this build
+has been published yet.
 
 The sampler defect is separate from a measured Vulkan precision issue: some
 large MiniMax matrix multiplications on this hardware use 16-bit accumulation.
