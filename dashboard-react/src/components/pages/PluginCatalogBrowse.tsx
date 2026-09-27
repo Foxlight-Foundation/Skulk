@@ -14,7 +14,7 @@ import { CatalogInstallProgress, type SetupTarget } from './CatalogInstallProgre
 import { CatalogOfferCard } from './CatalogOfferCard';
 import { CatalogReviewPanel } from './CatalogReviewPanel';
 import {
-  catalogOffers, displayTitle, isBound, isStartRefusal, readJourneys, startCatalogInstall,
+  catalogOffers, displayTitle, isBound, isStartRefusal, journeyInProgress, readJourneys, startCatalogInstall,
   type BoundJourney, type CatalogOffer, type InstallStartRefusal,
 } from './catalogJourney';
 
@@ -67,7 +67,18 @@ export function PluginCatalogBrowse({ onManage }: PluginCatalogBrowseProps = {})
     starting.current = false;
     setView(isStartRefusal(outcome) ? { ...base, journey: null, refusal: outcome } : { ...base, transferBytes: outcome.transferBytes, journey: outcome, refusal: null });
   };
-  const toList = () => { setView({ kind: 'list' }); void catalog.refetch(); void runtimes.refetch(); };
+  const toList = () => {
+    setView({ kind: 'list' });
+    // A query that has not started yet (Browse opened on a resumed install)
+    // has nothing to refetch; it starts when the list needs it.
+    if (!catalog.isUninitialized) void catalog.refetch();
+    if (!runtimes.isUninitialized) void runtimes.refetch();
+  };
+  const resume = (journey: BoundJourney, updating: boolean) => setView({
+    kind: 'install', title: journey.title, publisher: journey.publisher, sequence: journey.sequence, transferBytes: journey.transferBytes, updating, journey, refusal: null,
+  });
+  // Read when the list renders: leaving an install's progress returns here.
+  const journeys = view.kind === 'list' ? readJourneys() : [];
 
   if (view.kind === 'install') {
     return <CatalogInstallProgress title={view.title} publisher={view.publisher} sequence={view.sequence} transferBytes={view.transferBytes}
@@ -98,9 +109,13 @@ export function PluginCatalogBrowse({ onManage }: PluginCatalogBrowseProps = {})
       <Button variant="outline" size="sm" disabled={catalog.isFetching} onClick={() => void catalog.refetch()}>{t('plugins.catalog.retry', 'Try again')}</Button>
     </Notice> : null}
     {catalog.data && offers.length === 0 ? <p>{t('plugins.catalog.empty', 'This catalog lists nothing yet.')}</p> : null}
-    <Offers>{catalog.data ? offers.map((offer) => <CatalogOfferCard key={offer.entry.bundle_id} offer={offer}
-      onReview={() => setView({ kind: 'review', offer, listing: catalog.data! })}
-      onSetUp={() => offer.installed && setView({ kind: 'setup', target: { pluginId: offer.installed.plugin_id, title: displayTitle(offer.entry) } })} />) : null}</Offers>
+    <Offers>{catalog.data ? offers.map((offer) => {
+      const progress = journeyInProgress(offer.entry.bundle_id, offer.entry.sequence, journeys);
+      return <CatalogOfferCard key={offer.entry.bundle_id} offer={offer} progress={progress}
+        onResume={() => progress && resume(progress, offer.state === 'update')}
+        onReview={() => setView({ kind: 'review', offer, listing: catalog.data! })}
+        onSetUp={() => offer.installed && setView({ kind: 'setup', target: { pluginId: offer.installed.plugin_id, title: displayTitle(offer.entry) } })} />;
+    }) : null}</Offers>
   </section>;
 }
 

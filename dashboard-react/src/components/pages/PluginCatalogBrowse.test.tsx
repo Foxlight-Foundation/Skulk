@@ -7,7 +7,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { apiSlice } from '../../store/api';
 import type { CatalogEntry, ManagedRuntime } from '../../store/endpoints/plugins';
 import { darkTheme } from '../../theme/theme';
-import { encodeInvitation, readJourneys } from './catalogJourney';
+import { encodeInvitation, readJourneys, saveJourney } from './catalogJourney';
 import { PluginCatalogBrowse } from './PluginCatalogBrowse';
 
 Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', { value: true, configurable: true });
@@ -157,4 +157,21 @@ it('continues a new installation whose binding reply was lost instead of registe
   const binds = posts.filter((post) => post.path === '/v1/plugins/managed/catalog/install').map((post) => post.body.plugin_id);
   expect(binds[0]).toMatch(/^managed\.[0-9a-f]{32}$/);
   expect(binds[1]).toBe(binds[0]);
+});
+
+it('returns to an install in progress instead of offering the release again', async () => {
+  freshHost = true;
+  const pending = `managed.${'7'.repeat(32)}`;
+  saveJourney({ pluginId: pending, title: 'Example Studio', bundleId: 'example.studio', sequence: 51, publisher: 'example', runtimeDigest: newDigest,
+    transferBytes: 12_000_000, installOperationId: '8'.repeat(32), activationOperationId: null, startedAt: 1 });
+  await render();
+  // Opening Browse picks the install up where it was.
+  await contains('Installing Example Studio');
+  await click('Back to Browse');
+  await contains('Show progress');
+  expect(host.textContent).toContain('Installing');
+  expect(button('Review and install')).toBeNull();
+  await click('Show progress');
+  await contains('Installing Example Studio');
+  expect(posts.filter((post) => post.path === '/v1/plugins/managed/catalog/install')).toEqual([]);
 });

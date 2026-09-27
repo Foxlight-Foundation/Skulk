@@ -2,7 +2,7 @@ import styled from 'styled-components';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 import { Button } from '../common/Button';
 import { Monogram, StatusPill } from '../common/Surfaces';
-import { canSpendMoney, displayTitle, formatMegabytes, monogram, platformLabel, type CatalogOffer } from './catalogJourney';
+import { canSpendMoney, displayTitle, formatMegabytes, monogram, platformLabel, type BoundJourney, type CatalogOffer } from './catalogJourney';
 
 /** Props for one catalog card: the offer and what its button does. */
 export interface CatalogOfferCardProps {
@@ -11,22 +11,29 @@ export interface CatalogOfferCardProps {
   onReview: () => void;
   /** Open the setup checklist of the installed release. */
   onSetUp: () => void;
+  /** The install of this release this browser is following, if any. */
+  progress?: BoundJourney | null;
+  /** Return to that install's progress. */
+  onResume?: () => void;
 }
 
 /** One bundle a catalog offers, with the facts a newcomer decides on at a glance. */
-export function CatalogOfferCard({ offer, onReview, onSetUp }: CatalogOfferCardProps) {
+export function CatalogOfferCard({ offer, onReview, onSetUp, progress = null, onResume }: CatalogOfferCardProps) {
   const { t } = useSkulkTranslation();
   const { entry, installed, state } = offer;
   const title = displayTitle(entry);
   const installedSequence = installed?.release?.sequence ?? null;
-  const fit = {
+  // A release being installed is shown as such: offering it again would start
+  // a second installation beside the first.
+  const busy = progress !== null && state !== 'installed';
+  const fit = busy ? <StatusPill tone="live">{state === 'update' ? t('plugins.catalog.updatingPill', 'Updating') : t('plugins.catalog.installingPill', 'Installing')}</StatusPill> : {
     available: <StatusPill tone="healthy">{t('plugins.catalog.fitsHost', 'Fits this host')}</StatusPill>,
     update: <StatusPill tone="live">{t('plugins.catalog.updateAvailable', 'Update available')}</StatusPill>,
     installed: <StatusPill tone="healthy">{t('plugins.catalog.installed', 'Installed')}</StatusPill>,
     unfit: <StatusPill tone="neutral">{t('plugins.catalog.notForHost', 'Not built for this host')}</StatusPill>,
   }[state];
   const opens = entry.surfaces.length > 0 ? t('plugins.catalog.opens', 'Opens {surfaces}.', { surfaces: entry.surfaces.join(', ') }) : null;
-  const primary = {
+  const primary = busy ? <Button variant="primary" size="sm" onClick={onResume}>{t('plugins.catalog.showProgress', 'Show progress')}</Button> : {
     available: <Button variant="primary" size="sm" onClick={onReview}>{t('plugins.catalog.reviewInstall', 'Review and install')}</Button>,
     update: <Button variant="primary" size="sm" onClick={onReview}>{t('plugins.catalog.reviewUpdate', 'Review update')}</Button>,
     installed: <Button variant="outline" size="sm" onClick={onSetUp}>{t('plugins.catalog.setUp', 'Set up')}</Button>,

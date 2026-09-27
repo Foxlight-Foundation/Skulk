@@ -33,7 +33,9 @@ beforeEach(() => {
   saveJourney(journey);
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
     const request = input instanceof Request ? input : new Request(new URL(String(input), location.href), init);
-    if (new URL(request.url).pathname.endsWith('/install')) return installRead();
+    const path = new URL(request.url).pathname;
+    if (path.endsWith('/install')) return installRead();
+    if (path === '/v1/plugins/managed') return json({ installations: [] });
     return json({ detail: 'not found' }, 404);
   });
   store = makeStore();
@@ -68,5 +70,12 @@ it('forgets the install only when the host answers that its download is not ther
   installRead = () => json({ operation: null });
   await render();
   await contains('The host never confirmed the download.');
+  expect(readJourneys()).toEqual([]);
+});
+
+it('forgets the install when the host answers without its installation', async () => {
+  installRead = () => json({ operation: { request: { operation_id: journey.installOperationId, runtime_digest: journey.runtimeDigest, expected_source_revision: 7 }, review: {}, state: 'staged', downloaded_bytes: 12_000_000, error_code: null } });
+  await render();
+  await contains('The installation is not in the host’s inventory.');
   expect(readJourneys()).toEqual([]);
 });

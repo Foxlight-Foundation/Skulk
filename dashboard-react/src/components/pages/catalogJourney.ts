@@ -213,6 +213,11 @@ export function isBound(journey: InstallJourney): journey is BoundJourney {
   return journey.runtimeDigest !== null;
 }
 
+/** The confirmed journey installing this release of a bundle, if this browser still follows one. */
+export function journeyInProgress(bundleId: string, sequence: number, journeys: InstallJourney[] = readJourneys()): BoundJourney | null {
+  return journeys.find((item): item is BoundJourney => isBound(item) && item.bundleId === bundleId && item.sequence === sequence) ?? null;
+}
+
 /** Installs this browser started and has not finished watching. Storage may be unavailable. */
 export function readJourneys(storage: Pick<Storage, 'getItem'> | null = safeStorage()): InstallJourney[] {
   if (!storage) return [];
@@ -276,6 +281,10 @@ export async function startCatalogInstall(
   newOperationId: () => string,
   refusedStatus: (error: unknown) => number | null = () => null,
 ): Promise<BoundJourney | InstallStartRefusal> {
+  // A release this browser is already installing, in this tab or another, is
+  // followed rather than started again.
+  const inProgress = journeyInProgress(offer.entry.bundle_id, offer.entry.sequence);
+  if (inProgress) return inProgress;
   const unconfirmed = readJourneys().find((item) => item.bundleId === offer.entry.bundle_id && !isBound(item));
   const pluginId = offer.installed?.plugin_id ?? unconfirmed?.pluginId ?? `managed.${newOperationId()}`;
   const pending: InstallJourney = {

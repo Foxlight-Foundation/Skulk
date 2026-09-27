@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { CatalogEntry, CatalogInstallation, CatalogListing, ManagedRuntime, RuntimeInstallation } from '../../store/endpoints/plugins';
 import {
-  catalogOffers, clearJourney, decodeInvitation, encodeInvitation, isStartRefusal,
+  catalogOffers, clearJourney, decodeInvitation, encodeInvitation, isStartRefusal, journeyInProgress,
   platformLabel, readJourneys, saveJourney, startCatalogInstall, type InstallJourney,
 } from './catalogJourney';
 
@@ -122,6 +122,18 @@ describe('startCatalogInstall', () => {
     expect(bindCalls.map((call) => call.plugin_id)).toEqual([`managed.${'a'.repeat(32)}`, `managed.${'a'.repeat(32)}`]);
     expect(again).toMatchObject({ pluginId: `managed.${'a'.repeat(32)}`, runtimeDigest: '9'.repeat(64) });
     expect(readJourneys()).toHaveLength(1);
+  });
+
+  it('follows a release this browser is already installing instead of starting it again', async () => {
+    const following = { ...bound(`managed.${'e'.repeat(32)}`) };
+    const journey = { pluginId: following.plugin_id, title: 'Example Studio', bundleId: 'example.studio', sequence: 51, publisher: 'example', runtimeDigest: '9'.repeat(64), transferBytes: 1, installOperationId: '6'.repeat(32), activationOperationId: null, startedAt: 1 };
+    saveJourney(journey);
+    let binds = 0;
+    const outcome = await startCatalogInstall({ bind: () => { binds += 1; return resolved(following); }, install: () => resolved({} as RuntimeInstallation) }, fresh, listing([entry(51)]), () => null, ids(), statusOf);
+    expect(outcome).toEqual(journey);
+    expect(binds).toBe(0);
+    // Another release of the bundle is a separate install.
+    expect(journeyInProgress('example.studio', 52)).toBeNull();
   });
 
   it('returns the host\'s sentence for a decided refusal, keeping only a new installation\'s identity', async () => {

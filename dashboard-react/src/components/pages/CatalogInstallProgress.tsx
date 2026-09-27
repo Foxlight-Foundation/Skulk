@@ -120,10 +120,17 @@ export function CatalogInstallProgress({ title, publisher, sequence, transferByt
         }
       }
       mark({ downloaded: 'done', prepared: 'done', activated: 'active' });
-      let runtime: ManagedRuntime | null;
-      try { runtime = await findRuntime(); } catch { runtime = null; }
+      let runtime: ManagedRuntime | null = null;
+      let answered = false;
+      for (let attempt = 0; attempt < UNREADABLE_ATTEMPTS && !answered; attempt += 1) {
+        try { runtime = await findRuntime(); answered = true; } catch {
+          try { await sleep(pollMs, signal); } catch { return; }
+        }
+      }
       if (signal.aborted) return;
-      if (!runtime) { fail({ kind: 'code', step: 'activated', code: 'inventory' }); return; }
+      if (!answered) { fail({ kind: 'code', step: 'activated', code: 'unreadable' }); return; }
+      // The host answered without this installation, so nothing is left to follow.
+      if (!runtime) { clearJourney(pluginId); fail({ kind: 'code', step: 'activated', code: 'inventory' }); return; }
       const alreadyActive = runtime.enabled && runtime.selected_digest === current.runtimeDigest;
       current = saved() ?? current;
       if (!alreadyActive && current.activationOperationId === null && !activationInFlight.has(pluginId)) {
@@ -180,6 +187,9 @@ export function CatalogInstallProgress({ title, publisher, sequence, transferByt
         }
         try { await sleep(pollMs, signal); } catch { return; }
       }
+      // Activation completed; starting is the plugin's own business now, and
+      // Installed follows it. Keeping the journey would hold this release.
+      clearJourney(pluginId);
       fail({ kind: 'code', step: 'activated', code: 'start-slow' });
     };
     void follow();
