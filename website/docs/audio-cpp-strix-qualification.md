@@ -3,9 +3,28 @@ id: audio-cpp-strix-qualification
 title: audio.cpp Strix Vulkan qualification
 ---
 
-This record supports the `music.generate` engine support claims for the two
-exact music cards below on the `amd:pci-1002-1586` hardware class. The class
+This record preserves the original functional qualification of the two exact
+music cards below on the `amd:pci-1002-1586` hardware class. The class
 identifies a GPU type, not an individual Skulk node.
+
+**MiniMax quality correction (2026-09-27):** Later listening found that the
+MiniMax build recorded here can begin musically and then collapse into a held
+note or noise. Its non-silent WAV and stability results below do not establish
+acceptable music quality, and this build should not be used as evidence for a
+MiniMax `supported` claim. The pinned audio.cpp MiniMax depth decoder resets
+its fallback random generator to the same request seed for every autoregressive
+frame on non-CUDA backends. A source patch that also mixes in the frame's
+sample index removed the repeated-token lock in controlled Strix runs, including
+a 59.9-second clip accepted by listening. The patch is part of the next wheel
+candidate; this historical wheel does not contain it. New build identities and
+load, generation, and listening qualification are required before replacing a
+support claim. ACE-Step's results below are unaffected by this MiniMax defect.
+
+The sampler defect is separate from a measured Vulkan precision issue: some
+large MiniMax matrix multiplications on this hardware use 16-bit accumulation.
+The resulting numerical error may lower fidelity. The sound and latency effects
+of forcing 32-bit accumulation are still being measured, so that change is not
+part of the sampler correction.
 
 | Contract | Qualified value |
 | --- | --- |
@@ -60,9 +79,7 @@ current candidate reader also mounted and generated from both models.
 
 The earlier paced run did not record beginning and ending RSS for each model;
 the continuous run above supplies that evidence.
-Human listening of an exact output from each card is still needed for the
-release plan's subjective quality gate; PCM measurements establish only that
-the WAVs are non-silent.
-These claims apply only to the exact cards, build identity, capability, and
-hardware class listed here. Other audio.cpp builds and GPUs need their own
-qualification.
+The later MiniMax listening failure supersedes the original non-silent signal
+gate. Any replacement claims apply only to the exact cards, build identity,
+capability, and hardware class tested. Other audio.cpp builds and GPUs need
+their own qualification.

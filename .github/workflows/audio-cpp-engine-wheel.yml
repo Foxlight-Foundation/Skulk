@@ -9,6 +9,7 @@ permissions:
 on:
   pull_request:
     paths:
+      - "packaging/minimax-depth-rng-per-frame.patch"
       - "packaging/skulk-audio-cpp-cpu/**"
       - "packaging/skulk-audio-cpp-vulkan/**"
       - "packaging/skulk-audio-cpp-cuda/**"
@@ -16,6 +17,7 @@ on:
   push:
     branches: [dev]
     paths:
+      - "packaging/minimax-depth-rng-per-frame.patch"
       - "packaging/skulk-audio-cpp-cpu/**"
       - "packaging/skulk-audio-cpp-vulkan/**"
       - "packaging/skulk-audio-cpp-cuda/**"
@@ -42,6 +44,7 @@ on:
 
 env:
   AUDIO_CPP_REF: 4d88768fbcae4e6eb3352c6ab1422dabb7d90b58
+  AUDIO_CPP_PATCH_SHA256: f00ab4d05bc3e070b2d2e32087933cc69fc96c4be2201a90171834735e5755bb
 
 jobs:
   build:
@@ -118,6 +121,15 @@ jobs:
           git clone --filter=blob:none https://github.com/0xShug0/audio.cpp /tmp/audio-cpp-src
           git -C /tmp/audio-cpp-src checkout --detach "$AUDIO_CPP_REF"
           test "$(git -C /tmp/audio-cpp-src rev-parse HEAD)" = "$AUDIO_CPP_REF"
+      - name: Apply pinned MiniMax depth sampler correction
+        run: |
+          set -euo pipefail
+          patch="$GITHUB_WORKSPACE/packaging/minimax-depth-rng-per-frame.patch"
+          python3 -c 'import hashlib, sys; actual = hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest(); sys.exit(0 if actual == sys.argv[2] else f"patch SHA-256 mismatch: {actual}")' \
+            "$patch" "$AUDIO_CPP_PATCH_SHA256"
+          git -C /tmp/audio-cpp-src apply --check "$patch"
+          git -C /tmp/audio-cpp-src apply "$patch"
+          git -C /tmp/audio-cpp-src diff --check
       - name: Build only the music server and two families
         run: |
           set -eo pipefail
@@ -232,6 +244,9 @@ jobs:
           git clone --filter=blob:none https://github.com/0xShug0/audio.cpp /tmp/audio-cpp-src
           git -C /tmp/audio-cpp-src checkout --detach "$AUDIO_CPP_REF"
           test "$(git -C /tmp/audio-cpp-src rev-parse HEAD)" = "$AUDIO_CPP_REF"
+          # CUDA uses the advancing Philox sampler, so retain its already
+          # qualified source and wheel identity. The fallback correction is
+          # applied only in the CPU and Vulkan build matrix above.
       - name: Build GB10 CUDA server and two music families
         run: |
           set -euo pipefail
