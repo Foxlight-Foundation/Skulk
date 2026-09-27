@@ -90,6 +90,27 @@ take-management contracts. Its UI is one way to use those capabilities. The
 application is packaged separately from Skulk core and calls Skulk through its
 APIs, illustrating how developers can build applications on the platform.
 
+### What the Studio needs
+
+The Studio renders through Skulk, so the cluster must be able to serve MiniMax
+H3 before a render can start:
+
+- **A render node.** A Linux node with an NVIDIA GPU (CUDA) or an AMD Strix
+  Halo (ROCm), with about 64 GB of GPU memory. Skulk provisions the ComfyUI
+  engine that serves H3 on these nodes; `uv run skulk doctor` reports its
+  state. Apple Silicon nodes cannot render H3.
+- **Video models turned on.** Add `SKULK_ENABLE_VIDEO_MODELS=true` to
+  `~/.skulk/skulk.env` on each node and restart Skulk. Video model cards stay
+  hidden until then.
+- **A placed model.** Place a MiniMax H3 card (FL2VA or Ref2VA) from **Model
+  Store**. Each is about 49 GB to download. Place it before installing the
+  Studio; if the Studio was installed first and its setup check reports that
+  no video model is placed, disable and re-enable it in **Plugins** once the
+  model is ready.
+- **Licence terms.** MiniMax H3 open-weight use is territorially scoped by its
+  licence. The model card shows the notice before download.
+- **Optional:** a ready chat model for **Refine with guides**.
+
 ## Manage plugins
 
 Skulk core owns discovery, routing, plugin management, and the dashboard. A
@@ -113,6 +134,14 @@ platforms, exact runtime compatibility, permissions, required services, costs,
 and cleanup procedures before installing. A matching version label alone is not
 proof of compatible bytes or dependencies.
 
+A publisher can also give you a signed catalog: an address and the publisher
+trust to verify it. With the catalog configured on the host,
+`skulk-plugin-service catalog` lists the releases that match this host, and
+`skulk-plugin-service install-plugin --from-catalog BUNDLE_ID` installs one
+through the same consent steps as a single release (prefix both with
+`uv run` from the Skulk directory on a source install). See
+[Extensions](extensions.md#owner-configured-private-release-source).
+
 The RunPod cloud-capacity plugin is distributed privately to owners with access.
 Its supplier must provide the compatible release,
 trusted publisher information, download access, and complete administration
@@ -124,8 +153,13 @@ Open **Plugins** on the host that will manage the installation. Initial service
 setup and publisher trust require owner access; a paired browser cannot grant
 itself that authority.
 
-1. Prepare the host's plugin-management service according to the supplied release
-   instructions. This can require a one-time local administrator step.
+1. Set up the host's plugin-management service once. On a source install, run
+   `uv run skulk-plugin-service setup` from the Skulk directory as the user who
+   runs Skulk (see [Install](install.md#add-capabilities-optional)). It asks for
+   your administrator password to register the service (Apple Silicon macOS, or
+   Linux with systemd). Until it is ready, **Plugins** reports that local
+   runtime management is unavailable; `uv run skulk-plugin-service status`
+   shows its progress.
 2. In **Add plugin**, enter the supplied release source, metadata filename,
    publisher trust, and feed credential where required.
 3. Save the source and inspect the release. Review its signature, compatibility,

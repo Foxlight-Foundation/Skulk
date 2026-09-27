@@ -100,9 +100,21 @@ export interface ConfigurationMutation extends NodeAddress {
   values?: Record<string, unknown>;
 }
 
+/** Name, version and publisher of an installation's selected signed release. Display only. */
+export interface InstalledRelease {
+  bundle_id: string;
+  /** Title from the signed manifest; null when the manifest declares none. */
+  title: string | null;
+  bundle_version: string;
+  publisher: string;
+  sequence: number;
+}
+
 /** Public process observation; a running process alone does not establish readiness. */
 export interface ManagedRuntime {
   plugin_id: string;
+  /** The selected signed release, when its staged metadata is readable. */
+  release?: InstalledRelease | null;
   selected_digest: string | null;
   selection_revision: number;
   enabled: boolean;
@@ -112,7 +124,8 @@ export interface ManagedRuntime {
   error_code: string | null;
   operation_id: string | null;
   operation_state: ManagedOperation['state'] | null;
-  service: { state: string; active_digest: string | null; observed_at: number } | null;
+  /** `error_code` names why a failed process stopped, such as `verification_failed`. */
+  service: { state: string; active_digest: string | null; observed_at: number; error_code?: string | null } | null;
 }
 
 /** Durable local operation reference; provider submissions and approvals are separate. */

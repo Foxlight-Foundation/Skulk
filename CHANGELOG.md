@@ -9,6 +9,12 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Changed
 
+- The Plugins page names each installed plugin by its signed release, for
+  example "Skulk Video Studio" with its version, sequence and publisher,
+  instead of its local `managed.<id>`. A plugin whose process stopped says
+  why, such as a release built for a different Skulk build, and reads
+  "Needs attention" instead of "Status unavailable".
+  `GET /v1/plugins/managed` gains a `release` field for each installation.
 - Video renders on AMD (the ComfyUI engine's ROCm lane) keep their models
   loaded between renders and memory-map weight files up to 64 GB. Before,
   every render rebuilt the text encoder, transformer and VAEs. ComfyUI's
@@ -102,6 +108,12 @@ This project records release notes here and mirrors public-facing notes in
   catalog video card can be filtered and badged.
 
 ### Fixed
+
+- The dashboard no longer opens to a blank page after a Skulk update. Its
+  HTML shell was served without a cache policy, so browsers kept an old
+  shell that asked for script bundles the new build no longer had. The
+  shell and other unhashed files are now revalidated on every load, and
+  the content-hashed bundles under `assets/` are cached as immutable.
 
 - A node no longer crashes when a peer restart changes the master. The
   node closes its worker's event channel before replacing the worker, and
