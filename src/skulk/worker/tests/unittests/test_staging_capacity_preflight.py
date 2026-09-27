@@ -1,7 +1,9 @@
 # pyright: reportPrivateUsage=false
 """Worker tests for exact-transfer staging capacity admission."""
 
+import os
 import threading
+import time
 from pathlib import Path
 
 import anyio
@@ -23,7 +25,10 @@ from skulk.shared.types.tasks import CreateRunner
 from skulk.shared.types.worker.downloads import DownloadCompleted, DownloadPending
 from skulk.shared.types.worker.instances import InstanceId
 from skulk.shared.types.worker.runners import RunnerId
-from skulk.shared.types.worker.shards import PipelineShardMetadata
+from skulk.shared.types.worker.shards import (
+    PipelineShardMetadata,
+    RpcDonorShardMetadata,
+)
 from skulk.store.config import StagingNodeConfig
 from skulk.store.model_store_client import ModelStoreClient
 from skulk.store.staging_eviction import (
@@ -344,31 +349,55 @@ async def test_runner_creation_waits_for_capacity_eviction_snapshot(
             await runner_creation_started.wait()
 
 
-@pytest.mark.asyncio
-async def test_startup_reconciliation_waits_for_state_and_keeps_placed_models(
-    tmp_path: Path,
-) -> None:
-    """A restarted or recreated worker keeps the models its placements load.
+def _age_marker(directory: Path, seconds: float) -> None:
+    stamp = time.time() - seconds
+    os.utime(directory / LAST_USED_MARKER_FILENAME, (stamp, stamp))
 
-    The pass waits for the session's state, then protects every model an
-    instance places on this node even though no runner exists yet; only a
-    true orphan competes for the grace budget, here zero.
+
+def test_startup_reconciliation_keeps_what_was_serving(tmp_path: Path) -> None:
+    """A restart or a recreated worker keeps the models that were serving.
+
+    Nothing is in use at startup and the node id is new, so the recency
+    marker decides: a model used within the window survives even though it
+    alone exceeds the grace budget, here zero; an old idle copy does not.
+    """
+    serving = _stage(tmp_path, "org/serving", size_bytes=40)
+    stale = _stage(tmp_path, "org/stale", size_bytes=40)
+    _age_marker(serving, 120)
+    _age_marker(stale, 2 * 3600)
+    worker, _event_receiver = _worker(tmp_path, keep_recent_gb=0)
+
+    worker._reconcile_staging_on_startup()
+
+    assert serving.exists()
+    assert not stale.exists()
+    assert worker._stale_downloads_pending_reset == {"org--stale"}
+
+
+def test_placed_models_are_in_use_and_donor_shards_are_not(tmp_path: Path) -> None:
+    """A placement on this node protects its model before its runner exists.
+
+    Another node's placement protects nothing here, and neither does an RPC
+    donor shard: a donor lends memory and never reads the model.
     """
     placed = _shard("org/placed", storage_bytes=40)
     elsewhere = _shard("org/elsewhere", storage_bytes=40)
-    placed_directory = _stage(tmp_path, "org/placed", size_bytes=40)
-    elsewhere_directory = _stage(tmp_path, "org/elsewhere", size_bytes=40)
-    orphan_directory = _stage(tmp_path, "org/orphan", size_bytes=40)
-    worker, _event_receiver = _worker(tmp_path, keep_recent_gb=0)
-
-    # Before state arrives nothing is known to be placed, so nothing is removed.
-    await worker._reconcile_staging_once_state_is_known()
-    assert placed_directory.exists()
-    assert elsewhere_directory.exists()
-    assert orphan_directory.exists()
-
-    here, there = RunnerId(), RunnerId()
-    placed_instance, elsewhere_instance = InstanceId(), InstanceId()
+    donated = _shard("org/donated", storage_bytes=40)
+    donor = RpcDonorShardMetadata(
+        model_card=donated.model_card,
+        device_rank=1,
+        world_size=2,
+        start_layer=0,
+        end_layer=0,
+        n_layers=donated.n_layers,
+    )
+    worker, _event_receiver = _worker(tmp_path)
+    here, there, lent = RunnerId(), RunnerId(), RunnerId()
+    placed_instance, elsewhere_instance, donor_instance = (
+        InstanceId(),
+        InstanceId(),
+        InstanceId(),
+    )
     worker.state = State(
         instances={
             placed_instance: get_mlx_ring_instance(
@@ -383,18 +412,50 @@ async def test_startup_reconciliation_waits_for_state_and_keeps_placed_models(
                 node_to_runner={NodeId("other-node"): there},
                 runner_to_shard={there: elsewhere},
             ),
-        },
-        last_event_applied_idx=0,
+            donor_instance: get_mlx_ring_instance(
+                instance_id=donor_instance,
+                model_id=donated.model_card.model_id,
+                node_to_runner={worker.node_id: lent},
+                runner_to_shard={lent: donor},
+            ),
+        }
     )
+
     assert worker._models_in_use() == {"org/placed"}
 
-    await worker._reconcile_staging_once_state_is_known()
-    assert placed_directory.exists()
-    assert not elsewhere_directory.exists()
-    assert not orphan_directory.exists()
-    assert worker._stale_downloads_pending_reset == {"org--elsewhere", "org--orphan"}
 
-    # It runs once per worker; a later deactivation pass owns the rest.
-    _stage(tmp_path, "org/orphan", size_bytes=40)
-    await worker._reconcile_staging_once_state_is_known()
-    assert (tmp_path / "org--orphan").exists()
+def test_in_use_markers_are_refreshed_once_a_minute(tmp_path: Path) -> None:
+    """Serving models keep a fresh marker for the next startup to read."""
+    placed = _shard("org/placed", storage_bytes=40)
+    placed_directory = _stage(tmp_path, "org/placed", size_bytes=40)
+    idle_directory = _stage(tmp_path, "org/idle", size_bytes=40)
+    _age_marker(placed_directory, 3600)
+    _age_marker(idle_directory, 3600)
+    worker, _event_receiver = _worker(tmp_path)
+    runner_id, instance_id = RunnerId(), InstanceId()
+    worker.state = State(
+        instances={
+            instance_id: get_mlx_ring_instance(
+                instance_id=instance_id,
+                model_id=placed.model_card.model_id,
+                node_to_runner={worker.node_id: runner_id},
+                runner_to_shard={runner_id: placed},
+            )
+        }
+    )
+    marker = placed_directory / LAST_USED_MARKER_FILENAME
+    idle_marker = idle_directory / LAST_USED_MARKER_FILENAME
+
+    worker._refresh_in_use_markers()
+    assert time.time() - marker.stat().st_mtime < 60
+    assert time.time() - idle_marker.stat().st_mtime > 3000
+
+    # Within the minute nothing is touched again.
+    _age_marker(placed_directory, 3600)
+    worker._refresh_in_use_markers()
+    assert time.time() - marker.stat().st_mtime > 3000
+
+    assert worker._in_use_markers_refreshed_at is not None
+    worker._in_use_markers_refreshed_at -= 61
+    worker._refresh_in_use_markers()
+    assert time.time() - marker.stat().st_mtime < 60

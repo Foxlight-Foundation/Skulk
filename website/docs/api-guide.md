@@ -2199,10 +2199,10 @@ curl http://localhost:52415/store/storage
 ```
 
 Staged copies are managed automatically when the model store is on: when an
-instance shuts down (and at node startup, once the node has the cluster's
-state, which reconciles copies orphaned by a crash), staged models that no
-live runner uses and no instance placed on the node needs are kept
-newest-first up to the
+instance shuts down (and at node startup, which reconciles copies orphaned
+by a crash while keeping any copy used within the last 30 minutes), staged
+models that no live runner uses and no instance placed on the node needs are
+kept newest-first up to the
 `staging_keep_recent_gb` grace budget (default 40 GiB) and evicted beyond
 it. Set `cleanup_on_deactivate: false` in the staging config to keep every
 staged copy while disk is healthy. Independently, before each store-backed
