@@ -9,6 +9,8 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Changed
 
+- A disabled plugin reads "Disabled" in the plugin list instead of "Status
+  unavailable".
 - The Plugins page names each installed plugin by its signed release, for
   example "Skulk Video Studio" with its version, sequence and publisher,
   instead of its local `managed.<id>`. A plugin whose process stopped says
@@ -37,6 +39,18 @@ This project records release notes here and mirrors public-facing notes in
   resources are gathered, so a slow or hung engine probe no longer stalls
   the worker's event loop.
 ### Added
+
+- The Plugins page has a Browse tab for installing plugins from a signed
+  catalog:
+  - Connect a catalog with an invitation code, or its address and publisher
+    key.
+  - Review a release's signed facts, its permissions and whether it can spend
+    money, then install or update it with one consent.
+  - Follow the download, staging and activation in place. Leaving the page and
+    coming back picks the install up where it was, without repeating it.
+  - A setup step then shows what each of the plugin's nodes reports, offers
+    its setup checks and settings when one needs attention, and opens its
+    screens once they are ready.
 
 - `kill -USR1 <pid>` makes any Skulk node or runner process write every
   thread's Python stack to its log and keep running. A runner stuck in
