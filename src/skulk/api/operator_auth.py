@@ -53,10 +53,9 @@ _PAIRING_AUTHORITY_DETAIL: Final = (
     "access are blocked."
 )
 _PLUGIN_OWNER_AUTHORITY_DETAIL: Final = (
-    "Plugin administration needs direct owner access to this node. Open its "
-    "dashboard in a browser on the node itself (localhost), or through Tailscale "
-    "using the node's MagicDNS name or Tailscale IP. Ordinary LAN addresses, the "
-    "public relay and forwarded requests cannot administer plugins."
+    "Plugins are managed from a browser on this node itself (localhost) or "
+    "through Tailscale using the node's MagicDNS name or Tailscale IP. Ordinary "
+    "LAN addresses, the public relay and forwarded requests cannot manage them."
 )
 _PAIRED_PLUGIN_OWNER_DETAIL: Final = (
     "Paired devices cannot administer plugins. Open this node's dashboard in a "
@@ -277,7 +276,9 @@ async def authorize_plugin_request(
 
     authorization = request.headers.getlist("authorization")
     if not authorization:
-        await _require_direct_dashboard_authority(request, tailnet_peer_verifier)
+        await _require_direct_dashboard_authority(
+            request, tailnet_peer_verifier, _PLUGIN_OWNER_AUTHORITY_DETAIL
+        )
         return "local-owner"
     if len(authorization) != 1 or service is None:
         raise HTTPException(status_code=401, detail="operator credential invalid")
@@ -320,7 +321,7 @@ async def authorize_plugin_owner_request(
     ):
         raise HTTPException(status_code=403, detail=_PAIRED_PLUGIN_OWNER_DETAIL)
     # The pairing refusal names invitations and the operator gateway; neither
-    # applies to plugins, which any node administers from a direct dashboard.
+    # applies to plugins, which any node manages from a direct dashboard.
     await _require_direct_dashboard_authority(
         request, tailnet_peer_verifier, _PLUGIN_OWNER_AUTHORITY_DETAIL
     )

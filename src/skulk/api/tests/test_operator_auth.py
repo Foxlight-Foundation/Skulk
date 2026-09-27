@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 
 from skulk.api.operator_auth import (
     authorize_plugin_owner_request,
+    authorize_plugin_request,
     create_operator_auth_router,
 )
 from skulk.operator.authority import EncryptedAuthorityStore
@@ -683,11 +684,12 @@ def _plugin_owner_request(
     )
 
 
-async def test_plugin_owner_refusals_say_how_to_reach_the_node() -> None:
-    """A LAN browser or a paired device is told how to administer plugins.
+async def test_plugin_refusals_say_how_to_reach_the_node() -> None:
+    """A LAN browser or a paired device is told how plugins are managed.
 
     The refusal used to be the pairing-invitation text, which names the
-    operator gateway and does not say how to reach plugin administration.
+    operator gateway and does not say how to reach plugin management; every
+    plugin route, reads included, answered a LAN browser with it.
     """
 
     async def verified(_: str) -> bool:
@@ -699,9 +701,16 @@ async def test_plugin_owner_refusals_say_how_to_reach_the_node() -> None:
         )
     assert lan.value.status_code == 403
     assert isinstance(lan.value.detail, str)
-    assert lan.value.detail.startswith("Plugin administration needs direct owner")
+    assert lan.value.detail.startswith("Plugins are managed from a browser")
     assert "localhost" in lan.value.detail and "Tailscale" in lan.value.detail
     assert "Pairing invitations" not in lan.value.detail
+    # Scoped plugin routes refuse a LAN browser without a credential the same way.
+    with pytest.raises(HTTPException) as scoped:
+        await authorize_plugin_request(
+            _plugin_owner_request("192.168.1.20"), None, "plugins:read", verified
+        )
+    assert scoped.value.status_code == 403
+    assert scoped.value.detail == lan.value.detail
 
     with pytest.raises(HTTPException) as paired:
         await authorize_plugin_owner_request(
