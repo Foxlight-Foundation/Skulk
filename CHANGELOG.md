@@ -9,6 +9,12 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Changed
 
+- The Plugins page names each installed plugin by its signed release, for
+  example "Skulk Video Studio" with its version, sequence and publisher,
+  instead of its local `managed.<id>`. A plugin whose process stopped says
+  why, such as a release built for a different Skulk build, and reads
+  "Needs attention" instead of "Status unavailable".
+  `GET /v1/plugins/managed` gains a `release` field for each installation.
 - Video renders on AMD (the ComfyUI engine's ROCm lane) keep their models
   loaded between renders and memory-map weight files up to 64 GB. Before,
   every render rebuilt the text encoder, transformer and VAEs. ComfyUI's
