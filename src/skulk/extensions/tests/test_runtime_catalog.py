@@ -3,7 +3,10 @@
 import hashlib
 import json
 import time
+from collections.abc import Awaitable, Callable
+from functools import partial
 from pathlib import Path
+from typing import get_args
 
 import httpx
 import pytest
@@ -17,8 +20,13 @@ from skulk.extensions.runtime_artifacts import (
 )
 from skulk.extensions.runtime_catalog import (
     ACCEPTED_CATALOG_PROTOCOLS,
+    CatalogRefusal,
+    CatalogRefusedError,
     CatalogSourceUpdate,
     HostCatalog,
+    catalog_refusal,
+    catalog_refusal_payload,
+    catalog_refusal_sentence,
     verify_catalog,
 )
 from skulk.extensions.runtime_files import (
@@ -416,3 +424,154 @@ def test_the_floor_map_refuses_a_new_history_at_the_bound() -> None:
     floors[f"{prefix}publisher-32"] = AcceptedFloor(revision=1, sha256="c" * 64)
     with pytest.raises(ValueError, match="local maintenance"):
         bounded_floors(floors, f"{prefix}publisher-32", prefix)
+
+
+async def _refused(call: Awaitable[object]) -> CatalogRefusedError:
+    with pytest.raises(CatalogRefusedError) as refused:
+        await call
+    return refused.value
+
+
+def _refused_now(call: Callable[[], object]) -> CatalogRefusedError:
+    with pytest.raises(CatalogRefusedError) as refused:
+        call()
+    return refused.value
+
+
+def test_catalog_refusals_are_named_from_a_fixed_vocabulary() -> None:
+    """Each code has one plain sentence; the wire form is a code and a status only."""
+    codes: tuple[CatalogRefusal, ...] = get_args(CatalogRefusal)
+    for code in codes:
+        sentence = catalog_refusal_sentence(code)
+        assert sentence.endswith(".") and "\u2014" not in sentence
+        wire = _RECORD.validate_json(
+            catalog_refusal_payload(CatalogRefusedError(code, "local detail"))
+        )
+        assert wire == {"error": "catalog_refused", "code": code}
+        rebuilt = catalog_refusal(wire)
+        assert rebuilt is not None
+        assert (rebuilt.code, rebuilt.status) == (code, None)
+    missing = CatalogRefusedError(
+        "catalog_download_refused", "catalog download refused", status=404
+    )
+    wire = _RECORD.validate_json(catalog_refusal_payload(missing))
+    assert wire == {
+        "error": "catalog_refused",
+        "code": "catalog_download_refused",
+        "status": 404,
+    }
+    rebuilt = catalog_refusal(wire)
+    assert rebuilt is not None and rebuilt.status == 404
+    assert "HTTP 404" in catalog_refusal_sentence(rebuilt.code, rebuilt.status)
+    # Nothing outside the vocabulary is rebuilt.
+    assert catalog_refusal({"error": "manager_operation_refused"}) is None
+    assert catalog_refusal({"error": "catalog_refused", "code": "elsewhere"}) is None
+    assert catalog_refusal({**wire, "status": True}) is None
+    assert catalog_refusal({**wire, "status": "404"}) is None
+    assert catalog_refusal({**wire, "status": 99}) is None
+
+
+async def test_the_host_catalog_names_why_it_refused(tmp_path: Path) -> None:
+    """Every refusal an operator can act on carries its code."""
+    key = Ed25519PrivateKey.generate()
+    mode = ["catalog"]
+    served = [_catalog(key, [_entry(1)])]
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if mode[0] == "unreachable":
+            raise httpx.ConnectError("name resolution failed", request=request)
+        if mode[0] == "missing":
+            return httpx.Response(404)
+        if mode[0] == "compressed":
+            # A stream, not content: content would be decoded on construction.
+            return httpx.Response(
+                200,
+                headers={"Content-Encoding": "gzip"},
+                stream=httpx.ByteStream(served[0]),
+            )
+        if mode[0] == "page":
+            return httpx.Response(200, content=b"<!doctype html><title>Sign in")
+        return httpx.Response(200, content=served[0])
+
+    private_directory(tmp_path)
+    catalog = HostCatalog(tmp_path, transport=httpx.MockTransport(respond))
+    now = int(time.time())
+    assert (await _refused(catalog.fetch())).code == "catalog_unconfigured"
+    assert (
+        _refused_now(lambda: catalog.accepted("a" * 64, now=now)).code
+        == "catalog_unconfigured"
+    )
+    incomplete = CatalogSourceUpdate(expected_revision=0)
+    assert (
+        await _refused(catalog.configure(incomplete))
+    ).code == "catalog_setup_incomplete"
+    await catalog.configure(
+        CatalogSourceUpdate(
+            expected_revision=0,
+            base_url="https://catalog.example.test/foxlight/",
+            trust=_trust(key),
+            token=SecretStr("hidden-catalog-token"),
+        )
+    )
+    assert (
+        await _refused(catalog.configure(incomplete))
+    ).code == "catalog_source_conflict"
+    expired = CatalogSourceUpdate(
+        expected_revision=1, trust=_trust(key, revision=2, expires_at=now - 1)
+    )
+    assert (
+        await _refused(catalog.configure(expired))
+    ).code == "catalog_trust_update_refused"
+    moved = CatalogSourceUpdate(
+        expected_revision=1, base_url="https://elsewhere.example.test/"
+    )
+    assert (
+        await _refused(catalog.configure(moved))
+    ).code == "catalog_credential_required"
+    # What the server did, as the operator can act on it.
+    for current, code in (
+        ("unreachable", "catalog_unreachable"),
+        ("compressed", "catalog_download_refused"),
+        ("page", "catalog_invalid"),
+    ):
+        mode[0] = current
+        refused = await _refused(catalog.fetch())
+        assert (refused.code, refused.status) == (code, None)
+    mode[0] = "missing"
+    refused = await _refused(catalog.fetch())
+    assert (refused.code, refused.status) == ("catalog_download_refused", 404)
+    # What the document is: signed by another key, by an untrusted publisher,
+    # outside its validity period, or signed yet not a catalog this host reads.
+    mode[0] = "catalog"
+    for document, code in (
+        (
+            _catalog(Ed25519PrivateKey.generate(), [_entry(1)]),
+            "catalog_signature_refused",
+        ),
+        (_catalog(key, [_entry(1)], publisher="stranger"), "catalog_trust_refused"),
+        (
+            _catalog(key, [_entry(1)], created_at=now - 7200, expires_at=now - 3600),
+            "catalog_window_refused",
+        ),
+        (_catalog(key, [_entry(1), _entry(1)]), "catalog_invalid"),
+    ):
+        served[0] = document
+        assert (await _refused(catalog.fetch())).code == code
+    # A listing a later read superseded, or one this host never held, is
+    # refused with the same remedy: read the catalog again.
+    served[0] = _catalog(key, [_entry(1)])
+    first = await catalog.fetch()
+    served[0] = _catalog(key, [_entry(1), _entry(2)], revision=2)
+    await catalog.fetch()
+    now = int(time.time())
+    for digest in (first.sha256, "f" * 64):
+        refused = _refused_now(partial(catalog.accepted, digest, now=now))
+        assert refused.code == "catalog_superseded"
+    served[0] = _catalog(key, [_entry(1)])
+    assert (await _refused(catalog.fetch())).code == "catalog_rollback_refused"
+    async with catalog.guard:
+        assert (await _refused(catalog.fetch())).code == "catalog_busy"
+    reference = catalog.source().credential_reference
+    assert reference is not None
+    (tmp_path / "catalog-credentials" / reference).unlink()
+    assert (await _refused(catalog.fetch())).code == "catalog_credential_unavailable"

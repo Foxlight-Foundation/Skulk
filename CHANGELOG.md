@@ -109,6 +109,17 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- A refused plugin catalog read, source change or install now says why.
+  The catalog routes answered every refusal with "local plugin operation
+  refused", and `skulk-plugin-service catalog` told the operator to
+  configure a catalog that was already configured, including when the
+  host simply could not reach the catalog address. Each refusal now has
+  one sentence, shared by the API and the terminal, that names the cause
+  (unreachable, not configured, the server's HTTP status, an untrusted
+  publisher, an expired catalog, a superseded listing, and others) and
+  what to do next, without the catalog address or credential. The guided
+  installer also names a catalog outside the host's protocol window.
+
 - The dashboard no longer opens to a blank page after a Skulk update. Its
   HTML shell was served without a cache policy, so browsers kept an old
   shell that asked for script bundles the new build no longer had. The

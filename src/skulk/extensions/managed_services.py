@@ -31,6 +31,7 @@ from skulk.extensions.runtime_attachment import (
     ProfileIdentifier,
     ServiceConnection,
 )
+from skulk.extensions.runtime_catalog import catalog_refusal
 from skulk.extensions.runtime_files import RuntimeLock, read_private
 from skulk.extensions.runtime_manager import (
     CatalogInstallRequest,
@@ -797,6 +798,9 @@ class ManagedServices:
             refused = protocol_refusal(result)
             if refused is not None:
                 raise refused
+            catalog_refused = catalog_refusal(result)
+            if catalog_refused is not None:
+                raise catalog_refused
             raise ValueError("managed service request refused")
         return payload
 
