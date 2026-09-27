@@ -38,6 +38,16 @@ This project records release notes here and mirrors public-facing notes in
   the worker's event loop.
 ### Added
 
+- The Plugins page has a Browse tab for installing capabilities from a
+  signed catalog:
+  - Connect a catalog with an invitation code, or its address and publisher key.
+  - Review a release's signed facts and permissions.
+  - Install or update it with one consent, with live progress that survives
+    leaving the page.
+  - A setup checklist reads the capability's own readiness and links to its
+    screen when everything it needs is in place.
+  - A disabled plugin now reads "Disabled" rather than "Status unavailable".
+
 - `kill -USR1 <pid>` makes any Skulk node or runner process write every
   thread's Python stack to its log and keep running. A runner stuck in
   native code shows only C frames to an OS sampler, and a Python profiler

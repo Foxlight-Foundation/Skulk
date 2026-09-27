@@ -1,5 +1,5 @@
 import { derivePluginHealth, type PluginFilter } from './pluginHealth';
-import { useState, useSyncExternalStore } from 'react';
+import { useState, useSyncExternalStore, type ReactNode } from 'react';
 import styled from 'styled-components';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 import { useGetManagedRuntimesQuery, useGetPluginNodesQuery, useGetNodeConfigurationQuery, useConfigurePluginNodeMutation, type ConfigurableNode, type NodeConfiguration } from '../../store/endpoints/plugins';
@@ -14,7 +14,14 @@ import { NodeSetupPanel } from './NodeSetupPanel';
 import { NodeSetupActionsPanel } from './NodeSetupActionsPanel';
 import { NodeProposalsPanel } from './NodeProposalsPanel';
 import { OperatorAccessPanel } from './OperatorAccessPanel';
+import { PluginCatalogBrowse } from './PluginCatalogBrowse';
 import { operatorSession } from '../../auth/operatorSession';
+
+type PluginsView = 'installed' | 'browse';
+
+function initialView(): PluginsView {
+  try { return new URLSearchParams(window.location.search).get('view') === 'browse' ? 'browse' : 'installed'; } catch { return 'installed'; }
+}
 
 const Page = styled.section`padding: 32px; @media (max-width: 600px) { padding: 16px; } width: 100%; max-width: 1044px; margin: 0 auto; box-sizing: border-box; container-type: inline-size;`;
 const Card = styled.article`
@@ -102,6 +109,7 @@ function PluginInventory() {
   const session = useSyncExternalStore(operatorSession.subscribe, operatorSession.snapshot);
   const [accessOpen, setAccessOpen] = useState(false);
   const [filter, setFilter] = useState<PluginFilter>('all');
+  const [view, setView] = useState<PluginsView>(initialView);
   const [selected, setSelected] = useState<string | null>(null);
   const [width, setWidth] = useState(640);
   const { t } = useSkulkTranslation();
@@ -114,9 +122,12 @@ function PluginInventory() {
   }
   counts.all += query.data?.filter(plugin => !runtimes.data?.installations.some(runtime => runtime.plugin_id === plugin.pluginId)).length ?? 0;
   const inventoryKnown = !!runtimes.data && !runtimes.error && !!query.data && !query.error;
-  return <>
-    <ManagedRuntimesPanel renderHeader={registrationAction => <>
-      <PageHeading><div>    <h1>{t('plugins.title', 'Plugins')}</h1>
+  const chooseView = (next: PluginsView) => {
+    setView(next);
+    // The view is part of the address so Browse can be linked to directly.
+    try { history.replaceState(null, '', next === 'browse' ? `${window.location.pathname}?view=browse` : window.location.pathname); } catch { /* the view still changes */ }
+  };
+  const heading = (registrationAction?: ReactNode) => <PageHeading><div>    <h1>{t('plugins.title', 'Plugins')}</h1>
     <p>{t('plugins.introReference', 'Capability runtimes installed on this host.')} {' '}
       {inventoryKnown ? t('plugins.inventorySummary', '{count} installed · {healthy} healthy.', { count: counts.all - counts.uninstalled, healthy: counts.healthy })
         : runtimes.isLoading || query.isLoading ? t('plugins.loadingInventory', 'Loading inventory…') : t('plugins.inventoryUnknown', 'Inventory unavailable.')}
@@ -124,7 +135,17 @@ function PluginInventory() {
 </div><HeaderActions>
         <AccessButton variant="ghost" size="sm" onClick={() => setAccessOpen(true)}><AccessDot $direct={session.mode === 'direct'} aria-hidden />{session.mode === 'direct' ? t('operator.direct', 'Direct host access') : t('operator.browserAccess', 'Browser access')}</AccessButton>
         {registrationAction}
-      </HeaderActions></PageHeading>
+      </HeaderActions></PageHeading>;
+  const tabs = <Tabs role="tablist" aria-label={t('plugins.views', 'Plugin views')}>
+    <Tab role="tab" type="button" aria-selected={view === 'installed'} $active={view === 'installed'} onClick={() => chooseView('installed')}>{t('plugins.tabInstalled', 'Installed')}</Tab>
+    <Tab role="tab" type="button" aria-selected={view === 'browse'} $active={view === 'browse'} onClick={() => chooseView('browse')}>{t('plugins.tabBrowse', 'Browse')}</Tab>
+  </Tabs>;
+  const accessDrawer = <RightDrawer open={accessOpen} onClose={() => setAccessOpen(false)} title={t('operator.browserAccess', 'Browser access')} ariaLabel={t('operator.browserAccess', 'Browser access')} width={width} minWidth={360} maxWidth={900} onWidthChange={setWidth} closeLabel={t('common.close', 'Close')} resizeLabel={t('plugins.resize', 'Resize plugin details')}><OperatorAccessPanel /></RightDrawer>;
+  if (view === 'browse') return <>{heading()}{tabs}<BrowseArea><PluginCatalogBrowse /></BrowseArea>{accessDrawer}</>;
+  return <>
+    <ManagedRuntimesPanel renderHeader={registrationAction => <>
+      {heading(registrationAction)}
+      {tabs}
       <Filters aria-label={t('plugins.filters', 'Filter plugins')}>
         {([{ value: 'all', label: t('plugins.all', 'All') }, { value: 'healthy', label: t('plugins.healthy', 'Healthy') }, { value: 'attention', label: t('plugins.needsAttention', 'Needs attention') }, { value: 'uninstalled', label: t('plugins.uninstalled', 'Uninstalled') }] as const).map(option => <FilterButton key={option.value} type="button" $active={filter === option.value} aria-pressed={filter === option.value} disabled={!inventoryKnown} onClick={() => setFilter(option.value)}>{option.label}{inventoryKnown ? ` · ${counts[option.value]}` : ''}</FilterButton>)}
       </Filters>
@@ -140,7 +161,7 @@ function PluginInventory() {
       tone="neutral" release={Array.from(new Set(plugin.nodes.map(node => node.version))).join(' · ') || t('plugins.noRelease', 'None selected')}
       nodes={plugin.nodes.map(node => node.nodeId)} onOpen={() => setSelected(plugin.pluginId)} />)}
     </div>
-    <RightDrawer open={accessOpen} onClose={() => setAccessOpen(false)} title={t('operator.browserAccess', 'Browser access')} ariaLabel={t('operator.browserAccess', 'Browser access')} width={width} minWidth={360} maxWidth={900} onWidthChange={setWidth} closeLabel={t('common.close', 'Close')} resizeLabel={t('plugins.resize', 'Resize plugin details')}><OperatorAccessPanel /></RightDrawer>
+    {accessDrawer}
     <RightDrawer open={selected !== null} onClose={() => setSelected(null)} title={selected ?? ''} ariaLabel={t('plugins.details', 'Plugin details')}
       width={width} minWidth={360} maxWidth={900} onWidthChange={setWidth} closeLabel={t('common.close', 'Close')} resizeLabel={t('plugins.resize', 'Resize plugin details')}>
       <div style={{ padding: 24, overflowY: 'auto' }}>
@@ -163,6 +184,15 @@ const PageHeading = styled.div`
 `;
 const HeaderActions = styled.div`display: flex; align-items: center; gap: 10px; flex-wrap: wrap;`;
 const Filters = styled.div`display: flex; flex-wrap: wrap; gap: 6px; margin: 22px 0;`;
+const BrowseArea = styled.div`margin-top: 24px;`;
+const Tabs = styled.div`display: flex; gap: 4px; margin: 22px 0 0; border-bottom: 1px solid ${({ theme }) => theme.colors.border};`;
+const Tab = styled.button<{ $active: boolean }>`
+  border: 0; background: transparent; cursor: pointer; padding: 10px 14px; margin-bottom: -1px;
+  border-bottom: 2px solid ${({ theme, $active }) => $active ? theme.colors.accentText : 'transparent'};
+  color: ${({ theme, $active }) => $active ? theme.colors.text : theme.colors.textSecondary};
+  font: ${({ $active }) => $active ? 600 : 500} 14px ${({ theme }) => theme.fonts.body};
+  &:hover { color: ${({ theme }) => theme.colors.text}; }
+`;
 const FilterButton = styled.button<{ $active: boolean }>`
   border: 0; border-radius: 999px; padding: 6px 12px; cursor: pointer;
   background: ${({ theme, $active }) => $active ? theme.colors.selected : 'transparent'};

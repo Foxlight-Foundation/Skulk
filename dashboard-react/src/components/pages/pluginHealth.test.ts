@@ -36,6 +36,8 @@ describe('plugin health evidence', () => {
     expect(derivePluginHealth({ ...runtime, enabled: false, uninstalled: true, service: null }, undefined, false)).toBe('uninstalled');
     // An uninstalled installation is always stale, since nothing runs to be observed.
     expect(derivePluginHealth({ ...runtime, enabled: false, uninstalled: true, stale: true, service: null }, undefined, false)).toBe('uninstalled');
+    // So is a disabled one; it reads as disabled rather than status unavailable.
+    expect(derivePluginHealth({ ...runtime, enabled: false, stale: true, service: null }, undefined, false)).toBe('disabled');
     expect(derivePluginHealth({ ...runtime, enabled: false }, nodes, false)).toBe('disabled');
   });
 });

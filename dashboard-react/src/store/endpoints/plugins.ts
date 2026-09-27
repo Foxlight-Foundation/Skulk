@@ -175,6 +175,91 @@ export interface RuntimeSourceStatus {
   trust_revision: number | null;
 }
 
+/** One release a signed catalog lists: the consent facts, never an address or credential. */
+export interface CatalogEntry {
+  bundle_id: string;
+  bundle_version: string;
+  /** Title from the signed record; null when the release declares none. */
+  title: string | null;
+  publisher: string;
+  sequence: number;
+  release_digest: string;
+  /** Exact artifact family of a runtime-bearing release, such as `macos-arm64`. */
+  runtime_platform: string | null;
+  artifact_sha256: string;
+  artifact_bytes: number;
+  /** The artifact plus every wheel the runtime needs: what a download costs. */
+  transfer_bytes: number;
+  platforms: string[];
+  skulk_build_sha256: string;
+  permissions: string[];
+  /** Capability ids it serves, such as `video.render@1.0.0`. */
+  descriptors: string[];
+  /** Titles of the screens it opens. */
+  surfaces: string[];
+  /** Whether it runs durable operations that survive restarts. */
+  operations: boolean;
+  /** Steward risk classes; `billable` means an action can spend money. */
+  steward_risks: string[];
+  expires_at: number;
+  /** Whether this release was built for this host's exact Skulk build and platform. */
+  matches_host: boolean;
+}
+
+/** A catalog read and verified by the host against its discovery trust. */
+export interface CatalogListing {
+  publisher: string;
+  revision: number;
+  created_at: number;
+  expires_at: number;
+  /** Digest of the verified document; an install names it as the reviewed listing. */
+  catalog_sha256: string;
+  entries: CatalogEntry[];
+}
+
+/** Owner consent to bind one installation to one reviewed listing. */
+export interface CatalogInstallRequest {
+  catalog_sha256: string;
+  bundle_id: string;
+  sequence: number;
+  runtime_platform?: string | null;
+  /** An existing installation of the same bundle to upgrade; omitted registers a new one. */
+  plugin_id?: string;
+}
+
+/** The bound installation, its source readiness and the signed release it will stage. */
+export interface CatalogInstallation {
+  plugin_id: string;
+  listing: CatalogEntry;
+  source: RuntimeSourceStatus;
+  review: RuntimeRelease;
+}
+
+/** Owner catalog address and discovery trust; the credential is write-only. */
+export interface CatalogSourceUpdate {
+  expected_revision: number;
+  base_url?: string;
+  document_filename?: string;
+  trust?: { revision: number; expires_at: number; publishers: Record<string, string> };
+  token?: string;
+  clear_token?: boolean;
+}
+
+/**
+ * The server's own sentence for a refused plugin request, when it sent one.
+ *
+ * Catalog refusals, owner-access refusals and protocol refusals carry a
+ * sentence that names the cause and the next step; everything else returns
+ * null so the caller shows its own conservative text.
+ */
+export function pluginRefusalDetail(error: unknown): string | null {
+  if (!error || typeof error !== 'object' || !('data' in error)) return null;
+  const data = (error as { data?: unknown }).data;
+  if (!data || typeof data !== 'object' || !('detail' in data)) return null;
+  const detail = (data as { detail?: unknown }).detail;
+  return typeof detail === 'string' && detail.length > 0 && detail.length <= 600 ? detail : null;
+}
+
 const headers = { 'X-Skulk-Dashboard': 'pairing-v1' };
 const nodePath = ({ pluginId, nodeId }: NodeAddress) =>
   `/v1/plugins/${encodeURIComponent(pluginId)}/nodes/${encodeURIComponent(nodeId)}/configuration`;
@@ -281,6 +366,25 @@ const pluginsApi = apiSlice.injectEndpoints({
       query: ({ pluginId, operationId }) => ({ url: `/v1/plugins/managed/installations/${encodeURIComponent(pluginId)}/operations/${encodeURIComponent(operationId)}/recover`, method: 'POST', headers }),
       invalidatesTags: ['Plugins'],
     }),
+    getPluginCatalog: build.query<CatalogListing, void>({
+      // Each read fetches and verifies the signed document on the host, so it
+      // is read on demand and never polled.
+      query: () => ({ url: '/v1/plugins/managed/catalog', headers, cache: 'no-store' }),
+      providesTags: ['PluginCatalog'],
+      keepUnusedDataFor: 0,
+    }),
+    getCatalogSource: build.query<RuntimeSourceStatus, void>({
+      query: () => ({ url: '/v1/plugins/managed/catalog/source', headers, cache: 'no-store' }),
+      providesTags: ['PluginCatalog'],
+    }),
+    configureCatalogSource: build.mutation<RuntimeSourceStatus, CatalogSourceUpdate>({
+      query: (body) => ({ url: '/v1/plugins/managed/catalog/source', method: 'POST', headers, body }),
+      invalidatesTags: ['PluginCatalog'],
+    }),
+    installFromCatalog: build.mutation<CatalogInstallation, CatalogInstallRequest>({
+      query: (body) => ({ url: '/v1/plugins/managed/catalog/install', method: 'POST', headers, body }),
+      invalidatesTags: ['Plugins'],
+    }),
     getPluginNodes: build.query<PluginNodes[], void>({
       query: () => ({ url: '/v1/plugins', headers, cache: 'no-store' }),
       providesTags: ['Plugins'],
@@ -300,4 +404,4 @@ const pluginsApi = apiSlice.injectEndpoints({
   }),
 });
 
-export const { useGetNodeProposalsQuery, useGetNodeProposalReviewQuery, useApproveNodeProposalMutation, useGetNodeProposalOperationQuery, useResumeNodeProposalMutation, useGetNodeSetupActionsQuery, useStartNodeSetupMutation, useResumeNodeSetupMutation, useLazyGetNodeSetupQuery, useLazyGetNodePreflightQuery, useGetNodeCredentialsQuery, useRegisterManagedRuntimeMutation, useGetRuntimeSourceStatusQuery, useRecoverRuntimeInstallationMutation, useLazyGetRuntimeReleaseQuery, useGetRuntimeInstallationQuery, useInstallRuntimeReleaseMutation, useActivateRuntimeReleaseMutation, useGetManagedRuntimesQuery, useGetManagedOperationQuery, useWithdrawManagedRuntimeMutation, useRecoverManagedOperationMutation, usePurgeManagedRuntimeMutation, useGetPluginNodesQuery, useGetNodeConfigurationQuery, useConfigurePluginNodeMutation } = pluginsApi;
+export const { useGetPluginCatalogQuery, useGetCatalogSourceQuery, useConfigureCatalogSourceMutation, useInstallFromCatalogMutation, useLazyGetManagedOperationQuery, useLazyGetRuntimeInstallationQuery, useLazyGetManagedRuntimesQuery, useGetNodeProposalsQuery, useGetNodeProposalReviewQuery, useApproveNodeProposalMutation, useGetNodeProposalOperationQuery, useResumeNodeProposalMutation, useGetNodeSetupActionsQuery, useStartNodeSetupMutation, useResumeNodeSetupMutation, useLazyGetNodeSetupQuery, useLazyGetNodePreflightQuery, useGetNodeCredentialsQuery, useRegisterManagedRuntimeMutation, useGetRuntimeSourceStatusQuery, useRecoverRuntimeInstallationMutation, useLazyGetRuntimeReleaseQuery, useGetRuntimeInstallationQuery, useInstallRuntimeReleaseMutation, useActivateRuntimeReleaseMutation, useGetManagedRuntimesQuery, useGetManagedOperationQuery, useWithdrawManagedRuntimeMutation, useRecoverManagedOperationMutation, usePurgeManagedRuntimeMutation, useGetPluginNodesQuery, useGetNodeConfigurationQuery, useConfigurePluginNodeMutation } = pluginsApi;
