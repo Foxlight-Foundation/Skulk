@@ -40,6 +40,14 @@ This project records release notes here and mirrors public-facing notes in
   the worker's event loop.
 ### Added
 
+- Plugins can be managed on any node from any machine on the tailnet:
+  - A capability's **Manage on {host}**, in its topology flyout and its
+    details, links to that host's own dashboard at its Tailscale address,
+    opened on the plugin. It was only a hint before.
+  - **Plugins** lists the cluster's other nodes, each linking to its own
+    Plugins page.
+  - `/plugins?plugin=<id>` opens that plugin's details.
+
 - The Plugins page has a Browse tab for installing plugins from a signed
   catalog:
   - Connect a catalog with an invitation code, or its address and publisher

@@ -26,6 +26,7 @@ import {
   type CapabilityActionItem,
 } from '../topology/capabilityActions';
 import { satelliteColor, satelliteStatusLabel } from '../topology/capabilityPresentation';
+import { dashboardUrlOn, pluginsPath, tailnetAddress } from '../../utils/hostDashboard';
 
 const TAB_ORDER: CapabilityPanelTab[] = ['overview', 'surfaces', 'actions'];
 
@@ -208,6 +209,10 @@ export function CapabilityPanel() {
     ? topology?.nodes[target.hostNodeId]?.friendly_name ?? target.hostNodeId.slice(-8)
     : '';
   const isLocalHost = target !== null && localNodeId !== null && localNodeId === target.hostNodeId;
+  const hostAddress = target ? tailnetAddress(topology?.nodes[target.hostNodeId]) : null;
+  // The host's own dashboard, opened on this plugin: the host admits a browser
+  // that reaches it over the tailnet.
+  const hostDashboardUrl = hostAddress && summary ? dashboardUrlOn(hostAddress, pluginsPath(summary.pluginId)) : null;
   const actions = useMemo(
     () =>
       summary
@@ -215,10 +220,11 @@ export function CapabilityPanel() {
             isLocalHost,
             hostName,
             dashboardHostname: window.location.hostname,
+            hostDashboardUrl,
             t,
           })
         : [],
-    [summary, isLocalHost, hostName, t],
+    [summary, isLocalHost, hostName, hostDashboardUrl, t],
   );
 
   const runCall = async (item: Extract<CapabilityActionItem, { kind: 'call' }>) => {
@@ -325,10 +331,16 @@ export function CapabilityPanel() {
                 <>
                   <dt>{t('capabilityPanel.field.manage', 'Manage')}</dt>
                   <dd>
-                    {t(
-                      'topology.capability.manageOnHostHint',
-                      'Settings and actions for this node are managed from the dashboard on {host}.',
-                      { host: hostName },
+                    {hostDashboardUrl ? (
+                      <a href={hostDashboardUrl} rel="noopener noreferrer" target="_blank">
+                        {t('topology.capability.manageOnHost', 'Manage on {host}', { host: hostName })}
+                      </a>
+                    ) : (
+                      t(
+                        'topology.capability.manageOnHostHint',
+                        'Settings and actions for this node are managed from the dashboard on {host}.',
+                        { host: hostName },
+                      )
                     )}
                   </dd>
                 </>

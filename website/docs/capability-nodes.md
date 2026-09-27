@@ -120,6 +120,16 @@ use their topology actions to discover and open what they provide.
 
 ![Managed plugin inventory in the live dashboard](./imgs/dashboard-plugins.png)
 
+Each node manages its own plugins, and admits a browser that reaches it over
+Tailscale. So an owner on any tailnet machine can manage every node's plugins:
+- **Plugins** lists the cluster's other nodes, each linking to that node's own
+  Plugins page at its Tailscale address.
+- A capability's **Manage on {host}** entry, in its topology flyout and its
+  details, opens that host's dashboard on the plugin.
+
+A node that reports no Tailscale address is named without a link; open its
+dashboard on the node itself.
+
 Process separation helps lifecycle management; it is not a sandbox against
 malicious code running as the same operating-system user. Install bundles from
 publishers you trust.
