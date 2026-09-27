@@ -13,7 +13,7 @@ import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Annotated, Literal, cast, final
+from typing import Annotated, Final, Literal, cast, final
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, SecretStr, TypeAdapter
@@ -91,6 +91,74 @@ def refusal_payload(refused: ProtocolUnsupportedError) -> bytes:
 
 class _Request(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+
+class InstalledRelease(BaseModel):
+    """Display identity of the signed release an installation has selected.
+
+    Read from that release's staged metadata, which was verified when it was
+    staged and is private to the manager's owner. It names what is installed;
+    it grants nothing and is never used for a trust or compatibility decision.
+    """
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+    bundle_id: str = Field(
+        min_length=1,
+        max_length=128,
+        description="Signed capability bundle identifier, such as `foxlight.video-studio`.",
+    )
+    title: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+        description="Human-readable bundle title from the signed manifest, when it declares one.",
+    )
+    bundle_version: str = Field(
+        min_length=1, max_length=64, description="Bundle version from the signed manifest."
+    )
+    publisher: str = Field(
+        min_length=1,
+        max_length=64,
+        description="Identifier of the publisher that signed the release.",
+    )
+    sequence: int = Field(
+        ge=1, description="The publisher's increasing release sequence number."
+    )
+
+
+_STAGED_METADATA_BYTES: Final = 131072
+"""Signed runtime metadata is refused above this size, so staged copies fit it."""
+
+
+def installed_release(staged: Path) -> InstalledRelease | None:
+    """Read the display identity of one staged generation, or ``None``.
+
+    Any unreadable, oversized, or unexpected document yields ``None``: a
+    missing name must never hide an installation or fail the inventory.
+    """
+    try:
+        document = _OBJECT.validate_json(read_private(staged, _STAGED_METADATA_BYTES))
+    except (OSError, ValueError):
+        return None
+    runtime = document.get("runtime")
+    release = runtime.get("release") if isinstance(runtime, dict) else None
+    manifest = release.get("manifest") if isinstance(release, dict) else None
+    if not isinstance(release, dict) or not isinstance(manifest, dict):
+        return None
+    title = manifest.get("title")
+    try:
+        return InstalledRelease.model_validate(
+            {
+                "bundle_id": manifest.get("bundle_id"),
+                "title": title if isinstance(title, str) and title.strip() else None,
+                "bundle_version": manifest.get("bundle_version"),
+                "publisher": release.get("publisher"),
+                "sequence": release.get("sequence"),
+            }
+        )
+    except ValueError:
+        # A strict field check failed (a missing or mistyped claim): no name.
+        return None
 
 
 class InventoryRequest(_Request):
@@ -443,6 +511,10 @@ class RuntimeManager:
         self.catalog_read = asyncio.Lock()
         self.host: asyncio.Task[QualifiedHost] | None = None
         self.errors: dict[str, str] = {}
+        # A generation's staged metadata never changes once written, so its
+        # display identity is read once per digest; failures are not cached
+        # because a staging in progress completes later.
+        self.release_identities: dict[str, InstalledRelease] = {}
         self.server: asyncio.Server | None = None
         self.lock: RuntimeLock | None = None
         # Set by the serving loop: a reload activates the successor, then asks
@@ -713,8 +785,14 @@ class RuntimeManager:
                 # Older selections created directly by the local selector do not
                 # have a controller operation. Never invent an operation to replay.
                 pass
+            release = (
+                self._release_identity(controller.root, selection.runtime_digest)
+                if selection is not None
+                else None
+            )
             return {
                 "plugin_id": identifier,
+                "release": release.model_dump(mode="json") if release else None,
                 "operation_id": operation.request.operation_id if operation else None,
                 "operation_state": operation.state if operation else None,
                 "error_code": "service_unavailable" if failed else None,
@@ -732,6 +810,20 @@ class RuntimeManager:
                 "service": None,
                 "stale": True,
             }
+
+    def _release_identity(self, root: Path, digest: str) -> InstalledRelease | None:
+        """The selected generation's display identity, read once per digest."""
+        cached = self.release_identities.get(digest)
+        if cached is not None:
+            return cached
+        identity = installed_release(root / "generations" / digest / "staged.json")
+        if identity is not None:
+            if len(self.release_identities) >= 64:
+                # Bounded: installations are capped at 16, so this only drops
+                # identities of generations no longer selected.
+                self.release_identities.clear()
+            self.release_identities[digest] = identity
+        return identity
 
     async def dispatch(self, request: ManagerRequest) -> dict[str, JsonValue]:
         """Execute the same fixed operations for terminal and authenticated API callers."""
