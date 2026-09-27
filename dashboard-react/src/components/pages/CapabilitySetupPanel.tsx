@@ -112,7 +112,11 @@ export function CapabilitySetupPanel({ target, onBack }: CapabilitySetupPanelPro
           : t('plugins.setup.videoModelsOff', 'Off for this cluster. Start Skulk with SKULK_ENABLE_VIDEO_MODELS=1 on every node.'),
         state: readiness.video_models.length > 0 ? 'done' : 'needed',
       });
-      const lanes = readiness.lanes.map((lane) => [lane.node, ...lane.backends.slice(0, 1).map(engineLabel)].join(' · '));
+      // Name the lane by its most specific tag: `comfy-rocm` says more than `comfy`.
+      const lanes = readiness.lanes.map((lane) => {
+        const tag = lane.backends.find((backend) => backend.includes('-')) ?? lane.backends[0];
+        return [lane.node, ...(tag ? [engineLabel(tag)] : [])].join(' · ');
+      });
       items.push({
         id: 'lanes', title: t('plugins.setup.renderNode', 'A render node'),
         detail: lanes.length > 0 ? lanes.join(', ') : t('plugins.setup.renderNodeNone', 'No node runs a video engine. Video renders need a Linux node with an NVIDIA or AMD GPU.'),

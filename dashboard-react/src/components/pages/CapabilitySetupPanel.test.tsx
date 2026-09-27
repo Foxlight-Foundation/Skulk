@@ -30,7 +30,7 @@ async function contains(text: string) { await act(async () => { await vi.waitFor
 beforeEach(async () => {
   readiness = {
     ready: true, api_reachable: true, video_models: ['Comfy-Org/MiniMax-H3-FL2VA-comfy-int8'],
-    lanes: [{ node: 'kite4', backends: ['comfy-rocm'], placed_models: ['Comfy-Org/MiniMax-H3-FL2VA-comfy-int8'] }],
+    lanes: [{ node: 'kite4', backends: ['comfy', 'comfy-rocm'], placed_models: ['Comfy-Org/MiniMax-H3-FL2VA-comfy-int8'] }],
     default_model: 'Comfy-Org/MiniMax-H3-FL2VA-comfy-int8', default_host: 'kite4', reasons: [],
   };
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
