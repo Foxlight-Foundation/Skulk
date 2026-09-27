@@ -109,6 +109,13 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- The dashboard's English string catalog, the file seeded into Tolgee for
+  translation, is current again. Its exporter had failed since mid-September
+  (one key carried two different English texts, and the Integrations page
+  built tool-description keys at runtime, which the exporter cannot read),
+  so about 300 strings added since then never reached translators. Both are
+  fixed and the catalog is regenerated; nothing changes in English.
+
 - A refused plugin catalog read, source change or install now says why.
   The catalog routes answered every refusal with "local plugin operation
   refused", and `skulk-plugin-service catalog` told the operator to
