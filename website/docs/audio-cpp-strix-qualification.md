@@ -16,9 +16,9 @@ its fallback random generator to the same request seed for every autoregressive
 frame on non-CUDA backends. A source patch that also mixes in the frame's
 sample index removed the repeated-token lock in controlled Strix runs, including
 a 59.9-second clip accepted by listening. The historical wheel below does not
-contain it. New build identities and load, generation, and listening
-qualification are required before replacing a support claim. ACE-Step's
-results below are unaffected by this MiniMax defect.
+contain it. The replacement build's qualification and signed activation are
+recorded below. ACE-Step's original results were unaffected by this MiniMax
+defect.
 
 **Sampler-corrected candidate:** [CI run 36294070711](https://github.com/Foxlight-Foundation/Skulk/actions/runs/36294070711)
 built `skulk_audio_cpp_vulkan-0.8.2.post3-py3-none-manylinux_2_35_x86_64.whl`
@@ -77,8 +77,34 @@ the minimum full-wave PCM16 RMS was 549.36. The maximum inter-request gap was
 maximum sampled resident Vulkan memory on one DRM fd was 15,542,144 KiB
 across 374 five-second samples. A separate 45-second ACE-Step output had
 SHA-256 `b9b897f1f99bfdab4150db47f70a1c7a647f5567f8f9be68e49133b89e01dc6e`;
-human listening found it acceptable through the end. No production-signed
-claim for this build has been published yet.
+human listening found it acceptable through the end.
+
+**Production-signed activation (2026-09-27):** The compatible Skulk reader
+merged to `dev` at `4024b93112119973e1c1dca41ab264b26c42a9dd` and was
+deployed to all three participating nodes before new support claims were
+published. The deployed registry required no code update or seed-card
+re-import. A stock TUF client verified
+`snapshot_145_8193e4a1f00f1d6db83ecd9c`, containing 176 unchanged cards
+and engine-support matrix version 145. Its exact `music.generate` decisions
+for hardware class `amd:pci-1002-1586` are:
+
+| Card and build | Signed decision |
+| --- | --- |
+| MiniMax Music 3 Q4, corrected Vulkan build `audio.cpp@sha256:a0fe05ce8f120126a6997cfdeea7f28ca46f4ee853586ea94349509d3a333ab3` | `supported`, claim `support_pnrn6wewdqks4n3n3vscge4wl5j2xpvsxv6bmbaemnjpolcb4oya` |
+| ACE-Step 1.5 Turbo BF16, same corrected Vulkan build | `supported`, claim `support_bvkdzihcvhgaopa5ztzj2fp4lsmbqfemlxgwi2cl5ds7ezc7kvhq` |
+| MiniMax Music 3 Q4, older Vulkan build `audio.cpp@sha256:aacd5af30a4e7c4f7bcc02e392c46a3e9f73dd07c992488fbf53c74469c2f9e0` | `unsupported`, claim `support_nzjbyvlci2dpob64vk2htnyskvahszwrieztwkybslmmpzwidbea` superseding the historical `supported` claim |
+
+Ordinary signed placement mounted both cards through `audio_cpp-vulkan` with
+the corrected executable hash. Concurrent `POST /v1/music` jobs completed:
+MiniMax returned a 29.953741-second stereo 44.1 kHz PCM16 WAV of 5,283,884
+bytes (SHA-256 `a37547034dd440c37badc3a480b911d8c22415064c4c61a466c211d474b3f67b`);
+ACE-Step returned a 10-second stereo 48 kHz PCM16 WAV of 1,920,044 bytes
+(SHA-256 `0baeb8d2d6ae3ca7b09064e9ede7318dab728e958d9fb80dc05c71ce5331b905`).
+Each downloaded content digest and WAV geometry matched its completed job
+metadata. MiniMax rejected omitted lyrics with HTTP 400. Test jobs and
+placements were removed; all three nodes remained healthy, on the same
+commit, and with the two original placements ready. This is a
+configured-fleet regression, not a fresh-install qualification.
 
 The sampler defect is separate from a measured Vulkan precision issue: some
 large MiniMax matrix multiplications on this hardware use 16-bit accumulation.
@@ -86,7 +112,13 @@ The resulting numerical error may lower fidelity. The sound and latency effects
 of forcing 32-bit accumulation are still being measured, so that change is not
 part of the sampler correction.
 
-| Contract | Qualified value |
+### Historical post1 functional results
+
+The following post1 measurements predate the MiniMax listening failure.
+They document load and WAV mechanics; the post1 MiniMax build is now
+`unsupported` for `music.generate` on this hardware class.
+
+| Contract | Original post1 value |
 | --- | --- |
 | Engine source | audio.cpp v0.8.2, revision `4d88768fbcae4e6eb3352c6ab1422dabb7d90b58` |
 | Engine lane | `audio_cpp-vulkan`, Linux `amd64` |
@@ -104,7 +136,7 @@ retrieval. The API digest matched the downloaded bytes. Both outputs were
 non-silent when measured as PCM, and the Vulkan render device was observed
 during generation.
 
-| Card | Immutable model revision | Qualification result |
+| Card | Immutable model revision | Original functional result |
 | --- | --- | --- |
 | `audio-cpp/ACE-Step1.5-Turbo-BF16` | `a776907b362419343f4b9996bdd899619efcf3f8` | Stereo 48 kHz WAV; eight completed digest-verified, non-silent jobs in a paced 30-minute stability run; generation latency 60.74–74.87 seconds |
 | `audio-cpp/MiniMax-Music3-GGUF-Q4` | `9634a1e1364f94f1ac85a38c114ef105c678f824` | Stereo 44.1 kHz WAV; eight completed digest-verified, non-silent jobs in a paced 30-minute stability run; generation latency 58.74–62.79 seconds; missing lyrics rejected |
