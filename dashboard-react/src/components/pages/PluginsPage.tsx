@@ -182,6 +182,9 @@ function PluginInventory() {
     <Tab role="tab" type="button" aria-selected={view === 'browse'} $active={view === 'browse'} onClick={() => chooseView('browse')}>{t('plugins.tabBrowse', 'Browse')}</Tab>
   </Tabs>;
   const accessDrawer = <RightDrawer open={accessOpen} onClose={() => setAccessOpen(false)} title={t('operator.browserAccess', 'Browser access')} ariaLabel={t('operator.browserAccess', 'Browser access')} width={width} minWidth={360} maxWidth={900} onWidthChange={setWidth} closeLabel={t('common.close', 'Close')} resizeLabel={t('plugins.resize', 'Resize plugin details')}><OperatorAccessPanel /></RightDrawer>;
+  // Name the open plugin by its signed release, as the list does; its local id is the fallback.
+  const selectedRelease = runtimes.data?.installations.find((runtime) => runtime.plugin_id === selected)?.release;
+  const selectedTitle = selectedRelease?.title?.trim() || selectedRelease?.bundle_id || selected || '';
   const closeDetails = () => {
     setSelected(null);
     // A plugin named in the address was a one-time deep link; drop it so a reload does not reopen it.
@@ -213,7 +216,7 @@ function PluginInventory() {
       nodes={plugin.nodes.map(node => node.nodeId)} onOpen={() => setSelected(plugin.pluginId)} />)}
     </div>
     {accessDrawer}
-    <RightDrawer open={selected !== null} onClose={closeDetails} title={selected ?? ''} ariaLabel={t('plugins.details', 'Plugin details')}
+    <RightDrawer open={selected !== null} onClose={closeDetails} title={selectedTitle} ariaLabel={t('plugins.details', 'Plugin details')}
       width={width} minWidth={360} maxWidth={900} onWidthChange={setWidth} closeLabel={t('common.close', 'Close')} resizeLabel={t('plugins.resize', 'Resize plugin details')}>
       <div style={{ padding: 24, overflowY: 'auto' }}>
       {query.data?.find(plugin => plugin.pluginId === selected)?.nodes.map(node => <NodeCard key={node.nodeId} pluginId={selected!} node={node} />)}
