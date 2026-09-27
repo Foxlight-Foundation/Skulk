@@ -3,9 +3,88 @@ id: audio-cpp-strix-qualification
 title: audio.cpp Strix Vulkan qualification
 ---
 
-This record supports the `music.generate` engine support claims for the two
-exact music cards below on the `amd:pci-1002-1586` hardware class. The class
+This record preserves the original functional qualification of the two exact
+music cards below on the `amd:pci-1002-1586` hardware class. The class
 identifies a GPU type, not an individual Skulk node.
+
+**MiniMax quality correction (2026-09-27):** Later listening found that the
+MiniMax build recorded here can begin musically and then collapse into a held
+note or noise. Its non-silent WAV and stability results below do not establish
+acceptable music quality, and this build should not be used as evidence for a
+MiniMax `supported` claim. The pinned audio.cpp MiniMax depth decoder resets
+its fallback random generator to the same request seed for every autoregressive
+frame on non-CUDA backends. A source patch that also mixes in the frame's
+sample index removed the repeated-token lock in controlled Strix runs, including
+a 59.9-second clip accepted by listening. The historical wheel below does not
+contain it. New build identities and load, generation, and listening
+qualification are required before replacing a support claim. ACE-Step's
+results below are unaffected by this MiniMax defect.
+
+**Sampler-corrected candidate:** [CI run 36294070711](https://github.com/Foxlight-Foundation/Skulk/actions/runs/36294070711)
+built `skulk_audio_cpp_vulkan-0.8.2.post3-py3-none-manylinux_2_35_x86_64.whl`
+with wheel SHA-256
+`12297a15a1b7fd5fea6deb1ea3f431b9fa2a4efc5e695b3377ccbaf46e2980ca`
+and executable SHA-256
+`a0fe05ce8f120126a6997cfdeea7f28ca46f4ee853586ea94349509d3a333ab3`.
+The exact attested wheel loaded on Strix Vulkan and returned a 59.919-second
+structured vocal WAV and a different-seed instrumental WAV that ended naturally
+at 35.352 seconds. Both passed human listening as very good. These were direct
+engine-server requests. [Publication run 36297920867](https://github.com/Foxlight-Foundation/Skulk/actions/runs/36297920867)
+verified the source run, wheel digest, and attestation, then published those
+exact wheel bytes to the engine-package index.
+
+An isolated Skulk reader with a test-signed catalog then prepared the published
+wheel on ordinary placement, verified its executable build identity, and
+mounted both exact music cards. MiniMax and ACE-Step each completed
+`POST /v1/music` jobs with bounded WAV content and matching output digests.
+MiniMax also rejected missing lyrics. A queued cancellation left active work
+running; an active cancellation stopped that model server, and a subsequent
+job completed on its supervised replacement. An ACE-Step job overlapped two
+completed MiniMax generations.
+
+The isolated MiniMax reader then completed **34 back-to-back ten-second jobs in
+1,849.11 seconds** with no failed job or intentional idle interval. All 34
+WAVs had distinct SHA-256 digests, valid stereo 44.1 kHz PCM16 headers, output
+metadata matching the delivered bytes, and measured signal. The maximum gap
+between requests was 0.014 seconds; the minimum full-wave PCM16 RMS was
+682.61. Latency was 53.20–54.20–58.21 seconds (minimum, median, maximum).
+Across 394 five-second samples of that MiniMax server, the process high-water
+RSS was 1,956,500 KiB and its maximum reported resident Vulkan memory on one
+DRM file descriptor was 6,761,408 KiB. These are sampled measurements on one
+64 GiB Strix host, not universal capacity requirements.
+
+An induced crash of only the isolated MiniMax server failed its in-flight job,
+supervision started a different server process, and a fresh job returned a
+digest-matched WAV. After removing both test mounts, the isolated reader was
+restarted offline with engine auto-provisioning disabled and the test catalog
+server stopped. It recovered a completed job's original WAV and remounted
+both music cards from verified cached engine and model artifacts. Each card
+then completed a fresh offline generation with content matching its digest.
+The normal three-node service retained its original process, code revision,
+configuration digest, two placements, and empty diagnostics warnings after
+the isolated test. The temporary reader and catalog were removed and the
+fleet lease released.
+
+These results establish the new build's MiniMax functional and stability
+path, alongside the two accepted listening samples. ACE-Step also loaded,
+generated, and ran concurrently through this build. A separate direct-server
+check of the same wheel and SHA-256-verified ACE-Step artifact completed
+**62 back-to-back ten-second jobs in 1,800.146 seconds** with no failed job.
+All 62 stereo 48 kHz PCM16 WAVs had distinct digests and measured signal;
+the minimum full-wave PCM16 RMS was 549.36. The maximum inter-request gap was
+0.002 seconds and latency was 23.14–30.30–34.00 seconds
+(minimum, median, maximum). Its server high-water RSS was 5,549,056 KiB and
+maximum sampled resident Vulkan memory on one DRM fd was 15,542,144 KiB
+across 374 five-second samples. A separate 45-second ACE-Step output had
+SHA-256 `b9b897f1f99bfdab4150db47f70a1c7a647f5567f8f9be68e49133b89e01dc6e`;
+human listening found it acceptable through the end. No production-signed
+claim for this build has been published yet.
+
+The sampler defect is separate from a measured Vulkan precision issue: some
+large MiniMax matrix multiplications on this hardware use 16-bit accumulation.
+The resulting numerical error may lower fidelity. The sound and latency effects
+of forcing 32-bit accumulation are still being measured, so that change is not
+part of the sampler correction.
 
 | Contract | Qualified value |
 | --- | --- |
@@ -60,9 +139,7 @@ current candidate reader also mounted and generated from both models.
 
 The earlier paced run did not record beginning and ending RSS for each model;
 the continuous run above supplies that evidence.
-Human listening of an exact output from each card is still needed for the
-release plan's subjective quality gate; PCM measurements establish only that
-the WAVs are non-silent.
-These claims apply only to the exact cards, build identity, capability, and
-hardware class listed here. Other audio.cpp builds and GPUs need their own
-qualification.
+The later MiniMax listening failure supersedes the original non-silent signal
+gate. Any replacement claims apply only to the exact cards, build identity,
+capability, and hardware class tested. Other audio.cpp builds and GPUs need
+their own qualification.
