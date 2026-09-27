@@ -103,6 +103,13 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- The Plugins page works when the dashboard is opened over plain HTTP from
+  another machine on the network. Add plugin, Configure, credential
+  changes, setup actions, proposal approvals, and runtime install or
+  activation all minted their operation IDs with `crypto.randomUUID`,
+  which browsers only provide on HTTPS or localhost pages, so each of
+  those buttons failed silently on a LAN dashboard.
+
 - On an AMD Strix Halo node, a Vulkan model (such as the resident steward)
   is no longer counted against host RAM as well as the VRAM carve it
   occupies. Admission subtracted a loaded one from both, so a node with room

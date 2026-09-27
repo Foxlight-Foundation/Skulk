@@ -8,6 +8,7 @@ import {
   type NodeAddress, type ProposalReference,
 } from '../../store/endpoints/plugins';
 import { Button } from '../common/Button';
+import { randomHex32 } from '../../utils/randomIds';
 
 const Panel = styled.section`margin-top: 16px; overflow-wrap: anywhere;`;
 const Actions = styled.div`display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0;`;
@@ -48,7 +49,7 @@ function ProposalControls({ pluginId, nodeId, actionsAvailable }: NodeAddress & 
     if (submitting.current || operationId || !current?.approvalRevision || review.isFetching || review.isError || !actionsAvailable) return;
     submitting.current = true;
     setNotice('');
-    const identity = crypto.randomUUID().replaceAll('-', '');
+    const identity = randomHex32();
     remember(identity);
     try {
       await approve({ operationId: identity, reference: current.proposal.reference, reviewRevision: current.approvalRevision }).unwrap();

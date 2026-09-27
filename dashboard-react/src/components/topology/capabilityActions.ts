@@ -209,6 +209,7 @@ export function buildCapabilityActions(
  * always be made. Exposed with an injectable crypto for tests.
  */
 export function generateCallId(cryptoLike: Partial<Crypto> | null = globalThis.crypto ?? null): string {
+  // eslint-disable-next-line no-restricted-syntax -- guarded secure-context path
   if (cryptoLike && typeof cryptoLike.randomUUID === 'function') return cryptoLike.randomUUID();
   if (cryptoLike && typeof cryptoLike.getRandomValues === 'function') {
     const bytes = cryptoLike.getRandomValues(new Uint8Array(16));

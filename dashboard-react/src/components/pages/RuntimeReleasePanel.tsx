@@ -8,6 +8,7 @@ import {
 } from '../../store/endpoints/plugins';
 import { Button } from '../common/Button';
 import { RuntimeSourceForm } from './RuntimeSourceForm';
+import { randomHex32 } from '../../utils/randomIds';
 
 /** Submission fences retained by a parent when release details can unmount. */
 export interface RuntimeReleaseOwnership {
@@ -62,7 +63,7 @@ export function RuntimeReleasePanel({ runtime, ownership }: { runtime: ManagedRu
   };
   const installRelease = async () => {
     if (!review) return;
-    const id = crypto.randomUUID().replaceAll('-', '');
+    const id = randomHex32();
     setSubmitted(id);
     setNotice('');
     try {
@@ -73,7 +74,7 @@ export function RuntimeReleasePanel({ runtime, ownership }: { runtime: ManagedRu
   };
   const activateRelease = async (action: 'activate' | 'select' = 'activate') => {
     if (!review || !permissionsAccepted) return;
-    const operationId = crypto.randomUUID().replaceAll('-', '');
+    const operationId = randomHex32();
     setActivationSubmitted(operationId);
     setNotice('');
     try {
