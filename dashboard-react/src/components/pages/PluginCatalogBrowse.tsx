@@ -2,7 +2,7 @@ import { useMemo, useRef, useState } from 'react';
 import styled from 'styled-components';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 import {
-  pluginRefusalDetail, useGetCatalogSourceQuery, useGetManagedRuntimesQuery, useGetPluginCatalogQuery,
+  pluginRefusalDetail, pluginRequestRefused, useGetCatalogSourceQuery, useGetManagedRuntimesQuery, useGetPluginCatalogQuery,
   useInstallFromCatalogMutation, useInstallRuntimeReleaseMutation, type CatalogListing,
 } from '../../store/endpoints/plugins';
 import { randomHex32 } from '../../utils/randomIds';
@@ -55,7 +55,7 @@ export function PluginCatalogBrowse() {
     starting.current = true;
     const base = { kind: 'install' as const, title: displayTitle(offer.entry), publisher: offer.entry.publisher, sequence: offer.entry.sequence, transferBytes: offer.entry.transfer_bytes, updating: offer.state === 'update' };
     setView({ ...base, journey: null, refusal: null });
-    const outcome = await startCatalogInstall({ bind, install }, offer, listing, pluginRefusalDetail, randomHex32);
+    const outcome = await startCatalogInstall({ bind, install }, offer, listing, pluginRefusalDetail, randomHex32, pluginRequestRefused);
     starting.current = false;
     setView(isStartRefusal(outcome) ? { ...base, journey: null, refusal: outcome } : { ...base, transferBytes: outcome.transferBytes, journey: outcome, refusal: null });
   };

@@ -108,6 +108,10 @@ describe('startCatalogInstall', () => {
     expect(isStartRefusal(lost)).toBe(false);
     expect(readJourneys().map((item) => item.pluginId)).toContain(bound.plugin_id);
     clearJourney(bound.plugin_id);
+    // A 4xx without a sentence is still a decided refusal, reported with its status.
+    const invalid = await startCatalogInstall({ bind: () => resolved(bound), install: () => rejected({ status: 422, data: {} }) }, offer, listing([entry(51)]), () => null, () => '1'.repeat(32), (error) => (error as { status: number }).status);
+    expect(invalid).toEqual({ stage: 'download', detail: null, status: 422 });
+    expect(readJourneys()).toEqual([]);
   });
 });
 

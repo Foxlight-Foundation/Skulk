@@ -55,7 +55,7 @@ const Card = styled.article`
   background: ${({ theme }) => theme.colors.surface}; display: grid; grid-template-columns: 48px minmax(0, 1fr) auto; gap: 16px; align-items: center;
   color: ${({ theme }) => theme.colors.text};
   h2 { font-size: 17px; font-weight: 600; margin: 0; overflow-wrap: anywhere; }
-  @media (max-width: 600px) { grid-template-columns: 44px minmax(0, 1fr); > div:last-child { grid-column: 1 / -1; } }
+  @media (max-width: 600px) { grid-template-columns: 44px minmax(0, 1fr); align-items: start; > div:last-child { grid-column: 1 / -1; } }
 `;
 const Mark = styled(Monogram)`border-radius: 12px; border: 1px solid ${({ theme }) => theme.colors.border}; font-size: 15px;`;
 const Row = styled.div`display: flex; align-items: center; flex-wrap: wrap; gap: 10px; min-width: 0;`;

@@ -255,9 +255,25 @@ export interface CatalogSourceUpdate {
 export function pluginRefusalDetail(error: unknown): string | null {
   if (!error || typeof error !== 'object' || !('data' in error)) return null;
   const data = (error as { data?: unknown }).data;
-  if (!data || typeof data !== 'object' || !('detail' in data)) return null;
-  const detail = (data as { detail?: unknown }).detail;
+  if (!data || typeof data !== 'object') return null;
+  // Route errors carry `detail`; request-validation errors carry `error.message`.
+  const detail = 'detail' in data ? (data as { detail?: unknown }).detail
+    : 'error' in data && (data as { error?: unknown }).error && typeof (data as { error?: unknown }).error === 'object'
+      ? ((data as { error: { message?: unknown } }).error.message) : undefined;
   return typeof detail === 'string' && detail.length > 0 && detail.length <= 600 ? detail : null;
+}
+
+/**
+ * Whether a failed plugin request was definitely answered with a refusal.
+ *
+ * A 4xx means the host decided and nothing changed, so the caller reports
+ * it. A 5xx, a timeout or a lost connection may have landed, so the caller
+ * reads the operation back instead of assuming either way.
+ */
+export function pluginRequestRefused(error: unknown): number | null {
+  if (!error || typeof error !== 'object' || !('status' in error)) return null;
+  const status = (error as { status?: unknown }).status;
+  return typeof status === 'number' && status >= 400 && status < 500 ? status : null;
 }
 
 const headers = { 'X-Skulk-Dashboard': 'pairing-v1' };

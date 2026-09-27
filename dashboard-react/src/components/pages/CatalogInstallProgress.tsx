@@ -6,7 +6,7 @@ import { Button } from '../common/Button';
 import { Spinner } from '../common/Spinner';
 import { Surface } from '../common/Surfaces';
 import {
-  pluginRefusalDetail, useActivateRuntimeReleaseMutation, useLazyGetManagedOperationQuery, useLazyGetManagedRuntimesQuery,
+  pluginRefusalDetail, pluginRequestRefused, useActivateRuntimeReleaseMutation, useLazyGetManagedOperationQuery, useLazyGetManagedRuntimesQuery,
   useLazyGetRuntimeInstallationQuery, type ManagedRuntime,
 } from '../../store/endpoints/plugins';
 import { randomHex32 } from '../../utils/randomIds';
@@ -35,7 +35,7 @@ interface Steps { verified: StepState; downloaded: StepState; prepared: StepStat
 type Failure =
   | { kind: 'detail'; step: keyof Steps; detail: string }
   | { kind: 'code'; step: keyof Steps; code: 'recovery' | 'download-unconfirmed' | 'inventory' | 'activation-unconfirmed' | 'start-slow' }
-  | { kind: 'code-with-value'; step: keyof Steps; code: 'activation-failed' | 'start-failed'; value: string };
+  | { kind: 'code-with-value'; step: keyof Steps; code: 'activation-failed' | 'activation-refused' | 'start-failed'; value: string };
 
 const POLL_MS = 2000;
 const CONFIRM_ATTEMPTS = 15;
@@ -121,8 +121,15 @@ export function CatalogInstallProgress({ title, publisher, sequence, transferByt
         try {
           await activate({ pluginId, operationId: current.activationOperationId!, expectedRevision: runtime.selection_revision, runtimeDigest: current.runtimeDigest, rollback: false }).unwrap();
         } catch (error) {
-          const detail = pluginRefusalDetail(error);
-          if (detail) { clearJourney(pluginId); activationInFlight.delete(pluginId); fail({ kind: 'detail', step: 'activated', detail }); return; }
+          // Only a 4xx is a decided refusal; a 5xx, timeout or lost reply may
+          // have landed, so the operation is read back below.
+          const status = pluginRequestRefused(error);
+          if (status !== null) {
+            const detail = pluginRefusalDetail(error);
+            clearJourney(pluginId); activationInFlight.delete(pluginId);
+            fail(detail ? { kind: 'detail', step: 'activated', detail } : { kind: 'code-with-value', step: 'activated', code: 'activation-refused', value: String(status) });
+            return;
+          }
         } finally {
           activationInFlight.delete(pluginId);
         }
@@ -169,6 +176,7 @@ export function CatalogInstallProgress({ title, publisher, sequence, transferByt
   const failureText = (value: Failure): string => {
     if (value.kind === 'detail') return value.detail;
     if (value.kind === 'code-with-value') {
+      if (value.code === 'activation-refused') return t('plugins.catalog.activationRefused', 'The host refused the activation (HTTP {status}). The release stays downloaded; activate it from Installed.', { status: value.value });
       return value.code === 'activation-failed'
         ? t('plugins.catalog.activationFailed', 'Activation did not complete ({code}). Open Installed to see the retained operation.', { code: value.value })
         : t('plugins.catalog.startFailed', 'It was activated but did not start ({code}). Open Installed for the reason.', { code: value.value });
@@ -183,7 +191,8 @@ export function CatalogInstallProgress({ title, publisher, sequence, transferByt
   };
   const refusalText = refusal ? (refusal.detail ?? (refusal.stage === 'bind'
     ? t('plugins.catalog.bindRefused', 'The host did not accept this release. Nothing was installed. Read the catalog again and retry.')
-    : t('plugins.catalog.downloadRefused', 'The host refused the download. Nothing was installed.'))) : null;
+    : t('plugins.catalog.downloadRefused', 'The host refused the download. Nothing was installed.'))
+    + (refusal.status !== undefined && !refusal.detail ? ` (HTTP ${refusal.status})` : '')) : null;
   const message = refusalText ?? (failure ? failureText(failure) : null);
   const rows: { key: keyof Steps; label: string; detail: string }[] = [
     { key: 'verified', label: t('plugins.catalog.stepVerified', 'Signature and compatibility verified'), detail: `${publisher} · ${t('plugins.catalog.release', 'release {sequence}', { sequence })}` },

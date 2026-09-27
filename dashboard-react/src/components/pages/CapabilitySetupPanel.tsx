@@ -1,11 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import styled from 'styled-components';
 import { FiCheck, FiCircle, FiExternalLink } from 'react-icons/fi';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 import { useClusterState } from '../../hooks/useClusterState';
 import { useAppDispatch } from '../../store/hooks';
 import { uiActions } from '../../store/slices/uiSlice';
-import { modelSupportsTextChat, type ModelInfo } from '../../types/models';
+import type { ModelInfo } from '../../types/models';
 import { runDescriptorAction } from '../topology/capabilityActions';
 import { Button } from '../common/Button';
 import { Spinner } from '../common/Spinner';
@@ -20,6 +20,11 @@ export interface CapabilitySetupPanelProps {
 }
 
 type ItemState = 'done' | 'needed' | 'optional' | 'checking';
+
+// A capability that has just started may not serve its readiness contract for
+// a few seconds; keep asking before calling it unreachable.
+const READINESS_ATTEMPTS = 15;
+const READINESS_RETRY_MS = 4000;
 interface SetupItem { id: string; title: string; detail: string; state: ItemState; action?: { label: string; run: () => void } }
 
 /** The ready chat models: every runner of the placement reports ready. */
@@ -52,19 +57,25 @@ export function CapabilitySetupPanel({ target, onBack }: CapabilitySetupPanelPro
   const summary = useMemo(() => Object.values(capabilityNodes).flat().find((node) => node.pluginId === target.pluginId) ?? null, [capabilityNodes, target.pluginId]);
   const surface = summary?.surfaces.find((item) => item.kind === 'link') ?? null;
 
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const check = useCallback(async () => {
     if (!video || !localNodeId) return;
     setChecking(true);
-    try {
-      const reply = await runDescriptorAction(localNodeId, 'video.readiness', {});
-      const parsed = reply.ok ? parseVideoReadiness(reply.result) : null;
-      setReadiness(parsed);
-      setReadinessError(parsed === null);
-    } catch {
-      setReadinessError(true);
-    } finally {
-      setChecking(false);
+    setReadinessError(false);
+    for (let attempt = 0; attempt < READINESS_ATTEMPTS && mounted.current; attempt += 1) {
+      let parsed: VideoReadiness | null = null;
+      try {
+        const reply = await runDescriptorAction(localNodeId, 'video.readiness', {});
+        parsed = reply.ok ? parseVideoReadiness(reply.result) : null;
+      } catch {
+        parsed = null;
+      }
+      if (!mounted.current) return;
+      if (parsed) { setReadiness(parsed); setChecking(false); return; }
+      await new Promise((resolve) => setTimeout(resolve, READINESS_RETRY_MS));
     }
+    if (mounted.current) { setReadinessError(true); setChecking(false); }
   }, [localNodeId, video]);
 
   useEffect(() => { void check(); }, [check]);
@@ -72,7 +83,9 @@ export function CapabilitySetupPanel({ target, onBack }: CapabilitySetupPanelPro
     let alive = true;
     fetch('/v1/models', { cache: 'no-store' })
       .then(async (response) => (response.ok ? await response.json() as { data?: ModelInfo[] } : { data: [] }))
-      .then((body) => { if (alive) setChatModels(new Set((body.data ?? []).filter((model) => modelSupportsTextChat(model)).map((model) => model.id))); })
+      // Only a card that declares text generation can refine a prompt; the
+      // chat-surface helper also admits cards that declare no task at all.
+      .then((body) => { if (alive) setChatModels(new Set((body.data ?? []).filter((model) => model.tasks?.includes('TextGeneration')).map((model) => model.id))); })
       .catch(() => { if (alive) setChatModels(new Set()); });
     return () => { alive = false; };
   }, []);
@@ -92,7 +105,7 @@ export function CapabilitySetupPanel({ target, onBack }: CapabilitySetupPanelPro
   }];
   if (video) {
     if (!readiness) {
-      items.push({ id: 'readiness', title: t('plugins.setup.readiness', 'Rendering readiness'), detail: readinessError ? t('plugins.setup.readinessError', 'It could not report its readiness yet.') : t('plugins.setup.readinessChecking', 'Checking the fleet…'), state: readinessError ? 'needed' : 'checking' });
+      items.push({ id: 'readiness', title: t('plugins.setup.readiness', 'Rendering readiness'), detail: readinessError ? t('plugins.setup.readinessError', 'It did not report its readiness. Check that it is running, then check again.') : t('plugins.setup.readinessChecking', 'Checking the fleet…'), state: readinessError ? 'needed' : 'checking' });
     } else {
       items.push({
         id: 'models', title: t('plugins.setup.videoModels', 'Video models'),

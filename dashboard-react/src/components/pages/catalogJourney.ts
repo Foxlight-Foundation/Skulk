@@ -289,8 +289,8 @@ export interface InstallStarters {
   install: (args: { pluginId: string; request: RuntimeInstallation['request'] }) => Unwrappable<RuntimeInstallation>;
 }
 
-/** Why starting an install stopped: the server's own sentence, or none. */
-export interface InstallStartRefusal { stage: 'bind' | 'download'; detail: string | null }
+/** Why starting an install stopped: the server's own sentence and status, when it gave them. */
+export interface InstallStartRefusal { stage: 'bind' | 'download'; detail: string | null; status?: number }
 
 /**
  * Bind the installation to the reviewed listing and ask the host to download
@@ -306,6 +306,7 @@ export async function startCatalogInstall(
   listing: CatalogListing,
   refusalDetail: (error: unknown) => string | null,
   newOperationId: () => string,
+  refusedStatus: (error: unknown) => number | null = () => null,
 ): Promise<InstallJourney | InstallStartRefusal> {
   let bound: CatalogInstallation;
   try {
@@ -315,7 +316,8 @@ export async function startCatalogInstall(
       ...(offer.installed ? { plugin_id: offer.installed.plugin_id } : {}),
     }).unwrap();
   } catch (error) {
-    return { stage: 'bind', detail: refusalDetail(error) };
+    const status = refusedStatus(error);
+    return { stage: 'bind', detail: refusalDetail(error), ...(status !== null ? { status } : {}) };
   }
   const journey: InstallJourney = {
     pluginId: bound.plugin_id, title: displayTitle(offer.entry), bundleId: offer.entry.bundle_id, sequence: offer.entry.sequence,
@@ -327,9 +329,10 @@ export async function startCatalogInstall(
   try {
     await starters.install({ pluginId: journey.pluginId, request: { operation_id: journey.installOperationId, runtime_digest: journey.runtimeDigest, expected_source_revision: bound.source.revision } }).unwrap();
   } catch (error) {
-    const detail = refusalDetail(error);
-    // A refusal with a reason is final; any other failure may have landed.
-    if (detail) { clearJourney(journey.pluginId); return { stage: 'download', detail }; }
+    // Only a 4xx is a decided refusal; a 5xx, timeout or lost reply may have
+    // landed, so the journey stays and its operation is read back.
+    const status = refusedStatus(error);
+    if (status !== null) { clearJourney(journey.pluginId); return { stage: 'download', detail: refusalDetail(error), status }; }
   }
   return journey;
 }
