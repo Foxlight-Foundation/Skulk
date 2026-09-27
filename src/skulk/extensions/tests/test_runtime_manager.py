@@ -325,6 +325,28 @@ def test_a_protocol_refusal_is_a_fixed_vocabulary_of_a_code_and_integers() -> No
     }
 
 
+async def test_a_catalog_refusal_is_named_on_the_manager_socket(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A catalog read this host cannot serve says why: a code and nothing else."""
+    from skulk.extensions.runtime_manager import CatalogRequest
+    from skulk.extensions.tests.test_managed_services import manager_fixture
+
+    manager = manager_fixture(tmp_path, monkeypatch)
+    await manager.start()
+    try:
+        read = CatalogRequest(action="read_catalog")
+        assert await manager_request(tmp_path, read) == {
+            "error": "catalog_refused",
+            "code": "catalog_unconfigured",
+        }
+        async with manager.catalog_read:
+            busy = await manager_request(tmp_path, read)
+        assert busy == {"error": "catalog_refused", "code": "catalog_busy"}
+    finally:
+        await manager.close()
+
+
 async def test_reload_runtime_selects_the_staged_generation_and_stops(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -438,7 +460,10 @@ def test_installed_release_without_a_usable_title_keeps_the_rest(
 @pytest.mark.parametrize(
     "document",
     [
-        _staged({"publisher": "fixture", "sequence": "1"}, {"bundle_id": "x", "bundle_version": "1"}),
+        _staged(
+            {"publisher": "fixture", "sequence": "1"},
+            {"bundle_id": "x", "bundle_version": "1"},
+        ),
         _staged({"publisher": "fixture", "sequence": 1}, {"bundle_version": "1"}),
         _staged({"sequence": 1}, {"bundle_id": "x", "bundle_version": "1"}),
         {"runtime": {"release": "not an object"}},
@@ -468,4 +493,3 @@ def test_installed_release_tolerates_missing_oversized_and_invalid_files(
     invalid = tmp_path / "invalid.json"
     write_private(invalid, b"{not json")
     assert installed_release(invalid) is None
-

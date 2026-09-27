@@ -1153,7 +1153,7 @@ def test_cli_lost_response_directs_owner_to_generated_resume_command(
     assert "sensitive connection details" not in captured.err
 
 
-async def test_a_protocol_refusal_is_the_one_manager_error_the_terminal_names() -> None:
+async def test_the_terminal_names_a_protocol_refusal_from_its_vocabulary() -> None:
     """The installer says what to do about a release outside the window, and nothing else."""
     from skulk.extensions.terminal_install import protocol_refusal
 
@@ -1182,3 +1182,21 @@ async def test_a_protocol_refusal_is_the_one_manager_error_the_terminal_names() 
     with pytest.raises(ValueError, match="manager request incomplete"):
         await terminal.run("managed." + "a" * 32)
     assert any("the release offers 2" in line for line in output)
+    catalog_protocol = protocol_refusal({**refusal, "kind": "catalog"})
+    assert catalog_protocol is not None
+    assert "choose a catalog published for it" in catalog_protocol
+
+
+async def test_the_terminal_names_a_catalog_refusal() -> None:
+    """A catalog read the host refused says why, not that the manager refused."""
+    from skulk.extensions.runtime_catalog import catalog_refusal_sentence
+
+    output: list[str] = []
+
+    async def request(_: ManagerRequest) -> dict[str, JsonValue]:
+        return {"error": "catalog_refused", "code": "catalog_unreachable"}
+
+    terminal = TerminalInstaller(request, lambda _: "", lambda _: "", output.append)
+    with pytest.raises(ValueError, match="manager request incomplete"):
+        await terminal.run_from_catalog("example.plugin")
+    assert output == [catalog_refusal_sentence("catalog_unreachable")]

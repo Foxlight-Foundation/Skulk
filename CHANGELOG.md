@@ -109,6 +109,17 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- A refused plugin catalog read, source change or install now says why.
+  The catalog routes answered every refusal with "local plugin operation
+  refused", and `skulk-plugin-service catalog` told the operator to
+  configure a catalog that was already configured, including when the
+  host simply could not reach the catalog address. Each refusal now has
+  one sentence, shared by the API and the terminal, that names the cause
+  (unreachable, not configured, the server's HTTP status, an untrusted
+  publisher, an expired catalog, a superseded listing, and others) and
+  what to do next, without the catalog address or credential. The guided
+  installer also names a catalog outside the host's protocol window.
+
 - A node no longer copies the models it was serving from the store again
   after a restart, an update or a master election it wins. The startup
   cleanup ran before any runner existed, so every staged model competed for
@@ -123,7 +134,22 @@ This project records release notes here and mirrors public-facing notes in
   HTML shell was served without a cache policy, so browsers kept an old
   shell that asked for script bundles the new build no longer had. The
   shell and other unhashed files are now revalidated on every load, and
-  the content-hashed bundles under `assets/` are cached as immutable.
+  the content-hashed bundles under `assets/` are cached as immutable, also
+  when a browser revalidates one.
+
+- Active instance cards name the engine that serves each instance, with
+  its accelerator ("ComfyUI · ROCm", "vLLM · CUDA", "llama.cpp ·
+  Vulkan"). The dashboard guessed the engine from the model card's first
+  compatible backend and labelled every engine other than llama.cpp
+  "Pipeline · MLX Ring", including video models on AMD nodes; it now
+  reads the backend the master resolved for the placement.
+
+- A node no longer crashes when a peer restart changes the master. The
+  node closes its worker's event channel before replacing the worker, and
+  a topology update sent in that window raised out of the worker and
+  stopped the whole node, taking every model instance it hosted with it.
+  Both topology tasks now end quietly when their channel closes, as the
+  worker's other senders already did.
 
 - The Plugins page works when the dashboard is opened over plain HTTP from
   another machine on the network. Add plugin, Configure, credential

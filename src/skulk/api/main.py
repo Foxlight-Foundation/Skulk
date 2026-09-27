@@ -1740,7 +1740,6 @@ class _PreviewContextFields(TypedDict):
     kv_bytes_per_token: int | None
 
 
-
 DASHBOARD_SHELL_CACHE_CONTROL: Final = "no-cache"
 """The dashboard shell is revalidated on every load.
 
@@ -1763,7 +1762,10 @@ class DashboardStaticFiles(StaticFiles):
 
         Content-hashed bundles under ``assets/`` are immutable; everything
         else, including the ``index.html`` shell served for ``/``, must be
-        revalidated so a new build is picked up on the next load.
+        revalidated so a new build is picked up on the next load. A 304 for
+        a bundle carries the same immutable policy as its 200: a cache
+        updates its stored headers from the 304, so a revalidation answered
+        with ``no-cache`` would demote the bundle for every later load.
 
         Args:
             path: File path relative to the dashboard directory, as Starlette
@@ -1776,7 +1778,7 @@ class DashboardStaticFiles(StaticFiles):
             Starlette's 404 ``HTTPException`` unchanged.
         """
         response = await super().get_response(path, scope)
-        if path.startswith("assets/") and response.status_code == 200:
+        if path.startswith("assets/") and response.status_code in (200, 304):
             response.headers["Cache-Control"] = DASHBOARD_BUNDLE_CACHE_CONTROL
         else:
             response.headers["Cache-Control"] = DASHBOARD_SHELL_CACHE_CONTROL
