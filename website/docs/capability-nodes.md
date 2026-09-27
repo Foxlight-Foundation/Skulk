@@ -124,8 +124,8 @@ Each node manages its own plugins, and admits a browser that reaches it over
 Tailscale. So an owner on any tailnet machine can manage every node's plugins:
 - **Plugins** lists the cluster's other nodes, each linking to that node's own
   Plugins page at its Tailscale address.
-- A capability's **Manage on {host}** entry, in its topology flyout and its
-  details, opens that host's dashboard on the plugin.
+- A capability's **Manage on** entry, followed by its host's name, in its
+  topology flyout and its details, opens that host's dashboard on the plugin.
 
 A node that reports no Tailscale address is named without a link; open its
 dashboard on the node itself.
