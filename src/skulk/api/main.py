@@ -1764,6 +1764,16 @@ class DashboardStaticFiles(StaticFiles):
         Content-hashed bundles under ``assets/`` are immutable; everything
         else, including the ``index.html`` shell served for ``/``, must be
         revalidated so a new build is picked up on the next load.
+
+        Args:
+            path: File path relative to the dashboard directory, as Starlette
+                resolved it from the request (empty for the ``/`` shell).
+            scope: The ASGI HTTP scope of the request being served.
+
+        Returns:
+            Starlette's file, redirect, or not-modified response for ``path``,
+            with its ``Cache-Control`` header set. A missing file raises
+            Starlette's 404 ``HTTPException`` unchanged.
         """
         response = await super().get_response(path, scope)
         if path.startswith("assets/") and response.status_code == 200:
