@@ -77,8 +77,8 @@ the minimum full-wave PCM16 RMS was 549.36. The maximum inter-request gap was
 maximum sampled resident Vulkan memory on one DRM fd was 15,542,144 KiB
 across 374 five-second samples. A separate 45-second ACE-Step output had
 SHA-256 `b9b897f1f99bfdab4150db47f70a1c7a647f5567f8f9be68e49133b89e01dc6e`;
-its listening verdict is pending. No production-signed claim for this build
-has been published yet.
+human listening found it acceptable through the end. No production-signed
+claim for this build has been published yet.
 
 The sampler defect is separate from a measured Vulkan precision issue: some
 large MiniMax matrix multiplications on this hardware use 16-bit accumulation.
