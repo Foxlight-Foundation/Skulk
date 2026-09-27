@@ -4,6 +4,7 @@ import { operatorSession } from '../../auth/operatorSession';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 import { useGetNodeCredentialsQuery, type NodeAddress, type NodeCredentials } from '../../store/endpoints/plugins';
 import { Button } from '../common/Button';
+import { randomHex32 } from '../../utils/randomIds';
 
 const Field = styled.fieldset`
   min-width: 0; margin: 12px 0; padding: 14px; border: 1px solid ${({ theme }) => theme.colors.border};
@@ -59,7 +60,7 @@ function CredentialEditor({ address, current, reload, unavailable }: { address: 
     try {
       // The secret-bearing body bypasses Redux actions and query caches. Only
       // safe metadata is fetched after a confirmed or unconfirmed write.
-      const body = JSON.stringify({ operation, operationId: crypto.randomUUID().replaceAll('-', ''), credentialId,
+      const body = JSON.stringify({ operation, operationId: randomHex32(), credentialId,
         expectedRevision: baseline.revision, expectedSchemaDigest: baseline.schemaDigest,
         ...(operation === 'replace' ? { value } : {}),
       });

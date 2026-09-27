@@ -15,6 +15,7 @@ import { PluginSummaryCard } from '../common/PluginSummaryCard';
 import { Button } from '../common/Button';
 import { RuntimeReleasePanel } from './RuntimeReleasePanel';
 import { RuntimeSourceForm } from './RuntimeSourceForm';
+import { randomHex32 } from '../../utils/randomIds';
 
 const RuntimeCard = styled.article`
   margin: 0; padding: 24px; border: 1px solid ${({ theme }) => theme.colors.border};
@@ -87,7 +88,7 @@ function RuntimeControls({ runtime, unavailable, nodes, details, nodeEvidence, f
     }
   };
   const withdrawRuntime = async (action: 'disable' | 'uninstall') => {
-    const id = crypto.randomUUID().replaceAll('-', '');
+    const id = randomHex32();
     setSubmitted(id);
     setNotice('');
     try {
@@ -185,7 +186,7 @@ export function ManagedRuntimesPanel({ nodeNames = () => [], renderDetails, node
   const [setupId, setSetupId] = useState<string | null>(null);
   const [registrationUncertain, setRegistrationUncertain] = useState(false);
   const addPlugin = async () => {
-    const id = setupId ?? `managed.${crypto.randomUUID().replaceAll('-', '')}`;
+    const id = setupId ?? `managed.${randomHex32()}`;
     setSetupId(id);
     setRegistrationUncertain(false);
     try { await register(id).unwrap(); }
