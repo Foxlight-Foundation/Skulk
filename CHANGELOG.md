@@ -109,6 +109,15 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- A node no longer deletes the staged copy of a model it still hosts when
+  it restarts or wins a master election. The startup cleanup ran before the
+  node knew its placements and counted only running models as in use, so a
+  placed model larger than the 40 GiB recent-use budget (a 45 GiB video
+  model, for one) was deleted and copied from the store again on every
+  restart and every election the node won. The cleanup now waits for the
+  cluster's state and keeps every model an instance places on the node, and
+  the cleanup after an instance stops keeps them too.
+
 - The dashboard no longer opens to a blank page after a Skulk update. Its
   HTML shell was served without a cache policy, so browsers kept an old
   shell that asked for script bundles the new build no longer had. The

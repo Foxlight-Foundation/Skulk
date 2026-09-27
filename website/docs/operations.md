@@ -48,7 +48,11 @@ The first three use the least-recently-used policy below. The operator purge is
 an explicit unconditional reset of staged copies.
 
 A staged model becomes an **eviction candidate** when no live runner uses
-it. Candidates are kept newest-first by last use up to the
+it and no instance placed on the node needs it. A placed model stays staged
+while its runner is away, such as across a node restart or a master change,
+because the runner comes back for the same files. The startup pass waits until
+the node has received the cluster's state, so it knows those placements.
+Candidates are kept newest-first by last use up to the
 `staging_keep_recent_gb` grace budget, and everything beyond the budget is
 deleted.
 

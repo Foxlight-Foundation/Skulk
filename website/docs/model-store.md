@@ -342,8 +342,11 @@ safety check and an explicit delete path.
 
 A staged copy is **in use** whenever a live runner depends on it, including
 companion repositories that no instance names directly (a speculative-decoding
-draft model, an assistant model, or separate vision weights). In-use copies are
-never evicted automatically.
+draft model, an assistant model, or separate vision weights). A copy is also in
+use while an instance placed on the node needs it, even before its runner
+starts: after a node restart or a master change the runner comes back for the
+same files, so they are kept rather than copied from the store again. In-use
+copies are never evicted automatically.
 
 ### The recency budget
 
@@ -353,7 +356,9 @@ deleted. This warm-cache check runs at two specific moments, and only when
 `cleanup_on_deactivate` is `true`:
 
 - when a model instance is shut down, and
-- at node startup, which reconciles copies orphaned by a crash or kill.
+- at node startup, once the node has received the cluster's state, which
+  reconciles copies orphaned by a crash or kill while keeping every model the
+  cluster still places on the node.
 
 `cleanup_on_deactivate` is the on/off switch for that check:
 
@@ -613,8 +618,8 @@ multimodal request through the chat APIs.
 A staged copy that falls outside the recency budget had to be re-copied from the
 store host before loading. With `cleanup_on_deactivate: true` (the default), the
 newest ~40 GiB of idle copies stay warm, but a model larger than the budget, or
-one pushed out by other recently used models, is evicted and re-staged on its
-next placement. Raise `staging_keep_recent_gb` to keep more models warm, or set
+one pushed out by other recently used models, is evicted once no instance
+places it on the node and is re-staged on its next placement. Raise `staging_keep_recent_gb` to keep more models warm, or set
 it large enough to hold the models you cycle between. Setting
 `cleanup_on_deactivate: false` keeps every copy warm until a future launch
 needs that space; the pre-download safety pass can still evict idle copies to

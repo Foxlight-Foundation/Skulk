@@ -1053,6 +1053,10 @@ class Worker:
         # are never advertised independently.
         self._stale_downloads_awaiting_completion: dict[str, int] = {}
         self._stale_reset_wait_ticks: int = 0
+        # The startup staging reconciliation waits for the session's state:
+        # it must know which instances are placed here before deciding what
+        # is an orphan. See _reconcile_staging_once_state_is_known.
+        self._startup_staging_reconcile_pending: bool = True
         # Runtime eviction takes a filesystem snapshot on the event loop and
         # deletes from a worker thread. Keep that whole interval atomic with
         # stale-state reconciliation plus CreateRunner planning/registration:
@@ -1425,7 +1429,9 @@ class Worker:
 
     async def run(self):
         logger.info("Starting Worker")
-        self._reconcile_staging_on_startup()
+        # Staging orphans are reconciled from the planning guard once this
+        # worker has applied the session's state, never here: nothing is
+        # known to be placed yet (_reconcile_staging_once_state_is_known).
         # A vLLM engine core orphaned by an abrupt previous shutdown holds
         # its GPU allocation invisibly and blocks placement admission until
         # someone kills it (#653); reap exactly that shape before this
@@ -3453,6 +3459,7 @@ class Worker:
         """
 
         async with self._staging_runner_transition_lock:
+            await self._reconcile_staging_once_state_is_known()
             if self._stale_downloads_pending_reset:
                 await self._reset_stale_downloads_from_state()
                 if self._state_still_advertises_evicted_downloads():
@@ -3756,17 +3763,32 @@ class Worker:
         )
 
     def _models_in_use(self) -> frozenset[str]:
-        """Repo-form IDs of every model a live runner depends on.
+        """Repo-form IDs of every model this node must keep staged.
 
-        Includes companion repos (MTP sidecar, assistant, split vision
-        weights) of active models: no instance names them directly, but
-        evicting one corrupts a live runner just the same - MLX loads
-        weights lazily.
+        A live runner's model, including companion repos (MTP sidecar,
+        assistant, split vision weights) of active models: no instance
+        names them directly, but evicting one corrupts a live runner just
+        the same - MLX loads weights lazily. Also every model, with its
+        companions, that an instance placed on this node will load, whether
+        or not its runner exists yet: a restarted or recreated worker brings
+        its runners back for exactly these files, and deleting them first
+        forces a full re-copy from the store.
         """
 
         in_use: set[str] = set()
         for runner in self.runners.values():
             in_use.update(_staging_model_ids(runner.shard_metadata.model_card))
+        for instance in self.state.instances.values():
+            placed_runner_id = instance.shard_assignments.node_to_runner.get(
+                self.node_id
+            )
+            placed_shard = (
+                instance.shard(placed_runner_id)
+                if placed_runner_id is not None
+                else None
+            )
+            if placed_shard is not None:
+                in_use.update(_staging_model_ids(placed_shard.model_card))
         # A store-backed download in progress has already created its
         # staging directory but no runner exists yet - a concurrent
         # teardown's budget pass must not delete a directory that is
@@ -4129,37 +4151,57 @@ class Worker:
         if not self._stale_downloads_pending_reset:
             self._stale_reset_wait_ticks = 0
 
-    def _reconcile_staging_on_startup(self) -> None:
-        """Reconcile staging orphans left by a crashed or killed session.
+    async def _reconcile_staging_once_state_is_known(self) -> None:
+        """Run the startup staging reconciliation once, when state has arrived.
+
+        Called from the planning guard, under the staging transition lock.
+        The worker's state is known once it has applied an indexed event of
+        the master's session: a follower's snapshot, or the promoted master's
+        seed at index 0. Before that no instance is known to be placed here,
+        and the election winner recreates its worker with no runners, so a
+        pass then would treat every placed model as an orphan.
+        """
+        if (
+            not self._startup_staging_reconcile_pending
+            or self.state.last_event_applied_idx < 0
+        ):
+            return
+        self._startup_staging_reconcile_pending = False
+        await self._reconcile_staging_on_startup()
+
+    async def _reconcile_staging_on_startup(self) -> None:
+        """Reconcile staging orphans left by a crashed or replaced session.
 
         A node that dies never runs the deactivate-time eviction, so its
-        staged copies survive forever without this. At startup nothing is
-        in use yet, so every staged model is a candidate and the grace
-        budget alone decides what survives - which is exactly the crash
-        recovery behavior we want: recent models stay warm for the
-        restart, the old tail goes.
+        staged copies survive forever without this. Models placed on this
+        node are protected like a live runner's (``_models_in_use``); every
+        other staged model is a candidate and the grace budget alone decides
+        what survives - recent models stay warm for a re-placement, the old
+        tail goes.
         """
         if (
             self._staging_config is None
             or not self._staging_config.cleanup_on_deactivate
         ):
             return
-        report = self._enforce_staging_budget(self._models_in_use())
+        # The in-use snapshot is taken on the loop thread; the walk and the
+        # deletions run in a worker thread.
+        report = await to_thread.run_sync(
+            self._enforce_staging_budget, self._models_in_use()
+        )
         if report is not None and report.evicted_model_ids:
             logger.info(
                 "Worker: startup staging reconciliation evicted "
                 f"{len(report.evicted_model_ids)} orphaned model(s) "
                 f"({report.evicted_bytes / 2**30:.1f} GiB)"
             )
-            # The master may still hold DownloadCompleted entries for the
-            # files we just deleted, but this runs BEFORE state replay -
-            # there is no shard metadata to build the reset events from
-            # yet. Remember the DIRECTORY names (forward-sanitized; the
-            # report's repo-form ids are best-effort inverses and would be
-            # ambiguous for ids containing "--"); plan_step counters the
-            # stale entries as soon as they appear in replicated state
-            # (the plan layer consults state.downloads, so leaving them
-            # would skip re-staging and fail a later load).
+            # Replicated state may still hold DownloadCompleted entries for
+            # the files just deleted. Remember the DIRECTORY names
+            # (forward-sanitized; the report's repo-form ids are best-effort
+            # inverses and would be ambiguous for ids containing "--"); the
+            # planning guard counters each stale entry before it plans, since
+            # the plan layer consults state.downloads and would otherwise
+            # skip re-staging and fail a later load.
             self._stale_downloads_pending_reset.update(
                 staging_directory_name(model_id)
                 for model_id in report.evicted_model_ids

@@ -65,6 +65,8 @@ def _stage(root: Path, model_id: str, size_bytes: int) -> Path:
 
 def _worker(
     staging_root: Path,
+    *,
+    keep_recent_gb: float = 40.0,
 ) -> tuple[Worker, Receiver[Event]]:
     _, indexed_receiver = channel[IndexedEvent]()
     event_sender, event_receiver = channel[Event]()
@@ -77,7 +79,10 @@ def _worker(
         command_sender=command_sender,
         download_command_sender=download_sender,
         store_client=ModelStoreClient(store_host="store.local"),
-        staging_config=StagingNodeConfig(node_cache_path=str(staging_root)),
+        staging_config=StagingNodeConfig(
+            node_cache_path=str(staging_root),
+            staging_keep_recent_gb=keep_recent_gb,
+        ),
     )
     return worker, event_receiver
 
@@ -337,3 +342,59 @@ async def test_runner_creation_waits_for_capacity_eviction_snapshot(
         release_eviction.set()
         with anyio.fail_after(2):
             await runner_creation_started.wait()
+
+
+@pytest.mark.asyncio
+async def test_startup_reconciliation_waits_for_state_and_keeps_placed_models(
+    tmp_path: Path,
+) -> None:
+    """A restarted or recreated worker keeps the models its placements load.
+
+    The pass waits for the session's state, then protects every model an
+    instance places on this node even though no runner exists yet; only a
+    true orphan competes for the grace budget, here zero.
+    """
+    placed = _shard("org/placed", storage_bytes=40)
+    elsewhere = _shard("org/elsewhere", storage_bytes=40)
+    placed_directory = _stage(tmp_path, "org/placed", size_bytes=40)
+    elsewhere_directory = _stage(tmp_path, "org/elsewhere", size_bytes=40)
+    orphan_directory = _stage(tmp_path, "org/orphan", size_bytes=40)
+    worker, _event_receiver = _worker(tmp_path, keep_recent_gb=0)
+
+    # Before state arrives nothing is known to be placed, so nothing is removed.
+    await worker._reconcile_staging_once_state_is_known()
+    assert placed_directory.exists()
+    assert elsewhere_directory.exists()
+    assert orphan_directory.exists()
+
+    here, there = RunnerId(), RunnerId()
+    placed_instance, elsewhere_instance = InstanceId(), InstanceId()
+    worker.state = State(
+        instances={
+            placed_instance: get_mlx_ring_instance(
+                instance_id=placed_instance,
+                model_id=placed.model_card.model_id,
+                node_to_runner={worker.node_id: here},
+                runner_to_shard={here: placed},
+            ),
+            elsewhere_instance: get_mlx_ring_instance(
+                instance_id=elsewhere_instance,
+                model_id=elsewhere.model_card.model_id,
+                node_to_runner={NodeId("other-node"): there},
+                runner_to_shard={there: elsewhere},
+            ),
+        },
+        last_event_applied_idx=0,
+    )
+    assert worker._models_in_use() == {"org/placed"}
+
+    await worker._reconcile_staging_once_state_is_known()
+    assert placed_directory.exists()
+    assert not elsewhere_directory.exists()
+    assert not orphan_directory.exists()
+    assert worker._stale_downloads_pending_reset == {"org--elsewhere", "org--orphan"}
+
+    # It runs once per worker; a later deactivation pass owns the rest.
+    _stage(tmp_path, "org/orphan", size_bytes=40)
+    await worker._reconcile_staging_once_state_is_known()
+    assert (tmp_path / "org--orphan").exists()
