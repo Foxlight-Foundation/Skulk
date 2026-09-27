@@ -103,6 +103,12 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- The dashboard no longer opens to a blank page after a Skulk update. Its
+  HTML shell was served without a cache policy, so browsers kept an old
+  shell that asked for script bundles the new build no longer had. The
+  shell and other unhashed files are now revalidated on every load, and
+  the content-hashed bundles under `assets/` are cached as immutable.
+
 - The Plugins page works when the dashboard is opened over plain HTTP from
   another machine on the network. Add plugin, Configure, credential
   changes, setup actions, proposal approvals, and runtime install or

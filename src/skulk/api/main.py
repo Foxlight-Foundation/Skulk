@@ -38,6 +38,7 @@ from typing import (
     TypedDict,
     TypeVar,
     cast,
+    final,
 )
 from uuid import uuid4
 
@@ -72,6 +73,7 @@ from loguru import logger
 from pydantic import UUID4, ValidationError
 from starlette.datastructures import FormData
 from starlette.datastructures import UploadFile as StarletteUploadFile
+from starlette.types import Scope
 
 import skulk.shared.types.tasks as task_types
 from skulk.api.adapters.chat_completions import (
@@ -1738,6 +1740,39 @@ class _PreviewContextFields(TypedDict):
     kv_bytes_per_token: int | None
 
 
+
+DASHBOARD_SHELL_CACHE_CONTROL: Final = "no-cache"
+"""The dashboard shell is revalidated on every load.
+
+``index.html`` names the build's content-hashed bundles. A browser that kept
+a heuristically cached shell after a Skulk update asks for bundles that no
+longer exist and renders a blank page until a hard refresh.
+"""
+
+DASHBOARD_BUNDLE_CACHE_CONTROL: Final = "public, max-age=31536000, immutable"
+"""Vite names every file under ``assets/`` by its content hash, so one name
+never changes content and can be cached for good."""
+
+
+@final
+class DashboardStaticFiles(StaticFiles):
+    """Dashboard files with cache headers that survive a Skulk update."""
+
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        """Serve one dashboard file with the cache policy for its kind.
+
+        Content-hashed bundles under ``assets/`` are immutable; everything
+        else, including the ``index.html`` shell served for ``/``, must be
+        revalidated so a new build is picked up on the next load.
+        """
+        response = await super().get_response(path, scope)
+        if path.startswith("assets/") and response.status_code == 200:
+            response.headers["Cache-Control"] = DASHBOARD_BUNDLE_CACHE_CONTROL
+        else:
+            response.headers["Cache-Control"] = DASHBOARD_SHELL_CACHE_CONTROL
+        return response
+
+
 class API:
     def __init__(
         self,
@@ -2075,7 +2110,10 @@ class API:
             # dashboard-react/src/components/layout/HeaderNav.tsx.
             async def _spa_index() -> FileResponse:
                 """Serve the dashboard SPA shell for client-routed paths."""
-                return FileResponse(os.path.join(dashboard_dir, "index.html"))
+                return FileResponse(
+                    os.path.join(dashboard_dir, "index.html"),
+                    headers={"Cache-Control": DASHBOARD_SHELL_CACHE_CONTROL},
+                )
 
             # Both slash forms: the StaticFiles mount at "/" swallows
             # unmatched paths before FastAPI's redirect-slashes logic can
@@ -2094,7 +2132,7 @@ class API:
 
             self.app.mount(
                 "/",
-                StaticFiles(
+                DashboardStaticFiles(
                     directory=dashboard_dir,
                     html=True,
                 ),
