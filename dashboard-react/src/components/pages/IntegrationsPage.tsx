@@ -437,6 +437,21 @@ export function IntegrationsPage({ readyInstances }: IntegrationsPageProps) {
   const hasModels = models.length > 0;
   const showAddressChooser = Boolean(tailscaleUrl && localUrl && tailscaleUrl !== localUrl);
 
+  // Literal keys and fallbacks: the Tolgee exporter reads each t() call
+  // statically, so a key built from the tool id cannot reach the catalog.
+  const toolDescriptions: Record<IntegrationToolId, string> = {
+    'claude-code': t('integrations.tools.claude-code.description', 'Anthropic-compatible coding agent in your terminal.'),
+    opencode: t('integrations.tools.opencode.description', 'Open-source terminal agent with provider config.'),
+    codex: t('integrations.tools.codex.description', 'OpenAI Codex CLI pointed at a local model.'),
+    hermes: t('integrations.tools.hermes.description', 'Agent harness with tool use and memory.'),
+    openclaw: t('integrations.tools.openclaw.description', 'Autonomous agent runtime.'),
+    pi: t('integrations.tools.pi.description', 'Minimalist assistant CLI.'),
+    anythingllm: t('integrations.tools.anythingllm.description', 'Desktop RAG workspace: pairs a chat and an embedding model.'),
+    'open-webui': t('integrations.tools.open-webui.description', 'Self-hosted chat UI for the whole cluster.'),
+    n8n: t('integrations.tools.n8n.description', 'Workflow automation with LLM nodes.'),
+    firefox: t('integrations.tools.firefox.description', 'Sidebar AI chat via about:config.'),
+  };
+
   const toolDescription = tool.usesTierChooser
     ? t('integrations.tierMapping', 'Anthropic-compatible · maps Opus / Sonnet / Haiku onto your models')
     : t('integrations.setupHint', 'Configure your tool using the endpoint and model choices below. Copying a recipe does not verify a connection.');
@@ -498,11 +513,7 @@ export function IntegrationsPage({ readyInstances }: IntegrationsPageProps) {
         <ToolHeading><h2>{t('integrations.connectTool', 'Connect a tool')}</h2><span>{t('integrations.toolCount', '{count} tools · pick one to get its setup', { count: INTEGRATION_TOOLS.length })}</span></ToolHeading>
         <ToolGrid>
           {INTEGRATION_TOOLS.map(entry => <IntegrationToolCard key={entry.id} name={entry.label} monogram={TOOL_MONOGRAMS[entry.id]}
-            description={t(`integrations.tools.${entry.id}.description`, {
-              'claude-code': 'Anthropic-compatible coding agent in your terminal.', opencode: 'Open-source terminal agent with provider config.', codex: 'OpenAI Codex CLI pointed at a local model.',
-              hermes: 'Agent harness with tool use and memory.', openclaw: 'Autonomous agent runtime.', pi: 'Minimalist assistant CLI.',
-              anythingllm: 'Desktop RAG workspace: pairs a chat and an embedding model.', 'open-webui': 'Self-hosted chat UI for the whole cluster.', n8n: 'Workflow automation with LLM nodes.', firefox: 'Sidebar AI chat via about:config.',
-            }[entry.id])}
+            description={toolDescriptions[entry.id]}
             method={`${entry.surface} · ${TOOL_METHODS[entry.id]}`}
             onOpen={() => { setToolId(entry.id); setSnippetId(null); setDetailsOpen(true); }} />)}
         </ToolGrid>
