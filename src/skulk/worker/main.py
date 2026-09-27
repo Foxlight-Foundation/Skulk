@@ -4259,6 +4259,20 @@ class Worker:
         return stale
 
     async def _session_edge_ingress(self) -> None:
+        """Record libp2p sessions as topology paths until the event channel closes.
+
+        See ``_session_edge_ingress_loop``. On a master change the node shuts
+        this worker's event router down before replacing the worker, and a
+        peer restart is exactly when connection updates arrive; a send in
+        that window finds the channel closed. That ends this task quietly
+        instead of failing the worker's task group and, with it, the node.
+        """
+        try:
+            await self._session_edge_ingress_loop()
+        except (BrokenResourceError, ClosedResourceError):
+            logger.debug("session-edge ingress stopped: worker event channel closed")
+
+    async def _session_edge_ingress_loop(self) -> None:
         """Record authenticated libp2p sessions as topology paths (#662).
 
         The connectivity graph was built exclusively from HTTP probes of
@@ -4376,7 +4390,22 @@ class Worker:
     _PROBE_BACKOFF_AFTER_FAILURES = 3
     _PROBE_BACKOFF_RETRY_ROUNDS = 6
 
-    async def _poll_connection_updates(self):
+    async def _poll_connection_updates(self) -> None:
+        """Probe and heal topology edges until the worker's event channel closes.
+
+        See ``_poll_connection_updates_loop``. The node closes this worker's
+        event router before replacing the worker on a master change; a sweep
+        that sends in that window ends here quietly rather than failing the
+        worker's task group, which took the whole node down on a peer
+        restart and dropped every instance it hosted.
+        """
+        try:
+            await self._poll_connection_updates_loop()
+        except (BrokenResourceError, ClosedResourceError):
+            logger.debug("topology probing stopped: worker event channel closed")
+
+    async def _poll_connection_updates_loop(self) -> None:
+        """Probe advertised peer addresses and reconcile this node's topology edges."""
         probe_failures: defaultdict[str, int] = defaultdict(int)
         sweep_index = 0
         while True:
