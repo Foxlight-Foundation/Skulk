@@ -59,6 +59,14 @@ describe('buildCapabilityActions', () => {
     const last = items[items.length - 1];
     expect(last?.kind).toBe('manage-on-host');
     expect(last?.title).toBe('Manage on kite6');
+    expect(last?.kind === 'manage-on-host' && last.url).toBeNull();
+  });
+
+  it('links "manage on host" to the host\'s own dashboard when it has a tailnet address', () => {
+    const url = 'http://100.70.1.2:52415/plugins?plugin=example.video';
+    const items = buildCapabilityActions(summary(), { isLocalHost: false, hostName: 'kite6', hostDashboardUrl: url, t });
+    const last = items[items.length - 1];
+    expect(last?.kind === 'manage-on-host' && last.url).toBe(url);
   });
 });
 

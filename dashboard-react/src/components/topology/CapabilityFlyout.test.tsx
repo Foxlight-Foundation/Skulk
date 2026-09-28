@@ -135,4 +135,15 @@ describe('CapabilityFlyout', () => {
     await render({ localNodeId: 'node-elsewhere' });
     expect(container?.textContent).toContain('managed from the dashboard on kite6');
   });
+
+  it('links to the host\'s own dashboard over the tailnet when it reports an address', async () => {
+    await render({ localNodeId: 'node-elsewhere', hostAddress: '100.70.1.2' });
+    const link = [...(container?.querySelectorAll('a') ?? [])].find((item) => item.textContent === 'Manage on kite6');
+    expect(link).toBeDefined();
+    const url = new URL(link!.href);
+    expect(url.hostname).toBe('100.70.1.2');
+    expect(`${url.pathname}${url.search}`).toBe('/plugins?plugin=foxlight.video-studio');
+    expect(link!.target).toBe('_blank');
+    expect(container?.textContent).not.toContain('managed from the dashboard on kite6');
+  });
 });
