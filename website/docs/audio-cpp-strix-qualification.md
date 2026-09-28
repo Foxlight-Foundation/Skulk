@@ -106,11 +106,66 @@ placements were removed; all three nodes remained healthy, on the same
 commit, and with the two original placements ready. This is a
 configured-fleet regression, not a fresh-install qualification.
 
+## MiniMax F32 accumulation qualification (2026-09-28)
+
 The sampler defect is separate from a measured Vulkan precision issue: some
 large MiniMax matrix multiplications on this hardware use 16-bit accumulation.
-The resulting numerical error may lower fidelity. The sound and latency effects
-of forcing 32-bit accumulation are still being measured, so that change is not
-part of the sampler correction.
+The post4 package retains the sampler correction and requests F32 accumulation
+for MiniMax's Vulkan matrix multiplications. It preserves the upstream F16 KV
+cache. Other model families and CPU, Metal, and CUDA execution are unchanged.
+
+| Identity | Qualified value |
+| --- | --- |
+| Wheel | `skulk_audio_cpp_vulkan-0.8.2.post4-py3-none-manylinux_2_35_x86_64.whl` |
+| Wheel SHA-256 / size | `a077d3627b96430a8359c707e608296955501bc8042c7b1efe49f3e407fa1071` / 23,905,021 bytes |
+| Executable SHA-256 | `886e9d4fce8eb1a4eef5363e5bbe61c086ee417765681b7eced7ef2a1b336440` |
+| Source | audio.cpp `4d88768fbcae4e6eb3352c6ab1422dabb7d90b58`, plus the pinned sampler and MiniMax Vulkan precision patches in [Skulk #1076](https://github.com/Foxlight-Foundation/Skulk/pull/1076) |
+| Attested build | [CI run 36376118682](https://github.com/Foxlight-Foundation/Skulk/actions/runs/36376118682), source `1fbf6c59533fb828ecfcceba2d9bb27582c2095a`; its complete tree matches reviewed head `fcb7b3460ef27c90899d0a6446dd5f76332b70c0` |
+| Hardware class / lane | `amd:pci-1002-1586` / `audio_cpp-vulkan` |
+
+Both clean standard controls reproduced previously accepted WAVs byte for byte.
+The listener preferred F32 in both randomized, loudness-matched comparisons:
+one vocal request and one instrumental request. This establishes preference
+for those two requests, not a universal improvement for every song.
+
+The exact post4 executable reproduced the accepted 60-second vocal F32 sample
+byte for byte: SHA-256
+`1767b5daa14cd3707660fb4a76131a5c135f22db772497cc0f54da184f35038b`.
+Three fresh 60-second targets passed listening: the acoustic folk vocal was
+exceptionally good; electronic and chamber-orchestra requests were acceptable
+music. The latter two produced unwanted wordless vocals despite `No vocals.`
+in their prompts and `[Instrumental]` in their lyrics. Instrumental conditioning
+is therefore not reliable in these samples. Actual durations were 59.919093,
+43.583855, and 31.079909 seconds respectively. MiniMax's duration target remains
+a generation budget, not an exact-length promise.
+
+ACE-Step reproduced its accepted 45-second folk output byte for byte, SHA-256
+`b9b897f1f99bfdab4150db47f70a1c7a647f5567f8f9be68e49133b89e01dc6e`.
+Both models passed the real Skulk runner's queued and active cancellation,
+single-active-generation admission, crash recovery, replacement generation,
+and reload/shutdown checks. Neither left partial output after cancellation.
+These used an isolated verified-cache reader and real sidecars, separate from
+ordinary production-signed placement.
+
+| Exact-package gate | MiniMax Q4 | ACE-Step Turbo BF16 |
+| --- | --- | --- |
+| Continuous generation | 34 requests / 1,819.266 s | 51 requests / 1,817.715 s |
+| Median generation-call latency | 53.417 s | 35.262 s |
+| Sampled process RSS maximum | 876,064 KiB | 4,852,228 KiB |
+| Sampled resident Vulkan memory, one DRM descriptor | 8,755,704 KiB | 16,072,680 KiB |
+| Output | Distinct, non-silent stereo 44.1 kHz PCM16 WAVs; no full-scale samples | Distinct, non-silent stereo 48 kHz PCM16 WAVs; 10,565 full-scale samples / 48,960,000 samples (0.022%) |
+
+Memory samples remained bounded during these separate 30-minute runs. They do
+not establish longer endurance or universal hardware capacity requirements.
+Three matched 30-second MiniMax seeds, with fresh servers and equal warmup,
+measured median wall time of 194.725 s for post3 and 190.688 s for post4
+(2.074% lower). This workload showed no speed penalty; other workloads may
+differ. All qualification results were valid WAVs below the 64 MiB limit.
+
+The new reader pin selects these exact tested wheel bytes. Signed support still
+requires separate claims for this executable, each exact card, `music.generate`,
+and the hardware class above. Package availability alone does not grant
+placement. Existing post3 qualification remains valid for its own build.
 
 ### Historical post1 functional results
 

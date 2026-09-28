@@ -76,7 +76,7 @@ class AudioCppWheel(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
     filename: str = Field(
-        pattern=r"^skulk_audio_cpp_(?:cpu-0\.8\.2\.post[12]|vulkan-0\.8\.2\.post[13]|cuda-0\.8\.2\.post1)-.+\.whl$"
+        pattern=r"^skulk_audio_cpp_(?:cpu-0\.8\.2\.post[12]|vulkan-0\.8\.2\.post[134]|cuda-0\.8\.2\.post1)-.+\.whl$"
     )
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
@@ -105,12 +105,12 @@ AUDIO_CPP_CPU_WHEELS: Final[dict[tuple[str, str], AudioCppWheel]] = {
 }
 
 # The Vulkan package is separate so preparing it cannot replace an in-use CPU
-# executable. This exact sampler-corrected candidate passed real Strix listening
-# and isolated Skulk lifecycle checks; signed support remains registry truth.
+# executable. This sampler-corrected, MiniMax-F32 build passed Strix listening
+# and both models' lifecycle/soak gates; signed support remains registry truth.
 AUDIO_CPP_VULKAN_WHEELS: Final[dict[tuple[str, str], AudioCppWheel]] = {
     ("linux", "x86_64"): AudioCppWheel(
-        filename="skulk_audio_cpp_vulkan-0.8.2.post3-py3-none-manylinux_2_35_x86_64.whl",
-        sha256="12297a15a1b7fd5fea6deb1ea3f431b9fa2a4efc5e695b3377ccbaf46e2980ca",
+        filename="skulk_audio_cpp_vulkan-0.8.2.post4-py3-none-manylinux_2_35_x86_64.whl",
+        sha256="a077d3627b96430a8359c707e608296955501bc8042c7b1efe49f3e407fa1071",
     ),
 }
 
