@@ -55,6 +55,10 @@ or Vulkan package or workflow changes. The separate audio.cpp wheel workflow
 runs on music-package changes in PRs and on `dev`; both workflows refresh Linux
 APT metadata and retry once when a security mirror retires a package revision.
 Wheel publication in either workflow remains an explicit manual dispatch.
+The audio.cpp Vulkan build applies a SHA-pinned MiniMax-only F32 matmul policy
+after the released sampler correction. It preserves the upstream F16 KV cache
+and other families/backends; a native graph-policy check runs before packaging.
+Candidate artifacts do not update Skulk's qualified package inventory or claims.
 
 `uv` is the canonical Skulk runtime path on macOS, including the official
 `mlx` + `mlx-metal` wheel stack. Nix is kept for formatting, flake-based

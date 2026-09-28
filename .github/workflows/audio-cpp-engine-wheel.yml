@@ -45,6 +45,7 @@ on:
 env:
   AUDIO_CPP_REF: 4d88768fbcae4e6eb3352c6ab1422dabb7d90b58
   AUDIO_CPP_PATCH_SHA256: f00ab4d05bc3e070b2d2e32087933cc69fc96c4be2201a90171834735e5755bb
+  AUDIO_CPP_VULKAN_PRECISION_PATCH_SHA256: 625ea01f64518bbea2aa542b1a5d289d01c9b3426e7e7be7e8f0708fbd17b538
 
 jobs:
   build:
@@ -130,6 +131,16 @@ jobs:
           git -C /tmp/audio-cpp-src apply --check "$patch"
           git -C /tmp/audio-cpp-src apply "$patch"
           git -C /tmp/audio-cpp-src diff --check
+      - name: Apply pinned MiniMax Vulkan accumulation policy
+        if: matrix.variant == 'vulkan'
+        run: |
+          set -euo pipefail
+          patch="$GITHUB_WORKSPACE/packaging/skulk-audio-cpp-vulkan/minimax-vulkan-f32.patch"
+          python3 -c 'import hashlib, sys; actual = hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest(); sys.exit(0 if actual == sys.argv[2] else f"patch SHA-256 mismatch: {actual}")' \
+            "$patch" "$AUDIO_CPP_VULKAN_PRECISION_PATCH_SHA256"
+          git -C /tmp/audio-cpp-src apply --check "$patch"
+          git -C /tmp/audio-cpp-src apply "$patch"
+          git -C /tmp/audio-cpp-src diff --check
       - name: Build only the music server and two families
         run: |
           set -eo pipefail
@@ -160,6 +171,18 @@ jobs:
             grep -Fq 'GL_EXT_integer_dot_product supported by glslc' /tmp/audio-cpp-configure.log
           fi
           cmake --build /tmp/audio-cpp-build --target audiocpp_server --parallel 4
+      - name: Verify MiniMax precision policy preserves other backends
+        if: matrix.variant == 'vulkan'
+        run: |
+          set -euo pipefail
+          ggml_base=$(find /tmp/audio-cpp-build -name libggml-base.a -print -quit)
+          test -n "$ggml_base"
+          c++ -std=c++17 -O2 \
+            -I/tmp/audio-cpp-src/include \
+            -I/tmp/audio-cpp-src/external/ggml/include \
+            "$AUDIO_CPP_PACKAGE_DIR/precision_test.cpp" "$ggml_base" \
+            -pthread -ldl -o /tmp/audio-cpp-precision-test
+          /tmp/audio-cpp-precision-test
       - name: Assemble and smoke-test wheel
         run: |
           mkdir -p "$AUDIO_CPP_PACKAGE_DIR/src/$AUDIO_CPP_PACKAGE_MODULE/bin"
