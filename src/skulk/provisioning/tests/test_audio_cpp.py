@@ -177,14 +177,14 @@ def test_gb10_cuda_wheel_uses_exact_hardware_tested_artifact() -> None:
 
 
 def test_strix_vulkan_wheel_uses_exact_listening_tested_artifact() -> None:
-    """The Vulkan lane selects the sampler-corrected CI wheel heard on Strix."""
+    """The Vulkan lane selects the sampler-corrected F32 wheel heard on Strix."""
     wheel = audio_cpp.audio_cpp_vulkan_wheel_for_host(
         system="linux", machine="x86_64"
     )
     assert wheel.filename == (
-        "skulk_audio_cpp_vulkan-0.8.2.post3-py3-none-manylinux_2_35_x86_64.whl"
+        "skulk_audio_cpp_vulkan-0.8.2.post4-py3-none-manylinux_2_35_x86_64.whl"
     )
-    assert wheel.sha256 == "12297a15a1b7fd5fea6deb1ea3f431b9fa2a4efc5e695b3377ccbaf46e2980ca"
+    assert wheel.sha256 == "a077d3627b96430a8359c707e608296955501bc8042c7b1efe49f3e407fa1071"
 
 
 def test_audio_cpp_wheel_filename_rejects_unbuilt_variant_versions() -> None:
