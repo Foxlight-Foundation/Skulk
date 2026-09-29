@@ -18,8 +18,8 @@ from skulk.shared.models.model_cards import (
     ModelId,
     VideoMode,
     VideoPreprocessorRole,
-    get_bundled_card,
 )
+from skulk.shared.tests.model_card_fixtures import load_fixture_card
 from skulk.shared.types.chunks import ErrorChunk, VideoChunk
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.events import ChunkGenerated
@@ -72,7 +72,7 @@ _DIGEST = "0" * 64
 
 
 def _card(model_id: ModelId) -> ModelCard:
-    card = asyncio.run(get_bundled_card(model_id))
+    card = asyncio.run(load_fixture_card(model_id))
     assert card is not None and card.video is not None
     return card
 

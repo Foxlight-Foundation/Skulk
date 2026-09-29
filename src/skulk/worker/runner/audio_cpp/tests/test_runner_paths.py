@@ -11,8 +11,8 @@ from typing import cast
 import pytest
 
 from skulk.download import download_utils
-from skulk.shared.constants import RESOURCES_DIR
 from skulk.shared.models.model_cards import ModelCard, ModelId
+from skulk.shared.tests.model_card_fixtures import fixture_card_path
 from skulk.shared.types.chunks import ErrorChunk
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.events import ChunkGenerated, Event
@@ -117,11 +117,7 @@ def test_ace_step_server_uses_nested_loader_root(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """A repository root would make ACE-Step select the wrong model variant."""
-    card_path = (
-        Path(RESOURCES_DIR)
-        / "music_model_cards"
-        / "audio-cpp--ACE-Step1.5-Turbo-BF16.toml"
-    )
+    card_path = fixture_card_path("audio-cpp/ACE-Step1.5-Turbo-BF16")
     card = ModelCard.model_validate(tomllib.loads(card_path.read_text()))
     loader_root = tmp_path / "ACE-Step1.5-GGUF" / "turbo"
     loader_root.mkdir(parents=True)

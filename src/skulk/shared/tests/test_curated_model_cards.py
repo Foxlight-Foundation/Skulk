@@ -1,4 +1,4 @@
-"""Invariant gate over every bundled model card.
+"""Invariant gate over the curated model cards the tests carry.
 
 The 2026-07-05 card audit found bad cards that had shipped silently: a card
 whose HF repo no longer existed, cards missing their context length (losing
@@ -8,8 +8,11 @@ honor. The repo-existence check needs the network and stays an operational
 script, but every static invariant it applied lives here so a bad card fails
 CI instead of shipping.
 
-Every check runs over ALL bundled cards (inference, image, embedding, speech),
-so a newly added card is held to the same bar automatically.
+Skulk ships no model cards; the curated corpus is the model registry's
+seed, which validates every card it publishes. These checks run over the
+fixture copies of registry cards the tests carry (text generation and
+speech), which exercise Skulk's own reading of card truth: backend tags,
+capability resolution, and the steward's preferred models.
 """
 
 import tomllib
@@ -19,17 +22,13 @@ from typing import cast
 import pytest
 
 from skulk.shared.backends import engine_of
-from skulk.shared.constants import RESOURCES_DIR
 from skulk.shared.models.capabilities import resolve_model_capability_profile
 from skulk.shared.models.model_cards import ModelCard
 from skulk.shared.models.reference_voices import bundled_reference_voice_profiles
+from skulk.shared.tests.model_card_fixtures import FIXTURE_CARDS_DIR, fixture_card_paths
 
-_CARD_DIRS = {
-    "inference": Path(RESOURCES_DIR) / "inference_model_cards",
-    "image": Path(RESOURCES_DIR) / "image_model_cards",
-    "embedding": Path(RESOURCES_DIR) / "embedding_model_cards",
-    "speech": Path(RESOURCES_DIR) / "speech_model_cards",
-}
+# Every fixture card lives in one directory; the kind is read from its tasks.
+_CARD_DIRS = {"inference": FIXTURE_CARDS_DIR, "speech": FIXTURE_CARDS_DIR}
 
 # Mirrors _ENGINES x _COMPUTE_BACKENDS in skulk.shared.backends. If an engine
 # or compute backend is added there, extend this and the assertions below.
@@ -42,13 +41,28 @@ _VALID_TAGS = frozenset(
 )
 
 
+def _kind_of(path: Path) -> str | None:
+    """The family a card belongs to, from its tasks; ``None`` when out of scope.
+
+    Video and music cards name engines outside the tag set this gate checks,
+    and have their own suites.
+    """
+
+    tasks = set(cast("list[str]", tomllib.loads(path.read_text()).get("tasks", [])))
+    if "TextGeneration" in tasks:
+        return "inference"
+    if tasks & {"TextToSpeech", "SpeechToText"}:
+        return "speech"
+    return None
+
+
 def _all_card_files() -> list[tuple[str, Path]]:
     files = [
         (kind, path)
-        for kind, directory in _CARD_DIRS.items()
-        for path in sorted(directory.glob("*.toml"))
+        for path in fixture_card_paths()
+        if (kind := _kind_of(path)) is not None
     ]
-    assert files, f"no bundled cards found under {RESOURCES_DIR}"
+    assert files, f"no fixture cards found under {FIXTURE_CARDS_DIR}"
     return files
 
 
@@ -245,11 +259,7 @@ def test_bundled_card_capability_resolution_is_coherent(kind: str, path: Path) -
 def test_qwen_base_card_pins_validated_six_bit_artifact() -> None:
     """Ship the smallest Qwen Base conversion validated for stable cloning."""
 
-    path = (
-        Path(RESOURCES_DIR)
-        / "speech_model_cards"
-        / "mlx-community--Qwen3-TTS-12Hz-0.6B-Base-6bit.toml"
-    )
+    path = FIXTURE_CARDS_DIR / "mlx-community--Qwen3-TTS-12Hz-0.6B-Base-6bit.toml"
     card = _load(path)
 
     assert card.quantization == "6bit"
@@ -274,7 +284,7 @@ def test_reference_capable_cards_expose_shared_voice_catalog(card_name: str) -> 
     """
 
     profiles = bundled_reference_voice_profiles()
-    card = _load(Path(RESOURCES_DIR) / "speech_model_cards" / card_name)
+    card = _load(FIXTURE_CARDS_DIR / card_name)
 
     assert card.audio is not None
     assert card.audio.supports_reference_audio is True
@@ -300,18 +310,20 @@ def test_reference_capable_cards_expose_shared_voice_catalog(card_name: str) -> 
 def test_voice_cloning_cards_expose_managed_reference_audio(card_name: str) -> None:
     """Bundled cloning models must expose the conditioning path Skulk serves."""
 
-    card = _load(Path(RESOURCES_DIR) / "speech_model_cards" / card_name)
+    card = _load(FIXTURE_CARDS_DIR / card_name)
 
     assert card.audio is not None
     assert card.audio.supports_reference_audio is True
 
-def test_default_steward_models_are_bundled_tool_calling_text_cards() -> None:
+def test_default_steward_models_are_tool_calling_text_cards() -> None:
     """Every default steward brain must exist, place, and call tools.
 
     The master walks ``steward_models`` in order and places the first card
-    the cluster can serve, so an entry naming a card that is not bundled is
-    a silent skip that costs a fleet its best brain, and an entry whose card
-    cannot call tools would place a steward that can never investigate.
+    the cluster can serve, so an entry whose card the registry lacks is a
+    silent skip that costs a fleet its best brain, and an entry whose card
+    cannot call tools would place a steward that can never investigate. The
+    fixtures carry a copy of each default's registry card; refresh them when
+    the list or the registry cards change.
     """
     from skulk.shared.backends import platform_compatible_backends
     from skulk.store.config import IntelligentFabricConfig
@@ -322,7 +334,7 @@ def test_default_steward_models_are_bundled_tool_calling_text_cards() -> None:
         if kind == "inference"
     }
     for model_ref in IntelligentFabricConfig().steward_models:
-        assert model_ref in bundled, f"steward model {model_ref} has no bundled card"
+        assert model_ref in bundled, f"steward model {model_ref} has no fixture card"
         card = _load(bundled[model_ref])
         profile = resolve_model_capability_profile(card.model_id, model_card=card)
         assert profile.supports_tool_calling, (
@@ -370,3 +382,26 @@ def test_steward_gguf_brains_stay_eligible_for_the_served_lanes() -> None:
         assert "llama_server" in {
             engine for tag in servable if (engine := engine_of(tag))
         }, f"{model_ref} lost the served lane"
+
+
+def test_skulk_ships_no_model_cards() -> None:
+    """A model card never goes back into the package.
+
+    A card comes with the model: from the signed registry when the model is
+    downloaded, then from the model's own installed record. A card file
+    under ``resources/`` would be shipped with every Skulk and quietly
+    compete with that truth, so none may exist there.
+    """
+    from skulk.shared.constants import RESOURCES_DIR
+
+    # Other TOML stays (the reference voices' catalog); a model card is any
+    # file that declares a model_id.
+    shipped = sorted(
+        str(path.relative_to(RESOURCES_DIR))
+        for path in Path(RESOURCES_DIR).rglob("*.toml")
+        if "model_id" in tomllib.loads(path.read_text())
+    )
+    assert shipped == [], (
+        "model cards belong in the registry seed, not in Skulk: " + ", ".join(shipped)
+    )
+

@@ -19,7 +19,6 @@ from pathlib import Path
 from anyio import Path as AsyncPath
 
 from skulk.shared.constants import (
-    RESOURCES_DIR,
     SKULK_CUSTOM_MODEL_CARDS_DIR,
     SKULK_MODELS_DIR,
     add_model_search_path,
@@ -27,16 +26,27 @@ from skulk.shared.constants import (
 from skulk.shared.models.model_cards import ModelCard, ModelId, add_to_card_cache
 
 TEST_VIDEO_MODEL_ID = ModelId("foxlight/test-video")
-"""The one card the test engine serves; bundled under ``resources/test_engine_cards``."""
+"""The one card the test engine serves; its TOML sits beside this module."""
 
 _WEIGHTS_FILENAME = "model.safetensors"
 _CARD_FILENAME = TEST_VIDEO_MODEL_ID.normalize() + ".toml"
 
 
-def bundled_card_path() -> Path:
-    """The bundled TOML for the test engine's card."""
+def test_video_card_path() -> Path:
+    """The TOML for the test engine's card.
 
-    return Path(RESOURCES_DIR) / "test_engine_cards" / _CARD_FILENAME
+    It ships with the engine rather than among model cards: it names no
+    downloadable artifact, so the signed registry can never supply it, and
+    Skulk ships no model cards of its own.
+    """
+
+    return Path(__file__).with_name(_CARD_FILENAME)
+
+
+async def load_test_video_card() -> ModelCard:
+    """Load the test engine's card from its TOML."""
+
+    return await ModelCard.load_from_path(AsyncPath(test_video_card_path()))
 
 
 def register_test_video_card(custom_cards_dir: Path = SKULK_CUSTOM_MODEL_CARDS_DIR) -> Path:
@@ -52,7 +62,7 @@ def register_test_video_card(custom_cards_dir: Path = SKULK_CUSTOM_MODEL_CARDS_D
     custom_cards_dir.mkdir(parents=True, exist_ok=True)
     target = custom_cards_dir / _CARD_FILENAME
     if not target.is_file():
-        shutil.copyfile(bundled_card_path(), target)
+        shutil.copyfile(test_video_card_path(), target)
     return target
 
 

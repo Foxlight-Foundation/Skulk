@@ -1,4 +1,4 @@
-"""Bundled cards for one base model must not contradict each other on tools.
+"""Curated cards for one base model must not contradict each other on tools.
 
 Whether a model can call tools is a property of the model, so two cards for the
 same `base_model` cannot both be right when one says it can and the other says
@@ -7,6 +7,10 @@ advertises the capability, and on the served engines whether a request carrying
 tools is rejected outright. It also reaches callers through `/v1/models`, so a
 client picking a quantization can be told the same model does and does not
 support tools depending which one it picked.
+
+Skulk ships no cards, so this runs over the fixture copies of registry cards
+the tests carry (several share a base model: the Qwen3.6 and Gemma 4 variants);
+the registry holds the same rule over its whole corpus.
 
 An unstated value is not a contradiction. A card with no `[tooling]` section
 resolves through conservative family defaults, so silence next to an explicit
@@ -18,12 +22,11 @@ from __future__ import annotations
 
 import tomllib
 from collections import defaultdict
-from pathlib import Path
 from typing import Any, cast
 
-CARD_DIRECTORY = (
-    Path(__file__).resolve().parents[5] / "resources" / "inference_model_cards"
-)
+from skulk.shared.tests.model_card_fixtures import FIXTURE_CARDS_DIR
+
+CARD_DIRECTORY = FIXTURE_CARDS_DIR
 
 # Contradictions that exist today and are tracked for the signed registry
 # rather than fixed here. The vLLM-only cards under-declare when a model does
@@ -37,16 +40,18 @@ KNOWN_CONTRADICTIONS: frozenset[str] = frozenset()
 
 
 def load_cards() -> dict[str, dict[str, Any]]:
-    """Return every bundled card keyed by file name."""
+    """Return every text-generation fixture card keyed by file name."""
 
     cards: dict[str, dict[str, Any]] = {}
     for path in sorted(CARD_DIRECTORY.glob("*.toml")):
-        cards[path.name] = tomllib.loads(path.read_text())
+        card = tomllib.loads(path.read_text())
+        if "TextGeneration" in cast("list[str]", card.get("tasks", [])):
+            cards[path.name] = card
     return cards
 
 
 def group_by_base_model() -> dict[str, list[tuple[str, dict[str, Any]]]]:
-    """Group bundled cards by their declared base model."""
+    """Group the cards by their declared base model."""
 
     grouped: dict[str, list[tuple[str, dict[str, Any]]]] = defaultdict(list)
     for name, card in load_cards().items():
@@ -67,7 +72,7 @@ class TestToolingAgreement:
     def test_the_card_directory_was_found(self) -> None:
         # A wrong path would make every assertion below vacuous.
         assert CARD_DIRECTORY.is_dir()
-        assert len(load_cards()) > 50
+        assert len(load_cards()) >= 10
 
     def test_no_two_cards_disagree_on_whether_tools_are_supported(self) -> None:
         offenders: dict[str, dict[bool, list[str]]] = {}
