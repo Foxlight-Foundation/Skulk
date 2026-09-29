@@ -2051,6 +2051,18 @@ transport renewal after stopping affected owners; recovery finishes only exact
 recorded local metadata before owner startup. Durable plugin identities and cleanup
 records remain independent of Skulk's changing transport ID. Profiles and builds
 must match, and foreign installation bindings are never silently adopted.
+The attachment also tells plugins where they may serve beyond loopback. The bridge
+reads the node's Tailscale address in the background, at most once a minute, and
+keeps it once seen, so an attachment never waits on Tailscale and a failed read
+never withdraws the address. It sends the address when it has one; without one the
+manager keeps the address its installations already have. A new address stops the
+owners, is written as an owner-only `serve.json` into each installation and then
+into the manager's root, and the owners start again; the root record is written
+last, so the next attachment finishes an interrupted write. A newly registered
+installation receives the current address. `serve.json` is separate from
+`owner.json` and `host.json` because owners parse `owner.json` strictly and an
+older owner or manager must keep starting; owners that speak plugin protocol 3
+hand the address to their children as `Startup.serve_host`.
 `service_setup.py` now owns the resumable local setup command. It stages a verified
 runtime as the owner, generates the profile connection, and invokes the standalone
 standard-library-only `service_registration.py` helper for fixed system definitions.
