@@ -102,3 +102,48 @@ def test_preserves_single_gpu_wheel_contract(
     (tmp_path / f"skulk_audio_cpp_{variant}-extra.whl").write_bytes(b"extra")
     with pytest.raises(ValueError, match="exactly one"):
         verifier.verify_artifacts(tmp_path, variant, digest)
+
+
+def _cuda_set(directory: Path) -> dict[str, str]:
+    expected: dict[str, str] = {}
+    for platform in ("manylinux_2_35_x86_64", "manylinux_2_35_aarch64"):
+        name = f"skulk_audio_cpp_cuda-0.8.2.post1-py3-none-{platform}.whl"
+        data = platform.encode()
+        (directory / name).write_bytes(data)
+        expected[name] = hashlib.sha256(data).hexdigest()
+    return expected
+
+
+def test_gpu_map_authorizes_only_the_selected_platform(tmp_path: Path) -> None:
+    """The other downloaded CUDA platform must never enter the publication set."""
+    expected = _cuda_set(tmp_path)
+    name, digest = next(iter(expected.items()))
+    (tmp_path / "skulk_audio_cpp_cpu-unrelated.whl").write_bytes(b"unrelated")
+    other = next(value for value in expected if value != name)
+    (tmp_path / other).write_bytes(b"unqualified rebuild")
+    wheels = _verifier().verify_artifacts(tmp_path, "cuda", json.dumps({name: digest}))
+    assert wheels == (tmp_path / name,)
+
+
+@pytest.mark.parametrize("change", ["missing", "changed_bytes", "wrong_platform", "extra", "multiple", "wrong_variant"])
+def test_gpu_map_rejects_invalid_selection(tmp_path: Path, change: str) -> None:
+    """No missing, changed, additional, or invalid platform can be promoted."""
+    expected = _cuda_set(tmp_path)
+    name, digest = next(iter(expected.items()))
+    selected = {name: digest}
+    if change == "missing":
+        (tmp_path / name).unlink()
+    elif change == "changed_bytes":
+        (tmp_path / name).write_bytes(b"rebuilt")
+    elif change == "wrong_platform":
+        wrong = name.replace("manylinux_2_35_x86_64", "win_amd64")
+        (tmp_path / name).rename(tmp_path / wrong)
+        selected = {wrong: digest}
+    elif change == "extra":
+        (tmp_path / name.replace("post1", "post2")).write_bytes(b"extra")
+    elif change == "multiple":
+        selected = expected
+    else:
+        selected = {name.replace("_cuda-", "_vulkan-"): digest}
+    with pytest.raises(ValueError):
+        _verifier().verify_artifacts(tmp_path, "cuda", json.dumps(selected))

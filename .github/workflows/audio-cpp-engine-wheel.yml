@@ -40,7 +40,7 @@ on:
         type: string
         default: ""
       publish_sha256:
-        description: "Prior artifact SHA-256: one digest for GPU; filename-to-digest JSON map for all three CPU wheels"
+        description: "Prior artifact SHA-256: filename-to-digest JSON map (all CPU platforms or one GPU platform); legacy GPU digest"
         type: string
         default: ""
 
@@ -242,8 +242,18 @@ jobs:
           path: ${{ env.AUDIO_CPP_PACKAGE_DIR }}/dist/*.whl
           if-no-files-found: error
 
-  build-cuda-arm64:
-    runs-on: ubuntu-22.04-arm
+  build-cuda:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            platform: linux-amd64
+            cuda_arch: 89-real
+          - runner: ubuntu-22.04-arm
+            platform: linux-arm64
+            cuda_arch: 121-real
+    runs-on: ${{ matrix.runner }}
     container: nvidia/cuda:12.9.1-devel-ubuntu22.04
     defaults:
       run:
@@ -272,15 +282,15 @@ jobs:
           # CUDA uses the advancing Philox sampler, so retain its already
           # qualified source and wheel identity. The fallback correction is
           # applied only in the CPU and Vulkan build matrix above.
-      - name: Build GB10 CUDA server and two music families
+      - name: Build native CUDA server and two music families
         run: |
           set -euo pipefail
           # audio.cpp upgrades 121-real to 121a-real for Blackwell's
-          # architecture-specific instructions. Never infer the CI runner's
-          # CPU or absent GPU as a portable target.
+          # architecture-specific instructions; L40S uses explicit 89-real.
+          # Never infer the hosted runner's absent GPU as a portable target.
           cmake -S /tmp/audio-cpp-src -B /tmp/audio-cpp-build \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_CUDA_ARCHITECTURES=121-real \
+            -DCMAKE_CUDA_ARCHITECTURES=${{ matrix.cuda_arch }} \
             -DAUDIOCPP_MODEL_SET=custom \
             -DAUDIOCPP_MODELS=ace_step,minimax_music3 \
             -DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=OFF \
@@ -301,7 +311,7 @@ jobs:
           cp /tmp/audio-cpp-build/bin/audiocpp_server "$bin/"
           # Hosted builders have no NVIDIA driver; the toolkit image may also
           # omit its link-only driver stub. Real loader/device smoke is required
-          # on the GB10 before this wheel can receive a qualified pin.
+          # on each target hardware class before a wheel receives a qualified pin.
           ldd "$bin/audiocpp_server" | tee /tmp/audio-cpp-cuda-ldd.txt
           missing=$(awk '/not found/ {print $1}' /tmp/audio-cpp-cuda-ldd.txt)
           if [[ -n "$missing" && "$missing" != 'libcuda.so.1' ]]; then
@@ -365,12 +375,12 @@ jobs:
           subject-path: ${{ env.AUDIO_CPP_PACKAGE_DIR }}/dist/*.whl
       - uses: actions/upload-artifact@v4
         with:
-          name: audio-cpp-linux-arm64-cuda
+          name: audio-cpp-${{ matrix.platform }}-cuda
           path: ${{ env.AUDIO_CPP_PACKAGE_DIR }}/dist/*.whl
           if-no-files-found: error
 
   publish-index:
-    needs: [build, build-cuda-arm64]
+    needs: [build, build-cuda]
     if: github.event_name == 'workflow_dispatch' && inputs.publish
     runs-on: ubuntu-latest
     permissions:
@@ -390,7 +400,6 @@ jobs:
           run-id: ${{ inputs.publish_run_id || github.run_id }}
           github-token: ${{ github.token }}
       - name: Verify hardware-qualified source artifact
-        if: inputs.publish_variant != 'cpu' || inputs.publish_run_id != ''
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_RUN_ID: ${{ inputs.publish_run_id }}
@@ -410,4 +419,8 @@ jobs:
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
-        run: uv run --no-project --with boto3 python scripts/publish_wheel_index.py dist/skulk_audio_cpp_${{ inputs.publish_variant }}-*.whl
+        run: |
+          set -euo pipefail
+          mapfile -t wheels < verified-wheels.txt
+          test "${#wheels[@]}" -gt 0
+          uv run --no-project --with boto3 python scripts/publish_wheel_index.py "${wheels[@]}"

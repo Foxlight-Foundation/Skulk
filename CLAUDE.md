@@ -59,6 +59,12 @@ The audio.cpp Vulkan build applies a SHA-pinned MiniMax-only F32 matmul policy
 after the released sampler correction. It preserves the upstream F16 KV cache
 and other families/backends; a native graph-policy check runs before packaging.
 Candidate artifacts do not update Skulk's qualified package inventory or claims.
+The audio.cpp CUDA build matrix emits separate Linux amd64 L40S (SM 8.9)
+and arm64 GB10 (SM 12.1) artifacts. CUDA retains upstream Philox; the CPU/Vulkan
+fallback RNG patch does not apply. Promotion requires a successful prior build
+and SHA-256 pins: all three CPU filenames, or one exact GPU filename when
+multiple GPU platforms are downloaded. Only verifier-returned, attested paths
+are published. A build artifact alone does not authorize a reader pin or claim.
 
 `uv` is the canonical Skulk runtime path on macOS, including the official
 `mlx` + `mlx-metal` wheel stack. Nix is kept for formatting, flake-based

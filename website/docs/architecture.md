@@ -981,7 +981,11 @@ CUDA packages may restore their separate executable paths without contacting
 the package channel. Preparing a GPU package leaves existing CPU and other GPU
 mounts' executables and build identities intact. The CUDA wheel targets the
 NVIDIA compute architecture compiled into that package; installing it does
-not qualify a model for every NVIDIA GPU. Its GB10 variant requires an
+not qualify a model for every NVIDIA GPU. The build workflow emits separate
+Linux amd64 (SM 8.9) and arm64 (SM 12.1) CUDA artifacts. Each platform requires
+its own native qualification, immutable reader pin, and signed model claim;
+promotion selects one exact qualified GPU filename and digest.
+Its GB10 variant requires an
 observed `nvidia:sm-12.1` class and a signed claim explicitly naming that
 class before preparation. CUDA 12 runtime, cuBLAS, NCCL, and the NVIDIA driver
 must be on the host loader path; the binary probe exposes missing libraries.
