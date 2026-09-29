@@ -13,6 +13,7 @@ on:
       - "packaging/skulk-audio-cpp-cpu/**"
       - "packaging/skulk-audio-cpp-vulkan/**"
       - "packaging/skulk-audio-cpp-cuda/**"
+      - "scripts/verify_audio_cpp_promotion.py"
       - ".github/workflows/audio-cpp-engine-wheel.yml"
   push:
     branches: [dev]
@@ -21,6 +22,7 @@ on:
       - "packaging/skulk-audio-cpp-cpu/**"
       - "packaging/skulk-audio-cpp-vulkan/**"
       - "packaging/skulk-audio-cpp-cuda/**"
+      - "scripts/verify_audio_cpp_promotion.py"
       - ".github/workflows/audio-cpp-engine-wheel.yml"
   workflow_dispatch:
     inputs:
@@ -38,7 +40,7 @@ on:
         type: string
         default: ""
       publish_sha256:
-        description: "Exact SHA-256 of that prior run's selected wheel"
+        description: "Prior artifact SHA-256: one digest for GPU; filename-to-digest JSON map for all three CPU wheels"
         type: string
         default: ""
 
@@ -395,14 +397,12 @@ jobs:
           EXPECTED_SHA256: ${{ inputs.publish_sha256 }}
           PUBLISH_VARIANT: ${{ inputs.publish_variant }}
         run: |
-          test "$PUBLISH_VARIANT" = vulkan -o "$PUBLISH_VARIANT" = cuda
           [[ "$SOURCE_RUN_ID" =~ ^[0-9]+$ ]]
-          [[ "$EXPECTED_SHA256" =~ ^[0-9a-f]{64}$ ]]
           test "$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" --jq '.conclusion')" = success
-          wheels=(dist/skulk_audio_cpp_${PUBLISH_VARIANT}-*.whl)
-          test "${#wheels[@]}" -eq 1
-          printf '%s  %s\n' "$EXPECTED_SHA256" "${wheels[0]}" | sha256sum --check
-          gh attestation verify "${wheels[0]}" --repo "$GITHUB_REPOSITORY" > /dev/null
+          python scripts/verify_audio_cpp_promotion.py dist "$PUBLISH_VARIANT" "$EXPECTED_SHA256" > verified-wheels.txt
+          while IFS= read -r wheel; do
+            gh attestation verify "$wheel" --repo "$GITHUB_REPOSITORY" > /dev/null
+          done < verified-wheels.txt
       - uses: astral-sh/setup-uv@v6
       - name: Publish exact wheels to the Foxlight index
         env:

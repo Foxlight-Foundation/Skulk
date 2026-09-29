@@ -272,7 +272,12 @@ task on a music card. The cards have
 their own `[music]` section and require exact signed support claims. The
 `audio-cpp-engine-wheel` workflow builds the CPU-capable package for Apple
 Silicon macOS and Linux amd64/arm64 plus separate Linux amd64 Vulkan and Linux
-arm64 CUDA packages from the pinned source. `PrepareAudioCpp` carries the
+arm64 CUDA packages from the pinned source. To promote already tested artifacts without rebuilding,
+the workflow accepts `publish_run_id` and `publish_sha256`: one digest for a GPU
+wheel, or a JSON filename-to-digest map for the complete three-platform CPU/Metal
+set at one version. The promotion verifier rejects missing, extra, mixed-version
+or digest-mismatched CPU wheels before attestation checks and publication.
+`PrepareAudioCpp` carries the
 selected package variant; the API chooses CUDA or Vulkan only when a matching
 signed support claim applies to the node's hardware, and can try a separately
 claimed CPU fallback. An explicit primary-binary override may probe as CUDA
