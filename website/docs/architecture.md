@@ -987,7 +987,7 @@ its own native qualification, immutable reader pin, and signed model claim;
 promotion selects one exact qualified GPU filename and digest.
 Managed CUDA preparation requires the platform's exact build and compiled class
 in the signed claim, plus one observed NVIDIA device with that known class.
-Mixed, unknown, and multiple NVIDIA devices are rejected until the runner can
+Mixed GPU vendors, unknown classes, and multiple NVIDIA devices are rejected until the runner can
 select the physical device used by both execution and memory admission. The
 inventory retains unknown compute classes and marks multiple NVIDIA devices,
 so another matching device cannot hide insufficient evidence. These are compute

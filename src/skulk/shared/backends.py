@@ -207,12 +207,14 @@ def audio_cpp_cuda_hardware_matches(
 ) -> bool:
     """Check one observed NVIDIA device against a managed wheel's compute class.
 
-    The sidecar does not select a particular accelerator. Multiple devices or
-    unknown SM classes cannot bind its execution and memory pool to a device.
+    The sidecar does not select a particular accelerator. Multiple devices,
+    including other vendors, or unknown SM classes cannot bind its execution and
+    memory pool to a device. Linux telemetry may prefer an AMD pool on a mixed
+    host, so the presence of one matching NVIDIA device is insufficient.
     ``required_class`` names the wheel's compiled target; ``hardware_classes``
     contains live inventory evidence. Return whether that evidence is sufficient.
     """
-    return "nvidia:multiple-devices" not in hardware_classes and {
+    return not (hardware_classes & {"amd", "apple", "nvidia:multiple-devices"}) and {
         hardware_class
         for hardware_class in hardware_classes
         if hardware_class.startswith("nvidia:sm-")

@@ -308,7 +308,7 @@ chip-class identifiers
 Music model weights are separate immutable downloads. Managed CUDA wheels target
 SM 8.9 on amd64 and GB10 SM 12.1 on arm64. Preparation requires the platform's
 exact managed executable build and compute class in the signed claim, plus one
-observed NVIDIA device with that class. Mixed, unknown, and multiple NVIDIA
+observed NVIDIA device with that class. Mixed GPU vendors, unknown classes, and multiple NVIDIA
 devices are rejected because the runner cannot yet bind execution and memory
 admission to a selected physical device. A qualified operator-provided primary
 CUDA binary uses its own exact claim through primary preparation. If a dedicated

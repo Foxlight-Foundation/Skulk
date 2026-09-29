@@ -314,6 +314,9 @@ async def test_cuda_claim_prepares_exact_host_gpu_variant(
         ("x86_64", L40S_AUDIO_CPP_CUDA_BUILD, "nvidia:sm-8.9,nvidia:sm-8.0", "nvidia:sm-8.9", True, None),
         ("x86_64", L40S_AUDIO_CPP_CUDA_BUILD, "nvidia:sm-8.9,nvidia:sm-unknown", "nvidia:sm-8.9", True, None),
         ("x86_64", L40S_AUDIO_CPP_CUDA_BUILD, "nvidia:sm-8.9,nvidia:multiple-devices", "nvidia:sm-8.9", True, None),
+        ("x86_64", L40S_AUDIO_CPP_CUDA_BUILD, "nvidia:sm-8.9,amd", "nvidia:sm-8.9", False, None),
+        ("x86_64", L40S_AUDIO_CPP_CUDA_BUILD, "nvidia:sm-8.9,amd", "nvidia:sm-8.9", True, None),
+        ("aarch64", GB10_AUDIO_CPP_CUDA_BUILD, "nvidia:sm-12.1,amd", "nvidia:sm-12.1", True, None),
         ("aarch64", GB10_AUDIO_CPP_CUDA_BUILD, "nvidia:sm-12.1,nvidia:sm-9.0", "nvidia:sm-12.1", True, None),
     ],
 )
