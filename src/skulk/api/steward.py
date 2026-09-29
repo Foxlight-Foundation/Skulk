@@ -1501,6 +1501,10 @@ class StewardHarness:
         # abandoned stream (client disconnect, cancel button) can stop the
         # runner instead of leaving it generating for nobody.
         self._active_command_id: CommandId | None = None
+        # Latched by cancel_turn. The investigation loop checks it at every
+        # step boundary, so cancelling the turn's advertised command id ends
+        # the whole turn rather than only the generation in flight.
+        self._turn_cancelled = False
         # Aggregated across the turn's inner generations so the terminal
         # chunk reports real usage instead of null, and the model's actual
         # terminal reason (e.g. length) is preserved.
@@ -1525,10 +1529,11 @@ class StewardHarness:
     async def canary_probe(self, instance_id: InstanceId, model_id: str) -> bool:
         """One deterministic liveness probe of the steward's generation path.
 
-        A minimal no-tools request pinned to the instance; success is any
-        non-thinking text within the deadline, checked by code, never judged
-        by a model. Used by the hosting node's canary loop to catch a
-        steward that is alive in state but wedged in generation.
+        A minimal no-tools request pinned to the instance; success is
+        non-thinking text from a generation that finishes within the
+        deadline, checked by code, never judged by a model. Used by the
+        hosting node's canary loop to catch a steward that is alive in state
+        but wedged in generation.
         """
         from skulk.api.adapters.chat_completions import (
             chat_request_to_text_generation,
@@ -1570,7 +1575,7 @@ class StewardHarness:
         # stream iteration, and the chunk stream's own cancellation handling
         # already sends TaskCancelled and finalizes; a second cancel here
         # would just duplicate it for an already-finalized command.
-        with anyio.move_on_after(CANARY_PROBE_TIMEOUT_SECONDS):
+        with anyio.move_on_after(CANARY_PROBE_TIMEOUT_SECONDS) as deadline:
             async for chunk in chunk_stream:
                 if isinstance(chunk, ErrorChunk):
                     return False
@@ -1582,6 +1587,12 @@ class StewardHarness:
                     got_text = True
                 if isinstance(chunk, TokenChunk) and chunk.finish_reason is not None:
                     break
+        # An expired deadline fails the probe even when some text arrived
+        # first. Partial output followed by a stall is the wedge this canary
+        # exists to catch; counting it as success would reset the failure
+        # run that the teardown threshold depends on.
+        if deadline.cancelled_caught:
+            return False
         return got_text
 
     def steward_instance(self) -> tuple[InstanceId, str] | None:
@@ -2057,6 +2068,34 @@ class StewardHarness:
                     with anyio.move_on_after(2, shield=True):
                         await self._api.send_task_cancellation(abandoned)
 
+    async def cancel_turn(self) -> None:
+        """Cancel this turn on behalf of its advertised command id.
+
+        The chat surface advertises one command id for the whole turn, while
+        the harness dispatches each investigation step under an inner id the
+        caller never sees. Cancelling the advertised id therefore has to stop
+        the inner generation in flight and also latch the turn closed, or the
+        investigation loop would simply dispatch its next step.
+
+        Side effects:
+            Sets the turn's cancellation latch. When a step is generating,
+            cancels it through the API's local cancellation path, which
+            closes its response queue so this turn's stream ends now rather
+            than when the worker acknowledges. When that queue is already
+            gone, sends a bare worker cancellation instead.
+        """
+        self._turn_cancelled = True
+        active = self._active_command_id
+        if active is None:
+            return
+        self._active_command_id = None
+        if not await self._api.cancel_local_command(active):
+            # No local stream remains to finalize this command, so nothing
+            # would ever discard a retained local-finish marker.
+            await self._api.send_task_cancellation(
+                active, suppress_local_finish=False
+            )
+
     async def _run_investigation(
         self,
         messages: list[ChatCompletionMessage],
@@ -2064,7 +2103,12 @@ class StewardHarness:
         instance_id: InstanceId,
     ) -> "AsyncGenerator[TokenChunk | ErrorChunk | ToolCallChunk | PrefillProgressChunk, None]":
         """The turn's investigation loop; separated so the public stream can
-        wrap it with abandonment cleanup."""
+        wrap it with abandonment cleanup.
+
+        A cancelled turn returns without a terminal chunk. The chat adapters
+        then report the turn as ended before completion, which is what an
+        ordinary cancelled generation reports too.
+        """
         # Evidence is an execution prerequisite, not a tool-use suggestion.
         # Fetch on every turn (after conversation/middleware context) so even
         # a direct answer or a follow-up cannot start from model memory alone.
@@ -2076,6 +2120,8 @@ class StewardHarness:
             is_thinking=True,
         )
         result = await self.execute_tool("get_cluster_state", {})
+        if self._turn_cancelled:
+            return
         try:
             evidence = cast("object", json.loads(result))
         except json.JSONDecodeError:
@@ -2122,6 +2168,8 @@ class StewardHarness:
                 is_thinking=True,
             )
             inventory = await self.execute_tool(tool, {})
+            if self._turn_cancelled:
+                return
             inventory_payload: dict[str, object]
             try:
                 inventory_payload = _as_object_dict(
@@ -2171,6 +2219,8 @@ class StewardHarness:
         )
         reply = ""
         for step_index in range(MAX_STEPS_PER_TURN):
+            if self._turn_cancelled:
+                return
             if step_index == MAX_STEPS_PER_TURN - 1:
                 messages.append(
                     ChatCompletionMessage(
@@ -2220,6 +2270,10 @@ class StewardHarness:
                     text, tool_calls, error = cast(
                         "tuple[str, list[ToolCall], str | None]", payload
                     )
+            if self._turn_cancelled:
+                # The step's text stopped at the cancellation, so it is not
+                # an answer, and its tool calls must not run.
+                return
             if error is not None:
                 yield ErrorChunk(
                     model=ModelId(STEWARD_VIRTUAL_MODEL_ID), error_message=error
@@ -2260,6 +2314,10 @@ class StewardHarness:
                 usage=None,
                 is_thinking=True,
             )
+            if self._turn_cancelled:
+                # A cancel that lands after the trace line must still stop
+                # the call: proposal tools record operator-facing proposals.
+                return
             result = await self.execute_tool(call.function.name, arguments)
             content_text = strip_tool_markup(text)
             messages.append(
@@ -2343,9 +2401,21 @@ class StewardHarness:
         task_params = await chat_request_to_text_generation(
             request, model_card=model_card
         )
+        if self._turn_cancelled:
+            return
         command = await api.dispatch_text_generation(
             task_params, target_instance_id=instance_id
         )
+        if self._turn_cancelled:
+            # cancel_turn ran while this dispatch was in flight, before the
+            # inner id existed, so it had nothing to stop. Cancel the fresh
+            # command here instead of streaming one more generation behind an
+            # accepted cancellation. No chunk stream opens for it, so no
+            # local-finish marker may be retained.
+            await api.send_task_cancellation(
+                command.command_id, suppress_local_finish=False
+            )
+            return
         self._active_command_id = command.command_id
         # No extension tap: this is one investigation step, not the turn.
         # The turn's single tap is applied by the caller of

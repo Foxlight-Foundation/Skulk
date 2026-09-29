@@ -1996,6 +1996,15 @@ class API:
         # this node), so an outstanding failed probe surfaces as `degraded`
         # instead of hiding until the third failure tears the steward down.
         self._steward_canary = StewardCanaryState()
+        # Live steward turns keyed by their advertised command id, so the
+        # generic cancel-by-id endpoint can stop a turn whose inner generation
+        # ids the caller never sees. The response stream removes its entry
+        # when it ends; weak values also drop a turn whose response was
+        # discarded before it ever started streaming, which no generator
+        # cleanup can observe.
+        self._steward_turns: weakref.WeakValueDictionary[
+            CommandId, StewardHarness
+        ] = weakref.WeakValueDictionary()
         self._event_log = DiskEventLog(_API_EVENT_LOG_DIR) if enable_event_log else None
         self._event_log_appends_since_retention_check = 0
         self._system_id = SystemId()
@@ -3021,7 +3030,11 @@ class API:
             "/v1/cancel/{command_id}",
             tags=["Compatibility APIs"],
             summary="Cancel an active generation command",
-            description="Request cancellation for an in-flight text, image, embedding, or speech command by its command ID.",
+            description=(
+                "Request cancellation for an in-flight text, image, video, music, "
+                "embedding, or speech command by its command ID. The command ID a "
+                "steward turn (`skulk/steward`) advertises cancels the whole turn."
+            ),
         )(self.cancel_command)
         self.app.post(
             "/v1/tools/web_search",
@@ -4717,10 +4730,20 @@ class API:
             chunk_stream = self._extensions.tap_chat_stream(
                 self._extension_context, task_params, chunk_stream
             )
+        # The advertised command id must honor the generic cancel-by-id
+        # contract, but the harness's inner generation ids are never shown
+        # to the caller. The outer id therefore maps to this turn's harness,
+        # registered before the response exists: the streaming adapter
+        # advertises the id before it pulls the first chunk, so registering
+        # inside the stream would leave a window where cancel returns 404.
+        self._steward_turns[command_id] = harness
         if payload.stream:
             return StreamingResponse(
-                with_sse_keepalive(
-                    generate_chat_stream(command_id, chunk_stream),
+                self._release_steward_turn_after(
+                    command_id,
+                    with_sse_keepalive(
+                        generate_chat_stream(command_id, chunk_stream),
+                    ),
                 ),
                 media_type="text/event-stream",
                 headers={
@@ -4736,9 +4759,39 @@ class API:
         # costs the ability to choose a status after the outcome is known, so
         # a post-commit failure is reported in the body instead (#872).
         return StreamingResponse(
-            collect_chat_response(command_id, chunk_stream),
+            self._release_steward_turn_after(
+                command_id,
+                collect_chat_response(command_id, chunk_stream),
+            ),
             media_type="application/json",
         )
+
+    async def _release_steward_turn_after(
+        self,
+        command_id: CommandId,
+        response_stream: AsyncIterator[str],
+    ) -> AsyncGenerator[str, None]:
+        """Remove a steward turn from cancel-by-id when its response ends.
+
+        The caller registers the turn before building the response; this
+        wrapper owns only the removal. It must wrap the outermost response
+        iterator, the one Starlette drives, because an inner generator can be
+        abandoned before it ever starts (the keepalive layer emits bytes
+        before pulling its source), and an unstarted generator never runs
+        its ``finally``.
+
+        Args:
+            command_id: The advertised command id the caller registered.
+            response_stream: The fully assembled response body iterator.
+
+        Yields:
+            The wrapped response's items, unchanged.
+        """
+        try:
+            async for item in response_stream:
+                yield item
+        finally:
+            self._steward_turns.pop(command_id, None)
 
     async def _steward_extension_transform(
         self, history: list[StewardChatMessage], *, stream: bool
@@ -5188,14 +5241,26 @@ class API:
             instance_id=instance_id,
         )
 
-    async def cancel_command(self, command_id: CommandId) -> CancelCommandResponse:
-        """Cancel an active command by closing its stream and notifying workers."""
-        music_job = self._music_jobs.get(command_id)
-        if music_job is not None and not music_job.is_terminal:
-            await self._cancel_music_job(command_id)
-            return CancelCommandResponse(
-                message="Command cancelled.", command_id=command_id,
-            )
+    async def cancel_local_command(self, command_id: CommandId) -> bool:
+        """Cancel one command whose response stream is open on this node.
+
+        The shared implementation behind the cancel-by-id endpoint and the
+        steward harness's turn cancellation. Closing the local response queue
+        ends the caller's stream at once, rather than when worker-side
+        cancellation lands (a served engine may observe that only when its
+        generation completes).
+
+        Args:
+            command_id: The command whose local stream should be cancelled.
+
+        Returns:
+            True when a local stream existed and was cancelled; False when the
+            command has no open stream here.
+
+        Side effects:
+            Sends ``TaskCancelled``, records the id so the stream's cleanup
+            suppresses its ``TaskFinished``, and closes the queue.
+        """
         sender = (
             self._text_generation_queues.get(command_id)
             or self._image_generation_queues.get(command_id)
@@ -5205,31 +5270,58 @@ class API:
             or self._audio_transcription_queues.get(command_id)
         )
         if sender is None:
-            # A video job whose render finished but whose container is still
-            # crossing OUTPUT_MEDIA has no stream queue left; cancel the job
-            # itself and tell the producing worker to stop streaming.
-            job = self._video_jobs.get(command_id)
-            if job is not None and not job.is_terminal:
-                await self._cancel_video_job(command_id)
-                return CancelCommandResponse(
-                    message="Command cancelled.",
-                    command_id=command_id,
-                )
-            raise HTTPException(
-                status_code=404,
-                detail="Command not found or already completed",
-            )
-
+            return False
         await self._send(TaskCancelled(cancelled_command_id=command_id))
         # Suppress the final TaskFinished emitted by local stream cleanup so the
         # worker can observe the Cancelled task and deliver runner-local cancel
         # before event-sourced task deletion happens.
         self._cancelled_command_ids.add(command_id)
         sender.close()
+        return True
 
-        return CancelCommandResponse(
-            message="Command cancelled.",
-            command_id=command_id,
+    async def cancel_command(self, command_id: CommandId) -> CancelCommandResponse:
+        """Cancel an active command by closing its stream and notifying workers.
+
+        Covers music and video jobs, every locally streamed generation, and
+        steward turns, whose advertised id cancels the whole turn.
+
+        Raises:
+            HTTPException: 404 when the command is unknown on this node or
+                already completed.
+        """
+        music_job = self._music_jobs.get(command_id)
+        if music_job is not None and not music_job.is_terminal:
+            await self._cancel_music_job(command_id)
+            return CancelCommandResponse(
+                message="Command cancelled.", command_id=command_id,
+            )
+        if await self.cancel_local_command(command_id):
+            return CancelCommandResponse(
+                message="Command cancelled.",
+                command_id=command_id,
+            )
+        # A video job whose render finished but whose container is still
+        # crossing OUTPUT_MEDIA has no stream queue left; cancel the job
+        # itself and tell the producing worker to stop streaming.
+        job = self._video_jobs.get(command_id)
+        if job is not None and not job.is_terminal:
+            await self._cancel_video_job(command_id)
+            return CancelCommandResponse(
+                message="Command cancelled.",
+                command_id=command_id,
+            )
+        # A steward turn advertises one command id while its steps run under
+        # private inner ids; route the advertised id to the turn itself.
+        steward_turn = self._steward_turns.get(command_id)
+        if steward_turn is not None:
+            await steward_turn.cancel_turn()
+            return CancelCommandResponse(
+                message="Steward turn cancelled.",
+                command_id=command_id,
+            )
+        raise HTTPException(
+            status_code=404,
+            detail="Command not found or already completed",
         )
 
     def _command_task_is_terminal(self, command_id: CommandId) -> bool:
@@ -6308,15 +6400,26 @@ class API:
                     "Vision media timed out waiting for worker verification",
                 )
 
-    async def send_task_cancellation(self, command_id: CommandId) -> None:
+    async def send_task_cancellation(
+        self, command_id: CommandId, *, suppress_local_finish: bool = True
+    ) -> None:
         """Public cancellation seam for internal callers (the steward harness).
 
         Sends the same TaskCancelled command the HTTP cancel endpoint sends,
-        suppressing the final TaskFinished so the worker can observe the
-        cancelled task and stop the runner promptly.
+        by default suppressing the final TaskFinished so the worker can
+        observe the cancelled task and stop the runner promptly.
+
+        Args:
+            command_id: The command to cancel on the workers.
+            suppress_local_finish: Record the id so the local stream's cleanup
+                skips its TaskFinished. Pass False when no local stream will
+                ever finalize this command (it never opened, or it already
+                closed): only stream finalization discards the marker, so
+                retaining it would leak one entry per cancellation.
         """
         await self._send(TaskCancelled(cancelled_command_id=command_id))
-        self._cancelled_command_ids.add(command_id)
+        if suppress_local_finish:
+            self._cancelled_command_ids.add(command_id)
 
     async def dispatch_text_generation(
         self,

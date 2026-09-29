@@ -164,7 +164,9 @@ The bare `audio_cpp` tag reports engine availability, but signed music support a
 - Canary: the lowest API-advertising node runs `_steward_canary_loop` (every 300s,
   only when mode on + elected + runner idle-Ready + no in-flight
   task; busy-wedge belongs to the worker wedge detector). Probe = minimal
-  pinned no-tools generation, code-checked non-empty text within 120s; 3
+  pinned no-tools generation, code-checked non-empty text from a generation
+  that finishes within 120s (an expired deadline fails the probe even after
+  partial text, so a stalled runner cannot reset the failure run); 3
   consecutive failures send `FailInstance(runner_unresponsive)` so the cause is
   retained before teardown, and the invariant re-places.
   Pure target selection = `canary_probe_target` (steward.py). The failure
@@ -180,7 +182,12 @@ The bare `audio_cpp` tag reports engine availability, but signed music support a
   preference list (min_nodes=1, MlxRing meta), tears down duplicate
   stewards keeping the lowest instance id, paces attempts to one per
   minute. Master failover re-establishes the steward via the invariant; no
-  dedicated failover code. If a higher-preference brain remains placeable for
+  dedicated failover code. Both the placement walk and the upgrade walk place
+  candidates only through `_place_steward_model`, which skips (warning once per
+  candidate) any card `steward_candidate_is_servable` rejects: it requires
+  `TextGeneration`, no task or speech declaration that routes the card to a
+  non-text runner, and a resolved profile that supports tool calling. If a
+  higher-preference brain remains placeable for
   five minutes, its exact shards are prestaged; after the current steward is
   idle-Ready for 30 seconds the invariant performs a short exactly-one restart.
   Failed promotion falls through to the prior brain and retries after 30 minutes.
@@ -285,7 +292,14 @@ The bare `audio_cpp` tag reports engine availability, but signed music support a
   staging and repair. The
   earlier bespoke `POST /v1/steward/chat` was removed before any release.
   Ordinary `DELETE /instance/{id}` of the steward is refused 409 while the
-  mode is enabled.
+  mode is enabled. `POST /v1/cancel/{command_id}` accepts the turn's
+  advertised id: `API._steward_turns` (weak values, entry removed by
+  `_release_steward_turn_after` around the outermost response iterator)
+  routes it to `StewardHarness.cancel_turn`, which cancels the generating
+  step through `API.cancel_local_command` and latches the loop so no further
+  step or tool call runs; a cancel racing a step's dispatch cancels the fresh
+  inner command. The cancelled turn ends without a terminal chunk, so the
+  adapters report it like any cancelled generation.
 - Readiness preflight: the reserved id answers 404 when the mode is off and
   503 (status payload + `message` + `Retry-After`) when the mode is on but
   no steward is ready, checked BEFORE the response begins. The in-stream

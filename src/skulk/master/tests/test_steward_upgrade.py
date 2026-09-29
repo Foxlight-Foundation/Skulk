@@ -1,16 +1,23 @@
 # pyright: reportPrivateUsage=false, reportAttributeAccessIssue=false
-"""Controlled best-brain convergence for the intelligent-fabric steward."""
+"""Steward candidate walks: best-brain convergence and candidate servability."""
 
 from collections.abc import Mapping
+from types import SimpleNamespace
 
 import pytest
 
-from skulk.master.main import Master
+from skulk.master.main import Master, steward_candidate_is_servable
 from skulk.routing.router import get_node_id_keypair
-from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
+from skulk.shared.models.model_cards import (
+    ModelCard,
+    ModelId,
+    ModelTask,
+    ToolingCardConfig,
+)
 from skulk.shared.types.commands import (
     ForwarderCommand,
     ForwarderDownloadCommand,
+    PlaceInstance,
     StartDownload,
 )
 from skulk.shared.types.common import NodeId, SessionId
@@ -233,3 +240,146 @@ def test_replacement_admission_credits_outgoing_steward_ram_and_vram(
     assert replacement[other_node].ram_available.in_gb == 4
     assert vram[master.node_id].in_gb > 2
     assert vram[other_node].in_gb == 4
+
+
+def _candidate(
+    model_id: str,
+    *,
+    tasks: list[ModelTask] | None = None,
+    tool_calling: bool = True,
+) -> ModelCard:
+    return ModelCard(
+        model_id=ModelId(model_id),
+        storage_size=Memory.from_gb(1),
+        n_layers=4,
+        hidden_size=16,
+        supports_tensor=False,
+        tasks=tasks if tasks is not None else [ModelTask.TextGeneration],
+        tooling=(
+            ToolingCardConfig(supports_tool_calling=True) if tool_calling else None
+        ),
+    )
+
+
+def test_tool_calling_text_card_is_a_servable_steward() -> None:
+    assert steward_candidate_is_servable(_candidate("org/brain")) is True
+
+
+@pytest.mark.parametrize(
+    ("tasks", "tool_calling"),
+    [
+        pytest.param([ModelTask.TextGeneration], False, id="tool-less text"),
+        pytest.param([ModelTask.TextEmbedding], True, id="no text generation"),
+        pytest.param(
+            [ModelTask.TextGeneration, ModelTask.TextEmbedding], True, id="embedding"
+        ),
+        pytest.param(
+            [ModelTask.TextGeneration, ModelTask.TextToImage], True, id="image"
+        ),
+        pytest.param(
+            [ModelTask.TextGeneration, ModelTask.TextToSpeech], True, id="speech"
+        ),
+    ],
+)
+def test_cards_the_steward_cannot_run_on_are_not_servable(
+    tasks: list[ModelTask], tool_calling: bool
+) -> None:
+    """Each shape would place a steward that fails every turn."""
+    card = _candidate("org/not-a-brain", tasks=tasks, tool_calling=tool_calling)
+
+    assert steward_candidate_is_servable(card) is False
+
+
+async def _no_card_refresh() -> list[ModelCard]:
+    return []
+
+
+def _unservable_card(model_id: ModelId) -> ModelCard:
+    return _candidate(str(model_id), tool_calling=False)
+
+
+@pytest.mark.asyncio
+async def test_unservable_candidate_is_skipped_before_placement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shared placement step refuses the candidate and warns only once."""
+    master, _, _ = _master()
+    monkeypatch.setattr("skulk.master.main.get_model_cards", _no_card_refresh)
+    monkeypatch.setattr("skulk.master.main.get_card", _unservable_card)
+
+    def refuse_placement(command: PlaceInstance, *args: object, **kwargs: object) -> None:
+        raise AssertionError("an unservable steward candidate must not be placed")
+
+    monkeypatch.setattr("skulk.master.main.place_instance", refuse_placement)
+
+    assert await master._place_steward_model("org/plain", {}) is None
+    assert await master._place_steward_model("org/plain", {}) is None
+    assert master._steward_unservable_warned == {"org/plain"}
+
+
+@pytest.mark.asyncio
+async def test_placement_walk_falls_through_to_the_first_servable_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    master, _, _ = _master()
+    cards = {
+        "org/plain": _candidate("org/plain", tool_calling=False),
+        "org/brain": _candidate("org/brain"),
+    }
+    monkeypatch.setattr(
+        "skulk.master.main.load_skulk_config",
+        lambda: SimpleNamespace(
+            intelligent_fabric=SimpleNamespace(
+                enabled=True, steward_models=["org/plain", "org/brain"]
+            )
+        ),
+    )
+    monkeypatch.setattr("skulk.master.main.get_model_cards", _no_card_refresh)
+
+    def lookup_card(model_id: ModelId) -> ModelCard | None:
+        return cards.get(str(model_id))
+
+    monkeypatch.setattr("skulk.master.main.get_card", lookup_card)
+    monkeypatch.setattr("skulk.master.main.time.monotonic", lambda: 1000.0)
+    attempted: list[str] = []
+
+    def record_placement(
+        command: PlaceInstance, *args: object, **kwargs: object
+    ) -> dict[InstanceId, Instance]:
+        attempted.append(str(command.model_card.model_id))
+        return {}
+
+    monkeypatch.setattr("skulk.master.main.place_instance", record_placement)
+
+    await master._maintain_steward_placement()
+
+    assert attempted == ["org/brain"]
+
+
+@pytest.mark.asyncio
+async def test_upgrade_walk_passes_over_an_unservable_better_brain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A higher-ranked card that cannot serve never becomes an upgrade target."""
+    master, download_receiver, _ = _master()
+    current, _ = _instance(master.node_id, "org/current")
+    runner = next(iter(current.shard_assignments.node_to_runner.values()))
+    master.state = State(
+        instances={current.instance_id: current},
+        runners={runner: RunnerReady()},
+    )
+    master._telemetry_view.node_memory[master.node_id] = _memory(8)
+    monkeypatch.setattr("skulk.master.main.get_model_cards", _no_card_refresh)
+    monkeypatch.setattr("skulk.master.main.get_card", _unservable_card)
+
+    def refuse_placement(command: PlaceInstance, *args: object, **kwargs: object) -> None:
+        raise AssertionError("an unservable upgrade candidate must not be placed")
+
+    monkeypatch.setattr("skulk.master.main.place_instance", refuse_placement)
+
+    await master._maintain_steward_upgrade(
+        current.instance_id, ("org/plain", "org/current")
+    )
+
+    assert master._steward_upgrade_model is None
+    assert download_receiver.collect() == []

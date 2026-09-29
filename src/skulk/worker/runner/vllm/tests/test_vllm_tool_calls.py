@@ -271,7 +271,12 @@ def test_tools_without_parser_surface_error_chunk(monkeypatch: Any) -> None:
         if isinstance(e, ChunkGenerated) and isinstance(e.chunk, ErrorChunk)
     ]
     assert len(errors) == 1
-    assert "tool" in errors[0].error_message.lower()
+    message = errors[0].error_message
+    assert "tool" in message.lower()
+    # The pin is the only way to get a parser: there is no family fallback,
+    # so the message must not send an operator looking for one.
+    assert "runtime.vllm_tool_call_parser" in message
+    assert "family default" not in message
 
 
 def test_truncated_tool_call_surfaces_length_not_a_call(monkeypatch: Any) -> None:

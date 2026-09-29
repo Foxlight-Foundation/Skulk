@@ -143,6 +143,27 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- Cancelling a steward answer by its command ID now works.
+  `POST /v1/cancel/{command_id}` with the ID a steward response advertises
+  used to return 404, because each investigation step runs under an internal
+  ID. It now stops the step that is generating and ends the turn, so the
+  steward starts no further steps or tool calls.
+
+- The steward's liveness canary now fails a probe that starts answering and
+  then stalls. A probe that produced some text before its two-minute
+  deadline used to count as healthy, so a steward that wedged mid-answer
+  never reached the three-failure replacement.
+
+- The steward is placed only on models that can serve it. A card in
+  `steward_models` that is not a tool-calling text model (an embedding,
+  image, or speech model, or a text model that cannot call tools) is now
+  skipped with a warning and the next candidate is tried. It used to be
+  placed as a steward that failed every turn.
+
+- The error for a tool request to a vLLM model without a pinned tool-call
+  parser no longer points at a family default that does not exist. It names
+  `runtime.vllm_tool_call_parser`, the only way to enable tools on vLLM.
+
 - The dashboard's English string catalog, the file seeded into Tolgee for
   translation, is current again. Its exporter had failed since mid-September
   (one key carried two different English texts, and the Integrations page

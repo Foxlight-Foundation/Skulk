@@ -1294,7 +1294,11 @@ the answer; client-supplied tool definitions are rejected, and client system
 prompts are ignored in favor of the steward's own. Generation itself rides
 the normal text-generation dispatch path, pinned to the steward instance,
 and the underlying model card id remains addressable as an ordinary model
-without tools or cluster access. Steward turns always run with the brain's
+without tools or cluster access. The command ID a steward response advertises
+cancels the whole turn through the ordinary cancel endpoint: the generating
+step stops and no further step or tool call runs. Only tool-calling text
+models are placed as the steward; any other card in the preference list is
+skipped with a warning. Steward turns always run with the brain's
 thinking disabled: the model candidates were compared with and without it,
 and thinking made the finalists measurably less trustworthy on this
 workload while gaining nothing, so the harness pins it off rather than
@@ -1310,9 +1314,10 @@ service-unavailable response carrying that same status, so a client can tell
 "the fabric is still setting up" from "the answer failed halfway". The
 API-advertising node with the lowest stable identity also runs a slow
 deterministic canary: a minimal
-pinned generation whose answer is shape-checked by code, so a steward
-that is alive in state but wedged in generation is torn down and
-re-placed by the same invariant that handles node loss. The first failed
+pinned generation whose answer is shape-checked by code and must finish
+within its deadline, so a steward that is alive in state but wedged in
+generation, including one that starts answering and then stalls, is torn
+down and re-placed by the same invariant that handles node loss. The first failed
 probe already shows up in the status as a degraded steward, well before the
 third one triggers the replacement. API presence is explicit telemetry
 (`NodeResources.api_available`), so a worker launched with `--no-api` can still

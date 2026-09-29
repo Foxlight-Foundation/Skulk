@@ -36,6 +36,7 @@ from skulk.master.placement_utils import (
 from skulk.shared.apply import apply
 from skulk.shared.constants import SKULK_EVENT_LOG_DIR, SKULK_TRACING_ENABLED
 from skulk.shared.log_summaries import summarize_command_for_log
+from skulk.shared.models.capabilities import resolve_model_capability_profile
 from skulk.shared.models.memory_estimate import (
     estimate_shard_footprint,
     shard_fraction_of_model,
@@ -45,6 +46,7 @@ from skulk.shared.models.model_cards import (
     ModelId,
     ModelTask,
     VideoMode,
+    card_serves_speech,
     get_card,
     get_current_registry_card,
     get_custom_card_storage_collision,
@@ -408,6 +410,50 @@ def dead_node_instance_failure_events(
             )
         )
     return failures
+
+
+_SPECIALIZED_RUNNER_TASKS: frozenset[ModelTask] = frozenset(
+    {
+        ModelTask.TextToMusic,
+        ModelTask.TextToVideo,
+        ModelTask.ImageToVideo,
+        ModelTask.ReferenceToVideo,
+        ModelTask.TextToImage,
+        ModelTask.ImageToImage,
+        ModelTask.TextEmbedding,
+    }
+)
+"""Tasks whose cards the worker routes to a non-text runner.
+
+The worker's runner bootstrap dispatches music, video, image, and embedding
+cards (and speech cards, see ``card_serves_speech``) to their own runners
+before it selects a text engine, so a card declaring any of these never
+serves text generation, whatever else it declares.
+"""
+
+
+def steward_candidate_is_servable(card: ModelCard) -> bool:
+    """Whether a configured steward candidate can actually serve steward turns.
+
+    The steward harness always dispatches text generation with server-side
+    tools. A candidate must therefore be a text-generation card that the
+    worker routes to a text runner, and its resolved capability profile must
+    support tool calling. Any other card named in ``steward_models`` would
+    place a steward that fails every turn instead of letting the walk fall
+    through to the next candidate.
+
+    Args:
+        card: The candidate's model card.
+
+    Returns:
+        True when the card can serve tool-driven steward text generation.
+    """
+    if ModelTask.TextGeneration not in card.tasks:
+        return False
+    if _SPECIALIZED_RUNNER_TASKS.intersection(card.tasks) or card_serves_speech(card):
+        return False
+    profile = resolve_model_capability_profile(card.model_id, model_card=card)
+    return profile.supports_tool_calling
 
 
 def _aware_timestamp(when: datetime) -> datetime:
@@ -1013,6 +1059,10 @@ class Master:
         self._steward_upgrade_idle_since: float | None = None
         self._steward_upgrade_replacing_instance: InstanceId | None = None
         self._steward_upgrade_retry_after: float = 0.0
+        # Steward candidates already reported as unservable. The upgrade walk
+        # revisits the preference list on every planning tick, so the warning
+        # is logged once per candidate rather than every ten seconds.
+        self._steward_unservable_warned: set[str] = set()
         # Per-node memory (bytes) freed by a just-deleted instance. The grace
         # window is zero by default, so entries are normally pruned without being
         # applied; keeping the structure preserves one place to revisit this if
@@ -3844,6 +3894,17 @@ class Master:
         card = get_card(ModelId(model_ref))
         if card is None:
             logger.warning(f"Steward model {model_ref} has no model card; skipping")
+            return None
+        # Both steward walks (the exactly-one placement and the best-brain
+        # upgrade) place candidates only through here, so this one check
+        # keeps either walk from committing a steward that cannot answer.
+        if not steward_candidate_is_servable(card):
+            if model_ref not in self._steward_unservable_warned:
+                self._steward_unservable_warned.add(model_ref)
+                logger.warning(
+                    f"Steward model {model_ref} is not a tool-calling text "
+                    "model; skipping it as a steward candidate"
+                )
             return None
         command = PlaceInstance(
             model_card=card,

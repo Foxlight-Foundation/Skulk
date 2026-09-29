@@ -1,4 +1,7 @@
+import gc
 import tempfile
+import weakref
+from collections.abc import AsyncGenerator
 from pathlib import Path
 
 # pyright: reportUnusedFunction=false, reportAny=false
@@ -6,7 +9,7 @@ from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from skulk.api.data_plane import DataPlaneObserver
@@ -75,6 +78,7 @@ def _make_api() -> Any:
     api._vision_media_failures = {}  # pyright: ignore[reportPrivateUsage]
     api._vision_media_packet_sender = None  # pyright: ignore[reportPrivateUsage]
     api._cancelled_command_ids = set()  # pyright: ignore[reportPrivateUsage]
+    api._steward_turns = weakref.WeakValueDictionary()  # pyright: ignore[reportPrivateUsage]
     api._chunk_reorder = {}  # pyright: ignore[reportPrivateUsage]
     api._data_dedup_cursor = {}  # pyright: ignore[reportPrivateUsage]
     api._data_plane_observer = DataPlaneObserver(  # pyright: ignore[reportPrivateUsage]
@@ -221,3 +225,125 @@ async def test_finalize_command_stream_reports_natural_completion() -> None:
     task_finished = api._send.call_args[0][0]
     assert task_finished.finished_command_id == cid
     assert cid not in queue
+
+
+class _RecordingTurn:
+    """Stands in for a live steward turn's harness in the turn registry."""
+
+    def __init__(self) -> None:
+        self.cancelled = 0
+
+    async def cancel_turn(self) -> None:
+        self.cancelled += 1
+
+
+def test_cancel_routes_a_registered_steward_turn() -> None:
+    """The id a steward turn advertises cancels the turn instead of a 404."""
+    api = _make_api()
+    client = TestClient(api.app)
+    outer = CommandId("steward-turn-1")
+    turn = _RecordingTurn()
+    api._steward_turns[outer] = turn
+
+    response = client.post(f"/v1/cancel/{outer}")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "message": "Steward turn cancelled.",
+        "command_id": str(outer),
+    }
+    assert turn.cancelled == 1
+    # The turn cancels its own inner generations; the outer id itself is
+    # never a worker task.
+    api._send.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_release_wrapper_removes_the_turn_when_the_response_ends() -> None:
+    """A finished response leaves nothing for a later cancel to find."""
+    api = _make_api()
+    outer = CommandId("steward-turn-2")
+    turn = _RecordingTurn()
+    api._steward_turns[outer] = turn
+
+    async def _body() -> AsyncGenerator[str, None]:
+        yield "data: one\n\n"
+        yield "data: [DONE]\n\n"
+
+    items = [item async for item in api._release_steward_turn_after(outer, _body())]
+
+    assert items == ["data: one\n\n", "data: [DONE]\n\n"]
+    assert outer not in api._steward_turns
+    with pytest.raises(HTTPException) as raised:
+        await api.cancel_command(outer)
+    assert raised.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_release_wrapper_removes_the_turn_on_early_disconnect() -> None:
+    """The wrapper cleans up even when every inner generator never started.
+
+    The keepalive layer emits a byte before it pulls its source, so a client
+    can leave while the inner generators are still unstarted, and an
+    unstarted generator never runs its ``finally``. The outermost wrapper is
+    the iterator Starlette drives, so its cleanup always runs.
+    """
+    api = _make_api()
+    outer = CommandId("steward-turn-3")
+    turn = _RecordingTurn()
+    api._steward_turns[outer] = turn
+    source_started: list[bool] = []
+
+    async def _source() -> AsyncGenerator[str, None]:
+        source_started.append(True)
+        yield "never reached"
+
+    async def _keepalive_like(
+        source: AsyncGenerator[str, None],
+    ) -> AsyncGenerator[str, None]:
+        yield ": keep-alive\n\n"
+        async for item in source:
+            yield item
+
+    stream = api._release_steward_turn_after(outer, _keepalive_like(_source()))
+    assert await stream.__anext__() == ": keep-alive\n\n"
+    await stream.aclose()
+
+    assert source_started == []
+    assert outer not in api._steward_turns
+
+
+def test_turn_whose_response_never_started_leaves_no_entry() -> None:
+    """A response discarded before streaming cannot pin its turn forever.
+
+    No generator cleanup runs for a response that never started, so the
+    registry holds turns weakly and drops one when nothing else references it.
+    """
+    api = _make_api()
+    outer = CommandId("steward-turn-4")
+    turn = _RecordingTurn()
+    api._steward_turns[outer] = turn
+    assert outer in api._steward_turns
+
+    del turn
+    gc.collect()
+
+    assert outer not in api._steward_turns
+
+
+@pytest.mark.asyncio
+async def test_send_task_cancellation_without_a_stream_retains_no_marker() -> None:
+    """A cancellation no stream will finalize must not leave its marker.
+
+    Only stream finalization discards the local-finish marker, so retaining
+    it for a command whose stream never opens would grow the set forever.
+    """
+    api = _make_api()
+    cid = CommandId("no-stream-cmd")
+
+    await api.send_task_cancellation(cid, suppress_local_finish=False)
+    assert cid not in api._cancelled_command_ids
+    api._send.assert_called_once()
+
+    await api.send_task_cancellation(cid)
+    assert cid in api._cancelled_command_ids

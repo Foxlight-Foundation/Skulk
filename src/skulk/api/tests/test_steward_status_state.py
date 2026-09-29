@@ -1,5 +1,7 @@
 """Steward lifecycle state: derivation, canary history, and the 503 preflight."""
 
+import weakref
+from collections.abc import AsyncGenerator, AsyncIterator
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 
@@ -14,12 +16,14 @@ from skulk.api.steward import (
     STEWARD_NOT_READY_MESSAGES,
     STEWARD_RETRY_AFTER_SECONDS,
     StewardCanaryState,
+    StewardChatMessage,
+    StewardHarness,
     StewardStatusResponse,
     derive_steward_state,
 )
 from skulk.api.types.api import ChatCompletionMessage, ChatCompletionRequest
 from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
-from skulk.shared.types.common import NodeId
+from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.telemetry import TelemetryView
 from skulk.shared.types.worker.downloads import DownloadOngoing, DownloadProgressData
@@ -321,3 +325,60 @@ def test_no_download_records_is_not_downloading() -> None:
         )
         is False
     )
+
+
+class _ReadyTurnApi:
+    """An API stand-in that lets one ready steward turn reach its response."""
+
+    def __init__(self) -> None:
+        self._extensions = None
+        self._steward_turns: weakref.WeakValueDictionary[CommandId, StewardHarness] = (
+            weakref.WeakValueDictionary()
+        )
+        # No placement: the turn answers with its in-stream error chunk, which
+        # is enough to drive the response from first byte to last.
+        self.state = SimpleNamespace(instances={})
+
+    @property
+    def turns(self) -> "weakref.WeakValueDictionary[CommandId, StewardHarness]":
+        return self._steward_turns
+
+    def _intelligent_fabric_enabled(self) -> bool:
+        return True
+
+    def _steward_status(self) -> StewardStatusResponse:
+        return _status("ready")
+
+    async def _steward_extension_transform(
+        self, history: list[StewardChatMessage], *, stream: bool
+    ) -> tuple[list[StewardChatMessage], str, None]:
+        return history, "steward prompt", None
+
+    def _release_steward_turn_after(
+        self, command_id: CommandId, response_stream: AsyncIterator[str]
+    ) -> AsyncGenerator[str, None]:
+        return API._release_steward_turn_after(  # pyright: ignore[reportPrivateUsage]
+            cast("API", cast(object, self)), command_id, response_stream
+        )
+
+
+async def test_a_turn_is_cancellable_by_its_advertised_id_until_it_ends() -> None:
+    """The id the stream advertises is registered for exactly the stream's life."""
+    api = _ReadyTurnApi()
+    response = await API._steward_chat_completions(  # pyright: ignore[reportPrivateUsage]
+        cast("API", cast(object, api)), _request()
+    )
+
+    advertised: str | None = None
+    registered_while_streaming = False
+    async for item in response.body_iterator:
+        assert isinstance(item, str)
+        if item.startswith(": command_id "):
+            advertised = item.removeprefix(": command_id ").strip()
+            registered_while_streaming = advertised in {
+                str(command_id) for command_id in api.turns
+            }
+
+    assert advertised is not None
+    assert registered_while_streaming
+    assert len(api.turns) == 0
