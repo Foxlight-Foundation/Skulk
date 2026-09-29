@@ -5,7 +5,7 @@ from math import inf
 from multiprocessing.synchronize import Event
 from queue import Empty, Full
 from types import TracebackType
-from typing import Any, Self
+from typing import Any, Final, Self
 
 from anyio import (
     CapacityLimiter,
@@ -163,46 +163,72 @@ class MpSender[T]:
         return d
 
 
+_CLOSED_DRAIN_SECONDS: Final = 1.0
+"""How long a blocking receive on a closed channel waits for the sender's
+end-of-stream marker. The sender sets the shared closed flag before its feeder
+thread writes the marker, so the marker, and anything queued just before it,
+can still be in flight when the flag becomes visible."""
+
+
 @dataclass(eq=False)
 class MpReceiver[T]:
     """
     An interprocess channel, mimicing the Anyio structure.
     It should be noted that none of the clone methods are implemented for simplicity, for now.
+
+    Every item sent before the sender closes is delivered, then ``EndOfStream``.
+    ``ClosedResourceError`` means this end is closed, or the sender closed and
+    its end-of-stream marker never arrived.
     """
 
     _state: MpState[T] = field()
 
-    def receive_nowait(self) -> T:
-        if self._state.closed.is_set():
-            raise ClosedResourceError
+    def _unwrap(self, item: T | _MpEndOfStream) -> T:
+        if isinstance(item, _MpEndOfStream):
+            self.close()
+            raise EndOfStream
+        return item
 
+    def _drain_closed(self, timeout: float) -> T:
+        """Deliver what a closed sender still has in flight, then end the stream."""
+        try:
+            item = self._state.buffer.get(block=True, timeout=timeout)
+        except (Empty, TypeError, OSError, ValueError):
+            raise ClosedResourceError from None
+        return self._unwrap(item)
+
+    def receive_nowait(self) -> T:
+        # The shared closed flag ends the stream only once delivered items are
+        # drained. A sender closes right after its last sends, and checking the
+        # flag first dropped items it had already delivered: a runner's final
+        # task status, sent just before it exits, was lost that way.
         try:
             item = self._state.buffer.get(block=False)
-            if isinstance(item, _MpEndOfStream):
-                self.close()
-                raise EndOfStream
-            return item
         except Empty:
+            if self._state.closed.is_set():
+                raise ClosedResourceError from None
             raise WouldBlock from None
         except ValueError as e:
-            print("Unreachable code path - let me know!")
+            # This end's queue is closed.
             raise ClosedResourceError from e
+        return self._unwrap(item)
 
     def receive(self) -> T:
         try:
-            return self.receive_nowait()
-        except WouldBlock:
+            item = self._state.buffer.get(block=False)
+        except Empty:
+            if self._state.closed.is_set():
+                return self._drain_closed(_CLOSED_DRAIN_SECONDS)
             try:
                 item = self._state.buffer.get()
-            except (TypeError, OSError):
+            except (TypeError, OSError, ValueError):
                 # Queue pipe can get closed while we are blocked on get().
                 # The underlying connection._handle becomes None, causing
                 # TypeError in read(handle, remaining).
                 raise ClosedResourceError from None
-            if isinstance(item, _MpEndOfStream):
-                self.close()
-                raise EndOfStream from None
-            return item
+        except ValueError:
+            raise ClosedResourceError from None
+        return self._unwrap(item)
 
     def receive_timeout(self, timeout: float) -> T:
         """Blocking receive that gives up after ``timeout`` seconds.
@@ -210,21 +236,23 @@ class MpReceiver[T]:
         Raises ``WouldBlock`` on timeout, mirroring ``receive_nowait``. Lets a
         receiver loop interleave a blocking wait with periodic side-work (e.g.
         a runner health-checking its subprocess between tasks) without busy
-        polling.
+        polling. A closed channel still delivers what its sender sent first.
         """
-        if self._state.closed.is_set():
-            raise ClosedResourceError
         try:
-            item = self._state.buffer.get(block=True, timeout=timeout)
+            item = self._state.buffer.get(block=False)
         except Empty:
-            raise WouldBlock from None
-        except (TypeError, OSError):
-            # Same closed-pipe race as receive() above.
+            if self._state.closed.is_set():
+                return self._drain_closed(min(timeout, _CLOSED_DRAIN_SECONDS))
+            try:
+                item = self._state.buffer.get(block=True, timeout=timeout)
+            except Empty:
+                raise WouldBlock from None
+            except (TypeError, OSError, ValueError):
+                # Same closed-pipe race as receive() above.
+                raise ClosedResourceError from None
+        except ValueError:
             raise ClosedResourceError from None
-        if isinstance(item, _MpEndOfStream):
-            self.close()
-            raise EndOfStream
-        return item
+        return self._unwrap(item)
 
     async def receive_async(self) -> T:
         return await to_thread.run_sync(

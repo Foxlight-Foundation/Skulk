@@ -797,6 +797,10 @@ class RunnerSupervisor:
                     # ChunkGenerated output, which _emit diverts to the data
                     # plane (#279 Phase 2).
                     await self._emit(event)
+            # The runner ended its event stream, so it is exiting. Check it now,
+            # as a broken stream is checked, instead of leaving the exit to the
+            # five-second liveness watch.
+            await self._check_runner(RuntimeError("Runner closed its event stream"))
         except (ClosedResourceError, BrokenResourceError) as e:
             await self._check_runner(e)
         finally:

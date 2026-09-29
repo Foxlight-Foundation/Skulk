@@ -143,6 +143,13 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- A runner's last events are no longer lost when it exits. The channel from
+  a runner process to its worker discarded whatever the runner had sent but
+  the worker had not yet read as soon as the runner closed it. Stopping a
+  model therefore sometimes stalled for 15 seconds and recorded the shutdown
+  as timed out instead of complete. Everything a runner sends before closing
+  is now delivered.
+
 - The dashboard's English string catalog, the file seeded into Tolgee for
   translation, is current again. Its exporter had failed since mid-September
   (one key carried two different English texts, and the Integrations page
