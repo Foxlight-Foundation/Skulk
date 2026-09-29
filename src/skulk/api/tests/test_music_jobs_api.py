@@ -642,7 +642,7 @@ async def test_mount_preflight_uses_vram_for_gpu_music(
         node_resources={node: resources},
         node_memory={node: memory},
         node_system={node: SystemPerformanceProfile(accelerator=AcceleratorMetrics(
-            vendor=vendor, vram_total_bytes=1 << 30,
+            vendor=vendor, vram_total_bytes=8 << 30,
         ))},
     )
     api._audio_cpp_prepare_events = {}

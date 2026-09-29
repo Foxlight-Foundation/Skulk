@@ -1009,6 +1009,10 @@ ready audio.cpp lanes for restored instances.
 Runner diagnostics and shutdown load Metal/MLX memory APIs only on macOS.
 Linux music runners stop their server without initializing an unused native
 MLX extension during cleanup.
+CUDA music admission includes measured transient workspace beyond weight/runtime
+overhead: 10 GiB for ACE-Step and 2 GiB for MiniMax. The shared estimator covers
+API preflight, placement, committed capacity and the worker load guard, preventing
+a matching compute class from admitting a model beyond its device-memory pool.
 On NVIDIA GB10, NVML can report device memory as unsupported even while CUDA
 can allocate from its shared CPU/GPU pool. Skulk reads CUDA's free and total
 device bytes in that case. Placement also checks live host RAM, reserves 16 GB

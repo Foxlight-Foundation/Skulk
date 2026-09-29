@@ -175,6 +175,10 @@ The qualified BF16 artifact contains 10.1 GB of weights, but its eight-thread
 cannot cover these buffers. Ten GiB leaves headroom above the measured peak;
 accelerator lanes retain their independently qualified estimates.
 """
+_ACE_STEP_CUDA_WORKSPACE: Final = Memory.from_bytes(10 * 1024**3)
+"""CUDA generation reserve covering ACE's measured 17.93 GiB device peak."""
+_MINIMAX_CUDA_WORKSPACE: Final = Memory.from_bytes(2 * 1024**3)
+"""CUDA generation reserve covering MiniMax's measured 9.15 GiB device peak."""
 
 
 def memory_overhead_factor(model_card: ModelCard) -> float:
@@ -228,17 +232,24 @@ def estimate_music_workspace(
 ) -> Memory:
     """Return transient workspace charged for the selected music engine lane.
 
-    ACE-Step CPU generation reserves its measured working buffers separately
-    from weight bytes. Other models, unresolved advisory estimates and
-    accelerator lanes receive no additional reserve. This pure estimate is
+    ACE-Step CPU and CUDA generation reserve measured working buffers separately
+    from weight bytes. MiniMax CUDA also reserves its observed transient buffers.
+    Other lanes and unresolved advisory estimates receive no additional reserve.
+    This pure estimate is
     shared by placement, API admission and the worker's local load guard.
     """
-    if (
-        model_card.music is not None
-        and model_card.music.family == MusicModelFamily.AceStep15
-        and resolved_backend == "audio_cpp-cpu"
-    ):
+    if model_card.music is None:
+        return Memory()
+    family = model_card.music.family
+    if family == MusicModelFamily.AceStep15 and resolved_backend == "audio_cpp-cpu":
         return _ACE_STEP_CPU_WORKSPACE
+    if resolved_backend == "audio_cpp-cuda":
+        # L40S generation peaked at 17.93 GiB for ACE and 9.15 GiB for MiniMax.
+        # Weight-only estimates admitted smaller GPUs that cannot serve them.
+        if family == MusicModelFamily.AceStep15:
+            return _ACE_STEP_CUDA_WORKSPACE
+        if family == MusicModelFamily.MiniMaxMusic3:
+            return _MINIMAX_CUDA_WORKSPACE
     return Memory()
 
 
