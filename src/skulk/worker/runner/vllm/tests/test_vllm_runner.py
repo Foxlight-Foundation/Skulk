@@ -132,7 +132,7 @@ def test_build_vllm_serve_args_shape() -> None:
     assert args[args.index("--host") + 1] == "127.0.0.1"
     assert args[args.index("--port") + 1] == "51234"
     assert args[args.index("--max-model-len") + 1] == "8192"
-    assert args[args.index("--gpu-memory-utilization") + 1] == "0.90"
+    assert args[args.index("--gpu-memory-utilization") + 1] == "0.9000"
     # single-node in this slice.
     assert args[args.index("--tensor-parallel-size") + 1] == "1"
     # Required for prompt_tokens_details in the include_usage final chunk;
@@ -356,17 +356,25 @@ def test_artifact_bound_is_unknown_without_a_readable_config(
 
 
 def test_share_holds_the_placement_footprint() -> None:
-    """The share covers the reserved footprint, rounded up to a hundredth.
+    """The share covers the reserved footprint, rounded up to a ten-thousandth.
 
     14 GiB of weights at the 1.30 overhead factor, 1.75 GiB of KV cache for a
-    32768-token window and the 256 MB floor come to 20.2 GiB, which is 0.1661
-    of a GB10's shared pool: vLLM receives 0.17, not the fixed 0.90.
+    32768-token window and the 256 MB floor come to about 20.2 GiB, which is
+    about 0.1661 of a GB10's shared pool, not the fixed 0.90. The rounding
+    leaves at most a ten-thousandth of the device outside the reservation.
     """
+    from skulk.shared.models.memory_estimate import estimate_shard_footprint
+
+    footprint = estimate_shard_footprint(
+        _sized_card(), 1.0, context_budget=32768, resolved_backend="vllm-cuda"
+    ).in_bytes
     share = resolve_gpu_memory_utilization(
         _sized_card(), 32768, "vllm-cuda", _GB10_TOTAL, None, _QWEN_7B_KV
     )
-    assert share == GpuMemoryShare(0.17, "placement")
-    assert share.fraction * _GB10_TOTAL >= 20.2 * _GIB
+    assert share.basis == "placement"
+    assert 0.16 < share.fraction < 0.17
+    assert share.fraction * _GB10_TOTAL >= footprint - 1
+    assert share.fraction * _GB10_TOTAL - footprint < _GB10_TOTAL / 10_000
 
 
 def test_share_grows_with_the_served_window() -> None:
@@ -491,6 +499,7 @@ def _patch_nvidia(
     import skulk.worker.runner.vllm.runner as vllm_runner
 
     monkeypatch.setattr(vllm_runner.sys, "platform", "linux")
+    monkeypatch.setattr(vllm_runner, "_cuda_device_total", lambda: None)
     monkeypatch.setattr(nvidia_gpu, "load_nvml", lambda: object())
 
     def has_nvidia_gpu(_nvml: object) -> bool:
@@ -501,6 +510,72 @@ def _patch_nvidia(
 
     monkeypatch.setattr(nvidia_gpu, "has_nvidia_gpu", has_nvidia_gpu)
     monkeypatch.setattr(nvidia_gpu, "read_accelerator_metrics", read)
+
+
+def test_device_total_prefers_the_cuda_visible_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CUDA's own total is the denominator vLLM applies its share to."""
+    import skulk.worker.runner.vllm.runner as vllm_runner
+
+    monkeypatch.setattr(vllm_runner.sys, "platform", "linux")
+    monkeypatch.setattr(vllm_runner, "_cuda_device_total", lambda: 79 * _GIB)
+    assert _device_memory_total("vllm-cuda") == 79 * _GIB
+
+
+class _FakeCudaDriver:
+    """Scriptable CUDA driver entry points for ``_cuda_device_total``."""
+
+    def __init__(self, total: int, failing: str | None = None) -> None:
+        self.total = total
+        self.failing = failing
+
+    def cuInit(self, _flags: int) -> int:  # noqa: N802 - CUDA's own naming
+        return 100 if self.failing == "init" else 0
+
+    def cuDeviceGet(self, _device: object, _ordinal: int) -> int:  # noqa: N802
+        return 101 if self.failing == "device" else 0
+
+    def cuDeviceTotalMem_v2(self, total: Any, _device: object) -> int:  # noqa: N802
+        if self.failing == "total":
+            return 1
+        total._obj.value = self.total
+        return 0
+
+
+def test_cuda_device_total_reads_the_driver(monkeypatch: pytest.MonkeyPatch) -> None:
+    import skulk.worker.runner.vllm.runner as vllm_runner
+
+    def load(_name: str) -> _FakeCudaDriver:
+        return _FakeCudaDriver(_GB10_TOTAL)
+
+    monkeypatch.setattr(vllm_runner.ctypes, "CDLL", load)
+    assert vllm_runner._cuda_device_total() == _GB10_TOTAL
+
+
+@pytest.mark.parametrize("failing", ["init", "device", "total"])
+def test_cuda_device_total_is_unknown_when_the_driver_fails(
+    monkeypatch: pytest.MonkeyPatch, failing: str
+) -> None:
+    import skulk.worker.runner.vllm.runner as vllm_runner
+
+    def load(_name: str) -> _FakeCudaDriver:
+        return _FakeCudaDriver(_GB10_TOTAL, failing)
+
+    monkeypatch.setattr(vllm_runner.ctypes, "CDLL", load)
+    assert vllm_runner._cuda_device_total() is None
+
+
+def test_cuda_device_total_is_unknown_without_the_driver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import skulk.worker.runner.vllm.runner as vllm_runner
+
+    def missing(_name: str) -> object:
+        raise OSError("libcuda.so.1: cannot open shared object file")
+
+    monkeypatch.setattr(vllm_runner.ctypes, "CDLL", missing)
+    assert vllm_runner._cuda_device_total() is None
 
 
 def test_device_total_reads_nvml_on_a_discrete_gpu(

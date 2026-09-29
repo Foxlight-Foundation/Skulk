@@ -108,7 +108,7 @@ continuous batching actually engage and decode them together.
   instance's placement. The runner passes the fraction of the device that
   holds the memory Skulk reserved for the model (weights with overhead, the KV
   cache for the served window, and a small floor), rounded up to the next
-  hundredth. vLLM spends whatever part of that share weights and runtime
+  ten-thousandth of the device total CUDA reports. vLLM spends whatever part of that share weights and runtime
   memory leave on KV cache. A vLLM model can therefore share a GPU with other
   models and stays within its reservation. The share never drops below the
   weights, the served window's KV cache at the model's own geometry (read

@@ -259,6 +259,10 @@ GpuMemoryShareBasis = Literal[
 """Why a launch received its share: an operator pin, the placement footprint,
 or the fixed default because the artifact or the device could not be sized."""
 
+_SHARE_RESOLUTION: Final = 10_000
+"""Shares are passed in ten-thousandths of the device, rounded up, so the
+rounding never leaves more than that much memory outside the reservation."""
+
 _KV_CACHE_ELEMENT_BYTES: Final = 2
 """vLLM keeps KV cache at the model's 16-bit precision unless a quantized cache
 dtype is requested, which the runner never does."""
@@ -346,10 +350,10 @@ def resolve_gpu_memory_utilization(
     estimate assumes 128-wide attention heads and a proportional overhead, so
     wide-head models and the smallest models would otherwise leave vLLM short
     of its window, and it would refuse to start. The share is rounded up to the
-    next hundredth, so vLLM's request (share times the device total it reads)
-    covers it even where the telemetry total runs slightly above CUDA's, and it
-    is capped at the fixed default: sizing never asks for more than the
-    historical share.
+    next ten-thousandth, so vLLM's request (share times the device total it
+    reads) covers it while leaving no more than a ten-thousandth of the device
+    beyond what placement reserved, and it is capped at the fixed default:
+    sizing never asks for more than the historical share.
 
     The fixed default remains when no honest size exists: the artifact's config
     names no KV geometry, or the device total is unreadable.
@@ -389,21 +393,49 @@ def resolve_gpu_memory_utilization(
         footprint.in_bytes,
         (model_card.storage_size + window_kv + _VLLM_RUNTIME_ALLOWANCE).in_bytes,
     )
-    hundredths = math.ceil(share_bytes * 100 / device_total_bytes)
+    units = math.ceil(share_bytes * _SHARE_RESOLUTION / device_total_bytes)
     return GpuMemoryShare(
-        min(_DEFAULT_GPU_MEMORY_UTILIZATION, max(1, hundredths) / 100), "placement"
+        min(_DEFAULT_GPU_MEMORY_UTILIZATION, max(1, units) / _SHARE_RESOLUTION),
+        "placement",
     )
+
+
+def _cuda_device_total() -> int | None:
+    """Total memory of the first CUDA-visible device, or ``None`` when unreadable.
+
+    vLLM applies its share to this device's total, so reading it through the
+    CUDA driver API gives the exact denominator: it follows
+    ``CUDA_VISIBLE_DEVICES``, CUDA's own device order and MIG slices, which
+    NVML's device 0 does not, and ``cuDeviceTotalMem`` opens no context in this
+    long-lived process.
+    """
+    try:
+        driver = ctypes.CDLL("libcuda.so.1")
+    except OSError:
+        return None
+    device = ctypes.c_int()
+    total = ctypes.c_size_t()
+    try:
+        if cast("int", driver.cuInit(0)) != 0:
+            return None
+        if cast("int", driver.cuDeviceGet(ctypes.byref(device), 0)) != 0:
+            return None
+        if cast("int", driver.cuDeviceTotalMem_v2(ctypes.byref(total), device)) != 0:
+            return None
+    except AttributeError:
+        return None
+    return total.value if total.value > 0 else None
 
 
 def _device_memory_total(resolved_backend: str | None) -> int | None:
     """Total memory of the GPU this server runs on, or ``None`` when unreadable.
 
-    vLLM's share is a fraction of the device total CUDA (or HIP) reports. NVML
-    reads that total without opening a CUDA context in this long-lived process.
-    NVML reports no memory on an NVIDIA GB10, whose CUDA total is the host's
-    physical memory (one shared pool), so the host total stands in there. AMD
-    GPUs use the amdgpu sysfs total; an APU whose GPU maps host memory has no
-    single device total and stays unsized.
+    vLLM's share is a fraction of the device total CUDA (or HIP) reports, so
+    NVIDIA devices read it from the CUDA driver (``_cuda_device_total``). When
+    the driver cannot be read, NVML's device 0 total stands in, and on an NVIDIA
+    GB10, where NVML reports no memory, the host's physical memory, which is
+    CUDA's total on that shared pool. AMD GPUs use the amdgpu sysfs total; an APU
+    whose GPU maps host memory has no single device total and stays unsized.
     """
     if sys.platform != "linux":
         return None
@@ -428,6 +460,9 @@ def _device_memory_total(resolved_backend: str | None) -> int | None:
         ):
             return None
         return total
+    cuda_total = _cuda_device_total()
+    if cuda_total is not None:
+        return cuda_total
     from skulk.utils.info_gatherer.nvidia_gpu import (
         has_nvidia_gpu,
         load_nvml,
@@ -488,7 +523,7 @@ def build_vllm_serve_args(
         "--max-model-len",
         str(max_model_len),
         "--gpu-memory-utilization",
-        f"{gpu_memory_utilization:.2f}",
+        f"{gpu_memory_utilization:.4f}",
         "--tensor-parallel-size",
         "1",
         # Off by default in vLLM; without it the include_usage final chunk
@@ -1052,12 +1087,12 @@ class Runner(ServedConcurrentDispatch):
         match share.basis:
             case "pinned":
                 logger.info(
-                    f"vllm gpu-memory-utilization {share.fraction:.2f}, pinned by "
+                    f"vllm gpu-memory-utilization {share.fraction:.4f}, pinned by "
                     f"{_GPU_MEMORY_UTILIZATION_ENV}"
                 )
             case "placement":
                 logger.info(
-                    f"vllm gpu-memory-utilization {share.fraction:.2f}, sized from "
+                    f"vllm gpu-memory-utilization {share.fraction:.4f}, sized from "
                     "the placement footprint"
                 )
             case "no_kv_geometry":
@@ -1065,12 +1100,12 @@ class Runner(ServedConcurrentDispatch):
                     f"vllm cannot size {shard.model_card.model_id} from its "
                     "placement: its config.json names no layer count, head "
                     "width and KV-head count; using the fixed "
-                    f"{share.fraction:.2f} share"
+                    f"{share.fraction:.4f} share"
                 )
             case "unknown_device_total":
                 logger.warning(
                     "vllm cannot read this GPU's memory total; using the fixed "
-                    f"{share.fraction:.2f} share"
+                    f"{share.fraction:.4f} share"
                 )
         return share.fraction
 
