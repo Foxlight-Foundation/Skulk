@@ -147,6 +147,121 @@ def _manifest(runtime: VerifiedRuntime) -> dict[str, JsonValue]:
     return _JSON_OBJECT.validate_python(release["manifest"], strict=True)
 
 
+CARRYING_PROTOCOL = 3
+"""First plugin protocol whose owners carry settings across a compatible schema.
+
+An owner binds an installation's settings to the exact schema they were saved
+under. From this protocol on, an owner validates them against a changed schema
+once and rebinds them; an earlier owner refuses them, so its release still needs
+an identical schema to keep them.
+"""
+
+_ANNOTATIONS = frozenset(
+    {"title", "description", "default", "examples", "$comment", "deprecated"}
+)
+"""JSON Schema keywords that describe a value without constraining it."""
+
+_SCHEMA_VALUED = frozenset(
+    {
+        "items",
+        "additionalItems",
+        "additionalProperties",
+        "contains",
+        "propertyNames",
+        "not",
+        "if",
+        "then",
+        "else",
+        "unevaluatedItems",
+        "unevaluatedProperties",
+    }
+)
+_SCHEMA_LISTS = frozenset({"allOf", "anyOf", "oneOf", "prefixItems"})
+
+
+def configuration_schema_compatible(installed: JsonValue, candidate: JsonValue) -> bool:
+    """Whether every setting the installed schema accepts, the candidate accepts too.
+
+    A release may reword a setting, change its default, or add an optional
+    setting to a closed object, and an installation keeps its settings. Anything
+    that could refuse a stored value (another type, a changed bound, pattern or
+    enum, a removed or newly required setting, a property added to an open
+    object) still needs migration. The comparison is structural and
+    conservative: it never evaluates either schema.
+    """
+    if isinstance(installed, dict) and isinstance(candidate, dict):
+        return _object_compatible(installed, candidate)
+    return installed == candidate
+
+
+def _object_compatible(
+    installed: dict[str, JsonValue], candidate: dict[str, JsonValue]
+) -> bool:
+    old = {key: value for key, value in installed.items() if key not in _ANNOTATIONS}
+    new = {key: value for key, value in candidate.items() if key not in _ANNOTATIONS}
+    if set(old) - {"properties", "required", "$defs"} != set(new) - {
+        "properties",
+        "required",
+        "$defs",
+    }:
+        return False
+    for key, value in old.items():
+        if key in {"properties", "required", "$defs"}:
+            continue
+        if key in _SCHEMA_VALUED:
+            if not configuration_schema_compatible(value, new[key]):
+                return False
+        elif key in _SCHEMA_LISTS:
+            other = new[key]
+            if not (
+                isinstance(value, list)
+                and isinstance(other, list)
+                and len(value) == len(other)
+                and all(
+                    configuration_schema_compatible(first, second)
+                    for first, second in zip(value, other, strict=True)
+                )
+            ):
+                return False
+        elif value != new[key]:
+            # Constraints and data (type, bounds, enum, const, $ref) compare
+            # exactly; a widened one is admitted only by migration.
+            return False
+    old_required = old.get("required", [])
+    new_required = new.get("required", [])
+    if not (isinstance(old_required, list) and isinstance(new_required, list)):
+        return False
+    # A setting that becomes optional still accepts its stored value; one that
+    # becomes required refuses settings saved without it.
+    if not set(map(str, new_required)) <= set(map(str, old_required)):
+        return False
+    old_definitions = old.get("$defs", {})
+    new_definitions = new.get("$defs", {})
+    if not (isinstance(old_definitions, dict) and isinstance(new_definitions, dict)):
+        return False
+    # A new definition is unused by anything the installed schema accepted.
+    if any(
+        name not in new_definitions
+        or not configuration_schema_compatible(value, new_definitions[name])
+        for name, value in old_definitions.items()
+    ):
+        return False
+    old_properties = old.get("properties", {})
+    new_properties = new.get("properties", {})
+    if not (isinstance(old_properties, dict) and isinstance(new_properties, dict)):
+        return False
+    if any(
+        name not in new_properties
+        or not configuration_schema_compatible(value, new_properties[name])
+        for name, value in old_properties.items()
+    ):
+        return False
+    added = set(new_properties) - set(old_properties)
+    # Stored settings cannot hold an undeclared key only when the installed
+    # object was closed; an added property on an open object could refuse one.
+    return not added or old.get("additionalProperties") is False
+
+
 @final
 class RuntimeSelector:
     """Select or withdraw one isolated runtime only while its owner is stopped.
@@ -276,7 +391,8 @@ class RuntimeSelector:
     ) -> RuntimeSelection:
         current = self.current()
         release = runtime.claims.release
-        schema = _manifest(runtime).get("configuration_schema")
+        manifest = _manifest(runtime)
+        schema = manifest.get("configuration_schema")
         if current is not None:
             if current.bundle_id != release.manifest.bundle_id:
                 raise ValueError("installation bundle identity differs")
@@ -292,7 +408,14 @@ class RuntimeSelector:
                 and current.state_schema not in release.compatible_state_schemas
             ):
                 raise ValueError("incompatible state migration")
-            if current.configuration_schema != schema:
+            protocol = manifest.get("protocol")
+            carries = isinstance(protocol, int) and protocol >= CARRYING_PROTOCOL
+            if current.configuration_schema != schema and not (
+                carries
+                and configuration_schema_compatible(
+                    current.configuration_schema, schema
+                )
+            ):
                 raise ValueError("configuration schema requires migration")
         elif rollback:
             raise ValueError("rollback requires an existing selection")

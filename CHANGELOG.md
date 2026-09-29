@@ -9,6 +9,11 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Changed
 
+- A plugin update that only rewords a setting, changes a setting's default, or
+  adds an optional setting now installs in place and keeps the installation's
+  settings, for plugins built with plugin SDK protocol 3 or later. Before, any
+  change to a plugin's settings schema refused the update with "configuration
+  schema requires migration", even a new description.
 - A disabled plugin reads "Disabled" in the plugin list instead of "Status
   unavailable".
 - The Plugins page names each installed plugin by its signed release, for
