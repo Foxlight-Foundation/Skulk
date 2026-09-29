@@ -15,7 +15,10 @@ from typing import Any
 
 import pytest
 
-from skulk.shared.types.common import CommandId
+from skulk.shared.models.model_cards import ModelCard, ModelTask
+from skulk.shared.types.common import CommandId, ModelId
+from skulk.shared.types.memory import Memory
+from skulk.shared.types.profiling import AcceleratorMetrics
 from skulk.shared.types.tasks import (
     CANCEL_ALL_TASKS,
     TaskId,
@@ -29,10 +32,15 @@ from skulk.worker.runner.vllm.runner import (
     _DEFAULT_MAX_CONCURRENT_REQUESTS,
     _GPU_MEMORY_UTILIZATION_ENV,
     _MAX_CONCURRENT_REQUESTS_ENV,
-    _gpu_memory_utilization,
+    GpuMemoryShare,
+    _configured_gpu_memory_utilization,
+    _device_memory_total,
     _max_concurrent_requests,
+    _read_artifact_kv_bytes_per_token,
+    artifact_kv_bytes_per_token,
     build_vllm_serve_args,
     parse_openai_sse_line,
+    resolve_gpu_memory_utilization,
     vllm_generation_kwargs,
     vllm_reasoning_overrides,
 )
@@ -124,7 +132,7 @@ def test_build_vllm_serve_args_shape() -> None:
     assert args[args.index("--host") + 1] == "127.0.0.1"
     assert args[args.index("--port") + 1] == "51234"
     assert args[args.index("--max-model-len") + 1] == "8192"
-    assert args[args.index("--gpu-memory-utilization") + 1] == "0.90"
+    assert args[args.index("--gpu-memory-utilization") + 1] == "0.9000"
     # single-node in this slice.
     assert args[args.index("--tensor-parallel-size") + 1] == "1"
     # Required for prompt_tokens_details in the include_usage final chunk;
@@ -243,24 +251,378 @@ def test_usage_count_bool_and_shape_guards() -> None:
     assert _usage_count(None, "prompt_tokens") is None
 
 
-def test_gpu_memory_utilization_default(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_gpu_memory_utilization_unset_is_not_pinned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.delenv(_GPU_MEMORY_UTILIZATION_ENV, raising=False)
-    assert _gpu_memory_utilization() == _DEFAULT_GPU_MEMORY_UTILIZATION
+    assert _configured_gpu_memory_utilization() is None
 
 
-def test_gpu_memory_utilization_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_gpu_memory_utilization_env_pins_the_share(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv(_GPU_MEMORY_UTILIZATION_ENV, "0.75")
-    assert _gpu_memory_utilization() == 0.75
+    assert _configured_gpu_memory_utilization() == 0.75
 
 
 @pytest.mark.parametrize("bad", ["nonsense", "0", "1.5", "-0.2"])
-def test_gpu_memory_utilization_rejects_bad_values(
+def test_gpu_memory_utilization_ignores_bad_values(
     monkeypatch: pytest.MonkeyPatch, bad: str
 ) -> None:
-    # Unparseable or out-of-(0,1] values fall back to the default rather than
-    # passing vLLM a fraction that would fail the server at spawn.
+    # Unparseable or out-of-(0,1] values are ignored, so the runner sizes vLLM
+    # from its placement rather than passing a fraction that fails at spawn.
     monkeypatch.setenv(_GPU_MEMORY_UTILIZATION_ENV, bad)
-    assert _gpu_memory_utilization() == _DEFAULT_GPU_MEMORY_UTILIZATION
+    assert _configured_gpu_memory_utilization() is None
+
+
+_GIB = 1024**3
+_GB10_TOTAL = 130_595_991_552
+_QWEN_7B_KV = 2 * 28 * 4 * 128 * 2
+"""The artifact bound for the 7B shape below: 28 layers, 4 KV heads, 128 wide."""
+
+
+def _sized_card(*, kv_heads: int | None = 4) -> ModelCard:
+    """A 14 GiB, 28-layer text card shaped like the served Qwen2.5-7B."""
+    return ModelCard(
+        model_id=ModelId("org/sized"),
+        storage_size=Memory.from_bytes(14 * _GIB),
+        n_layers=28,
+        hidden_size=3584,
+        supports_tensor=False,
+        num_key_value_heads=kv_heads,
+        tasks=[ModelTask.TextGeneration],
+    )
+
+
+def test_artifact_bound_derives_head_width_from_hidden_size() -> None:
+    config: dict[str, object] = {
+        "num_hidden_layers": 28,
+        "num_attention_heads": 28,
+        "num_key_value_heads": 4,
+        "hidden_size": 3584,
+    }
+    assert artifact_kv_bytes_per_token(config) == _QWEN_7B_KV
+
+
+def test_artifact_bound_reads_nested_wide_head_geometry() -> None:
+    """Gemma 4 nests its decoder and names wider heads for global layers.
+
+    Its 8 KV heads at 256 wide outweigh the single 512-wide global head, so
+    every layer counts at 2048 elements for keys and again for values.
+    """
+    config: dict[str, object] = {
+        "model_type": "gemma4_unified",
+        "text_config": {
+            "num_hidden_layers": 48,
+            "num_attention_heads": 16,
+            "num_key_value_heads": 8,
+            "head_dim": 256,
+            "global_head_dim": 512,
+            "num_global_key_value_heads": 1,
+            "hidden_size": 3840,
+        },
+    }
+    assert artifact_kv_bytes_per_token(config) == 2 * 48 * 8 * 256 * 2
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {},
+        {"num_hidden_layers": 28, "hidden_size": 3584},
+        {"num_hidden_layers": "28", "num_attention_heads": 28, "hidden_size": 3584},
+        {"text_config": {"num_hidden_layers": 0, "num_attention_heads": 8, "head_dim": 64}},
+    ],
+)
+def test_artifact_bound_needs_the_full_geometry(config: dict[str, object]) -> None:
+    assert artifact_kv_bytes_per_token(config) is None
+
+
+def test_artifact_bound_reads_the_served_directory(tmp_path: Path) -> None:
+    (tmp_path / "config.json").write_text(
+        '{"num_hidden_layers": 28, "num_attention_heads": 28, '
+        '"num_key_value_heads": 4, "hidden_size": 3584}'
+    )
+    assert _read_artifact_kv_bytes_per_token(tmp_path) == _QWEN_7B_KV
+
+
+@pytest.mark.parametrize("content", [None, "not json", "[1, 2]"])
+def test_artifact_bound_is_unknown_without_a_readable_config(
+    tmp_path: Path, content: str | None
+) -> None:
+    if content is not None:
+        (tmp_path / "config.json").write_text(content)
+    assert _read_artifact_kv_bytes_per_token(tmp_path) is None
+
+
+def test_share_holds_the_placement_footprint() -> None:
+    """The share covers the reserved footprint, rounded up to a ten-thousandth.
+
+    14 GiB of weights at the 1.30 overhead factor, 1.75 GiB of KV cache for a
+    32768-token window and the 256 MB floor come to about 20.2 GiB, which is
+    about 0.1661 of a GB10's shared pool, not the fixed 0.90. The rounding
+    leaves at most a ten-thousandth of the device outside the reservation.
+    """
+    from skulk.shared.models.memory_estimate import estimate_shard_footprint
+
+    footprint = estimate_shard_footprint(
+        _sized_card(), 1.0, context_budget=32768, resolved_backend="vllm-cuda"
+    ).in_bytes
+    share = resolve_gpu_memory_utilization(
+        _sized_card(), 32768, "vllm-cuda", _GB10_TOTAL, None, _QWEN_7B_KV
+    )
+    assert share.basis == "placement"
+    assert 0.16 < share.fraction < 0.17
+    assert share.fraction * _GB10_TOTAL >= footprint - 1
+    assert share.fraction * _GB10_TOTAL - footprint < _GB10_TOTAL / 10_000
+
+
+def test_share_grows_with_the_served_window() -> None:
+    short = resolve_gpu_memory_utilization(
+        _sized_card(), 4096, "vllm-cuda", _GB10_TOTAL, None, _QWEN_7B_KV
+    )
+    long = resolve_gpu_memory_utilization(
+        _sized_card(), 32768, "vllm-cuda", _GB10_TOTAL, None, _QWEN_7B_KV
+    )
+    assert short.fraction < long.fraction
+
+
+def test_operator_pin_wins_over_sizing() -> None:
+    share = resolve_gpu_memory_utilization(
+        _sized_card(), 32768, "vllm-cuda", _GB10_TOTAL, 0.6, _QWEN_7B_KV
+    )
+    assert share == GpuMemoryShare(0.6, "pinned")
+
+
+def test_wide_head_model_share_covers_the_artifact_cache() -> None:
+    """A card's 128-wide estimate cannot shrink a wide-head model's share.
+
+    A Gemma 4 12B shape on a 48 GiB GPU: the card estimates 6 GiB of window KV
+    cache, but at the artifact's 256-wide heads the bound is 12 GiB. The share
+    covers 8 GiB of weights, those 12 GiB and vLLM's own gigabyte.
+    """
+    card = ModelCard(
+        model_id=ModelId("org/wide"),
+        storage_size=Memory.from_bytes(8 * _GIB),
+        n_layers=48,
+        hidden_size=3840,
+        supports_tensor=False,
+        num_key_value_heads=8,
+        tasks=[ModelTask.TextGeneration],
+    )
+    device_total = 48 * _GIB
+    share = resolve_gpu_memory_utilization(
+        card, 32768, "vllm-cuda", device_total, None, 2 * 48 * 8 * 256 * 2
+    )
+    assert share.basis == "placement"
+    assert share.fraction * device_total >= (8 + 12 + 1) * _GIB
+
+
+def test_card_without_kv_geometry_is_sized_from_its_artifact() -> None:
+    """The artifact's config sizes a card that omits num_key_value_heads.
+
+    Its footprint holds no KV cache, and sizing from it alone left vLLM 0.16
+    GiB for a Qwen3-0.6B window that needs 3.5 GiB; the artifact bound covers
+    the window.
+    """
+    card = ModelCard(
+        model_id=ModelId("org/unsized"),
+        storage_size=Memory.from_bytes(1_519_209_243),
+        n_layers=28,
+        hidden_size=1024,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+    )
+    artifact = 2 * 28 * 8 * 128 * 2
+    share = resolve_gpu_memory_utilization(
+        card, 32768, "vllm-cuda", _GB10_TOTAL, None, artifact
+    )
+    assert share.basis == "placement"
+    assert share.fraction * _GB10_TOTAL >= 1_519_209_243 + artifact * 32768 + _GIB
+
+
+def test_unreadable_artifact_geometry_keeps_the_default_share() -> None:
+    share = resolve_gpu_memory_utilization(
+        _sized_card(), 32768, "vllm-cuda", _GB10_TOTAL, None, None
+    )
+    assert share == GpuMemoryShare(_DEFAULT_GPU_MEMORY_UTILIZATION, "no_kv_geometry")
+
+
+@pytest.mark.parametrize("total", [None, 0])
+def test_unknown_device_total_keeps_the_default_share(total: int | None) -> None:
+    share = resolve_gpu_memory_utilization(
+        _sized_card(), 32768, "vllm-cuda", total, None, _QWEN_7B_KV
+    )
+    assert share == GpuMemoryShare(
+        _DEFAULT_GPU_MEMORY_UTILIZATION, "unknown_device_total"
+    )
+
+
+def test_small_model_share_covers_vllm_runtime_memory() -> None:
+    """A tiny model still gets its window's KV cache after vLLM's own memory.
+
+    Half a GiB of weights at the 1.30 factor leaves only 0.15 GiB of overhead
+    allowance, less than the gigabyte vLLM holds for its CUDA context and
+    activations whatever the model's size. The share is raised to weights,
+    3.5 GiB of window KV cache and that gigabyte: 5.0 GiB, not the 4.4 GiB
+    footprint.
+    """
+    card = ModelCard(
+        model_id=ModelId("org/tiny"),
+        storage_size=Memory.from_bytes(_GIB // 2),
+        n_layers=28,
+        hidden_size=1024,
+        supports_tensor=False,
+        num_key_value_heads=8,
+        tasks=[ModelTask.TextGeneration],
+    )
+    device_total = 24 * _GIB
+    share = resolve_gpu_memory_utilization(
+        card, 32768, "vllm-cuda", device_total, None, 2 * 28 * 8 * 128 * 2
+    )
+    assert share.basis == "placement"
+    assert share.fraction * device_total >= 5.0 * _GIB
+
+
+def test_share_never_exceeds_the_fixed_default() -> None:
+    """Sizing never asks for more than the historical fixed share."""
+    share = resolve_gpu_memory_utilization(
+        _sized_card(), 32768, "vllm-cuda", 8 * _GIB, None, _QWEN_7B_KV
+    )
+    assert share == GpuMemoryShare(_DEFAULT_GPU_MEMORY_UTILIZATION, "placement")
+
+
+def _patch_nvidia(
+    monkeypatch: pytest.MonkeyPatch, accelerator: AcceleratorMetrics
+) -> None:
+    import skulk.utils.info_gatherer.nvidia_gpu as nvidia_gpu
+    import skulk.worker.runner.vllm.runner as vllm_runner
+
+    monkeypatch.setattr(vllm_runner.sys, "platform", "linux")
+    monkeypatch.setattr(vllm_runner, "_cuda_device_total", lambda: None)
+    monkeypatch.setattr(nvidia_gpu, "load_nvml", lambda: object())
+
+    def has_nvidia_gpu(_nvml: object) -> bool:
+        return True
+
+    def read(_nvml: object, **_: object) -> AcceleratorMetrics:
+        return accelerator
+
+    monkeypatch.setattr(nvidia_gpu, "has_nvidia_gpu", has_nvidia_gpu)
+    monkeypatch.setattr(nvidia_gpu, "read_accelerator_metrics", read)
+
+
+def test_device_total_prefers_the_cuda_visible_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CUDA's own total is the denominator vLLM applies its share to."""
+    import skulk.worker.runner.vllm.runner as vllm_runner
+
+    monkeypatch.setattr(vllm_runner.sys, "platform", "linux")
+    monkeypatch.setattr(vllm_runner, "_cuda_device_total", lambda: 79 * _GIB)
+    assert _device_memory_total("vllm-cuda") == 79 * _GIB
+
+
+class _FakeCudaDriver:
+    """Scriptable CUDA driver entry points for ``_cuda_device_total``."""
+
+    def __init__(self, total: int, failing: str | None = None) -> None:
+        self.total = total
+        self.failing = failing
+
+    def cuInit(self, _flags: int) -> int:  # noqa: N802 - CUDA's own naming
+        return 100 if self.failing == "init" else 0
+
+    def cuDeviceGet(self, _device: object, _ordinal: int) -> int:  # noqa: N802
+        return 101 if self.failing == "device" else 0
+
+    def cuDeviceTotalMem_v2(self, total: Any, _device: object) -> int:  # noqa: N802
+        if self.failing == "total":
+            return 1
+        total._obj.value = self.total
+        return 0
+
+
+def test_cuda_device_total_reads_the_driver(monkeypatch: pytest.MonkeyPatch) -> None:
+    import skulk.worker.runner.vllm.runner as vllm_runner
+
+    def load(_name: str) -> _FakeCudaDriver:
+        return _FakeCudaDriver(_GB10_TOTAL)
+
+    monkeypatch.setattr(vllm_runner.ctypes, "CDLL", load)
+    assert vllm_runner._cuda_device_total() == _GB10_TOTAL
+
+
+@pytest.mark.parametrize("failing", ["init", "device", "total"])
+def test_cuda_device_total_is_unknown_when_the_driver_fails(
+    monkeypatch: pytest.MonkeyPatch, failing: str
+) -> None:
+    import skulk.worker.runner.vllm.runner as vllm_runner
+
+    def load(_name: str) -> _FakeCudaDriver:
+        return _FakeCudaDriver(_GB10_TOTAL, failing)
+
+    monkeypatch.setattr(vllm_runner.ctypes, "CDLL", load)
+    assert vllm_runner._cuda_device_total() is None
+
+
+def test_cuda_device_total_is_unknown_without_the_driver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import skulk.worker.runner.vllm.runner as vllm_runner
+
+    def missing(_name: str) -> object:
+        raise OSError("libcuda.so.1: cannot open shared object file")
+
+    monkeypatch.setattr(vllm_runner.ctypes, "CDLL", missing)
+    assert vllm_runner._cuda_device_total() is None
+
+
+def test_device_total_reads_nvml_on_a_discrete_gpu(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_nvidia(
+        monkeypatch,
+        AcceleratorMetrics(
+            vendor="nvidia",
+            name="NVIDIA A100-SXM4-80GB",
+            vram_total_bytes=80 * _GIB,
+            compute_capability="8.0",
+        ),
+    )
+    assert _device_memory_total("vllm-cuda") == 80 * _GIB
+
+
+def test_device_total_uses_host_memory_on_a_gb10(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """NVML has no memory figure on a GB10; CUDA's total is the host's memory."""
+    _patch_nvidia(
+        monkeypatch,
+        AcceleratorMetrics(
+            vendor="nvidia", name="NVIDIA GB10", compute_capability="12.1"
+        ),
+    )
+    import skulk.worker.runner.vllm.runner as vllm_runner
+
+    monkeypatch.setattr(
+        vllm_runner.psutil,
+        "virtual_memory",
+        lambda: SimpleNamespace(total=_GB10_TOTAL),
+    )
+    assert _device_memory_total("vllm-cuda") == _GB10_TOTAL
+
+
+def test_device_total_is_unknown_without_a_memory_figure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_nvidia(
+        monkeypatch,
+        AcceleratorMetrics(
+            vendor="nvidia", name="NVIDIA H100", compute_capability="9.0"
+        ),
+    )
+    assert _device_memory_total("vllm-cuda") is None
 
 
 def test_max_concurrent_requests_default(monkeypatch: pytest.MonkeyPatch) -> None:

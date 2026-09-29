@@ -352,6 +352,18 @@ This project records release notes here and mirrors public-facing notes in
   window the instance was stamped with instead of falling back to the fleet's
   served context default.
 
+- A vLLM model now starts on a GPU that another model already uses. Skulk
+  used to launch vLLM with a fixed share of the GPU (90% unless configured),
+  and vLLM refuses to start unless that much memory is free, so any other
+  resident model stopped it even when placement had found room. The share is
+  now sized to the memory placement reserved for the instance, and vLLM uses
+  the part of it that weights and runtime memory leave as KV cache.
+  `SKULK_VLLM_GPU_MEMORY_UTILIZATION` still pins a fixed share: set it on a
+  GPU dedicated to vLLM to keep giving the KV cache the rest of the device.
+  The share always covers the model's KV cache at its own geometry, read from
+  its `config.json`, so wide-head models such as Gemma 4 still fit their
+  window, and it never exceeds the previous 0.90.
+
 - Served GGUF models on unified-memory nodes (every Mac, a Strix Halo, a
   GB10 running llama-server) no longer serve a fixed 8192-token window. The
   master sizes the window from the live available memory it admitted the

@@ -50,22 +50,31 @@ generation and drains the pool before tearing down the server.
 import contextlib
 import ctypes
 import json
+import math
 import os
 import random
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Final, Literal, NamedTuple, cast
 
 import httpx
+import psutil
 
 from skulk.api.types import GenerationStats
 from skulk.download.download_utils import build_model_path
 from skulk.shared.backends import VLLM_BIN_ENV
-from skulk.shared.models.memory_estimate import VLLM_MAX_MODEL_LEN
+from skulk.shared.models.memory_estimate import (
+    VLLM_MAX_MODEL_LEN,
+    estimate_shard_footprint,
+    is_gb10_accelerator,
+    per_token_kv_bytes,
+)
 from skulk.shared.models.model_cards import ModelCard
 from skulk.shared.types.chunks import ErrorChunk, TokenChunk, ToolCallChunk
 from skulk.shared.types.common import CommandId, ModelId
@@ -133,12 +142,25 @@ _PORT_COLLISION_ATTEMPTS: Final = 3
 _ADDRESS_IN_USE_MARKER: Final = "Address already in use"
 """Marker identifying a lost port race in a failed server's log tail."""
 
-# Fraction of GPU VRAM vLLM may use for weights + KV cache. Operator-tunable via
-# env; vLLM's own default is 0.90. Placement admits against the same usable-VRAM
-# figure, so this stays a node-local serving knob for now (a card-level override
-# is a follow-up when vLLM-aware admission lands).
+# --gpu-memory-utilization is the fraction of the GPU's memory vLLM may use for
+# weights, activations and KV cache. By default the runner sizes it to the
+# instance's placement footprint, the estimate the master reserved and the
+# worker's fit guard checked, so vLLM takes the memory placement admitted rather
+# than a fixed share of the device. A fixed share failed on every shared GPU:
+# vLLM refuses to start unless free memory covers share x total, so a resident
+# model stopped it even when the placement fit, and on a lone GPU it claimed
+# memory the master still counted as free. The env var pins the share instead,
+# for a GPU dedicated to vLLM whose KV cache should take the rest of the device.
+# The default share remains only for launches that cannot be sized honestly
+# (see resolve_gpu_memory_utilization).
 _GPU_MEMORY_UTILIZATION_ENV: Final = "SKULK_VLLM_GPU_MEMORY_UTILIZATION"
 _DEFAULT_GPU_MEMORY_UTILIZATION: Final = 0.90
+
+_VLLM_RUNTIME_ALLOWANCE: Final = Memory.from_bytes(1024**3)
+"""Memory vLLM holds beyond weights and KV cache whatever the model's size:
+CUDA context, cuBLAS workspace and peak activations, measured at 0.63 GiB for a
+0.6B and 1.0 GiB for a 7B model on vLLM 0.28. The placement estimate's overhead
+scales with weights, so on the smallest models it can fall short of this."""
 
 # Upper bound on concurrent in-flight generations the runner streams to the one
 # ``vllm serve`` at once. This is a client-side admission bound (the thread-pool
@@ -206,30 +228,260 @@ class _StreamDelta(NamedTuple):
     usage: dict[str, Any] | None = None  # the include_usage final-chunk counts
 
 
-def _gpu_memory_utilization() -> float:
-    """The ``--gpu-memory-utilization`` fraction, from env or the 0.90 default.
+def _configured_gpu_memory_utilization() -> float | None:
+    """The operator's pinned ``--gpu-memory-utilization``, or ``None`` when unset.
 
-    An unparseable or out-of-range (0, 1] value falls back to the default rather
-    than passing vLLM a nonsense fraction that would fail the server at spawn.
+    An unparseable or out-of-range (0, 1] value is ignored with a warning, so the
+    runner sizes vLLM from its placement rather than passing a fraction that
+    would fail the server at spawn.
     """
     raw = os.environ.get(_GPU_MEMORY_UTILIZATION_ENV, "").strip()
     if not raw:
-        return _DEFAULT_GPU_MEMORY_UTILIZATION
+        return None
     try:
         value = float(raw)
     except ValueError:
         logger.warning(
-            f"{_GPU_MEMORY_UTILIZATION_ENV}={raw!r} is not a number; "
-            f"using {_DEFAULT_GPU_MEMORY_UTILIZATION}"
+            f"{_GPU_MEMORY_UTILIZATION_ENV}={raw!r} is not a number; ignoring it"
         )
-        return _DEFAULT_GPU_MEMORY_UTILIZATION
+        return None
     if not 0.0 < value <= 1.0:
         logger.warning(
-            f"{_GPU_MEMORY_UTILIZATION_ENV}={value} is outside (0, 1]; "
-            f"using {_DEFAULT_GPU_MEMORY_UTILIZATION}"
+            f"{_GPU_MEMORY_UTILIZATION_ENV}={value} is outside (0, 1]; ignoring it"
         )
-        return _DEFAULT_GPU_MEMORY_UTILIZATION
+        return None
     return value
+
+
+GpuMemoryShareBasis = Literal[
+    "pinned", "placement", "no_kv_geometry", "unknown_device_total"
+]
+"""Why a launch received its share: an operator pin, the placement footprint,
+or the fixed default because the artifact or the device could not be sized."""
+
+_SHARE_RESOLUTION: Final = 10_000
+"""Shares are passed in ten-thousandths of the device, rounded up, so the
+rounding never leaves more than that much memory outside the reservation."""
+
+_KV_CACHE_ELEMENT_BYTES: Final = 2
+"""vLLM keeps KV cache at the model's 16-bit precision unless a quantized cache
+dtype is requested, which the runner never does."""
+
+
+def artifact_kv_bytes_per_token(config: Mapping[str, object]) -> int | None:
+    """Upper bound on vLLM's KV cache bytes per token, from a model's config.
+
+    The card's KV estimate assumes 128-wide attention heads, and many models are
+    wider (Gemma 4 uses 256, and 512 on its full-attention layers), so a share
+    sized from the card alone can leave vLLM short of the served window. This
+    bound reads the artifact's own geometry and counts every decoder layer at
+    full context with the widest head and KV-head count the config names, keys
+    and values both, at 16-bit precision. Sliding-window, shared-KV and
+    linear-attention layers hold less than that, so the bound only ever raises
+    a share. Multimodal wrappers nest the decoder under ``text_config``.
+
+    Args:
+        config: The parsed ``config.json`` of the served artifact.
+
+    Returns:
+        Bytes per token of context, or ``None`` when the config does not name
+        the layer count, head width and KV-head count.
+    """
+    nested = config.get("text_config")
+    source = cast("Mapping[str, object]", nested) if isinstance(nested, dict) else config
+
+    def positive(key: str) -> int | None:
+        value = source.get(key)
+        return value if type(value) is int and value > 0 else None
+
+    layers = positive("num_hidden_layers")
+    attention_heads = positive("num_attention_heads")
+    kv_heads = positive("num_key_value_heads") or attention_heads
+    head_dim = positive("head_dim")
+    hidden_size = positive("hidden_size")
+    if head_dim is None and hidden_size is not None and attention_heads is not None:
+        head_dim = hidden_size // attention_heads
+    if layers is None or kv_heads is None or not head_dim:
+        return None
+    widest = kv_heads * head_dim
+    global_kv_heads = positive("num_global_key_value_heads") or kv_heads
+    global_head_dim = positive("global_head_dim") or head_dim
+    widest = max(widest, global_kv_heads * global_head_dim)
+    return 2 * layers * widest * _KV_CACHE_ELEMENT_BYTES
+
+
+def _read_artifact_kv_bytes_per_token(model_dir: Path) -> int | None:
+    """The artifact's KV bound from ``config.json``, or ``None`` when unreadable."""
+    try:
+        config = cast("object", json.loads((model_dir / "config.json").read_text()))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(config, dict):
+        return None
+    return artifact_kv_bytes_per_token(cast("Mapping[str, object]", config))
+
+
+class GpuMemoryShare(NamedTuple):
+    """vLLM's ``--gpu-memory-utilization`` for one launch and how it was chosen."""
+
+    fraction: float
+    basis: GpuMemoryShareBasis
+
+
+def resolve_gpu_memory_utilization(
+    model_card: ModelCard,
+    context_tokens: int,
+    resolved_backend: str | None,
+    device_total_bytes: int | None,
+    pinned: float | None,
+    artifact_kv_per_token: int | None,
+) -> GpuMemoryShare:
+    """Choose vLLM's memory share for one placement. Pure, so it is unit-testable.
+
+    An operator pin wins. Otherwise the share holds the placement footprint:
+    weights with engine overhead, KV cache for the served window, and the flat
+    floor, from the estimator the master reserved with. vLLM fills whatever the
+    share leaves after weights, activations and runtime memory with KV cache, so
+    the overhead allowance becomes extra KV capacity rather than idle memory.
+
+    The share never drops below weights, the served window's KV cache at the
+    artifact's own geometry (``artifact_kv_bytes_per_token``, an upper bound)
+    and vLLM's fixed runtime memory (``_VLLM_RUNTIME_ALLOWANCE``). The card's
+    estimate assumes 128-wide attention heads and a proportional overhead, so
+    wide-head models and the smallest models would otherwise leave vLLM short
+    of its window, and it would refuse to start. The share is rounded up to the
+    next ten-thousandth, so vLLM's request (share times the device total it
+    reads) covers it while leaving no more than a ten-thousandth of the device
+    beyond what placement reserved, and it is capped at the fixed default:
+    sizing never asks for more than the historical share.
+
+    The fixed default remains when no honest size exists: the artifact's config
+    names no KV geometry, or the device total is unreadable.
+
+    Args:
+        model_card: The card the instance serves.
+        context_tokens: The served window, passed to vLLM as ``--max-model-len``.
+        resolved_backend: The engine tag placement stamped on the shard.
+        device_total_bytes: Total device memory, or ``None`` when unreadable.
+        pinned: A valid ``SKULK_VLLM_GPU_MEMORY_UTILIZATION``, or ``None``.
+        artifact_kv_per_token: The artifact's KV bound, or ``None`` when its
+            config could not be read.
+
+    Returns:
+        The share to pass to vLLM and the basis it was chosen on.
+    """
+    if pinned is not None:
+        return GpuMemoryShare(pinned, "pinned")
+    if artifact_kv_per_token is None or artifact_kv_per_token <= 0:
+        return GpuMemoryShare(_DEFAULT_GPU_MEMORY_UTILIZATION, "no_kv_geometry")
+    if device_total_bytes is None or device_total_bytes <= 0:
+        return GpuMemoryShare(_DEFAULT_GPU_MEMORY_UTILIZATION, "unknown_device_total")
+    # One vLLM server holds the whole model (tensor parallel size 1), so its
+    # footprint is the full-model one the master reserved for the instance.
+    footprint = estimate_shard_footprint(
+        model_card,
+        1.0,
+        context_budget=context_tokens,
+        resolved_backend=resolved_backend,
+    )
+    kv_per_token = max(
+        artifact_kv_per_token,
+        per_token_kv_bytes(model_card, resolved_backend=resolved_backend),
+    )
+    window_kv = Memory.from_bytes(kv_per_token * context_tokens)
+    share_bytes = max(
+        footprint.in_bytes,
+        (model_card.storage_size + window_kv + _VLLM_RUNTIME_ALLOWANCE).in_bytes,
+    )
+    units = math.ceil(share_bytes * _SHARE_RESOLUTION / device_total_bytes)
+    return GpuMemoryShare(
+        min(_DEFAULT_GPU_MEMORY_UTILIZATION, max(1, units) / _SHARE_RESOLUTION),
+        "placement",
+    )
+
+
+def _cuda_device_total() -> int | None:
+    """Total memory of the first CUDA-visible device, or ``None`` when unreadable.
+
+    vLLM applies its share to this device's total, so reading it through the
+    CUDA driver API gives the exact denominator: it follows
+    ``CUDA_VISIBLE_DEVICES``, CUDA's own device order and MIG slices, which
+    NVML's device 0 does not, and ``cuDeviceTotalMem`` opens no context in this
+    long-lived process.
+    """
+    try:
+        driver = ctypes.CDLL("libcuda.so.1")
+    except OSError:
+        return None
+    device = ctypes.c_int()
+    total = ctypes.c_size_t()
+    try:
+        if cast("int", driver.cuInit(0)) != 0:
+            return None
+        if cast("int", driver.cuDeviceGet(ctypes.byref(device), 0)) != 0:
+            return None
+        if cast("int", driver.cuDeviceTotalMem_v2(ctypes.byref(total), device)) != 0:
+            return None
+    except AttributeError:
+        return None
+    return total.value if total.value > 0 else None
+
+
+def _device_memory_total(resolved_backend: str | None) -> int | None:
+    """Total memory of the GPU this server runs on, or ``None`` when unreadable.
+
+    vLLM's share is a fraction of the device total CUDA (or HIP) reports, so
+    NVIDIA devices read it from the CUDA driver (``_cuda_device_total``). When
+    the driver cannot be read, NVML's device 0 total stands in, and on an NVIDIA
+    GB10, where NVML reports no memory, the host's physical memory, which is
+    CUDA's total on that shared pool. AMD GPUs use the amdgpu sysfs total; an APU
+    whose GPU maps host memory has no single device total and stays unsized.
+    """
+    if sys.platform != "linux":
+        return None
+    if resolved_backend is not None and resolved_backend.endswith("-rocm"):
+        from skulk.utils.info_gatherer.linux_gpu import (
+            find_amd_gpu_device,
+            read_accelerator_metrics,
+        )
+
+        device = find_amd_gpu_device()
+        if device is None:
+            return None
+        amd = read_accelerator_metrics(device)
+        total = amd.vram_total_bytes
+        if total is None or total <= 0:
+            return None
+        gtt_total = amd.gtt_total_bytes
+        if (
+            gtt_total is not None
+            and gtt_total > total
+            and gtt_total >= psutil.virtual_memory().total
+        ):
+            return None
+        return total
+    cuda_total = _cuda_device_total()
+    if cuda_total is not None:
+        return cuda_total
+    from skulk.utils.info_gatherer.nvidia_gpu import (
+        has_nvidia_gpu,
+        load_nvml,
+    )
+    from skulk.utils.info_gatherer.nvidia_gpu import (
+        read_accelerator_metrics as read_nvidia_accelerator_metrics,
+    )
+
+    nvml = load_nvml()
+    if nvml is None or not has_nvidia_gpu(nvml):
+        return None
+    # No CUDA fallback: it would hold a CUDA context in this process for the
+    # instance's whole lifetime.
+    nvidia = read_nvidia_accelerator_metrics(nvml, cuda_memory_info=lambda: None)
+    if nvidia.vram_total_bytes is not None and nvidia.vram_total_bytes > 0:
+        return nvidia.vram_total_bytes
+    if is_gb10_accelerator(nvidia):
+        return psutil.virtual_memory().total
+    return None
 
 
 def build_vllm_serve_args(
@@ -271,7 +523,7 @@ def build_vllm_serve_args(
         "--max-model-len",
         str(max_model_len),
         "--gpu-memory-utilization",
-        f"{gpu_memory_utilization:.2f}",
+        f"{gpu_memory_utilization:.4f}",
         "--tensor-parallel-size",
         "1",
         # Off by default in vLLM; without it the include_usage final chunk
@@ -763,7 +1015,7 @@ class Runner(ServedConcurrentDispatch):
             host,
             port,
             n_ctx,
-            _gpu_memory_utilization(),
+            self._gpu_memory_share(model_dir, n_ctx),
             self.shard_metadata.model_card.trust_remote_code,
             spec_method=(
                 card_runtime.vllm_spec_method if card_runtime is not None else None
@@ -819,6 +1071,43 @@ class Runner(ServedConcurrentDispatch):
             preexec_fn=_set_pdeathsig if os.name == "posix" else None,
             start_new_session=True,
         )
+
+    def _gpu_memory_share(self, model_dir: Path, n_ctx: int) -> float:
+        """Resolve this launch's ``--gpu-memory-utilization`` and log its basis."""
+        shard = self.shard_metadata
+        pinned = _configured_gpu_memory_utilization()
+        share = resolve_gpu_memory_utilization(
+            shard.model_card,
+            n_ctx,
+            shard.resolved_backend,
+            None if pinned is not None else _device_memory_total(shard.resolved_backend),
+            pinned,
+            None if pinned is not None else _read_artifact_kv_bytes_per_token(model_dir),
+        )
+        match share.basis:
+            case "pinned":
+                logger.info(
+                    f"vllm gpu-memory-utilization {share.fraction:.4f}, pinned by "
+                    f"{_GPU_MEMORY_UTILIZATION_ENV}"
+                )
+            case "placement":
+                logger.info(
+                    f"vllm gpu-memory-utilization {share.fraction:.4f}, sized from "
+                    "the placement footprint"
+                )
+            case "no_kv_geometry":
+                logger.warning(
+                    f"vllm cannot size {shard.model_card.model_id} from its "
+                    "placement: its config.json names no layer count, head "
+                    "width and KV-head count; using the fixed "
+                    f"{share.fraction:.4f} share"
+                )
+            case "unknown_device_total":
+                logger.warning(
+                    "vllm cannot read this GPU's memory total; using the fixed "
+                    f"{share.fraction:.4f} share"
+                )
+        return share.fraction
 
     def _pick_port(self) -> int:
         """Pick a free ephemeral port for the server, avoiding the API port."""

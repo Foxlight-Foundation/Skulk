@@ -104,9 +104,24 @@ continuous batching actually engage and decode them together.
   generations the runner keeps in flight; requests beyond it queue in the
   runner's bounded pool. This is a client-side admission bound, not the
   server's batch width (vLLM batches up to its own `--max-num-seqs`).
-- `SKULK_VLLM_GPU_MEMORY_UTILIZATION` (default 0.90) sets the fraction of GPU
-  VRAM vLLM may use for weights plus KV cache, passed through as
-  `--gpu-memory-utilization`.
+- vLLM's share of GPU memory (`--gpu-memory-utilization`) is sized to the
+  instance's placement. The runner passes the fraction of the device that
+  holds the memory Skulk reserved for the model (weights with overhead, the KV
+  cache for the served window, and a small floor), rounded up to the next
+  ten-thousandth of the device total CUDA reports. vLLM spends whatever part of that share weights and runtime
+  memory leave on KV cache. A vLLM model can therefore share a GPU with other
+  models and stays within its reservation. The share never drops below the
+  weights, the served window's KV cache at the model's own geometry (read
+  from its `config.json`, counting every layer at its widest attention head)
+  and about a gigabyte of vLLM's own runtime memory, so wide-head models and
+  very small models still fit their window. It never exceeds the previous
+  fixed share of 0.90.
+- `SKULK_VLLM_GPU_MEMORY_UTILIZATION` pins a fixed share instead. Set it on a
+  GPU dedicated to vLLM to give the KV cache the rest of the device, for more
+  concurrent long requests; other models then find that GPU full. A model
+  whose `config.json` does not name its layer count, head width and KV-head
+  count, or a GPU whose memory total cannot be read, gets the fixed 0.90
+  share with a warning in the node log.
 
 Operationally: server startup on a large model can take a couple of minutes
 (weight load, compilation, CUDA-graph capture) and is allowed a generous health
