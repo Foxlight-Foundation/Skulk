@@ -38,6 +38,7 @@ from typing import (
     TypedDict,
     TypeVar,
     cast,
+    final,
 )
 from uuid import uuid4
 
@@ -72,6 +73,7 @@ from loguru import logger
 from pydantic import UUID4, ValidationError
 from starlette.datastructures import FormData
 from starlette.datastructures import UploadFile as StarletteUploadFile
+from starlette.types import Scope
 
 import skulk.shared.types.tasks as task_types
 from skulk.api.adapters.chat_completions import (
@@ -363,7 +365,10 @@ from skulk.routing.vision_media import VisionMediaPacket
 from skulk.shared.apply import apply
 from skulk.shared.backends import (
     AUDIO_CPP_COMPUTE_BACKENDS,
-    GB10_AUDIO_CPP_CUDA_BUILD,
+    AUDIO_CPP_CUDA_BUILDS_BY_ARCHITECTURE,
+    AUDIO_CPP_CUDA_TARGETS_BY_ARCHITECTURE,
+    AUDIO_CPP_CUDA_TARGETS_BY_BUILD,
+    audio_cpp_cuda_hardware_matches,
     engine_of,
 )
 from skulk.shared.constants import (
@@ -1741,6 +1746,51 @@ class _PreviewContextFields(TypedDict):
     kv_bytes_per_token: int | None
 
 
+DASHBOARD_SHELL_CACHE_CONTROL: Final = "no-cache"
+"""The dashboard shell is revalidated on every load.
+
+``index.html`` names the build's content-hashed bundles. A browser that kept
+a heuristically cached shell after a Skulk update asks for bundles that no
+longer exist and renders a blank page until a hard refresh.
+"""
+
+DASHBOARD_BUNDLE_CACHE_CONTROL: Final = "public, max-age=31536000, immutable"
+"""Vite names every file under ``assets/`` by its content hash, so one name
+never changes content and can be cached for good."""
+
+
+@final
+class DashboardStaticFiles(StaticFiles):
+    """Dashboard files with cache headers that survive a Skulk update."""
+
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        """Serve one dashboard file with the cache policy for its kind.
+
+        Content-hashed bundles under ``assets/`` are immutable; everything
+        else, including the ``index.html`` shell served for ``/``, must be
+        revalidated so a new build is picked up on the next load. A 304 for
+        a bundle carries the same immutable policy as its 200: a cache
+        updates its stored headers from the 304, so a revalidation answered
+        with ``no-cache`` would demote the bundle for every later load.
+
+        Args:
+            path: File path relative to the dashboard directory, as Starlette
+                resolved it from the request (empty for the ``/`` shell).
+            scope: The ASGI HTTP scope of the request being served.
+
+        Returns:
+            Starlette's file, redirect, or not-modified response for ``path``,
+            with its ``Cache-Control`` header set. A missing file raises
+            Starlette's 404 ``HTTPException`` unchanged.
+        """
+        response = await super().get_response(path, scope)
+        if path.startswith("assets/") and response.status_code in (200, 304):
+            response.headers["Cache-Control"] = DASHBOARD_BUNDLE_CACHE_CONTROL
+        else:
+            response.headers["Cache-Control"] = DASHBOARD_SHELL_CACHE_CONTROL
+        return response
+
+
 class API:
     def __init__(
         self,
@@ -2078,7 +2128,10 @@ class API:
             # dashboard-react/src/components/layout/HeaderNav.tsx.
             async def _spa_index() -> FileResponse:
                 """Serve the dashboard SPA shell for client-routed paths."""
-                return FileResponse(os.path.join(dashboard_dir, "index.html"))
+                return FileResponse(
+                    os.path.join(dashboard_dir, "index.html"),
+                    headers={"Cache-Control": DASHBOARD_SHELL_CACHE_CONTROL},
+                )
 
             # Both slash forms: the StaticFiles mount at "/" swallows
             # unmatched paths before FastAPI's redirect-slashes logic can
@@ -2097,7 +2150,7 @@ class API:
 
             self.app.mount(
                 "/",
-                StaticFiles(
+                DashboardStaticFiles(
                     directory=dashboard_dir,
                     html=True,
                 ),
@@ -3731,11 +3784,14 @@ class API:
                 for claim in claims
             )
 
-        def gb10_cuda_wheel_claim_matches(classes: frozenset[str]) -> bool:
+        def cuda_wheel_claim_matches(
+            architecture: str, classes: frozenset[str]
+        ) -> bool:
             """Require the compiled SM in both live facts and the signed claim."""
-            required_class = "nvidia:sm-12.1"
-            return required_class in classes and any(
+            required_class = AUDIO_CPP_CUDA_TARGETS_BY_ARCHITECTURE.get(architecture)
+            return required_class is not None and audio_cpp_cuda_hardware_matches(required_class, classes) and any(
                 claim.engine in {"audio_cpp-cuda", "audio_cpp"}
+                and claim.engine_build == AUDIO_CPP_CUDA_BUILDS_BY_ARCHITECTURE[architecture]
                 and required_class in claim.hardware_classes
                 for claim in claims
             )
@@ -3753,12 +3809,19 @@ class API:
         def candidate_lanes(
             variant: Literal["cpu", "vulkan", "cuda"], resources: NodeResources
         ) -> frozenset[str]:
-            """Keep the dedicated SM 12.1 wheel out of primary CPU preparation."""
+            """Keep known dedicated CUDA wheels out of primary CPU preparation."""
             lanes = variant_lanes[variant]
             if (
                 variant == "cpu"
-                and resources.engine_builds.get("audio_cpp-cuda")
-                == GB10_AUDIO_CPP_CUDA_BUILD
+                and (
+                    resources.engine_builds.get("audio_cpp-cuda")
+                    in AUDIO_CPP_CUDA_TARGETS_BY_BUILD
+                    or not any(
+                        claim.engine in {"audio_cpp-cuda", "audio_cpp"}
+                        and claim.engine_build not in AUDIO_CPP_CUDA_TARGETS_BY_BUILD
+                        for claim in claims
+                    )
+                )
             ):
                 return lanes - {"audio_cpp-cuda"}
             return lanes
@@ -3793,9 +3856,8 @@ class API:
             variants: list[Literal["cpu", "vulkan", "cuda"]] = []
             if (
                 "platform:linux" in platform_classes
-                and architecture in {"aarch64", "arm64"}
                 and "nvidia" in platform_classes
-                and gb10_cuda_wheel_claim_matches(platform_classes)
+                and cuda_wheel_claim_matches(architecture, platform_classes)
             ):
                 variants.append("cuda")
             if (

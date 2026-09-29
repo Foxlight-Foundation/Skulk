@@ -75,7 +75,7 @@ it('requires explicit publisher trust and excludes the write-only credential fro
   await submit();
   await act(async () => { await vi.waitFor(() => expect(saved).toHaveBeenCalledOnce()); });
   expect(writes).toHaveLength(1);
-  expect(writes[0]).toMatchObject({ expected_revision: 0, base_url: 'https://releases.example.test/private/', metadata_filename: 'runtime.json', token: 'private-fixture-token', trust: { revision: 1, publishers: { 'example.publisher': 'a'.repeat(64) } } });
+  expect(writes[0]).toMatchObject({ expected_revision: 0, base_url: 'https://releases.example.test/private/', metadata_filename: 'release.json', token: 'private-fixture-token', trust: { revision: 1, publishers: { 'example.publisher': 'a'.repeat(64) } } });
   expect(JSON.stringify(store.getState())).not.toContain('private-fixture-token');
   expect(host.textContent).not.toContain('private-fixture-token');
 });

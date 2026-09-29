@@ -9,6 +9,7 @@ import skulk.shared.models.model_cards as model_cards_module
 from skulk.api.types.api import MusicCapabilitySection
 from skulk.shared.backends import (
     GB10_AUDIO_CPP_CUDA_BUILD,
+    L40S_AUDIO_CPP_CUDA_BUILD,
     platform_compatible_backends,
     resolve_node_backend,
 )
@@ -296,24 +297,35 @@ def test_music_signed_support_omits_aggregate_engine_tag(
 
 
 @pytest.mark.parametrize(
-    ("claim_classes", "node_classes", "supported"),
+    ("engine_build", "claim_classes", "node_classes", "supported"),
     [
-        ((), ("nvidia:sm-12.1",), False),
-        (("nvidia",), ("nvidia:sm-12.1", "nvidia"), False),
-        (("nvidia:sm-12.1",), ("nvidia:sm-9.0",), False),
-        (("nvidia:sm-12.1",), ("nvidia:sm-12.1",), True),
+        (GB10_AUDIO_CPP_CUDA_BUILD, (), ("nvidia:sm-12.1",), False),
+        (GB10_AUDIO_CPP_CUDA_BUILD, ("nvidia",), ("nvidia:sm-12.1", "nvidia"), False),
+        (GB10_AUDIO_CPP_CUDA_BUILD, ("nvidia:sm-12.1",), ("nvidia:sm-9.0",), False),
+        (GB10_AUDIO_CPP_CUDA_BUILD, ("nvidia:sm-12.1",), ("nvidia:sm-12.1",), True),
+        (L40S_AUDIO_CPP_CUDA_BUILD, (), ("nvidia:sm-8.9",), False),
+        (L40S_AUDIO_CPP_CUDA_BUILD, ("nvidia",), ("nvidia:sm-8.9", "nvidia"), False),
+        (L40S_AUDIO_CPP_CUDA_BUILD, ("nvidia:sm-8.9",), ("nvidia:sm-12.1",), False),
+        (L40S_AUDIO_CPP_CUDA_BUILD, ("nvidia:sm-8.9",), ("nvidia:sm-8.9",), True),
+        (L40S_AUDIO_CPP_CUDA_BUILD, ("nvidia:sm-8.9",), ("nvidia:sm-8.9", "nvidia:sm-8.0"), False),
+        (L40S_AUDIO_CPP_CUDA_BUILD, ("nvidia:sm-8.9",), ("nvidia:sm-8.9", "nvidia:sm-unknown"), False),
+        (L40S_AUDIO_CPP_CUDA_BUILD, ("nvidia:sm-8.9",), ("nvidia:sm-8.9", "nvidia:multiple-devices"), False),
+        (L40S_AUDIO_CPP_CUDA_BUILD, ("nvidia:sm-8.9",), ("nvidia:sm-8.9", "amd"), False),
+        (GB10_AUDIO_CPP_CUDA_BUILD, ("nvidia:sm-12.1",), ("nvidia:sm-12.1", "amd"), False),
+        (GB10_AUDIO_CPP_CUDA_BUILD, ("nvidia:sm-12.1",), ("nvidia:sm-12.1", "nvidia:sm-9.0"), False),
     ],
 )
-def test_managed_gb10_build_requires_exact_signed_sm_even_for_ready_cache(
+def test_managed_cuda_build_requires_exact_signed_sm_even_for_ready_cache(
     monkeypatch: pytest.MonkeyPatch,
+    engine_build: str,
     claim_classes: tuple[str, ...],
     node_classes: tuple[str, ...],
     supported: bool,
 ) -> None:
-    """Normal placement cannot use a broad claim for the cached SM 12.1 wheel."""
+    """Normal placement cannot widen a cached native wheel's compiled target."""
     claim = RegistryEngineSupportClaim.model_construct(
         status="supported", engine="audio_cpp-cuda",
-        engine_build=GB10_AUDIO_CPP_CUDA_BUILD,
+        engine_build=engine_build,
         capability_id="music.generate", hardware_classes=claim_classes,
     )
 
@@ -327,7 +339,7 @@ def test_managed_gb10_build_requires_exact_signed_sm_even_for_ready_cache(
     monkeypatch.setattr(model_cards_module, "get_model_engine_support", claims)
     resolved = registry_supported_backends_for_node(
         _card(), node_backends=frozenset({"audio_cpp", "audio_cpp-cuda"}),
-        engine_builds={"audio_cpp-cuda": GB10_AUDIO_CPP_CUDA_BUILD},
+        engine_builds={"audio_cpp-cuda": engine_build},
         hardware_classes=frozenset(node_classes),
     )
     assert ("audio_cpp-cuda" in resolved) is supported

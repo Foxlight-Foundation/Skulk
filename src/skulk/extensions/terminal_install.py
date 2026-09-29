@@ -17,7 +17,12 @@ from skulk.extensions.runtime_artifacts import (
     protocol_refusal_sentence,
 )
 from skulk.extensions.runtime_attachment import InstallationIdentifier
-from skulk.extensions.runtime_catalog import CatalogEntryReview, CatalogReview
+from skulk.extensions.runtime_catalog import (
+    CatalogEntryReview,
+    CatalogReview,
+    catalog_refusal,
+    catalog_refusal_sentence,
+)
 from skulk.extensions.runtime_controller import LifecycleOperation, LifecycleRequest
 from skulk.extensions.runtime_download import (
     InstallOperation,
@@ -56,7 +61,7 @@ def _is_integer(value: JsonValue) -> TypeGuard[int]:
 
 
 def protocol_refusal(response: dict[str, JsonValue]) -> str | None:
-    """The one manager error the terminal names: a protocol outside the window.
+    """A named manager error: a release, runtime or catalog protocol outside the window.
 
     Only the fixed vocabulary is read (a code, a kind, integers); anything else
     in the response stays undisclosed.
@@ -69,7 +74,7 @@ def protocol_refusal(response: dict[str, JsonValue]) -> str | None:
         accepted = _WINDOW.validate_python(response.get("accepted"), strict=True)
     except ValueError:
         return None
-    if kind not in ("release", "runtime") or not _is_integer(offered):
+    if kind not in ("release", "runtime", "catalog") or not _is_integer(offered):
         return None
     return protocol_refusal_sentence(str(kind), offered, tuple(accepted))
 
@@ -94,8 +99,15 @@ class TerminalInstaller:
         response = await self.request(request)
         if "error" in response or "result" not in response:
             named = protocol_refusal(response)
+            catalog_refused = catalog_refusal(response)
             if named is not None:
                 self.output(named)
+            elif catalog_refused is not None:
+                self.output(
+                    catalog_refusal_sentence(
+                        catalog_refused.code, catalog_refused.status
+                    )
+                )
             # Neither manager errors nor rejected credential inputs belong in
             # terminal diagnostics. The resume command was printed before effects.
             raise ValueError("manager request incomplete; inspect retained status")

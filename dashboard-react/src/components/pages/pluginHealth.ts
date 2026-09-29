@@ -7,15 +7,25 @@ export type PluginFilter = 'all' | 'healthy' | 'attention' | 'uninstalled';
 
 /** Combine current runtime, operation and node observations conservatively. */
 export function derivePluginHealth(runtime: ManagedRuntime, nodes: PluginNodes | undefined, unavailable: boolean, operationState: ManagedOperation['state'] | null = runtime.operation_state): PluginHealth {
-  // An uninstalled installation has no running service to observe, so it is
-  // always stale; that does not make its state unknown.
-  if (unavailable || (runtime.stale && !runtime.uninstalled)) return 'unknown';
+  if (unavailable) return 'unknown';
+  // A recorded failure stays evidence as its observation ages: a release that
+  // failed verification does not start again until something changes.
+  const failed = recordedServiceFailure(runtime) !== null;
+  // An uninstalled or disabled installation has no running service to
+  // observe, so it is always stale; that does not make its state unknown.
+  if (runtime.stale && !runtime.uninstalled && runtime.enabled && !failed) return 'unknown';
   if (operationState === 'failed' || operationState === 'recovery_required' || runtime.error_code) return 'attention';
   if (operationState === 'accepted' || operationState === 'applying') return 'updating';
   if (runtime.uninstalled) return 'uninstalled';
   if (!runtime.enabled) return 'disabled';
+  if (failed) return 'attention';
   if (!runtime.service || !nodes?.available || !nodes.nodes.length) return 'unknown';
   if (runtime.service.state === 'failed' || nodes.nodes.some(node => node.status === 'failed')) return 'attention';
   if (runtime.service.state === 'running' && runtime.selected_digest !== null && runtime.service.active_digest === runtime.selected_digest && nodes.nodes.every(node => node.status === 'ready' || node.status === 'healthy')) return 'healthy';
   return 'unknown';
+}
+
+/** The failure class a stopped plugin process recorded, or null when none was recorded. */
+export function recordedServiceFailure(runtime: ManagedRuntime): string | null {
+  return runtime.service?.state === 'failed' && runtime.service.error_code ? runtime.service.error_code : null;
 }

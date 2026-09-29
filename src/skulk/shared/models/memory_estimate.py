@@ -23,7 +23,7 @@ from skulk.shared.models.llama_server_settings import (
     LLAMA_SERVER_DEFAULT_DRAFT_DEPTH,
     LlamaServerSettings,
 )
-from skulk.shared.models.model_cards import ModelCard
+from skulk.shared.models.model_cards import ModelCard, MusicModelFamily
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.profiling import AcceleratorMetrics, MemoryUsage
@@ -167,6 +167,21 @@ silently invalidate the context window Skulk admitted.
 """
 
 
+_ACE_STEP_CPU_WORKSPACE: Final = Memory.from_bytes(10 * 1024**3)
+"""Transient CPU workspace reserved in addition to ACE's weight estimate.
+
+The qualified BF16 artifact contains 10.1 GB of weights, but its eight-thread
+10–60-second generation soak reached 18.7 GB RSS. A text-GGUF multiplier alone
+cannot cover these buffers. Ten GiB leaves headroom above the measured peak.
+"""
+_ACE_STEP_GPU_WORKSPACE: Final = Memory.from_bytes(10 * 1024**3)
+"""Reserve above weights covering CUDA/Vulkan peaks of 17.93/15.33 GiB."""
+_MINIMAX_GPU_WORKSPACE: Final = Memory.from_bytes(2 * 1024**3)
+"""Reserve above weights covering CUDA/Vulkan peaks of 9.15/8.35 GiB."""
+_MINIMAX_METAL_WORKSPACE: Final = Memory.from_bytes(5 * 1024**3)
+"""Reserve above weights covering the qualified 11.83 GiB Metal process peak."""
+
+
 def memory_overhead_factor(model_card: ModelCard) -> float:
     """Engine-appropriate weight-overhead multiplier for a model.
 
@@ -213,6 +228,34 @@ def estimate_kv_cache_bytes(
     return Memory.from_bytes(kv_bytes)
 
 
+def estimate_music_workspace(
+    model_card: ModelCard, *, resolved_backend: str | None,
+) -> Memory:
+    """Return transient workspace charged for the selected music engine lane.
+
+    Qualified CPU, CUDA, Vulkan and Metal lanes reserve measured working buffers
+    separately from weight bytes for the initial ACE-Step and MiniMax artifacts.
+    Other lanes and unresolved advisory estimates receive no additional reserve.
+    This pure estimate is
+    shared by placement, API admission and the worker's local load guard.
+    """
+    if model_card.music is None:
+        return Memory()
+    family = model_card.music.family
+    if family == MusicModelFamily.AceStep15 and resolved_backend == "audio_cpp-cpu":
+        return _ACE_STEP_CPU_WORKSPACE
+    if resolved_backend in {"audio_cpp-cuda", "audio_cpp-vulkan"}:
+        # Native GPU qualification measures transient buffers as well as weights.
+        # Weight-only estimates admitted smaller GPUs that cannot serve them.
+        if family == MusicModelFamily.AceStep15:
+            return _ACE_STEP_GPU_WORKSPACE
+        if family == MusicModelFamily.MiniMaxMusic3:
+            return _MINIMAX_GPU_WORKSPACE
+    if family == MusicModelFamily.MiniMaxMusic3 and resolved_backend == "audio_cpp-metal":
+        return _MINIMAX_METAL_WORKSPACE
+    return Memory()
+
+
 def estimate_shard_footprint(
     model_card: ModelCard,
     shard_fraction: float,
@@ -223,8 +266,9 @@ def estimate_shard_footprint(
 ) -> Memory:
     """Estimate resident memory for a shard holding ``shard_fraction`` of a model.
 
-    ``weights_share * overhead + kv_share + recurrent_share + overhead_floor``
-    where weights and KV both scale by ``shard_fraction``. That single fraction
+    ``weights_share * overhead + kv_share + recurrent_share + overhead_floor + music_workspace``
+    where weights and KV both scale by ``shard_fraction``. Music is single-host
+    and reserves its complete transient workspace. That single fraction
     works for every sharding because both quantities are linear in it:
 
     * Pipeline: ``shard_fraction = layers_held / n_layers`` (a node holds a
@@ -259,6 +303,7 @@ def estimate_shard_footprint(
         )
         * shard_fraction
         + MEMORY_OVERHEAD_FLOOR
+        + estimate_music_workspace(model_card, resolved_backend=resolved_backend)
     )
     # A single-node GGUF vision runner owns the complete projector in addition
     # to the base weights. RPC donors bypass this shard guard; the RPC driver
@@ -333,6 +378,18 @@ def shard_preallocates_kv_upfront(shard: ShardMetadata) -> bool:
         tag.startswith(_UPFRONT_WINDOW_ENGINE_PREFIXES)
         for tag in card.placement.compatible_backends
     )
+
+
+def vulkan_fills_carve_first(resolved_backend: str | None) -> bool:
+    """Whether a shard's engine allocates through Vulkan.
+
+    On a unified-memory AMD APU the Vulkan driver places device-local memory,
+    weights and a fixed KV window alike, in the BIOS VRAM carve and spills to
+    GTT (host RAM) only past it; a HIP engine on the same APU allocates from
+    GTT. Measured on Strix Halo: a llama-server-vulkan steward with its fixed
+    window loaded entirely into the carve and left host RAM untouched.
+    """
+    return resolved_backend is not None and resolved_backend.endswith("-vulkan")
 
 
 def backend_offloads_to_vram(resolved_backend: str | None) -> bool:

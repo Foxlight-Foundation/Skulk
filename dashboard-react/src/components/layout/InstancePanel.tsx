@@ -1,6 +1,7 @@
 import styled from 'styled-components';
 import { RunningInstanceCard, type InstanceStatus, type InstanceNodeStatus } from '../cluster/RunningInstanceCard';
 import { useSkulkTranslation } from '../../i18n/tolgee';
+import type { ServingEngine } from '../../utils/servingEngine';
 
 /* ── Types ────────────────────────────────────────────── */
 
@@ -9,10 +10,12 @@ export interface InstanceCardData {
   modelId: string;
   sharding: 'Pipeline' | 'Tensor';
   instanceType: 'MlxRing' | 'MlxJaccl' | 'LlamaRpc';
-  /** Serving engine, derived from the card's placement backends. Drives the
-   *  type label (MLX vs served llama.cpp) since the wire wraps every instance
-   *  as an MLX instance. */
-  engine: 'mlx' | 'llama_cpp' | 'served';
+  /** Serving engine, from the backend the master resolved for the placement
+   *  (the card's first compatible backend for older state). Drives the type
+   *  label, since the wire wraps every instance as an MLX instance. */
+  engine: ServingEngine;
+  /** Accelerator named by the resolved backend, such as `ROCm`; null if none. */
+  accelerator?: string | null;
   nodeStatuses: InstanceNodeStatus[];
   status: InstanceStatus;
   statusMessage?: string;

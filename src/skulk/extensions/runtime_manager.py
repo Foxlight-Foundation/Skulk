@@ -13,7 +13,7 @@ import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Annotated, Literal, cast, final
+from typing import Annotated, Final, Literal, cast, final
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, SecretStr, TypeAdapter
@@ -30,13 +30,18 @@ from skulk.extensions.runtime_attachment import (
     AttachmentRequest,
     HostSettings,
     OwnerBinding,
+    ServeBinding,
     finish_attachment,
+    publish_serve_host,
+    read_serve_host,
     recover_attachment,
 )
 from skulk.extensions.runtime_catalog import (
     CatalogEntryReview,
+    CatalogRefusedError,
     CatalogSourceUpdate,
     HostCatalog,
+    catalog_refusal_payload,
 )
 from skulk.extensions.runtime_controller import (
     LifecycleOperation,
@@ -91,6 +96,76 @@ def refusal_payload(refused: ProtocolUnsupportedError) -> bytes:
 
 class _Request(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+
+class InstalledRelease(BaseModel):
+    """Display identity of the signed release an installation has selected.
+
+    Read from that release's staged metadata, which was verified when it was
+    staged and is private to the manager's owner. It names what is installed;
+    it grants nothing and is never used for a trust or compatibility decision.
+    """
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+    bundle_id: str = Field(
+        min_length=1,
+        max_length=128,
+        description="Signed capability bundle identifier, such as `foxlight.video-studio`.",
+    )
+    title: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+        description="Human-readable bundle title from the signed manifest, when it declares one.",
+    )
+    bundle_version: str = Field(
+        min_length=1,
+        max_length=64,
+        description="Bundle version from the signed manifest.",
+    )
+    publisher: str = Field(
+        min_length=1,
+        max_length=64,
+        description="Identifier of the publisher that signed the release.",
+    )
+    sequence: int = Field(
+        ge=1, description="The publisher's increasing release sequence number."
+    )
+
+
+_STAGED_METADATA_BYTES: Final = 131072
+"""Signed runtime metadata is refused above this size, so staged copies fit it."""
+
+
+def installed_release(staged: Path) -> InstalledRelease | None:
+    """Read the display identity of one staged generation, or ``None``.
+
+    Any unreadable, oversized, or unexpected document yields ``None``: a
+    missing name must never hide an installation or fail the inventory.
+    """
+    try:
+        document = _OBJECT.validate_json(read_private(staged, _STAGED_METADATA_BYTES))
+    except (OSError, ValueError):
+        return None
+    runtime = document.get("runtime")
+    release = runtime.get("release") if isinstance(runtime, dict) else None
+    manifest = release.get("manifest") if isinstance(release, dict) else None
+    if not isinstance(release, dict) or not isinstance(manifest, dict):
+        return None
+    title = manifest.get("title")
+    try:
+        return InstalledRelease.model_validate(
+            {
+                "bundle_id": manifest.get("bundle_id"),
+                "title": title if isinstance(title, str) and title.strip() else None,
+                "bundle_version": manifest.get("bundle_version"),
+                "publisher": release.get("publisher"),
+                "sequence": release.get("sequence"),
+            }
+        )
+    except ValueError:
+        # A strict field check failed (a missing or mistyped claim): no name.
+        return None
 
 
 class InventoryRequest(_Request):
@@ -430,6 +505,9 @@ class RuntimeManager:
         self.settings = HostSettings.model_validate_json(
             read_private(self.root / "host.json")
         )
+        # The address the installations last received, kept in its own file
+        # so a manager built before it still reads host.json after a downgrade.
+        self.serve_host = read_serve_host(self.root / "serve.json")
         self.installations = self.root / "installations"
         private_directory(self.installations)
         self.path = manager_socket(self.root)
@@ -443,6 +521,10 @@ class RuntimeManager:
         self.catalog_read = asyncio.Lock()
         self.host: asyncio.Task[QualifiedHost] | None = None
         self.errors: dict[str, str] = {}
+        # A generation's staged metadata never changes once written, so its
+        # display identity is read once per digest; failures are not cached
+        # because a staging in progress completes later.
+        self.release_identities: dict[str, InstalledRelease] = {}
         self.server: asyncio.Server | None = None
         self.lock: RuntimeLock | None = None
         # Set by the serving loop: a reload activates the successor, then asks
@@ -545,7 +627,13 @@ class RuntimeManager:
                 raise ValueError("attachment requires a live local bridge")
             recovered = await asyncio.to_thread(recover_attachment, self.root)
             self.settings = recovered
-            if self.settings.transport_node_id != request.transport_node_id:
+            transport_changed = (
+                self.settings.transport_node_id != request.transport_node_id
+            )
+            # No address seen keeps the one the installations already have, so
+            # a slow or failed Tailscale query never restarts every owner.
+            serve_host = request.serve_host or self.serve_host
+            if transport_changed or serve_host != self.serve_host:
                 identifiers = self._identifiers()
                 # Validate all existing bindings before disturbing a healthy owner.
                 for identifier in identifiers:
@@ -566,18 +654,31 @@ class RuntimeManager:
                     for identifier in identifiers:
                         self.errors[identifier] = "attachment_recovery_required"
                     raise ValueError("attachment could not stop all owners")
-                journal = AttachmentJournal(
-                    previous=self.settings,
-                    current=self.settings.model_copy(
-                        update={"transport_node_id": request.transport_node_id}
-                    ),
-                    installations=tuple(identifiers),
-                    state="pending",
+                journal = (
+                    AttachmentJournal(
+                        previous=self.settings,
+                        current=self.settings.model_copy(
+                            update={"transport_node_id": request.transport_node_id}
+                        ),
+                        installations=tuple(identifiers),
+                        state="pending",
+                    )
+                    if transport_changed
+                    else None
                 )
                 try:
-                    self.settings = await asyncio.to_thread(
-                        finish_attachment, self.root, journal
-                    )
+                    if journal is not None:
+                        self.settings = await asyncio.to_thread(
+                            finish_attachment, self.root, journal
+                        )
+                    if serve_host is not None and serve_host != self.serve_host:
+                        await asyncio.to_thread(
+                            publish_serve_host,
+                            self.root,
+                            tuple(identifiers),
+                            serve_host,
+                        )
+                        self.serve_host = serve_host
                 finally:
                     await self._restore_locked()
             else:
@@ -601,6 +702,17 @@ class RuntimeManager:
             )
             if binding != self.settings.owner_binding():
                 raise ValueError("installation transport identity differs")
+            if (
+                self.serve_host is not None
+                and read_serve_host(root / "serve.json") != self.serve_host
+            ):
+                # An owner always starts with the recorded address, whatever
+                # interrupted the write that should have given it: a new
+                # registration gets it here too.
+                write_private(
+                    root / "serve.json",
+                    ServeBinding(serve_host=self.serve_host).model_dump_json().encode(),
+                )
             controller = RuntimeController(root)
             await controller.start()
             if identifier not in self.downloads:
@@ -649,11 +761,18 @@ class RuntimeManager:
                     writer.write(build_mismatch_payload(differs))
                     await writer.drain()
         except ProtocolUnsupportedError as refused:
-            # The one refusal named by design: a fixed vocabulary of ints, so
-            # the installer and the plugin routes can say what to do next.
+            # Named by design: a fixed vocabulary of ints, so the installer
+            # and the plugin routes can say what to do next.
             with contextlib.suppress(OSError, TimeoutError):
                 async with asyncio.timeout(1):
                     writer.write(refusal_payload(refused))
+                    await writer.drain()
+        except CatalogRefusedError as refused:
+            # Also named: a code and at most an HTTP status, never the address,
+            # the credential or the document.
+            with contextlib.suppress(OSError, TimeoutError):
+                async with asyncio.timeout(1):
+                    writer.write(catalog_refusal_payload(refused))
                     await writer.drain()
         except (OSError, ValueError, TimeoutError):
             with contextlib.suppress(OSError, TimeoutError):
@@ -713,8 +832,14 @@ class RuntimeManager:
                 # Older selections created directly by the local selector do not
                 # have a controller operation. Never invent an operation to replay.
                 pass
+            release = (
+                self._release_identity(controller.root, selection.runtime_digest)
+                if selection is not None
+                else None
+            )
             return {
                 "plugin_id": identifier,
+                "release": release.model_dump(mode="json") if release else None,
                 "operation_id": operation.request.operation_id if operation else None,
                 "operation_state": operation.state if operation else None,
                 "error_code": "service_unavailable" if failed else None,
@@ -732,6 +857,20 @@ class RuntimeManager:
                 "service": None,
                 "stale": True,
             }
+
+    def _release_identity(self, root: Path, digest: str) -> InstalledRelease | None:
+        """The selected generation's display identity, read once per digest."""
+        cached = self.release_identities.get(digest)
+        if cached is not None:
+            return cached
+        identity = installed_release(root / "generations" / digest / "staged.json")
+        if identity is not None:
+            if len(self.release_identities) >= 64:
+                # Bounded: installations are capped at 16, so this only drops
+                # identities of generations no longer selected.
+                self.release_identities.clear()
+            self.release_identities[digest] = identity
+        return identity
 
     async def dispatch(self, request: ManagerRequest) -> dict[str, JsonValue]:
         """Execute the same fixed operations for terminal and authenticated API callers."""
@@ -756,7 +895,7 @@ class RuntimeManager:
             # A slow catalog server must not block inventory or attachment
             # renewal behind the manager-wide lock, like release inspection.
             if self.catalog_read.locked():
-                raise ValueError("catalog source is busy")
+                raise CatalogRefusedError("catalog_busy", "catalog source is busy")
             async with self.catalog_read:
                 verified = await self.catalog.fetch()
                 host = await self._measured_host()
@@ -768,7 +907,7 @@ class RuntimeManager:
             # binding cannot see catalog state change between accepting a
             # listing and configuring the release source.
             if self.catalog_read.locked():
-                raise ValueError("catalog source is busy")
+                raise CatalogRefusedError("catalog_busy", "catalog source is busy")
             async with self.catalog_read:
                 return (await self.catalog.configure(request.request)).model_dump(
                     mode="json"
@@ -950,7 +1089,7 @@ class RuntimeManager:
         # is refused as busy rather than superseding the reviewed digest
         # between its check and the binding.
         if self.catalog_read.locked():
-            raise ValueError("catalog source is busy")
+            raise CatalogRefusedError("catalog_busy", "catalog source is busy")
         async with self.catalog_read, self.guard:
             verified = self.catalog.accepted(
                 install.catalog_sha256, now=int(time.time())

@@ -17,8 +17,10 @@ npm run tolgee:export
 ```
 
 The exporter scans dashboard source files for `t("key", "English fallback")`
-calls, rejects missing fallbacks, rejects conflicting fallback text for the same
-key, and writes sorted key/value pairs to `src/i18n/en/skulk.json`.
+calls, including calls through an object such as `context.t(...)`, rejects
+missing fallbacks and keys built at runtime, rejects conflicting fallback text
+for the same key, and writes sorted key/value pairs to `src/i18n/en/skulk.json`.
+Call a translator under any other name and the exporter cannot see its keys.
 
 ## Import into Tolgee
 

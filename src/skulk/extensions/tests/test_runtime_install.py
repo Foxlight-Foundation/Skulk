@@ -47,6 +47,7 @@ def artifacts(
     runtime_protocol: int = 2,
     release_protocol: int = 1,
     bundle_id: str = "example.plugin",
+    manifest_extra: dict[str, JsonValue] | None = None,
 ) -> tuple[bytes, RuntimeTrust, QualifiedHost]:
     """Create an independently signed generic package with no private SDK metadata."""
     private_directory(directory)
@@ -158,6 +159,7 @@ def artifacts(
                 "executable": "bundle.pyz",
                 "executable_sha256": hashlib.sha256(bundle).hexdigest(),
                 "plugin_specific_policy": {"opaque": True},
+                **(manifest_extra or {}),
             },
             "platforms": ["darwin" if platform.startswith("macos") else "linux"],
             "python_requires": "==3.13.*",

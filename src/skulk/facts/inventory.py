@@ -278,6 +278,8 @@ def engine_build_inventory(
 def hardware_class_inventory(facts: NodeFacts) -> frozenset[str]:
     """Return open stable hardware identifiers derived from observed node facts."""
     classes = {f"platform:{facts.platform.lower()}"}
+    if sum(gpu.vendor.lower() == "nvidia" for gpu in facts.gpus) > 1:
+        classes.add("nvidia:multiple-devices")
     for gpu in facts.gpus:
         vendor = gpu.vendor.lower()
         classes.add(vendor)
@@ -286,6 +288,8 @@ def hardware_class_inventory(facts: NodeFacts) -> frozenset[str]:
             classes.add(f"{vendor}:{name}")
         if gpu.pci_device_id is not None:
             classes.add(f"{vendor}:pci-{gpu.pci_device_id.replace(':', '-')}")
-        if vendor == "nvidia" and gpu.compute_capability:
-            classes.add(f"nvidia:sm-{gpu.compute_capability}")
+        if vendor == "nvidia":
+            # Preserve uncertainty when another NVIDIA device has a known SM;
+            # otherwise aggregate classes could hide an unqualified device.
+            classes.add(f"nvidia:sm-{gpu.compute_capability or 'unknown'}")
     return frozenset(classes)

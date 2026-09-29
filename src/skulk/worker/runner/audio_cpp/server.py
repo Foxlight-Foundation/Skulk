@@ -52,10 +52,13 @@ def server_config(
     model_dir: Path,
     music: MusicCardConfig,
     model_specs: Path,
+    threads: int = 1,
 ) -> dict[str, object]:
     """Build a fixed, single-model server config with no management surface."""
     if backend not in {"cpu", "metal", "vulkan", "cuda", "hip"}:
         raise ValueError(f"unsupported audio.cpp backend {backend}")
+    if not 1 <= threads <= 8 or (backend != "cpu" and threads != 1):
+        raise ValueError("audio.cpp requires 1–8 CPU threads or one accelerator thread")
     if music.family == MusicModelFamily.MiniMaxMusic3:
         session_options = {
             "minimax_music3.language_model_gguf": music.language_model_gguf,
@@ -68,7 +71,7 @@ def server_config(
         "host": "127.0.0.1",
         "port": port,
         "backend": backend,
-        "threads": 1,
+        "threads": threads,
         "ui": False,
         "ui_management": False,
         "log_request_body": False,
@@ -115,6 +118,15 @@ class AudioCppServer:
         self.model_dir = model_dir
         self.music = music
         self.backend = backend
+        # Upstream forwards this count to ggml inference, not HTTP admission.
+        # Bound CPU parallelism and leave a core for the node's control plane;
+        # the runner still admits exactly one generation at a time. Accelerator
+        # settings stay fixed so their qualified execution does not change.
+        self.threads = (
+            max(1, min(8, (os.process_cpu_count() or 1) - 1))
+            if backend == "cpu"
+            else 1
+        )
         self.work_dir = work_dir
         self.base_url: str | None = None
         self.process: subprocess.Popen[bytes] | None = None
@@ -135,6 +147,7 @@ class AudioCppServer:
                         model_dir=self.model_dir,
                         music=self.music,
                         model_specs=self.model_specs,
+                        threads=self.threads,
                     )
                 )
             )

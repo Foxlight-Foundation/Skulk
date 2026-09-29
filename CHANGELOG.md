@@ -63,6 +63,29 @@ This project records release notes here and mirrors public-facing notes in
   on every node, with or without a model store, and a model it records is
   listed at once rather than after the next restart.
 
+- A plugin update that only rewords a setting, changes a setting's default, or
+  adds an optional setting now installs in place and keeps the installation's
+  settings, for plugins built with plugin SDK protocol 3 or later. Before, any
+  change to a plugin's settings schema refused the update with "configuration
+  schema requires migration", even a new description.
+- A disabled plugin reads "Disabled" in the plugin list instead of "Status
+  unavailable".
+- The Plugins page names each installed plugin by its signed release, for
+  example "Skulk Video Studio" with its version, sequence and publisher,
+  instead of its local `managed.<id>`. A plugin whose process stopped says
+  why, such as a release built for a different Skulk build, and reads
+  "Needs attention" instead of "Status unavailable".
+  `GET /v1/plugins/managed` gains a `release` field for each installation.
+- Video renders on AMD (the ComfyUI engine's ROCm lane) keep their models
+  loaded between renders and memory-map weight files up to 64 GB. Before,
+  every render rebuilt the text encoder, transformer and VAEs. ComfyUI's
+  cache is told to keep 40% of host RAM free, because at its default the
+  text encoder and transformer evicted each other on every new prompt. On
+  Strix Halo a 480x480 four-step MiniMax H3 render with a new prompt drops
+  from about 210 s to about 105 s once the models are loaded. The output
+  matches the old path as closely as two runs of the old path match each
+  other. A card with a weight file above 64 GB still loads without memory
+  mapping.
 - A superseded plugin manager runtime that could not be fully removed is
   retried after five minutes. Before, a partial removal was recorded as
   done, and the rest waited for a restart.
@@ -84,6 +107,32 @@ This project records release notes here and mirrors public-facing notes in
   covers the model directories and the model store's canonical and staging
   directories. `GET /v1/diagnostics/node` now runs the doctor checks off
   the event loop, so a slow check no longer stalls the API.
+- A plugin can serve its own screens to every machine on the tailnet. When a
+  node runs Tailscale, Skulk hands the node's Tailscale address to the
+  plugins it runs. A plugin built for this serves there and on loopback,
+  never on the local network. Skulk picks the address up in the background,
+  and restarts the node's plugins once when it first sees it or when it
+  changes.
+
+- Plugins can be managed on any node from any machine on the tailnet:
+  - A capability's **Manage on** entry, followed by its host's name, in its
+    topology flyout and its details, links to that host's own dashboard at
+    its Tailscale address, opened on the plugin. It was only a hint before.
+  - **Plugins** lists the cluster's other nodes, each linking to its own
+    Plugins page.
+  - `/plugins?plugin=<id>` opens that plugin's details.
+
+- The Plugins page has a Browse tab for installing plugins from a signed
+  catalog:
+  - Connect a catalog with an invitation code, or its address and publisher
+    key.
+  - Review a release's signed facts, its permissions and whether it can spend
+    money, then install or update it with one consent.
+  - Follow the download, staging and activation in place. Leaving the page and
+    coming back picks the install up where it was, without repeating it.
+  - A setup step then shows what each of the plugin's nodes reports, offers
+    its setup checks and settings when one needs attention, and opens its
+    screens once they are ready.
 
 - `kill -USR1 <pid>` makes any Skulk node or runner process write every
   thread's Python stack to its log and keep running. A runner stuck in
@@ -156,6 +205,84 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- The dashboard's English string catalog, the file seeded into Tolgee for
+  translation, is current again. Its exporter had failed since mid-September
+  (one key carried two different English texts, and the Integrations page
+  built tool-description keys at runtime, which the exporter cannot read),
+  so about 300 strings added since then never reached translators. Both are
+  fixed, the exporter also reads calls made through an object such as
+  `context.t(...)`, and the catalog is regenerated; nothing changes in
+  English.
+
+- A plugin request refused from an ordinary LAN address now says how
+  plugins are managed: from a browser on the node itself, the node's
+  dashboard over Tailscale, or, where a route accepts one, a paired device
+  granted plugin access. Every plugin route, reads included, used to
+  refuse a LAN browser with the text about managing pairing invitations
+  from the operator gateway. An owner-only change sent with a paired
+  credential now says to choose "Use direct host access". The
+  dashboard's release source form also suggests `release.json`, the record
+  name releases use and the terminal installer defaults to; it suggested
+  `runtime.json`.
+
+- A refused plugin catalog read, source change or install now says why.
+  The catalog routes answered every refusal with "local plugin operation
+  refused", and `skulk-plugin-service catalog` told the operator to
+  configure a catalog that was already configured, including when the
+  host simply could not reach the catalog address. Each refusal now has
+  one sentence, shared by the API and the terminal, that names the cause
+  (unreachable, not configured, the server's HTTP status, an untrusted
+  publisher, an expired catalog, a superseded listing, and others) and
+  what to do next, without the catalog address or credential. The guided
+  installer also names a catalog outside the host's protocol window.
+
+- A node no longer copies the models it was serving from the store again
+  after a restart, an update or a master election it wins. The startup
+  cleanup ran before any runner existed, so every staged model competed for
+  the 40 GiB recent-use budget, and a model larger than the budget (a 45 GiB
+  video model, for one) was always deleted. In-use models now refresh their
+  last-use time every minute and the startup cleanup keeps any copy used in
+  the last 30 minutes, whatever its size. A model placed on a node is also
+  kept while its runner is retried; an RPC donor placement, which never
+  reads the model, keeps nothing.
+
+- The dashboard no longer opens to a blank page after a Skulk update. Its
+  HTML shell was served without a cache policy, so browsers kept an old
+  shell that asked for script bundles the new build no longer had. The
+  shell and other unhashed files are now revalidated on every load, and
+  the content-hashed bundles under `assets/` are cached as immutable, also
+  when a browser revalidates one.
+
+- Active instance cards name the engine that serves each instance, with
+  its accelerator ("ComfyUI · ROCm", "vLLM · CUDA", "llama.cpp ·
+  Vulkan"). The dashboard guessed the engine from the model card's first
+  compatible backend and labelled every engine other than llama.cpp
+  "Pipeline · MLX Ring", including video models on AMD nodes; it now
+  reads the backend the master resolved for the placement.
+
+- A node no longer crashes when a peer restart changes the master. The
+  node closes its worker's event channel before replacing the worker, and
+  a topology update sent in that window raised out of the worker and
+  stopped the whole node, taking every model instance it hosted with it.
+  Both topology tasks now end quietly when their channel closes, as the
+  worker's other senders already did.
+
+- The Plugins page works when the dashboard is opened over plain HTTP from
+  another machine on the network. Add plugin, Configure, credential
+  changes, setup actions, proposal approvals, and runtime install or
+  activation all minted their operation IDs with `crypto.randomUUID`,
+  which browsers only provide on HTTPS or localhost pages, so each of
+  those buttons failed silently on a LAN dashboard.
+
+- On an AMD Strix Halo node, a Vulkan model (such as the resident steward)
+  is no longer counted against host RAM as well as the VRAM carve it
+  occupies. Admission subtracted a loaded one from both, so a node with room
+  refused a MiniMax H3 video engine beside the steward (about 48 GB offered
+  of a 128 GB node). The worker's pre-load check did the same to a Vulkan
+  model being loaded, and refused the steward beside a video engine holding
+  host RAM while the carve sat empty. A Vulkan model still loading is
+  charged as before, and a ROCm (HIP) model, which does allocate host RAM,
+  is unchanged.
 - A single-node placement whose runner dies is relaunched, and given up
   with a recorded failure if it keeps dying, instead of staying dead behind
   a live instance. Only a peer's failure used to shut a runner down, so a

@@ -71,6 +71,55 @@ def test_spa_client_routes_serve_the_app_shell(tmp_path: Path) -> None:
             assert "skulk-test-shell" in response.text, route
 
 
+def test_app_shell_is_revalidated_on_every_load(tmp_path: Path) -> None:
+    # The shell names the build's hashed bundles; a cached shell after an
+    # update asks for bundles that no longer exist and renders a blank page.
+    with _client_with_dashboard(tmp_path) as client:
+        for route in ["/", *SPA_ROUTES, *(f"{r}/" for r in SPA_ROUTES)]:
+            response = client.get(route)
+            assert response.status_code == 200, route
+            assert response.headers["cache-control"] == "no-cache", route
+
+
+def test_hashed_bundles_are_immutable_and_other_files_revalidate(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "assets").mkdir()
+    (tmp_path / "assets" / "index-Ab12Cd34.js").write_text("console.log(1)")
+    (tmp_path / "favicon.svg").write_text("<svg/>")
+    with _client_with_dashboard(tmp_path) as client:
+        bundle = client.get("/assets/index-Ab12Cd34.js")
+        assert bundle.status_code == 200
+        assert bundle.headers["cache-control"] == "public, max-age=31536000, immutable"
+        favicon = client.get("/favicon.svg")
+        assert favicon.status_code == 200
+        assert favicon.headers["cache-control"] == "no-cache"
+        # A bundle from a replaced build is simply gone.
+        assert client.get("/assets/index-Old00000.js").status_code == 404
+
+
+def test_revalidated_bundles_stay_immutable(tmp_path: Path) -> None:
+    # A cache replaces its stored headers with the 304's, so a bundle
+    # revalidated once must come back immutable, not demoted to no-cache.
+    (tmp_path / "assets").mkdir()
+    (tmp_path / "assets" / "index-Ab12Cd34.js").write_text("console.log(1)")
+    with _client_with_dashboard(tmp_path) as client:
+        first = client.get("/assets/index-Ab12Cd34.js")
+        revalidated = client.get(
+            "/assets/index-Ab12Cd34.js",
+            headers={"If-None-Match": first.headers["etag"]},
+        )
+        assert revalidated.status_code == 304
+        assert (
+            revalidated.headers["cache-control"]
+            == "public, max-age=31536000, immutable"
+        )
+        shell_etag = client.get("/").headers["etag"]
+        shell = client.get("/", headers={"If-None-Match": shell_etag})
+        assert shell.status_code == 304
+        assert shell.headers["cache-control"] == "no-cache"
+
+
 def test_unknown_path_still_404s(tmp_path: Path) -> None:
     # The fallback is scoped to the known client routes — arbitrary paths
     # must keep 404ing so typos and probes don't silently render the app.

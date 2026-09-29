@@ -344,8 +344,11 @@ safety check and an explicit delete path.
 
 A staged copy is **in use** whenever a live runner depends on it, including
 companion repositories that no instance names directly (a speculative-decoding
-draft model, an assistant model, or separate vision weights). In-use copies are
-never evicted automatically.
+draft model, an assistant model, or separate vision weights). A copy is also in
+use while an instance placed on the node needs it, even before its runner
+starts, for example while a failed runner is retried. RPC donors never read the
+model, so a donor placement protects nothing. In-use copies are never evicted
+automatically.
 
 ### The recency budget
 
@@ -355,7 +358,11 @@ deleted. This warm-cache check runs at two specific moments, and only when
 `cleanup_on_deactivate` is `true`:
 
 - when a model instance is shut down, and
-- at node startup, which reconciles copies orphaned by a crash or kill.
+- at node startup, which reconciles copies orphaned by a crash or kill. A copy
+  used within the last 30 minutes is kept whatever its size: in-use models
+  refresh their last-use time every minute, so this keeps what was serving
+  before a restart, an update or a master change, when the same models are
+  placed again.
 
 `cleanup_on_deactivate` is the on/off switch for that check:
 

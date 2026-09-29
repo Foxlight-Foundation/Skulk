@@ -944,7 +944,7 @@ missing, reinstall the complete qualified package before retrying setup.
 
 The `skulk-plugin-service setup` command prepares a verified independent
 manager runtime and registers a fixed nonroot system service on Apple Silicon
-macOS or Linux x86_64 with systemd. Run it as the existing Skulk owner; only its fixed registration helper requests local elevation.
+macOS or Linux with systemd. Run it as the existing Skulk owner; only its fixed registration helper requests local elevation.
 It generates service storage and a local profile connection without configuration
 file editing. `skulk-plugin-service status` separates retained setup progress from
 current management availability and registered-runtime integrity.

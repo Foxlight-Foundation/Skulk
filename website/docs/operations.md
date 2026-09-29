@@ -48,7 +48,11 @@ The first three use the least-recently-used policy below. The operator purge is
 an explicit unconditional reset of staged copies.
 
 A staged model becomes an **eviction candidate** when no live runner uses
-it. Candidates are kept newest-first by last use up to the
+it and no instance placed on the node needs it. At node startup a model used
+within the last 30 minutes is also kept, whatever its size: in-use models
+refresh their last-use time every minute, so a restart, an update or a master
+change does not copy the models that were serving from the store again.
+Candidates are kept newest-first by last use up to the
 `staging_keep_recent_gb` grace budget, and everything beyond the budget is
 deleted.
 

@@ -1,10 +1,11 @@
 """Journal local transport renewal without changing durable plugin identities."""
 
 from contextlib import ExitStack
+from ipaddress import ip_address
 from pathlib import Path
 from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
 from skulk.extensions.runtime_artifacts import Digest, Identifier
 from skulk.extensions.runtime_files import RuntimeLock, read_private, write_private
@@ -13,6 +14,72 @@ ProfileIdentifier = Annotated[str, Field(pattern=r"^[a-f0-9]{32}$")]
 InstallationIdentifier = Annotated[
     str, Field(pattern=r"^managed\.[a-z0-9][a-z0-9._-]{0,80}$")
 ]
+
+
+def serve_address(value: str) -> str:
+    """Refuse a serve address that is not one routable unicast IP address."""
+    try:
+        address = ip_address(value)
+    except ValueError:
+        raise ValueError("a serve address is one IP address") from None
+    if address.is_loopback or address.is_unspecified or address.is_multicast:
+        raise ValueError("a serve address is a routable unicast address")
+    return value
+
+
+ServeAddress = Annotated[str, AfterValidator(serve_address)]
+"""An address the host lets installed capabilities serve on besides loopback."""
+
+
+def _omit_absent(value: str | None) -> bool:
+    return value is None
+
+
+class ServeBinding(BaseModel):
+    """Where an installation's capabilities may serve besides loopback.
+
+    Written as ``serve.json`` beside each installation's ``owner.json``, and at
+    the manager root to record the address the installations last received.
+    A separate file on purpose: owners parse ``owner.json`` strictly, so an
+    owner built before this setting would refuse a new field there, while it
+    never reads this file.
+    """
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+    serve_host: ServeAddress | None = Field(
+        default=None,
+        description="The node's Tailscale address; absent without Tailscale.",
+    )
+
+
+def read_serve_host(path: Path) -> str | None:
+    """The serve address recorded at ``path``; none when absent or unreadable."""
+    try:
+        return ServeBinding.model_validate_json(read_private(path)).serve_host
+    except (OSError, ValueError):
+        return None
+
+
+def publish_serve_host(
+    root: Path, installations: tuple[str, ...], serve_host: str
+) -> None:
+    """Give every stopped installation the serve address, then record it at the root.
+
+    The caller owns the host manager lock and has stopped every owner; the
+    per-installation fences refuse the write while any of them survives.
+    Owners read the address once at start. The root record is written last,
+    so an interrupted write leaves it naming the previous address and the
+    next attachment writes every installation again.
+    """
+    binding = ServeBinding(serve_host=serve_host).model_dump_json().encode()
+    with ExitStack() as locks:
+        for identifier in installations:
+            installation = root / "installations" / identifier
+            for name in ("manager.lock", "service.lock", "supervisor.lock"):
+                locks.callback(RuntimeLock(installation, name).close)
+        for identifier in installations:
+            write_private(root / "installations" / identifier / "serve.json", binding)
+        write_private(root / "serve.json", binding)
 
 
 class OwnerBinding(BaseModel):
@@ -50,6 +117,15 @@ class AttachmentRequest(BaseModel):
     )
     skulk_build_sha256: Digest = Field(
         description="Build measured in the live Skulk process."
+    )
+    serve_host: ServeAddress | None = Field(
+        default=None,
+        exclude_if=_omit_absent,
+        description=(
+            "The node's Tailscale address as the live Skulk process last saw "
+            "it. Absent when it has seen none yet: the manager keeps the "
+            "address its installations already have."
+        ),
     )
 
 

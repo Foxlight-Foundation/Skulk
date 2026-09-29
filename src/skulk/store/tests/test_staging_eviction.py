@@ -196,6 +196,25 @@ def test_in_use_models_are_never_evicted(tmp_path: Path) -> None:
     assert (tmp_path / "FoxlightAI--base-mtp").exists()
 
 
+def test_recently_used_models_survive_whatever_their_size(tmp_path: Path) -> None:
+    """The startup case: a model used within the window is kept even when it
+    alone exceeds the budget, while older models still compete for it."""
+    _stage_model(tmp_path, "org/serving", size_bytes=300, last_used_age_seconds=60)
+    _stage_model(tmp_path, "org/recent-idle", size_bytes=50, last_used_age_seconds=3000)
+    _stage_model(tmp_path, "org/old-idle", size_bytes=50, last_used_age_seconds=9000)
+
+    report = enforce_staging_budget(
+        tmp_path,
+        keep_recent_bytes=60,
+        protect_used_since=time.time() - 1800,
+    )
+
+    assert report.evicted_model_ids == ["org/old-idle"]
+    assert report.retained_candidate_bytes == 50
+    assert (tmp_path / "org--serving").exists()
+    assert (tmp_path / "org--recent-idle").exists()
+
+
 def test_touch_last_used_refreshes_lru_position(tmp_path: Path) -> None:
     """A model staged long ago but used just now must sort newest.
 

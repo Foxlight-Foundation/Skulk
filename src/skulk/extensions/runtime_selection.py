@@ -1,6 +1,7 @@
 """Journaled stopped-owner runtime selection with retained logical plugin state."""
 
 import os
+from collections.abc import Callable
 from pathlib import Path
 from typing import Literal, Self, final
 from uuid import uuid4
@@ -147,6 +148,184 @@ def _manifest(runtime: VerifiedRuntime) -> dict[str, JsonValue]:
     return _JSON_OBJECT.validate_python(release["manifest"], strict=True)
 
 
+CARRYING_PROTOCOL = 3
+"""First plugin protocol whose owners carry settings across a compatible schema.
+
+An owner binds an installation's settings to the exact schema they were saved
+under. From this protocol on, an owner validates them against a changed schema
+once and rebinds them; an earlier owner refuses them, so its release still needs
+an identical schema to keep them.
+"""
+
+_ANNOTATIONS = frozenset(
+    {"title", "description", "default", "examples", "$comment", "deprecated"}
+)
+"""JSON Schema keywords that describe a value without constraining it."""
+
+_SCHEMA_MAPS = frozenset(
+    {"properties", "patternProperties", "$defs", "definitions", "dependentSchemas"}
+)
+"""Keywords whose value maps names to schemas; the names are data, not keywords."""
+
+_SCHEMA_VALUED = frozenset(
+    {
+        "items",
+        "additionalItems",
+        "additionalProperties",
+        "contains",
+        "propertyNames",
+        "not",
+        "if",
+        "then",
+        "else",
+        "unevaluatedItems",
+        "unevaluatedProperties",
+        "contentSchema",
+    }
+)
+_SCHEMA_LISTS = frozenset({"allOf", "anyOf", "oneOf", "prefixItems"})
+
+_WIDENING = frozenset({"items", "additionalItems", "additionalProperties"})
+"""Keywords whose schema, accepting more, makes the enclosing schema accept more."""
+
+_WIDENING_LISTS = frozenset({"allOf", "anyOf", "prefixItems"})
+"""List keywords with the same property: each branch or position counts alone."""
+
+
+def configuration_schema_compatible(installed: JsonValue, candidate: JsonValue) -> bool:
+    """Whether every setting the installed schema accepts, the candidate accepts too.
+
+    A release may reword a setting, change its default, or add an optional
+    setting to a closed object, and an installation keeps its settings. Anything
+    that could refuse a stored value (another type, a changed bound, pattern or
+    enum, a removed or newly required setting, a property added to an open
+    object or to one whose patterns may already admit it) still needs migration.
+
+    Loosening is followed only through keywords where a schema that accepts more
+    makes its parent accept more: object properties, array items,
+    additionalProperties, allOf and anyOf. Under every other keyword (not,
+    if/then/else, oneOf, contains, propertyNames, dependentSchemas, and existing
+    definitions, which a reference can reach from anywhere) accepting more can
+    refuse more, so only annotations may change there. The comparison is
+    structural and never evaluates a schema.
+    """
+    if isinstance(installed, dict) and isinstance(candidate, dict):
+        return _object_compatible(installed, candidate)
+    return installed == candidate
+
+
+def _same_constraints(installed: JsonValue, candidate: JsonValue) -> bool:
+    """Whether two schemas differ at most in their annotations, at any depth."""
+    if not (isinstance(installed, dict) and isinstance(candidate, dict)):
+        return installed == candidate
+    old = {key: value for key, value in installed.items() if key not in _ANNOTATIONS}
+    new = {key: value for key, value in candidate.items() if key not in _ANNOTATIONS}
+    return set(old) == set(new) and all(
+        _same_keyword(key, value, new[key]) for key, value in old.items()
+    )
+
+
+def _same_keyword(key: str, installed: JsonValue, candidate: JsonValue) -> bool:
+    """Compare one keyword's values, looking inside them only where schemas are."""
+    if key in _SCHEMA_MAPS:
+        return (
+            isinstance(installed, dict)
+            and isinstance(candidate, dict)
+            and set(installed) == set(candidate)
+            and all(
+                _same_constraints(value, candidate[name])
+                for name, value in installed.items()
+            )
+        )
+    if key in _SCHEMA_VALUED:
+        return _same_constraints(installed, candidate)
+    if key in _SCHEMA_LISTS:
+        return _pairwise(installed, candidate, _same_constraints)
+    # Constraints and data (type, bounds, enum, const, $ref) compare exactly;
+    # a widened one is admitted only by migration.
+    return installed == candidate
+
+
+def _pairwise(
+    installed: JsonValue,
+    candidate: JsonValue,
+    compare: Callable[[JsonValue, JsonValue], bool],
+) -> bool:
+    """Whether two lists of schemas have one length and pass ``compare`` in order."""
+    return (
+        isinstance(installed, list)
+        and isinstance(candidate, list)
+        and len(installed) == len(candidate)
+        and all(
+            compare(first, second)
+            for first, second in zip(installed, candidate, strict=True)
+        )
+    )
+
+
+def _object_compatible(
+    installed: dict[str, JsonValue], candidate: dict[str, JsonValue]
+) -> bool:
+    old = {key: value for key, value in installed.items() if key not in _ANNOTATIONS}
+    new = {key: value for key, value in candidate.items() if key not in _ANNOTATIONS}
+    handled = {"properties", "required", "$defs", "definitions"}
+    if set(old) - handled != set(new) - handled:
+        return False
+    for key, value in old.items():
+        if key in handled:
+            continue
+        other = new[key]
+        if key in _WIDENING:
+            compatible = configuration_schema_compatible(value, other)
+        elif key in _WIDENING_LISTS:
+            compatible = _pairwise(value, other, configuration_schema_compatible)
+        else:
+            compatible = _same_keyword(key, value, other)
+        if not compatible:
+            return False
+    old_required = old.get("required", [])
+    new_required = new.get("required", [])
+    if not (isinstance(old_required, list) and isinstance(new_required, list)):
+        return False
+    # A setting that becomes optional still accepts its stored value; one that
+    # becomes required refuses settings saved without it.
+    if not set(map(str, new_required)) <= set(map(str, old_required)):
+        return False
+    for keyword in ("$defs", "definitions"):
+        old_definitions = old.get(keyword, {})
+        new_definitions = new.get(keyword, {})
+        if not (
+            isinstance(old_definitions, dict) and isinstance(new_definitions, dict)
+        ):
+            return False
+        # A reference can reach an existing definition from any keyword, so it
+        # may change only its annotations. A new one is unreachable from
+        # anything the installed schema accepted.
+        if any(
+            name not in new_definitions
+            or not _same_constraints(value, new_definitions[name])
+            for name, value in old_definitions.items()
+        ):
+            return False
+    old_properties = old.get("properties", {})
+    new_properties = new.get("properties", {})
+    if not (isinstance(old_properties, dict) and isinstance(new_properties, dict)):
+        return False
+    if any(
+        name not in new_properties
+        or not configuration_schema_compatible(value, new_properties[name])
+        for name, value in old_properties.items()
+    ):
+        return False
+    added = set(new_properties) - set(old_properties)
+    # Stored settings hold no undeclared key only when the installed object was
+    # closed and had no patterns that could admit one; an added property there
+    # never meets a stored value.
+    return not added or (
+        old.get("additionalProperties") is False and not old.get("patternProperties")
+    )
+
+
 @final
 class RuntimeSelector:
     """Select or withdraw one isolated runtime only while its owner is stopped.
@@ -276,7 +455,8 @@ class RuntimeSelector:
     ) -> RuntimeSelection:
         current = self.current()
         release = runtime.claims.release
-        schema = _manifest(runtime).get("configuration_schema")
+        manifest = _manifest(runtime)
+        schema = manifest.get("configuration_schema")
         if current is not None:
             if current.bundle_id != release.manifest.bundle_id:
                 raise ValueError("installation bundle identity differs")
@@ -292,7 +472,14 @@ class RuntimeSelector:
                 and current.state_schema not in release.compatible_state_schemas
             ):
                 raise ValueError("incompatible state migration")
-            if current.configuration_schema != schema:
+            protocol = manifest.get("protocol")
+            carries = isinstance(protocol, int) and protocol >= CARRYING_PROTOCOL
+            if current.configuration_schema != schema and not (
+                carries
+                and configuration_schema_compatible(
+                    current.configuration_schema, schema
+                )
+            ):
                 raise ValueError("configuration schema requires migration")
         elif rollback:
             raise ValueError("rollback requires an existing selection")

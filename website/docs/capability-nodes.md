@@ -41,10 +41,15 @@ the capability. Available actions come from the provider; a capability without
 an application interface can still expose useful operations. Opening an interface
 does not itself launch a model or submit work.
 
-Application links must be reachable from your browser. A surface published only
-on its host's loopback address needs a browser on that host; discovery alone does
-not make it remotely accessible. Configuration and management actions can also
-require access to the dashboard on the capability's host.
+Application links must be reachable from your browser. When a capability's host
+runs Tailscale, Skulk gives the host's plugins its Tailscale address. A plugin
+built for this serves its screens there as well as on loopback, so any browser on
+your tailnet can open them, and the local network cannot. Tailscale's own access
+rules decide which of your machines reach the host at all. On a host without
+Tailscale, or for a plugin built before this, a surface on the host's loopback
+address needs a browser on that host; discovery alone does not make it remotely
+accessible. Configuration and management actions can also require access to the
+dashboard on the capability's host.
 
 ## Example: Skulk Video Studio
 
@@ -90,6 +95,27 @@ take-management contracts. Its UI is one way to use those capabilities. The
 application is packaged separately from Skulk core and calls Skulk through its
 APIs, illustrating how developers can build applications on the platform.
 
+### What the Studio needs
+
+The Studio renders through Skulk, so the cluster must be able to serve MiniMax
+H3 before a render can start:
+
+- **A render node.** A Linux node with an NVIDIA GPU (CUDA) or an AMD Strix
+  Halo (ROCm), with about 64 GB of GPU memory. Skulk provisions the ComfyUI
+  engine that serves H3 on these nodes; `uv run skulk doctor` reports its
+  state. Apple Silicon nodes cannot render H3.
+- **Video models turned on.** Add `SKULK_ENABLE_VIDEO_MODELS=true` to
+  `~/.skulk/skulk.env` on each node and restart Skulk. Video model cards stay
+  hidden until then.
+- **A placed model.** Place a MiniMax H3 card (FL2VA or Ref2VA) from **Model
+  Store**. Each is about 49 GB to download. Place it before installing the
+  Studio; if the Studio was installed first and its setup check reports that
+  no video model is placed, disable and re-enable it in **Plugins** once the
+  model is ready.
+- **Licence terms.** MiniMax H3 open-weight use is territorially scoped by its
+  licence. The model card shows the notice before download.
+- **Optional:** a ready chat model for **Refine with guides**.
+
 ## Manage plugins
 
 Skulk core owns discovery, routing, plugin management, and the dashboard. A
@@ -98,6 +124,16 @@ provider-specific policy. Use **Plugins** to install and manage these packages;
 use their topology actions to discover and open what they provide.
 
 ![Managed plugin inventory in the live dashboard](./imgs/dashboard-plugins.png)
+
+Each node manages its own plugins, and admits a browser that reaches it over
+Tailscale. So an owner on any tailnet machine can manage every node's plugins:
+- **Plugins** lists the cluster's other nodes, each linking to that node's own
+  Plugins page at its Tailscale address.
+- A capability's **Manage on** entry, followed by its host's name, in its
+  topology flyout and its details, opens that host's dashboard on the plugin.
+
+A node that reports no Tailscale address is named without a link; open its
+dashboard on the node itself.
 
 Process separation helps lifecycle management; it is not a sandbox against
 malicious code running as the same operating-system user. Install bundles from
@@ -113,6 +149,16 @@ platforms, exact runtime compatibility, permissions, required services, costs,
 and cleanup procedures before installing. A matching version label alone is not
 proof of compatible bytes or dependencies.
 
+A publisher can also give you a signed catalog: an address and the publisher
+trust to verify it, often as a single invitation code. Connect it under
+**Plugins**, then **Browse**, which lists its plugins and says which releases fit
+this host (see [From a catalog](#from-a-catalog)). From a terminal,
+`skulk-plugin-service catalog` lists the releases that match this host, and
+`skulk-plugin-service install-plugin --from-catalog BUNDLE_ID` installs one
+through the same consent steps as a single release (prefix both with
+`uv run` from the Skulk directory on a source install). See
+[Extensions](extensions.md#owner-configured-private-release-source).
+
 The RunPod cloud-capacity plugin is distributed privately to owners with access.
 Its supplier must provide the compatible release,
 trusted publisher information, download access, and complete administration
@@ -124,17 +170,52 @@ Open **Plugins** on the host that will manage the installation. Initial service
 setup and publisher trust require owner access; a paired browser cannot grant
 itself that authority.
 
-1. Prepare the host's plugin-management service according to the supplied release
-   instructions. This can require a one-time local administrator step.
-2. In **Add plugin**, enter the supplied release source, metadata filename,
+First, set up the host's plugin-management service once. On a source install,
+run `uv run skulk-plugin-service setup` from the Skulk directory as the user who
+runs Skulk (see [Install](install.md#add-capabilities-optional)). It asks for
+your administrator password to register the service (Apple Silicon macOS, or
+Linux with systemd). Until it is ready, **Plugins** reports that local runtime
+management is unavailable; `uv run skulk-plugin-service status` shows its
+progress.
+
+### From a catalog
+
+1. Open **Plugins**, then **Browse**. If the host has no catalog yet, paste the
+   invitation code from the publisher (it starts with `skulk-catalog:`), or
+   enter the catalog address, publisher name and publisher key, then select
+   **Connect**. The code carries no authority of its own: every release is still
+   verified against the publisher key before anything installs.
+2. Each card is one plugin. **Review and install** opens its review. An installed
+   plugin with a newer release that fits this host offers **Review update**
+   instead, including one that stopped fitting after a Skulk update. A card that
+   reads **Not built for this host** has no release for this host's Skulk build
+   or platform; its publisher has to build one.
+3. The review shows what the release's signed listing says: publisher, version,
+   download size, platforms, permissions, the screens it opens, the capabilities
+   it adds, and whether any of its actions can spend money. Accept the
+   permissions, then select **Install** or **Update**.
+4. The page follows the download, staging, and activation. You can leave it:
+   when you return in the same browser, **Browse** picks the install up where it
+   was and reads its progress back instead of starting it again.
+5. **Set it up** shows what each of the plugin's nodes reports. A node that
+   needs you offers the plugin's own setup checks and **Open settings**, which
+   opens its configuration and credentials under **Installed**. Its screens open
+   from here once it reports ready.
+
+An update replaces the release on the same installation; its settings and saved
+work stay.
+
+### From a release source
+
+1. In **Add plugin**, enter the supplied release source, metadata filename,
    publisher trust, and feed credential where required.
-3. Save the source and inspect the release. Review its signature, compatibility,
+2. Save the source and inspect the release. Review its signature, compatibility,
    expiry, and permissions before downloading.
-4. Download and install, then accept the reviewed permissions and activate the
+3. Download and install, then accept the reviewed permissions and activate the
    staged release.
-5. Configure the capability, supply credentials through the separate credential
+4. Configure the capability, supply credentials through the separate credential
    controls, complete its setup actions, and select **Check setup**.
-6. Correct any reported issues and enable the capability once checks pass.
+5. Correct any reported issues and enable the capability once checks pass.
 
 Installation, activation, configuration, readiness, and enablement are different
 states. An installed plugin can expose setup controls without advertising a ready

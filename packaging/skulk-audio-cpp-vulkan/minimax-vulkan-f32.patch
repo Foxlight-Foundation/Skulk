@@ -1,0 +1,144 @@
+diff --git a/include/engine/community_models/minimax_music3/vulkan_precision.h b/include/engine/community_models/minimax_music3/vulkan_precision.h
+new file mode 100644
+index 0000000..238b6fa
+--- /dev/null
++++ b/include/engine/community_models/minimax_music3/vulkan_precision.h
+@@ -0,0 +1,30 @@
++#pragma once
++
++#include "engine/framework/core/module.h"
++
++#include <ggml.h>
++
++namespace engine::models::minimax_music3 {
++
++// MiniMax's quantized projections amplify F16 accumulation error on Vulkan.
++// Keep this policy in the family adapter: other families and backends retain
++// their existing precision, and the Vulkan KV cache still uses upstream F16.
++inline ggml_prec vulkan_matmul_precision(core::BackendType backend_type) {
++    return backend_type == core::BackendType::Vulkan ? GGML_PREC_F32 : GGML_PREC_DEFAULT;
++}
++
++// Stamp the completed MiniMax graph before allocation/pipeline selection.
++// This also covers attention and projections constructed by shared modules.
++inline void apply_vulkan_matmul_precision(core::BackendType backend_type, ggml_cgraph * graph) {
++    if (backend_type != core::BackendType::Vulkan) {
++        return;
++    }
++    for (int index = 0; index < ggml_graph_n_nodes(graph); ++index) {
++        ggml_tensor * node = ggml_graph_node(graph, index);
++        if (node->op == GGML_OP_MUL_MAT) {
++            ggml_mul_mat_set_prec(node, GGML_PREC_F32);
++        }
++    }
++}
++
++}  // namespace engine::models::minimax_music3
+diff --git a/src/community_models/minimax_music3/condition_encoder.cpp b/src/community_models/minimax_music3/condition_encoder.cpp
+index 5e68305..4f187ec 100644
+--- a/src/community_models/minimax_music3/condition_encoder.cpp
++++ b/src/community_models/minimax_music3/condition_encoder.cpp
+@@ -1,4 +1,5 @@
+ #include "engine/community_models/minimax_music3/condition_encoder.h"
++#include "engine/community_models/minimax_music3/vulkan_precision.h"
+
+ #include "engine/framework/core/backend.h"
+ #include "engine/framework/debug/profiler.h"
+@@ -186,6 +187,7 @@ struct MiniMaxMusic3ConditionEncoderRuntime::Impl {
+         output = interpolated.tensor;
+         graph = ggml_new_graph_custom(ggml.get(), 65536, false);
+         ggml_build_forward_expand(graph, output);
++        apply_vulkan_matmul_precision(execution.backend_type(), graph);
+         gallocr.reset(ggml_gallocr_new(ggml_backend_get_default_buffer_type(execution.backend())));
+         if (gallocr == nullptr || !ggml_gallocr_reserve(gallocr.get(), graph) ||
+             !ggml_gallocr_alloc_graph(gallocr.get(), graph)) {
+diff --git a/src/community_models/minimax_music3/depth_decoder.cpp b/src/community_models/minimax_music3/depth_decoder.cpp
+index c584497..b5756b8 100644
+--- a/src/community_models/minimax_music3/depth_decoder.cpp
++++ b/src/community_models/minimax_music3/depth_decoder.cpp
+@@ -1,4 +1,5 @@
+ #include "engine/community_models/minimax_music3/depth_decoder.h"
++#include "engine/community_models/minimax_music3/vulkan_precision.h"
+
+ #include "engine/framework/core/backend.h"
+ #include "engine/framework/debug/profiler.h"
+@@ -358,6 +359,7 @@ struct MiniMaxMusic3DepthDecoderRuntime::Impl {
+         out.graph = ggml_new_graph_custom(out.ggml.get(), 262144, false);
+         ggml_build_forward_expand(out.graph, out.hidden);
+         ggml_build_forward_expand(out.graph, out.logits);
++        apply_vulkan_matmul_precision(execution.backend_type(), out.graph);
+         out.gallocr.reset(ggml_gallocr_new(ggml_backend_get_default_buffer_type(execution.backend())));
+         if (out.gallocr == nullptr || !ggml_gallocr_reserve(out.gallocr.get(), out.graph) ||
+             !ggml_gallocr_alloc_graph(out.gallocr.get(), out.graph)) {
+@@ -396,6 +398,7 @@ struct MiniMaxMusic3DepthDecoderRuntime::Impl {
+         feedback.output = scaled.tensor;
+         feedback.graph = ggml_new_graph_custom(feedback.ggml.get(), 65536, false);
+         ggml_build_forward_expand(feedback.graph, feedback.output);
++        apply_vulkan_matmul_precision(execution.backend_type(), feedback.graph);
+         feedback.gallocr.reset(ggml_gallocr_new(ggml_backend_get_default_buffer_type(execution.backend())));
+         if (feedback.gallocr == nullptr || !ggml_gallocr_reserve(feedback.gallocr.get(), feedback.graph) ||
+             !ggml_gallocr_alloc_graph(feedback.gallocr.get(), feedback.graph)) {
+diff --git a/src/community_models/minimax_music3/flow_transformer.cpp b/src/community_models/minimax_music3/flow_transformer.cpp
+index 36e8409..60d8f10 100644
+--- a/src/community_models/minimax_music3/flow_transformer.cpp
++++ b/src/community_models/minimax_music3/flow_transformer.cpp
+@@ -1,4 +1,5 @@
+ #include "engine/community_models/minimax_music3/flow_transformer.h"
++#include "engine/community_models/minimax_music3/vulkan_precision.h"
+
+ #include "engine/framework/core/backend.h"
+ #include "engine/framework/modules/activation_modules.h"
+@@ -346,6 +347,7 @@ struct MiniMaxMusic3FlowTransformerRuntime::Impl {
+         slot.output = x.tensor;
+         slot.graph = ggml_new_graph_custom(slot.ggml.get(), 524288, false);
+         ggml_build_forward_expand(slot.graph, slot.output);
++        apply_vulkan_matmul_precision(execution.backend_type(), slot.graph);
+         slot.gallocr.reset(ggml_gallocr_new(ggml_backend_get_default_buffer_type(execution.backend())));
+         if (slot.gallocr == nullptr || !ggml_gallocr_reserve(slot.gallocr.get(), slot.graph) ||
+             !ggml_gallocr_alloc_graph(slot.gallocr.get(), slot.graph)) {
+diff --git a/src/community_models/minimax_music3/global_lm.cpp b/src/community_models/minimax_music3/global_lm.cpp
+index abdc823..b6dc123 100644
+--- a/src/community_models/minimax_music3/global_lm.cpp
++++ b/src/community_models/minimax_music3/global_lm.cpp
+@@ -1,4 +1,5 @@
+ #include "engine/community_models/minimax_music3/global_lm.h"
++#include "engine/community_models/minimax_music3/vulkan_precision.h"
+
+ #include "engine/framework/modules/weight_binding.h"
+
+@@ -142,7 +143,7 @@ modules::QwenCausalDecodeRuntimeConfig make_minimax_music3_global_lm_runtime_con
+     out.decoder.stack.rope_theta = config.qwen.rope_theta;
+     out.decoder.stack.rope_type = GGML_ROPE_TYPE_NEOX;
+     out.decoder.stack.attention_precision = GGML_PREC_F32;
+-    out.decoder.stack.projection_precision = GGML_PREC_DEFAULT;
++    out.decoder.stack.projection_precision = vulkan_matmul_precision(backend_type);
+     out.decoder.stack.use_qk_norm = true;
+     out.decoder.stack.activation_cast = activation_cast_policy(backend_type);
+     out.decoder.stack.runtime.attention.prefill_mode = modules::QwenDecoderAttentionMode::FlashGroupedViewKV;
+@@ -156,7 +157,7 @@ modules::QwenCausalDecodeRuntimeConfig make_minimax_music3_global_lm_runtime_con
+     }
+     out.decoder.logits_size = minimax_music3_lm_head_output_size(lm_head_layout, config.qwen.vocab_size);
+     out.decoder.logits_mode = modules::QwenCausalDecoderLogitsMode::LastStep;
+-    out.decoder.lm_head_precision = GGML_PREC_DEFAULT;
++    out.decoder.lm_head_precision = vulkan_matmul_precision(backend_type);
+     out.readback_round_type = GGML_TYPE_BF16;
+     if (backend_type == core::BackendType::Metal) {
+         out.decoder.lm_head_input_type = GGML_TYPE_F32;
+diff --git a/src/community_models/minimax_music3/vocoder.cpp b/src/community_models/minimax_music3/vocoder.cpp
+index 0e71ff7..37e27a2 100644
+--- a/src/community_models/minimax_music3/vocoder.cpp
++++ b/src/community_models/minimax_music3/vocoder.cpp
+@@ -1,4 +1,5 @@
+ #include "engine/community_models/minimax_music3/vocoder.h"
++#include "engine/community_models/minimax_music3/vulkan_precision.h"
+
+ #include "engine/framework/core/backend.h"
+ #include "engine/framework/core/backend_weight_store.h"
+@@ -270,6 +271,7 @@ struct MiniMaxMusic3VocoderRuntime::Impl {
+         output = x.tensor;
+         graph = ggml_new_graph_custom(ggml.get(), 262144, false);
+         ggml_build_forward_expand(graph, output);
++        apply_vulkan_matmul_precision(execution.backend_type(), graph);
+         gallocr.reset(ggml_gallocr_new(ggml_backend_get_default_buffer_type(execution.backend())));
+         if (gallocr == nullptr || !ggml_gallocr_reserve(gallocr.get(), graph) ||
+             !ggml_gallocr_alloc_graph(gallocr.get(), graph)) {

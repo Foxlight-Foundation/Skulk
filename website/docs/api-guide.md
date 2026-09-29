@@ -1726,6 +1726,29 @@ it. Returns `{ "id": ..., "object": "video.deleted", "deleted": true }`.
 
 ## Music generation
 
+Music model placement checks the selected backend's complete estimated
+footprint. ACE-Step CPU serving includes a 10 GiB working-buffer reserve beyond
+its weight estimate and regular runtime overhead; insufficient capacity returns
+an actionable mount error before a generation job is admitted.
+CUDA and Vulkan serving also reserve transient generation buffers beyond
+weight/runtime overhead: 10 GiB for ACE-Step and 2 GiB for MiniMax. MiniMax Metal
+reserves 5 GiB beyond weight/runtime overhead against its system-RAM ceiling.
+The same estimate governs mounting and worker admission; a matching hardware
+class with insufficient capacity cannot place the model.
+CUDA music preparation requires the package's compiled GPU class in both
+live node facts and the signed support claim: SM 8.9 for Linux amd64 and
+SM 12.1 for Linux arm64. The signed claim must name the platform's exact managed
+build. Managed packages require one observed NVIDIA device with a known matching
+compute class; multiple devices, mixed classes, and unknown classes cannot be
+admitted until execution and memory accounting can select the same physical
+device. Each published native build retains those restrictions when restored
+from cache. A generic NVIDIA claim cannot widen a managed package's compiled
+target, and package availability alone cannot place a model. A qualified
+operator-provided primary CUDA binary can use its own exact signed build claim.
+When a dedicated CUDA wheel is already cached, configure
+`SKULK_AUDIO_CPP_CUDA_BIN` for that operator binary as well; startup cache
+rehydration otherwise prefers the dedicated build over a primary-only override.
+
 Music generation is an asynchronous job API for a mounted `TextToMusic` card.
 The model's `/v1/models` `music` object identifies its family, lyric rule,
 accepted `min_seconds` and `max_seconds`, and `wav` output format. Music uses
@@ -2211,7 +2234,9 @@ curl http://localhost:52415/store/storage
 
 Staged copies are managed automatically when the model store is on: when an
 instance shuts down (and at node startup, which reconciles copies orphaned
-by a crash), not-in-use staged models are kept newest-first up to the
+by a crash while keeping any copy used within the last 30 minutes), staged
+models that no live runner uses and no instance placed on the node needs are
+kept newest-first up to the
 `staging_keep_recent_gb` grace budget (default 40 GiB) and evicted beyond
 it. Set `cleanup_on_deactivate: false` in the staging config to keep every
 staged copy while disk is healthy. Independently, before each store-backed
@@ -3818,6 +3843,14 @@ be present. Forwarding headers are refused. Scoped paired operators send
 `Authorization: Bearer <access token>` over HTTPS, the authenticated relay, or
 the verified direct owner transport. An invalid bearer token never falls back
 to local owner authority. Read and mutation responses use `Cache-Control: no-store`.
+A request without a credential from anywhere else answers `403` saying how
+plugins are managed: from a browser on the node itself (localhost) or through
+Tailscale by its MagicDNS name or Tailscale IP, or, for routes that accept a
+scope, by a paired device granted plugin access. An owner-only route names only
+the direct routes. A request carrying a paired credential to an owner-only
+route is told that the change needs direct owner access: a browser on the node
+or over Tailscale chooses "Use direct host access", and an API client sends the
+request without the credential.
 
 Unknown providers or nodes return `404`. Revision/schema conflicts and provider
 validation refusals return `409`; callers must reload before retrying a stale
@@ -3987,11 +4020,11 @@ without restart. Missing setup returns an actionable unavailable response.
 
 | Method | Path | Parameters and behavior |
 | --- | --- | --- |
-| GET | `/v1/plugins/managed` | Requires `plugins:read`. Returns `installations`, at most sixteen entries, with `plugin_id`, `selected_digest`, `selection_revision`, `enabled`, `service`, `stale`, `error_code`, `operation_id` and `operation_state`. `reload_runtime` is true when the manager can select a staged runtime and restart on request; a host reads it before asking, so a manager from before that request is told apart from one refusing a generation. Pending or selected operation references allow reconnect to resume observation without repeating a mutation. |
+| GET | `/v1/plugins/managed` | Requires `plugins:read`. Returns `installations`, at most sixteen entries, with `plugin_id`, `release`, `selected_digest`, `selection_revision`, `enabled`, `service`, `stale`, `error_code`, `operation_id` and `operation_state`. `release` names the selected signed release from its staged metadata: `bundle_id`, `title` (null when the manifest declares none), `bundle_version`, `publisher` and `sequence`. It is null before a release is staged or when that metadata cannot be read, and it is display information only, never a trust or compatibility decision. `reload_runtime` is true when the manager can select a staged runtime and restart on request; a host reads it before asking, so a manager from before that request is told apart from one refusing a generation. Pending or selected operation references allow reconnect to resume observation without repeating a mutation. |
 | POST | `/v1/plugins/managed/installations` | Requires `plugins:manage`. Body: `plugin_id` in the `managed.*` namespace. Registers an empty installation and returns its observation. Does not download, stage or enable a release. |
 | GET | `/v1/plugins/managed/installations/{plugin_id}` | Requires `plugins:read`. Returns `installation` observation and `selection`, nullable before a release is selected. |
 | DELETE | `/v1/plugins/managed/installations/{plugin_id}` | Requires `plugins:manage`. No body. Removes one installation that is uninstalled, or that never selected a release, together with everything it retained: lifecycle records, staged generations, feed credentials and cleanup state. Returns `plugin_id` and `purged: true`; the installation leaves the inventory. A live installation, or one with an operation or a release download under way, is refused with 409 and left unchanged. The terminal equivalent is `skulk-plugin-service purge-plugin <plugin_id>`. |
-| POST | `/v1/plugins/managed/installations/{plugin_id}/operations` | Requires `plugins:manage`. Body: `operation_id` (32 lowercase hexadecimal characters), `action` (`activate`, `select`, `disable` or `uninstall`), `expected_revision` (nonnegative integer), and activation/selection-only `runtime_digest`, optional `rollback` and `accept_permissions` booleans. Returns the retained `LifecycleOperation`. Activation and stopped selection accept only an already staged, verified generation. `select` keeps its owner stopped until a later explicit `activate` request. An explicit `disable` can withdraw a stalled activation/selection, including a revoked release, using the current selection revision. Live work and a pending withdrawal cannot be superseded. `activate` and `select` revalidate the staged metadata; a runtime that a host update has moved outside the protocol window answers `409` with the sentence the guided installer prints (which protocol the host accepts, which the runtime offers, and that the fix is to update Skulk on this host or choose a release published for it). |
+| POST | `/v1/plugins/managed/installations/{plugin_id}/operations` | Requires `plugins:manage`. Body: `operation_id` (32 lowercase hexadecimal characters), `action` (`activate`, `select`, `disable` or `uninstall`), `expected_revision` (nonnegative integer), and activation/selection-only `runtime_digest`, optional `rollback` and `accept_permissions` booleans. Returns the retained `LifecycleOperation`. Activation and stopped selection accept only an already staged, verified generation. A generation whose configuration schema differs from the selected one is refused with `configuration schema requires migration`, unless its owner speaks plugin protocol 3 or later and the new schema still accepts every stored setting: only descriptions, titles, defaults, examples or comments changed, optional settings were added to a closed object, or required settings became optional. `select` keeps its owner stopped until a later explicit `activate` request. An explicit `disable` can withdraw a stalled activation/selection, including a revoked release, using the current selection revision. Live work and a pending withdrawal cannot be superseded. `activate` and `select` revalidate the staged metadata; a runtime that a host update has moved outside the protocol window answers `409` with the sentence the guided installer prints (which protocol the host accepts, which the runtime offers, and that the fix is to update Skulk on this host or choose a release published for it). |
 | GET | `/v1/plugins/managed/installations/{plugin_id}/operations/{operation_id}` | Requires `plugins:read`. Reads the original local operation's exact `request`, previewed `selection`, `state`, sanitized `error_code` and optional `withdraws_operation_id`. Superseded unpublished transitions remain terminal history. Never repeats its effect. |
 | POST | `/v1/plugins/managed/installations/{plugin_id}/operations/{operation_id}/recover` | Requires `plugins:manage`. No body. Explicitly resumes the existing journaled local operation; completed or superseded operations are unchanged. |
 
@@ -4031,10 +4064,10 @@ staging. It resolves no dependency versions and does not modify Skulk's environm
 | --- | --- | --- |
 | GET | `/v1/plugins/managed/installations/{plugin_id}/source` | Requires `plugins:read`. Returns `revision`, `configured`, opaque `credential_reference`, `credential_ready` and `trust_revision`; no network request or stored token value. |
 | POST | `/v1/plugins/managed/installations/{plugin_id}/source` | Direct localhost/Tailscale owner only; paired bearers and relay requests are refused. Body: `expected_revision` (zero initially), optional HTTPS `base_url` ending in `/`, `metadata_filename`, `trust`, write-only `token`, and `clear_token`. Omitted directory, filename and trust retain current values; initial setup must supply any missing values. Returns source readiness. `trust` contains monotonic `revision`, Unix `expires_at`, `publishers` mapping publisher IDs to Ed25519 public-key hex, and optional `revoked_publishers`/`revoked_artifacts` arrays. New trust revisions retain all prior revocations; these cannot be removed through source configuration. Same-revision trust changes, stale source revisions and expired trust are refused. |
-| GET | `/v1/plugins/managed/catalog` | Requires `plugins:read`. Fetches and verifies the host's signed catalog (the `read_catalog` manager request) and returns `publisher`, `revision`, `created_at`, `expires_at`, `catalog_sha256` and `entries`, each with `bundle_id`, `bundle_version`, `title`, `publisher`, `sequence`, `release_digest`, `runtime_platform` (the exact artifact family of a runtime-bearing release, else null), `artifact_sha256`, `artifact_bytes`, `transfer_bytes` (the artifact plus every wheel of a runtime-bearing release), `platforms`, `skulk_build_sha256`, `permissions`, `descriptors`, `surfaces`, `operations`, `steward_risks`, `expires_at` and `matches_host`. A release whose served record, signed claims or executable artifact the discovery trust revokes is not listed (wheel revocations are enforced by the release path at inspection and staging). Retained catalog documents are pruned to the newest few beyond every accepted revision. The discovery trust the host accepted is recorded as a floor; a restored older trust file is refused. The accepted catalog revision only moves forward: an older revision, or a different document at the accepted revision, is refused as a rollback. No addresses or credentials; nothing is selected, staged or installed. |
+| GET | `/v1/plugins/managed/catalog` | Requires `plugins:read`. Fetches and verifies the host's signed catalog (the `read_catalog` manager request) and returns `publisher`, `revision`, `created_at`, `expires_at`, `catalog_sha256` and `entries`, each with `bundle_id`, `bundle_version`, `title`, `publisher`, `sequence`, `release_digest`, `runtime_platform` (the exact artifact family of a runtime-bearing release, else null), `artifact_sha256`, `artifact_bytes`, `transfer_bytes` (the artifact plus every wheel of a runtime-bearing release), `platforms`, `skulk_build_sha256`, `permissions`, `descriptors`, `surfaces`, `operations`, `steward_risks`, `expires_at` and `matches_host`. A release whose served record, signed claims or executable artifact the discovery trust revokes is not listed (wheel revocations are enforced by the release path at inspection and staging). Retained catalog documents are pruned to the newest few beyond every accepted revision. The discovery trust the host accepted is recorded as a floor; a restored older trust file is refused. The accepted catalog revision only moves forward: an older revision, or a different document at the accepted revision, is refused as a rollback. A refused read answers `409` with one sentence naming why and what to do next: no catalog is configured; the catalog address cannot be reached from this host; the catalog server answered an HTTP status other than 200 (the status is named) or an encoded response; the address returned something other than a valid signed catalog; the discovery trust does not accept the publisher or has expired; the signature does not match the publisher's trusted key; the catalog is outside its validity period, or the host clock is wrong; the catalog is older than the one the host already accepted; the stored catalog credential cannot be read; or another catalog read, install or source change is in progress. No addresses or credentials; nothing is selected, staged or installed. |
 | GET | `/v1/plugins/managed/catalog/source` | Requires `plugins:read`. Returns catalog source readiness: `revision`, `configured`, `credential_reference`, `credential_ready`, `trust_revision`. No network I/O. |
-| POST | `/v1/plugins/managed/catalog/source` | Direct localhost/Tailscale owner only. Body: `expected_revision` (zero initially), optional HTTPS `base_url` ending in `/`, `document_filename` (default `catalog.json`), `trust` (the publishers trusted for discovery, the same shape as release trust), write-only `token`, and `clear_token`. Initial setup requires the directory and trust; omitted fields retain current values; new trust revisions keep prior revocations; moving the catalog requires supplying its credential again. Nothing is fetched or installed. |
-| POST | `/v1/plugins/managed/catalog/install` | Direct localhost/Tailscale owner only. Body: `catalog_sha256` (the reviewed catalog's digest, from the catalog review), `bundle_id`, `sequence`, optional `runtime_platform` (the listed artifact family, matched by canonical family) and optional `plugin_id` (an existing installation to upgrade; omitted registers a new `managed.` ID). The listing is taken from the retained catalog under that digest and verified again against discovery trust; the digest must still be the newest listing the host accepted from its source for that publisher, or the request is refused as superseded. The listing must fit this host. The installation's release source becomes the listed feed with `release.json` as its record, the discovery trust becomes its publisher trust, and the catalog credential is presented only when the feed shares the catalog's origin (a credential the installation already holds for the listed feed address is kept; otherwise another origin is read anonymously until the installation is given its own credential). An existing installation keeps its bundle and never goes back: another bundle or a lower sequence is refused before the source is touched. The release record is then inspected through the ordinary path and must be the record the listing names (`runtime_digest`, signed publisher, bundle and sequence). Returns `plugin_id`, `listing` (the catalog entry review), `source` (source readiness) and `review` (the release review). Nothing is downloaded beyond the record, staged or activated: continue with the install and activate requests, which remain their own consents. `409` names a refusal without addresses. |
+| POST | `/v1/plugins/managed/catalog/source` | Direct localhost/Tailscale owner only. Body: `expected_revision` (zero initially), optional HTTPS `base_url` ending in `/`, `document_filename` (default `catalog.json`), `trust` (the publishers trusted for discovery, the same shape as release trust), write-only `token`, and `clear_token`. Initial setup requires the directory and trust; omitted fields retain current values; new trust revisions keep prior revocations; moving the catalog requires supplying its credential again. Nothing is fetched or installed. A refused change answers `409` naming why: `expected_revision` is not the current revision, initial setup lacks the directory or trust, the trust is expired or older than the trust the host holds, the catalog moved without its credential, or another catalog operation is in progress. |
+| POST | `/v1/plugins/managed/catalog/install` | Direct localhost/Tailscale owner only. Body: `catalog_sha256` (the reviewed catalog's digest, from the catalog review), `bundle_id`, `sequence`, optional `runtime_platform` (the listed artifact family, matched by canonical family) and optional `plugin_id` (an existing installation to upgrade; omitted registers a new `managed.` ID). The listing is taken from the retained catalog under that digest and verified again against discovery trust; the digest must still be the newest listing the host accepted from its source for that publisher, or the request is refused as superseded. The listing must fit this host. The installation's release source becomes the listed feed with `release.json` as its record, the discovery trust becomes its publisher trust, and the catalog credential is presented only when the feed shares the catalog's origin (a credential the installation already holds for the listed feed address is kept; otherwise another origin is read anonymously until the installation is given its own credential). An existing installation keeps its bundle and never goes back: another bundle or a lower sequence is refused before the source is touched. The release record is then inspected through the ordinary path and must be the record the listing names (`runtime_digest`, signed publisher, bundle and sequence). Returns `plugin_id`, `listing` (the catalog entry review), `source` (source readiness) and `review` (the release review). Nothing is downloaded beyond the record, staged or activated: continue with the install and activate requests, which remain their own consents. `409` names a refusal without addresses; a listing that a later read superseded, or that this host no longer holds, is named with the remedy to read the catalog again. |
 | GET | `/v1/plugins/managed/installations/{plugin_id}/release` | Requires `plugins:read`. Downloads and verifies only metadata, returning `runtime_digest`, `source_revision`, `publisher`, `bundle_id`, `version`, `sequence`, `platform`, `python_requires`, `skulk_build_sha256`, declared `permissions`, total `artifact_bytes` and Unix `expires_at`. The exact verified metadata is retained for a later install request. A verified release outside this host's protocol window answers `409` with the sentence the guided installer prints: which protocol the host accepts, which the release offers, and that the fix is to update Skulk on this host or choose a release published for it. |
 | POST | `/v1/plugins/managed/installations/{plugin_id}/install` | Requires `plugins:manage`. Body: `operation_id` (32 lowercase hexadecimal characters), exact reviewed `runtime_digest`, `expected_source_revision`. Journals intent before returning `InstallOperation`, then downloads and stages under independent manager ownership. Reusing the ID with the same request reads its retained state; different intent is refused. Does not activate or approve spending. A verified release outside this host's protocol window answers `409` with the sentence the guided installer prints: which protocol the host accepts, which the release offers, and that the fix is to update Skulk on this host or choose a release published for it. |
 | GET | `/v1/plugins/managed/installations/{plugin_id}/install` | Requires `plugins:read`. Returns `operation`, nullable before installation. The retained operation contains exact `request`, signed `review`, `state`, `downloaded_bytes`, sanitized `error_code`, `attempt` (zero initially) and nullable `attempt_source_revision` for explicit recovery. Reconnect polls this route, never resubmits an uncertain request. |
@@ -4171,7 +4204,8 @@ manual attachment behavior until migrated by local setup.
 
 The in-process adapters share one process-lifetime `attachment.lock`. Their internal
 `attach` socket request contains the provisioned `profile_id`, the actual live
-`transport_node_id`, and the measured live `skulk_build_sha256`. The manager refuses
+`transport_node_id`, the measured live `skulk_build_sha256` and, once seen, the
+node's Tailscale address as `serve_host`. The manager refuses
 foreign profiles, competing bridge lifetimes, missing bridge ownership and a live
 core build different from its independently installed core. A manager's own build
 measurement alone is not evidence of compatibility with the live API process.
@@ -4186,6 +4220,22 @@ owner. A foreign installation binding is refused before stopping healthy owners.
 An incomplete write exposes `attachment_recovery_required` until local recovery
 succeeds. Disconnect does not cancel accepted local renewal. API shutdown releases
 its attachment fence without terminating independent cleanup services.
+
+The serve address tells plugin owners where their capabilities may serve besides
+loopback. The API process reads it from `tailscale status` in the background, at
+most once a minute, so an attachment never waits on it; until the first answer the
+request omits the field and the manager keeps the address its installations
+already have. An address stays once seen: a failed or slow query never withdraws
+it, and only a different address replaces it. When the address changes, the manager
+stops the owners, writes an owner-only `serve.json` (`{"serve_host": "<address>"}`)
+into each installation, records the same value at its own root last, and starts
+the owners again, so an interrupted write is finished by the next attachment.
+Before any owner starts, the manager also brings that installation's `serve.json`
+to the recorded address, so a newly registered installation receives it and an
+installation whose write was interrupted is repaired. The file sits beside
+`owner.json` rather than inside it because owners parse `owner.json` strictly; an
+owner built before the setting never reads `serve.json`, and neither does a
+manager built before it.
 
 
 ### Local system-service setup
@@ -4382,7 +4432,9 @@ Closing or reopening the panel does not cancel or repeat server-owned setup.
 
 `skulk-plugin-service catalog` reads the host's configured signed catalog in an
 owner terminal and prints the same review the `/v1/plugins/managed/catalog` route
-returns. The catalog address and discovery trust are configured through the
+returns. A refused read exits nonzero and prints the same sentence the route
+answers with `409`, such as an unreachable or unconfigured catalog; the guided
+installer below names catalog refusals the same way. The catalog address and discovery trust are configured through the
 `configure_catalog` manager request (`skulk-plugin-service manage` with a
 `configure_catalog` document, or the owner-only `POST /v1/plugins/managed/catalog/source`).
 

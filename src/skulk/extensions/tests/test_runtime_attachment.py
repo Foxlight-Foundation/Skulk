@@ -1,9 +1,12 @@
 """Restart attachment, foreign-profile fencing and interrupted local write recovery."""
 
+import asyncio
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
+from skulk.connectivity.tailscale import TailscaleStatus
 from skulk.extensions.managed import ManagedConnection, load_managed_owners
 from skulk.extensions.managed_attachment import ManagedAttachment
 from skulk.extensions.runtime_artifacts import QualifiedHost
@@ -12,6 +15,7 @@ from skulk.extensions.runtime_attachment import (
     AttachmentRequest,
     HostSettings,
     OwnerBinding,
+    read_serve_host,
 )
 from skulk.extensions.runtime_controller import LifecycleRequest
 from skulk.extensions.runtime_files import RuntimeLock, read_private, write_private
@@ -287,3 +291,188 @@ async def test_registered_adapters_share_one_process_attachment(
         await attachment.release()
         await manager.close()
     RuntimeLock(manager.root, "attachment.lock").close()
+
+
+def attach(serve_host: str | None) -> AttachmentRequest:
+    """An attachment from the live bridge on the provisioned transport."""
+    return AttachmentRequest(
+        profile_id=PROFILE,
+        transport_node_id="before-reboot",
+        skulk_build_sha256="a" * 64,
+        serve_host=serve_host,
+    )
+
+
+def test_an_attachment_without_an_address_keeps_its_previous_bytes() -> None:
+    """A manager built before the address reads the request it always read."""
+    assert "serve_host" not in attach(None).model_dump_json()
+    assert '"serve_host":"100.70.1.2"' in attach("100.70.1.2").model_dump_json()
+    for invalid in ("127.0.0.1", "::1", "0.0.0.0", "224.0.0.1", "node.example"):
+        with pytest.raises(ValidationError, match="serve address"):
+            attach(invalid)
+
+
+async def test_a_new_serve_address_reaches_every_installation_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Owners restart once for a new address; an attachment without one keeps it."""
+    manager = setup(tmp_path, monkeypatch)
+    await manager.start()
+    lease = RuntimeLock(tmp_path, "attachment.lock")
+    try:
+        assert manager.boot is not None
+        await manager.boot
+        for identifier in ("managed.first", "managed.second"):
+            await manager_request(
+                tmp_path, InstallationRequest(action="register", plugin_id=identifier)
+            )
+        first = dict(manager.controllers)
+        assert "result" in await manager_request(tmp_path, attach("100.70.1.2"))
+        restarted = dict(manager.controllers)
+        assert set(restarted) == set(first)
+        assert all(restarted[name] is not first[name] for name in first)
+        for path in (
+            tmp_path / "serve.json",
+            *(tmp_path / "installations" / name / "serve.json" for name in first),
+        ):
+            assert read_serve_host(path) == "100.70.1.2"
+        # No address seen keeps the current one, and the same one changes nothing.
+        for serve_host in (None, "100.70.1.2"):
+            assert "result" in await manager_request(tmp_path, attach(serve_host))
+            assert all(manager.controllers[name] is restarted[name] for name in first)
+        assert read_serve_host(tmp_path / "serve.json") == "100.70.1.2"
+        await manager_request(
+            tmp_path, InstallationRequest(action="register", plugin_id="managed.third")
+        )
+        assert (
+            read_serve_host(tmp_path / "installations/managed.third/serve.json")
+            == "100.70.1.2"
+        )
+        await manager.close()
+        manager = RuntimeManager(tmp_path)
+        assert manager.serve_host == "100.70.1.2"
+    finally:
+        lease.close()
+        await manager.close()
+
+
+async def test_an_interrupted_serve_address_write_is_finished_next_time(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A disk fault leaves the old address recorded, and the owners running."""
+    manager = setup(tmp_path, monkeypatch)
+    await manager.start()
+    lease = RuntimeLock(tmp_path, "attachment.lock")
+    try:
+        assert manager.boot is not None
+        await manager.boot
+        for identifier in ("managed.first", "managed.second"):
+            await manager_request(
+                tmp_path, InstallationRequest(action="register", plugin_id=identifier)
+            )
+
+        def fail_write(path: Path, content: bytes) -> None:
+            if path == tmp_path / "installations/managed.second/serve.json":
+                raise OSError("synthetic disk fault")
+            write_private(path, content)
+
+        with monkeypatch.context() as fault:
+            fault.setattr(
+                "skulk.extensions.runtime_attachment.write_private", fail_write
+            )
+            assert "error" in await manager_request(tmp_path, attach("100.70.1.2"))
+        assert set(manager.controllers) == {"managed.first", "managed.second"}
+        assert manager.serve_host is None
+        assert read_serve_host(tmp_path / "serve.json") is None
+        assert "result" in await manager_request(tmp_path, attach("100.70.1.2"))
+        for name in ("managed.first", "managed.second"):
+            path = tmp_path / "installations" / name / "serve.json"
+            assert read_serve_host(path) == "100.70.1.2"
+        assert read_serve_host(tmp_path / "serve.json") == "100.70.1.2"
+    finally:
+        lease.close()
+        await manager.close()
+
+
+async def test_the_bridge_attaches_with_the_address_tailscale_reports(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first answer reaches the manager; a failed query later keeps it."""
+    manager = setup(tmp_path, monkeypatch)
+    await manager.start()
+    reports = [TailscaleStatus(running=True, self_ip="100.70.1.2")]
+    answered = asyncio.Event()
+
+    async def status() -> TailscaleStatus:
+        await answered.wait()
+        return reports[-1]
+
+    monkeypatch.setattr(
+        "skulk.extensions.managed_attachment.query_tailscale_status", status
+    )
+    bridge = ManagedAttachment(tmp_path, PROFILE)
+    bridge.retain("before-reboot")
+    try:
+        assert manager.boot is not None
+        await manager.boot
+        await manager_request(
+            tmp_path, InstallationRequest(action="register", plugin_id="managed.first")
+        )
+        # An attachment never waits for Tailscale.
+        await bridge.ensure()
+        assert manager.serve_host is None
+        answered.set()
+        assert bridge.serve_task is not None
+        await bridge.serve_task
+        await bridge.ensure()
+        assert manager.serve_host == "100.70.1.2"
+        path = tmp_path / "installations/managed.first/serve.json"
+        assert read_serve_host(path) == "100.70.1.2"
+        monkeypatch.setattr(
+            "skulk.extensions.managed_attachment.SERVE_ADDRESS_REFRESH_SECONDS", 0.0
+        )
+        reports.append(TailscaleStatus(running=False))
+        await bridge.ensure()
+        assert bridge.serve_task is not None
+        await bridge.serve_task
+        assert bridge.serve_host == "100.70.1.2"
+        assert read_serve_host(path) == "100.70.1.2"
+    finally:
+        await bridge.release()
+        await manager.close()
+    RuntimeLock(tmp_path, "attachment.lock").close()
+
+
+async def test_an_owner_always_starts_with_the_recorded_address(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A registration interrupted before its serve.json is repaired at load."""
+    manager = setup(tmp_path, monkeypatch)
+    await manager.start()
+    lease = RuntimeLock(tmp_path, "attachment.lock")
+    try:
+        assert manager.boot is not None
+        await manager.boot
+        await manager_request(
+            tmp_path, InstallationRequest(action="register", plugin_id="managed.first")
+        )
+        assert "result" in await manager_request(tmp_path, attach("100.70.1.2"))
+        path = tmp_path / "installations/managed.first/serve.json"
+        assert read_serve_host(path) == "100.70.1.2"
+        # The window a crash can leave: the installation exists, its address
+        # does not, and the root already records it, so no attachment repairs it.
+        path.unlink()
+        await manager.close()
+        manager = RuntimeManager(tmp_path)
+        await manager.start()
+        assert manager.boot is not None
+        await manager.boot
+        assert "managed.first" in manager.controllers
+        assert read_serve_host(path) == "100.70.1.2"
+    finally:
+        lease.close()
+        await manager.close()
