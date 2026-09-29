@@ -308,6 +308,10 @@ def test_music_signed_support_omits_aggregate_engine_tag(
         (L40S_AUDIO_CPP_CUDA_BUILD, ("nvidia",), ("nvidia:sm-8.9", "nvidia"), False),
         (L40S_AUDIO_CPP_CUDA_BUILD, ("nvidia:sm-8.9",), ("nvidia:sm-12.1",), False),
         (L40S_AUDIO_CPP_CUDA_BUILD, ("nvidia:sm-8.9",), ("nvidia:sm-8.9",), True),
+        (L40S_AUDIO_CPP_CUDA_BUILD, ("nvidia:sm-8.9",), ("nvidia:sm-8.9", "nvidia:sm-8.0"), False),
+        (L40S_AUDIO_CPP_CUDA_BUILD, ("nvidia:sm-8.9",), ("nvidia:sm-8.9", "nvidia:sm-unknown"), False),
+        (L40S_AUDIO_CPP_CUDA_BUILD, ("nvidia:sm-8.9",), ("nvidia:sm-8.9", "nvidia:multiple-devices"), False),
+        (GB10_AUDIO_CPP_CUDA_BUILD, ("nvidia:sm-12.1",), ("nvidia:sm-12.1", "nvidia:sm-9.0"), False),
     ],
 )
 def test_managed_cuda_build_requires_exact_signed_sm_even_for_ready_cache(

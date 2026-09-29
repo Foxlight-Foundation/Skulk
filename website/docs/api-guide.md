@@ -1732,9 +1732,15 @@ its weight estimate and regular runtime overhead; insufficient capacity returns
 an actionable mount error before a generation job is admitted.
 CUDA music preparation requires the package's compiled GPU class in both
 live node facts and the signed support claim: SM 8.9 for Linux amd64 and
-SM 12.1 for Linux arm64. Each published native build retains that restriction
-when restored from cache. A generic NVIDIA claim cannot widen a managed
-package's compiled target, and package availability alone cannot place a model.
+SM 12.1 for Linux arm64. The signed claim must name the platform's exact managed
+build. Managed packages require one observed NVIDIA device with a known matching
+compute class; multiple devices, mixed classes, and unknown classes cannot be
+admitted until execution and memory accounting can select the same physical
+device. Each published native build retains those restrictions when restored
+from cache. A generic NVIDIA claim cannot widen a managed package's compiled
+target, and package availability alone cannot place a model. A qualified
+operator-provided primary CUDA binary remains eligible through its own exact
+signed build claim.
 
 Music generation is an asynchronous job API for a mounted `TextToMusic` card.
 The model's `/v1/models` `music` object identifies its family, lyric rule,

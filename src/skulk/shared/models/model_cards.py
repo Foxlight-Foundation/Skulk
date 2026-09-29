@@ -34,6 +34,7 @@ from tomlkit.exceptions import TOMLKitError
 from skulk.shared.backends import (
     AUDIO_CPP_COMPUTE_BACKENDS,
     AUDIO_CPP_CUDA_TARGETS_BY_BUILD,
+    audio_cpp_cuda_hardware_matches,
     engine_of,
 )
 from skulk.shared.constants import (
@@ -841,7 +842,7 @@ def registry_supported_backends_for_node(
                 backend == "audio_cpp-cuda"
                 and required_cuda_class is not None
                 and (
-                    required_cuda_class not in hardware_classes
+                    not audio_cpp_cuda_hardware_matches(required_cuda_class, hardware_classes)
                     or required_cuda_class not in claim.hardware_classes
                 )
             ):

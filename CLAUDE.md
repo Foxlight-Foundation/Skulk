@@ -286,11 +286,13 @@ task on a music card. The cards have
 their own `[music]` section and require exact signed support claims. The
 `audio-cpp-engine-wheel` workflow builds the CPU-capable package for Apple
 Silicon macOS and Linux amd64/arm64 plus separate Linux amd64 Vulkan and Linux
-arm64 CUDA packages from the pinned source. To promote already tested artifacts without rebuilding,
-the workflow accepts `publish_run_id` and `publish_sha256`: one digest for a GPU
-wheel, or a JSON filename-to-digest map for the complete three-platform CPU/Metal
-set at one version. The promotion verifier rejects missing, extra, mixed-version
-or digest-mismatched CPU wheels before attestation checks and publication.
+amd64/arm64 CUDA packages from the pinned source. To promote already tested
+artifacts without rebuilding, the workflow accepts `publish_run_id` and
+`publish_sha256`: a one-entry JSON filename-to-digest map for the selected GPU
+wheel, or a map for the complete three-platform CPU/Metal set at one version.
+A plain GPU digest is accepted only when the source run contains one GPU wheel.
+The verifier rejects missing, ambiguous, mixed-version, or digest-mismatched
+selections before attestation checks and publishes only verified paths.
 `PrepareAudioCpp` carries the
 selected package variant; the API chooses CUDA or Vulkan only when a matching
 signed support claim applies to the node's hardware, and can try a separately
@@ -300,15 +302,22 @@ lane. A standalone primary Vulkan override remains eligible when its pinned
 revision, specs, and device probe pass. AMD sysfs PCI IDs produce stable
 chip-class identifiers
 (`amd:pci-1002-1586` on Strix Halo) for claim selection before preparation.
-Music model weights are separate immutable downloads. The dedicated arm64 CUDA wheel is compiled
-for GB10 SM 12.1 and requires both that observed hardware class and a signed
-claim naming it. CUDA 12 runtime, cuBLAS, NCCL, and NVIDIA driver libraries
+Music model weights are separate immutable downloads. Managed CUDA wheels target
+SM 8.9 on amd64 and GB10 SM 12.1 on arm64. Preparation requires the platform's
+exact managed executable build and compute class in the signed claim, plus one
+observed NVIDIA device with that class. Mixed, unknown, and multiple NVIDIA
+devices are rejected because the runner cannot yet bind execution and memory
+admission to a selected physical device. A qualified operator-provided primary
+CUDA binary uses its own exact claim and is not replaced by a managed package.
+CUDA 12 runtime, cuBLAS, NCCL, and NVIDIA driver libraries
 must be on the host loader path; the binary probe reports missing libraries
 before advertising the lane. Signed support resolution also requires the
 exact class for this build after cache restore; CPU preparation does not
 reuse the dedicated CUDA wheel as a primary override.
 The bare `audio_cpp` tag reports availability; music support claims and runner
 placement select a concrete compute lane so memory and device choice agree.
+Runner Metal memory diagnostics and shutdown cleanup are inert outside macOS;
+Linux music runners do not import an unused MLX extension during teardown.
 Music mounting uses targeted `PrepareAudioCpp` even for a package already
 observed ready, and indexed `AudioCppPreparationRequested`/
 `AudioCppPreparationCompleted` events. The worker verifies the package and

@@ -365,8 +365,10 @@ from skulk.routing.vision_media import VisionMediaPacket
 from skulk.shared.apply import apply
 from skulk.shared.backends import (
     AUDIO_CPP_COMPUTE_BACKENDS,
+    AUDIO_CPP_CUDA_BUILDS_BY_ARCHITECTURE,
     AUDIO_CPP_CUDA_TARGETS_BY_ARCHITECTURE,
     AUDIO_CPP_CUDA_TARGETS_BY_BUILD,
+    audio_cpp_cuda_hardware_matches,
     engine_of,
 )
 from skulk.shared.constants import (
@@ -3784,8 +3786,9 @@ class API:
         ) -> bool:
             """Require the compiled SM in both live facts and the signed claim."""
             required_class = AUDIO_CPP_CUDA_TARGETS_BY_ARCHITECTURE.get(architecture)
-            return required_class is not None and required_class in classes and any(
+            return required_class is not None and audio_cpp_cuda_hardware_matches(required_class, classes) and any(
                 claim.engine in {"audio_cpp-cuda", "audio_cpp"}
+                and claim.engine_build == AUDIO_CPP_CUDA_BUILDS_BY_ARCHITECTURE[architecture]
                 and required_class in claim.hardware_classes
                 for claim in claims
             )
@@ -3807,8 +3810,15 @@ class API:
             lanes = variant_lanes[variant]
             if (
                 variant == "cpu"
-                and resources.engine_builds.get("audio_cpp-cuda")
-                in AUDIO_CPP_CUDA_TARGETS_BY_BUILD
+                and (
+                    resources.engine_builds.get("audio_cpp-cuda")
+                    in AUDIO_CPP_CUDA_TARGETS_BY_BUILD
+                    or not any(
+                        claim.engine in {"audio_cpp-cuda", "audio_cpp"}
+                        and claim.engine_build not in AUDIO_CPP_CUDA_TARGETS_BY_BUILD
+                        for claim in claims
+                    )
+                )
             ):
                 return lanes - {"audio_cpp-cuda"}
             return lanes

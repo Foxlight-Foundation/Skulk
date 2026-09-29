@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Final, Literal
+from typing import AbstractSet, Final, Literal
 
 from loguru import logger
 
@@ -193,6 +193,30 @@ AUDIO_CPP_CUDA_TARGETS_BY_BUILD: Final[dict[str, str]] = {
     L40S_AUDIO_CPP_CUDA_BUILD: "nvidia:sm-8.9",
 }
 """Exact native builds whose compiled target cannot be widened by broad claims."""
+AUDIO_CPP_CUDA_BUILDS_BY_ARCHITECTURE: Final[dict[str, str]] = {
+    "x86_64": L40S_AUDIO_CPP_CUDA_BUILD,
+    "amd64": L40S_AUDIO_CPP_CUDA_BUILD,
+    "aarch64": GB10_AUDIO_CPP_CUDA_BUILD,
+    "arm64": GB10_AUDIO_CPP_CUDA_BUILD,
+}
+"""Managed executable selected by each architecture's immutable CUDA wheel."""
+
+
+def audio_cpp_cuda_hardware_matches(
+    required_class: str, hardware_classes: AbstractSet[str]
+) -> bool:
+    """Check one observed NVIDIA device against a managed wheel's compute class.
+
+    The sidecar does not select a particular accelerator. Multiple devices or
+    unknown SM classes cannot bind its execution and memory pool to a device.
+    ``required_class`` names the wheel's compiled target; ``hardware_classes``
+    contains live inventory evidence. Return whether that evidence is sufficient.
+    """
+    return "nvidia:multiple-devices" not in hardware_classes and {
+        hardware_class
+        for hardware_class in hardware_classes
+        if hardware_class.startswith("nvidia:sm-")
+    } == {required_class}
 
 # ComfyUI compute backends Skulk advertises: NVIDIA CUDA and AMD ROCm.
 _COMFY_COMPUTE_BACKENDS: Final[tuple[ComputeBackend, ...]] = ("cuda", "rocm")

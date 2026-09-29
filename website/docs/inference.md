@@ -141,6 +141,12 @@ live node facts and the signed support claim: `nvidia:sm-8.9` for Linux
 `amd64`, or `nvidia:sm-12.1` for Linux `arm64`. These describe compute
 architectures shared by matching GPUs, independent of node identity. A cached
 package or a generic NVIDIA claim cannot widen a managed build's target.
+The claim must also name the selected platform's exact managed executable.
+Managed packages require one observed NVIDIA device with a known matching
+compute class. Multiple devices, mixed classes, and unknown classes are rejected
+until the runner can bind execution and memory accounting to a selected device.
+Qualified operator-provided primary CUDA binaries keep their own build claims;
+managed preparation does not replace them.
 For AMD, node resources include a PCI chip class such as
 `amd:pci-1002-1586`, allowing a claim to cover the qualified hardware class
 without identifying a specific node.
