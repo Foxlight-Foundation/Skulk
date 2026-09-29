@@ -26,7 +26,11 @@ from skulk.api.types.api import (
 )
 from skulk.api.video_store import VideoStore
 from skulk.routing.output_media import OutputMediaPacket
-from skulk.shared.backends import GB10_AUDIO_CPP_CUDA_BUILD
+from skulk.shared.backends import (
+    AUDIO_CPP_CUDA_BUILDS_BY_ARCHITECTURE,
+    GB10_AUDIO_CPP_CUDA_BUILD,
+    L40S_AUDIO_CPP_CUDA_BUILD,
+)
 from skulk.shared.models.model_cards import ModelCard, ModelId
 from skulk.shared.topology import Topology
 from skulk.shared.types.chunks import MusicChunk
@@ -84,7 +88,7 @@ async def test_mount_preflight_skips_ready_build_without_signed_music_support(
         for node, build in ((unsupported, "unsupported"), (supported, "supported"))
     }
     memory = MemoryUsage.from_bytes(
-        ram_total=2**30, ram_available=2**30,
+        ram_total=8 * 2**30, ram_available=8 * 2**30,
         swap_total=0, swap_available=0,
     )
     api: Any = object.__new__(API)
@@ -212,20 +216,36 @@ async def test_strix_vulkan_claim_prepares_gpu_variant_before_placement(
     api._send.assert_awaited_once()
 
 
-async def test_gb10_cuda_claim_prepares_arm64_gpu_variant(
+@pytest.mark.parametrize(
+    ("architecture", "hardware_class", "primary_override"),
+    [
+        ("aarch64", "nvidia:sm-12.1", False),
+        ("arm64", "nvidia:sm-12.1", False),
+        ("x86_64", "nvidia:sm-8.9", False),
+        ("x86_64", "nvidia:sm-8.9", True),
+        ("amd64", "nvidia:sm-8.9", False),
+    ],
+)
+async def test_cuda_claim_prepares_exact_host_gpu_variant(
     monkeypatch: pytest.MonkeyPatch,
+    architecture: str,
+    hardware_class: str,
+    primary_override: bool,
 ) -> None:
-    """A signed GB10 claim prepares CUDA before the exact build can place."""
-    node = NodeId("gb10-node")
+    """Each compiled platform needs the exact signed/live SM before preparation."""
+    engine_build = "operator-cuda-build" if primary_override else AUDIO_CPP_CUDA_BUILDS_BY_ARCHITECTURE[architecture]
+    node = NodeId("cuda-node")
     topology = Topology()
     topology.add_node(node)
-    hardware = frozenset({"platform:linux", "nvidia", "nvidia:sm-12.1"})
+    hardware = frozenset({"platform:linux", "nvidia", hardware_class})
     initial = NodeResources(
-        backends=frozenset(), architecture="aarch64", hardware_classes=hardware,
+        backends=frozenset({"audio_cpp-cuda"}) if primary_override else frozenset(),
+        engine_builds={"audio_cpp-cuda": engine_build} if primary_override else {},
+        architecture=architecture, hardware_classes=hardware,
     )
     ready = initial.model_copy(update={
         "backends": frozenset({"audio_cpp", "audio_cpp-cuda"}),
-        "engine_builds": {"audio_cpp-cuda": "gb10-build"},
+        "engine_builds": {"audio_cpp-cuda": engine_build},
     })
     memory = MemoryUsage.from_bytes(
         ram_total=2**30, ram_available=2**30,
@@ -245,8 +265,8 @@ async def test_gb10_cuda_claim_prepares_arm64_gpu_variant(
     def signed_claims(_card: ModelCard) -> tuple[SimpleNamespace, ...]:
         return (
             SimpleNamespace(
-                status="supported", engine="audio_cpp-cuda",
-                hardware_classes=("nvidia:sm-12.1",),
+                status="supported", engine="audio_cpp-cuda", engine_build=engine_build,
+                hardware_classes=(hardware_class,),
             ),
         )
 
@@ -261,7 +281,7 @@ async def test_gb10_cuda_claim_prepares_arm64_gpu_variant(
         return (
             frozenset({"audio_cpp-cuda"})
             if "audio_cpp-cuda" in node_backends
-            and engine_builds.get("audio_cpp-cuda") == "gb10-build"
+            and engine_builds.get("audio_cpp-cuda") == engine_build
             else frozenset()
         )
 
@@ -269,7 +289,7 @@ async def test_gb10_cuda_claim_prepares_arm64_gpu_variant(
 
     async def complete_preparation(command: PrepareAudioCpp) -> None:
         assert command.target_node == node
-        assert command.variant == "cuda"
+        assert command.variant == ("cpu" if primary_override else "cuda")
         api._audio_cpp_prepare_results[command.command_id] = AudioCppPreparationCompleted(
             request_id=command.command_id, target_node=node,
             owner_node=command.owner_node, success=True, resources=ready,
@@ -282,21 +302,34 @@ async def test_gb10_cuda_claim_prepares_arm64_gpu_variant(
 
 
 @pytest.mark.parametrize(
-    ("live_sm", "claim_class", "cached_build", "expected_variant"),
+    ("architecture", "engine_build", "live_sm", "claim_class", "cached_build", "expected_variant"),
     [
-        ("nvidia:sm-12.1", "nvidia", False, "cpu"),
-        ("nvidia:sm-12.1", "nvidia", True, None),
-        ("nvidia:sm-9.0", "nvidia:sm-12.1", False, None),
+        ("aarch64", GB10_AUDIO_CPP_CUDA_BUILD, "nvidia:sm-12.1", "nvidia", False, None),
+        ("aarch64", GB10_AUDIO_CPP_CUDA_BUILD, "nvidia:sm-12.1", "nvidia", True, None),
+        ("aarch64", GB10_AUDIO_CPP_CUDA_BUILD, "nvidia:sm-9.0", "nvidia:sm-12.1", False, None),
+        ("x86_64", L40S_AUDIO_CPP_CUDA_BUILD, "nvidia:sm-8.9", "nvidia", False, None),
+        ("x86_64", L40S_AUDIO_CPP_CUDA_BUILD, "nvidia:sm-8.9", "nvidia", True, None),
+        ("x86_64", L40S_AUDIO_CPP_CUDA_BUILD, "nvidia:sm-12.1", "nvidia:sm-8.9", False, None),
+        ("x86_64", L40S_AUDIO_CPP_CUDA_BUILD, "nvidia:sm-8.9,nvidia:sm-8.0", "nvidia:sm-8.9", False, None),
+        ("x86_64", L40S_AUDIO_CPP_CUDA_BUILD, "nvidia:sm-8.9,nvidia:sm-8.0", "nvidia:sm-8.9", True, None),
+        ("x86_64", L40S_AUDIO_CPP_CUDA_BUILD, "nvidia:sm-8.9,nvidia:sm-unknown", "nvidia:sm-8.9", True, None),
+        ("x86_64", L40S_AUDIO_CPP_CUDA_BUILD, "nvidia:sm-8.9,nvidia:multiple-devices", "nvidia:sm-8.9", True, None),
+        ("x86_64", L40S_AUDIO_CPP_CUDA_BUILD, "nvidia:sm-8.9,amd", "nvidia:sm-8.9", False, None),
+        ("x86_64", L40S_AUDIO_CPP_CUDA_BUILD, "nvidia:sm-8.9,amd", "nvidia:sm-8.9", True, None),
+        ("aarch64", GB10_AUDIO_CPP_CUDA_BUILD, "nvidia:sm-12.1,amd", "nvidia:sm-12.1", True, None),
+        ("aarch64", GB10_AUDIO_CPP_CUDA_BUILD, "nvidia:sm-12.1,nvidia:sm-9.0", "nvidia:sm-12.1", True, None),
     ],
 )
-async def test_dedicated_gb10_wheel_requires_exact_signed_sm(
+async def test_dedicated_cuda_wheel_requires_exact_signed_sm(
     monkeypatch: pytest.MonkeyPatch,
+    architecture: str,
+    engine_build: str,
     live_sm: str,
     claim_class: str,
     cached_build: bool,
     expected_variant: str | None,
 ) -> None:
-    """A broad or mismatched claim cannot select the SM 12.1 CUDA package."""
+    """A broad or mismatched claim cannot select either native CUDA package."""
     node = NodeId("nvidia-node")
     topology = Topology()
     topology.add_node(node)
@@ -306,11 +339,11 @@ async def test_dedicated_gb10_wheel_requires_exact_signed_sm(
             if cached_build else frozenset()
         ),
         engine_builds=(
-            {"audio_cpp-cuda": GB10_AUDIO_CPP_CUDA_BUILD}
+            {"audio_cpp-cuda": engine_build}
             if cached_build else {}
         ),
-        architecture="aarch64",
-        hardware_classes=frozenset({"platform:linux", "nvidia", live_sm}),
+        architecture=architecture,
+        hardware_classes=frozenset({"platform:linux", "nvidia", *live_sm.split(",")}),
     )
     memory = MemoryUsage.from_bytes(
         ram_total=Memory.from_gb(128).in_bytes,
@@ -327,7 +360,7 @@ async def test_dedicated_gb10_wheel_requires_exact_signed_sm(
     api._audio_cpp_prepare_results = {}
     def broad_or_mismatched_claims(_card: ModelCard) -> tuple[SimpleNamespace, ...]:
         return (SimpleNamespace(
-            status="supported", engine="audio_cpp-cuda",
+            status="supported", engine="audio_cpp-cuda", engine_build=engine_build,
             hardware_classes=(claim_class,),
         ),)
 
@@ -478,7 +511,7 @@ async def test_mount_preflight_uses_ordered_preparation_resources(
         "engine_builds": {"audio_cpp-metal": "qualified-build"},
     })
     memory = MemoryUsage.from_bytes(
-        ram_total=2**30, ram_available=2**30,
+        ram_total=8 * 2**30, ram_available=8 * 2**30,
         swap_total=0, swap_available=0,
     )
     api: Any = object.__new__(API)
@@ -516,7 +549,7 @@ async def test_mount_preflight_uses_ordered_preparation_resources(
     monkeypatch.setattr(api_module, "registry_supported_backends_for_node", supported_backends)
     def signed_claims(_card: ModelCard) -> tuple[SimpleNamespace, ...]:
         return (
-            SimpleNamespace(status="supported", engine=claim_engine, hardware_classes=()),
+            SimpleNamespace(status="supported", engine=claim_engine, engine_build="qualified-build", hardware_classes=()),
         )
 
     monkeypatch.setattr(api_module, "get_model_engine_support", signed_claims)
@@ -612,7 +645,7 @@ async def test_mount_preflight_uses_vram_for_gpu_music(
         node_resources={node: resources},
         node_memory={node: memory},
         node_system={node: SystemPerformanceProfile(accelerator=AcceleratorMetrics(
-            vendor=vendor, vram_total_bytes=1 << 30,
+            vendor=vendor, vram_total_bytes=8 << 30,
         ))},
     )
     api._audio_cpp_prepare_events = {}
@@ -641,7 +674,7 @@ async def test_mount_preflight_uses_vram_for_gpu_music(
     monkeypatch.setattr(api_module, "registry_supported_backends_for_node", supported_backends)
     def signed_claims(_card: ModelCard) -> tuple[SimpleNamespace, ...]:
         return (
-            SimpleNamespace(status="supported", engine=lane, hardware_classes=(hardware,)),
+            SimpleNamespace(status="supported", engine=lane, engine_build="qualified-build", hardware_classes=(hardware,)),
         )
 
     monkeypatch.setattr(api_module, "get_model_engine_support", signed_claims)

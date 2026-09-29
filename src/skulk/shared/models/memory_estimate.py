@@ -172,9 +172,14 @@ _ACE_STEP_CPU_WORKSPACE: Final = Memory.from_bytes(10 * 1024**3)
 
 The qualified BF16 artifact contains 10.1 GB of weights, but its eight-thread
 10–60-second generation soak reached 18.7 GB RSS. A text-GGUF multiplier alone
-cannot cover these buffers. Ten GiB leaves headroom above the measured peak;
-accelerator lanes retain their independently qualified estimates.
+cannot cover these buffers. Ten GiB leaves headroom above the measured peak.
 """
+_ACE_STEP_GPU_WORKSPACE: Final = Memory.from_bytes(10 * 1024**3)
+"""Reserve above weights covering CUDA/Vulkan peaks of 17.93/15.33 GiB."""
+_MINIMAX_GPU_WORKSPACE: Final = Memory.from_bytes(2 * 1024**3)
+"""Reserve above weights covering CUDA/Vulkan peaks of 9.15/8.35 GiB."""
+_MINIMAX_METAL_WORKSPACE: Final = Memory.from_bytes(5 * 1024**3)
+"""Reserve above weights covering the qualified 11.83 GiB Metal process peak."""
 
 
 def memory_overhead_factor(model_card: ModelCard) -> float:
@@ -228,17 +233,26 @@ def estimate_music_workspace(
 ) -> Memory:
     """Return transient workspace charged for the selected music engine lane.
 
-    ACE-Step CPU generation reserves its measured working buffers separately
-    from weight bytes. Other models, unresolved advisory estimates and
-    accelerator lanes receive no additional reserve. This pure estimate is
+    Qualified CPU, CUDA, Vulkan and Metal lanes reserve measured working buffers
+    separately from weight bytes for the initial ACE-Step and MiniMax artifacts.
+    Other lanes and unresolved advisory estimates receive no additional reserve.
+    This pure estimate is
     shared by placement, API admission and the worker's local load guard.
     """
-    if (
-        model_card.music is not None
-        and model_card.music.family == MusicModelFamily.AceStep15
-        and resolved_backend == "audio_cpp-cpu"
-    ):
+    if model_card.music is None:
+        return Memory()
+    family = model_card.music.family
+    if family == MusicModelFamily.AceStep15 and resolved_backend == "audio_cpp-cpu":
         return _ACE_STEP_CPU_WORKSPACE
+    if resolved_backend in {"audio_cpp-cuda", "audio_cpp-vulkan"}:
+        # Native GPU qualification measures transient buffers as well as weights.
+        # Weight-only estimates admitted smaller GPUs that cannot serve them.
+        if family == MusicModelFamily.AceStep15:
+            return _ACE_STEP_GPU_WORKSPACE
+        if family == MusicModelFamily.MiniMaxMusic3:
+            return _MINIMAX_GPU_WORKSPACE
+    if family == MusicModelFamily.MiniMaxMusic3 and resolved_backend == "audio_cpp-metal":
+        return _MINIMAX_METAL_WORKSPACE
     return Memory()
 
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import sys
 from collections.abc import Iterator, Sequence
 from datetime import datetime, timezone
 from importlib import import_module
@@ -78,6 +79,10 @@ def _memory_from_callable(module: object, name: str) -> Memory | None:
 def capture_mlx_memory_snapshot() -> MlxMemorySnapshot | None:
     """Return a best-effort MLX/Metal memory snapshot for the current process."""
 
+    if sys.platform != "darwin":
+        # Diagnostics must not initialize an unused native engine on Linux.
+        # Metal memory APIs are relevant only to Apple runner processes.
+        return None
     for module_name in ("mlx.core", "mlx.core.metal"):
         try:
             module = import_module(module_name)

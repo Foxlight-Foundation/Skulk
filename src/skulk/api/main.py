@@ -365,7 +365,10 @@ from skulk.routing.vision_media import VisionMediaPacket
 from skulk.shared.apply import apply
 from skulk.shared.backends import (
     AUDIO_CPP_COMPUTE_BACKENDS,
-    GB10_AUDIO_CPP_CUDA_BUILD,
+    AUDIO_CPP_CUDA_BUILDS_BY_ARCHITECTURE,
+    AUDIO_CPP_CUDA_TARGETS_BY_ARCHITECTURE,
+    AUDIO_CPP_CUDA_TARGETS_BY_BUILD,
+    audio_cpp_cuda_hardware_matches,
     engine_of,
 )
 from skulk.shared.constants import (
@@ -3778,11 +3781,14 @@ class API:
                 for claim in claims
             )
 
-        def gb10_cuda_wheel_claim_matches(classes: frozenset[str]) -> bool:
+        def cuda_wheel_claim_matches(
+            architecture: str, classes: frozenset[str]
+        ) -> bool:
             """Require the compiled SM in both live facts and the signed claim."""
-            required_class = "nvidia:sm-12.1"
-            return required_class in classes and any(
+            required_class = AUDIO_CPP_CUDA_TARGETS_BY_ARCHITECTURE.get(architecture)
+            return required_class is not None and audio_cpp_cuda_hardware_matches(required_class, classes) and any(
                 claim.engine in {"audio_cpp-cuda", "audio_cpp"}
+                and claim.engine_build == AUDIO_CPP_CUDA_BUILDS_BY_ARCHITECTURE[architecture]
                 and required_class in claim.hardware_classes
                 for claim in claims
             )
@@ -3800,12 +3806,19 @@ class API:
         def candidate_lanes(
             variant: Literal["cpu", "vulkan", "cuda"], resources: NodeResources
         ) -> frozenset[str]:
-            """Keep the dedicated SM 12.1 wheel out of primary CPU preparation."""
+            """Keep known dedicated CUDA wheels out of primary CPU preparation."""
             lanes = variant_lanes[variant]
             if (
                 variant == "cpu"
-                and resources.engine_builds.get("audio_cpp-cuda")
-                == GB10_AUDIO_CPP_CUDA_BUILD
+                and (
+                    resources.engine_builds.get("audio_cpp-cuda")
+                    in AUDIO_CPP_CUDA_TARGETS_BY_BUILD
+                    or not any(
+                        claim.engine in {"audio_cpp-cuda", "audio_cpp"}
+                        and claim.engine_build not in AUDIO_CPP_CUDA_TARGETS_BY_BUILD
+                        for claim in claims
+                    )
+                )
             ):
                 return lanes - {"audio_cpp-cuda"}
             return lanes
@@ -3840,9 +3853,8 @@ class API:
             variants: list[Literal["cpu", "vulkan", "cuda"]] = []
             if (
                 "platform:linux" in platform_classes
-                and architecture in {"aarch64", "arm64"}
                 and "nvidia" in platform_classes
-                and gb10_cuda_wheel_claim_matches(platform_classes)
+                and cuda_wheel_claim_matches(architecture, platform_classes)
             ):
                 variants.append("cuda")
             if (

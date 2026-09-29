@@ -1730,6 +1730,24 @@ Music model placement checks the selected backend's complete estimated
 footprint. ACE-Step CPU serving includes a 10 GiB working-buffer reserve beyond
 its weight estimate and regular runtime overhead; insufficient capacity returns
 an actionable mount error before a generation job is admitted.
+CUDA and Vulkan serving also reserve transient generation buffers beyond
+weight/runtime overhead: 10 GiB for ACE-Step and 2 GiB for MiniMax. MiniMax Metal
+reserves 5 GiB beyond weight/runtime overhead against its system-RAM ceiling.
+The same estimate governs mounting and worker admission; a matching hardware
+class with insufficient capacity cannot place the model.
+CUDA music preparation requires the package's compiled GPU class in both
+live node facts and the signed support claim: SM 8.9 for Linux amd64 and
+SM 12.1 for Linux arm64. The signed claim must name the platform's exact managed
+build. Managed packages require one observed NVIDIA device with a known matching
+compute class; multiple devices, mixed classes, and unknown classes cannot be
+admitted until execution and memory accounting can select the same physical
+device. Each published native build retains those restrictions when restored
+from cache. A generic NVIDIA claim cannot widen a managed package's compiled
+target, and package availability alone cannot place a model. A qualified
+operator-provided primary CUDA binary can use its own exact signed build claim.
+When a dedicated CUDA wheel is already cached, configure
+`SKULK_AUDIO_CPP_CUDA_BIN` for that operator binary as well; startup cache
+rehydration otherwise prefers the dedicated build over a primary-only override.
 
 Music generation is an asynchronous job API for a mounted `TextToMusic` card.
 The model's `/v1/models` `music` object identifies its family, lyric rule,

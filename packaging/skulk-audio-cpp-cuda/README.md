@@ -4,6 +4,9 @@ This separately installed wheel contains audio.cpp v0.8.2 at source commit
 `4d88768fbcae4e6eb3352c6ab1422dabb7d90b58`, compiled for only ACE-Step
 and MiniMax Music 3 with CPU and CUDA backends. It carries the two pinned
 loader model specs and incorporated licenses. Model weights remain separate.
+Native artifacts are separate for Linux amd64 (SM 8.9) and Linux arm64
+(SM 12.1). The CUDA build keeps upstream's advancing Philox sampler;
+the CPU/Vulkan fallback sampler patch does not apply to this package.
 
 The runtime needs a working CUDA loader and GPU driver on the host. A wheel
 build or successful CPU probe does not establish usable CUDA music generation.

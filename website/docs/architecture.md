@@ -981,9 +981,21 @@ CUDA packages may restore their separate executable paths without contacting
 the package channel. Preparing a GPU package leaves existing CPU and other GPU
 mounts' executables and build identities intact. The CUDA wheel targets the
 NVIDIA compute architecture compiled into that package; installing it does
-not qualify a model for every NVIDIA GPU. Its GB10 variant requires an
-observed `nvidia:sm-12.1` class and a signed claim explicitly naming that
-class before preparation. CUDA 12 runtime, cuBLAS, NCCL, and the NVIDIA driver
+not qualify a model for every NVIDIA GPU. The build workflow emits separate
+Linux amd64 (SM 8.9) and arm64 (SM 12.1) CUDA artifacts. Each platform requires
+its own native qualification, immutable reader pin, and signed model claim;
+promotion selects one exact qualified GPU filename and digest.
+Managed CUDA preparation requires the platform's exact build and compiled class
+in the signed claim, plus one observed NVIDIA device with that known class.
+Mixed GPU vendors, unknown classes, and multiple NVIDIA devices are rejected until the runner can
+select the physical device used by both execution and memory admission. The
+inventory retains unknown compute classes and marks multiple NVIDIA devices,
+so another matching device cannot hide insufficient evidence. These are compute
+architecture restrictions, independent of node identity. Qualified primary
+CUDA overrides can use their own exact build claims. With an existing dedicated
+CUDA cache, the operator must also configure `SKULK_AUDIO_CPP_CUDA_BIN`:
+startup rehydration otherwise prefers the managed CUDA executable over a
+primary-only override. CUDA 12 runtime, cuBLAS, NCCL, and the NVIDIA driver
 must be on the host loader path; the binary probe exposes missing libraries.
 Signed support resolution applies the same exact class rule to a restored
 wheel, so a generic claim cannot reuse it through the CPU preparation path.
@@ -994,6 +1006,14 @@ standalone binaries must report the full pinned source revision.
 The facts probe checks both pinned model specs; a standalone binary may name
 its specs through `SKULK_AUDIO_CPP_SPECS_DIR`. Only then can the node publish
 ready audio.cpp lanes for restored instances.
+Runner diagnostics and shutdown load Metal/MLX memory APIs only on macOS.
+Linux music runners stop their server without initializing an unused native
+MLX extension during cleanup.
+Qualified music admission includes measured transient workspace beyond
+weight/runtime overhead: ACE-Step reserves 10 GiB on CPU/CUDA/Vulkan; MiniMax
+reserves 2 GiB on CUDA/Vulkan or 5 GiB on Metal. The shared estimator covers
+API preflight, placement, committed capacity and the worker load guard against
+the backend's GPU-memory pool or Metal system-RAM ceiling.
 On NVIDIA GB10, NVML can report device memory as unsupported even while CUDA
 can allocate from its shared CPU/GPU pool. Skulk reads CUDA's free and total
 device bytes in that case. Placement also checks live host RAM, reserves 16 GB

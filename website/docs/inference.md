@@ -113,19 +113,26 @@ lifecycle and are not model-generated video.
 
 ## Music jobs and engine preparation
 
+Music capacity includes measured generation workspace beyond model weights:
+ACE-Step reserves 10 GiB on CPU/CUDA/Vulkan; MiniMax reserves 2 GiB on
+CUDA/Vulkan or 5 GiB on Metal. Placement and the worker load guard use the same
+estimate. A supported hardware class still needs enough free memory for the
+complete footprint, including Metal's system-RAM working-set ceiling.
+
 Skulk ships without the audio.cpp engine package. When you mount a music card,
 the API chooses a hardware-eligible node, asks that worker to fetch and verify
 the pinned engine package, then waits for fresh node resources before ordinary
 placement. Apple Silicon macOS, Linux `amd64`, and Linux `arm64` have CPU-capable
-packages. Linux `amd64` has a separate Vulkan package, and Linux `arm64` has a
-CUDA package compiled for NVIDIA GB10 compute 12.1. A GPU package is selected
+packages. Linux `amd64` has separate Vulkan and CUDA packages; its CUDA
+package targets NVIDIA compute 8.9. Linux `arm64` has a CUDA package compiled
+for NVIDIA GB10 compute 12.1. A GPU package is selected
 only when a signed claim covers the exact card, engine build, and hardware class.
 The pinned CPU/Metal package is `0.8.2.post2`; its MiniMax depth sampler starts
-a fresh random stream for each audio frame. The Linux Vulkan and GB10 CUDA
+a fresh random stream for each audio frame. The Linux Vulkan and native CUDA
 pins remain `0.8.2.post4` and `0.8.2.post1`, respectively. Registry support
 matches the executable digest, so claims for an older CPU/Metal build do not
 authorize the new package.
-The GB10 CUDA package requires CUDA 12 runtime, cuBLAS, and NCCL libraries in
+The CUDA packages require CUDA 12 runtime, cuBLAS, and NCCL libraries in
 the host loader path; its probe reports missing libraries before the lane can
 be advertised. The package contains the server, model specs, and licenses;
 model weights download separately. An offline node can use a verified cached package
@@ -135,6 +142,19 @@ node serving its other workloads. `SKULK_AUDIO_CPP_BIN`,
 separate operator-installed builds, each of which must pass the same source
 and device probes. Preparing a GPU wheel does not replace another music
 instance's executable or build identity.
+Managed CUDA preparation requires the package's compiled GPU class in both
+live node facts and the signed support claim: `nvidia:sm-8.9` for Linux
+`amd64`, or `nvidia:sm-12.1` for Linux `arm64`. These describe compute
+architectures shared by matching GPUs, independent of node identity. A cached
+package or a generic NVIDIA claim cannot widen a managed build's target.
+The claim must also name the selected platform's exact managed executable.
+Managed packages require one observed NVIDIA device with a known matching
+compute class. Multiple devices, mixed classes, and unknown classes are rejected
+until the runner can bind execution and memory accounting to a selected device.
+Operator-provided primary CUDA binaries can use their own build claims. If a
+dedicated CUDA wheel is already cached, set `SKULK_AUDIO_CPP_CUDA_BIN` to the
+operator binary as well; startup cache rehydration otherwise prefers that
+dedicated build over a primary-only override.
 For AMD, node resources include a PCI chip class such as
 `amd:pci-1002-1586`, allowing a claim to cover the qualified hardware class
 without identifying a specific node.
