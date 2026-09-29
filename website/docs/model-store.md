@@ -83,7 +83,9 @@ and the dashboard reports `installed_not_current` or `update_available` until a
 complete replacement commits.
 
 Pre-existing caches are associated only with trusted card sources: an existing
-sidecar, persisted download state, custom card, bundled card, or signed catalog.
+sidecar, persisted download state, custom card, or signed catalog. When the
+registry cannot be read, the last verified catalog cached on the node serves
+this association without its age limit; it is never listed or placed from.
 A matching directory name never creates signed verification by itself. A full
 immutable revision marker plus matching artifact selection is
 `registry_verified`; complete bytes without that proof are `local_legacy` and

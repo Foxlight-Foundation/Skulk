@@ -29,9 +29,9 @@ Skulk supports DeepSeek V3.2 through resolved family defaults:
 - DSML tool-call format
 - thinking-toggle aware family behavior
 
-## Built-In Card Status
+## Registry Card Status
 
-The validated built-in `mlx-community/DeepSeek-V3.2-{4bit,8bit}` cards now
+The signed registry's validated `mlx-community/DeepSeek-V3.2-{4bit,8bit}` cards
 declare the same DSML contract that the runtime already used through resolved
 family defaults:
 

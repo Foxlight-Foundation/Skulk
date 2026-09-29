@@ -43,6 +43,7 @@ from skulk.store.installed_cards import (
     InstalledCardRecord,
     VerifiedDetachedInstalledCardCache,
     build_installed_card_record,
+    read_installed_card,
     write_installed_card,
 )
 from skulk.store.model_store_client import ModelStoreClient
@@ -412,6 +413,61 @@ async def test_inventory_publisher_excludes_canonical_store_catalog(
     published = sender.messages[0].info
     assert isinstance(published, NodeArtifactInventory)
     assert published.store_host
+    assert published.artifacts == []
+
+
+async def test_inventory_publisher_associates_a_legacy_canonical_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A model only in the canonical store gets its record on the node pass.
+
+    Telemetry still leaves canonical entries out; association does not, so
+    the record does not wait for reconciliation to scan the store.
+    """
+
+    store_root = tmp_path / "store"
+    cache_root = tmp_path / "cache"
+    models_root = tmp_path / "models"
+    for root in (store_root, cache_root, models_root):
+        root.mkdir()
+    card = _model_card()
+    legacy = store_root / "org--model"
+    legacy.mkdir()
+    (legacy / "config.json").write_text("{}")
+    (legacy / "model.safetensors").write_bytes(b"weights")
+    monkeypatch.setattr(
+        artifact_inventory.shared_constants, "SKULK_MODELS_DIR", models_root
+    )
+    monkeypatch.setattr(artifact_inventory.shared_constants, "SKULK_MODELS_PATH", None)
+
+    async def cards() -> list[ModelCard]:
+        return [card]
+
+    registered: list[InstalledCardRecord] = []
+    monkeypatch.setattr(skulk_main, "get_association_cards", cards)
+    monkeypatch.setattr(skulk_main, "register_installed_card_record", registered.append)
+    sender = _RecordingTelemetrySender()
+    node = _publisher_node(sender)
+    node.node_id = NodeId("store-node")
+    node.skulk_config = SkulkConfig(
+        model_store=ModelStoreConfig(
+            store_host="store-node",
+            store_path=str(store_root),
+            staging=StagingNodeConfig(node_cache_path=str(cache_root)),
+        )
+    )
+    node.store_client = ModelStoreClient(
+        store_host="store-node",
+        local_store_path=store_root,
+    )
+
+    await node._publish_artifact_inventory()
+
+    assert read_installed_card(legacy) is not None
+    assert [record.artifact_model_id for record in registered] == [card.model_id]
+    published = sender.messages[0].info
+    assert isinstance(published, NodeArtifactInventory)
     assert published.artifacts == []
 
 

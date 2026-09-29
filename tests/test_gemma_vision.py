@@ -5,14 +5,12 @@ model_type auto-detection priority, and VisionCardConfig BOI/EOI fields."""
 
 import base64
 import io
-from pathlib import Path
 from types import SimpleNamespace
 
 import mlx.core as mx
 import mlx.nn as nn
 from PIL import Image
 
-from skulk.shared.constants import RESOURCES_DIR
 from skulk.shared.models.model_cards import (
     ModelCard,
     ModelTask,
@@ -23,6 +21,7 @@ from skulk.shared.models.model_cards import (
     ToolCallFormat,
     VisionCardConfig,
 )
+from skulk.shared.tests.model_card_fixtures import FIXTURE_CARDS_DIR
 from skulk.shared.types.common import ModelId
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.text_generation import InputMessage, TextGenerationTaskParams
@@ -130,13 +129,11 @@ class TestVisionCardConfigBoiEoi:
 
 
 class TestGemma4ExtendedModelCard:
-    """Gemma 4 built-in cards should expose advanced runtime declarations."""
+    """Curated cards should expose advanced runtime declarations."""
 
     async def test_builtin_card_includes_reasoning_and_runtime_sections(self):
         card = await ModelCard.load_from_path(
-            Path(RESOURCES_DIR)
-            / "inference_model_cards"
-            / "mlx-community--gemma-4-26b-a4b-it-4bit.toml"
+            FIXTURE_CARDS_DIR / "mlx-community--gemma-4-26b-a4b-it-4bit.toml"
         )
 
         assert card.reasoning is not None
@@ -148,9 +145,7 @@ class TestGemma4ExtendedModelCard:
 
     async def test_gpt_oss_builtin_card_includes_tooling_and_runtime_sections(self):
         card = await ModelCard.load_from_path(
-            Path(RESOURCES_DIR)
-            / "inference_model_cards"
-            / "mlx-community--gpt-oss-20b-MXFP4-Q8.toml"
+            FIXTURE_CARDS_DIR / "mlx-community--gpt-oss-20b-MXFP4-Q8.toml"
         )
 
         assert card.tooling is not None
@@ -161,9 +156,7 @@ class TestGemma4ExtendedModelCard:
 
     async def test_deepseek_v32_builtin_card_includes_dsml_sections(self):
         card = await ModelCard.load_from_path(
-            Path(RESOURCES_DIR)
-            / "inference_model_cards"
-            / "mlx-community--DeepSeek-V3.2-4bit.toml"
+            FIXTURE_CARDS_DIR / "mlx-community--DeepSeek-V3.2-4bit.toml"
         )
 
         assert card.reasoning is not None

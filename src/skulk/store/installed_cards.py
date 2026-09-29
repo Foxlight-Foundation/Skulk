@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path, PurePosixPath
-from typing import Literal, final
+from typing import Final, Literal, final
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -1259,37 +1259,167 @@ def _legacy_companion_artifact_is_complete(
     return _legacy_base_artifact_is_complete(model_directory)
 
 
+@final
+@dataclass(frozen=True)
+class UnrecordedArtifacts:
+    """Model directories under the search roots, by whether their card is recorded."""
+
+    complete: tuple[Path, ...]
+    """Complete artifacts with no card record, or a record their files no
+    longer match. Offline, Skulk can serve these only from a shipped card."""
+
+    incomplete: tuple[Path, ...]
+    """Directories without a record that are not a complete artifact, such
+    as an interrupted download."""
+
+    recorded: int
+    """Directories whose card record matches their files."""
+
+
+# The downloader keeps per-model file-list metadata under
+# ``<models dir>/caches``. It is not an artifact, and a model directory is
+# always ``org--name``, so the name cannot belong to one.
+_DOWNLOAD_METADATA_CACHE_NAME: Final = "caches"
+
+
+def _detached_records_by_path(
+    fallback_root: Path,
+) -> dict[str, tuple[InstalledCardRecord, ...]]:
+    """Index the detached records under ``fallback_root`` by artifact path.
+
+    Only records whose outer manifest digest matches the inner record are
+    kept, the same binding :func:`read_installed_card_with_fallback` applies.
+    """
+
+    if not fallback_root.is_dir():
+        return {}
+    by_path: dict[str, list[InstalledCardRecord]] = {}
+    for path in fallback_root.glob("*.json"):
+        try:
+            external = ExternalInstalledCardRecord.model_validate_json(
+                path.read_bytes(), strict=False
+            )
+        except (OSError, ValueError):
+            continue
+        if external.manifest_sha256 == external.record.manifest_sha256:
+            by_path.setdefault(external.artifact_path, []).append(external.record)
+    return {artifact: tuple(records) for artifact, records in by_path.items()}
+
+
+def find_unrecorded_artifacts(
+    roots: Iterable[Path],
+    *,
+    fallback_root: Path = SKULK_INSTALLED_CARD_RECORDS_DIR,
+) -> UnrecordedArtifacts:
+    """Sort every model directory under ``roots`` by whether its card is recorded.
+
+    A record, adjacent or detached, is checked against the file sizes it
+    lists and never against their hashes, so this stays cheap on a node that
+    holds hundreds of gigabytes. That is enough for a report: the question is
+    whether a record exists, and launch still hashes a detached record before
+    trusting it. Hidden directories are skipped, as discovery skips them, and
+    so is the downloader's metadata cache.
+
+    Args:
+        roots: Model-search roots to inspect.
+        fallback_root: Directory holding detached records for read-only roots.
+
+    Returns:
+        The complete and incomplete directories without a usable record, and
+        the number with one.
+    """
+
+    detached = _detached_records_by_path(fallback_root)
+    complete: list[Path] = []
+    incomplete: list[Path] = []
+    recorded = 0
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for model_directory in sorted(root.iterdir()):
+            if (
+                not model_directory.is_dir()
+                or model_directory.name.startswith(".")
+                or model_directory.name == _DOWNLOAD_METADATA_CACHE_NAME
+            ):
+                continue
+            try:
+                adjacent = read_installed_card(model_directory)
+                candidates = (
+                    (adjacent,)
+                    if adjacent is not None
+                    else detached.get(str(model_directory.resolve()), ())
+                )
+                has_record = any(
+                    verify_installed_card(model_directory, record)
+                    for record in candidates
+                )
+            except (OSError, ValueError):
+                has_record = False
+            if has_record:
+                recorded += 1
+            elif _legacy_base_artifact_is_complete(model_directory):
+                complete.append(model_directory)
+            else:
+                incomplete.append(model_directory)
+    return UnrecordedArtifacts(
+        complete=tuple(complete), incomplete=tuple(incomplete), recorded=recorded
+    )
+
+
 def ensure_installed_cards(
     root: Path,
     cards: Iterable[ModelCard],
     verified_detached_cache: VerifiedDetachedInstalledCardCache | None = None,
-) -> None:
+    *,
+    fallback_root: Path = SKULK_INSTALLED_CARD_RECORDS_DIR,
+) -> tuple[InstalledCardRecord, ...]:
     """Materialize missing sidecars for trusted, complete legacy directories.
+
+    Only a directory with no record at all is associated. One whose record no
+    longer matches its files has drifted: re-deriving a record from the
+    changed bytes would bless corruption or tampering, so it stays unresolved
+    until a download repairs it.
 
     Args:
         root: Launchable model-search root to inspect.
         cards: Trusted cards used to associate complete legacy artifacts.
         verified_detached_cache: Optional operator-inventory cache for detached
             records on read-only roots.
+        fallback_root: Directory holding detached records for read-only roots.
+
+    Returns:
+        The records written by this call, so an async caller can converge the
+        process's live catalog on its event loop.
     """
 
     if not root.is_dir():
-        return
+        return ()
+    written: list[InstalledCardRecord] = []
     card_list = tuple(cards)
+    detached = _detached_records_by_path(fallback_root)
     for model_directory in root.iterdir():
         if not model_directory.is_dir() or model_directory.name.startswith("."):
             continue
         try:
-            existing = read_installed_card_with_fallback(
+            if installed_card_path(model_directory).exists() or detached.get(
+                str(model_directory.resolve())
+            ):
+                # Recorded, whether it still verifies or has drifted: never
+                # re-derive a record over an existing one.
+                continue
+            if read_installed_card_with_fallback(
                 model_directory,
                 verified_detached_cache=verified_detached_cache,
-            )
-            if existing is not None and verify_installed_card(
-                model_directory, existing
+                fallback_root=fallback_root,
             ):
                 continue
             record = associate_installed_card(model_directory, card_list)
             if record is not None:
-                write_installed_card_with_fallback(model_directory, record)
+                write_installed_card_with_fallback(
+                    model_directory, record, fallback_root=fallback_root
+                )
+                written.append(record)
         except (OSError, ValueError):
             continue
+    return tuple(written)
