@@ -306,6 +306,95 @@ def test_a_settings_schema_is_compatible_only_when_it_still_accepts_every_settin
     assert configuration_schema_compatible(SETTINGS, candidate) is compatible
 
 
+def _with(keywords: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    """SETTINGS with top-level keywords added or replaced."""
+    return {**SETTINGS, **keywords}
+
+
+_NESTED: dict[str, JsonValue] = {
+    "type": "object",
+    "properties": {"size": {"type": "integer"}},
+}
+
+
+@pytest.mark.parametrize(
+    ("installed", "candidate", "compatible"),
+    [
+        # Under not, accepting more refuses more: a dropped nested requirement
+        # makes the whole schema stricter, while wording stays free.
+        (
+            _with({"not": {"required": ["region", "limit"]}}),
+            _with({"not": {"required": ["region"]}}),
+            False,
+        ),
+        (
+            _with({"not": {"required": ["limit"]}}),
+            _with({"not": {"required": ["limit"], "description": "Never both."}}),
+            True,
+        ),
+        # A wider oneOf branch can make a stored value match two branches.
+        (
+            _with({"oneOf": [{"required": ["region", "limit"]}, {"required": ["note"]}]}),
+            _with({"oneOf": [{"required": ["region"]}, {"required": ["note"]}]}),
+            False,
+        ),
+        # A wider if condition routes more stored values into then.
+        (
+            _with({"if": {"required": ["region", "limit"]}, "then": {"required": ["note"]}}),
+            _with({"if": {"required": ["region"]}, "then": {"required": ["note"]}}),
+            False,
+        ),
+        # anyOf and allOf branches widen their parent.
+        (
+            _with({"anyOf": [{"required": ["region", "limit"]}, {"required": ["note"]}]}),
+            _with({"anyOf": [{"required": ["region"]}, {"required": ["note"]}]}),
+            True,
+        ),
+        (
+            _with({"allOf": [{"required": ["region", "limit"]}]}),
+            _with({"allOf": [{"required": ["region"]}]}),
+            True,
+        ),
+        # A pattern may already admit the key a new property starts constraining.
+        (
+            _with({"patternProperties": {"^x_": {"type": "string"}}}),
+            {
+                **_settings(x_mode={"type": "string", "enum": ["fast"]}),
+                "patternProperties": {"^x_": {"type": "string"}},
+            },
+            False,
+        ),
+        # A reference can reach a definition from any keyword: wording may
+        # change, structure may not, and a new definition is unreachable.
+        (
+            _with({"$defs": {"Nested": _NESTED}}),
+            _with({"$defs": {"Nested": {**_NESTED, "title": "Nested"}}}),
+            True,
+        ),
+        (
+            _with({"$defs": {"Nested": {**_NESTED, "required": ["size"]}}}),
+            _with({"$defs": {"Nested": _NESTED}}),
+            False,
+        ),
+        (
+            SETTINGS,
+            {
+                **_settings(nested={"$ref": "#/$defs/Nested"}),
+                "$defs": {"Nested": _NESTED},
+            },
+            True,
+        ),
+    ],
+)
+def test_only_widening_keywords_carry_a_loosened_subschema(
+    installed: dict[str, JsonValue],
+    candidate: dict[str, JsonValue],
+    compatible: bool,
+) -> None:
+    """Loosening under not, oneOf, if, patterns or definitions still needs migration."""
+    assert configuration_schema_compatible(installed, candidate) is compatible
+
+
 def test_a_property_added_to_an_open_object_is_not_compatible() -> None:
     """Stored settings may already hold the key, so the new schema could refuse it."""
     open_settings = {**SETTINGS, "additionalProperties": True}
