@@ -828,8 +828,9 @@ an attachment never waits on it, and sticky for the API lifetime, so a failed re
 never withdraws it. Absent means "keep": the manager changes nothing until a new
 address arrives. Then it stops the owners, writes owner-only `serve.json` into each
 installation, records the same value in its own root `serve.json` last (the next
-attachment finishes an interrupted write), and restarts them; a new installation
-receives the current address at registration. Never move the address into
+attachment finishes an interrupted write), and restarts them. `_load` brings each
+installation's `serve.json` to the recorded address before its owner starts, which
+covers new registrations and interrupted writes. Never move the address into
 `owner.json` or `host.json`: owners parse `owner.json` strictly, and an older owner
 or manager must keep starting. Protocol 3 owners hand it to children as
 `Startup.serve_host`.

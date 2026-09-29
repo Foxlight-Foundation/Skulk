@@ -2067,8 +2067,10 @@ never withdraws the address. It sends the address when it has one; without one t
 manager keeps the address its installations already have. A new address stops the
 owners, is written as an owner-only `serve.json` into each installation and then
 into the manager's root, and the owners start again; the root record is written
-last, so the next attachment finishes an interrupted write. A newly registered
-installation receives the current address. `serve.json` is separate from
+last, so the next attachment finishes an interrupted write. Before any owner
+starts, the manager brings its installation's `serve.json` to the recorded
+address, which covers new registrations and repairs an interrupted one.
+`serve.json` is separate from
 `owner.json` and `host.json` because owners parse `owner.json` strictly and an
 older owner or manager must keep starting; owners that speak plugin protocol 3
 hand the address to their children as `Startup.serve_host`.

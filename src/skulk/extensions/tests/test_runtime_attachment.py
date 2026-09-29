@@ -444,3 +444,35 @@ async def test_the_bridge_attaches_with_the_address_tailscale_reports(
         await bridge.release()
         await manager.close()
     RuntimeLock(tmp_path, "attachment.lock").close()
+
+
+async def test_an_owner_always_starts_with_the_recorded_address(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A registration interrupted before its serve.json is repaired at load."""
+    manager = setup(tmp_path, monkeypatch)
+    await manager.start()
+    lease = RuntimeLock(tmp_path, "attachment.lock")
+    try:
+        assert manager.boot is not None
+        await manager.boot
+        await manager_request(
+            tmp_path, InstallationRequest(action="register", plugin_id="managed.first")
+        )
+        assert "result" in await manager_request(tmp_path, attach("100.70.1.2"))
+        path = tmp_path / "installations/managed.first/serve.json"
+        assert read_serve_host(path) == "100.70.1.2"
+        # The window a crash can leave: the installation exists, its address
+        # does not, and the root already records it, so no attachment repairs it.
+        path.unlink()
+        await manager.close()
+        manager = RuntimeManager(tmp_path)
+        await manager.start()
+        assert manager.boot is not None
+        await manager.boot
+        assert "managed.first" in manager.controllers
+        assert read_serve_host(path) == "100.70.1.2"
+    finally:
+        lease.close()
+        await manager.close()
