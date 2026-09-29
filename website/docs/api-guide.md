@@ -4197,8 +4197,10 @@ already have. An address stays once seen: a failed or slow query never withdraws
 it, and only a different address replaces it. When the address changes, the manager
 stops the owners, writes an owner-only `serve.json` (`{"serve_host": "<address>"}`)
 into each installation, records the same value at its own root last, and starts
-the owners again, so an interrupted write is finished by the next attachment. A
-newly registered installation receives the current address. The file sits beside
+the owners again, so an interrupted write is finished by the next attachment.
+Before any owner starts, the manager also brings that installation's `serve.json`
+to the recorded address, so a newly registered installation receives it and an
+installation whose write was interrupted is repaired. The file sits beside
 `owner.json` rather than inside it because owners parse `owner.json` strictly; an
 owner built before the setting never reads `serve.json`, and neither does a
 manager built before it.

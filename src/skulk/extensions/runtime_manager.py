@@ -702,6 +702,17 @@ class RuntimeManager:
             )
             if binding != self.settings.owner_binding():
                 raise ValueError("installation transport identity differs")
+            if (
+                self.serve_host is not None
+                and read_serve_host(root / "serve.json") != self.serve_host
+            ):
+                # An owner always starts with the recorded address, whatever
+                # interrupted the write that should have given it: a new
+                # registration gets it here too.
+                write_private(
+                    root / "serve.json",
+                    ServeBinding(serve_host=self.serve_host).model_dump_json().encode(),
+                )
             controller = RuntimeController(root)
             await controller.start()
             if identifier not in self.downloads:
@@ -1049,11 +1060,6 @@ class RuntimeManager:
                 root / "owner.json",
                 self.settings.owner_binding().model_dump_json().encode(),
             )
-            if self.serve_host is not None:
-                write_private(
-                    root / "serve.json",
-                    ServeBinding(serve_host=self.serve_host).model_dump_json().encode(),
-                )
         if identifier not in self.controllers:
             await self._load(identifier)
 
