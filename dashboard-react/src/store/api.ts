@@ -26,6 +26,7 @@ export const apiSlice = createApi({
     'OperatorDevices',
     'Plugins',
     'PluginConfiguration',
+    'PluginCatalog',
     'StewardStatus',
     'StewardProposals',
   ] as const,

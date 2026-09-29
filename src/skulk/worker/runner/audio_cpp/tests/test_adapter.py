@@ -19,7 +19,43 @@ from skulk.worker.runner.audio_cpp.adapter import (
     audio_cpp_music_request,
     decode_audio_cpp_music_response,
 )
-from skulk.worker.runner.audio_cpp.server import server_config
+from skulk.worker.runner.audio_cpp.server import AudioCppServer, server_config
+
+
+@pytest.mark.parametrize("available_cpus, expected", [(None, 1), (1, 1), (2, 1), (4, 3), (24, 8)])
+def test_cpu_inference_respects_usable_cpus_and_control_plane_reserve(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    available_cpus: int | None,
+    expected: int,
+) -> None:
+    """CPU inference uses bounded usable cores; accelerators keep their qualified setting."""
+    monkeypatch.setattr(audio_server.os, "process_cpu_count", lambda: available_cpus)
+    for backend in ("cpu", "metal", "vulkan", "cuda", "hip"):
+        server = AudioCppServer(
+            binary=tmp_path / "server", model_specs=tmp_path / "specs",
+            model_dir=tmp_path / "model", music=_family("minimax_music3"),
+            backend=backend, work_dir=tmp_path / "work",
+        )
+        expected_threads = expected if backend == "cpu" else 1
+        config = server_config(
+            port=10000, backend=backend, model_dir=server.model_dir,
+            music=server.music, model_specs=server.model_specs, threads=server.threads,
+        )
+        assert config["threads"] == expected_threads
+
+
+@pytest.mark.parametrize("backend, threads", [("cpu", 0), ("cpu", 9), ("metal", 2)])
+def test_server_rejects_unbounded_or_unqualified_inference_threads(
+    backend: str, threads: int,
+) -> None:
+    """Thread overrides cannot exceed the bound or alter accelerator execution."""
+    with pytest.raises(ValueError, match="CPU threads"):
+        server_config(
+            port=10000, backend=backend, model_dir=Path("/tmp/model"),
+            music=_family("minimax_music3"), model_specs=Path("/tmp/specs"),
+            threads=threads,
+        )
 
 
 def test_linux_parent_death_signal_uses_pr_set_pdeathsig(

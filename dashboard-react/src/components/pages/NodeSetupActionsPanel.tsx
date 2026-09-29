@@ -4,6 +4,7 @@ import { useSkulkTranslation } from '../../i18n/tolgee';
 import { useGetNodeSetupActionsQuery, useStartNodeSetupMutation, useResumeNodeSetupMutation, type NodeAddress, type SetupAction, type SetupActions } from '../../store/endpoints/plugins';
 import { Button } from '../common/Button';
 import { PluginConfigurationFields, supportedConfigurationSchema } from './PluginConfigurationFields';
+import { randomHex32 } from '../../utils/randomIds';
 
 const Panel = styled.section`overflow-wrap: anywhere; margin-top: 12px;`;
 const Form = styled.form`margin: 12px 0; padding: 12px; border: 1px solid ${({ theme }) => theme.colors.border}; border-radius: ${({ theme }) => theme.radii.sm};`;
@@ -23,7 +24,7 @@ function SetupForm({ address, action, snapshot, blocked }: { address: NodeAddres
   const submit = async () => {
     if (sending.current || disabled) return;
     sending.current = true;
-    const operationId = crypto.randomUUID().replaceAll('-', '');
+    const operationId = randomHex32();
     setSubmitted(true);
     setNotice(`${t('plugins.setupSubmitted', 'Setup submitted. Operation')}: ${operationId}`);
     try {

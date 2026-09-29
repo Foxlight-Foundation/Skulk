@@ -4,10 +4,15 @@ from pathlib import Path
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from pydantic import JsonValue
 
 from skulk.extensions.runtime_artifacts import QualifiedHost
 from skulk.extensions.runtime_files import RuntimeLock, read_private, write_private
-from skulk.extensions.runtime_selection import RuntimeSelector, SelectionOperation
+from skulk.extensions.runtime_selection import (
+    RuntimeSelector,
+    SelectionOperation,
+    configuration_schema_compatible,
+)
 from skulk.extensions.tests.test_runtime_install import artifacts
 
 
@@ -241,3 +246,205 @@ async def test_recovery_accepts_a_selection_journaled_under_the_legacy_platform_
     recovered = await selector.recover()
     assert recovered.state == "complete"
     assert not selector.pending.exists()
+
+
+SETTINGS: dict[str, JsonValue] = {
+    "type": "object",
+    "properties": {
+        "region": {"type": "string", "enum": ["one", "two"]},
+        "limit": {"type": "integer", "minimum": 60, "default": 7200},
+    },
+    "required": ["region"],
+    "additionalProperties": False,
+}
+
+
+def _settings(**changes: JsonValue) -> dict[str, JsonValue]:
+    """SETTINGS with its properties replaced or extended by ``changes``."""
+    properties = SETTINGS["properties"]
+    assert isinstance(properties, dict)
+    return {**SETTINGS, "properties": {**properties, **changes}}
+
+
+@pytest.mark.parametrize(
+    ("candidate", "compatible"),
+    [
+        (SETTINGS, True),
+        ({**SETTINGS, "description": "Where and how long."}, True),
+        (
+            _settings(
+                limit={
+                    "type": "integer",
+                    "minimum": 60,
+                    "default": 86400,
+                    "description": "The longest the release allows.",
+                }
+            ),
+            True,
+        ),
+        (_settings(note={"type": "string"}), True),
+        ({**SETTINGS, "required": []}, True),
+        (_settings(region={"type": "string", "enum": ["one", "two", "three"]}), False),
+        (_settings(limit={"type": "integer", "minimum": 30, "default": 7200}), False),
+        (_settings(limit={"type": "number", "minimum": 60}), False),
+        ({**SETTINGS, "required": ["region", "limit"]}, False),
+        (
+            {
+                **SETTINGS,
+                "properties": {"region": {"type": "string", "enum": ["one", "two"]}},
+            },
+            False,
+        ),
+        ({**_settings(note={"type": "string"}), "additionalProperties": True}, False),
+    ],
+)
+def test_a_settings_schema_is_compatible_only_when_it_still_accepts_every_setting(
+    candidate: dict[str, JsonValue], compatible: bool
+) -> None:
+    """Rewording, new defaults, optional additions and relaxed requirements carry;
+    any changed constraint, new requirement, removal or opened object does not."""
+    assert configuration_schema_compatible(SETTINGS, candidate) is compatible
+
+
+def _with(keywords: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    """SETTINGS with top-level keywords added or replaced."""
+    return {**SETTINGS, **keywords}
+
+
+_NESTED: dict[str, JsonValue] = {
+    "type": "object",
+    "properties": {"size": {"type": "integer"}},
+}
+
+
+@pytest.mark.parametrize(
+    ("installed", "candidate", "compatible"),
+    [
+        # Under not, accepting more refuses more: a dropped nested requirement
+        # makes the whole schema stricter, while wording stays free.
+        (
+            _with({"not": {"required": ["region", "limit"]}}),
+            _with({"not": {"required": ["region"]}}),
+            False,
+        ),
+        (
+            _with({"not": {"required": ["limit"]}}),
+            _with({"not": {"required": ["limit"], "description": "Never both."}}),
+            True,
+        ),
+        # A wider oneOf branch can make a stored value match two branches.
+        (
+            _with({"oneOf": [{"required": ["region", "limit"]}, {"required": ["note"]}]}),
+            _with({"oneOf": [{"required": ["region"]}, {"required": ["note"]}]}),
+            False,
+        ),
+        # A wider if condition routes more stored values into then.
+        (
+            _with({"if": {"required": ["region", "limit"]}, "then": {"required": ["note"]}}),
+            _with({"if": {"required": ["region"]}, "then": {"required": ["note"]}}),
+            False,
+        ),
+        # anyOf and allOf branches widen their parent.
+        (
+            _with({"anyOf": [{"required": ["region", "limit"]}, {"required": ["note"]}]}),
+            _with({"anyOf": [{"required": ["region"]}, {"required": ["note"]}]}),
+            True,
+        ),
+        (
+            _with({"allOf": [{"required": ["region", "limit"]}]}),
+            _with({"allOf": [{"required": ["region"]}]}),
+            True,
+        ),
+        # A pattern may already admit the key a new property starts constraining.
+        (
+            _with({"patternProperties": {"^x_": {"type": "string"}}}),
+            {
+                **_settings(x_mode={"type": "string", "enum": ["fast"]}),
+                "patternProperties": {"^x_": {"type": "string"}},
+            },
+            False,
+        ),
+        # A reference can reach a definition from any keyword: wording may
+        # change, structure may not, and a new definition is unreachable.
+        (
+            _with({"$defs": {"Nested": _NESTED}}),
+            _with({"$defs": {"Nested": {**_NESTED, "title": "Nested"}}}),
+            True,
+        ),
+        (
+            _with({"$defs": {"Nested": {**_NESTED, "required": ["size"]}}}),
+            _with({"$defs": {"Nested": _NESTED}}),
+            False,
+        ),
+        (
+            SETTINGS,
+            {
+                **_settings(nested={"$ref": "#/$defs/Nested"}),
+                "$defs": {"Nested": _NESTED},
+            },
+            True,
+        ),
+    ],
+)
+def test_only_widening_keywords_carry_a_loosened_subschema(
+    installed: dict[str, JsonValue],
+    candidate: dict[str, JsonValue],
+    compatible: bool,
+) -> None:
+    """Loosening under not, oneOf, if, patterns or definitions still needs migration."""
+    assert configuration_schema_compatible(installed, candidate) is compatible
+
+
+def test_a_property_added_to_an_open_object_is_not_compatible() -> None:
+    """Stored settings may already hold the key, so the new schema could refuse it."""
+    open_settings = {**SETTINGS, "additionalProperties": True}
+    extended = {**_settings(note={"type": "string"}), "additionalProperties": True}
+    assert not configuration_schema_compatible(open_settings, extended)
+    assert configuration_schema_compatible(None, None)
+    assert not configuration_schema_compatible(None, SETTINGS)
+
+
+async def test_a_compatible_settings_schema_upgrades_in_place_at_protocol_3(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only owners that carry settings may change the schema without migration."""
+    key = Ed25519PrivateKey.generate()
+    reworded = _settings(
+        limit={"type": "integer", "minimum": 60, "default": 86400},
+        note={"type": "string"},
+    )
+    releases = {
+        name: artifacts(
+            tmp_path / name,
+            signing_key=key,
+            sequence=sequence,
+            manifest_extra={"protocol": protocol, "configuration_schema": schema},
+        )
+        for name, sequence, protocol, schema in (
+            ("first", 1, 3, SETTINGS),
+            ("previous-owner", 2, 2, reworded),
+            ("reworded", 3, 3, reworded),
+            ("retyped", 4, 3, _settings(limit={"type": "string"})),
+        )
+    }
+    _, trust, host = releases["first"]
+    monkeypatch.setattr("skulk.extensions.runtime_install.measure_host", lambda: host)
+    selector = RuntimeSelector(tmp_path / "installed")
+    write_private(
+        selector.root / "publisher-trust.json", trust.model_dump_json().encode()
+    )
+    staged = {
+        name: await selector.installer.stage(metadata, tmp_path / name)
+        for name, (metadata, _, _) in releases.items()
+    }
+    await selector.activate(staged["first"].runtime_digest, expected_revision=0)
+    with pytest.raises(ValueError, match="configuration schema requires migration"):
+        await selector.activate(
+            staged["previous-owner"].runtime_digest, expected_revision=1
+        )
+    upgraded = await selector.activate(
+        staged["reworded"].runtime_digest, expected_revision=1
+    )
+    assert upgraded.selection.configuration_schema == reworded
+    with pytest.raises(ValueError, match="configuration schema requires migration"):
+        await selector.activate(staged["retyped"].runtime_digest, expected_revision=2)

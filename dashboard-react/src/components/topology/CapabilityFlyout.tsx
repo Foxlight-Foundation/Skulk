@@ -10,6 +10,7 @@ import {
   type CapabilityNodeSummary,
 } from '../../types/capabilityNodes';
 import { buildCapabilityActions, runDescriptorAction, type CapabilityActionItem } from './capabilityActions';
+import { dashboardUrlOn, pluginsPath } from '../../utils/hostDashboard';
 import { satelliteColor, satelliteStatusLabel } from './capabilityPresentation';
 
 /** Width of the flyout card, used to keep it inside the canvas. */
@@ -30,6 +31,8 @@ export interface CapabilityFlyoutProps {
   hostNodeId: string;
   /** Friendly name of the host. */
   hostName: string;
+  /** The host's Tailscale address, so "manage on host" can open its dashboard; null when it reports none. */
+  hostAddress?: string | null;
   /** Node id the dashboard is served by; null while unknown. */
   localNodeId: string | null;
   /** Canvas coordinates of the satellite the flyout hangs from. */
@@ -237,6 +240,7 @@ export function CapabilityFlyout({
   onSelectKey,
   hostNodeId,
   hostName,
+  hostAddress = null,
   localNodeId,
   anchor,
   canvasWidth,
@@ -291,6 +295,7 @@ export function CapabilityFlyout({
     isLocalHost,
     hostName,
     dashboardHostname: window.location.hostname,
+    hostDashboardUrl: hostAddress ? dashboardUrlOn(hostAddress, pluginsPath(summary.pluginId)) : null,
     t,
   });
   const level = capabilityNodeHealth(summary);
@@ -442,6 +447,20 @@ export function CapabilityFlyout({
                 <FiInfo aria-hidden size={14} />
                 <ActionText>{item.title}</ActionText>
               </ActionButton>
+            );
+          }
+          if (item.url) {
+            return (
+              <ActionLink
+                href={item.url}
+                key={item.id}
+                rel="noopener noreferrer"
+                target="_blank"
+                title={t('topology.capability.manageOnHostLink', 'Open the dashboard on {host}, where this node is managed', { host: item.hostName })}
+              >
+                <FiExternalLink aria-hidden size={14} />
+                <ActionText>{item.title}</ActionText>
+              </ActionLink>
             );
           }
           return (

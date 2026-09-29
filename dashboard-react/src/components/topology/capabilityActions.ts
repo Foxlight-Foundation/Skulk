@@ -31,7 +31,14 @@ export type CapabilityActionItem =
       enabled: boolean;
     }
   | { kind: 'details'; id: string; title: string }
-  | { kind: 'manage-on-host'; id: string; title: string; hostName: string };
+  | {
+      kind: 'manage-on-host';
+      id: string;
+      title: string;
+      hostName: string;
+      /** The host's own dashboard for this node, reached over the tailnet; null when the host reports no Tailscale address. */
+      url: string | null;
+    };
 
 /** Where the dashboard sits relative to the node's host. */
 export interface CapabilityActionContext {
@@ -43,8 +50,14 @@ export interface CapabilityActionContext {
    * the dashboard is served by the capability host.
    */
   dashboardHostname?: string;
-  /** Friendly name of the host, for the "manage on host" hint. */
+  /** Friendly name of the host, for the "manage on host" entry. */
   hostName: string;
+  /**
+   * The host's own dashboard for this node, at the host's Tailscale address.
+   * The host admits a browser that reaches it over the tailnet, so "manage on
+   * host" links there; without one the entry stays a hint.
+   */
+  hostDashboardUrl?: string | null;
   /** Translates a key with an English fallback. */
   t: (key: string, fallback: string, params?: Record<string, string | number>) => string;
 }
@@ -197,6 +210,7 @@ export function buildCapabilityActions(
         host: context.hostName,
       }),
       hostName: context.hostName,
+      url: context.hostDashboardUrl ?? null,
     });
   }
   return items;
@@ -209,6 +223,7 @@ export function buildCapabilityActions(
  * always be made. Exposed with an injectable crypto for tests.
  */
 export function generateCallId(cryptoLike: Partial<Crypto> | null = globalThis.crypto ?? null): string {
+  // eslint-disable-next-line no-restricted-syntax -- guarded secure-context path
   if (cryptoLike && typeof cryptoLike.randomUUID === 'function') return cryptoLike.randomUUID();
   if (cryptoLike && typeof cryptoLike.getRandomValues === 'function') {
     const bytes = cryptoLike.getRandomValues(new Uint8Array(16));

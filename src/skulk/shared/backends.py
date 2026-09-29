@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Final, Literal
+from typing import AbstractSet, Final, Literal
 
 from loguru import logger
 
@@ -177,6 +177,48 @@ GB10_AUDIO_CPP_CUDA_BUILD: Final = (
     "audio.cpp@sha256:21db727c1f2ec030b93cabffbd09e3c522ceb77fa2ae1092cd96a0f4b0120c9c"
 )
 """Exact SM 12.1 package build; broad CUDA claims cannot authorize this binary."""
+L40S_AUDIO_CPP_CUDA_BUILD: Final = (
+    "audio.cpp@sha256:05f719a638a5152944c00fc724db802ffcc9c99d90a9e772e850a6c92f82ba80"
+)
+"""Exact amd64 SM 8.9 package build; model support remains signed registry truth."""
+AUDIO_CPP_CUDA_TARGETS_BY_ARCHITECTURE: Final[dict[str, str]] = {
+    "x86_64": "nvidia:sm-8.9",
+    "amd64": "nvidia:sm-8.9",
+    "aarch64": "nvidia:sm-12.1",
+    "arm64": "nvidia:sm-12.1",
+}
+"""Compiled CUDA targets, requiring exact live and signed hardware evidence."""
+AUDIO_CPP_CUDA_TARGETS_BY_BUILD: Final[dict[str, str]] = {
+    GB10_AUDIO_CPP_CUDA_BUILD: "nvidia:sm-12.1",
+    L40S_AUDIO_CPP_CUDA_BUILD: "nvidia:sm-8.9",
+}
+"""Exact native builds whose compiled target cannot be widened by broad claims."""
+AUDIO_CPP_CUDA_BUILDS_BY_ARCHITECTURE: Final[dict[str, str]] = {
+    "x86_64": L40S_AUDIO_CPP_CUDA_BUILD,
+    "amd64": L40S_AUDIO_CPP_CUDA_BUILD,
+    "aarch64": GB10_AUDIO_CPP_CUDA_BUILD,
+    "arm64": GB10_AUDIO_CPP_CUDA_BUILD,
+}
+"""Managed executable selected by each architecture's immutable CUDA wheel."""
+
+
+def audio_cpp_cuda_hardware_matches(
+    required_class: str, hardware_classes: AbstractSet[str]
+) -> bool:
+    """Check one observed NVIDIA device against a managed wheel's compute class.
+
+    The sidecar does not select a particular accelerator. Multiple devices,
+    including other vendors, or unknown SM classes cannot bind its execution and
+    memory pool to a device. Linux telemetry may prefer an AMD pool on a mixed
+    host, so the presence of one matching NVIDIA device is insufficient.
+    ``required_class`` names the wheel's compiled target; ``hardware_classes``
+    contains live inventory evidence. Return whether that evidence is sufficient.
+    """
+    return not (hardware_classes & {"amd", "apple", "nvidia:multiple-devices"}) and {
+        hardware_class
+        for hardware_class in hardware_classes
+        if hardware_class.startswith("nvidia:sm-")
+    } == {required_class}
 
 # ComfyUI compute backends Skulk advertises: NVIDIA CUDA and AMD ROCm.
 _COMFY_COMPUTE_BACKENDS: Final[tuple[ComputeBackend, ...]] = ("cuda", "rocm")

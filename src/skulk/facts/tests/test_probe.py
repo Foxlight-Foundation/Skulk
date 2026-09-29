@@ -2,12 +2,16 @@
 """Gathering-side tests: env classification, device-list parsing, injection."""
 
 from pathlib import Path
+from typing import cast
+from unittest.mock import Mock
 
 import pytest
 
 from skulk.facts import probe
+from skulk.facts.inventory import hardware_class_inventory
 from skulk.facts.probe import gather_node_facts, parse_list_devices_output
 from skulk.shared.types.node_facts import LlamaServerDeviceProbe
+from skulk.utils.info_gatherer.nvidia_gpu import NvmlLike
 
 
 def _make_executable(path: Path) -> Path:
@@ -109,6 +113,27 @@ def test_nvidia_presence_only_yields_device_node_fact(tmp_path: Path) -> None:
     assert len(nvidia) == 1
     assert nvidia[0].detection_source == "nvidia_device_node"
     assert nvidia[0].vram_total_bytes is None
+
+
+def test_unavailable_nvidia_device_handle_remains_in_inventory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An inaccessible enumerated GPU must not disappear behind a qualified one."""
+    nvml = Mock(spec=NvmlLike)
+    monkeypatch.setattr(nvml, "nvmlDeviceGetCount", Mock(return_value=2))
+    monkeypatch.setattr(nvml, "nvmlDeviceGetHandleByIndex", Mock(side_effect=[object(), RuntimeError("unavailable")]))
+    monkeypatch.setattr(nvml, "nvmlDeviceGetName", Mock(return_value="NVIDIA L40S"))
+    monkeypatch.setattr(nvml, "nvmlDeviceGetCudaComputeCapability", Mock(return_value=(8, 9)))
+    facts = gather_node_facts(
+        env={}, platform="linux", nvml=cast(NvmlLike, nvml),
+        nvidia_presence=True, drm_root=tmp_path / "no-drm",
+    )
+    assert len(facts.gpus_of("nvidia")) == 2
+    assert facts.gpus_of("nvidia")[1].index == 1
+    assert facts.gpus_of("nvidia")[1].compute_capability is None
+    assert {"nvidia:sm-8.9", "nvidia:sm-unknown", "nvidia:multiple-devices"}.issubset(
+        hardware_class_inventory(facts)
+    )
 
 
 def test_amd_sysfs_devices_gathered(tmp_path: Path) -> None:

@@ -4,6 +4,8 @@ import asyncio
 from dataclasses import replace
 from pathlib import Path
 
+from skulk.extensions.calls import CapabilityCall
+from skulk.extensions.capabilities import CapabilityDescriptor, descriptor_revision
 from skulk.extensions.managed import (
     ManagedConnection,
     ManagedNode,
@@ -173,3 +175,58 @@ async def test_an_owner_answering_only_describe_stays_admitted(tmp_path: Path) -
     owner._request = request  # type: ignore[method-assign]
     await owner.refresh()
     assert asked == ["describe-extended", "describe"] and owner.available
+
+
+async def test_forwarded_calls_speak_the_protocol_the_owner_states(
+    tmp_path: Path,
+) -> None:
+    """An owner that states no protocol predates the field and speaks 1."""
+    owner = ManagedOwner(
+        ManagedConnection(plugin_id="managed.fixture", state_root=str(tmp_path)),
+        attachment=ManagedAttachment(tmp_path, PROFILE),
+    )
+    owner.attachment = None
+    ctx = context()
+    owner.context = ctx
+    echo = CapabilityDescriptor(
+        id="echo",
+        version="1.0.0",
+        title="Echo",
+        description="Fixture",
+        input_schema={"type": "object"},
+        output_schema={"type": "object"},
+    )
+    node = _node().model_copy(update={"descriptors": (echo,)})
+    stated: list[int | None] = [None]
+    sent: list[dict[str, object]] = []
+
+    async def request(
+        message: dict[str, object], *, timeout: float
+    ) -> dict[str, object]:
+        if message["operation"] == "describe-extended":
+            description: dict[str, object] = {
+                "transport_node_id": str(ctx.node_id),
+                "nodes": [node.model_dump(mode="json")],
+            }
+            if stated[0] is not None:
+                description["protocol"] = stated[0]
+            return description
+        sent.append(message)
+        return {}
+
+    owner._request = request  # type: ignore[method-assign]
+    call = CapabilityCall(
+        call_id="call-1",
+        capability_id="echo",
+        version="1.0.0",
+        descriptor_revision=descriptor_revision(echo),
+        caller_node=str(ctx.node_id),
+        target_node=str(ctx.node_id),
+        payload={},
+    )
+    for protocol, expected in ((None, 1), (3, 3)):
+        stated[0] = protocol
+        await owner.refresh()
+        await owner.handle_call(ctx, call)
+        invoke = sent[-1]["invoke"]
+        assert isinstance(invoke, dict) and invoke["protocol"] == expected

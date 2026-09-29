@@ -32,9 +32,11 @@ from skulk.extensions.runtime_attachment import (
     ProfileIdentifier,
 )
 from skulk.extensions.runtime_catalog import (
+    CatalogRefusedError,
     CatalogReview,
     CatalogSourceStatus,
     CatalogSourceUpdate,
+    catalog_refusal_sentence,
 )
 from skulk.extensions.runtime_controller import LifecycleOperation, LifecycleRequest
 from skulk.extensions.runtime_download import (
@@ -186,6 +188,11 @@ def create_managed_plugins_router(
                 detail=protocol_refusal_sentence(
                     refused.kind, refused.offered, refused.accepted
                 ),
+            ) from None
+        except CatalogRefusedError as refused:
+            raise HTTPException(
+                status_code=409,
+                detail=catalog_refusal_sentence(refused.code, refused.status),
             ) from None
         except ValueError:
             raise HTTPException(
@@ -341,7 +348,7 @@ def create_managed_plugins_router(
         "/catalog",
         response_model=CatalogReview,
         summary="Read the host's signed capability catalog",
-        description="Fetch the owner-configured signed catalog and verify it against the host's discovery trust before listing its releases: identity, sequence, platforms, size and digests, the signed permissions, capability ids, surfaces, durable operations and steward risk classes, and whether each release matches this host. Requires plugins:read. Returns no addresses or credentials; selects, stages and installs nothing.",
+        description="Fetch the owner-configured signed catalog and verify it against the host's discovery trust before listing its releases: identity, sequence, platforms, size and digests, the signed permissions, capability ids, surfaces, durable operations and steward risk classes, and whether each release matches this host. Requires plugins:read. Returns no addresses or credentials; selects, stages and installs nothing. A refused read answers 409 with one sentence naming the cause and the next step, such as an unconfigured or unreachable catalog, the HTTP status the catalog server answered, an untrusted publisher or an expired catalog.",
     )
     async def catalog(request: Request, response: Response) -> CatalogReview:
         """Read the one host-scoped catalog without touching any installation."""
@@ -375,7 +382,7 @@ def create_managed_plugins_router(
         "/catalog/source",
         response_model=CatalogSourceStatus,
         summary="Configure the host's catalog source",
-        description="Direct localhost/Tailscale owner administration only: set the HTTPS catalog directory, document basename and the publishers trusted for discovery at expected_revision, optionally provisioning a write-only bearer. Omitted fields retain configured values; initial setup requires the directory and trust. Existing revocations remain in force; moving the catalog requires supplying its credential again. Nothing is fetched or installed.",
+        description="Direct localhost/Tailscale owner administration only: set the HTTPS catalog directory, document basename and the publishers trusted for discovery at expected_revision, optionally provisioning a write-only bearer. Omitted fields retain configured values; initial setup requires the directory and trust. Existing revocations remain in force; moving the catalog requires supplying its credential again. Nothing is fetched or installed. A refused change answers 409 naming the cause, such as a stale expected_revision or an expired or older trust.",
     )
     async def configure_catalog(
         body: CatalogSourceUpdate, request: Request, response: Response

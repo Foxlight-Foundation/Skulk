@@ -34,7 +34,6 @@ from skulk.shared.backends import (
 from skulk.shared.constants import SKULK_ENGINES_DIR
 
 AUDIO_CPP_SOURCE_REVISION: Final = "4d88768fbcae4e6eb3352c6ab1422dabb7d90b58"
-AUDIO_CPP_PACKAGE_VERSION: Final = "0.8.2.post1"
 AudioCppVariant: TypeAlias = Literal["cpu", "vulkan", "cuda"]
 _MAX_WHEEL_BYTES: Final = 256 * 1024 * 1024
 _MAX_EXPANDED_BYTES: Final = 512 * 1024 * 1024
@@ -76,7 +75,9 @@ class AudioCppWheel(BaseModel):
 
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
-    filename: str = Field(pattern=r"^skulk_audio_cpp_(?:cpu|vulkan|cuda)-0\.8\.2\.post1-.+\.whl$")
+    filename: str = Field(
+        pattern=r"^skulk_audio_cpp_(?:cpu-0\.8\.2\.post[12]|vulkan-0\.8\.2\.post[134]|cuda-0\.8\.2\.post1)-.+\.whl$"
+    )
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
     @property
@@ -90,33 +91,38 @@ class AudioCppWheel(BaseModel):
 # Engine availability here grants no model support claim by itself.
 AUDIO_CPP_CPU_WHEELS: Final[dict[tuple[str, str], AudioCppWheel]] = {
     ("darwin", "arm64"): AudioCppWheel(
-        filename="skulk_audio_cpp_cpu-0.8.2.post1-py3-none-macosx_15_0_arm64.whl",
-        sha256="6a5dc4118818c3c3e3be5259c1f189f114703b6ce68ade5a1cd11e8d89064baa",
+        filename="skulk_audio_cpp_cpu-0.8.2.post2-py3-none-macosx_15_0_arm64.whl",
+        sha256="6029c852a2134b6da3f3ac7be14375eff9597b9ba4e5580f441e8cf8f8fdbd3b",
     ),
     ("linux", "x86_64"): AudioCppWheel(
-        filename="skulk_audio_cpp_cpu-0.8.2.post1-py3-none-manylinux_2_35_x86_64.whl",
-        sha256="89a73bc202ed79f06ec85f26a127b62723179f637b32c2ebb5eef0093bc2f315",
+        filename="skulk_audio_cpp_cpu-0.8.2.post2-py3-none-manylinux_2_35_x86_64.whl",
+        sha256="2b0d76951ac68fdfb08beb2dcbf0fd0b8258985c97248df6f3a3c65113d0e334",
     ),
     ("linux", "aarch64"): AudioCppWheel(
-        filename="skulk_audio_cpp_cpu-0.8.2.post1-py3-none-manylinux_2_35_aarch64.whl",
-        sha256="858b98f45cb7cfdc5b4e8f19f74b37f937dd9060706d5b8b4281770b92a3ce9e",
+        filename="skulk_audio_cpp_cpu-0.8.2.post2-py3-none-manylinux_2_35_aarch64.whl",
+        sha256="40aeb29bd4fb11e0d70203f5424d91a8cd348f567fe805be269fe61742acf9bf",
     ),
 }
 
 # The Vulkan package is separate so preparing it cannot replace an in-use CPU
-# executable. Its exact wheel pin is added after the CI artifact passes separate
-# target-GPU qualification; no unpinned URL is a preparation candidate.
+# executable. This sampler-corrected, MiniMax-F32 build passed Strix listening
+# and both models' lifecycle/soak gates; signed support remains registry truth.
 AUDIO_CPP_VULKAN_WHEELS: Final[dict[tuple[str, str], AudioCppWheel]] = {
     ("linux", "x86_64"): AudioCppWheel(
-        filename="skulk_audio_cpp_vulkan-0.8.2.post1-py3-none-manylinux_2_35_x86_64.whl",
-        sha256="72f0a600cff38d65640254e24c7c7b4271effbb49bf9e948ecdebcb2bb210930",
+        filename="skulk_audio_cpp_vulkan-0.8.2.post4-py3-none-manylinux_2_35_x86_64.whl",
+        sha256="a077d3627b96430a8359c707e608296955501bc8042c7b1efe49f3e407fa1071",
     ),
 }
 
-# The attested arm64 CUDA artifact was verified against the real GB10 driver
-# and generated valid WAV output with both initial cards before publication.
-# No other CUDA host architecture can reuse this binary.
+# CUDA packages are native to one CPU architecture and compiled GPU target.
+# Their exact binary inventories and signed hardware claims constrain placement;
+# another architecture must never reuse these bytes. GB10's qualified pin stays
+# unchanged when adding the separately built amd64 package.
 AUDIO_CPP_CUDA_WHEELS: Final[dict[tuple[str, str], AudioCppWheel]] = {
+    ("linux", "x86_64"): AudioCppWheel(
+        filename="skulk_audio_cpp_cuda-0.8.2.post1-py3-none-manylinux_2_35_x86_64.whl",
+        sha256="102e7e3c9636136f514066a553e6a5750d41e24b2420fce689a364379f776209",
+    ),
     ("linux", "aarch64"): AudioCppWheel(
         filename="skulk_audio_cpp_cuda-0.8.2.post1-py3-none-manylinux_2_35_aarch64.whl",
         sha256="39d9f4e2f037ac808ba3588119e3d11a2437e3eb2d85e8bf5eecf63cc3c4c772",

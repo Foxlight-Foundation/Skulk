@@ -7,10 +7,11 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { apiSlice } from '../../store/api';
 import type { NodeConfiguration } from '../../store/endpoints/plugins';
 import { darkTheme } from '../../theme/theme';
+import { dashboardUrlOn } from '../../utils/hostDashboard';
 import { PluginsPage } from './PluginsPage';
 
 Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', { value: true, configurable: true });
-vi.mock('../../i18n/tolgee', () => ({ useSkulkTranslation: () => ({ t: (_key: string, fallback: string) => fallback }) }));
+vi.mock('../../i18n/tolgee', () => ({ useSkulkTranslation: () => ({ t: (_key: string, fallback: string, params?: Record<string, unknown>) => fallback.replace(/\{(\w+)\}/g, (_match, name: string) => String(params?.[name] ?? '')) }) }));
 
 let root: Root;
 let host: HTMLDivElement;
@@ -19,6 +20,7 @@ let failRead: boolean;
 let reads: number;
 let mutations: Record<string, unknown>[];
 let store: ReturnType<typeof makeStore>;
+let clusterState: Record<string, unknown>;
 
 function makeStore() {
   return configureStore({ reducer: { [apiSlice.reducerPath]: apiSlice.reducer }, middleware: (defaults) => defaults().concat(apiSlice.middleware) });
@@ -57,8 +59,14 @@ beforeEach(async () => {
   failRead = false;
   reads = 0;
   mutations = [];
+  clusterState = {};
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
     const request = new Request(input, init);
+    // Cluster state names the other nodes; only plugin requests carry the dashboard header.
+    const path = new URL(request.url).pathname;
+    if (path === '/state') return response(clusterState);
+    if (path === '/node_id') return response('host-node');
+    if (path === '/node/identity') return response({ nodeId: 'host-node', friendlyName: 'host' });
     expect(request.headers.get('X-Skulk-Dashboard')).toBe('pairing-v1');
     if (new URL(request.url).pathname === '/v1/plugins/managed') return response({ installations: [] });
     if (new URL(request.url).pathname === '/v1/plugins') return response([{ pluginId: 'bridge', available: true, nodes: [
@@ -78,12 +86,16 @@ beforeEach(async () => {
   host = document.createElement('div');
   document.body.appendChild(host);
   root = createRoot(host);
-  await act(async () => { root.render(<Provider store={store}><ThemeProvider theme={darkTheme}><PluginsPage /></ThemeProvider></Provider>); });
+  await renderPage();
 });
+async function renderPage() {
+  await act(async () => { root.render(<Provider store={store}><ThemeProvider theme={darkTheme}><PluginsPage /></ThemeProvider></Provider>); });
+}
 afterEach(async () => {
   await act(async () => { root.unmount(); store.dispatch(apiSlice.util.resetApiState()); });
   host.remove();
   vi.unstubAllGlobals();
+  history.replaceState(null, '', '/');
 });
 
 it('loads disabled-node settings on demand and fences writes by revision and schema', async () => {
@@ -121,4 +133,34 @@ it('preserves unsaved values when reloading fails', async () => {
   await act(async () => { await vi.waitFor(() => expect(host.textContent).toContain('Your draft is preserved')); });
   expect(host.querySelector('[aria-haspopup="listbox"]')?.textContent).toBe('west');
   expect(mutations).toEqual([]);
+});
+
+it('opens the plugin named in the address, then forgets the link when closed', async () => {
+  await act(async () => { root.unmount(); });
+  history.replaceState(null, '', '/plugins?plugin=bridge');
+  root = createRoot(host);
+  await renderPage();
+  await act(async () => { await vi.waitFor(() => expect(host.querySelector('[role=dialog]')?.textContent).toContain('test.bundle')); });
+  await act(async () => { (host.querySelector('[role=dialog] button[aria-label="Close"]') as HTMLButtonElement).click(); });
+  expect(window.location.search).toBe('');
+});
+
+it('links to the other nodes\' Plugins pages at their tailnet addresses', async () => {
+  const summary = { pluginId: 'managed.' + '3'.repeat(32), nodeId: 'studio', bundleId: 'example.studio', version: '0.1.0', title: 'Example Studio', status: 'ready', ownerAvailable: true, surfaces: [], actions: [], operationsActive: 0, observedAt: '2026-09-27T12:00:00Z' };
+  clusterState = {
+    topology: { nodes: ['host-node', 'render-node', 'lan-node'], connections: {} },
+    nodeIdentities: { 'host-node': { friendlyName: 'host' }, 'render-node': { friendlyName: 'render' }, 'lan-node': { friendlyName: 'lan' } },
+    nodeNetwork: { 'render-node': { interfaces: [{ name: 'tailscale0', ipAddress: '100.70.1.2' }] }, 'lan-node': { interfaces: [{ name: 'en0', ipAddress: '192.168.1.9' }] } },
+    capabilityNodes: { 'render-node': [summary] },
+  };
+  await act(async () => { root.unmount(); store.dispatch(apiSlice.util.resetApiState()); });
+  root = createRoot(host);
+  await renderPage();
+  await act(async () => { await vi.waitFor(() => expect(host.querySelector('nav[aria-label="Plugins on other nodes"]')?.textContent).toContain('render · 1 plugin'), { timeout: 5000 }); });
+  const row = host.querySelector('nav[aria-label="Plugins on other nodes"]')!;
+  const links = [...row.querySelectorAll('a')];
+  expect(links.map((link) => [link.textContent, link.getAttribute('href')])).toEqual([['render · 1 plugin', dashboardUrlOn('100.70.1.2', '/plugins')]]);
+  // A node without a Tailscale address is named, not linked.
+  expect(row.textContent).toContain('lan');
+  expect(row.textContent).not.toContain('host');
 });

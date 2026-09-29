@@ -162,3 +162,16 @@ def test_comfy_torch_reads_only_the_sentinel_line(
     monkeypatch.setattr(inventory_module.subprocess, "run", fake_run)
     inventory_module._comfy_torch.cache_clear()
     assert inventory_module._comfy_torch(f"/opt/python-{hash(stdout)}") == expected
+
+
+def test_unknown_nvidia_compute_class_remains_visible() -> None:
+    """An unknown second GPU cannot disappear behind a qualified device class."""
+    unknown = NVIDIA_A40.model_copy(update={"compute_capability": None})
+    classes = hardware_class_inventory(make_facts(gpus=(NVIDIA_A40, unknown)))
+    assert {"nvidia:sm-8.6", "nvidia:sm-unknown", "nvidia:multiple-devices"}.issubset(classes)
+
+
+def test_multiple_identical_nvidia_devices_remain_visible() -> None:
+    """Class deduplication must retain ambiguous device identity and memory."""
+    classes = hardware_class_inventory(make_facts(gpus=(NVIDIA_A40, NVIDIA_A40)))
+    assert "nvidia:multiple-devices" in classes

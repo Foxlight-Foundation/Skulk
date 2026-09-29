@@ -167,6 +167,33 @@ def test_cuda_unsupported_host_fails_before_download() -> None:
         audio_cpp.audio_cpp_cuda_wheel_for_host(system="linux", machine="ppc64le")
 
 
+@pytest.mark.parametrize(
+    ("system", "machines", "platform_tag", "expected_digest"),
+    [
+        (
+            "darwin", ("arm64", "aarch64"), "macosx_15_0_arm64",
+            "6029c852a2134b6da3f3ac7be14375eff9597b9ba4e5580f441e8cf8f8fdbd3b",
+        ),
+        (
+            "linux", ("x86_64", "amd64", "AMD64"), "manylinux_2_35_x86_64",
+            "2b0d76951ac68fdfb08beb2dcbf0fd0b8258985c97248df6f3a3c65113d0e334",
+        ),
+        (
+            "linux", ("aarch64", "arm64"), "manylinux_2_35_aarch64",
+            "40aeb29bd4fb11e0d70203f5424d91a8cd348f567fe805be269fe61742acf9bf",
+        ),
+    ],
+)
+def test_cpu_architecture_aliases_select_original_corrected_artifacts(
+    system: str, machines: tuple[str, ...], platform_tag: str, expected_digest: str,
+) -> None:
+    """Every supported host alias selects the attested sampler-corrected bytes."""
+    for machine in machines:
+        wheel = audio_cpp.audio_cpp_wheel_for_host(system=system, machine=machine)
+        assert wheel.filename == f"skulk_audio_cpp_cpu-0.8.2.post2-py3-none-{platform_tag}.whl"
+        assert wheel.sha256 == expected_digest
+
+
 def test_gb10_cuda_wheel_uses_exact_hardware_tested_artifact() -> None:
     """The arm64 CUDA lane selects only the GB10-tested wheel bytes."""
     wheel = audio_cpp.audio_cpp_cuda_wheel_for_host(system="linux", machine="aarch64")
@@ -174,6 +201,36 @@ def test_gb10_cuda_wheel_uses_exact_hardware_tested_artifact() -> None:
         "skulk_audio_cpp_cuda-0.8.2.post1-py3-none-manylinux_2_35_aarch64.whl"
     )
     assert wheel.sha256 == "39d9f4e2f037ac808ba3588119e3d11a2437e3eb2d85e8bf5eecf63cc3c4c772"
+
+
+@pytest.mark.parametrize("machine", ["x86_64", "amd64"])
+def test_amd64_cuda_wheel_selects_attested_native_artifact(machine: str) -> None:
+    """The amd64 CUDA pin cannot select or substitute the arm64 payload."""
+    wheel = audio_cpp.audio_cpp_cuda_wheel_for_host(system="linux", machine=machine)
+    assert wheel.filename == (
+        "skulk_audio_cpp_cuda-0.8.2.post1-py3-none-manylinux_2_35_x86_64.whl"
+    )
+    assert wheel.sha256 == "102e7e3c9636136f514066a553e6a5750d41e24b2420fce689a364379f776209"
+
+
+def test_strix_vulkan_wheel_uses_exact_listening_tested_artifact() -> None:
+    """The Vulkan lane selects the sampler-corrected F32 wheel heard on Strix."""
+    wheel = audio_cpp.audio_cpp_vulkan_wheel_for_host(
+        system="linux", machine="x86_64"
+    )
+    assert wheel.filename == (
+        "skulk_audio_cpp_vulkan-0.8.2.post4-py3-none-manylinux_2_35_x86_64.whl"
+    )
+    assert wheel.sha256 == "a077d3627b96430a8359c707e608296955501bc8042c7b1efe49f3e407fa1071"
+
+
+def test_audio_cpp_wheel_filename_rejects_unbuilt_variant_versions() -> None:
+    """Version validation cannot accept a plausible wheel from another lane."""
+    with pytest.raises(ValueError, match="filename"):
+        audio_cpp.AudioCppWheel(
+            filename="skulk_audio_cpp_cuda-0.8.2.post3-py3-none-manylinux_2_35_aarch64.whl",
+            sha256="0" * 64,
+        )
 
 
 def test_offline_miss_and_tampered_cache_fail_closed(

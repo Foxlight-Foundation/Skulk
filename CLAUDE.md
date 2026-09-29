@@ -55,6 +55,16 @@ or Vulkan package or workflow changes. The separate audio.cpp wheel workflow
 runs on music-package changes in PRs and on `dev`; both workflows refresh Linux
 APT metadata and retry once when a security mirror retires a package revision.
 Wheel publication in either workflow remains an explicit manual dispatch.
+The audio.cpp Vulkan build applies a SHA-pinned MiniMax-only F32 matmul policy
+after the released sampler correction. It preserves the upstream F16 KV cache
+and other families/backends; a native graph-policy check runs before packaging.
+Candidate artifacts do not update Skulk's qualified package inventory or claims.
+The audio.cpp CUDA build matrix emits separate Linux amd64 L40S (SM 8.9)
+and arm64 GB10 (SM 12.1) artifacts. CUDA retains upstream Philox; the CPU/Vulkan
+fallback RNG patch does not apply. Promotion requires a successful prior build
+and SHA-256 pins: all three CPU filenames, or one exact GPU filename when
+multiple GPU platforms are downloaded. Only verifier-returned, attested paths
+are published. A build artifact alone does not authorize a reader pin or claim.
 
 `uv` is the canonical Skulk runtime path on macOS, including the official
 `mlx` + `mlx-metal` wheel stack. Nix is kept for formatting, flake-based
@@ -262,13 +272,32 @@ only for that verified wheel; standalone overrides need the full pinned revision
 Standalone binary overrides may use `SKULK_AUDIO_CPP_SPECS_DIR`; facts and the
 runner require both pinned model specs before readiness or load.
 
+CPU music inference uses `os.process_cpu_count()` to respect CPU affinity,
+reserves one usable core when possible, and caps inference at eight threads.
+This upstream setting controls ggml math; per-instance admission remains one
+active generation. Accelerator settings remain one thread.
+`estimate_music_workspace` reserves 10 GiB beyond ACE-Step's weight estimate
+for its CPU working buffers. API admission, ordinary/exact placement and the
+worker load guard use the same reserve. CUDA/Vulkan generation reserves 10 GiB
+for ACE-Step or 2 GiB for MiniMax beyond weight/runtime overhead; MiniMax Metal
+reserves 5 GiB. These cover measured generation peaks. API admission, placement,
+committed capacity and the load guard share those estimates; unqualified model
+lanes retain their existing estimates.
+
 `NodeResources.engine_builds` hashes the executable for each concrete lane.
 `TextToMusic` is the sole
 task on a music card. The cards have
 their own `[music]` section and require exact signed support claims. The
 `audio-cpp-engine-wheel` workflow builds the CPU-capable package for Apple
 Silicon macOS and Linux amd64/arm64 plus separate Linux amd64 Vulkan and Linux
-arm64 CUDA packages from the pinned source. `PrepareAudioCpp` carries the
+amd64/arm64 CUDA packages from the pinned source. To promote already tested
+artifacts without rebuilding, the workflow accepts `publish_run_id` and
+`publish_sha256`: a one-entry JSON filename-to-digest map for the selected GPU
+wheel, or a map for the complete three-platform CPU/Metal set at one version.
+A plain GPU digest is accepted only when the source run contains one GPU wheel.
+The verifier rejects missing, ambiguous, mixed-version, or digest-mismatched
+selections before attestation checks and publishes only verified paths.
+`PrepareAudioCpp` carries the
 selected package variant; the API chooses CUDA or Vulkan only when a matching
 signed support claim applies to the node's hardware, and can try a separately
 claimed CPU fallback. An explicit primary-binary override may probe as CUDA
@@ -277,15 +306,25 @@ lane. A standalone primary Vulkan override remains eligible when its pinned
 revision, specs, and device probe pass. AMD sysfs PCI IDs produce stable
 chip-class identifiers
 (`amd:pci-1002-1586` on Strix Halo) for claim selection before preparation.
-Music model weights are separate immutable downloads. The dedicated arm64 CUDA wheel is compiled
-for GB10 SM 12.1 and requires both that observed hardware class and a signed
-claim naming it. CUDA 12 runtime, cuBLAS, NCCL, and NVIDIA driver libraries
+Music model weights are separate immutable downloads. Managed CUDA wheels target
+SM 8.9 on amd64 and GB10 SM 12.1 on arm64. Preparation requires the platform's
+exact managed executable build and compute class in the signed claim, plus one
+observed NVIDIA device with that class. Mixed GPU vendors, unknown classes, and multiple NVIDIA
+devices are rejected because the runner cannot yet bind execution and memory
+admission to a selected physical device. A qualified operator-provided primary
+CUDA binary uses its own exact claim through primary preparation. If a dedicated
+CUDA wheel is already cached, set `SKULK_AUDIO_CPP_CUDA_BIN` to the operator
+binary as well: startup cache rehydration can otherwise prefer that managed
+build over a primary-only override.
+CUDA 12 runtime, cuBLAS, NCCL, and NVIDIA driver libraries
 must be on the host loader path; the binary probe reports missing libraries
 before advertising the lane. Signed support resolution also requires the
 exact class for this build after cache restore; CPU preparation does not
 reuse the dedicated CUDA wheel as a primary override.
 The bare `audio_cpp` tag reports availability; music support claims and runner
 placement select a concrete compute lane so memory and device choice agree.
+Runner Metal memory diagnostics and shutdown cleanup are inert outside macOS;
+Linux music runners do not import an unused MLX extension during teardown.
 Music mounting uses targeted `PrepareAudioCpp` even for a package already
 observed ready, and indexed `AudioCppPreparationRequested`/
 `AudioCppPreparationCompleted` events. The worker verifies the package and
@@ -516,8 +555,10 @@ A model card's `placement.compatible_backends` selects which engine serves it
   runner itself rather than dispatched against nothing. Teardown
   signals the process group; worker startup sweeps init-parented servers
   launched with Skulk's `--user-directory`. Tags `comfy-cuda` and
-  `comfy-rocm` (the ROCm lane launches with `ROCM_LAUNCH_FLAGS`:
-  `--bf16-vae --disable-mmap --cache-none`); GPU-only, single-host. The
+  `comfy-rocm` (the ROCm lane launches with `ROCM_LAUNCH_FLAGS`
+  `--bf16-vae` plus `--cache-ram N`, N = 40% of host RAM, keeping models
+  resident without host-memory thrash, and `--disable-mmap` only for a
+  weight file above 64 GiB); GPU-only, single-host. The
   runner treats ComfyUI's `execution_success` socket event as success but
   reads the outputs from `/history` only once the entry exists: ComfyUI
   sends the event from inside its executor and records history after the
@@ -803,6 +844,18 @@ metadata with affected owners stopped and their controller/service/child locks h
 Recover pending writes before owner startup; refuse foreign profiles/bindings and
 preserve logical identities, selected generations, settings, receipts and budgets.
 Keep attachment off remote HTTP management; it is local setup/lifecycle wiring.
+The request also carries the node's Tailscale address as `serve_host` once the
+bridge has seen it: a background `tailscale status` read at most once a minute, so
+an attachment never waits on it, and sticky for the API lifetime, so a failed read
+never withdraws it. Absent means "keep": the manager changes nothing until a new
+address arrives. Then it stops the owners, writes owner-only `serve.json` into each
+installation, records the same value in its own root `serve.json` last (the next
+attachment finishes an interrupted write), and restarts them. `_load` brings each
+installation's `serve.json` to the recorded address before its owner starts, which
+covers new registrations and interrupted writes. Never move the address into
+`owner.json` or `host.json`: owners parse `owner.json` strictly, and an older owner
+or manager must keep starting. Protocol 3 owners hand it to children as
+`Startup.serve_host`.
 
 
 `extensions/managed_services.py` observes the protected connection generated by

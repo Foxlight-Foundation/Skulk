@@ -3,6 +3,7 @@ import gc
 import os
 import resource
 import signal
+import sys
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -320,6 +321,11 @@ def _release_metal_resources() -> None:
     wired memory is returned to the OS instead of leaking when the runner
     subprocess is terminated mid-load.
     """
+    if sys.platform != "darwin":
+        # Linux engine runners have no Metal allocation to release. Loading
+        # an unused MLX extension during shutdown can abort its native runtime.
+        gc.collect()
+        return
     try:
         import mlx.core as mx
 

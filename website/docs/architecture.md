@@ -644,13 +644,21 @@ telemetry cannot have shown yet (awaiting its indexed echo, still
 loading, or loaded for less than a short settle period, since memory
 telemetry is sampled on its own cadence) is also taken off the observed
 figure, and the GPU pool of a
-unified-memory APU is derived from the reserved figure. That live figure is
+unified-memory APU is derived from the reserved figure. On a unified-memory
+AMD APU a Vulkan shard is charged only until its load has shown: once
+loaded it sits in the BIOS VRAM carve, which the observed carve usage
+already takes off the pool, so charging host RAM as well would count it
+twice (a ROCm video engine was refused beside a loaded Vulkan steward that
+way). That live figure is
 reduced by the worker guard's fit tolerance as headroom, then capped at the
 node's GPU working-set ceiling and at the static fit, and never below the
 floor; a node without a live reading keeps the floor. The worker's own
 pre-spawn guard checks that stamped window against its current free memory
 before loading, so a reading that has gone stale by load time is refused
-rather than committed. An uncomputable fit (a card without KV-head metadata,
+rather than committed. On a unified-memory AMD APU a Vulkan engine's window
+is checked against the combined pool only, because it fills the carve before
+it takes host pages; a HIP engine there, which allocates from host RAM, is
+also checked against host RAM. An uncomputable fit (a card without KV-head metadata,
 or a pooled RPC placement) also clamps back to the floor rather than
 committing a fictitious window that would fail at load. MLX is unaffected
 either way: it grows its KV cache lazily per request and keeps the full
@@ -811,11 +819,16 @@ and x86_64), and for x86_64 AMD nodes AMD's own stable ROCm 10.0.0 channel,
 where torch is a host wheel plus a gfx1151 device package on top of the
 `rocm` runtime packages, all bundling the HIP runtime so the host needs
 only the amdgpu kernel driver; the ROCm lane
-launches ComfyUI with `--bf16-vae --disable-mmap --cache-none`, the flags
-validated for MiniMax H3 on Strix Halo (memory-mapping a checkpoint above 64
-GB through unified memory is pathologically slow, the fp32 VAE decode does
-not fit beside the transformer, and node outputs are not worth retaining on
-a host whose GPU memory is the system's). The CUDA lane launches ComfyUI
+launches ComfyUI with `--bf16-vae`, validated for MiniMax H3 on Strix Halo
+(the fp32 VAE decode does not fit beside the transformer), plus
+`--disable-mmap` only when a weight file exceeds 64 GB, since memory-mapping
+one that large through unified memory is pathologically slow. Models stay
+resident between renders under ComfyUI's RAM-pressure cache with 40% of
+host RAM kept free (`--cache-ram`, sized from the host at launch; HIP
+allocations on the APU come out of host RAM, and the default 10% headroom
+made the text encoder and transformer evict each other on each new prompt),
+which cuts a warm render with a new prompt on gfx1151 from about 210 s to
+about 105 s. The CUDA lane launches ComfyUI
 with `--disable-cuda-malloc`: on the async allocator backend ComfyUI would
 otherwise choose, a render that applies the Fun ControlNet patch aborts the
 server on its first sampling step on the GB10, while PyTorch's own allocator
@@ -967,9 +980,21 @@ CUDA packages may restore their separate executable paths without contacting
 the package channel. Preparing a GPU package leaves existing CPU and other GPU
 mounts' executables and build identities intact. The CUDA wheel targets the
 NVIDIA compute architecture compiled into that package; installing it does
-not qualify a model for every NVIDIA GPU. Its GB10 variant requires an
-observed `nvidia:sm-12.1` class and a signed claim explicitly naming that
-class before preparation. CUDA 12 runtime, cuBLAS, NCCL, and the NVIDIA driver
+not qualify a model for every NVIDIA GPU. The build workflow emits separate
+Linux amd64 (SM 8.9) and arm64 (SM 12.1) CUDA artifacts. Each platform requires
+its own native qualification, immutable reader pin, and signed model claim;
+promotion selects one exact qualified GPU filename and digest.
+Managed CUDA preparation requires the platform's exact build and compiled class
+in the signed claim, plus one observed NVIDIA device with that known class.
+Mixed GPU vendors, unknown classes, and multiple NVIDIA devices are rejected until the runner can
+select the physical device used by both execution and memory admission. The
+inventory retains unknown compute classes and marks multiple NVIDIA devices,
+so another matching device cannot hide insufficient evidence. These are compute
+architecture restrictions, independent of node identity. Qualified primary
+CUDA overrides can use their own exact build claims. With an existing dedicated
+CUDA cache, the operator must also configure `SKULK_AUDIO_CPP_CUDA_BIN`:
+startup rehydration otherwise prefers the managed CUDA executable over a
+primary-only override. CUDA 12 runtime, cuBLAS, NCCL, and the NVIDIA driver
 must be on the host loader path; the binary probe exposes missing libraries.
 Signed support resolution applies the same exact class rule to a restored
 wheel, so a generic claim cannot reuse it through the CPU preparation path.
@@ -980,6 +1005,14 @@ standalone binaries must report the full pinned source revision.
 The facts probe checks both pinned model specs; a standalone binary may name
 its specs through `SKULK_AUDIO_CPP_SPECS_DIR`. Only then can the node publish
 ready audio.cpp lanes for restored instances.
+Runner diagnostics and shutdown load Metal/MLX memory APIs only on macOS.
+Linux music runners stop their server without initializing an unused native
+MLX extension during cleanup.
+Qualified music admission includes measured transient workspace beyond
+weight/runtime overhead: ACE-Step reserves 10 GiB on CPU/CUDA/Vulkan; MiniMax
+reserves 2 GiB on CUDA/Vulkan or 5 GiB on Metal. The shared estimator covers
+API preflight, placement, committed capacity and the worker load guard against
+the backend's GPU-memory pool or Metal system-RAM ceiling.
 On NVIDIA GB10, NVML can report device memory as unsupported even while CUDA
 can allocate from its shared CPU/GPU pool. Skulk reads CUDA's free and total
 device bytes in that case. Placement also checks live host RAM, reserves 16 GB
@@ -1008,6 +1041,11 @@ signed claim check and request-local placement dry-run. Both the API dry-run
 and master constrain ordinary placement to the prepared node. Exact placements reject
 RPC shaped music instances and require a matching ready build and signed support
 claim.
+CPU music inference uses at most eight usable CPU threads and reserves one
+usable core for the node control plane when available. This is inference
+parallelism: each model instance still runs one generation at a time.
+Accelerator lanes retain their fixed one-thread setting.
+
 Placement stamps the selected audio.cpp build on the music shard. At each
 sidecar launch, the runner selects the executable for that lane and checks its
 digest and selected device
@@ -1019,6 +1057,10 @@ memory and CPU uses system RAM. Preparation and exact placement check the
 complete estimated music footprint against the applicable pool, including the system-memory
 working-set ceiling, before creating one runner shard on one node. Exact music
 mounts use that backend-specific check without the generic RAM-only precheck.
+ACE-Step CPU inference reserves an additional 10 GiB for native working buffers:
+its measured generation peak exceeds the weight-only GGUF estimate. The shared
+estimator applies this reserve to API admission, ordinary and exact placement,
+committed instances and the worker's local load guard.
 Ordinary signed placement selects only ready backends. A `MusicGeneration` command creates a distinct
 task; its runner owns one loopback audio.cpp server per mounted model and emits
 only a terminal `MusicChunk` manifest through the control path. Bounded WAV
@@ -1828,7 +1870,7 @@ On the store host itself, staging hardlinks the store's files into the staging d
 
 A model card can bind its artifacts to an immutable Hugging Face commit through `source_revision`, and the repository plus pin are artifact identity rather than download hints. Metadata probes and byte downloads read from exactly that source, the store registry persists both values, and every staged copy records the revision in an on-disk marker; a staged or canonical directory carrying a different source identity is the wrong artifact and is replaced rather than reused, with the replacement landing only after the requested artifact has fully downloaded so a failed fetch never destroys the previous copy. Pinned models load from revision- and source-qualified canonical directories, so pinned bytes never occupy the mutable-`main` path and a changed upstream `main` can never silently substitute different weights for a qualified artifact.
 
-Staged copies have a lifecycle: by default (`cleanup_on_deactivate: true`), a staged model becomes an eviction candidate when no live runner uses it (including as a companion repo: MTP sidecar, assistant, served draft, or split vision weights, which no instance names directly but which a live runner depends on just the same). Candidates are kept newest-first by last use up to the `staging_keep_recent_gb` grace budget (default 40 GiB) and deleted beyond it; the in-use set is always kept and does not count against the budget. That recency pass runs at instance deactivation and node startup, where it reconciles copies orphaned by a crashed session. A separate safety trigger runs inside every store-backed staging transaction: after the store resolves the exact registered artifact set, Skulk counts only the additional manifest bytes (resumable data is credited and same-filesystem hardlinks add zero), protects every active base-plus-companion transaction and live runner, then evicts the least-recently-used idle copies until that allocation fits with 10 GiB of operating-system headroom. Capacity admission and transfer are serialized so concurrent launches cannot spend the same free bytes. Disk safety overrides the warm-cache grace budget and still applies when `cleanup_on_deactivate` is `false`; if all idle data is gone and capacity remains insufficient, the worker emits `DownloadFailed` before transfer. The store host's canonical path is never subject to either eviction path; instead, canonical Hugging Face downloads serialize exact selected-manifest admission with transfer and fail before writing when the authoritative volume cannot preserve the same reserve. Operators can cancel that canonical work through `DELETE /store/models/{id}/download`; cancellation preserves partial files so a later request can resume. Store-unreachable direct fallback uses the same mechanism against the actual model-cache filesystem, never the unrelated staging path. `GET /store/storage` reports artifacts across the staging cache, direct-download model root, and configured read-only roots so fallback downloads can reconcile when the store returns. Deleting a model from the store (`DELETE /store/models/{id}`) goes further than the lazy budget pass: it removes the canonical copy from the store host *and* broadcasts a cluster-wide eviction (the `EvictStagedModel` command → `StagedModelEvicted` event) so every node immediately drops its locally-staged copy, because a worker's staged shards are an independent cache the store-host delete would otherwise leave behind. `POST /store/purge-staging` clears staged copies without touching the store's canonical copy.
+Staged copies have a lifecycle: by default (`cleanup_on_deactivate: true`), a staged model becomes an eviction candidate when no live runner uses it (including as a companion repo: MTP sidecar, assistant, served draft, or split vision weights, which no instance names directly but which a live runner depends on just the same) and no instance placed on the node needs it (an RPC donor shard needs nothing, since a donor never reads the model). Candidates are kept newest-first by last use up to the `staging_keep_recent_gb` grace budget (default 40 GiB) and deleted beyond it; the in-use set is always kept and does not count against the budget. That recency pass runs at instance deactivation and node startup, where it reconciles copies orphaned by a crashed session. At startup no runner exists and the node id is new, so neither runners nor placements can say what was serving; instead the worker refreshes the last-use marker of every in-use model once a minute, and the startup pass keeps any copy used within the last 30 minutes whatever its size, so a restart, an update or the election winner's recreated worker does not re-copy the models it was serving. A separate safety trigger runs inside every store-backed staging transaction: after the store resolves the exact registered artifact set, Skulk counts only the additional manifest bytes (resumable data is credited and same-filesystem hardlinks add zero), protects every active base-plus-companion transaction and live runner, then evicts the least-recently-used idle copies until that allocation fits with 10 GiB of operating-system headroom. Capacity admission and transfer are serialized so concurrent launches cannot spend the same free bytes. Disk safety overrides the warm-cache grace budget and still applies when `cleanup_on_deactivate` is `false`; if all idle data is gone and capacity remains insufficient, the worker emits `DownloadFailed` before transfer. The store host's canonical path is never subject to either eviction path; instead, canonical Hugging Face downloads serialize exact selected-manifest admission with transfer and fail before writing when the authoritative volume cannot preserve the same reserve. Operators can cancel that canonical work through `DELETE /store/models/{id}/download`; cancellation preserves partial files so a later request can resume. Store-unreachable direct fallback uses the same mechanism against the actual model-cache filesystem, never the unrelated staging path. `GET /store/storage` reports artifacts across the staging cache, direct-download model root, and configured read-only roots so fallback downloads can reconcile when the store returns. Deleting a model from the store (`DELETE /store/models/{id}`) goes further than the lazy budget pass: it removes the canonical copy from the store host *and* broadcasts a cluster-wide eviction (the `EvictStagedModel` command → `StagedModelEvicted` event) so every node immediately drops its locally-staged copy, because a worker's staged shards are an independent cache the store-host delete would otherwise leave behind. `POST /store/purge-staging` clears staged copies without touching the store's canonical copy.
 
 Companion repos follow a single download contract: `companion_download_specs()` (in `src/skulk/download/download_utils.py`) enumerates a card's companions (MTP sidecar, assistant model, split vision weights), each flagged required or best-effort, and every model resolution path (fresh download, already-staged fast path, store staging, direct-from-store) ensures companions through it before reporting the model ready. Required companions (vision weights, which the model cannot load without) fail the resolution loudly; best-effort companions (sidecar, assistant) log and continue, so a missing drafter degrades to plain decode instead of blocking the model.
 
@@ -2019,7 +2061,12 @@ setup or migration before identity initialization. Starting it requires a separa
 revision-fenced `activate`; interrupted stopped selection revalidates artifacts
 and trust, unlike retained-state disable. Target preview
 checks the current revision, signed artifacts, permissions and migration compatibility
-before interrupting a healthy owner. Accepted intent survives client disconnect;
+before interrupting a healthy owner. A release that rewords a setting, changes a
+default or adds an optional setting keeps an installation's settings without
+migration when its owner speaks plugin protocol 3 or later, because such an owner
+validates the stored settings against the new schema and rebinds them before its
+child starts; an earlier owner binds settings to the exact schema, so its releases
+still need an identical one. Accepted intent survives client disconnect;
 restart reconciles the exact local selection across its atomic publication boundary.
 `runtime_manager.py` exposes a fixed protected Unix socket shared by terminal and
 HTTP management integration. It registers up to sixteen installations,
@@ -2048,6 +2095,20 @@ transport renewal after stopping affected owners; recovery finishes only exact
 recorded local metadata before owner startup. Durable plugin identities and cleanup
 records remain independent of Skulk's changing transport ID. Profiles and builds
 must match, and foreign installation bindings are never silently adopted.
+The attachment also tells plugins where they may serve beyond loopback. The bridge
+reads the node's Tailscale address in the background, at most once a minute, and
+keeps it once seen, so an attachment never waits on Tailscale and a failed read
+never withdraws the address. It sends the address when it has one; without one the
+manager keeps the address its installations already have. A new address stops the
+owners, is written as an owner-only `serve.json` into each installation and then
+into the manager's root, and the owners start again; the root record is written
+last, so the next attachment finishes an interrupted write. Before any owner
+starts, the manager brings its installation's `serve.json` to the recorded
+address, which covers new registrations and repairs an interrupted one.
+`serve.json` is separate from
+`owner.json` and `host.json` because owners parse `owner.json` strictly and an
+older owner or manager must keep starting; owners that speak plugin protocol 3
+hand the address to their children as `Startup.serve_host`.
 `service_setup.py` now owns the resumable local setup command. It stages a verified
 runtime as the owner, generates the profile connection, and invokes the standalone
 standard-library-only `service_registration.py` helper for fixed system definitions.

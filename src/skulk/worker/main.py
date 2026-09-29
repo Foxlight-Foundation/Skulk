@@ -56,6 +56,7 @@ from skulk.shared.models.memory_estimate import (
     gpu_working_set_ceiling,
     is_gb10_accelerator,
     shard_preallocates_kv_upfront,
+    vulkan_fills_carve_first,
 )
 from skulk.shared.models.model_cards import (
     ModelCard,
@@ -152,7 +153,11 @@ from skulk.shared.types.worker.instances import (
     LlamaRpcInstance,
 )
 from skulk.shared.types.worker.runners import RunnerFailed, RunnerId, RunnerStatus
-from skulk.shared.types.worker.shards import ShardMetadata, TensorShardMetadata
+from skulk.shared.types.worker.shards import (
+    RpcDonorShardMetadata,
+    ShardMetadata,
+    TensorShardMetadata,
+)
 from skulk.store.config import (
     StagingNodeConfig,
     persist_model_trust_config,
@@ -162,6 +167,7 @@ from skulk.store.installed_cards import require_registry_installed_artifact
 from skulk.store.model_store_client import ModelStoreClient
 from skulk.store.staging_eviction import (
     MINIMUM_STAGING_FREE_DISK_BYTES,
+    STARTUP_RECENT_USE_GRACE_SECONDS,
     StagingCapacityError,
     StagingEvictionReport,
     enforce_staging_budget,
@@ -189,6 +195,10 @@ resets round-trip through the master (~30s). The deadline exists so a
 masterless interval cannot freeze the worker forever - past it, planning
 resumes and the download coordinator's missing-directory self-heal covers
 the residual risk."""
+
+_IN_USE_MARKER_REFRESH_SECONDS = 60.0
+"""How often the recency markers of in-use staged models are refreshed, so
+they stay well inside ``STARTUP_RECENT_USE_GRACE_SECONDS`` while serving."""
 
 
 _RUNNER_CRASH_THRESHOLD = 3
@@ -609,9 +619,52 @@ def _local_unified_memory_gpu() -> bool:
     return gtt_total >= MemoryUsage.from_local_gpu_wireable().ram_total.in_bytes
 
 
+def _local_carve_first_gpu() -> bool:
+    """Whether this node is a unified-memory AMD APU that reports its carve usage.
+
+    On such a node a Vulkan engine fills the BIOS VRAM carve before it takes
+    host pages, so the combined pool (free carve plus host share) bounds its
+    load. GB10 has no carve and is excluded, as is an AMD node whose carve
+    usage is unreported, since the pool would then read the carve as empty.
+    """
+    if sys.platform != "linux":
+        return False
+    from skulk.utils.info_gatherer.linux_gpu import (
+        find_amd_gpu_device,
+        read_accelerator_metrics,
+    )
+    from skulk.utils.info_gatherer.nvidia_gpu import prefer_nvidia_telemetry
+
+    if prefer_nvidia_telemetry():
+        return False
+    device = find_amd_gpu_device()
+    if device is None:
+        return False
+    accelerator = read_accelerator_metrics(device)
+    total = accelerator.vram_total_bytes
+    gtt_total = accelerator.gtt_total_bytes
+    if not total or total <= 0 or gtt_total is None or gtt_total <= total:
+        return False
+    return (
+        accelerator.vram_used_bytes is not None
+        and gtt_total >= MemoryUsage.from_local_gpu_wireable().ram_total.in_bytes
+    )
+
+
 def _summarize_worker_task(task: Task) -> str:
     """Return a compact task summary for worker lifecycle logs."""
     return summarize_task_for_log(task)
+
+
+def _staged_model_ids_for(shard: ShardMetadata) -> frozenset[str]:
+    """Return the staged repo IDs this node reads for ``shard``.
+
+    An RPC donor lends memory to the driver and never reads the model, so a
+    donor shard needs nothing staged here.
+    """
+    if isinstance(shard, RpcDonorShardMetadata):
+        return frozenset()
+    return _staging_model_ids(shard.model_card)
 
 
 def _staging_model_ids(card: ModelCard) -> frozenset[str]:
@@ -1020,6 +1073,9 @@ class Worker:
         # are never advertised independently.
         self._stale_downloads_awaiting_completion: dict[str, int] = {}
         self._stale_reset_wait_ticks: int = 0
+        # Monotonic time the in-use staged models' recency markers were last
+        # refreshed; None until the first planning tick refreshes them.
+        self._in_use_markers_refreshed_at: float | None = None
         # Runtime eviction takes a filesystem snapshot on the event loop and
         # deletes from a worker thread. Keep that whole interval atomic with
         # stale-state reconciliation plus CreateRunner planning/registration:
@@ -1246,8 +1302,20 @@ class Worker:
             # in its figure even as host RAM falls, but a fixed-window engine's
             # KV allocation takes host pages and its window was sized from host
             # RAM; check that window against host RAM as well, or the guard
-            # could pass an allocation host memory no longer holds.
-            if shard_preallocates_kv_upfront(shard) and _local_unified_memory_gpu():
+            # could pass an allocation host memory no longer holds. A Vulkan
+            # engine on an AMD APU is the exception: it fills the carve first,
+            # which the combined pool already nets out, and a host-only check
+            # refused a steward beside a video engine holding host RAM while
+            # the carve sat empty.
+            carve_resident = (
+                vulkan_fills_carve_first(shard.resolved_backend)
+                and _local_carve_first_gpu()
+            )
+            if (
+                shard_preallocates_kv_upfront(shard)
+                and _local_unified_memory_gpu()
+                and not carve_resident
+            ):
                 local = MemoryUsage.from_local_gpu_wireable()
                 host = min(
                     local.ram_available, gpu_working_set_ceiling(local.ram_total)
@@ -2895,6 +2963,7 @@ class Worker:
             # let a lingering instance re-trip and re-send FailInstance), so
             # this is where dead-instance keys are reclaimed.
             self._crash_breaker.retain(self.state.instances)
+            self._refresh_in_use_markers()
             self._model_trust_failures_handled.intersection_update(self.state.instances)
 
             for (
@@ -3711,17 +3780,32 @@ class Worker:
         )
 
     def _models_in_use(self) -> frozenset[str]:
-        """Repo-form IDs of every model a live runner depends on.
+        """Repo-form IDs of every model this node must keep staged.
 
-        Includes companion repos (MTP sidecar, assistant, split vision
-        weights) of active models: no instance names them directly, but
-        evicting one corrupts a live runner just the same - MLX loads
-        weights lazily.
+        A live runner's model, including companion repos (MTP sidecar,
+        assistant, split vision weights) of active models: no instance
+        names them directly, but evicting one corrupts a live runner just
+        the same - MLX loads weights lazily. Also every model, with its
+        companions, that an instance placed on this node will load, whether
+        or not its runner exists yet: a runner being retried comes back for
+        exactly these files. An RPC donor never reads the model, so its
+        shard protects nothing.
         """
 
         in_use: set[str] = set()
         for runner in self.runners.values():
-            in_use.update(_staging_model_ids(runner.shard_metadata.model_card))
+            in_use.update(_staged_model_ids_for(runner.shard_metadata))
+        for instance in self.state.instances.values():
+            placed_runner_id = instance.shard_assignments.node_to_runner.get(
+                self.node_id
+            )
+            placed_shard = (
+                instance.shard(placed_runner_id)
+                if placed_runner_id is not None
+                else None
+            )
+            if placed_shard is not None:
+                in_use.update(_staged_model_ids_for(placed_shard))
         # A store-backed download in progress has already created its
         # staging directory but no runner exists yet - a concurrent
         # teardown's budget pass must not delete a directory that is
@@ -3951,6 +4035,7 @@ class Worker:
         required_free_bytes: int = 0,
         enforce_recent_budget: bool = True,
         fail_on_error: bool = False,
+        protect_used_since: float | None = None,
     ) -> StagingEvictionReport | None:
         """Run one staging-budget or capacity enforcement pass.
 
@@ -3989,6 +4074,7 @@ class Worker:
                 models_in_use,
                 required_free_bytes=required_free_bytes,
                 enforce_recent_budget=enforce_recent_budget,
+                protect_used_since=protect_used_since,
             )
         except Exception as exc:
             logger.warning(f"Worker: staging budget enforcement failed: {exc}")
@@ -4084,22 +4170,54 @@ class Worker:
         if not self._stale_downloads_pending_reset:
             self._stale_reset_wait_ticks = 0
 
+    def _refresh_in_use_markers(self) -> None:
+        """Keep the recency marker of every in-use staged model current.
+
+        A runner that stops without a planned shutdown (a process restart, a
+        crash, or the election winner recreating its worker) never refreshes
+        its model's marker, which otherwise records only when it was loaded.
+        Refreshing while in use lets the next startup pass tell the models
+        that were serving from the idle tail
+        (``STARTUP_RECENT_USE_GRACE_SECONDS``).
+        """
+        if self._staging_config is None or not self._staging_config.enabled:
+            return
+        now = time.monotonic()
+        last_refresh = self._in_use_markers_refreshed_at
+        if (
+            last_refresh is not None
+            and now - last_refresh < _IN_USE_MARKER_REFRESH_SECONDS
+        ):
+            return
+        self._in_use_markers_refreshed_at = now
+        cache_path = Path(self._staging_config.node_cache_path).expanduser()
+        for model_id in self._models_in_use():
+            staged_dir = cache_path / staging_directory_name(model_id)
+            if staged_dir.is_dir():
+                touch_last_used(staged_dir)
+
     def _reconcile_staging_on_startup(self) -> None:
-        """Reconcile staging orphans left by a crashed or killed session.
+        """Reconcile staging orphans left by a crashed or replaced session.
 
         A node that dies never runs the deactivate-time eviction, so its
-        staged copies survive forever without this. At startup nothing is
-        in use yet, so every staged model is a candidate and the grace
-        budget alone decides what survives - which is exactly the crash
-        recovery behavior we want: recent models stay warm for the
-        restart, the old tail goes.
+        staged copies survive forever without this. At startup no runner
+        exists, and after a process restart the node id is new, so neither
+        live runners nor the placements in state can say what was serving.
+        The recency markers can: in-use models refresh theirs every minute,
+        so a model used within ``STARTUP_RECENT_USE_GRACE_SECONDS`` is kept
+        whatever its size, for the re-placement a restart or a master change
+        brings straight back. Every older staged model competes for the
+        grace budget, newest first, and the old tail goes.
         """
         if (
             self._staging_config is None
             or not self._staging_config.cleanup_on_deactivate
         ):
             return
-        report = self._enforce_staging_budget(self._models_in_use())
+        report = self._enforce_staging_budget(
+            self._models_in_use(),
+            protect_used_since=time.time() - STARTUP_RECENT_USE_GRACE_SECONDS,
+        )
         if report is not None and report.evicted_model_ids:
             logger.info(
                 "Worker: startup staging reconciliation evicted "
@@ -4214,6 +4332,20 @@ class Worker:
         return stale
 
     async def _session_edge_ingress(self) -> None:
+        """Record libp2p sessions as topology paths until the event channel closes.
+
+        See ``_session_edge_ingress_loop``. On a master change the node shuts
+        this worker's event router down before replacing the worker, and a
+        peer restart is exactly when connection updates arrive; a send in
+        that window finds the channel closed. That ends this task quietly
+        instead of failing the worker's task group and, with it, the node.
+        """
+        try:
+            await self._session_edge_ingress_loop()
+        except (BrokenResourceError, ClosedResourceError):
+            logger.debug("session-edge ingress stopped: worker event channel closed")
+
+    async def _session_edge_ingress_loop(self) -> None:
         """Record authenticated libp2p sessions as topology paths (#662).
 
         The connectivity graph was built exclusively from HTTP probes of
@@ -4331,7 +4463,22 @@ class Worker:
     _PROBE_BACKOFF_AFTER_FAILURES = 3
     _PROBE_BACKOFF_RETRY_ROUNDS = 6
 
-    async def _poll_connection_updates(self):
+    async def _poll_connection_updates(self) -> None:
+        """Probe and heal topology edges until the worker's event channel closes.
+
+        See ``_poll_connection_updates_loop``. The node closes this worker's
+        event router before replacing the worker on a master change; a sweep
+        that sends in that window ends here quietly rather than failing the
+        worker's task group, which took the whole node down on a peer
+        restart and dropped every instance it hosted.
+        """
+        try:
+            await self._poll_connection_updates_loop()
+        except (BrokenResourceError, ClosedResourceError):
+            logger.debug("topology probing stopped: worker event channel closed")
+
+    async def _poll_connection_updates_loop(self) -> None:
+        """Probe advertised peer addresses and reconcile this node's topology edges."""
         probe_failures: defaultdict[str, int] = defaultdict(int)
         sweep_index = 0
         while True:

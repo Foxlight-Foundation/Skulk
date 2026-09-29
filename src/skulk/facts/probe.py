@@ -166,6 +166,11 @@ def _nvidia_gpu_facts(nvml: NvmlLike | None) -> tuple[GpuDeviceFact, ...]:
         try:
             handle = nvml.nvmlDeviceGetHandleByIndex(index)
         except Exception:  # noqa: BLE001 - device-level degradation
+            # Enumeration still proves a device exists. Keep its unknown class
+            # so a different qualified GPU cannot hide this unavailable device.
+            facts.append(
+                GpuDeviceFact(vendor="nvidia", index=index, detection_source="nvml")
+            )
             continue
         try:
             raw = nvml.nvmlDeviceGetName(handle)

@@ -7,6 +7,7 @@ import { useSkulkTranslation } from '../../i18n/tolgee';
 import { ClusterNode } from './ClusterNode';
 import { CapabilityFlyout } from './CapabilityFlyout';
 import { CAPABILITY_SATELLITES_ENABLED } from '../../featureFlags';
+import { tailnetAddress } from '../../utils/hostDashboard';
 import {
   capabilityNodeKey,
   isCapabilityNodeVisible,
@@ -279,6 +280,7 @@ export function TopologyGraph({
           anchor={openFlyout.anchor}
           canvasHeight={height}
           canvasWidth={width}
+          hostAddress={tailnetAddress(data.nodes[openFlyout.hostNodeId])}
           hostName={data.nodes[openFlyout.hostNodeId]?.friendly_name ?? openFlyout.hostNodeId.slice(-8)}
           hostNodeId={openFlyout.hostNodeId}
           localNodeId={localNodeId}
