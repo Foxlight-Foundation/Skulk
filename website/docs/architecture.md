@@ -992,8 +992,10 @@ select the physical device used by both execution and memory admission. The
 inventory retains unknown compute classes and marks multiple NVIDIA devices,
 so another matching device cannot hide insufficient evidence. These are compute
 architecture restrictions, independent of node identity. Qualified primary
-CUDA overrides retain their own exact build claims and are not replaced by the
-managed wheel. CUDA 12 runtime, cuBLAS, NCCL, and the NVIDIA driver
+CUDA overrides can use their own exact build claims. With an existing dedicated
+CUDA cache, the operator must also configure `SKULK_AUDIO_CPP_CUDA_BIN`:
+startup rehydration otherwise prefers the managed CUDA executable over a
+primary-only override. CUDA 12 runtime, cuBLAS, NCCL, and the NVIDIA driver
 must be on the host loader path; the binary probe exposes missing libraries.
 Signed support resolution applies the same exact class rule to a restored
 wheel, so a generic claim cannot reuse it through the CPU preparation path.

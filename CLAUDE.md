@@ -308,7 +308,10 @@ exact managed executable build and compute class in the signed claim, plus one
 observed NVIDIA device with that class. Mixed, unknown, and multiple NVIDIA
 devices are rejected because the runner cannot yet bind execution and memory
 admission to a selected physical device. A qualified operator-provided primary
-CUDA binary uses its own exact claim and is not replaced by a managed package.
+CUDA binary uses its own exact claim through primary preparation. If a dedicated
+CUDA wheel is already cached, set `SKULK_AUDIO_CPP_CUDA_BIN` to the operator
+binary as well: startup cache rehydration can otherwise prefer that managed
+build over a primary-only override.
 CUDA 12 runtime, cuBLAS, NCCL, and NVIDIA driver libraries
 must be on the host loader path; the binary probe reports missing libraries
 before advertising the lane. Signed support resolution also requires the

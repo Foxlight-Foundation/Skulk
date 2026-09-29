@@ -145,8 +145,10 @@ The claim must also name the selected platform's exact managed executable.
 Managed packages require one observed NVIDIA device with a known matching
 compute class. Multiple devices, mixed classes, and unknown classes are rejected
 until the runner can bind execution and memory accounting to a selected device.
-Qualified operator-provided primary CUDA binaries keep their own build claims;
-managed preparation does not replace them.
+Operator-provided primary CUDA binaries can use their own build claims. If a
+dedicated CUDA wheel is already cached, set `SKULK_AUDIO_CPP_CUDA_BIN` to the
+operator binary as well; startup cache rehydration otherwise prefers that
+dedicated build over a primary-only override.
 For AMD, node resources include a PCI chip class such as
 `amd:pci-1002-1586`, allowing a claim to cover the qualified hardware class
 without identifying a specific node.

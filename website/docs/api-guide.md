@@ -1739,8 +1739,10 @@ admitted until execution and memory accounting can select the same physical
 device. Each published native build retains those restrictions when restored
 from cache. A generic NVIDIA claim cannot widen a managed package's compiled
 target, and package availability alone cannot place a model. A qualified
-operator-provided primary CUDA binary remains eligible through its own exact
-signed build claim.
+operator-provided primary CUDA binary can use its own exact signed build claim.
+When a dedicated CUDA wheel is already cached, configure
+`SKULK_AUDIO_CPP_CUDA_BIN` for that operator binary as well; startup cache
+rehydration otherwise prefers the dedicated build over a primary-only override.
 
 Music generation is an asynchronous job API for a mounted `TextToMusic` card.
 The model's `/v1/models` `music` object identifies its family, lyric rule,
