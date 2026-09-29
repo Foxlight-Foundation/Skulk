@@ -234,3 +234,54 @@ def test_music_exact_placement_checks_full_system_memory_footprint(
             CreateInstance(instance=instance), Topology(), {}, {node: memory},
             node_resources={node: resources},
         )
+
+
+@pytest.mark.parametrize("exact", [False, True])
+def test_ace_cpu_placement_rejects_weight_only_memory_capacity(
+    monkeypatch: pytest.MonkeyPatch, exact: bool,
+) -> None:
+    """Both placement paths refuse RAM that fits weights but cannot hold CPU buffers."""
+    path = Path(RESOURCES_DIR) / "music_model_cards" / "audio-cpp--ACE-Step1.5-Turbo-BF16.toml"
+    card = ModelCard.model_validate(tomllib.loads(path.read_text()))
+    node, runner = NodeId("music-node"), RunnerId("music-runner")
+    topology = Topology()
+    topology.add_node(node)
+    resources = NodeResources(
+        backends=frozenset({"audio_cpp", "audio_cpp-cpu"}),
+        engine_builds={"audio_cpp-cpu": "verified-build"},
+    )
+
+    def supported(_card: ModelCard, _resources: NodeResources) -> frozenset[str]:
+        return frozenset({"audio_cpp-cpu"})
+
+    monkeypatch.setattr(placement_module, "_card_platform_backends", supported)
+    memory = MemoryUsage.from_bytes(
+        ram_total=Memory.from_gb(32).in_bytes,
+        ram_available=Memory.from_gb(14).in_bytes,
+        swap_total=0, swap_available=0,
+    )
+    if exact:
+        instance = MlxRingInstance(
+            instance_id=InstanceId(),
+            shard_assignments=ShardAssignments(
+                model_id=card.model_id,
+                node_to_runner={node: runner},
+                runner_to_shard={runner: PipelineShardMetadata(
+                    model_card=card, device_rank=0, world_size=1,
+                    start_layer=0, end_layer=24, n_layers=24,
+                    resolved_backend="audio_cpp-cpu",
+                )},
+            ),
+            hosts_by_node={node: []}, ephemeral_port=52415,
+        )
+        with pytest.raises(PlacementError, match="Insufficient system memory"):
+            add_instance_to_placements(
+                CreateInstance(instance=instance), topology, {}, {node: memory},
+                node_resources={node: resources},
+            )
+    else:
+        with pytest.raises(PlacementError, match="No candidate cycle fits"):
+            place_instance(
+                PlaceInstance(model_card=card, sharding=Sharding.Pipeline, instance_meta=InstanceMeta.MlxRing, min_nodes=1),
+                topology, {}, {node: memory}, {}, node_resources={node: resources},
+            )

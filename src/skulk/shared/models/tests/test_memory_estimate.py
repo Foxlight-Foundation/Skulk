@@ -1,3 +1,7 @@
+import tomllib
+from pathlib import Path
+
+from skulk.shared.constants import RESOURCES_DIR
 from skulk.shared.models.memory_estimate import (
     GPU_WORKING_SET_FRACTION,
     LLAMA_CPP_MEMORY_OVERHEAD_FACTOR,
@@ -51,6 +55,19 @@ def test_shard_footprint_uses_lighter_factor_for_gguf():
         Memory.from_gb(40) * LLAMA_CPP_MEMORY_OVERHEAD_FACTOR + MEMORY_OVERHEAD_FLOOR
     )
     assert gguf.in_bytes == expected.in_bytes
+
+
+def test_ace_cpu_footprint_covers_observed_generation_peak() -> None:
+    """ACE's CPU admission must cover generation buffers beyond its GGUF weights."""
+    path = Path(RESOURCES_DIR) / "music_model_cards" / "audio-cpp--ACE-Step1.5-Turbo-BF16.toml"
+    card = ModelCard.model_validate(tomllib.loads(path.read_text()))
+    measured_peak = Memory.from_bytes(18_218_632 * 1024)
+    cpu = estimate_shard_footprint(card, 1.0, resolved_backend="audio_cpp-cpu")
+    assert cpu > measured_peak * 1.1
+    for backend in (None, "audio_cpp-metal", "audio_cpp-vulkan", "audio_cpp-cuda", "audio_cpp-rocm"):
+        assert estimate_shard_footprint(card, 1.0, resolved_backend=backend) == (
+            card.storage_size * LLAMA_CPP_MEMORY_OVERHEAD_FACTOR + MEMORY_OVERHEAD_FLOOR
+        )
 
 
 def test_kv_is_zero_without_kv_heads():

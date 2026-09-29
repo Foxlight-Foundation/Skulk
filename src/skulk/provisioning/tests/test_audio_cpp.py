@@ -167,6 +167,33 @@ def test_cuda_unsupported_host_fails_before_download() -> None:
         audio_cpp.audio_cpp_cuda_wheel_for_host(system="linux", machine="ppc64le")
 
 
+@pytest.mark.parametrize(
+    ("system", "machines", "platform_tag", "expected_digest"),
+    [
+        (
+            "darwin", ("arm64", "aarch64"), "macosx_15_0_arm64",
+            "6029c852a2134b6da3f3ac7be14375eff9597b9ba4e5580f441e8cf8f8fdbd3b",
+        ),
+        (
+            "linux", ("x86_64", "amd64", "AMD64"), "manylinux_2_35_x86_64",
+            "2b0d76951ac68fdfb08beb2dcbf0fd0b8258985c97248df6f3a3c65113d0e334",
+        ),
+        (
+            "linux", ("aarch64", "arm64"), "manylinux_2_35_aarch64",
+            "40aeb29bd4fb11e0d70203f5424d91a8cd348f567fe805be269fe61742acf9bf",
+        ),
+    ],
+)
+def test_cpu_architecture_aliases_select_original_corrected_artifacts(
+    system: str, machines: tuple[str, ...], platform_tag: str, expected_digest: str,
+) -> None:
+    """Every supported host alias selects the attested sampler-corrected bytes."""
+    for machine in machines:
+        wheel = audio_cpp.audio_cpp_wheel_for_host(system=system, machine=machine)
+        assert wheel.filename == f"skulk_audio_cpp_cpu-0.8.2.post2-py3-none-{platform_tag}.whl"
+        assert wheel.sha256 == expected_digest
+
+
 def test_gb10_cuda_wheel_uses_exact_hardware_tested_artifact() -> None:
     """The arm64 CUDA lane selects only the GB10-tested wheel bytes."""
     wheel = audio_cpp.audio_cpp_cuda_wheel_for_host(system="linux", machine="aarch64")

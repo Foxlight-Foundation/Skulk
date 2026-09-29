@@ -91,16 +91,16 @@ class AudioCppWheel(BaseModel):
 # Engine availability here grants no model support claim by itself.
 AUDIO_CPP_CPU_WHEELS: Final[dict[tuple[str, str], AudioCppWheel]] = {
     ("darwin", "arm64"): AudioCppWheel(
-        filename="skulk_audio_cpp_cpu-0.8.2.post1-py3-none-macosx_15_0_arm64.whl",
-        sha256="6a5dc4118818c3c3e3be5259c1f189f114703b6ce68ade5a1cd11e8d89064baa",
+        filename="skulk_audio_cpp_cpu-0.8.2.post2-py3-none-macosx_15_0_arm64.whl",
+        sha256="6029c852a2134b6da3f3ac7be14375eff9597b9ba4e5580f441e8cf8f8fdbd3b",
     ),
     ("linux", "x86_64"): AudioCppWheel(
-        filename="skulk_audio_cpp_cpu-0.8.2.post1-py3-none-manylinux_2_35_x86_64.whl",
-        sha256="89a73bc202ed79f06ec85f26a127b62723179f637b32c2ebb5eef0093bc2f315",
+        filename="skulk_audio_cpp_cpu-0.8.2.post2-py3-none-manylinux_2_35_x86_64.whl",
+        sha256="2b0d76951ac68fdfb08beb2dcbf0fd0b8258985c97248df6f3a3c65113d0e334",
     ),
     ("linux", "aarch64"): AudioCppWheel(
-        filename="skulk_audio_cpp_cpu-0.8.2.post1-py3-none-manylinux_2_35_aarch64.whl",
-        sha256="858b98f45cb7cfdc5b4e8f19f74b37f937dd9060706d5b8b4281770b92a3ce9e",
+        filename="skulk_audio_cpp_cpu-0.8.2.post2-py3-none-manylinux_2_35_aarch64.whl",
+        sha256="40aeb29bd4fb11e0d70203f5424d91a8cd348f567fe805be269fe61742acf9bf",
     ),
 }
 

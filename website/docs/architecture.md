@@ -1022,6 +1022,11 @@ signed claim check and request-local placement dry-run. Both the API dry-run
 and master constrain ordinary placement to the prepared node. Exact placements reject
 RPC shaped music instances and require a matching ready build and signed support
 claim.
+CPU music inference uses at most eight usable CPU threads and reserves one
+usable core for the node control plane when available. This is inference
+parallelism: each model instance still runs one generation at a time.
+Accelerator lanes retain their fixed one-thread setting.
+
 Placement stamps the selected audio.cpp build on the music shard. At each
 sidecar launch, the runner selects the executable for that lane and checks its
 digest and selected device
@@ -1033,6 +1038,10 @@ memory and CPU uses system RAM. Preparation and exact placement check the
 complete estimated music footprint against the applicable pool, including the system-memory
 working-set ceiling, before creating one runner shard on one node. Exact music
 mounts use that backend-specific check without the generic RAM-only precheck.
+ACE-Step CPU inference reserves an additional 10 GiB for native working buffers:
+its measured generation peak exceeds the weight-only GGUF estimate. The shared
+estimator applies this reserve to API admission, ordinary and exact placement,
+committed instances and the worker's local load guard.
 Ordinary signed placement selects only ready backends. A `MusicGeneration` command creates a distinct
 task; its runner owns one loopback audio.cpp server per mounted model and emits
 only a terminal `MusicChunk` manifest through the control path. Bounded WAV
