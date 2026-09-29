@@ -2031,7 +2031,12 @@ setup or migration before identity initialization. Starting it requires a separa
 revision-fenced `activate`; interrupted stopped selection revalidates artifacts
 and trust, unlike retained-state disable. Target preview
 checks the current revision, signed artifacts, permissions and migration compatibility
-before interrupting a healthy owner. Accepted intent survives client disconnect;
+before interrupting a healthy owner. A release that rewords a setting, changes a
+default or adds an optional setting keeps an installation's settings without
+migration when its owner speaks plugin protocol 3 or later, because such an owner
+validates the stored settings against the new schema and rebinds them before its
+child starts; an earlier owner binds settings to the exact schema, so its releases
+still need an identical one. Accepted intent survives client disconnect;
 restart reconciles the exact local selection across its atomic publication boundary.
 `runtime_manager.py` exposes a fixed protected Unix socket shared by terminal and
 HTTP management integration. It registers up to sixteen installations,
