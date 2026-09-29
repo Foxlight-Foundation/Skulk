@@ -59,6 +59,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Final, Literal, NamedTuple, cast
 
@@ -256,7 +257,64 @@ GpuMemoryShareBasis = Literal[
     "pinned", "placement", "no_kv_geometry", "unknown_device_total"
 ]
 """Why a launch received its share: an operator pin, the placement footprint,
-or the fixed default because the card or the device could not be sized."""
+or the fixed default because the artifact or the device could not be sized."""
+
+_KV_CACHE_ELEMENT_BYTES: Final = 2
+"""vLLM keeps KV cache at the model's 16-bit precision unless a quantized cache
+dtype is requested, which the runner never does."""
+
+
+def artifact_kv_bytes_per_token(config: Mapping[str, object]) -> int | None:
+    """Upper bound on vLLM's KV cache bytes per token, from a model's config.
+
+    The card's KV estimate assumes 128-wide attention heads, and many models are
+    wider (Gemma 4 uses 256, and 512 on its full-attention layers), so a share
+    sized from the card alone can leave vLLM short of the served window. This
+    bound reads the artifact's own geometry and counts every decoder layer at
+    full context with the widest head and KV-head count the config names, keys
+    and values both, at 16-bit precision. Sliding-window, shared-KV and
+    linear-attention layers hold less than that, so the bound only ever raises
+    a share. Multimodal wrappers nest the decoder under ``text_config``.
+
+    Args:
+        config: The parsed ``config.json`` of the served artifact.
+
+    Returns:
+        Bytes per token of context, or ``None`` when the config does not name
+        the layer count, head width and KV-head count.
+    """
+    nested = config.get("text_config")
+    source = cast("Mapping[str, object]", nested) if isinstance(nested, dict) else config
+
+    def positive(key: str) -> int | None:
+        value = source.get(key)
+        return value if type(value) is int and value > 0 else None
+
+    layers = positive("num_hidden_layers")
+    attention_heads = positive("num_attention_heads")
+    kv_heads = positive("num_key_value_heads") or attention_heads
+    head_dim = positive("head_dim")
+    hidden_size = positive("hidden_size")
+    if head_dim is None and hidden_size is not None and attention_heads is not None:
+        head_dim = hidden_size // attention_heads
+    if layers is None or kv_heads is None or not head_dim:
+        return None
+    widest = kv_heads * head_dim
+    global_kv_heads = positive("num_global_key_value_heads") or kv_heads
+    global_head_dim = positive("global_head_dim") or head_dim
+    widest = max(widest, global_kv_heads * global_head_dim)
+    return 2 * layers * widest * _KV_CACHE_ELEMENT_BYTES
+
+
+def _read_artifact_kv_bytes_per_token(model_dir: Path) -> int | None:
+    """The artifact's KV bound from ``config.json``, or ``None`` when unreadable."""
+    try:
+        config = cast("object", json.loads((model_dir / "config.json").read_text()))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(config, dict):
+        return None
+    return artifact_kv_bytes_per_token(cast("Mapping[str, object]", config))
 
 
 class GpuMemoryShare(NamedTuple):
@@ -272,6 +330,7 @@ def resolve_gpu_memory_utilization(
     resolved_backend: str | None,
     device_total_bytes: int | None,
     pinned: float | None,
+    artifact_kv_per_token: int | None,
 ) -> GpuMemoryShare:
     """Choose vLLM's memory share for one placement. Pure, so it is unit-testable.
 
@@ -279,17 +338,21 @@ def resolve_gpu_memory_utilization(
     weights with engine overhead, KV cache for the served window, and the flat
     floor, from the estimator the master reserved with. vLLM fills whatever the
     share leaves after weights, activations and runtime memory with KV cache, so
-    the overhead allowance becomes extra KV capacity rather than idle memory. For
-    the smallest models the share is raised to cover weights, the window's KV
-    cache and vLLM's fixed runtime memory (``_VLLM_RUNTIME_ALLOWANCE``). The
-    share is rounded up to the next hundredth so vLLM's request (share times the
-    device total it reads) covers the footprint even where the telemetry total
-    runs slightly above CUDA's.
+    the overhead allowance becomes extra KV capacity rather than idle memory.
 
-    The fixed default remains when no honest size exists. A card without KV
-    geometry has no KV cache in its footprint, so a sized share would leave vLLM
-    too little for its window and it would refuse to start. An unreadable device
-    total leaves nothing to divide by.
+    The share never drops below weights, the served window's KV cache at the
+    artifact's own geometry (``artifact_kv_bytes_per_token``, an upper bound)
+    and vLLM's fixed runtime memory (``_VLLM_RUNTIME_ALLOWANCE``). The card's
+    estimate assumes 128-wide attention heads and a proportional overhead, so
+    wide-head models and the smallest models would otherwise leave vLLM short
+    of its window, and it would refuse to start. The share is rounded up to the
+    next hundredth, so vLLM's request (share times the device total it reads)
+    covers it even where the telemetry total runs slightly above CUDA's, and it
+    is capped at the fixed default: sizing never asks for more than the
+    historical share.
+
+    The fixed default remains when no honest size exists: the artifact's config
+    names no KV geometry, or the device total is unreadable.
 
     Args:
         model_card: The card the instance serves.
@@ -297,13 +360,15 @@ def resolve_gpu_memory_utilization(
         resolved_backend: The engine tag placement stamped on the shard.
         device_total_bytes: Total device memory, or ``None`` when unreadable.
         pinned: A valid ``SKULK_VLLM_GPU_MEMORY_UTILIZATION``, or ``None``.
+        artifact_kv_per_token: The artifact's KV bound, or ``None`` when its
+            config could not be read.
 
     Returns:
         The share to pass to vLLM and the basis it was chosen on.
     """
     if pinned is not None:
         return GpuMemoryShare(pinned, "pinned")
-    if per_token_kv_bytes(model_card, resolved_backend=resolved_backend) <= 0:
+    if artifact_kv_per_token is None or artifact_kv_per_token <= 0:
         return GpuMemoryShare(_DEFAULT_GPU_MEMORY_UTILIZATION, "no_kv_geometry")
     if device_total_bytes is None or device_total_bytes <= 0:
         return GpuMemoryShare(_DEFAULT_GPU_MEMORY_UTILIZATION, "unknown_device_total")
@@ -315,19 +380,19 @@ def resolve_gpu_memory_utilization(
         context_budget=context_tokens,
         resolved_backend=resolved_backend,
     )
-    # Never less than weights, the window's KV cache and vLLM's fixed runtime
-    # memory, or a small model's share leaves vLLM short of its window and it
-    # refuses to start.
-    window_kv = Memory.from_bytes(
-        per_token_kv_bytes(model_card, resolved_backend=resolved_backend)
-        * context_tokens
+    kv_per_token = max(
+        artifact_kv_per_token,
+        per_token_kv_bytes(model_card, resolved_backend=resolved_backend),
     )
+    window_kv = Memory.from_bytes(kv_per_token * context_tokens)
     share_bytes = max(
         footprint.in_bytes,
         (model_card.storage_size + window_kv + _VLLM_RUNTIME_ALLOWANCE).in_bytes,
     )
     hundredths = math.ceil(share_bytes * 100 / device_total_bytes)
-    return GpuMemoryShare(min(1.0, max(1, hundredths) / 100), "placement")
+    return GpuMemoryShare(
+        min(_DEFAULT_GPU_MEMORY_UTILIZATION, max(1, hundredths) / 100), "placement"
+    )
 
 
 def _device_memory_total(resolved_backend: str | None) -> int | None:
@@ -915,7 +980,7 @@ class Runner(ServedConcurrentDispatch):
             host,
             port,
             n_ctx,
-            self._gpu_memory_share(n_ctx),
+            self._gpu_memory_share(model_dir, n_ctx),
             self.shard_metadata.model_card.trust_remote_code,
             spec_method=(
                 card_runtime.vllm_spec_method if card_runtime is not None else None
@@ -972,7 +1037,7 @@ class Runner(ServedConcurrentDispatch):
             start_new_session=True,
         )
 
-    def _gpu_memory_share(self, n_ctx: int) -> float:
+    def _gpu_memory_share(self, model_dir: Path, n_ctx: int) -> float:
         """Resolve this launch's ``--gpu-memory-utilization`` and log its basis."""
         shard = self.shard_metadata
         pinned = _configured_gpu_memory_utilization()
@@ -982,6 +1047,7 @@ class Runner(ServedConcurrentDispatch):
             shard.resolved_backend,
             None if pinned is not None else _device_memory_total(shard.resolved_backend),
             pinned,
+            None if pinned is not None else _read_artifact_kv_bytes_per_token(model_dir),
         )
         match share.basis:
             case "pinned":
@@ -997,8 +1063,8 @@ class Runner(ServedConcurrentDispatch):
             case "no_kv_geometry":
                 logger.warning(
                     f"vllm cannot size {shard.model_card.model_id} from its "
-                    "placement: the card declares no num_key_value_heads, so its "
-                    "footprint omits the KV cache; using the fixed "
+                    "placement: its config.json names no layer count, head "
+                    "width and KV-head count; using the fixed "
                     f"{share.fraction:.2f} share"
                 )
             case "unknown_device_total":

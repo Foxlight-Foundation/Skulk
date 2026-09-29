@@ -110,14 +110,18 @@ continuous batching actually engage and decode them together.
   cache for the served window, and a small floor), rounded up to the next
   hundredth. vLLM spends whatever part of that share weights and runtime
   memory leave on KV cache. A vLLM model can therefore share a GPU with other
-  models and stays within its reservation. For the smallest models the share
-  also always covers vLLM's own runtime memory, about a gigabyte, so the
-  served window still fits.
+  models and stays within its reservation. The share never drops below the
+  weights, the served window's KV cache at the model's own geometry (read
+  from its `config.json`, counting every layer at its widest attention head)
+  and about a gigabyte of vLLM's own runtime memory, so wide-head models and
+  very small models still fit their window. It never exceeds the previous
+  fixed share of 0.90.
 - `SKULK_VLLM_GPU_MEMORY_UTILIZATION` pins a fixed share instead. Set it on a
   GPU dedicated to vLLM to give the KV cache the rest of the device, for more
-  concurrent long requests; other models then find that GPU full. A card that
-  does not declare `num_key_value_heads`, or a GPU whose memory total cannot be
-  read, gets the fixed 0.90 share with a warning in the node log.
+  concurrent long requests; other models then find that GPU full. A model
+  whose `config.json` does not name its layer count, head width and KV-head
+  count, or a GPU whose memory total cannot be read, gets the fixed 0.90
+  share with a warning in the node log.
 
 Operationally: server startup on a large model can take a couple of minutes
 (weight load, compilation, CUDA-graph capture) and is allowed a generous health
