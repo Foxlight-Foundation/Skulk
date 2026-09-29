@@ -12,6 +12,7 @@ from skulk.shared.models.memory_estimate import (
     GPU_WORKING_SET_FRACTION,
     UMA_GPU_OS_HEADROOM,
     backend_offloads_to_vram,
+    estimate_music_workspace,
     estimate_recurrent_cache_bytes,
     estimate_shard_footprint,
     gb10_unified_memory_pool,
@@ -697,7 +698,7 @@ def filter_cycles_by_memory(
     admit it. Each node must satisfy::
 
         weights_share * memory_overhead_factor(model_card)
-            + kv_share + PLACEMENT_MEMORY_OVERHEAD_FLOOR
+            + kv_share + PLACEMENT_MEMORY_OVERHEAD_FLOOR + music_workspace
             <= node usable memory
 
     where usable memory is the node's discrete VRAM pool when it has one
@@ -821,6 +822,7 @@ def filter_cycles_by_memory(
                 + kv_share
                 + recurrent_share
                 + PLACEMENT_MEMORY_OVERHEAD_FLOOR
+                + estimate_music_workspace(model_card, resolved_backend=backend)
                 + fixed_memory_by_node.get(node_id, Memory())
             )
             node_vram_usable = node_vram.get(node_id)

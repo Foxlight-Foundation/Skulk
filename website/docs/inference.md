@@ -120,6 +120,11 @@ placement. Apple Silicon macOS, Linux `amd64`, and Linux `arm64` have CPU-capabl
 packages. Linux `amd64` has a separate Vulkan package, and Linux `arm64` has a
 CUDA package compiled for NVIDIA GB10 compute 12.1. A GPU package is selected
 only when a signed claim covers the exact card, engine build, and hardware class.
+The pinned CPU/Metal package is `0.8.2.post2`; its MiniMax depth sampler starts
+a fresh random stream for each audio frame. The Linux Vulkan and GB10 CUDA
+pins remain `0.8.2.post4` and `0.8.2.post1`, respectively. Registry support
+matches the executable digest, so claims for an older CPU/Metal build do not
+authorize the new package.
 The GB10 CUDA package requires CUDA 12 runtime, cuBLAS, and NCCL libraries in
 the host loader path; its probe reports missing libraries before the lane can
 be advertised. The package contains the server, model specs, and licenses;
@@ -152,12 +157,18 @@ download, including on offline nodes.
 capability conflicts and engine build inventory when an override or native
 library is incompatible. A CPU-capable package never implies that a given
 model is qualified on that machine.
+ACE-Step CPU placement reserves 10 GiB of working buffers in addition to its
+weight estimate and ordinary runtime overhead. This covers the higher measured
+memory demand during generation; a node that can hold the weights alone may
+still lack enough memory to mount it.
 The Linux wheels require glibc 2.35 or newer, `libstdc++.so.6`, and
 `libgomp.so.1`; the node probe reports a missing loader dependency instead of
 advertising the engine. They do not embed GPU driver libraries.
 
 The selected model runs in one supervised loopback server with one active
-generation. Submit `/v1/music`, poll the returned ID, and download its WAV
+generation. CPU inference uses up to eight usable threads, reserving one core
+when possible; accelerator inference keeps one CPU thread. This setting does
+not increase the number of simultaneous generations. Submit `/v1/music`, poll the returned ID, and download its WAV
 from the accepting API node. The card controls lyric requirements and duration
 bounds. `seconds` is a target or budget; MiniMax may produce a different actual
 duration, which the completed job reports. WAV results are limited to 64 MiB

@@ -270,6 +270,9 @@ CPU music inference uses `os.process_cpu_count()` to respect CPU affinity,
 reserves one usable core when possible, and caps inference at eight threads.
 This upstream setting controls ggml math; per-instance admission remains one
 active generation. Accelerator settings remain one thread.
+`estimate_music_workspace` reserves 10 GiB beyond ACE-Step's weight estimate
+for its CPU working buffers. API admission, ordinary/exact placement and the
+worker load guard use the same reserve; accelerator estimates remain unchanged.
 
 `NodeResources.engine_builds` hashes the executable for each concrete lane.
 `TextToMusic` is the sole

@@ -1038,6 +1038,10 @@ memory and CPU uses system RAM. Preparation and exact placement check the
 complete estimated music footprint against the applicable pool, including the system-memory
 working-set ceiling, before creating one runner shard on one node. Exact music
 mounts use that backend-specific check without the generic RAM-only precheck.
+ACE-Step CPU inference reserves an additional 10 GiB for native working buffers:
+its measured generation peak exceeds the weight-only GGUF estimate. The shared
+estimator applies this reserve to API admission, ordinary and exact placement,
+committed instances and the worker's local load guard.
 Ordinary signed placement selects only ready backends. A `MusicGeneration` command creates a distinct
 task; its runner owns one loopback audio.cpp server per mounted model and emits
 only a terminal `MusicChunk` manifest through the control path. Bounded WAV

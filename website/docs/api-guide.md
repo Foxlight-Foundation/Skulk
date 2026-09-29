@@ -1726,6 +1726,11 @@ it. Returns `{ "id": ..., "object": "video.deleted", "deleted": true }`.
 
 ## Music generation
 
+Music model placement checks the selected backend's complete estimated
+footprint. ACE-Step CPU serving includes a 10 GiB working-buffer reserve beyond
+its weight estimate and regular runtime overhead; insufficient capacity returns
+an actionable mount error before a generation job is admitted.
+
 Music generation is an asynchronous job API for a mounted `TextToMusic` card.
 The model's `/v1/models` `music` object identifies its family, lyric rule,
 accepted `min_seconds` and `max_seconds`, and `wav` output format. Music uses
