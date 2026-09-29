@@ -233,6 +233,13 @@ This project records release notes here and mirrors public-facing notes in
   name releases use and the terminal installer defaults to; it suggested
   `runtime.json`.
 
+- A runner's last events are no longer lost when it exits. The channel from
+  a runner process to its worker discarded whatever the runner had sent but
+  the worker had not yet read as soon as the runner closed it. Stopping a
+  model therefore sometimes stalled for 15 seconds and recorded the shutdown
+  as timed out instead of complete. Everything a runner sends before closing
+  is now delivered.
+
 - A refused plugin catalog read, source change or install now says why.
   The catalog routes answered every refusal with "local plugin operation
   refused", and `skulk-plugin-service catalog` told the operator to
