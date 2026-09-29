@@ -9,6 +9,60 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Changed
 
+- Skulk no longer ships model cards. A node's catalog is the signed
+  registry's cards, each installed model's own card record (kept with the
+  model and valid offline indefinitely), and custom cards. Curated card edits
+  go to the model registry's seed.
+  - Offline, a node lists its installed and custom models.
+  - A node that has never reached the registry and holds neither logs why
+    its catalog is empty.
+  - `/v1/models` reports `catalog_source` as `registry`, `installed` or
+    `custom`; `bundled` is gone.
+  - `scripts/fetch_kv_heads.py` takes `--cards-dir`.
+  - Tests carry fixture copies of the few registry cards they exercise.
+  - A test refuses any model card under `src/skulk/resources`.
+  - The frozen PyInstaller build collects the test video engine's card from
+    its new home.
+  - A generated custom card keeps its signed split limit on every catalog
+    reload, including from a repository the registry carries only as quant
+    aliases. While the registry cannot be read, the installed cards for the
+    repository supply that limit.
+  - The empty-catalog warning names a disabled registry
+    (`SKULK_MODEL_REGISTRY_ENABLED=false`) as its own cause.
+  - `skulk doctor`'s installed-card check says an unrecorded model cannot be
+    served offline, since no shipped card stands in for it any more.
+  - Association never re-derives a card record over an existing one. A
+    model directory whose record no longer matches its files has drifted,
+    and it stays unresolved until a download repairs it; before, the
+    association scan could write a fresh verified record from the changed
+    bytes.
+
+- A model added from the Hugging Face search keeps the pipeline-split limit
+  of the signed registry card for its repository, taking the strictest
+  among the repository's quant aliases. Before, only a card shipped inside
+  Skulk supplied that limit.
+- A node whose catalog is legitimately empty (nothing installed and no
+  registry) no longer refreshes the catalog, and waits on the network, on
+  every catalog read.
+- The synthetic test video engine's card ships beside the engine instead
+  of among the model cards, since the registry can never supply it.
+
+- `skulk --offline` keeps the model registry out of reach, as
+  `SKULK_OFFLINE=true` does. Before, the flag only logged the mode, and the
+  card catalog still tried the network.
+- On the model store host, the node's own association pass gives a legacy
+  model in the canonical store its card record, instead of waiting for
+  reconciliation to scan the store.
+
+- A node that cannot reach the model registry, however long it has been
+  offline, gives a model downloaded before card records existed its record
+  from the last verified registry catalog it cached. Before, only the
+  cards shipped inside Skulk could. The cached catalog is never listed or
+  placed from; a model it matches gains its own card record and is then
+  listed and served like any other installed model. Association now runs
+  on every node, with or without a model store, and a model it records is
+  listed at once rather than after the next restart.
+
 - A plugin update that only rewords a setting, changes a setting's default, or
   adds an optional setting now installs in place and keeps the installation's
   settings, for plugins built with plugin SDK protocol 3 or later. Before, any
@@ -45,6 +99,14 @@ This project records release notes here and mirrors public-facing notes in
   the worker's event loop.
 ### Added
 
+- `skulk doctor` reports installed models that lack their card record
+  (`installed-card-records`). A downloaded model's own card record is what
+  keeps it servable without the network; a model downloaded before those
+  records existed gets one when Skulk starts with network access and
+  recognizes it. Incomplete downloads are counted, not flagged. The audit
+  covers the model directories and the model store's canonical and staging
+  directories. `GET /v1/diagnostics/node` now runs the doctor checks off
+  the event loop, so a slow check no longer stalls the API.
 - A plugin can serve its own screens to every machine on the tailnet. When a
   node runs Tailscale, Skulk hands the node's Tailscale address to the
   plugins it runs. A plugin built for this serves there and on loopback,
@@ -143,17 +205,13 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
-- A vLLM model now starts on a GPU that another model already uses. Skulk
-  used to launch vLLM with a fixed share of the GPU (90% unless configured),
-  and vLLM refuses to start unless that much memory is free, so any other
-  resident model stopped it even when placement had found room. The share is
-  now sized to the memory placement reserved for the instance, and vLLM uses
-  the part of it that weights and runtime memory leave as KV cache.
-  `SKULK_VLLM_GPU_MEMORY_UTILIZATION` still pins a fixed share: set it on a
-  GPU dedicated to vLLM to keep giving the KV cache the rest of the device.
-  The share always covers the model's KV cache at its own geometry, read from
-  its `config.json`, so wide-head models such as Gemma 4 still fit their
-  window, and it never exceeds the previous 0.90.
+- An NVIDIA GB10 no longer refuses models that fit right after a download.
+  CUDA leaves reclaimable page cache out of its free-memory figure on the
+  GB10's shared pool, so a freshly downloaded model's cached files read as
+  used GPU memory; one node reported 116 GB in use while about 51 GB was
+  allocated. Skulk now counts the host's available memory as free when it
+  is the larger figure, which also corrects the GPU memory the dashboard
+  shows for that node.
 
 - The dashboard's English string catalog, the file seeded into Tolgee for
   translation, is current again. Its exporter had failed since mid-September
@@ -265,6 +323,18 @@ This project records release notes here and mirrors public-facing notes in
 - A repair re-placement of an exact `POST /instance` placement keeps the
   window the instance was stamped with instead of falling back to the fleet's
   served context default.
+
+- A vLLM model now starts on a GPU that another model already uses. Skulk
+  used to launch vLLM with a fixed share of the GPU (90% unless configured),
+  and vLLM refuses to start unless that much memory is free, so any other
+  resident model stopped it even when placement had found room. The share is
+  now sized to the memory placement reserved for the instance, and vLLM uses
+  the part of it that weights and runtime memory leave as KV cache.
+  `SKULK_VLLM_GPU_MEMORY_UTILIZATION` still pins a fixed share: set it on a
+  GPU dedicated to vLLM to keep giving the KV cache the rest of the device.
+  The share always covers the model's KV cache at its own geometry, read from
+  its `config.json`, so wide-head models such as Gemma 4 still fit their
+  window, and it never exceeds the previous 0.90.
 
 - Served GGUF models on unified-memory nodes (every Mac, a Strix Halo, a
   GB10 running llama-server) no longer serve a fixed 8192-token window. The

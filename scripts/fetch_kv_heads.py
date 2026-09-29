@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """Fetch num_key_value_heads from HuggingFace config.json and update TOML model cards.
 
+Skulk ships no model cards; the curated cards live in the model registry's
+seed. Point the script at that directory.
+
 Usage:
     # Update only cards missing num_key_value_heads
-    uv run python scripts/fetch_kv_heads.py --missing
+    uv run python scripts/fetch_kv_heads.py --missing --cards-dir ../foxlight-model-registry/seed/cards
 
     # Update all cards (overwrite existing values)
-    uv run python scripts/fetch_kv_heads.py --all
+    uv run python scripts/fetch_kv_heads.py --all --cards-dir ../foxlight-model-registry/seed/cards
 """
 
 from __future__ import annotations
@@ -20,9 +23,6 @@ from pathlib import Path
 
 import tomlkit
 
-CARDS_DIR = (
-    Path(__file__).resolve().parent.parent / "resources" / "inference_model_cards"
-)
 MAX_WORKERS = 5
 
 
@@ -97,11 +97,18 @@ def main():
         action="store_true",
         help="Only update cards missing num_key_value_heads",
     )
+    parser.add_argument(
+        "--cards-dir",
+        type=Path,
+        required=True,
+        help="Directory of TOML cards to update, such as the registry seed",
+    )
     args = parser.parse_args()
+    cards_dir: Path = args.cards_dir
 
-    toml_files = sorted(CARDS_DIR.glob("*.toml"))
+    toml_files = sorted(cards_dir.glob("*.toml"))
     if not toml_files:
-        print(f"No TOML files found in {CARDS_DIR}", file=sys.stderr)
+        print(f"No TOML files found in {cards_dir}", file=sys.stderr)
         sys.exit(1)
 
     to_process = []

@@ -108,9 +108,43 @@ def test_gb10_uses_cuda_memory_when_nvml_does_not_report_it() -> None:
     metrics = read_accelerator_metrics(
         _FakeNvml(broken={"memory"}, name="NVIDIA GB10", cc=(12, 1)),
         cuda_memory_info=lambda: (free, total),
+        host_memory_available=lambda: None,
     )
     assert metrics.vram_total_bytes == total
     assert metrics.vram_used_bytes == total - free
+
+
+def test_gb10_counts_reclaimable_page_cache_as_free() -> None:
+    """Page cache the kernel can reclaim does not read as used GPU memory.
+
+    The shape measured on a GB10 after a model download: CUDA reported 14 GiB
+    free while the host could hand out 74 GiB, and placement refused a model
+    that fit.
+    """
+    total = 130 * 1024**3
+    cuda_free = 14 * 1024**3
+    host_available = 74 * 1024**3
+    metrics = read_accelerator_metrics(
+        _FakeNvml(broken={"memory"}, name="NVIDIA GB10", cc=(12, 1)),
+        cuda_memory_info=lambda: (cuda_free, total),
+        host_memory_available=lambda: host_available,
+    )
+    assert metrics.vram_used_bytes == total - host_available
+
+
+@pytest.mark.parametrize("host_available", [None, 10 * 1024**3])
+def test_gb10_never_reads_less_free_than_cuda_reports(
+    host_available: int | None,
+) -> None:
+    """An unreadable or smaller host figure leaves CUDA's free memory in charge."""
+    total = 130 * 1024**3
+    cuda_free = 40 * 1024**3
+    metrics = read_accelerator_metrics(
+        _FakeNvml(broken={"memory"}, name="NVIDIA GB10", cc=(12, 1)),
+        cuda_memory_info=lambda: (cuda_free, total),
+        host_memory_available=lambda: host_available,
+    )
+    assert metrics.vram_used_bytes == total - cuda_free
 
 
 def test_cuda_memory_fallback_does_not_hide_other_nvml_failures() -> None:

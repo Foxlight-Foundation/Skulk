@@ -258,7 +258,7 @@ describe('ModelBrowser store discovery taxonomy', () => {
         id: 'local/Qwen3-4B-8bit',
         name: 'Qwen3-4B-8bit',
         quantization: '8bit',
-        catalog_source: 'bundled' as const,
+        catalog_source: 'installed' as const,
         registry_provenance: null,
       },
     ];

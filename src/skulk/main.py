@@ -41,7 +41,7 @@ from skulk.operator.pairing import OperatorPairingService
 from skulk.routing.event_router import EventRouter
 from skulk.routing.router import Router, TelemetrySender, get_node_id_keypair
 from skulk.routing.zenoh_status import ZenohPeerSampler
-from skulk.shared.constants import SKULK_LOG
+from skulk.shared.constants import SKULK_LOG, set_offline_mode
 from skulk.shared.election import Election, ElectionResult
 from skulk.shared.logging import (
     external_log_pipe_enabled,
@@ -50,6 +50,7 @@ from skulk.shared.logging import (
 )
 from skulk.shared.models.model_cards import (
     get_all_model_cards,
+    get_association_cards,
     get_current_registry_cards,
     register_installed_card_record,
 )
@@ -81,6 +82,7 @@ from skulk.shared.types.state_sync import StateSyncMessage
 from skulk.shared.types.telemetry import NodeTelemetry, TelemetryView
 from skulk.startup_recovery import preflight_api_port
 from skulk.store.artifact_inventory import (
+    associate_installed_artifacts,
     installed_artifact_roots,
     inventory_installed_artifacts,
 )
@@ -1229,21 +1231,41 @@ class Node:
         )
         artifacts: list[NodeArtifactAvailability] = []
         truncated = False
+        canonical_resolved = (
+            canonical_root.expanduser().resolve() if canonical_root is not None else None
+        )
+        every_root = installed_artifact_roots(self._configured_artifact_cache_root())
+        # Telemetry leaves the canonical store out: the store host advertises
+        # its role, not its catalog. Association does not, so a legacy model
+        # that exists only in the canonical store still gets its record here
+        # rather than only when reconciliation happens to scan the store.
+        roots = tuple(
+            root
+            for root in every_root
+            if canonical_resolved is None
+            or not root.expanduser().resolve().is_relative_to(canonical_resolved)
+        )
+        association_roots = (
+            every_root
+            if canonical_root is None
+            or any(
+                root.expanduser().resolve() == canonical_resolved for root in every_root
+            )
+            else (*every_root, canonical_root)
+        )
+        cards = await get_association_cards()
+        # Association runs on every node, with or without a model store: a
+        # model downloaded before card records existed must get its record
+        # wherever it lives. The scan runs in a thread; the records it writes
+        # are registered here, on the loop, so the model lists at once.
+        for record in await to_thread.run_sync(
+            associate_installed_artifacts,
+            association_roots,
+            cards,
+            self._artifact_inventory_detached_cache,
+        ):
+            register_installed_card_record(record)
         if store_enabled:
-            canonical_resolved = (
-                canonical_root.expanduser().resolve()
-                if canonical_root is not None
-                else None
-            )
-            roots = tuple(
-                root
-                for root in installed_artifact_roots(
-                    self._configured_artifact_cache_root()
-                )
-                if canonical_resolved is None
-                or not root.expanduser().resolve().is_relative_to(canonical_resolved)
-            )
-            cards = await get_all_model_cards()
             discovered = await to_thread.run_sync(
                 inventory_installed_artifacts,
                 roots,
@@ -1980,6 +2002,10 @@ def main():
         logger.warning(local_network_denied_message())
 
     if args.offline:
+        # The flag, not only the environment variable, must keep the model
+        # registry out of reach: an air-gapped node started with --offline
+        # alone would otherwise still try the network for its card catalog.
+        set_offline_mode()
         logger.info("Running in OFFLINE mode — no internet checks, local models only")
 
     if args.bootstrap_peers:

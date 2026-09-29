@@ -37,7 +37,7 @@ The engine serves **single-node text generation with tool calling**. Its
 boundaries are enforced loudly rather than degraded silently:
 
 - **Tool calling works on parser-pinned cards.** A card that pins
-  `vllm_tool_call_parser` in its `[runtime]` section (the bundled Qwen2.5
+  `vllm_tool_call_parser` in its `[runtime]` section (the registry's Qwen2.5
   vLLM cards pin `hermes`) launches the server with vLLM's native
   tool-call parsing, and a tool-enabled request runs non-streamed so the
   caller receives the assembled call, the same shape as the llama.cpp
