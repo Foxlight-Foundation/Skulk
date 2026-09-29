@@ -114,10 +114,15 @@ AUDIO_CPP_VULKAN_WHEELS: Final[dict[tuple[str, str], AudioCppWheel]] = {
     ),
 }
 
-# The attested arm64 CUDA artifact was verified against the real GB10 driver
-# and generated valid WAV output with both initial cards before publication.
-# No other CUDA host architecture can reuse this binary.
+# CUDA packages are native to one CPU architecture and compiled GPU target.
+# Their exact binary inventories and signed hardware claims constrain placement;
+# another architecture must never reuse these bytes. GB10's qualified pin stays
+# unchanged when adding the separately built amd64 package.
 AUDIO_CPP_CUDA_WHEELS: Final[dict[tuple[str, str], AudioCppWheel]] = {
+    ("linux", "x86_64"): AudioCppWheel(
+        filename="skulk_audio_cpp_cuda-0.8.2.post1-py3-none-manylinux_2_35_x86_64.whl",
+        sha256="102e7e3c9636136f514066a553e6a5750d41e24b2420fce689a364379f776209",
+    ),
     ("linux", "aarch64"): AudioCppWheel(
         filename="skulk_audio_cpp_cuda-0.8.2.post1-py3-none-manylinux_2_35_aarch64.whl",
         sha256="39d9f4e2f037ac808ba3588119e3d11a2437e3eb2d85e8bf5eecf63cc3c4c772",

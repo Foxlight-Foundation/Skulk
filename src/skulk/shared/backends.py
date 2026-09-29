@@ -177,6 +177,22 @@ GB10_AUDIO_CPP_CUDA_BUILD: Final = (
     "audio.cpp@sha256:21db727c1f2ec030b93cabffbd09e3c522ceb77fa2ae1092cd96a0f4b0120c9c"
 )
 """Exact SM 12.1 package build; broad CUDA claims cannot authorize this binary."""
+L40S_AUDIO_CPP_CUDA_BUILD: Final = (
+    "audio.cpp@sha256:05f719a638a5152944c00fc724db802ffcc9c99d90a9e772e850a6c92f82ba80"
+)
+"""Exact amd64 SM 8.9 package build; model support remains signed registry truth."""
+AUDIO_CPP_CUDA_TARGETS_BY_ARCHITECTURE: Final[dict[str, str]] = {
+    "x86_64": "nvidia:sm-8.9",
+    "amd64": "nvidia:sm-8.9",
+    "aarch64": "nvidia:sm-12.1",
+    "arm64": "nvidia:sm-12.1",
+}
+"""Compiled CUDA targets, requiring exact live and signed hardware evidence."""
+AUDIO_CPP_CUDA_TARGETS_BY_BUILD: Final[dict[str, str]] = {
+    GB10_AUDIO_CPP_CUDA_BUILD: "nvidia:sm-12.1",
+    L40S_AUDIO_CPP_CUDA_BUILD: "nvidia:sm-8.9",
+}
+"""Exact native builds whose compiled target cannot be widened by broad claims."""
 
 # ComfyUI compute backends Skulk advertises: NVIDIA CUDA and AMD ROCm.
 _COMFY_COMPUTE_BACKENDS: Final[tuple[ComputeBackend, ...]] = ("cuda", "rocm")

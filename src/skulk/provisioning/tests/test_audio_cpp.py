@@ -203,6 +203,16 @@ def test_gb10_cuda_wheel_uses_exact_hardware_tested_artifact() -> None:
     assert wheel.sha256 == "39d9f4e2f037ac808ba3588119e3d11a2437e3eb2d85e8bf5eecf63cc3c4c772"
 
 
+@pytest.mark.parametrize("machine", ["x86_64", "amd64"])
+def test_amd64_cuda_wheel_selects_attested_native_artifact(machine: str) -> None:
+    """The amd64 CUDA pin cannot select or substitute the arm64 payload."""
+    wheel = audio_cpp.audio_cpp_cuda_wheel_for_host(system="linux", machine=machine)
+    assert wheel.filename == (
+        "skulk_audio_cpp_cuda-0.8.2.post1-py3-none-manylinux_2_35_x86_64.whl"
+    )
+    assert wheel.sha256 == "102e7e3c9636136f514066a553e6a5750d41e24b2420fce689a364379f776209"
+
+
 def test_strix_vulkan_wheel_uses_exact_listening_tested_artifact() -> None:
     """The Vulkan lane selects the sampler-corrected F32 wheel heard on Strix."""
     wheel = audio_cpp.audio_cpp_vulkan_wheel_for_host(

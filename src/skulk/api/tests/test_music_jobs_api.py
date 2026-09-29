@@ -26,7 +26,7 @@ from skulk.api.types.api import (
 )
 from skulk.api.video_store import VideoStore
 from skulk.routing.output_media import OutputMediaPacket
-from skulk.shared.backends import GB10_AUDIO_CPP_CUDA_BUILD
+from skulk.shared.backends import GB10_AUDIO_CPP_CUDA_BUILD, L40S_AUDIO_CPP_CUDA_BUILD
 from skulk.shared.models.model_cards import ModelCard, ModelId
 from skulk.shared.topology import Topology
 from skulk.shared.types.chunks import MusicChunk
@@ -212,16 +212,27 @@ async def test_strix_vulkan_claim_prepares_gpu_variant_before_placement(
     api._send.assert_awaited_once()
 
 
-async def test_gb10_cuda_claim_prepares_arm64_gpu_variant(
+@pytest.mark.parametrize(
+    ("architecture", "hardware_class"),
+    [
+        ("aarch64", "nvidia:sm-12.1"),
+        ("arm64", "nvidia:sm-12.1"),
+        ("x86_64", "nvidia:sm-8.9"),
+        ("amd64", "nvidia:sm-8.9"),
+    ],
+)
+async def test_cuda_claim_prepares_exact_host_gpu_variant(
     monkeypatch: pytest.MonkeyPatch,
+    architecture: str,
+    hardware_class: str,
 ) -> None:
-    """A signed GB10 claim prepares CUDA before the exact build can place."""
-    node = NodeId("gb10-node")
+    """Each compiled platform needs the exact signed/live SM before preparation."""
+    node = NodeId("cuda-node")
     topology = Topology()
     topology.add_node(node)
-    hardware = frozenset({"platform:linux", "nvidia", "nvidia:sm-12.1"})
+    hardware = frozenset({"platform:linux", "nvidia", hardware_class})
     initial = NodeResources(
-        backends=frozenset(), architecture="aarch64", hardware_classes=hardware,
+        backends=frozenset(), architecture=architecture, hardware_classes=hardware,
     )
     ready = initial.model_copy(update={
         "backends": frozenset({"audio_cpp", "audio_cpp-cuda"}),
@@ -246,7 +257,7 @@ async def test_gb10_cuda_claim_prepares_arm64_gpu_variant(
         return (
             SimpleNamespace(
                 status="supported", engine="audio_cpp-cuda",
-                hardware_classes=("nvidia:sm-12.1",),
+                hardware_classes=(hardware_class,),
             ),
         )
 
@@ -282,21 +293,26 @@ async def test_gb10_cuda_claim_prepares_arm64_gpu_variant(
 
 
 @pytest.mark.parametrize(
-    ("live_sm", "claim_class", "cached_build", "expected_variant"),
+    ("architecture", "engine_build", "live_sm", "claim_class", "cached_build", "expected_variant"),
     [
-        ("nvidia:sm-12.1", "nvidia", False, "cpu"),
-        ("nvidia:sm-12.1", "nvidia", True, None),
-        ("nvidia:sm-9.0", "nvidia:sm-12.1", False, None),
+        ("aarch64", GB10_AUDIO_CPP_CUDA_BUILD, "nvidia:sm-12.1", "nvidia", False, "cpu"),
+        ("aarch64", GB10_AUDIO_CPP_CUDA_BUILD, "nvidia:sm-12.1", "nvidia", True, None),
+        ("aarch64", GB10_AUDIO_CPP_CUDA_BUILD, "nvidia:sm-9.0", "nvidia:sm-12.1", False, None),
+        ("x86_64", L40S_AUDIO_CPP_CUDA_BUILD, "nvidia:sm-8.9", "nvidia", False, "cpu"),
+        ("x86_64", L40S_AUDIO_CPP_CUDA_BUILD, "nvidia:sm-8.9", "nvidia", True, None),
+        ("x86_64", L40S_AUDIO_CPP_CUDA_BUILD, "nvidia:sm-12.1", "nvidia:sm-8.9", False, None),
     ],
 )
-async def test_dedicated_gb10_wheel_requires_exact_signed_sm(
+async def test_dedicated_cuda_wheel_requires_exact_signed_sm(
     monkeypatch: pytest.MonkeyPatch,
+    architecture: str,
+    engine_build: str,
     live_sm: str,
     claim_class: str,
     cached_build: bool,
     expected_variant: str | None,
 ) -> None:
-    """A broad or mismatched claim cannot select the SM 12.1 CUDA package."""
+    """A broad or mismatched claim cannot select either native CUDA package."""
     node = NodeId("nvidia-node")
     topology = Topology()
     topology.add_node(node)
@@ -306,10 +322,10 @@ async def test_dedicated_gb10_wheel_requires_exact_signed_sm(
             if cached_build else frozenset()
         ),
         engine_builds=(
-            {"audio_cpp-cuda": GB10_AUDIO_CPP_CUDA_BUILD}
+            {"audio_cpp-cuda": engine_build}
             if cached_build else {}
         ),
-        architecture="aarch64",
+        architecture=architecture,
         hardware_classes=frozenset({"platform:linux", "nvidia", live_sm}),
     )
     memory = MemoryUsage.from_bytes(

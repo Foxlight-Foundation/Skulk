@@ -33,7 +33,7 @@ from tomlkit.exceptions import TOMLKitError
 
 from skulk.shared.backends import (
     AUDIO_CPP_COMPUTE_BACKENDS,
-    GB10_AUDIO_CPP_CUDA_BUILD,
+    AUDIO_CPP_CUDA_TARGETS_BY_BUILD,
     engine_of,
 )
 from skulk.shared.constants import (
@@ -831,19 +831,21 @@ def registry_supported_backends_for_node(
         if model_card.music is not None and backend not in AUDIO_CPP_COMPUTE_BACKENDS:
             continue
         supported_capabilities: set[str] = set()
+        required_cuda_class = AUDIO_CPP_CUDA_TARGETS_BY_BUILD.get(
+            engine_builds.get(backend, engine_builds.get("audio_cpp", ""))
+        )
         for claim in support_claims:
             if claim.status != "supported":
                 continue
             if (
                 backend == "audio_cpp-cuda"
-                and engine_builds.get(backend, engine_builds.get("audio_cpp"))
-                == GB10_AUDIO_CPP_CUDA_BUILD
+                and required_cuda_class is not None
                 and (
-                    "nvidia:sm-12.1" not in hardware_classes
-                    or "nvidia:sm-12.1" not in claim.hardware_classes
+                    required_cuda_class not in hardware_classes
+                    or required_cuda_class not in claim.hardware_classes
                 )
             ):
-                # This published wheel contains only SM 12.1 kernels. A broad
+                # A managed CUDA wheel contains one compiled SM target. A broad
                 # claim must not authorize it through the CPU/override path.
                 continue
             if claim.hardware_classes and not (
