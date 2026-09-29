@@ -41,10 +41,15 @@ the capability. Available actions come from the provider; a capability without
 an application interface can still expose useful operations. Opening an interface
 does not itself launch a model or submit work.
 
-Application links must be reachable from your browser. A surface published only
-on its host's loopback address needs a browser on that host; discovery alone does
-not make it remotely accessible. Configuration and management actions can also
-require access to the dashboard on the capability's host.
+Application links must be reachable from your browser. When a capability's host
+runs Tailscale, Skulk gives the host's plugins its Tailscale address. A plugin
+built for this serves its screens there as well as on loopback, so any browser on
+your tailnet can open them, and the local network cannot. Tailscale's own access
+rules decide which of your machines reach the host at all. On a host without
+Tailscale, or for a plugin built before this, a surface on the host's loopback
+address needs a browser on that host; discovery alone does not make it remotely
+accessible. Configuration and management actions can also require access to the
+dashboard on the capability's host.
 
 ## Example: Skulk Video Studio
 
