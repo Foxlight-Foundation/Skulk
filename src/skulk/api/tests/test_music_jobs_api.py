@@ -88,7 +88,7 @@ async def test_mount_preflight_skips_ready_build_without_signed_music_support(
         for node, build in ((unsupported, "unsupported"), (supported, "supported"))
     }
     memory = MemoryUsage.from_bytes(
-        ram_total=2**30, ram_available=2**30,
+        ram_total=8 * 2**30, ram_available=8 * 2**30,
         swap_total=0, swap_available=0,
     )
     api: Any = object.__new__(API)
@@ -511,7 +511,7 @@ async def test_mount_preflight_uses_ordered_preparation_resources(
         "engine_builds": {"audio_cpp-metal": "qualified-build"},
     })
     memory = MemoryUsage.from_bytes(
-        ram_total=2**30, ram_available=2**30,
+        ram_total=8 * 2**30, ram_available=8 * 2**30,
         swap_total=0, swap_available=0,
     )
     api: Any = object.__new__(API)

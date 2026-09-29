@@ -1730,10 +1730,11 @@ Music model placement checks the selected backend's complete estimated
 footprint. ACE-Step CPU serving includes a 10 GiB working-buffer reserve beyond
 its weight estimate and regular runtime overhead; insufficient capacity returns
 an actionable mount error before a generation job is admitted.
-CUDA serving also reserves transient generation buffers beyond weight/runtime
-overhead: 10 GiB for ACE-Step and 2 GiB for MiniMax. The same estimate governs
-mounting and worker admission; a matching compute class with insufficient GPU
-capacity cannot place the model.
+CUDA and Vulkan serving also reserve transient generation buffers beyond
+weight/runtime overhead: 10 GiB for ACE-Step and 2 GiB for MiniMax. MiniMax Metal
+reserves 5 GiB beyond weight/runtime overhead against its system-RAM ceiling.
+The same estimate governs mounting and worker admission; a matching hardware
+class with insufficient capacity cannot place the model.
 CUDA music preparation requires the package's compiled GPU class in both
 live node facts and the signed support claim: SM 8.9 for Linux amd64 and
 SM 12.1 for Linux arm64. The signed claim must name the platform's exact managed

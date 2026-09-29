@@ -278,10 +278,11 @@ This upstream setting controls ggml math; per-instance admission remains one
 active generation. Accelerator settings remain one thread.
 `estimate_music_workspace` reserves 10 GiB beyond ACE-Step's weight estimate
 for its CPU working buffers. API admission, ordinary/exact placement and the
-worker load guard use the same reserve. CUDA generation reserves another 10 GiB
-for ACE-Step or 2 GiB for MiniMax beyond weight/runtime overhead, based on native
-GPU peaks; API admission, placement, committed capacity and the load guard share
-those estimates. Other accelerator lanes keep their existing estimates.
+worker load guard use the same reserve. CUDA/Vulkan generation reserves 10 GiB
+for ACE-Step or 2 GiB for MiniMax beyond weight/runtime overhead; MiniMax Metal
+reserves 5 GiB. These cover measured generation peaks. API admission, placement,
+committed capacity and the load guard share those estimates; unqualified model
+lanes retain their existing estimates.
 
 `NodeResources.engine_builds` hashes the executable for each concrete lane.
 `TextToMusic` is the sole

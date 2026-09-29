@@ -113,10 +113,11 @@ lifecycle and are not model-generated video.
 
 ## Music jobs and engine preparation
 
-Music capacity includes generation workspace beyond model weights: ACE-Step
-reserves 10 GiB on CPU and CUDA, while MiniMax reserves 2 GiB on CUDA. Placement
-and the worker load guard use the same estimate. A supported compute class still
-needs enough free memory for that complete footprint.
+Music capacity includes measured generation workspace beyond model weights:
+ACE-Step reserves 10 GiB on CPU/CUDA/Vulkan; MiniMax reserves 2 GiB on
+CUDA/Vulkan or 5 GiB on Metal. Placement and the worker load guard use the same
+estimate. A supported hardware class still needs enough free memory for the
+complete footprint, including Metal's system-RAM working-set ceiling.
 
 Skulk ships without the audio.cpp engine package. When you mount a music card,
 the API chooses a hardware-eligible node, asks that worker to fetch and verify

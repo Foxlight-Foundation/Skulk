@@ -66,29 +66,32 @@ def test_ace_cpu_footprint_covers_observed_generation_peak() -> None:
     measured_peak = Memory.from_bytes(18_218_632 * 1024)
     cpu = estimate_shard_footprint(card, 1.0, resolved_backend="audio_cpp-cpu")
     assert cpu > measured_peak * 1.1
-    for backend in (None, "audio_cpp-metal", "audio_cpp-vulkan", "audio_cpp-rocm"):
+    for backend in (None, "audio_cpp-metal", "audio_cpp-rocm"):
         assert estimate_shard_footprint(card, 1.0, resolved_backend=backend) == (
             card.storage_size * LLAMA_CPP_MEMORY_OVERHEAD_FACTOR + MEMORY_OVERHEAD_FLOOR
         )
 
 
 @pytest.mark.parametrize(
-    ("filename", "measured_peak_mib", "insufficient_vram_gib"),
+    ("filename", "backend", "measured_peak_kib", "insufficient_pool_gib"),
     [
-        ("audio-cpp--ACE-Step1.5-Turbo-BF16.toml", 18_361, 16),
-        ("audio-cpp--MiniMax-Music3-GGUF-Q4.toml", 9_365, 8),
+        ("audio-cpp--ACE-Step1.5-Turbo-BF16.toml", "audio_cpp-cuda", 18_361 * 1024, 16),
+        ("audio-cpp--MiniMax-Music3-GGUF-Q4.toml", "audio_cpp-cuda", 9_365 * 1024, 8),
+        ("audio-cpp--ACE-Step1.5-Turbo-BF16.toml", "audio_cpp-vulkan", 16_072_680, 16),
+        ("audio-cpp--MiniMax-Music3-GGUF-Q4.toml", "audio_cpp-vulkan", 8_755_704, 8),
+        ("audio-cpp--MiniMax-Music3-GGUF-Q4.toml", "audio_cpp-metal", 12_400_080, 12),
     ],
 )
-def test_cuda_music_admission_covers_native_generation_peak(
-    filename: str, measured_peak_mib: int, insufficient_vram_gib: int,
+def test_qualified_accelerator_music_admission_covers_native_generation_peak(
+    filename: str, backend: str, measured_peak_kib: int, insufficient_pool_gib: int,
 ) -> None:
-    """Native CUDA peaks need headroom beyond the selected GGUF's weight bytes."""
+    """Qualified peaks need headroom beyond weights, including Metal's RAM ceiling."""
     path = Path(RESOURCES_DIR) / "music_model_cards" / filename
     card = ModelCard.model_validate(tomllib.loads(path.read_text()))
-    footprint = estimate_shard_footprint(card, 1.0, resolved_backend="audio_cpp-cuda")
-    measured_peak = Memory.from_bytes(measured_peak_mib * 1024**2)
+    footprint = estimate_shard_footprint(card, 1.0, resolved_backend=backend)
+    measured_peak = Memory.from_bytes(measured_peak_kib * 1024)
     assert footprint > measured_peak * 1.1
-    assert footprint > Memory.from_gb(insufficient_vram_gib)
+    assert footprint > Memory.from_gb(insufficient_pool_gib)
     assert footprint < Memory.from_gb(24) * 0.9
 
 
