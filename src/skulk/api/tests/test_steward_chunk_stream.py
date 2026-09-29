@@ -5,6 +5,7 @@ tool collaborators is the loop's unit-test seam.
 """
 
 import json
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
@@ -14,8 +15,9 @@ if TYPE_CHECKING:
 
 from skulk.api.steward import StewardChatMessage, StewardHarness
 from skulk.api.types.api import ChatCompletionMessage, ToolCall, ToolCallItem
-from skulk.shared.models.model_cards import ModelId
+from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
 from skulk.shared.types.chunks import ErrorChunk, TokenChunk
+from skulk.shared.types.memory import Memory
 from skulk.shared.types.worker.instances import InstanceId
 
 
@@ -316,3 +318,142 @@ async def test_each_followup_reads_again_after_old_history() -> None:
     ):
         pass
     assert harness.executed == ["get_cluster_state", "get_cluster_state"]
+
+
+def _finished(chunks: list[TokenChunk | ErrorChunk]) -> bool:
+    """Whether any chunk carries a terminal finish reason."""
+    return any(
+        isinstance(chunk, TokenChunk) and chunk.finish_reason is not None
+        for chunk in chunks
+    )
+
+
+async def test_cancel_turn_cancels_the_step_and_stops_the_loop() -> None:
+    """Cancelling the advertised id ends the whole turn.
+
+    The latch matters as much as the cancellation: without it the loop would
+    treat the cancelled step as complete and go on to its next step.
+    """
+    cancelled: list[object] = []
+
+    class _Api:
+        async def cancel_local_command(self, command_id: object) -> bool:
+            cancelled.append(command_id)
+            return True
+
+        async def send_task_cancellation(
+            self, command_id: object, *, suppress_local_finish: bool = True
+        ) -> None:
+            raise AssertionError(
+                "the fallback must not run when the local cancel succeeded"
+            )
+
+    # Scripted to call a tool on every step for the whole budget.
+    harness = _ScriptedHarness(turns=[("", [_call("get_cluster_state")])])
+    harness._api = cast("API", cast(object, _Api()))  # pyright: ignore[reportPrivateUsage]
+    stream = harness.run_turn_chunks(
+        [StewardChatMessage(role="user", content="hi")]
+    )
+    baseline_trace = await stream.__anext__()
+    step_trace = await stream.__anext__()
+    assert isinstance(baseline_trace, TokenChunk) and baseline_trace.is_thinking
+    assert isinstance(step_trace, TokenChunk) and step_trace.is_thinking
+    assert len(harness.system_prompts) == 1
+
+    harness._active_command_id = cast(Any, "cmd-inner-1")  # pyright: ignore[reportPrivateUsage]
+    await harness.cancel_turn()
+    rest: list[TokenChunk | ErrorChunk] = []
+    async for chunk in stream:
+        assert isinstance(chunk, (TokenChunk, ErrorChunk))
+        rest.append(chunk)
+
+    assert cancelled == ["cmd-inner-1"]
+    # No further step was dispatched, the chosen tool never ran, and the
+    # turn did not end as if it had answered.
+    assert len(harness.system_prompts) == 1
+    assert harness.executed == ["get_cluster_state"]
+    assert not _finished(rest)
+
+
+async def test_cancel_during_generation_drops_the_partial_step() -> None:
+    """Text streamed before a cancel is not an answer, and its calls never run."""
+
+    class _CancelledMidStep(_ScriptedHarness):
+        async def _generate_events(
+            self,
+            messages: list[ChatCompletionMessage],
+            model_id: str,
+            instance_id: InstanceId,
+        ):
+            self.system_prompts.append(str(messages[0].content))
+            yield ("text", "Restarting the ")
+            # The cancel lands mid-generation; the closed stream ends the step.
+            await self.cancel_turn()
+            yield ("result", ("Restarting the ", [_call("propose_restart")], None))
+
+    harness = _CancelledMidStep(turns=[])
+    chunks = await _collect(harness, "hi")
+
+    assert harness.executed == ["get_cluster_state"]
+    assert not _finished(chunks)
+
+
+async def test_cancel_racing_dispatch_cancels_the_fresh_command() -> None:
+    """A cancel that lands while a step dispatches still stops that step.
+
+    cancel_turn can run before the inner id exists. The step must then cancel
+    the command it just obtained, retain no local-finish marker (no stream
+    ever opens for it), and end the turn instead of streaming one more
+    generation behind an accepted cancellation.
+    """
+    cancelled: list[tuple[object, bool]] = []
+    opened: list[object] = []
+    harnesses: list[StewardHarness] = []
+
+    class _RacingApi:
+        async def steward_extension_tools(
+            self, *, proposals_allowed: bool
+        ) -> tuple[()]:
+            return ()
+
+        async def running_model_card(self, model_id: ModelId) -> ModelCard:
+            return ModelCard(
+                model_id=ModelId("org/steward-model"),
+                storage_size=Memory.from_gb(3),
+                n_layers=12,
+                hidden_size=30,
+                supports_tensor=True,
+                tasks=[ModelTask.TextGeneration],
+            )
+
+        async def dispatch_text_generation(
+            self, task_params: object, target_instance_id: object = None
+        ) -> object:
+            await harnesses[0].cancel_turn()
+            return SimpleNamespace(command_id="cmd-fresh-inner")
+
+        def text_generation_chunk_stream(
+            self, command: object, task_params: object, *, extension_tap: bool = True
+        ) -> object:
+            opened.append(command)
+            raise AssertionError("a cancelled step must not open a stream")
+
+        async def send_task_cancellation(
+            self, command_id: object, *, suppress_local_finish: bool = True
+        ) -> None:
+            cancelled.append((command_id, suppress_local_finish))
+
+    class _EvidenceOnly(StewardHarness):
+        def steward_instance(self) -> tuple[InstanceId, str] | None:
+            return InstanceId(), "org/steward-model"
+
+        async def execute_tool(self, name: str, arguments: dict[str, object]) -> str:
+            return '{"nodeCount": 3, "nodes": [], "ok": true}'
+
+    harness = _EvidenceOnly(cast("API", cast(object, _RacingApi())))
+    harnesses.append(harness)
+    chunks = await _collect(harness, "hi")
+
+    assert cancelled == [("cmd-fresh-inner", False)]
+    assert opened == []
+    assert not _finished(chunks)

@@ -590,7 +590,9 @@ planning-tick invariant keeps exactly one steward placed from the
 `steward_models` preference list (Qwen3.6-35B-A3B GGUF then MLX, then the
 parser-pinned vLLM FP8 card = the 35B tier, then the Qwen3.5-4B MLX/GGUF
 cards, then the Qwen3.5-0.8B
-GGUF universal floor so CPU-only fleets place one), tears down duplicates,
+GGUF universal floor so CPU-only fleets place one; both walks skip cards
+`steward_candidate_is_servable` rejects, i.e. anything but a tool-calling
+text card), tears down duplicates,
 and inherits failover from election since the invariant re-runs on every
 tick. A higher-preference brain must be stable for five minutes, is prestaged,
 and replaces the old brain only after 30 seconds idle, with a 30-minute retry
@@ -675,7 +677,9 @@ closed after promotion. There is no autonomous approval policy.
 normal chat dispatch path. Client surface = reserved virtual
 model `skulk/steward` on chat-completions (client tools 400; trace as
 reasoning_content; streaming via the ordinary adapters over
-`run_turn_chunks`); `GET /v1/steward` = presence plus a derived `state` and
+`run_turn_chunks`; the advertised command id cancels the whole turn via
+`POST /v1/cancel/{id}`, routed through `API._steward_turns` to
+`StewardHarness.cancel_turn`); `GET /v1/steward` = presence plus a derived `state` and
 additive `desired_model`/`transition`/`progress`
 (`disabled|downloading|starting|ready|degraded`); flagged entry in
 /v1/models (`system_role`). The reserved id refuses with 503 (status
@@ -683,7 +687,8 @@ payload + Retry-After) before streaming when no steward is ready, keeping
 the in-stream ErrorChunk for the post-preflight race. Ordinary deletion of
 the steward is refused while the mode is on; the dashboard hides
 `systemRole` instances. Canary: the lowest API-advertising node probes the steward
-every 300s when idle-Ready (minimal pinned generation, code-checked); the
+every 300s when idle-Ready (minimal pinned generation, code-checked, and an
+expired deadline fails it even after partial text); the
 failure run lives in `StewardCanaryState` so one failure already reads as
 `degraded`, and 3 consecutive failures tear it down and the invariant
 re-places (degraded-but-alive coverage; busy-wedge stays with the worker

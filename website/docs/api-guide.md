@@ -1860,6 +1860,14 @@ transcription, and active video or music jobs owned by the API node you call.
 Skulk closes the local response stream or job, stops an in-flight runner, and
 aborts any unfinished media delivery.
 
+Steward turns (`skulk/steward`) are covered too. The command ID a steward
+response advertises cancels the whole turn: the investigation step that is
+generating stops, and the steward starts no further steps or tool calls. The
+cancelled turn then ends the way any cancelled generation does: a streaming
+response sends an error event saying the generation ended before completing,
+followed by `data: [DONE]`, and a non-streaming response returns an error
+body instead of a partial answer.
+
 Finding the command ID:
 
 - streaming chat completions open with the SSE comment line
@@ -1875,9 +1883,10 @@ curl -X POST http://localhost:52415/v1/cancel/<command_id>
 ```
 
 A cancelled command returns
-`{"message": "Command cancelled.", "command_id": "..."}`. An unknown or
-already-completed command returns **404 Command not found or already
-completed**. Command streams are node-local, so call the same API node that
+`{"message": "Command cancelled.", "command_id": "..."}`; a cancelled steward
+turn returns `{"message": "Steward turn cancelled.", "command_id": "..."}`.
+An unknown or already-completed command returns **404 Command not found or
+already completed**. Command streams are node-local, so call the same API node that
 accepted the original request. Simply disconnecting from a streaming response
 triggers the same cancellation path implicitly.
 
