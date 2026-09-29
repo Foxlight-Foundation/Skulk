@@ -143,6 +143,14 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- An NVIDIA GB10 no longer refuses models that fit right after a download.
+  CUDA leaves reclaimable page cache out of its free-memory figure on the
+  GB10's shared pool, so a freshly downloaded model's cached files read as
+  used GPU memory; one node reported 116 GB in use while about 51 GB was
+  allocated. Skulk now counts the host's available memory as free when it
+  is the larger figure, which also corrects the GPU memory the dashboard
+  shows for that node.
+
 - The dashboard's English string catalog, the file seeded into Tolgee for
   translation, is current again. Its exporter had failed since mid-September
   (one key carried two different English texts, and the Integrations page
