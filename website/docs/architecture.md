@@ -1015,7 +1015,10 @@ API preflight, placement, committed capacity and the worker load guard against
 the backend's GPU-memory pool or Metal system-RAM ceiling.
 On NVIDIA GB10, NVML can report device memory as unsupported even while CUDA
 can allocate from its shared CPU/GPU pool. Skulk reads CUDA's free and total
-device bytes in that case. Placement also checks live host RAM, reserves 16 GB
+device bytes in that case. CUDA leaves page cache out of its free figure even
+though the kernel reclaims that cache for any allocation, so Skulk counts the
+host's available memory as free when it is larger; otherwise the cached files
+of a just-downloaded model would read as used GPU memory. Placement also checks live host RAM, reserves 16 GB
 for the OS, and applies the 75% unified-memory working-set ceiling. A failed
 CUDA query leaves capacity unmeasured and prevents GPU admission.
 
