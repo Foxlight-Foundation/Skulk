@@ -1,9 +1,7 @@
 import tomllib
-from pathlib import Path
 
 import pytest
 
-from skulk.shared.constants import RESOURCES_DIR
 from skulk.shared.models.memory_estimate import (
     GPU_WORKING_SET_FRACTION,
     LLAMA_CPP_MEMORY_OVERHEAD_FACTOR,
@@ -16,6 +14,7 @@ from skulk.shared.models.memory_estimate import (
     memory_overhead_factor,
 )
 from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
+from skulk.shared.tests.model_card_fixtures import FIXTURE_CARDS_DIR, fixture_card_path
 from skulk.shared.types.memory import Memory
 
 
@@ -61,7 +60,7 @@ def test_shard_footprint_uses_lighter_factor_for_gguf():
 
 def test_ace_cpu_footprint_covers_observed_generation_peak() -> None:
     """ACE's CPU admission must cover generation buffers beyond its GGUF weights."""
-    path = Path(RESOURCES_DIR) / "music_model_cards" / "audio-cpp--ACE-Step1.5-Turbo-BF16.toml"
+    path = fixture_card_path("audio-cpp/ACE-Step1.5-Turbo-BF16")
     card = ModelCard.model_validate(tomllib.loads(path.read_text()))
     measured_peak = Memory.from_bytes(18_218_632 * 1024)
     cpu = estimate_shard_footprint(card, 1.0, resolved_backend="audio_cpp-cpu")
@@ -86,7 +85,7 @@ def test_qualified_accelerator_music_admission_covers_native_generation_peak(
     filename: str, backend: str, measured_peak_kib: int, insufficient_pool_gib: int,
 ) -> None:
     """Qualified peaks need headroom beyond weights, including Metal's RAM ceiling."""
-    path = Path(RESOURCES_DIR) / "music_model_cards" / filename
+    path = FIXTURE_CARDS_DIR / filename
     card = ModelCard.model_validate(tomllib.loads(path.read_text()))
     footprint = estimate_shard_footprint(card, 1.0, resolved_backend=backend)
     measured_peak = Memory.from_bytes(measured_peak_kib * 1024)

@@ -25,6 +25,7 @@ import os
 from functools import cache
 from typing import Callable, Protocol, cast, final
 
+import psutil
 from loguru import logger
 
 from skulk.shared.types.profiling import (
@@ -188,10 +189,20 @@ def _cuda_memory_info() -> tuple[int, int] | None:
     return available.value, total.value
 
 
+def _host_memory_available() -> int | None:
+    """Bytes the kernel can hand out now, reclaimable page cache included."""
+    try:
+        return int(psutil.virtual_memory().available)
+    except Exception as exc:  # noqa: BLE001 - optional telemetry degrades independently
+        logger.debug(f"host memory query failed: {exc}")
+        return None
+
+
 def read_accelerator_metrics(
     nvml: NvmlLike,
     *,
     cuda_memory_info: Callable[[], tuple[int, int] | None] = _cuda_memory_info,
+    host_memory_available: Callable[[], int | None] = _host_memory_available,
 ) -> AcceleratorMetrics:
     """Read normalized metrics from NVML device 0.
 
@@ -246,6 +257,13 @@ def read_accelerator_metrics(
             observed = None
         if observed is not None:
             available, vram_total = observed
+            # CUDA leaves reclaimable page cache out of its free figure on this
+            # shared pool, although the kernel returns that cache to any
+            # allocation. Right after a model download the cache can fill most
+            # of memory, and CUDA's figure alone refused models that fit.
+            host_available = host_memory_available()
+            if host_available is not None:
+                available = max(available, min(host_available, vram_total))
             vram_used = vram_total - available
 
     power_watts: float | None = None

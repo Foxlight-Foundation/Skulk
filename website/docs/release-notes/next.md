@@ -163,8 +163,9 @@ for operator clients.
 
 Repository-code authorization now follows the action that introduced the exact
 card. Signed registry publication authorizes every provenance class, explicitly
-adding an external model authorizes its pinned card, and bundled cards are
-authorized by the Skulk release. A Hugging Face addition without an explicit
+adding an external model authorizes its pinned card, and an installed card
+recorded from a card an earlier Skulk release shipped stays authorized by that
+release. A Hugging Face addition without an explicit
 revision resolves `main` once to a full immutable commit before creating the
 card, then waits for the exact ordered mutation to appear in the responding
 API's catalog before returning. Historical executable custom cards with no
@@ -180,7 +181,8 @@ return HTTP 404 rather than an internal server error.
 The elected master repeats exact-card validation at command ordering for quick
 and caller-specified placements, so a card replacement or deletion that wins a
 race after API lookup also prevents stale content from launching.
-Executable bundled fallback cards must pin their repository revision. Retained
+Executable installed cards without a registry identity must pin their
+repository revision. Retained
 installed sidecars continue to describe custom artifacts, but they no longer
 restore catalog authorization after an operator deletes the custom card.
 External processor, vision-weight, assistant, MTP, and speculative-draft
@@ -195,8 +197,8 @@ sidecars, and artifact manifests before executing repository code.
 Mistral-family models can now call tools on Apple Silicon. Their chat
 templates write calls as `[TOOL_CALLS]` arrays rather than `<tool_call>`
 blocks, which the engine previously did not recognize, so the call arrived as
-raw markup in the answer. A card for Ministral 8B is bundled so smaller
-machines can serve a tool-calling Mistral out of the box.
+raw markup in the answer. The model registry carries a card for Ministral 8B
+so smaller machines can serve a tool-calling Mistral.
 
 
 A cluster configured with the model store enabled but no store host named now

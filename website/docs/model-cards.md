@@ -88,19 +88,35 @@ installed cards load before registry access, remain usable indefinitely while
 their artifact is complete, and keep an older installed generation active until
 a replacement has transferred and verified atomically.
 
-Fallback cards are still shipped in:
+Skulk ships no model cards. When a model is downloaded, so is its card. A
+node's catalog has three sources: signed registry cards (from the registry, or
+from its verified cache for up to 30 days during an outage), the installed
+cards of its downloaded models (including detached records for models under a
+read-only model root), and custom cards. Installed cards stay local and have no
+expiry, so they keep working offline.
 
-- [`resources/inference_model_cards`](https://github.com/Foxlight-Foundation/Skulk/tree/dev/resources/inference_model_cards)
-- [`resources/image_model_cards`](https://github.com/Foxlight-Foundation/Skulk/tree/dev/resources/image_model_cards)
-- [`resources/embedding_model_cards`](https://github.com/Foxlight-Foundation/Skulk/tree/dev/resources/embedding_model_cards)
+When neither the registry nor an acceptable cache is available, Skulk reads the
+last verified registry catalog cached on the node without its age limit. It
+uses that cache only to associate legacy installed artifacts that predate card
+records with their signed card; an associated artifact gains its own card
+record and is then listed. The cached catalog is never listed or placed from by itself.
+`SKULK_OFFLINE=true` and `skulk --offline` both skip registry network
+refreshes, so the catalog is the installed and custom cards.
 
-They provide a startup catalog when registry access and its bounded verified
-cache are unavailable; they do not replace the signed registry as current
-catalog truth.
+A node that has never reached the registry and has no installed model and no
+custom card has an empty catalog. It logs a warning that names the cause and
+the remedies: connect once, copy a model directory together with its
+`.skulk/installed-card.json`, or add a custom card.
+
+Curated cards are maintained in the model registry's seed,
+[`foxlight-model-registry/seed/cards`](https://github.com/Foxlight-Foundation/foxlight-model-registry/tree/main/seed/cards).
+Card edits go there, never into Skulk.
 
 Custom cards are stored under the user data directory and synced through the
 cluster event flow. They are operator-owned and retain final precedence over
-registry, installed, and bundled cards for the same `model_id`.
+registry and installed cards for the same `model_id`. Deleting a custom card
+restores the signed or installed card for that `model_id`, or removes the
+model from the catalog when neither exists.
 
 ## The card interface (source of truth)
 
@@ -140,7 +156,7 @@ remain separate truths.
 ### Identity and size
 
 - `model_id`
-  - selectable artifact alias; legacy and bundled cards normally use the Hugging Face repository id, while registry cards may give two exact files or quants from one repository different aliases
+  - selectable artifact alias; legacy and custom cards normally use the Hugging Face repository id, while registry cards may give two exact files or quants from one repository different aliases
 - `source_repository`
   - optional upstream Hugging Face repository containing the bytes; defaults to `model_id` and is set by the registry when the selectable alias differs from the byte origin
 - `storage_size`
@@ -175,7 +191,7 @@ remain separate truths.
   - supported task families such as `TextGeneration`, `TextEmbedding`, image tasks, `TextToSpeech`, `SpeechToText`, `SpeechTranslation`, or `TextToMusic`
 - `trust_remote_code`
   - whether the artifact requires repository-supplied Python; signed publication authorizes the exact immutable registry card regardless of provenance
-  - explicitly adding an external model authorizes its pinned card, and an omitted Hugging Face revision is resolved to one immutable commit before the card is created; bundled cards are authorized by the Skulk release that ships them
+  - explicitly adding an external model authorizes its pinned card, and an omitted Hugging Face revision is resolved to one immutable commit before the card is created; an installed card without a registry identity, recorded from a card an earlier Skulk release shipped, stays authorized by that release
   - legacy executable custom cards that predate immutable revision pinning fail closed and must be re-added through the operator flow; an absent revision can never silently authorize mutable `main`
   - ordinary catalog reads and placement requests never fetch or persist an unknown Hub card; callers must use an authenticated add flow first, and exact-placement payloads must match that effective catalog card completely
   - this field controls the loader's repository-code behavior, not a second operator approval ceremony; artifact identity and immutable revision checks still fail closed
@@ -189,7 +205,7 @@ remain separate truths.
 - `registry_card_id` / `registry_snapshot_id` / `registry_provenance`
   - provenance is signed catalog metadata (`foxlight`, `agent`, or `community`)
     and is deliberately excluded from the content-derived card identity
-  - runtime provenance attached by the verified external catalog; these are absent from bundled and custom cards
+  - runtime provenance attached by the verified external catalog; these are absent from custom cards and from installed cards without a registry identity
 - `registry_architecture` / `registry_capability_claims`
   - signed intrinsic architecture and model/artifact capability evidence from
     the registry envelope; persisted into installed sidecars for air-gapped use
@@ -344,7 +360,7 @@ eligibility gate; the model must also be mounted and ready.
 For realtime STT, both `supports_streaming = true` and
 `supports_realtime = true` are necessary but not sufficient. The API must have
 reachable ready single-host capacity and use a model whose upstream runtime
-exposes a true incremental streaming session. The bundled
+exposes a true incremental streaming session. The registry's
 `mlx-community/Voxtral-Mini-4B-Realtime-2602-4bit` card is the first validated
 contract candidate. Batch Parakeet and Whisper cards deliberately keep both
 flags false.
@@ -478,7 +494,7 @@ If the sidecar is declared but the file is not found locally, Skulk logs a warni
 
 ### Models with native MTP heads
 
-The shipped cards that declare an MTP sidecar are the Qwen3.5 and Qwen3.6
+The registry cards that declare an MTP sidecar include the Qwen3.5 and Qwen3.6
 quantizations:
 
 - `mlx-community/Qwen3.5-2B-4bit`
@@ -528,7 +544,7 @@ When Skulk resolves a runtime capability profile, it uses this order:
 2. conservative family/model heuristics
 3. generic fallback behavior
 
-That means a custom or built-in card can refine behavior without breaking old
+That means a custom or registry card can refine behavior without breaking old
 cards that only declare coarse metadata.
 
 ## Extended Card Example
@@ -623,8 +639,8 @@ reference_profile = "angus"
 
 The central profile manifest pins the local MP3 digest and exact transcript.
 Model cards intentionally repeat the public voice order so API and dashboard
-behavior remain explicit model truth; CI verifies every bundled cloning card
-against the central manifest.
+behavior remain explicit model truth; CI verifies the cloning cards among
+Skulk's test fixtures against the central manifest.
 
 ## When to Extend a Card
 

@@ -40,10 +40,10 @@ def test_true_knob_and_missing_runtime_allow_everything() -> None:
 def test_26b_card_pins_the_measured_negative() -> None:
     import asyncio
 
-    from skulk.shared.models.model_cards import ModelCard, ModelId
+    from skulk.shared.tests.model_card_fixtures import load_fixture_card
 
     card = asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
-        ModelCard.load(ModelId("mlx-community/gemma-4-26b-a4b-it-4bit"))
+        load_fixture_card("mlx-community/gemma-4-26b-a4b-it-4bit")
     )
     assert card.runtime is not None
     assert card.runtime.speculative_multi_node is False

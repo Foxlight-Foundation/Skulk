@@ -171,7 +171,7 @@ Why would you use Skulk over another solution? What does it get you?
 
 - **Model store.** A cluster-shared canonical artifact host with resumable staging: download once, and only nodes that run a model cache its bytes and full installed-card sidecar. Existing node caches reconcile back into the store without another Hugging Face download. **Why it matters:** large-model cold start is bandwidth-bounded by one node, while an air-gapped cluster retains complete model identity and artifact truth locally.
 
-- **Signed and custom model cards.** The TUF-verified Foxlight registry is the current supported catalog. Bundled cards are a startup fallback, complete installed artifacts retain their effective card locally, and operator-added `*.toml` files under the Skulk data directory keep final precedence. **Why it matters:** model support can evolve without shipping a new Skulk build, while local ownership and air-gapped operation remain intact.
+- **Signed and custom model cards.** The TUF-verified Foxlight registry is the current supported catalog. Skulk ships no model cards: when a model is downloaded, so is its card, and complete installed artifacts retain that card locally with no expiry. Operator-added `*.toml` files under the Skulk data directory keep final precedence. **Why it matters:** model support can evolve without shipping a new Skulk build, while local ownership and air-gapped operation remain intact.
 
 ### Operations
 

@@ -260,7 +260,7 @@ class ModelListModel(BaseModel):
     registry_provenance: Literal["foxlight", "agent", "community"] | None = Field(
         default=None,
         description=(
-            "Audited signed-registry origin, or null for bundled and custom cards."
+            "Audited signed-registry origin, or null for custom cards and installed cards without a registry identity."
         ),
     )
     registry_architecture: str | None = Field(
@@ -307,9 +307,13 @@ class ModelListModel(BaseModel):
         default_factory=list,
         description="Active signed warnings affecting this installed or current card.",
     )
-    catalog_source: Literal["registry", "bundled", "custom"] = Field(
-        default="bundled",
-        description="Trust and precedence source for this catalog entry.",
+    catalog_source: Literal["registry", "installed", "custom"] = Field(
+        default="installed",
+        description=(
+            "Trust and precedence source for this catalog entry: the signed "
+            "registry, a card recorded with an installed model that carries "
+            "no registry identity, or an operator's custom card."
+        ),
     )
     remote_code_approval_required: bool = Field(
         default=False,
@@ -347,7 +351,8 @@ class ModelListModel(BaseModel):
         default=False,
         description=(
             "Whether repository code is authorized by the card's signed "
-            "publication, explicit addition, or bundled distribution boundary."
+            "publication, its explicit addition, or an installed card recorded "
+            "from an earlier release."
         ),
     )
     source_revision: str | None = Field(

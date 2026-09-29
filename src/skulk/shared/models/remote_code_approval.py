@@ -63,15 +63,17 @@ def remote_code_is_automatically_trusted(card: ModelCard) -> bool:
 
     Signed registry publication authorizes every provenance class; provenance
     describes how truth was established, not whether the runtime may execute
-    it. Operator-added cards are authorized by the add action, and bundled cards
-    are authorized by the Skulk release that ships them.
+    it. Operator-added cards are authorized by the add action. An installed
+    card without a registry identity was recorded from a card an earlier
+    Skulk release shipped, and that release authorized it.
 
     Args:
         card: Effective card selected for download or execution.
 
     Returns:
         ``True`` when a card that may execute repository code was authorized by
-        registry publication, explicit addition, or bundled distribution.
+        registry publication, explicit addition, or an earlier shipped card
+        recorded with the installed model.
     """
     may_execute_repository_code = card.trust_remote_code or card.vision is not None
     if not may_execute_repository_code:
@@ -159,9 +161,9 @@ def require_remote_code_approval(
         and card.source_revision is None
     ):
         raise PermissionError(
-            f"{MODEL_TRUST_FAILURE_MARKER}: executable bundled model card lacks "
+            f"{MODEL_TRUST_FAILURE_MARKER}: executable installed model card lacks "
             "an immutable source revision; use the signed registry card or "
-            f"update the bundled definition: {card.model_id}"
+            f"re-add the model: {card.model_id}"
         )
     try:
         card.require_immutable_external_companions(
