@@ -249,6 +249,11 @@ class ManagedNode(_WireModel):
 
 class _Description(_WireModel):
     transport_node_id: str
+    # Each installed release carries its own owner, so owners speak different
+    # wire protocols. An owner states the one it speaks and forwarded calls
+    # carry it, keeping them inside that owner's accepted window. Owners that
+    # predate the field speak protocol 1.
+    protocol: int = Field(default=1, ge=1, le=64)
     host_callbacks_available: bool = False
     nodes: tuple[ManagedNode, ...] = Field(max_length=16)
 
@@ -337,6 +342,8 @@ class ManagedOwner:
         self.poll_task: asyncio.Task[None] | None = None
         self.host_task: asyncio.Task[None] | None = None
         self.host_callbacks_available = False
+        # The wire protocol the owner last stated; see ``_Description``.
+        self.protocol = 1
         self.published: set[str] = set()
         self.stopping = False
         self.unavailable_reason: str | None = None
@@ -449,6 +456,7 @@ class ManagedOwner:
                     if any(d.io_mode != "unary" for d in node.descriptors):
                         raise ValueError("managed owner requires unary contracts")
                 self.nodes = snapshot.nodes
+                self.protocol = snapshot.protocol
                 self.host_callbacks_available = snapshot.host_callbacks_available
                 self.observed = time.monotonic()
                 self.available = True
@@ -892,7 +900,7 @@ class ManagedOwner:
                 "operation": "invoke",
                 "node_id": node.node_id,
                 "invoke": {
-                    "protocol": 1,
+                    "protocol": self.protocol,
                     "kind": "invoke",
                     "call_id": call.call_id,
                     "capability_id": call.capability_id,
