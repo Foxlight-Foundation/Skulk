@@ -266,6 +266,11 @@ only for that verified wheel; standalone overrides need the full pinned revision
 Standalone binary overrides may use `SKULK_AUDIO_CPP_SPECS_DIR`; facts and the
 runner require both pinned model specs before readiness or load.
 
+CPU music inference uses `os.process_cpu_count()` to respect CPU affinity,
+reserves one usable core when possible, and caps inference at eight threads.
+This upstream setting controls ggml math; per-instance admission remains one
+active generation. Accelerator settings remain one thread.
+
 `NodeResources.engine_builds` hashes the executable for each concrete lane.
 `TextToMusic` is the sole
 task on a music card. The cards have

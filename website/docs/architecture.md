@@ -1022,6 +1022,11 @@ signed claim check and request-local placement dry-run. Both the API dry-run
 and master constrain ordinary placement to the prepared node. Exact placements reject
 RPC shaped music instances and require a matching ready build and signed support
 claim.
+CPU music inference uses at most eight usable CPU threads and reserves one
+usable core for the node control plane when available. This is inference
+parallelism: each model instance still runs one generation at a time.
+Accelerator lanes retain their fixed one-thread setting.
+
 Placement stamps the selected audio.cpp build on the music shard. At each
 sidecar launch, the runner selects the executable for that lane and checks its
 digest and selected device
