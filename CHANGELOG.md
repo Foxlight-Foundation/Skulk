@@ -143,6 +143,16 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- A vLLM model now starts on a GPU that another model already uses. Skulk
+  used to launch vLLM with a fixed share of the GPU (90% unless configured),
+  and vLLM refuses to start unless that much memory is free, so any other
+  resident model stopped it even when placement had found room. The share is
+  now sized to the memory placement reserved for the instance, and vLLM uses
+  the part of it that weights and runtime memory leave as KV cache.
+  `SKULK_VLLM_GPU_MEMORY_UTILIZATION` still pins a fixed share: set it on a
+  GPU dedicated to vLLM to keep giving the KV cache the rest of the device.
+  A card that does not declare `num_key_value_heads` keeps the fixed share.
+
 - The dashboard's English string catalog, the file seeded into Tolgee for
   translation, is current again. Its exporter had failed since mid-September
   (one key carried two different English texts, and the Integrations page

@@ -454,8 +454,13 @@ family can span tool-call generations with different wire formats), the
 runner launches the server with it and a tool-enabled request runs
 unstreamed so the caller receives the assembled call, the same shape as
 the llama.cpp engines; a card with no resolvable parser rejects tool
-requests loudly instead of silently dropping them. Logprobs, vLLM's own
-multi-GPU parallelism, and vLLM-aware memory admission are follow-ups.
+requests loudly instead of silently dropping them. The server's share of
+GPU memory is sized to the instance's placement: the runner passes the
+fraction of the device that holds the memory Skulk reserved for the model,
+so vLLM can share a GPU with other models and stays within its reservation
+instead of claiming a fixed 90% of the device. An operator can pin a fixed
+share for a GPU dedicated to vLLM. Logprobs, vLLM's own multi-GPU
+parallelism, and vLLM-aware memory admission are follow-ups.
 
 The vLLM server's lifecycle is guarded against GPU-memory leaks in both
 directions. On teardown, the runner signals the server's entire process

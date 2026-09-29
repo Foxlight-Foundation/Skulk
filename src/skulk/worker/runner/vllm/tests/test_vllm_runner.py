@@ -15,7 +15,10 @@ from typing import Any
 
 import pytest
 
-from skulk.shared.types.common import CommandId
+from skulk.shared.models.model_cards import ModelCard, ModelTask
+from skulk.shared.types.common import CommandId, ModelId
+from skulk.shared.types.memory import Memory
+from skulk.shared.types.profiling import AcceleratorMetrics
 from skulk.shared.types.tasks import (
     CANCEL_ALL_TASKS,
     TaskId,
@@ -29,10 +32,13 @@ from skulk.worker.runner.vllm.runner import (
     _DEFAULT_MAX_CONCURRENT_REQUESTS,
     _GPU_MEMORY_UTILIZATION_ENV,
     _MAX_CONCURRENT_REQUESTS_ENV,
-    _gpu_memory_utilization,
+    GpuMemoryShare,
+    _configured_gpu_memory_utilization,
+    _device_memory_total,
     _max_concurrent_requests,
     build_vllm_serve_args,
     parse_openai_sse_line,
+    resolve_gpu_memory_utilization,
     vllm_generation_kwargs,
     vllm_reasoning_overrides,
 )
@@ -243,24 +249,195 @@ def test_usage_count_bool_and_shape_guards() -> None:
     assert _usage_count(None, "prompt_tokens") is None
 
 
-def test_gpu_memory_utilization_default(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_gpu_memory_utilization_unset_is_not_pinned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.delenv(_GPU_MEMORY_UTILIZATION_ENV, raising=False)
-    assert _gpu_memory_utilization() == _DEFAULT_GPU_MEMORY_UTILIZATION
+    assert _configured_gpu_memory_utilization() is None
 
 
-def test_gpu_memory_utilization_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_gpu_memory_utilization_env_pins_the_share(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv(_GPU_MEMORY_UTILIZATION_ENV, "0.75")
-    assert _gpu_memory_utilization() == 0.75
+    assert _configured_gpu_memory_utilization() == 0.75
 
 
 @pytest.mark.parametrize("bad", ["nonsense", "0", "1.5", "-0.2"])
-def test_gpu_memory_utilization_rejects_bad_values(
+def test_gpu_memory_utilization_ignores_bad_values(
     monkeypatch: pytest.MonkeyPatch, bad: str
 ) -> None:
-    # Unparseable or out-of-(0,1] values fall back to the default rather than
-    # passing vLLM a fraction that would fail the server at spawn.
+    # Unparseable or out-of-(0,1] values are ignored, so the runner sizes vLLM
+    # from its placement rather than passing a fraction that fails at spawn.
     monkeypatch.setenv(_GPU_MEMORY_UTILIZATION_ENV, bad)
-    assert _gpu_memory_utilization() == _DEFAULT_GPU_MEMORY_UTILIZATION
+    assert _configured_gpu_memory_utilization() is None
+
+
+_GIB = 1024**3
+_GB10_TOTAL = 130_595_991_552
+
+
+def _sized_card(*, kv_heads: int | None = 4) -> ModelCard:
+    """A 14 GiB, 28-layer text card shaped like the served Qwen2.5-7B."""
+    return ModelCard(
+        model_id=ModelId("org/sized"),
+        storage_size=Memory.from_bytes(14 * _GIB),
+        n_layers=28,
+        hidden_size=3584,
+        supports_tensor=False,
+        num_key_value_heads=kv_heads,
+        tasks=[ModelTask.TextGeneration],
+    )
+
+
+def test_share_holds_the_placement_footprint() -> None:
+    """The share covers the reserved footprint, rounded up to a hundredth.
+
+    14 GiB of weights at the 1.30 overhead factor, 1.75 GiB of KV cache for a
+    32768-token window and the 256 MB floor come to 20.2 GiB, which is 0.1661
+    of a GB10's shared pool: vLLM receives 0.17, not the fixed 0.90.
+    """
+    share = resolve_gpu_memory_utilization(
+        _sized_card(), 32768, "vllm-cuda", _GB10_TOTAL, None
+    )
+    assert share == GpuMemoryShare(0.17, "placement")
+    assert share.fraction * _GB10_TOTAL >= 20.2 * _GIB
+
+
+def test_share_grows_with_the_served_window() -> None:
+    short = resolve_gpu_memory_utilization(
+        _sized_card(), 4096, "vllm-cuda", _GB10_TOTAL, None
+    )
+    long = resolve_gpu_memory_utilization(
+        _sized_card(), 32768, "vllm-cuda", _GB10_TOTAL, None
+    )
+    assert short.fraction < long.fraction
+
+
+def test_operator_pin_wins_over_sizing() -> None:
+    share = resolve_gpu_memory_utilization(
+        _sized_card(), 32768, "vllm-cuda", _GB10_TOTAL, 0.6
+    )
+    assert share == GpuMemoryShare(0.6, "pinned")
+
+
+def test_card_without_kv_geometry_keeps_the_default_share() -> None:
+    """Without num_key_value_heads the footprint omits the KV cache entirely.
+
+    A share sized from it left vLLM 0.16 GiB of KV cache for a Qwen3-0.6B
+    window that needs 3.5 GiB, and the server refused to start.
+    """
+    share = resolve_gpu_memory_utilization(
+        _sized_card(kv_heads=None), 32768, "vllm-cuda", _GB10_TOTAL, None
+    )
+    assert share == GpuMemoryShare(_DEFAULT_GPU_MEMORY_UTILIZATION, "no_kv_geometry")
+
+
+@pytest.mark.parametrize("total", [None, 0])
+def test_unknown_device_total_keeps_the_default_share(total: int | None) -> None:
+    share = resolve_gpu_memory_utilization(
+        _sized_card(), 32768, "vllm-cuda", total, None
+    )
+    assert share == GpuMemoryShare(
+        _DEFAULT_GPU_MEMORY_UTILIZATION, "unknown_device_total"
+    )
+
+
+def test_small_model_share_covers_vllm_runtime_memory() -> None:
+    """A tiny model still gets its window's KV cache after vLLM's own memory.
+
+    Half a GiB of weights at the 1.30 factor leaves only 0.15 GiB of overhead
+    allowance, less than the gigabyte vLLM holds for its CUDA context and
+    activations whatever the model's size. The share is raised to weights,
+    3.5 GiB of window KV cache and that gigabyte: 5.0 GiB, not the 4.4 GiB
+    footprint.
+    """
+    card = ModelCard(
+        model_id=ModelId("org/tiny"),
+        storage_size=Memory.from_bytes(_GIB // 2),
+        n_layers=28,
+        hidden_size=1024,
+        supports_tensor=False,
+        num_key_value_heads=8,
+        tasks=[ModelTask.TextGeneration],
+    )
+    device_total = 24 * _GIB
+    share = resolve_gpu_memory_utilization(card, 32768, "vllm-cuda", device_total, None)
+    assert share.basis == "placement"
+    assert share.fraction * device_total >= 5.0 * _GIB
+
+
+def test_share_never_exceeds_the_whole_device() -> None:
+    share = resolve_gpu_memory_utilization(
+        _sized_card(), 32768, "vllm-cuda", 8 * _GIB, None
+    )
+    assert share == GpuMemoryShare(1.0, "placement")
+
+
+def _patch_nvidia(
+    monkeypatch: pytest.MonkeyPatch, accelerator: AcceleratorMetrics
+) -> None:
+    import skulk.utils.info_gatherer.nvidia_gpu as nvidia_gpu
+    import skulk.worker.runner.vllm.runner as vllm_runner
+
+    monkeypatch.setattr(vllm_runner.sys, "platform", "linux")
+    monkeypatch.setattr(nvidia_gpu, "load_nvml", lambda: object())
+
+    def has_nvidia_gpu(_nvml: object) -> bool:
+        return True
+
+    def read(_nvml: object, **_: object) -> AcceleratorMetrics:
+        return accelerator
+
+    monkeypatch.setattr(nvidia_gpu, "has_nvidia_gpu", has_nvidia_gpu)
+    monkeypatch.setattr(nvidia_gpu, "read_accelerator_metrics", read)
+
+
+def test_device_total_reads_nvml_on_a_discrete_gpu(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_nvidia(
+        monkeypatch,
+        AcceleratorMetrics(
+            vendor="nvidia",
+            name="NVIDIA A100-SXM4-80GB",
+            vram_total_bytes=80 * _GIB,
+            compute_capability="8.0",
+        ),
+    )
+    assert _device_memory_total("vllm-cuda") == 80 * _GIB
+
+
+def test_device_total_uses_host_memory_on_a_gb10(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """NVML has no memory figure on a GB10; CUDA's total is the host's memory."""
+    _patch_nvidia(
+        monkeypatch,
+        AcceleratorMetrics(
+            vendor="nvidia", name="NVIDIA GB10", compute_capability="12.1"
+        ),
+    )
+    import skulk.worker.runner.vllm.runner as vllm_runner
+
+    monkeypatch.setattr(
+        vllm_runner.psutil,
+        "virtual_memory",
+        lambda: SimpleNamespace(total=_GB10_TOTAL),
+    )
+    assert _device_memory_total("vllm-cuda") == _GB10_TOTAL
+
+
+def test_device_total_is_unknown_without_a_memory_figure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_nvidia(
+        monkeypatch,
+        AcceleratorMetrics(
+            vendor="nvidia", name="NVIDIA H100", compute_capability="9.0"
+        ),
+    )
+    assert _device_memory_total("vllm-cuda") is None
 
 
 def test_max_concurrent_requests_default(monkeypatch: pytest.MonkeyPatch) -> None:
