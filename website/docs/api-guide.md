@@ -4167,7 +4167,8 @@ manual attachment behavior until migrated by local setup.
 
 The in-process adapters share one process-lifetime `attachment.lock`. Their internal
 `attach` socket request contains the provisioned `profile_id`, the actual live
-`transport_node_id`, and the measured live `skulk_build_sha256`. The manager refuses
+`transport_node_id`, the measured live `skulk_build_sha256` and, once seen, the
+node's Tailscale address as `serve_host`. The manager refuses
 foreign profiles, competing bridge lifetimes, missing bridge ownership and a live
 core build different from its independently installed core. A manager's own build
 measurement alone is not evidence of compatibility with the live API process.
@@ -4182,6 +4183,20 @@ owner. A foreign installation binding is refused before stopping healthy owners.
 An incomplete write exposes `attachment_recovery_required` until local recovery
 succeeds. Disconnect does not cancel accepted local renewal. API shutdown releases
 its attachment fence without terminating independent cleanup services.
+
+The serve address tells plugin owners where their capabilities may serve besides
+loopback. The API process reads it from `tailscale status` in the background, at
+most once a minute, so an attachment never waits on it; until the first answer the
+request omits the field and the manager keeps the address its installations
+already have. An address stays once seen: a failed or slow query never withdraws
+it, and only a different address replaces it. When the address changes, the manager
+stops the owners, writes an owner-only `serve.json` (`{"serve_host": "<address>"}`)
+into each installation, records the same value at its own root last, and starts
+the owners again, so an interrupted write is finished by the next attachment. A
+newly registered installation receives the current address. The file sits beside
+`owner.json` rather than inside it because owners parse `owner.json` strictly; an
+owner built before the setting never reads `serve.json`, and neither does a
+manager built before it.
 
 
 ### Local system-service setup

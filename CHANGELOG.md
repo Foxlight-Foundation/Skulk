@@ -40,6 +40,13 @@ This project records release notes here and mirrors public-facing notes in
   the worker's event loop.
 ### Added
 
+- A plugin can serve its own screens to every machine on the tailnet. When a
+  node runs Tailscale, Skulk hands the node's Tailscale address to the
+  plugins it runs. A plugin built for this serves there and on loopback,
+  never on the local network. Skulk picks the address up in the background,
+  and restarts the node's plugins once when it first sees it or when it
+  changes.
+
 - Plugins can be managed on any node from any machine on the tailnet:
   - A capability's **Manage on** entry, followed by its host's name, in its
     topology flyout and its details, links to that host's own dashboard at

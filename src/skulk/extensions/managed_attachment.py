@@ -10,14 +10,20 @@ from typing import final
 import psutil
 from pydantic import JsonValue, TypeAdapter
 
+from skulk.connectivity.tailscale import query_tailscale_status
 from skulk.extensions.runtime_artifacts import measure_host
-from skulk.extensions.runtime_attachment import AttachmentRequest
+from skulk.extensions.runtime_attachment import AttachmentRequest, ServeAddress
 from skulk.extensions.runtime_files import RuntimeLock, read_private
 from skulk.extensions.runtime_manager import (
     MANAGER_BUILD_DIFFERS,
     ManagerBuildMismatchError,
     manager_request,
 )
+
+SERVE_ADDRESS_REFRESH_SECONDS = 60.0
+"""How often the bridge looks at Tailscale for the node's serve address."""
+
+_SERVE_ADDRESS: TypeAdapter[str] = TypeAdapter(ServeAddress)
 
 
 @final
@@ -36,6 +42,10 @@ class ManagedAttachment:
         self.build: str | None = None
         self.observed = 0.0
         self.users = 0
+        # The node's Tailscale address, kept once seen for this API lifetime.
+        self.serve_host: str | None = None
+        self.serve_checked: float | None = None
+        self.serve_task: asyncio.Task[None] | None = None
 
     def retain(self, transport_node_id: str) -> None:
         """Retain the bridge for one adapter in the same live API process."""
@@ -54,6 +64,7 @@ class ManagedAttachment:
                 raise ValueError("bridge is not active")
             if self.lock is None:
                 self.lock = RuntimeLock(self.root, "attachment.lock")
+            self._observe_serve_host()
             if time.monotonic() - self.observed < 1:
                 return
             if self.build is None:
@@ -63,6 +74,7 @@ class ManagedAttachment:
                 profile_id=self.profile_id,
                 transport_node_id=self.transport_node_id,
                 skulk_build_sha256=self.build,
+                serve_host=self.serve_host,
             )
             result = await manager_request(self.root, request)
             if result.get("error") == MANAGER_BUILD_DIFFERS:
@@ -90,6 +102,44 @@ class ManagedAttachment:
                 raise ValueError("local attachment unavailable or incompatible")
             self.observed = time.monotonic()
 
+    def _observe_serve_host(self) -> None:
+        """Look at Tailscale in the background, at most once a minute.
+
+        The query is a subprocess that can take seconds, so an attachment
+        never waits on it. Until the first answer, attachments carry no
+        address, which the manager reads as "keep the one the installations
+        already have".
+        """
+        if self.serve_task is not None and not self.serve_task.done():
+            return
+        now = time.monotonic()
+        if (
+            self.serve_checked is not None
+            and now - self.serve_checked < SERVE_ADDRESS_REFRESH_SECONDS
+        ):
+            return
+        self.serve_checked = now
+        self.serve_task = asyncio.create_task(self._refresh_serve_host())
+
+    async def _refresh_serve_host(self) -> None:
+        """Record the node's Tailscale address when Tailscale reports a new one."""
+        try:
+            status = await query_tailscale_status()
+            if not status.running or status.self_ip is None:
+                # An address stays once seen. A slow or failed query must not
+                # restart every owner, and a node that left its tailnet only
+                # leaves its children a bind they fall back from.
+                return
+            address = _SERVE_ADDRESS.validate_python(status.self_ip)
+        except (AttributeError, TypeError, ValueError):
+            # Output this build cannot read is no observation at all.
+            return
+        if address != self.serve_host:
+            self.serve_host = address
+            # Attach again at the next refresh, which restarts the owners
+            # once so every child is told the new address.
+            self.observed = 0.0
+
     async def release(self) -> None:
         """Release the API fence after its last adapter stops; leave cleanup running."""
         async with self.guard:
@@ -98,6 +148,10 @@ class ManagedAttachment:
                 self.lock.close()
                 self.lock = None
                 self.observed = 0.0
+                if self.serve_task is not None:
+                    self.serve_task.cancel()
+                    self.serve_task = None
+                self.serve_checked = None
 
 
 def manager_processes(root: Path) -> list[tuple[int, list[str]]]:

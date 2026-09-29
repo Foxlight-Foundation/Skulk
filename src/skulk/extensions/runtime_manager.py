@@ -30,7 +30,10 @@ from skulk.extensions.runtime_attachment import (
     AttachmentRequest,
     HostSettings,
     OwnerBinding,
+    ServeBinding,
     finish_attachment,
+    publish_serve_host,
+    read_serve_host,
     recover_attachment,
 )
 from skulk.extensions.runtime_catalog import (
@@ -502,6 +505,9 @@ class RuntimeManager:
         self.settings = HostSettings.model_validate_json(
             read_private(self.root / "host.json")
         )
+        # The address the installations last received, kept in its own file
+        # so a manager built before it still reads host.json after a downgrade.
+        self.serve_host = read_serve_host(self.root / "serve.json")
         self.installations = self.root / "installations"
         private_directory(self.installations)
         self.path = manager_socket(self.root)
@@ -621,7 +627,13 @@ class RuntimeManager:
                 raise ValueError("attachment requires a live local bridge")
             recovered = await asyncio.to_thread(recover_attachment, self.root)
             self.settings = recovered
-            if self.settings.transport_node_id != request.transport_node_id:
+            transport_changed = (
+                self.settings.transport_node_id != request.transport_node_id
+            )
+            # No address seen keeps the one the installations already have, so
+            # a slow or failed Tailscale query never restarts every owner.
+            serve_host = request.serve_host or self.serve_host
+            if transport_changed or serve_host != self.serve_host:
                 identifiers = self._identifiers()
                 # Validate all existing bindings before disturbing a healthy owner.
                 for identifier in identifiers:
@@ -642,18 +654,31 @@ class RuntimeManager:
                     for identifier in identifiers:
                         self.errors[identifier] = "attachment_recovery_required"
                     raise ValueError("attachment could not stop all owners")
-                journal = AttachmentJournal(
-                    previous=self.settings,
-                    current=self.settings.model_copy(
-                        update={"transport_node_id": request.transport_node_id}
-                    ),
-                    installations=tuple(identifiers),
-                    state="pending",
+                journal = (
+                    AttachmentJournal(
+                        previous=self.settings,
+                        current=self.settings.model_copy(
+                            update={"transport_node_id": request.transport_node_id}
+                        ),
+                        installations=tuple(identifiers),
+                        state="pending",
+                    )
+                    if transport_changed
+                    else None
                 )
                 try:
-                    self.settings = await asyncio.to_thread(
-                        finish_attachment, self.root, journal
-                    )
+                    if journal is not None:
+                        self.settings = await asyncio.to_thread(
+                            finish_attachment, self.root, journal
+                        )
+                    if serve_host is not None and serve_host != self.serve_host:
+                        await asyncio.to_thread(
+                            publish_serve_host,
+                            self.root,
+                            tuple(identifiers),
+                            serve_host,
+                        )
+                        self.serve_host = serve_host
                 finally:
                     await self._restore_locked()
             else:
@@ -1024,6 +1049,11 @@ class RuntimeManager:
                 root / "owner.json",
                 self.settings.owner_binding().model_dump_json().encode(),
             )
+            if self.serve_host is not None:
+                write_private(
+                    root / "serve.json",
+                    ServeBinding(serve_host=self.serve_host).model_dump_json().encode(),
+                )
         if identifier not in self.controllers:
             await self._load(identifier)
 
