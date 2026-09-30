@@ -789,12 +789,22 @@ is supplied. Inert proposal tools have a 20-second deadline, reads retain 5 seco
 
 `extensions/managed.py` connects protected local owner registrations to separately
 supervised runtimes without importing their SDKs. `DynamicCapabilityProvider`
-supplies cached unary contracts for live loader lookup; static IDs retain priority
+supplies cached contracts for all four I/O modes for live loader lookup; static IDs retain priority
 and conflicting dynamic claims are hidden. The loader reconciles dynamic telemetry
 tags once per second. Owner health expires after three seconds; configuration
 remains a separate facet when capacity is disabled or unavailable. Local setup
 records live under `SKULK_CONFIG_HOME/managed-plugins/`; HTTP accepts no executable
 paths. Shutdown stops observation, not independent owner/cleanup services.
+
+`extensions/managed_streams.py` carries protocol-4 managed provider media through
+protected per-call Unix connections, capped at 64 KiB headers and 1 MiB raw media.
+The owner authenticates a separate child media channel so backpressure cannot
+block primary health. One active call per child, eight-frame ingress queues,
+300-second stream ceiling, input half-close, and cleanup acknowledgment before
+terminal publication preserve Fabric lifecycle. Cancellation or bad output
+invalidates/reaps that child through normal owner supervision; siblings and
+unary calls retain their contracts. Old unary owners remain supported; streaming
+requires protocol 4. No media enters State/event logs or imports a private SDK.
 
 Generic signed runtime verification and staging use `extensions/runtime_artifacts.py`,
 `runtime_files.py` and `runtime_install.py`. Provider manifest policy stays opaque;

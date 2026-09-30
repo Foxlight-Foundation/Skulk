@@ -4508,6 +4508,16 @@ invalid release, but cannot replace live work or another pending withdrawal.
 
 ## Extension Capabilities
 
+Protocol-4 managed owners participate in the same discovery and stream routes
+as in-process extensions, including server streaming, client streaming and
+bidirectional calls. Managed streaming admission/headers have a 64 KiB local
+limit and raw inline media a 1 MiB per-frame limit, with one active invocation
+per child and one deadline capped at 300 seconds. Input completion half-closes
+input. Output completion waits for child cleanup and owner acknowledgment;
+cancellation or broken IPC triggers child supervision without replay. Older
+unary owners retain their existing behavior. See
+[Managed streaming transport](extensions.md#managed-streaming-transport).
+
 Providers with a dynamic readiness facet appear in capability discovery only
 while ready. A cached descriptor does not grant continued admission: new unary
 and streaming calls to an unavailable capability return typed `not_found`.

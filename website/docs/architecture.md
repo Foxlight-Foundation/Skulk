@@ -2247,6 +2247,30 @@ recheck it on every dispatch or retry. The callback supplies no approval evidenc
 or signing authority, and omitted callbacks fail closed.
 
 
+### Managed capability streaming
+
+Separately supervised capabilities use the same Fabric I/O modes as in-process
+extensions: unary, server streaming, client streaming and bidirectional. Cached
+dynamic descriptors select the correct executable handler and retain static
+namespace priority, readiness and conflicting-owner fences. Streaming requires
+the protocol-4 managed reader and compatible owner/child SDK.
+
+The API adapter opens one protected owner connection per call, pinned to the
+installed node, exact descriptor and one remaining deadline. The owner admits
+one active call per child and authenticates a separate child media connection;
+health stays on the primary channel. JSON headers are capped at 64 KiB, raw
+inline attachments at 1 MiB, and eight-frame ingress queues apply backpressure.
+Input completion is a half-close. A public output terminal is withheld until
+child cleanup, owner acknowledgment and clean connection closure complete.
+
+Cancellation, crashes, deadlines and invalid frames invalidate that child
+instance's channels and trigger its owner's ordinary process-group supervision.
+Fresh local correlation IDs fence retried public IDs; sibling children remain
+independent. The bridge introduces no replicated State, event-log media,
+automatic replay, arbitrary file access or owner SDK import. See
+[Managed streaming transport](extensions.md#managed-streaming-transport) for the
+normative limits and protocol rollout order.
+
 ### Managed setup, authority and lifecycle
 
 Managed capability nodes may expose the optional `NodePreflightProvider` facet.

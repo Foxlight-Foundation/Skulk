@@ -661,8 +661,8 @@ The [managed lifecycle HTTP routes](api-guide.md#managed-plugin-http-lifecycle) 
 Plugins dashboard remain available while children are disabled or broken. The `/plugins`
 and `/plugins/` dashboard routes also support direct links and browser refreshes.
 
-The local protocol reads installed node IDs, ordinary settings and cached unary
-descriptors; mutations fence node identity, settings revision and schema digest.
+The local protocol reads installed node IDs, ordinary settings and cached
+descriptors for all four I/O modes; mutations fence node identity, settings revision and schema digest.
 The owner must report the same Skulk transport identity. Unary calls retain the
 negotiated contract and deadline, and are never replayed after a lost response.
 Management and call responses are bounded to 128 KiB; ordinary requests to 16 KiB
@@ -670,12 +670,48 @@ and invocation requests to 64 KiB. The socket grants no remote operator scope or
 provider spending approval. The existing HTTP authorization boundary still applies.
 
 `DynamicCapabilityProvider.dynamic_capabilities()` is an optional synchronous,
-cached unary snapshot. It performs no I/O. The loader consults current snapshots
+cached descriptor snapshot covering unary and streaming modes. It performs no I/O. The loader consults current snapshots
 for discovery and dispatch, so an owner's later arrival or activation needs no
 Skulk restart. Static capability IDs retain priority. Duplicate dynamic contracts
 are hidden even when one claimant is unavailable. The loader reconciles dynamic
 telemetry tags once per second; the managed adapter polls local health with a
 one-second timeout and refuses observations older than three seconds.
+
+### Managed streaming transport
+
+Managed owners speaking protocol **4** can serve server streaming, client
+streaming and bidirectional descriptors through the same public Fabric stream
+API as in-process extensions. An older owner's unary behavior is unchanged;
+streaming claims require protocol 4. Dynamic discovery and dispatch retain
+static namespace priority, readiness and duplicate-owner fences for every mode.
+
+Each managed stream opens one protected owner connection, names the exact
+installed node and descriptor revision, and carries its single remaining deadline
+(up to 300 seconds). A 64 KiB admission request is followed by length-prefixed,
+finite JSON headers (64 KiB maximum) and raw inline media (1 MiB per packet).
+There is no base64 expansion or caller-supplied file path. Blob references remain
+opaque. These process-local bytes never enter State or the event log; Fabric
+continues using its existing node-addressed `PROVIDER_DATA` media transport.
+
+The owner authenticates a fresh child media connection per invocation. Child
+health uses its separate primary channel, so slow media consumption cannot
+block health. One invocation at a time is admitted per child, shared across
+unary and streaming modes. Eight-frame ingress queues and socket backpressure
+bound input. Input completion is a half-close without payload or media; output
+remains active. An accepted output terminal stops forwarding caller input before
+the owner closes the media connection during cleanup.
+
+The child must emit exactly one output terminal and finish its handler cleanup.
+The owner then sends a private cleanup acknowledgment. The adapter withholds the
+public terminal until that acknowledgment and clean connection closure arrive.
+Cancellation, disconnect, malformed output, crashes and deadlines invalidate
+only that child instance's call channels; its owner reaps the owned process group
+and applies normal restart supervision. Calls are never automatically replayed.
+
+Deploy a compatible Skulk reader before enabling streaming bundles. The SDK 0.4.0
+protocol window is 3 and 4; protocol 3 unary children retain their prior startup
+shape, while protocol 2 bundles require rebuilding. The SDK/child protocol is
+separate from signed release and catalog protocol windows.
 
 Owners may advertise `host_callbacks_available: true` in their local description
 and expose the fixed `host.sock` beside `control.sock`, with the same owner-only

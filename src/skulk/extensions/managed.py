@@ -7,6 +7,7 @@ import json
 import os
 import stat
 import time
+from collections.abc import AsyncGenerator, AsyncIterator
 from itertools import islice
 from pathlib import Path
 from typing import Literal, Self, final
@@ -33,6 +34,11 @@ from skulk.extensions.configuration import (
 from skulk.extensions.credentials import CredentialMutation, NodeCredentials
 from skulk.extensions.managed_attachment import ManagedAttachment
 from skulk.extensions.managed_host import HostCallbacks, HostCapability
+from skulk.extensions.managed_streams import (
+    ManagedStreamEnd,
+    read_managed_frame,
+    write_managed_frame,
+)
 from skulk.extensions.preflight import NodePreflight
 from skulk.extensions.proposal_actions import ProposalApproval, ProposalOperation
 from skulk.extensions.proposal_review import (
@@ -45,6 +51,7 @@ from skulk.extensions.runtime_service import ServiceProcessState
 from skulk.extensions.setup import NodeSetup
 from skulk.extensions.setup_actions import SetupActions, SetupMutation, SetupOperation
 from skulk.extensions.steward import StewardTool
+from skulk.extensions.streams import CapabilityStreamFrame
 from skulk.extensions.types import ExtensionContext
 from skulk.shared.types.capability_nodes import (
     CapabilityNodeAction,
@@ -362,7 +369,10 @@ class ManagedOwner:
         if self.disabled or self.manager_enabled is False:
             return ()
         return tuple(
-            descriptor for node in self.nodes for descriptor in node.descriptors
+            descriptor
+            for node in self.nodes
+            for descriptor in node.descriptors
+            if descriptor.io_mode == "unary" or self.protocol == 4
         )
 
     def capability_ready(self, qualified_id: str) -> bool:
@@ -453,8 +463,10 @@ class ManagedOwner:
                     raise ValueError("ambiguous managed owner inventory")
                 for node in snapshot.nodes:
                     node.public()
-                    if any(d.io_mode != "unary" for d in node.descriptors):
-                        raise ValueError("managed owner requires unary contracts")
+                    if snapshot.protocol != 4 and any(
+                        d.io_mode != "unary" for d in node.descriptors
+                    ):
+                        raise ValueError("managed streaming requires protocol four")
                 self.nodes = snapshot.nodes
                 self.protocol = snapshot.protocol
                 self.host_callbacks_available = snapshot.host_callbacks_available
@@ -913,6 +925,173 @@ class ManagedOwner:
             timeout=min(call.timeout_seconds, 30.0),
         )
         return dict(result)
+
+    async def handle_stream(
+        self, context: ExtensionContext, call: CapabilityCall
+    ) -> AsyncGenerator[CapabilityStreamFrame, None]:
+        """Serve an admitted server stream through its independently bounded channel."""
+
+        async def no_input() -> AsyncGenerator[CapabilityStreamFrame, None]:
+            if False:
+                yield CapabilityStreamFrame(
+                    call_id=call.call_id,
+                    direction="caller_to_provider",
+                    sequence=0,
+                    kind="started",
+                )
+
+        async with contextlib.aclosing(
+            self._stream(context, call, no_input())
+        ) as frames:
+            async for frame in frames:
+                yield frame
+
+    async def handle_input_stream(
+        self,
+        context: ExtensionContext,
+        call: CapabilityCall,
+        input_frames: AsyncIterator[CapabilityStreamFrame],
+    ) -> AsyncGenerator[CapabilityStreamFrame, None]:
+        """Bridge client and bidirectional streams; completed input is a half-close."""
+        async with contextlib.aclosing(
+            self._stream(context, call, input_frames)
+        ) as frames:
+            async for frame in frames:
+                yield frame
+
+    async def _stream(
+        self,
+        context: ExtensionContext,
+        call: CapabilityCall,
+        input_frames: AsyncIterator[CapabilityStreamFrame],
+    ) -> AsyncGenerator[CapabilityStreamFrame, None]:
+        qualified_id = f"{call.capability_id}@{call.version}"
+        if (
+            self.context is not context
+            or self.protocol != 4
+            or not self.capability_ready(qualified_id)
+        ):
+            raise RuntimeError("managed streaming capability unavailable")
+        node = next(
+            node
+            for node in self.nodes
+            if any(item.qualified_id == qualified_id for item in node.descriptors)
+        )
+        descriptor = next(
+            item for item in node.descriptors if item.qualified_id == qualified_id
+        )
+        if descriptor.io_mode == "unary":
+            raise ValueError("unary descriptor cannot serve a stream")
+        payload = _OBJECT.validate_json(json.dumps(call.payload, allow_nan=False))
+        request = (
+            json.dumps(
+                {
+                    "operation": "stream",
+                    "node_id": node.node_id,
+                    "invoke": {
+                        "kind": "stream_invoke",
+                        "protocol": 4,
+                        "call_id": call.call_id,
+                        "capability_id": call.capability_id,
+                        "version": call.version,
+                        "descriptor_revision": call.descriptor_revision,
+                        "remaining_seconds": call.timeout_seconds,
+                        "payload": payload,
+                    },
+                },
+                allow_nan=False,
+                separators=(",", ":"),
+            ).encode()
+            + b"\n"
+        )
+        if len(request) > 65_536:
+            raise ValueError("managed stream request exceeds local bound")
+        sender: asyncio.Task[None] | None = None
+        writer: asyncio.StreamWriter | None = None
+        async with asyncio.timeout(call.timeout_seconds):
+            try:
+                reader, writer = await asyncio.open_unix_connection(
+                    self._socket_path("control.sock"), limit=65_540
+                )
+                writer.write(request)
+                await writer.drain()
+                channel_writer = writer
+
+                async def send_input() -> None:
+                    async for frame in input_frames:
+                        await write_managed_frame(channel_writer, frame)
+
+                if descriptor.io_mode in ("client_streaming", "bidirectional"):
+                    sender = asyncio.create_task(send_input())
+                sequence = 1
+                terminal: CapabilityStreamFrame | None = None
+                while True:
+                    receiver = asyncio.create_task(read_managed_frame(reader))
+                    try:
+                        if sender is not None and not sender.done():
+                            done, _ = await asyncio.wait(
+                                (receiver, sender), return_when=asyncio.FIRST_COMPLETED
+                            )
+                            if sender in done and receiver not in done:
+                                await sender
+                        elif sender is not None:
+                            await sender
+                        frame = await receiver
+                        if sender is not None and sender.done():
+                            if sender.cancelled():
+                                await sender
+                            failure = sender.exception()
+                            if failure is not None and not (
+                                isinstance(failure, ConnectionError)
+                                and isinstance(frame, CapabilityStreamFrame)
+                                and frame.is_terminal
+                            ):
+                                raise failure
+                    finally:
+                        receiver.cancel()
+                        await asyncio.gather(receiver, return_exceptions=True)
+                    if isinstance(frame, ManagedStreamEnd):
+                        if (
+                            frame.call_id != call.call_id
+                            or terminal is None
+                            or await reader.read(1)
+                        ):
+                            raise ValueError(
+                                "invalid managed stream cleanup acknowledgment"
+                            )
+                        yield terminal
+                        return
+                    if (
+                        terminal is not None
+                        or frame.synthetic
+                        or (frame.call_id, frame.direction, frame.sequence)
+                        != (call.call_id, "provider_to_caller", sequence)
+                    ):
+                        raise ValueError("invalid managed output identity or sequence")
+                    sequence += 1
+                    if frame.is_terminal:
+                        terminal = frame
+                        # Output completion closes the logical call. Stop input
+                        # before the owner closes its socket during cleanup; a
+                        # late input write must not replace this valid terminal.
+                        if sender is not None:
+                            sender.cancel()
+                            await asyncio.gather(sender, return_exceptions=True)
+                            sender = None
+                    else:
+                        yield frame
+            finally:
+                # Fabric uses level-triggered cancellation: even gathering an
+                # already cancelled input task can be interrupted. Close before
+                # any cleanup await so owner admission never waits for GC/timeout.
+                if writer is not None:
+                    writer.close()
+                if sender is not None:
+                    sender.cancel()
+                    await asyncio.gather(sender, return_exceptions=True)
+                if writer is not None:
+                    with contextlib.suppress(OSError):
+                        await writer.wait_closed()
 
 
 def load_managed_owners(
