@@ -114,7 +114,9 @@ def _ack(call_id: str = "call") -> bytes:
     return len(header).to_bytes(4, "big") + header
 
 
+@pytest.mark.parametrize("invalid_input", [False, True])
 async def test_provider_completion_stops_open_input_before_socket_close(
+    invalid_input: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A sender racing EOF must not replace a valid provider terminal with failure."""
@@ -156,7 +158,9 @@ async def test_provider_completion_stops_open_input_before_socket_close(
                 kind="started",
             )
             await terminal_read.wait()
-            raise OSError("input write raced the completed provider's socket close")
+            if invalid_input:
+                raise ValueError("invalid input frame")
+            raise ConnectionResetError("input write raced provider EOF")
         finally:
             input_stopped.set()
 
@@ -165,11 +169,17 @@ async def test_provider_completion_stops_open_input_before_socket_close(
         host_context,
         call,
     ):
-        output = [
-            frame
-            async for frame in owner.handle_input_stream(host_context, call, inputs())
-        ]
-        assert len(output) == 1 and output[0].kind == "completed"
+        if invalid_input:
+            with pytest.raises(ValueError, match="invalid input"):
+                await anext(owner.handle_input_stream(host_context, call, inputs()))
+        else:
+            output = [
+                frame
+                async for frame in owner.handle_input_stream(
+                    host_context, call, inputs()
+                )
+            ]
+            assert len(output) == 1 and output[0].kind == "completed"
         assert input_stopped.is_set()
 
 

@@ -1037,6 +1037,16 @@ class ManagedOwner:
                         elif sender is not None:
                             await sender
                         frame = await receiver
+                        if sender is not None and sender.done():
+                            if sender.cancelled():
+                                await sender
+                            failure = sender.exception()
+                            if failure is not None and not (
+                                isinstance(failure, ConnectionError)
+                                and isinstance(frame, CapabilityStreamFrame)
+                                and frame.is_terminal
+                            ):
+                                raise failure
                     finally:
                         receiver.cancel()
                         await asyncio.gather(receiver, return_exceptions=True)
