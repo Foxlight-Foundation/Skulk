@@ -40,8 +40,12 @@ class Provider:
                 input_schema={"type": "object"},
                 output_schema={"type": "object"},
                 io_mode=mode,
-                input_chunk_schema={"type": "object"} if mode in ("client_streaming", "bidirectional") else None,
-                output_chunk_schema={"type": "object"} if mode in ("server_streaming", "bidirectional") else None,
+                input_chunk_schema={"type": "object"}
+                if mode in ("client_streaming", "bidirectional")
+                else None,
+                output_chunk_schema={"type": "object"}
+                if mode in ("server_streaming", "bidirectional")
+                else None,
             )
             for mode in (
                 "unary",
@@ -157,11 +161,68 @@ async def test_shutdown_withdraws_then_cleans_siblings_despite_failure_and_cance
     assert provider.stops == 1
 
 
-async def test_shutdown_deadline_does_not_prevent_healthy_sibling_cleanup(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_shutdown_deadline_does_not_prevent_healthy_sibling_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The configured deadline bounds all cooperative hooks collectively."""
-    monkeypatch.setattr("skulk.extensions.loader._EXTENSION_SHUTDOWN_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(
+        "skulk.extensions.loader._EXTENSION_SHUTDOWN_TIMEOUT_SECONDS", 0.05
+    )
     slow, healthy = SlowCleanup(), Provider()
     loaded = LoadedExtensions([slow, healthy])
     with anyio.fail_after(7):
         await loaded.run_shutdown_hooks()
     assert slow.stops == healthy.stops == 1
+
+
+class DynamicProvider(Provider):
+    """Publish cached contracts through the same facet as managed owners."""
+
+    def capabilities(self) -> list[CapabilityDescriptor]:
+        """Do not register a static descriptor snapshot."""
+        return []
+
+    def dynamic_capabilities(self) -> tuple[CapabilityDescriptor, ...]:
+        """Updateable descriptors must retain all four executable call modes."""
+        return tuple(super().capabilities())
+
+
+@pytest.mark.parametrize("composed", [False, True])
+def test_dynamic_contract_lookup_preserves_all_four_modes(composed: bool) -> None:
+    """Live cached stream contracts are discoverable and routed without a reload."""
+    provider = DynamicProvider()
+    loaded = LoadedExtensions([provider])
+    if composed:
+        loaded = loaded.with_builtin_extensions([])
+    assert len(loaded.capability_descriptors) == 4
+    assert loaded.handled_capability_ids() == {"unary"}
+    assert loaded.handled_stream_capability_ids() == {
+        "server_streaming",
+        "client_streaming",
+        "bidirectional",
+    }
+    for mode in ("server_streaming", "client_streaming", "bidirectional"):
+        assert loaded.stream_handler(f"{mode}@1.0.0") is not None
+        assert loaded.call_handler(f"{mode}@1.0.0") is None
+    provider.ready = False
+    assert not loaded.capability_descriptors
+    assert not loaded.handled_stream_capability_ids()
+    assert loaded.stream_handler("bidirectional@1.0.0") is None
+
+
+def test_dynamic_stream_conflict_does_not_transfer_ownership() -> None:
+    """An unavailable duplicate reserves its identity across mode boundaries."""
+    first, second = DynamicProvider(), DynamicProvider()
+    second.name = "second-dynamic"
+    second.ready = False
+    assert not LoadedExtensions([first, second]).capability_descriptors
+    assert not LoadedExtensions([first, second]).handled_stream_capability_ids()
+    builtin = Provider()
+    assert (
+        len(
+            LoadedExtensions([first])
+            .with_builtin_extensions([builtin])
+            .capability_descriptors
+        )
+        == 4
+    )

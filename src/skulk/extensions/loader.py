@@ -342,32 +342,39 @@ class LoadedExtensions:
             descriptor
             for descriptor in self._capability_descriptors
             if self.capability_ready(descriptor.qualified_id)
-        ) + tuple(entry[2] for entry in self._dynamic_calls().values())
+        ) + tuple(entry[2] for entry in self._dynamic_entries().values())
 
-    def _dynamic_calls(
+    def _dynamic_entries(
         self,
-    ) -> dict[str, tuple[str, CapabilityCallHandler, CapabilityDescriptor]]:
+    ) -> dict[str, tuple[str, SkulkExtension, CapabilityDescriptor]]:
         providers: list[tuple[str, SkulkExtension]] = [
             *self._dynamic_providers,
             *((owner.name, owner) for owner in self._managed_owners()),
         ]
         if self._stopping or len(providers) > 32:
             return {}
-        calls: dict[str, tuple[str, CapabilityCallHandler, CapabilityDescriptor]] = {}
+        calls: dict[str, tuple[str, SkulkExtension, CapabilityDescriptor]] = {}
         conflicts: set[str] = set()
         reserved = {descriptor.id for descriptor in self._capability_descriptors}
         for name, provider in providers:
             try:
-                if not isinstance(
-                    provider, DynamicCapabilityProvider
-                ) or not isinstance(provider, CapabilityCallHandler):
+                if not isinstance(provider, DynamicCapabilityProvider):
                     continue
                 descriptors = provider.dynamic_capabilities()
                 if len(descriptors) > 128:
                     continue
                 for descriptor in descriptors:
                     qualified_id = descriptor.qualified_id
-                    if descriptor.id in reserved or descriptor.io_mode != "unary":
+                    if descriptor.id in reserved:
+                        continue
+                    if (
+                        descriptor.io_mode == "unary"
+                        and not isinstance(provider, CapabilityCallHandler)
+                        or descriptor.io_mode == "server_streaming"
+                        and not isinstance(provider, CapabilityStreamHandler)
+                        or descriptor.io_mode in ("client_streaming", "bidirectional")
+                        and not isinstance(provider, CapabilityInputStreamHandler)
+                    ):
                         continue
                     if qualified_id in calls or qualified_id in conflicts:
                         calls.pop(qualified_id, None)
@@ -386,6 +393,35 @@ class LoadedExtensions:
                 # exception payloads. Discard this provider's partial projection.
                 calls = {key: item for key, item in calls.items() if item[0] != name}
         return calls
+
+    def _dynamic_calls(
+        self,
+    ) -> dict[str, tuple[str, CapabilityCallHandler, CapabilityDescriptor]]:
+        return {
+            key: (name, provider, descriptor)
+            for key, (name, provider, descriptor) in self._dynamic_entries().items()
+            if descriptor.io_mode == "unary"
+            and isinstance(provider, CapabilityCallHandler)
+        }
+
+    def _dynamic_streams(
+        self,
+    ) -> dict[
+        str,
+        tuple[
+            str,
+            CapabilityStreamHandler | CapabilityInputStreamHandler,
+            CapabilityDescriptor,
+        ],
+    ]:
+        return {
+            key: (name, provider, descriptor)
+            for key, (name, provider, descriptor) in self._dynamic_entries().items()
+            if descriptor.io_mode != "unary"
+            and isinstance(
+                provider, CapabilityStreamHandler | CapabilityInputStreamHandler
+            )
+        }
 
     def call_handler(
         self, qualified_id: str
@@ -424,7 +460,9 @@ class LoadedExtensions:
 
         if not self.capability_ready(qualified_id):
             return None
-        return self._stream_handlers.get(qualified_id)
+        return self._stream_handlers.get(qualified_id) or self._dynamic_streams().get(
+            qualified_id
+        )
 
     def handled_stream_capability_ids(self) -> frozenset[str]:
         """Bare capability ids with an executable streaming handler."""
@@ -433,7 +471,7 @@ class LoadedExtensions:
             entry[2].id
             for entry in self._stream_handlers.values()
             if self.capability_ready(entry[2].qualified_id)
-        )
+        ) | frozenset(entry[2].id for entry in self._dynamic_streams().values())
 
     def capability_ready(self, qualified_id: str) -> bool:
         """Read cached provider readiness; unknown, stopping and broken fail closed."""
@@ -441,7 +479,7 @@ class LoadedExtensions:
         if self._stopping:
             return False
         if provider is None:
-            return qualified_id in self._dynamic_calls()
+            return qualified_id in self._dynamic_entries()
         try:
             return (
                 provider.capability_ready(qualified_id) is True
