@@ -1032,7 +1032,7 @@ class ManagedOwner:
                             done, _ = await asyncio.wait(
                                 (receiver, sender), return_when=asyncio.FIRST_COMPLETED
                             )
-                            if sender in done:
+                            if sender in done and receiver not in done:
                                 await sender
                         elif sender is not None:
                             await sender
@@ -1061,6 +1061,13 @@ class ManagedOwner:
                     sequence += 1
                     if frame.is_terminal:
                         terminal = frame
+                        # Output completion closes the logical call. Stop input
+                        # before the owner closes its socket during cleanup; a
+                        # late input write must not replace this valid terminal.
+                        if sender is not None:
+                            sender.cancel()
+                            await asyncio.gather(sender, return_exceptions=True)
+                            sender = None
                     else:
                         yield frame
             finally:

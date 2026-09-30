@@ -17,7 +17,11 @@ import pytest
 from skulk.extensions import CapabilityCall, CapabilityDescriptor, CapabilityStreamFrame
 from skulk.extensions.capabilities import descriptor_revision
 from skulk.extensions.managed import ManagedConnection, ManagedNode, ManagedOwner
-from skulk.extensions.managed_streams import write_managed_frame
+from skulk.extensions.managed_streams import (
+    ManagedStreamEnd,
+    read_managed_frame,
+    write_managed_frame,
+)
 from skulk.extensions.tests.test_steward_tools import context
 from skulk.extensions.types import ExtensionContext
 
@@ -26,6 +30,7 @@ from skulk.extensions.types import ExtensionContext
 async def _stream_fixture(
     handler: Callable[[asyncio.StreamReader, asyncio.StreamWriter], Awaitable[None]],
     timeout: float = 2.0,
+    mode: Literal["server_streaming", "bidirectional"] = "server_streaming",
 ) -> AsyncIterator[tuple[ManagedOwner, ExtensionContext, CapabilityCall]]:
     with tempfile.TemporaryDirectory(prefix="managed-frames-", dir="/tmp") as name:
         root = Path(name)
@@ -56,7 +61,8 @@ async def _stream_fixture(
             version="1.0.0",
             title="Fixture",
             description="Boundary fixture",
-            io_mode="server_streaming",
+            io_mode=mode,
+            input_chunk_schema={} if mode == "bidirectional" else None,
             input_schema={},
             output_chunk_schema={},
         )
@@ -106,6 +112,65 @@ def _ack(call_id: str = "call") -> bytes:
         {"protocol": 4, "frame": {"kind": "end", "call_id": call_id}, "media_size": 0}
     ).encode()
     return len(header).to_bytes(4, "big") + header
+
+
+async def test_provider_completion_stops_open_input_before_socket_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sender racing EOF must not replace a valid provider terminal with failure."""
+    terminal_read = asyncio.Event()
+    input_stopped = asyncio.Event()
+
+    async def read(
+        reader: asyncio.StreamReader,
+    ) -> CapabilityStreamFrame | ManagedStreamEnd:
+        frame = await read_managed_frame(reader)
+        if isinstance(frame, CapabilityStreamFrame) and frame.is_terminal:
+            terminal_read.set()
+        return frame
+
+    monkeypatch.setattr("skulk.extensions.managed.read_managed_frame", read)
+
+    async def handle(
+        reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        assert isinstance(await read_managed_frame(reader), CapabilityStreamFrame)
+        await write_managed_frame(
+            writer,
+            CapabilityStreamFrame(
+                call_id="call",
+                direction="provider_to_caller",
+                sequence=1,
+                kind="completed",
+            ),
+        )
+        writer.write(_ack())
+        await writer.drain()
+
+    async def inputs() -> AsyncIterator[CapabilityStreamFrame]:
+        try:
+            yield CapabilityStreamFrame(
+                call_id="call",
+                direction="caller_to_provider",
+                sequence=0,
+                kind="started",
+            )
+            await terminal_read.wait()
+            raise OSError("input write raced the completed provider's socket close")
+        finally:
+            input_stopped.set()
+
+    async with _stream_fixture(handle, mode="bidirectional") as (
+        owner,
+        host_context,
+        call,
+    ):
+        output = [
+            frame
+            async for frame in owner.handle_input_stream(host_context, call, inputs())
+        ]
+        assert len(output) == 1 and output[0].kind == "completed"
+        assert input_stopped.is_set()
 
 
 @pytest.mark.parametrize(

@@ -697,7 +697,9 @@ The owner authenticates a fresh child media connection per invocation. Child
 health uses its separate primary channel, so slow media consumption cannot
 block health. One invocation at a time is admitted per child, shared across
 unary and streaming modes. Eight-frame ingress queues and socket backpressure
-bound input. Input completion is a half-close; output remains active.
+bound input. Input completion is a half-close without payload or media; output
+remains active. An accepted output terminal stops forwarding caller input before
+the owner closes the media connection during cleanup.
 
 The child must emit exactly one output terminal and finish its handler cleanup.
 The owner then sends a private cleanup acknowledgment. The adapter withholds the
