@@ -90,6 +90,21 @@ interface tells the truth while it is working.
 8. **Restart and recovery.** Stop Skulk normally, start it with the same printed
    command, and confirm the dashboard, topology, model state, and a new text
    request recover without configuration edits.
+9. **Skulk fabric.** Turn on **Intelligent Fabric** in Settings, wait until
+   **Ask Skulk** reports ready, and ask about the cluster's nodes, models, and
+   downloads. Answers must match what the topology and Model Store show. Ask
+   for an action such as stopping an instance: the proposal must change
+   nothing until you approve it, and the approved action must then take
+   effect.
+10. **Plugins.** Set up the plugin service as the install guide describes,
+    connect a publisher's catalog under **Plugins → Browse**, review a
+    release, and install it with its consent screen. Finish its setup, then
+    open its screen from its satellite in the Cluster view. Every refusal must
+    say what to do next.
+11. **Operator app.** When an operator app build and a relay-configured
+    gateway are available, generate an invitation under **Settings → Devices &
+    pairing**, pair the app, send a chat request from it, then revoke the
+    device and confirm the app loses access.
 
 ## Platform focus
 
