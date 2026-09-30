@@ -1,6 +1,8 @@
 """Dynamic provider availability and bounded resource ownership regressions."""
 
+import asyncio
 from collections.abc import AsyncIterator
+from dataclasses import replace
 
 import anyio
 import pytest
@@ -12,6 +14,7 @@ from skulk.extensions import (
     ExtensionContext,
     LoadedExtensions,
 )
+from skulk.extensions.tests.test_steward_tools import context as fixture_context
 
 
 class Provider:
@@ -226,3 +229,40 @@ def test_dynamic_stream_conflict_does_not_transfer_ownership() -> None:
         )
         == 4
     )
+
+
+async def test_late_dynamic_stream_readiness_advertises_and_withdraws_telemetry() -> None:
+    """Peers discover late managed streams; withdrawal and shutdown remove every tag."""
+    provider = DynamicProvider()
+    provider.ready = False
+    loaded = LoadedExtensions([provider])
+    tags: set[str] = set()
+    changed = asyncio.Event()
+
+    def advertise(tag: str) -> None:
+        tags.add(tag)
+        changed.set()
+
+    def withdraw(tag: str) -> None:
+        tags.discard(tag)
+        changed.set()
+
+    async def wait_for(expected: set[str]) -> None:
+        async with asyncio.timeout(4):
+            while tags != expected:
+                changed.clear()
+                await changed.wait()
+
+    context = replace(fixture_context(), advertise_capability=advertise, withdraw_capability=withdraw)
+    loaded.run_startup_hooks(context)
+    try:
+        all_modes = {"unary", "server_streaming", "client_streaming", "bidirectional"}
+        provider.ready = True
+        await wait_for(all_modes)
+        provider.ready = False
+        await wait_for(set())
+        provider.ready = True
+        await wait_for(all_modes)
+    finally:
+        await loaded.run_shutdown_hooks()
+    assert tags == set()

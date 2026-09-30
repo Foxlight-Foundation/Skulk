@@ -551,7 +551,7 @@ class LoadedExtensions:
     async def _observe_dynamic(self, context: ExtensionContext) -> None:
         try:
             while True:
-                current = {entry[2].id for entry in self._dynamic_calls().values()}
+                current = {entry[2].id for entry in self._dynamic_entries().values()}
                 for tag in self._dynamic_advertised - current:
                     context.withdraw_capability(tag)
                 for tag in current - self._dynamic_advertised:
