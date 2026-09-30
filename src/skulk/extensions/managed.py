@@ -308,7 +308,7 @@ class ManagedOwner:
     Configuration remains an optional facet separate from capability admission.
     """
 
-    skulk_requires = ">=1.5.2,<2"
+    skulk_requires = ">=2.0.0,<3"
 
     def __init__(
         self,

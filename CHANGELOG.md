@@ -9,6 +9,12 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Changed
 
+- The next release is Skulk 2.0.0, and dev now reports that version. A
+  plugin is admitted only when its `skulk_requires` includes the running
+  Skulk version, so plugin releases pinned to 1.5.2 are refused by a 2.0.0
+  node. Rebuild plugins against 2.0.0 and install them together with the
+  core update.
+
 - Skulk no longer ships model cards. A node's catalog is the signed
   registry's cards, each installed model's own card record (kept with the
   model and valid offline indefinitely), and custom cards. Curated card edits

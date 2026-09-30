@@ -49,7 +49,7 @@ An extension provides three things (`src/skulk/extensions/types.py`):
 - **`name`**: a short unique name, used in logs.
 - **`skulk_requires`**: a [PEP 440](https://peps.python.org/pep-0440/)
   version specifier for the Skulk versions it supports, for example
-  `>=1.4,<1.5`. An extension whose specifier does not match the running
+  `>=2.0,<3`. An extension whose specifier does not match the running
   Skulk is refused at load time with a loud error. Mixed plugin/fabric
   versions are the same anti-pattern as mixed-version clusters; upgrade the
   fleet and its extensions together.
@@ -568,7 +568,7 @@ class AuditMiddleware(BaseChatMiddleware):
 
 class AuditExtension:
     name = "audit-example"
-    skulk_requires = ">=1.4,<1.5"
+    skulk_requires = ">=2.0,<3"
 
     def chat_middleware(self) -> AuditMiddleware:
         return AuditMiddleware()
