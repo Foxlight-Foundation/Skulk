@@ -1064,11 +1064,15 @@ class ManagedOwner:
                     else:
                         yield frame
             finally:
+                # Fabric uses level-triggered cancellation: even gathering an
+                # already cancelled input task can be interrupted. Close before
+                # any cleanup await so owner admission never waits for GC/timeout.
+                if writer is not None:
+                    writer.close()
                 if sender is not None:
                     sender.cancel()
                     await asyncio.gather(sender, return_exceptions=True)
                 if writer is not None:
-                    writer.close()
                     with contextlib.suppress(OSError):
                         await writer.wait_closed()
 

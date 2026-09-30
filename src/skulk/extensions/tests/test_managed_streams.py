@@ -221,9 +221,17 @@ async def test_timeout_before_cleanup_closes_owner_socket() -> None:
             await disconnected.wait()
 
 
-@pytest.mark.parametrize("mode", ["server_streaming", "bidirectional"])
+@pytest.mark.parametrize(
+    "mode,open_input",
+    [
+        ("server_streaming", False),
+        ("bidirectional", False),
+        ("bidirectional", True),
+    ],
+)
 async def test_fabric_cancellation_closes_the_managed_socket_explicitly(
     mode: Literal["server_streaming", "bidirectional"],
+    open_input: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Keep writer references alive so garbage collection cannot hide a leaked call."""
@@ -317,6 +325,8 @@ async def test_fabric_cancellation_closes_the_managed_socket_explicitly(
                 sequence=0,
                 kind="started",
             )
+            if open_input:
+                await asyncio.Event().wait()
             yield CapabilityStreamFrame(
                 call_id=call.call_id,
                 direction="caller_to_provider",
