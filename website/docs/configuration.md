@@ -82,6 +82,15 @@ Quantized also needs its advanced cache-bit configuration. An administrator's
 launch-time override can disable the selector; resolve that override before
 expecting dashboard changes to win.
 
+**Default served context (tokens)** sets the context window that llama-server,
+in-process llama.cpp, and vLLM placements receive when the placement does not
+choose one (`inference.served_context_tokens`, 32,768 by default, from 256 to
+1,048,576). Those engines reserve the whole window in memory when a model loads,
+whether or not requests use it. A placement can ask for a larger window under
+**Advanced** in the placement dialog, up to what its nodes hold. The change
+applies to the next placement; running models keep the window they loaded
+with. MLX grows its cache per request and is not affected.
+
 ## HuggingFace
 
 Expand **HuggingFace**, enter **API Token**, and choose **Save changes**. A token
@@ -90,7 +99,8 @@ model's terms using the same Hugging Face account first.
 
 The token is never returned as readable text by the configuration API. Settings
 shows whether one is configured. Entering a new token replaces a dashboard-managed
-value and propagates it without a restart; an empty field retains the existing
+value and propagates it without a restart to every node, including the model
+store host and nodes that join later; an empty field retains the existing
 value. A token explicitly supplied by an administrator when a node starts takes
 precedence on that node. See [installation](install#add-a-hugging-face-token) for
 the first-use steps.

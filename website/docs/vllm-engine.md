@@ -151,8 +151,9 @@ pairs Poolside's Laguna models with their block-parallel DFlash drafter
 Hugging Face cache at engine start (measured 1.35x single-stream on an
 A100-80GB; gains on other GPUs require measurement). Deep speculative depths need more scheduler budget
 than vLLM's defaults provide, so for carded depths of 8 or more the runner
-raises `--max-num-batched-tokens` automatically; shallow MTP depths run
-with vLLM's defaults untouched. DFlash speculators also JIT their kernels
+pins both `--max-num-batched-tokens` and `--max-num-seqs` explicitly, since
+vLLM's own defaults for them vary by version and hardware; shallow MTP depths
+run with vLLM's defaults untouched. DFlash speculators also JIT their kernels
 through NVRTC at engine start and need a CUDA 12.8+ toolchain on the node.
 See [Speculative Decoding](speculative-decoding.md) for the other engines'
 mechanisms.
