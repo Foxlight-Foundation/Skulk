@@ -17,7 +17,10 @@ from skulk.operator.pairing import (
     PairingInvitationPackage,
     PairingPackageTooLargeError,
 )
-from skulk.operator.relay import OperatorRelayProvisioning
+from skulk.operator.relay import (
+    OperatorRelayConfiguration,
+    OperatorRelayProvisioning,
+)
 from skulk.utils.pydantic_ext import FrozenModel
 
 DEFAULT_OPERATOR_API_PORT = 52417
@@ -115,6 +118,31 @@ def _write_pairing_qr(payload: str, output_path: Path) -> None:
     except BaseException:
         output_path.unlink(missing_ok=True)
         raise
+
+
+def _relay_configured_message(configuration: OperatorRelayConfiguration) -> str:
+    """Describe a newly configured relay route in its own version's terms.
+
+    Args:
+        configuration: The relay configuration that was just persisted.
+
+    Returns:
+        The one-line confirmation printed by ``configure-relay``.
+    """
+
+    lane_count = configuration.lane_count
+    if lane_count is None:
+        # Version-two routes keep one signed control connection and open data
+        # connections on demand, so there is no fixed lane pool to report.
+        return (
+            "Configured the designated gateway for on-demand relay "
+            "connections. Restart Skulk to connect."
+        )
+    lanes = "relay lane" if lane_count == 1 else "relay lanes"
+    return (
+        f"Configured the designated gateway with {lane_count} {lanes}. "
+        "Restart Skulk to connect."
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -245,10 +273,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             operator_api_port=arguments.operator_api_port,
             cluster_name=arguments.cluster_name,
         )
-        print(
-            "Configured the designated gateway with "
-            f"{configuration.lane_count} relay lanes. Restart Skulk to connect."
-        )
+        print(_relay_configured_message(configuration))
         return 0
 
     arguments = _PairArguments.model_validate(parsed_values)
