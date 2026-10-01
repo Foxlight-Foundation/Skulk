@@ -20,8 +20,10 @@ Do not expose the unauthenticated local API listener directly to the internet.
 
 ## Prepare remote access
 
-A cluster administrator must provision matching gateway and relay configuration,
-including the cluster's TLS identity and protected carrier credentials. Installing
+A cluster administrator configures the gateway once with the provisioning file
+the relay service supplies: `skulk operator configure-relay --provisioning-file
+<file>` stores the relay route and its protected carrier credentials and
+generates the gateway's TLS identity. Installing
 Skulk or opening **Remote Access** alone does not enroll a hosted relay service.
 Use the provisioning handoff supplied with your relay service; there is no
 public relay administration endpoint that a phone can use to create this trust.

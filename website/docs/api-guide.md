@@ -341,7 +341,7 @@ unfinished attempts but does not disconnect devices that already paired.
 Revoke those devices through the authenticated device-management API.
 
 The dashboard exposes the same authority operation under **Settings →
-Pairing**. Operators choose a lifetime and device limit, generate a branded QR,
+Devices & pairing**. Operators choose a lifetime and device limit, generate a branded QR,
 and may download or revoke it. The bearer QR remains in mounted browser memory
 for five minutes and then the section resets; this display timeout does not
 shorten a longer invitation. Safe invitation status remains visible without
@@ -540,8 +540,9 @@ Behavior:
   granted canonical API scopes;
 - when relay access is configured, also returns one-time `remoteAccess` material:
   `transport=paired_websocket_v1`, app WebSocket URL, opaque route locator,
-  app-role carrier credential, inner-TLS server name, and pinned gateway CA
-  certificate. The gateway-role carrier credential is never returned;
+  app-role carrier credential, inner-TLS server name, and the pinned gateway
+  certificate (`gatewayCaCertificatePem`; despite the name it is the
+  gateway's self-signed server certificate, not a certificate authority). The gateway-role carrier credential is never returned;
 - stores only encrypted session/device state and one-way token digests;
 - never returns either credential again;
 - returns `401` for an invalid proof, `404` for an unknown invitation or
@@ -1199,7 +1200,7 @@ file when generation ends or fails. Reference-audio requests return **503
 Service Unavailable** when the Zenoh data plane is unavailable; Skulk never
 broadcasts private reference media through the gossipsub fallback.
 
-Reference-capable bundled cards may also expose Skulk's packaged voice profiles
+Reference-capable cards may also expose Skulk's packaged voice profiles
 through the ordinary `voice` field. The worker resolves the selected identifier
 to its checksummed local MP3 and exact transcript; those asset paths and bytes
 never enter the command, State, or event log. This path does not require an
@@ -2093,7 +2094,7 @@ dashboard and operator API may call this through the normal cluster control
 surface when the request comes from a direct loopback or trusted-fabric socket
 peer (private LAN or CGNAT, with no proxy-forwarding headers and, for browser
 requests, an Origin on the same trust classes or naming one of this node's
-own hostnames, which is how a dashboard opened via `kite3.local` or the node's
+own hostnames, which is how a dashboard opened via `my-node.local` or the node's
 MagicDNS name qualifies while a DNS-rebound attacker hostname does not), or
 has passed the authenticated
 operator gateway with `operations:write`. The trusted-fabric admission matches
@@ -4268,7 +4269,7 @@ configuration must live outside Git checkouts and remain available after boot.
 | Platform | Durable service root | System registration |
 | --- | --- | --- |
 | Apple Silicon macOS | `/Library/Application Support/SkulkPluginServices/<uid>` | `/Library/LaunchDaemons/foundation.foxlight.skulk.plugins.u<uid>.plist`, using the system domain and a nonroot `UserName` |
-| Linux x86_64 with systemd | `/var/lib/skulk-plugin-services/<uid>` | `/etc/systemd/system/foundation.foxlight.skulk.plugins.u<uid>.service`, using a nonroot numeric `User` and `multi-user.target` |
+| Linux with a running systemd (any architecture) | `/var/lib/skulk-plugin-services/<uid>` | `/etc/systemd/system/foundation.foxlight.skulk.plugins.u<uid>.service`, using a nonroot numeric `User` and `multi-user.target` |
 
 Setup records a generated `operation_id` and phases `preparing`, `staged`,
 `selected`, `registered`, `ready`. Rerunning after interruption reuses the exact
