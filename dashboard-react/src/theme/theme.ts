@@ -322,7 +322,9 @@ const darkColors: ColorTokens = {
   topologyNodeWarning: '#F2A03D',
   topologyNodeDanger: '#F2707E',
   topologyNodeDotBorder: 'rgba(43, 58, 99, 0.28)',
-  topologyConnectionLine: 'rgba(147, 174, 223, 0.78)',
+  // Routes join every pair of nodes, so a six-node fleet draws fifteen of
+  // them; at higher weight they compete with the nodes they connect.
+  topologyConnectionLine: 'rgba(147, 174, 223, 0.39)',
   bgMeshLine: "rgba(147,174,223,.10)",
   bgMeshNode: "rgba(147,174,223,.10)",
   tagVision: "#22d3ee",
@@ -431,7 +433,9 @@ const lightColors: ColorTokens = {
   topologyNodeWarning: '#96601A',
   topologyNodeDanger: '#B23A44',
   topologyNodeDotBorder: '#FFFFFF',
-  topologyConnectionLine: 'rgba(17, 33, 60, 0.78)',
+  // Routes join every pair of nodes, so a six-node fleet draws fifteen of
+  // them; at higher weight they compete with the nodes they connect.
+  topologyConnectionLine: 'rgba(17, 33, 60, 0.39)',
   bgMeshLine: "rgba(77,124,196,.16)",
   bgMeshNode: "rgba(77,124,196,.16)",
   tagVision: "#0e7490",

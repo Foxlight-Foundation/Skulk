@@ -9,6 +9,10 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Changed
 
+- The Cluster topology draws its routes and arrowheads at half their previous
+  opacity in both themes. Routes join every pair of nodes, so a six-node fleet
+  draws fifteen of them, and at the old weight they competed with the nodes.
+
 - Adding a model (`POST /models/add`, the dashboard's **Add & Download**) and
   starting a node download (`POST /download/start`) now require direct
   operator access; before, any caller that reached the API could use them.
