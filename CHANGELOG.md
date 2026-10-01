@@ -507,6 +507,11 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- `skulk operator configure-relay` no longer reports "None relay lanes"
+  for a version 2 provisioning file. Version 2 routes open relay
+  connections on demand, and the command now says so; version 1 routes
+  still report their lane count, with "1 relay lane" in the singular.
+
 - A gated or private model that fails to download now says why.
   `GET /store/downloads` used to drop failed entries, leaving the Model Store
   with a frozen bar or nothing; it now keeps them, with their `error`, until a

@@ -529,6 +529,59 @@ def test_configure_relay_cli_uses_non_fabric_default_port(
     assert configuration.operator_api_port == operator_cli.DEFAULT_OPERATOR_API_PORT
 
 
+@pytest.mark.parametrize(
+    ("provisioning_factory", "expected_output"),
+    (
+        (
+            _provisioning,
+            "Configured the designated gateway with 1 relay lane. "
+            "Restart Skulk to connect.",
+        ),
+        (
+            _on_demand_provisioning,
+            "Configured the designated gateway for on-demand relay connections. "
+            "Restart Skulk to connect.",
+        ),
+    ),
+    ids=("legacy-lanes", "on-demand"),
+)
+def test_configure_relay_cli_reports_each_route_version_in_its_own_terms(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    provisioning_factory: Callable[[], OperatorRelayProvisioning],
+    expected_output: str,
+) -> None:
+    """A version-two route has no lane pool, so it must never print "None"."""
+
+    service, _ = _service(tmp_path)
+    provisioning_path = tmp_path / "relay-provisioning.json"
+    provisioning_path.write_text(
+        provisioning_factory().model_dump_json(), encoding="utf-8"
+    )
+
+    def service_from_default_paths(
+        _service_type: type[OperatorPairingService],
+    ) -> OperatorPairingService:
+        """Return the isolated service for this CLI invocation."""
+
+        return service
+
+    monkeypatch.setattr(
+        OperatorPairingService,
+        "from_default_paths",
+        classmethod(service_from_default_paths),
+    )
+
+    assert (
+        operator_cli.main(
+            ["configure-relay", "--provisioning-file", str(provisioning_path)]
+        )
+        == 0
+    )
+    assert capsys.readouterr().out.strip() == expected_output
+
+
 def test_pair_cli_uses_configured_relay_without_direct_url(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
