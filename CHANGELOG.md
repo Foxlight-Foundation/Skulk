@@ -507,6 +507,17 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- A node holding two copies of one model, such as a store host with an
+  older staged copy beside its store copy, no longer refuses to load it
+  after the registry replaces the model's card. The download step vouched
+  for the copy that matched the new card, but the runner opens the copy it
+  resolves itself, whose sidecar still named the previous card, and the
+  load failed for good with `model_trust_denied`. The load check now adopts
+  the current card for that copy under the same proof the download step
+  uses (same repository, revision and files, covered by its verified
+  manifest), so the copy verified is the copy loaded. A card that needs
+  bytes the copy lacks is still refused.
+
 - Gemma vision works again on the MLX engine. Since the MLX stack moved to
   mlx-vlm 0.6.17, every image sent to a Gemma 4 model crashed its runner and
   came back as an empty answer: Skulk still replaced the model's vision tower
