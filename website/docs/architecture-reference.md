@@ -1021,7 +1021,7 @@ Inventory snapshot; see #130 for consolidation plan.
 
 | Family | Total lines | Primary locations |
 |---|---|---|
-| Gemma 4 | ~600 | `gemma4_prompt.py`, vision tower wrapping in `utils_mlx.py:333-456`, `parse_gemma4_thinking_channels` in `model_output_parsers.py`, native-vision branches in `generate.py:1337-1900` |
+| Gemma 4 | ~480 | `gemma4_prompt.py`, `parse_gemma4_thinking_channels` in `model_output_parsers.py`, native-vision branches in `generate.py:1337-1900`; image pooling is mlx-vlm's own (its vision tower sizes pooled tokens from the real patch grid, so Skulk no longer wraps it) |
 | Qwen (5 variants) | ~350 | `QwenShardingStrategy` in `auto_parallel.py:1267-1567` |
 | DeepSeek V3.2 | ~350 | `dsml_encoding.py`, `parse_deepseek_v32` in `model_output_parsers.py:374-516` |
 | GLM-4 (Lite + MoE) | ~280 | Two strategies in `auto_parallel.py` |

@@ -263,12 +263,8 @@ def test_prefer_vlm_bypasses_text_only_mlx_lm_loader(
     def _fail_mlx_lm_loader(*_args: object, **_kwargs: object) -> object:
         raise AssertionError("prefer_vlm must bypass the text-only MLX-LM loader")
 
-    def _identity_model(model: object) -> object:
-        return model
-
     monkeypatch.setattr(utils_mlx, "import_module", _fake_import_module)
     monkeypatch.setattr(utils_mlx, "_mlx_lm_load_model", _fail_mlx_lm_loader)
-    monkeypatch.setattr(utils_mlx, "_patch_gemma4_native_vision", _identity_model)
 
     model_path = Path("/models/qwen-vlm")
     model, tokenizer = utils_mlx.load_model(
@@ -284,6 +280,53 @@ def test_prefer_vlm_bypasses_text_only_mlx_lm_loader(
         "model_path": model_path,
         "kwargs": {"lazy": True, "strict": False},
     }
+
+
+class _FakeGemma4VisionTower(nn.Module):
+    """Stands in for mlx-vlm's Gemma 4 vision tower."""
+
+
+class _FakeGemma4Model(nn.Module):
+    """Native Gemma 4 VLM as mlx-vlm's loader returns it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.config = SimpleNamespace(model_type="gemma4")
+        self.vision_tower = _FakeGemma4VisionTower()
+
+
+def test_vlm_loader_keeps_gemma4_vision_tower_as_mlx_vlm_built_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Gemma 4 image pooling belongs to mlx-vlm; the loader must not swap the tower.
+
+    mlx-vlm sizes Gemma 4's pooled image tokens from the real patch grid and
+    calls the tower as ``vision_tower(pixel_values, pixel_position_ids)``. A
+    Skulk replacement written for an older mlx-vlm took only the pixels and
+    crashed every Gemma 4 image request.
+    """
+    inner_model = _FakeGemma4Model()
+    vision_tower = inner_model.vision_tower
+
+    def _fake_vlm_load_model(_model_path: Path, **_kwargs: object) -> nn.Module:
+        return inner_model
+
+    def _fake_import_module(module_name: str) -> object:
+        assert module_name == "mlx_vlm.utils"
+        return SimpleNamespace(load_model=_fake_vlm_load_model)
+
+    monkeypatch.setattr(utils_mlx, "import_module", _fake_import_module)
+
+    model, _ = utils_mlx.load_model(
+        Path("/models/gemma-4"),
+        prefer_vlm=True,
+        lazy=True,
+        strict=False,
+    )
+
+    loaded = cast(_FakeGemma4Model, object.__getattribute__(model, "_inner"))
+    assert loaded is inner_model
+    assert loaded.vision_tower is vision_tower
 
 
 def test_pipeline_shards_use_native_loader_for_primary_vision_weights(
@@ -844,20 +887,6 @@ def test_vlm_wrapper_uses_native_language_model_cache_factory() -> None:
     )
 
     assert make_cache() == ["native-ssm-cache", "native-kv-cache"]
-
-
-def test_gemma4_native_vision_batches_single_image_pixels() -> None:
-    """A single CHW image must reach Gemma 4 as a BCHW tensor."""
-
-    batch_pixel_values = cast(
-        Callable[[mx.array], mx.array],
-        vars(utils_mlx)["_batch_gemma4_pixel_values"],
-    )
-    single_image = mx.zeros((3, 768, 768))
-    already_batched = mx.zeros((1, 3, 768, 768))
-
-    assert batch_pixel_values(single_image).shape == (1, 3, 768, 768)
-    assert batch_pixel_values(already_batched) is already_batched
 
 
 def test_vlm_loader_restores_qwen_sanitizer_after_failure(

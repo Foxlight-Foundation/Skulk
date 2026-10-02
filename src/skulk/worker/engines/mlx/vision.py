@@ -621,6 +621,17 @@ MUSE_GLIMMER_VISION_MODEL_TYPES: frozenset[str] = frozenset(
     {"muse_glimmer", "muse-glimmer"}
 )
 
+#: Model families whose own processor surrounds every expanded image block
+#: with a blank line on each side. Hugging Face's Gemma 3n processor builds
+#: ``"\n\n" + BOI + soft tokens + EOI + "\n\n"`` (its ``full_image_sequence``),
+#: while Gemma 4's processor adds no blank lines. The expansion has to match
+#: the family exactly: without the blank lines Gemma 3n E2B dropped letters of a
+#: six-character code it reads correctly with them. Gemma 3's processor frames
+#: images the same way, so a Gemma 3 vision card would belong here too once its
+#: placeholder handling is verified.
+_BLANK_LINE_FRAMED_IMAGE_MODEL_TYPES: frozenset[str] = frozenset({"gemma3n"})
+
+
 def _build_vision_prompt_with_debug(
     tokenizer: TokenizerWrapper,
     chat_template_messages: list[JsonDict],
@@ -635,8 +646,10 @@ def _build_vision_prompt_with_debug(
     """Build the expanded prompt and retain the raw placeholder layout.
 
     For models that use BOI/EOI framing (Gemma 3n/4), each expanded image
-    sequence is wrapped as ``BOI + (IMAGE × N) + EOI`` matching the format
-    the model was trained on."""
+    sequence is wrapped as ``BOI + (IMAGE × N) + EOI``. Families in
+    ``_BLANK_LINE_FRAMED_IMAGE_MODEL_TYPES`` also get the blank line their
+    own processor places on each side of that block, so the prompt matches
+    the format the model was trained on."""
     logger.info(
         "Building vision prompt "
         f"(messages={len(chat_template_messages)}, images={len(n_tokens_per_image)})"
@@ -679,6 +692,7 @@ def _build_vision_prompt_with_debug(
     # Walk the prompt and expand each single image_token placeholder into
     # N copies where N = the number of vision features for that image,
     # wrapped in BOI/EOI markers when configured.
+    frame = "\n\n" if model_type in _BLANK_LINE_FRAMED_IMAGE_MODEL_TYPES else ""
     image_idx = 0
     result: list[str] = []
     i = 0
@@ -690,7 +704,7 @@ def _build_vision_prompt_with_debug(
                 if image_idx < len(n_tokens_per_image)
                 else 1
             )
-            result.append(f"{boi_str}{image_token * n}{eoi_str}")
+            result.append(f"{frame}{boi_str}{image_token * n}{eoi_str}{frame}")
             image_idx += 1
             i += pad_len
         else:

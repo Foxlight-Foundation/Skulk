@@ -131,3 +131,65 @@ def test_build_vision_prompt_debug_records_raw_placeholder_offsets():
     assert built.debug.attrs()["raw_image_placeholder_offsets"] == [
         str(raw_placeholder)
     ]
+
+
+class _RawTemplateTokenizer:
+    """Renders a raw chat template with one image placeholder and decodes markers."""
+
+    def apply_chat_template(
+        self, _messages: list[dict[str, object]], **_kwargs: object
+    ) -> str:
+        return (
+            "<bos><start_of_turn>user\n<image_soft_token>What is shown?"
+            "<end_of_turn>\n<start_of_turn>model\n"
+        )
+
+    def decode(self, token_ids: list[int]) -> str:
+        return {1: "<start_of_image>", 2: "<end_of_image>"}[token_ids[0]]
+
+
+def _image_message() -> list[dict[str, object]]:
+    return [
+        {
+            "role": "user",
+            "content": [{"type": "image"}, {"type": "text", "text": "What is shown?"}],
+        }
+    ]
+
+
+def test_gemma3n_image_block_gets_the_blank_lines_its_processor_adds():
+    """Gemma 3n reads small text badly unless the image block is framed like HF's."""
+    built = vision_module._build_vision_prompt_with_debug(  # pyright: ignore[reportPrivateUsage]
+        cast(TokenizerWrapper, cast(object, _RawTemplateTokenizer())),
+        _image_message(),
+        [3],
+        "<image_soft_token>",
+        model_type="gemma3n",
+        boi_token_id=1,
+        eoi_token_id=2,
+    )
+
+    assert built.prompt == (
+        "<bos><start_of_turn>user\n\n\n<start_of_image>"
+        + "<image_soft_token>" * 3
+        + "<end_of_image>\n\nWhat is shown?<end_of_turn>\n<start_of_turn>model\n"
+    )
+
+
+def test_image_block_stays_bare_for_families_without_blank_line_framing():
+    """Families whose processor adds no blank lines keep the plain BOI/EOI block."""
+    built = vision_module._build_vision_prompt_with_debug(  # pyright: ignore[reportPrivateUsage]
+        cast(TokenizerWrapper, cast(object, _RawTemplateTokenizer())),
+        _image_message(),
+        [3],
+        "<image_soft_token>",
+        model_type="qwen3_vl",
+        boi_token_id=1,
+        eoi_token_id=2,
+    )
+
+    assert built.prompt == (
+        "<bos><start_of_turn>user\n<start_of_image>"
+        + "<image_soft_token>" * 3
+        + "<end_of_image>What is shown?<end_of_turn>\n<start_of_turn>model\n"
+    )
