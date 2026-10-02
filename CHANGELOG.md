@@ -507,6 +507,16 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- Gemma vision works again on the MLX engine. Since the MLX stack moved to
+  mlx-vlm 0.6.17, every image sent to a Gemma 4 model crashed its runner and
+  came back as an empty answer: Skulk still replaced the model's vision tower
+  with a pooling fix that mlx-vlm now makes itself, and the replacement could
+  not accept mlx-vlm's new arguments. The replacement is gone. Gemma 3n read
+  small text in images poorly because Skulk framed each image without the
+  blank lines the model's own processor puts around it; images are now framed
+  the same way, and Gemma 3n reads the qualification card's code, color and
+  shape correctly.
+
 - A fresh install no longer downloads the whole git history of Skulk's
   mflux fork (about 177 MB) to build one commit. The Foxlight forks of
   mflux and mlx-lm now install as small wheels built from their pinned
