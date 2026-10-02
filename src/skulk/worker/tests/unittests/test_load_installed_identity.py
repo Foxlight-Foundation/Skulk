@@ -67,6 +67,7 @@ async def test_load_adopts_a_replacement_card_for_unchanged_bytes(
     monkeypatch.setattr(
         worker_main, "register_installed_card_record", registered.append
     )
+    _current_catalog_card(monkeypatch, requested)
 
     with pytest.raises(PermissionError):
         require_registry_installed_artifact(artifact, requested)
@@ -98,9 +99,78 @@ async def test_load_still_refuses_a_card_that_selects_new_bytes(
     monkeypatch.setattr(
         worker_main, "register_installed_card_record", registered.append
     )
+    _current_catalog_card(monkeypatch, requested)
 
     with pytest.raises(PermissionError):
         await worker_main._require_installed_artifact_for_load(artifact, requested)
+
+    _assert_unchanged(artifact, registered)
+
+
+async def test_load_never_adopts_a_superseded_card(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A load stamped with an older card must not roll a copy back to it.
+
+    The copy names one card, the catalog has since moved to another, and an
+    instance placed before that move loads with a third, superseded card. The
+    proof of identical bytes holds, but adopting would rewrite the copy and the
+    process-wide installed record to stale truth.
+    """
+    artifact = _staged_copy_from_previous_card(tmp_path)
+    superseded = _card(_NEW_CARD_ID)
+    registered: list[InstalledCardRecord] = []
+    monkeypatch.setattr(
+        worker_main, "register_installed_card_record", registered.append
+    )
+    _current_catalog_card(monkeypatch, _card(f"card_{'c' * 52}"))
+
+    with pytest.raises(PermissionError):
+        await worker_main._require_installed_artifact_for_load(artifact, superseded)
+
+    _assert_unchanged(artifact, registered)
+
+
+async def test_load_refuses_when_the_adopted_sidecar_cannot_be_written(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed sidecar write keeps the trust refusal instead of escaping."""
+    artifact = _staged_copy_from_previous_card(tmp_path)
+    requested = _card(_NEW_CARD_ID)
+    registered: list[InstalledCardRecord] = []
+    monkeypatch.setattr(
+        worker_main, "register_installed_card_record", registered.append
+    )
+    _current_catalog_card(monkeypatch, requested)
+
+    def _disk_full(_directory: Path, _card: ModelCard) -> InstalledCardRecord:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(
+        worker_main, "refresh_registry_installed_card_if_same_artifact", _disk_full
+    )
+
+    with pytest.raises(PermissionError):
+        await worker_main._require_installed_artifact_for_load(artifact, requested)
+
+    _assert_unchanged(artifact, registered)
+
+
+def _current_catalog_card(
+    monkeypatch: pytest.MonkeyPatch, current: ModelCard
+) -> None:
+    """Pin the signed catalog's current card for the test model."""
+
+    def _lookup(model_id: ModelId) -> ModelCard | None:
+        return current if model_id == current.model_id else None
+
+    monkeypatch.setattr(worker_main, "get_current_registry_card", _lookup)
+
+
+def _assert_unchanged(artifact: Path, registered: list[InstalledCardRecord]) -> None:
+    """The copy still names its original card and nothing was registered."""
 
     record = read_installed_card(artifact)
     assert record is not None

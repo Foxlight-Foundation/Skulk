@@ -63,6 +63,7 @@ from skulk.shared.models.model_cards import (
     ModelId,
     add_to_card_cache,
     delete_custom_card,
+    get_current_registry_card,
     record_custom_card_mutation_applied,
     register_installed_card_record,
 )
@@ -399,10 +400,13 @@ async def _require_installed_artifact_for_load(
     store host's canonical copy beside an older staged copy. The download path
     adopts a replacement signed card for unchanged bytes in the copy it finds,
     but the runner opens the copy ``build_model_path`` resolves, which may still
-    carry the previous card's sidecar. Adopt the current card for that copy
-    under the same proof the download path uses (same repository, revision and
-    selected files, covered by its verified manifest), so the verified copy is
-    the loaded copy. Anything the proof cannot cover stays a terminal refusal.
+    carry the previous card's sidecar. When the requested card is the current
+    signed catalog card, adopt it for that copy under the same proof the
+    download path uses (same repository, revision and selected files, covered
+    by its verified manifest), so the verified copy is the loaded copy.
+    Adoption only ever moves a copy to current signed truth: a load stamped
+    with a superseded card, an adoption the proof cannot cover, and a sidecar
+    that cannot be persisted all keep the original terminal refusal.
 
     Args:
         model_directory: Artifact directory the runner resolves for this card.
@@ -414,24 +418,37 @@ async def _require_installed_artifact_for_load(
 
     Side effects:
         May atomically replace the directory's installed-card sidecar and
-        register the refreshed record.
+        register the refreshed record. Verification and adoption run in a
+        worker thread because a detached record can require a full hash pass.
     """
     try:
-        require_registry_installed_artifact(model_directory, model_card)
-    except PermissionError:
-        refreshed = await to_thread.run_sync(
-            refresh_registry_installed_card_if_same_artifact,
-            model_directory,
-            model_card,
+        await to_thread.run_sync(
+            require_registry_installed_artifact, model_directory, model_card
         )
-        if refreshed is None:
+    except PermissionError as refusal:
+        current = get_current_registry_card(model_card.model_id)
+        if current is None or current.registry_card_id != model_card.registry_card_id:
             raise
+        try:
+            refreshed = await to_thread.run_sync(
+                refresh_registry_installed_card_if_same_artifact,
+                model_directory,
+                model_card,
+            )
+        except OSError:
+            # The copy still names the previous card; refusing is the honest
+            # outcome, and an unhandled OSError would end the task loop.
+            refreshed = None
+        if refreshed is None:
+            raise refusal
         register_installed_card_record(refreshed)
         logger.info(
             "Worker: adopted the current signed card for unchanged local bytes "
             f"of {model_card.model_id} before load"
         )
-        require_registry_installed_artifact(model_directory, model_card)
+        await to_thread.run_sync(
+            require_registry_installed_artifact, model_directory, model_card
+        )
 
 
 def _model_load_trust_failure_message(error: Exception) -> str:
