@@ -51,7 +51,6 @@ jobs:
             version: "0.19.1.post1"
             version_file: pyproject.toml
             version_line: 'version = "{}"'
-            package_dir: mflux
           - distribution: mlx-lm
             wheel_name: mlx_lm
             repository: Foxlight-Foundation/mlx-lm
@@ -60,7 +59,6 @@ jobs:
             version: "0.32.0.post1"
             version_file: mlx_lm/_version.py
             version_line: '__version__ = "{}"'
-            package_dir: mlx_lm
     env:
       DISTRIBUTION: ${{ matrix.distribution }}
       WHEEL_NAME: ${{ matrix.wheel_name }}
@@ -69,7 +67,6 @@ jobs:
       BUILD_VERSION: ${{ matrix.version }}
       VERSION_FILE: ${{ matrix.version_file }}
       VERSION_LINE: ${{ matrix.version_line }}
-      PACKAGE_DIR: ${{ matrix.package_dir }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -97,10 +94,21 @@ jobs:
 
       - uses: astral-sh/setup-uv@v6
 
+      - name: Build the untouched commit for comparison
+        run: |
+          set -euo pipefail
+          # What a git source would have installed: the same commit, built by
+          # its own backend, before any stamp. The published wheel must match
+          # it except for the version.
+          cp -a fork pristine-src
+          cd pristine-src
+          uv build --wheel --out-dir ../pristine
+          ls -la ../pristine
+
       - name: Stamp the Foxlight build version
         run: |
           set -euo pipefail
-          python3 - <<'EOF'
+          python3 - <<'PY'
           import os
           import pathlib
           import re
@@ -118,7 +126,7 @@ jobs:
               sys.exit(f"expected exactly one line {upstream!r} in {path}")
           path.write_text(pattern.sub(stamped, text), encoding="utf-8")
           print(f"{path}: {upstream} -> {stamped}")
-          EOF
+          PY
 
       - name: Build wheel
         run: |
@@ -127,43 +135,79 @@ jobs:
           uv build --wheel --out-dir ../dist
           ls -la ../dist
 
-      - name: Verify wheel
+      - name: Verify the wheel differs from the commit only in its version
         run: |
           set -euo pipefail
-          python3 - <<'EOF'
+          python3 - <<'PY'
           import email
           import os
           import pathlib
           import sys
           import zipfile
 
+          distribution = os.environ["DISTRIBUTION"]
           wheel_name = os.environ["WHEEL_NAME"]
+          upstream = os.environ["UPSTREAM_VERSION"]
           version = os.environ["BUILD_VERSION"]
-          package_dir = os.environ["PACKAGE_DIR"]
-          expected = f"{wheel_name}-{version}-py3-none-any.whl"
-          wheels = sorted(pathlib.Path("dist").glob("*.whl"))
-          if [wheel.name for wheel in wheels] != [expected]:
-              sys.exit(f"expected only {expected}, built {[wheel.name for wheel in wheels]}")
-          with zipfile.ZipFile(wheels[0]) as archive:
-              names = set(archive.namelist())
-              metadata = email.message_from_bytes(
-                  archive.read(f"{wheel_name}-{version}.dist-info/METADATA")
-              )
-          if metadata["Name"].replace("_", "-").lower() != os.environ["DISTRIBUTION"]:
-              sys.exit(f"wheel names {metadata['Name']!r}")
+          version_file = os.environ["VERSION_FILE"]
+          line = os.environ["VERSION_LINE"]
+
+
+          def read_wheel(directory: str, wheel_version: str) -> tuple[dict[str, bytes], dict[str, bytes]]:
+              """Return a wheel's package files and its dist-info files by basename."""
+
+              expected = f"{wheel_name}-{wheel_version}-py3-none-any.whl"
+              wheels = sorted(pathlib.Path(directory).glob("*.whl"))
+              if [wheel.name for wheel in wheels] != [expected]:
+                  sys.exit(f"expected only {expected} in {directory}, found {[wheel.name for wheel in wheels]}")
+              info_prefix = f"{wheel_name}-{wheel_version}.dist-info/"
+              with zipfile.ZipFile(wheels[0]) as archive:
+                  files = {name: archive.read(name) for name in archive.namelist() if not name.endswith("/")}
+              package = {name: data for name, data in files.items() if not name.startswith(info_prefix)}
+              info = {name.removeprefix(info_prefix): data for name, data in files.items() if name.startswith(info_prefix)}
+              return package, info
+
+
+          pristine_package, pristine_info = read_wheel("pristine", upstream)
+          built_package, built_info = read_wheel("dist", version)
+
+          metadata = email.message_from_bytes(built_info["METADATA"])
+          if metadata["Name"].replace("_", "-").lower() != distribution:
+              sys.exit(f"wheel names {metadata['Name']!r}, expected {distribution}")
           if metadata["Version"] != version:
-              sys.exit(f"wheel declares version {metadata['Version']!r}")
-          # Every module of the pinned commit must ship: the wheel replaces
-          # the git checkout, so a missing file is a missing feature.
-          sources = {
-              path.relative_to("fork").as_posix()
-              for path in pathlib.Path("fork", package_dir).rglob("*.py")
-          }
-          missing = sorted(sources - names)
-          if missing:
-              sys.exit(f"wheel lacks {len(missing)} source modules, first {missing[:5]}")
-          print(f"{expected}: {len(names)} files, all {len(sources)} modules present")
-          EOF
+              sys.exit(f"wheel declares version {metadata['Version']!r}, expected {version}")
+
+          if set(built_package) != set(pristine_package):
+              sys.exit(
+                  "package files differ: only in the build "
+                  f"{sorted(set(built_package) - set(pristine_package))[:5]}, only in the commit "
+                  f"{sorted(set(pristine_package) - set(built_package))[:5]}"
+              )
+          stamped_line = line.format(version).encode()
+          upstream_line = line.format(upstream).encode()
+          for name, data in sorted(built_package.items()):
+              # The stamped version file is the one permitted difference.
+              comparable = data.replace(stamped_line, upstream_line) if name == version_file else data
+              if comparable != pristine_package[name]:
+                  sys.exit(f"{name} differs from the commit's own build")
+
+          # RECORD carries per-file hashes and WHEEL the builder's identity;
+          # every other dist-info file (entry points, licenses, top-level
+          # names, requirements) must match apart from METADATA's version.
+          ignored = {"RECORD", "WHEEL"}
+          if set(built_info) - ignored != set(pristine_info) - ignored:
+              sys.exit(f"dist-info files differ: {sorted(set(built_info) ^ set(pristine_info))}")
+          for name in sorted(set(built_info) - ignored):
+              data = built_info[name]
+              if name == "METADATA":
+                  data = data.replace(f"Version: {version}\n".encode(), f"Version: {upstream}\n".encode())
+              if data != pristine_info[name]:
+                  sys.exit(f"dist-info {name} differs from the commit's own build")
+          print(
+              f"{wheel_name}-{version}: {len(built_package)} package files and "
+              f"{len(built_info)} dist-info files match the commit except the version"
+          )
+          PY
 
       - uses: actions/upload-artifact@v4
         with:
