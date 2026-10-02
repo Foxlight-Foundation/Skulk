@@ -20,7 +20,10 @@ dependencies = [
   "anyio==4.11.0",
   "mlx==0.32.2; sys_platform == 'darwin'",
   "mlx[cpu]==0.32.2; sys_platform == 'linux'",
-  "mlx-lm",
+  # mlx-lm and mflux are Foxlight forks installed as wheels from the Foxlight
+  # index (see [tool.uv.sources]); a .postN version is a Foxlight build of
+  # one pinned fork commit.
+  "mlx-lm==0.32.0.post1",
   "mlx-optiq[convert]; sys_platform == 'darwin'",
   "tiktoken>=0.12.0",                             # required for kimi k2 tokenizer
   "hypercorn>=0.18.0",
@@ -33,7 +36,7 @@ dependencies = [
   # mlx<0.32.0; the fork pins upstream main at the commit that moved to
   # mlx 0.32, unblocking the coordinated MLX stack bump (Tom, 2026-09-05:
   # fork rather than drop or wait). Same ownership doctrine as mlx-lm.
-  "mflux",
+  "mflux==0.19.1.post1",
   "python-multipart>=0.0.21",
   "msgspec>=0.19.0",
   "zstandard>=0.23.0",
@@ -138,11 +141,24 @@ skulk_pyo3_bindings = { workspace = true }
 # lightning-indexer batch>1 fix. The CVE-2026-5843 gate is upstream code on
 # this base. Plan + evidence: foxlight-docs
 # initiatives/skulk-engine-refresh/lane-c-reconciliation-plan.md.
-mflux = { git = "https://github.com/Foxlight-Foundation/mflux", rev = "051ba9ff25c9a8a8703356053a012a0dfad3fe39" }
-mlx-lm = { git = "https://github.com/Foxlight-Foundation/mlx-lm", rev = "587b88aaff5accabf6c5ecb7b4de5e010453dde4" }
+# Both forks install as wheels built from their pinned commits (mflux
+# 051ba9ff, mlx-lm 587b88aa) by .github/workflows/fork-wheel.yml and
+# published to the Foxlight index. A git source made every fresh install
+# fetch the fork's whole history (mflux's is about 177 MB) to build one
+# commit. The index is append-only: moving a fork to another commit means
+# a new .postN in that workflow and in the pins above.
+mflux = { index = "foxlight" }
+mlx-lm = { index = "foxlight" }
 # Uncomment to use local mlx/mlx-lm development versions:
 # mlx = { path = "/Users/Shared/mlx", editable=true }
 # mlx-lm = { path = "/Users/Shared/mlx-lm", editable=true }
+
+# Foxlight-built wheels. Explicit: only packages whose source names this
+# index resolve from it, so nothing else can be substituted through it.
+[[tool.uv.index]]
+name = "foxlight"
+url = "https://wheels.foxlight.ai/simple/"
+explicit = true
 
 [build-system]
 requires = ["uv_build>=0.8.9,<0.9.0"]

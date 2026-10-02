@@ -507,6 +507,13 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- A fresh install no longer downloads the whole git history of Skulk's
+  mflux fork (about 177 MB) to build one commit. The Foxlight forks of
+  mflux and mlx-lm now install as small wheels built from their pinned
+  commits and published to the Foxlight package index
+  (`mflux 0.19.1.post1`, `mlx-lm 0.32.0.post1`), so a slow or throttled
+  connection to GitHub no longer stretches an install by an hour.
+
 - `skulk operator configure-relay` no longer reports "None relay lanes"
   for a version 2 provisioning file. Version 2 routes open relay
   connections on demand, and the command now says so; version 1 routes
