@@ -1,0 +1,201 @@
+# Builds Skulk's Foxlight-owned Python forks (mflux, mlx-lm) as wheels from
+# their exact pinned commits and publishes them to the Foxlight PEP 503 index
+# (wheels.foxlight.ai). Skulk pins these wheels instead of git sources: a git
+# source makes every fresh install fetch the fork's entire history (mflux's is
+# about 177 MB) only to build one commit, while a published wheel is one small
+# file pinned by hash in uv.lock.
+#
+# The wheel is the pinned commit's code; the only change is the version line,
+# stamped to the Foxlight build version (`<upstream>.postN`) so the wheel can
+# never be mistaken for, or collide with, an upstream release. The index is
+# append-only: a published version is never rebuilt or replaced, so moving a
+# fork to a new commit means a new `.postN` here and in pyproject.toml.
+#
+# Build runs on pull requests and dev pushes that touch this workflow or the
+# pins in pyproject.toml; PUBLISH runs only on manual dispatch with
+# publish=true (cutting a wheel release is a deliberate act).
+name: fork-wheel
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish the fork wheels to the Foxlight R2 index"
+        type: boolean
+        default: false
+  pull_request:
+    paths:
+      - ".github/workflows/fork-wheel.yml"
+      - "pyproject.toml"
+  push:
+    branches: [dev]
+    paths:
+      - ".github/workflows/fork-wheel.yml"
+      - "pyproject.toml"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - distribution: mflux
+            wheel_name: mflux
+            repository: Foxlight-Foundation/mflux
+            commit: 051ba9ff25c9a8a8703356053a012a0dfad3fe39
+            upstream_version: "0.19.1"
+            version: "0.19.1.post1"
+            version_file: pyproject.toml
+            version_line: 'version = "{}"'
+            package_dir: mflux
+          - distribution: mlx-lm
+            wheel_name: mlx_lm
+            repository: Foxlight-Foundation/mlx-lm
+            commit: 587b88aaff5accabf6c5ecb7b4de5e010453dde4
+            upstream_version: "0.32.0"
+            version: "0.32.0.post1"
+            version_file: mlx_lm/_version.py
+            version_line: '__version__ = "{}"'
+            package_dir: mlx_lm
+    env:
+      DISTRIBUTION: ${{ matrix.distribution }}
+      WHEEL_NAME: ${{ matrix.wheel_name }}
+      FORK_COMMIT: ${{ matrix.commit }}
+      UPSTREAM_VERSION: ${{ matrix.upstream_version }}
+      BUILD_VERSION: ${{ matrix.version }}
+      VERSION_FILE: ${{ matrix.version_file }}
+      VERSION_LINE: ${{ matrix.version_line }}
+      PACKAGE_DIR: ${{ matrix.package_dir }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: skulk
+
+      - name: Guard Skulk's pin
+        run: |
+          set -euo pipefail
+          # Skulk must install exactly the version this job builds, and only
+          # from the Foxlight index; a pin that drifts from this table would
+          # publish a wheel nothing installs, or install one nobody built.
+          grep -qF "\"${DISTRIBUTION}==${BUILD_VERSION}\"" skulk/pyproject.toml
+          grep -qE "^${DISTRIBUTION} = \{ index = \"foxlight\" \}" skulk/pyproject.toml
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ matrix.repository }}
+          ref: ${{ matrix.commit }}
+          path: fork
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify the fork commit
+        run: test "$(git -C fork rev-parse HEAD)" = "$FORK_COMMIT"
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Stamp the Foxlight build version
+        run: |
+          set -euo pipefail
+          python3 - <<'EOF'
+          import os
+          import pathlib
+          import re
+          import sys
+
+          path = pathlib.Path("fork") / os.environ["VERSION_FILE"]
+          line = os.environ["VERSION_LINE"]
+          upstream = line.format(os.environ["UPSTREAM_VERSION"])
+          stamped = line.format(os.environ["BUILD_VERSION"])
+          text = path.read_text(encoding="utf-8")
+          # Anchor on the whole line: a looser match could also rewrite an
+          # unrelated field that merely ends in the same text.
+          pattern = re.compile("^" + re.escape(upstream) + "$", re.MULTILINE)
+          if len(pattern.findall(text)) != 1:
+              sys.exit(f"expected exactly one line {upstream!r} in {path}")
+          path.write_text(pattern.sub(stamped, text), encoding="utf-8")
+          print(f"{path}: {upstream} -> {stamped}")
+          EOF
+
+      - name: Build wheel
+        run: |
+          set -euo pipefail
+          cd fork
+          uv build --wheel --out-dir ../dist
+          ls -la ../dist
+
+      - name: Verify wheel
+        run: |
+          set -euo pipefail
+          python3 - <<'EOF'
+          import email
+          import os
+          import pathlib
+          import sys
+          import zipfile
+
+          wheel_name = os.environ["WHEEL_NAME"]
+          version = os.environ["BUILD_VERSION"]
+          package_dir = os.environ["PACKAGE_DIR"]
+          expected = f"{wheel_name}-{version}-py3-none-any.whl"
+          wheels = sorted(pathlib.Path("dist").glob("*.whl"))
+          if [wheel.name for wheel in wheels] != [expected]:
+              sys.exit(f"expected only {expected}, built {[wheel.name for wheel in wheels]}")
+          with zipfile.ZipFile(wheels[0]) as archive:
+              names = set(archive.namelist())
+              metadata = email.message_from_bytes(
+                  archive.read(f"{wheel_name}-{version}.dist-info/METADATA")
+              )
+          if metadata["Name"].replace("_", "-").lower() != os.environ["DISTRIBUTION"]:
+              sys.exit(f"wheel names {metadata['Name']!r}")
+          if metadata["Version"] != version:
+              sys.exit(f"wheel declares version {metadata['Version']!r}")
+          # Every module of the pinned commit must ship: the wheel replaces
+          # the git checkout, so a missing file is a missing feature.
+          sources = {
+              path.relative_to("fork").as_posix()
+              for path in pathlib.Path("fork", package_dir).rglob("*.py")
+          }
+          missing = sorted(sources - names)
+          if missing:
+              sys.exit(f"wheel lacks {len(missing)} source modules, first {missing[:5]}")
+          print(f"{expected}: {len(names)} files, all {len(sources)} modules present")
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.distribution }}-fork-wheel
+          path: dist/*.whl
+          if-no-files-found: error
+          retention-days: 30
+
+  publish-index:
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    runs-on: ubuntu-latest
+    # Every wheel workflow regenerates the one shared index from the bucket's
+    # contents, so publications serialize across workflows.
+    concurrency:
+      group: foxlight-engine-wheel-index-publication
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: "*-fork-wheel"
+          merge-multiple: true
+          path: dist
+      - uses: astral-sh/setup-uv@v6
+      - name: Publish wheels to the Foxlight index
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          set -euo pipefail
+          ls -la dist
+          uv run --no-project --with boto3 python scripts/publish_wheel_index.py dist/*.whl

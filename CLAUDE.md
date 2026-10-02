@@ -239,7 +239,11 @@ PEP 503 index on Cloudflare R2 (`wheels.foxlight.ai`, source of
 truth; `scripts/publish_wheel_index.py`; CUDA wheel exceeds PyPI's size
 limit). The R2 index is the sole channel for new wheel versions: the Vulkan
 PyPI mirror was retired 2026-08-30 and existing PyPI versions stay up
-unchanged. The CUDA wheel builds with
+unchanged. Skulk's Python forks (mflux, mlx-lm) ship there too:
+`.github/workflows/fork-wheel.yml` builds each pinned fork commit as an
+`<upstream>.postN` wheel, and pyproject installs them from that explicit
+index, never as git sources (a git source made every fresh install fetch
+the fork's whole history, about 177 MB for mflux). The CUDA wheel builds with
 `GGML_CUDA_NO_VMM=ON`: GPU-less CI cannot satisfy the driver API's transitive
 libcuda.so.1 link (stubs ship only libcuda.so), so never reintroduce
 driver-API-dependent flags to that build. The aarch64 lane uses CUDA 12.9 and
