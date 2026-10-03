@@ -12,6 +12,7 @@ import base64
 import hashlib
 import json
 import os
+import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -566,14 +567,32 @@ def installed_card_path(model_directory: Path) -> Path:
     return model_directory / INSTALLED_CARD_RELATIVE_PATH
 
 
+def _replace_text_atomically(destination: Path, text: str) -> None:
+    """Replace ``destination`` with ``text`` through a temporary file of its own.
+
+    Two writers in one process, such as a model store finishing a download
+    while the artifact inventory associates the same directory, once shared a
+    PID-named temporary file, so the second rename found it already consumed
+    and failed the download. A per-write name keeps concurrent writers
+    independent; the last rename wins with a complete record either way.
+    """
+
+    temporary = destination.with_name(
+        f".{destination.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    )
+    try:
+        temporary.write_text(text)
+        temporary.replace(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def write_installed_card(model_directory: Path, record: InstalledCardRecord) -> Path:
     """Atomically persist ``record`` beside its artifact files."""
 
     destination = installed_card_path(model_directory)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
-    temporary.write_text(record.model_dump_json(indent=2))
-    temporary.replace(destination)
+    _replace_text_atomically(destination, record.model_dump_json(indent=2))
     return destination
 
 
@@ -611,9 +630,7 @@ def write_installed_card_with_fallback(
             manifest_sha256=record.manifest_sha256,
             record=record,
         )
-        temporary = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
-        temporary.write_text(external.model_dump_json(indent=2))
-        temporary.replace(destination)
+        _replace_text_atomically(destination, external.model_dump_json(indent=2))
         return destination
 
 
@@ -1415,11 +1432,18 @@ def ensure_installed_cards(
             ):
                 continue
             record = associate_installed_card(model_directory, card_list)
-            if record is not None:
-                write_installed_card_with_fallback(
-                    model_directory, record, fallback_root=fallback_root
-                )
-                written.append(record)
+            if record is None:
+                continue
+            # Association hashes every file, long enough for a model store
+            # finishing this same download to write its own record first.
+            # Keep that record rather than replace it with one derived from
+            # the same bytes.
+            if installed_card_path(model_directory).exists():
+                continue
+            write_installed_card_with_fallback(
+                model_directory, record, fallback_root=fallback_root
+            )
+            written.append(record)
         except (OSError, ValueError):
             continue
     return tuple(written)

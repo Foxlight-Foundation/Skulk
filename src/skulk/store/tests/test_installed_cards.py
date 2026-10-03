@@ -1248,3 +1248,86 @@ def test_association_never_re_derives_a_drifted_record(
         == ()
     )
 
+
+
+def test_concurrent_sidecar_writers_do_not_share_a_temporary_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second writer finishing mid-write cannot consume the first one's file.
+
+    A model store finishing a download and the artifact inventory associating
+    the same directory once staged through one PID-named temporary file, so
+    the later rename raised FileNotFoundError and failed the download.
+    """
+
+    artifact = _artifact(tmp_path)
+    card = _card()
+    first = build_installed_card_record(artifact, card)
+    second = build_installed_card_record(
+        artifact, card.model_copy(update={"registry_snapshot_id": "snapshot_2_test"})
+    )
+    original_write_text = Path.write_text
+    interleaved = False
+
+    def _write_then_let_the_other_writer_finish(
+        path: Path, data: str, *args: object, **kwargs: object
+    ) -> int:
+        nonlocal interleaved
+        written = original_write_text(path, data, *args, **kwargs)  # pyright: ignore[reportArgumentType]
+        if not interleaved:
+            interleaved = True
+            write_installed_card(artifact, second)
+        return written
+
+    monkeypatch.setattr(Path, "write_text", _write_then_let_the_other_writer_finish)
+
+    write_installed_card(artifact, first)
+
+    assert interleaved
+    # The interrupted writer renamed last, so its complete record stands.
+    assert read_installed_card(artifact) == first
+    assert [
+        path.name for path in installed_cards.installed_card_path(artifact).parent.iterdir()
+    ] == [installed_cards.installed_card_path(artifact).name]
+
+
+def test_association_keeps_a_record_written_while_it_was_hashing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The store's record for the same bytes is authoritative over a scan's.
+
+    Association hashes every file, long enough for the model store to finish
+    the same download and write its own record. The scan must neither replace
+    that record nor report it as written for re-registration.
+    """
+
+    card = _card()
+    assert card.source_revision is not None
+    root = tmp_path / "models"
+    artifact = root / f"org--model--revision-{card.source_revision}"
+    artifact.mkdir(parents=True)
+    (artifact / "config.json").write_text("{}")
+    (artifact / "model.safetensors").write_bytes(b"weights")
+    (artifact / ".skulk-source-revision").write_text(f"{card.source_revision}\n")
+    stored = build_installed_card_record(
+        artifact, card.model_copy(update={"registry_snapshot_id": "snapshot_2_test"})
+    )
+    original_associate = installed_cards.associate_installed_card
+
+    def _store_writes_during_association(
+        model_directory: Path, cards: tuple[ModelCard, ...]
+    ) -> InstalledCardRecord | None:
+        associated = original_associate(model_directory, cards)
+        write_installed_card(model_directory, stored)
+        return associated
+
+    monkeypatch.setattr(
+        installed_cards, "associate_installed_card", _store_writes_during_association
+    )
+
+    assert installed_cards.ensure_installed_cards(
+        root, [card], fallback_root=tmp_path / "records"
+    ) == ()
+    assert read_installed_card(artifact) == stored

@@ -507,6 +507,15 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- A model store download no longer fails at the moment it completes because
+  the artifact inventory recorded the same directory at the same time. Both
+  wrote the model's installed-card record through one temporary file named
+  after the process, so whichever renamed second found the file already
+  consumed and the download failed with `FileNotFoundError`. Every record
+  write now stages through a temporary file of its own, and the inventory
+  leaves alone a record that the store wrote while the inventory was still
+  hashing the files.
+
 - A node holding two copies of one model, such as a store host with an
   older staged copy beside its store copy, no longer refuses to load it
   after the registry replaces the model's card. The download step vouched
