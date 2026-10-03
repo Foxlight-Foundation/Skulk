@@ -47,6 +47,9 @@ afterEach(async () => {
   container?.remove();
   root = null;
   container = null;
+  // Section expansion persists in storage; a test that fails before its own
+  // cleanup must not open or close sections for the next one.
+  localStorage.removeItem('skulk-settings-sections');
   vi.unstubAllGlobals();
   vi.clearAllMocks();
 });
@@ -237,10 +240,15 @@ describe('SettingsPanel persisted config handling', () => {
 it('preserves an unsaved draft across Devices and commits it only with Save', async () => {
   const saveFullConfig = vi.fn<(config: unknown) => Promise<boolean>>(async () => true);
   useConfigMock.mockReturnValue({ fullConfig: { hf_token: '' }, effective: { kv_cache_backend: 'default', has_hf_token: false }, loading: false, saving: false, error: null, fetchConfig: vi.fn(), saveFullConfig });
+  // Open the section through its persisted preference, as the panel restores
+  // it, rather than by clicking its summary: the draft is the subject here,
+  // and once on a loaded CI runner the token field stayed hidden after that
+  // click until the test timed out.
+  localStorage.setItem('skulk-settings-sections', JSON.stringify({ huggingFace: true }));
   container = document.createElement('div'); document.body.append(container); root = createRoot(container);
   await act(async () => root?.render(<ThemeProvider theme={darkTheme}><SettingsPanel open onClose={vi.fn()} /></ThemeProvider>));
   const section = [...container.querySelectorAll('summary')].find(summary => summary.textContent?.includes('HuggingFace'))!;
-  if (!section.parentElement?.hasAttribute('open')) await userEvent.click(section);
+  expect(section.parentElement?.hasAttribute('open')).toBe(true);
   const token = container.querySelector<HTMLInputElement>('input[type="password"]')!;
   await userEvent.fill(token, 'fixture-unsaved-token');
   const devices = [...container.querySelectorAll('button')].find(button => button.getAttribute('aria-label') === 'Devices & pairing')!;
@@ -249,7 +257,7 @@ it('preserves an unsaved draft across Devices and commits it only with Save', as
   expect(saveFullConfig).not.toHaveBeenCalled();
   const back = [...container.querySelectorAll('button')].find(button => button.getAttribute('aria-label') === 'Back to Settings')!;
   await userEvent.click(back);
-  expect(token.value).toBe('fixture-unsaved-token');
+  expect(container.querySelector<HTMLInputElement>('input[type="password"]')?.value).toBe('fixture-unsaved-token');
   expect(saveFullConfig).not.toHaveBeenCalled();
   await userEvent.click([...container.querySelectorAll('button')].find(button => button.textContent === 'Save changes')!);
   expect(saveFullConfig).toHaveBeenCalledWith(expect.objectContaining({ hf_token: 'fixture-unsaved-token' }));
