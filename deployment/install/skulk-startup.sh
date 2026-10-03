@@ -96,6 +96,14 @@ run_prep() {
     # auth prompt, dirty tree) shouldn't block service start. Log the
     # exit code so an operator can spot a long-running silent failure.
     if [[ -d .git ]]; then
+        # The dashboard build below runs `npm install`, which can rewrite the
+        # lock file in this checkout. `git pull` then refuses any update that
+        # changes it, and the node silently stays on its old version. The file
+        # is a build by-product, not an operator edit, so restore it first.
+        if ! git diff --quiet HEAD -- dashboard-react/package-lock.json 2>/dev/null; then
+            log "restoring dashboard-react/package-lock.json (rewritten by the dashboard build) before git pull"
+            git checkout HEAD -- dashboard-react/package-lock.json 2>&1 | tee -a "$PREP_LOG" >&2 || true
+        fi
         log "git pull (non-fatal)"
         PRE_PULL_HEAD="$(git rev-parse HEAD 2>/dev/null || true)"
         if ! git pull --ff-only 2>&1 | tee -a "$PREP_LOG" >&2; then

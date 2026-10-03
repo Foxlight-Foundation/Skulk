@@ -1,6 +1,7 @@
 # Copyright 2026 Foxlight Foundation
 """Installer contract tests for commit-pinned release qualification."""
 
+import json
 import os
 import shlex
 import subprocess
@@ -56,6 +57,81 @@ def test_bundled_node_probe_keeps_retry_diagnostics_visible() -> None:
     installer = _installer()
     assert "elif run_bundled_npm --version; then" in installer
     assert "run_bundled_npm --version >/dev/null" not in installer
+
+
+
+def _git(cwd: Path, *arguments: str) -> str:
+    environment = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "installer-test",
+        "GIT_AUTHOR_EMAIL": "installer-test@example.invalid",
+        "GIT_COMMITTER_NAME": "installer-test",
+        "GIT_COMMITTER_EMAIL": "installer-test@example.invalid",
+    }
+    return subprocess.run(
+        ["git", *arguments],
+        cwd=cwd,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    ).stdout.strip()
+
+
+@pytest.mark.parametrize("ref_kind", ["branch", "commit"])
+def test_update_switches_past_a_lock_file_the_dashboard_build_rewrote(
+    tmp_path: Path, ref_kind: str
+) -> None:
+    """Rerunning the installer upgrades an install whose build rewrote its lock file.
+
+    The dashboard build's `npm install` rewrites dashboard-react/package-lock.json
+    in the checkout. Upgrading a 1.5.1 source install to a release whose lock
+    file differs then aborted at checkout for a pinned commit, and for a branch
+    the failed fast-forward was swallowed, so the installer reported success on
+    the old version.
+    """
+
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    _git(origin, "init", "-q", "-b", "main")
+    _git(origin, "config", "uploadpack.allowAnySHA1InWant", "true")
+    lock = origin / "dashboard-react" / "package-lock.json"
+    lock.parent.mkdir()
+    lock.write_text('{"lockfileVersion": 3, "release": "old"}\n')
+    _git(origin, "add", "-A")
+    _git(origin, "commit", "-q", "-m", "old release")
+    install = tmp_path / "skulk"
+    _git(tmp_path, "clone", "-q", str(origin), str(install))
+    lock.write_text('{"lockfileVersion": 3, "release": "new"}\n')
+    _git(origin, "commit", "-q", "-am", "new release")
+    new_head = _git(origin, "rev-parse", "HEAD")
+    installed_lock = install / "dashboard-react" / "package-lock.json"
+    installed_lock.write_text('{"lockfileVersion": 3, "rewritten": true}\n')
+
+    installer = _installer()
+    start = installer.index("# --- fetch")
+    end = installer.index('cd "$INSTALL_DIR"', start)
+    reference = "main" if ref_kind == "branch" else new_head
+    script = (
+        "set -euo pipefail\n"
+        "log() { printf '%s\\n' \"$*\"; }\n"
+        "die() { printf '%s\\n' \"$*\" >&2; exit 1; }\n"
+        f"INSTALL_DIR={shlex.quote(str(install))}\n"
+        f"INSTALL_REF={shlex.quote(reference)}\n" + installer[start:end]
+    )
+    result = subprocess.run(
+        ["/bin/bash", "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert _git(install, "rev-parse", "HEAD") == new_head
+    assert json.loads(installed_lock.read_text())["release"] == "new"
+    assert "restoring dashboard-react/package-lock.json" in result.stdout
 
 
 def _rust_fixture(
