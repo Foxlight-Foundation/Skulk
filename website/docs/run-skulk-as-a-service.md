@@ -229,6 +229,8 @@ systemctl --user restart skulk
 If you've turned auto-update off (`SKULK_AUTO_UPDATE=0`), do the manual flow:
 
 ```bash
+# The dashboard build rewrites this lock file; restore it so git can update.
+git checkout -- dashboard-react/package-lock.json
 git pull
 uv run python scripts/run_bundled_npm.py --version
 cd dashboard-react
