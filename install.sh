@@ -136,6 +136,15 @@ command -v uv >/dev/null 2>&1 || die "uv installation failed; see https://docs.a
 
 if [[ -d "$INSTALL_DIR/.git" ]]; then
     log "updating existing checkout at $INSTALL_DIR (ref: $INSTALL_REF)"
+    # The dashboard build runs `npm install`, which can rewrite the lock file
+    # inside the checkout. git then refuses to switch to any release whose
+    # lock file differs, so an install that built its dashboard could never
+    # be updated by rerunning this installer. The file is a build by-product,
+    # not an operator edit, so restore it before switching.
+    if ! git -C "$INSTALL_DIR" diff --quiet HEAD -- dashboard-react/package-lock.json 2>/dev/null; then
+        log "restoring dashboard-react/package-lock.json (rewritten by the dashboard build) before switching versions"
+        git -C "$INSTALL_DIR" checkout HEAD -- dashboard-react/package-lock.json
+    fi
     git -C "$INSTALL_DIR" fetch origin "$INSTALL_REF"
     # A tag or remote-only ref may not be checkout-able by name after a bare
     # fetch; FETCH_HEAD always is, keeping re-runs idempotent for any ref.

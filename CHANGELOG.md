@@ -507,6 +507,16 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- Rerunning the installer upgrades a source install again. The dashboard
+  build's `npm install` rewrites `dashboard-react/package-lock.json` inside the
+  checkout, and git refuses to switch to a release whose lock file differs:
+  with a pinned commit the installer aborted at checkout, and with a branch
+  such as `main` the failed fast-forward was swallowed, so the installer
+  reported success while the install stayed on its old version. The
+  supervised startup script's boot-time `git pull` stalled the same way with
+  only a warning. Both now restore that build-rewritten file, with a log line,
+  before they switch versions.
+
 - A model store download no longer fails at the moment it completes because
   the artifact inventory recorded the same directory at the same time. Both
   wrote the model's installed-card record through one temporary file named
