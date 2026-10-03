@@ -94,6 +94,15 @@ Docs source lives in `website/docs/`. Generated content:
 
 Deploy (`.github/workflows/docs.yml`): a push to `main` OR `dev` publishes TWO live sites in one GitHub Pages deploy: the **stable** docs built from `main` at `/Skulk/` and the **next** docs built from `dev` at `/Skulk/next/`. A build matrix builds each branch's current content (baseUrl set via `DOCS_BASE_URL`, channel banner via `DOCS_CHANNEL`), and the deploy job assembles them (stable at root, next under `/next/`). There are no Docusaurus version snapshots to maintain: each site is rebuilt live from its branch, so a push to either rebuilds and redeploys both. PRs build the PR's own docs as a validation artifact only.
 
+Successful push builds additionally export `openapi.json` and `docs-export.json`
+in each channel. `scripts/publish_docs_export.py` records the exact matrix
+checkout revision, workflow run ID, generated contract digest, original sidebar
+digest and tracked guide/image hashes. Independently branded documentation
+consumers retrieve that public revision and verify identities rather than
+re-exporting an API from an arbitrary branch head. Publication rejects obsolete
+workflow runs before the Pages upload; failed builds retain the last working
+site. No product implementation or operator configuration enters these exports.
+
 ## Pre-Commit Checks (REQUIRED)
 
 **IMPORTANT: Always run these checks before committing code. CI will fail if these don't pass.**

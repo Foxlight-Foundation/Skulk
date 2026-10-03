@@ -129,6 +129,17 @@ This starts a Vite dev server on port 3000 with hot reload. The dev server proxi
   or ordinary events.
 - `src/skulk/shared/` — Shared types, constants, topology
 - `website/docs/` — Docusaurus documentation source, including API guide and model-capability docs
+- `scripts/publish_docs_export.py` — Exact source and OpenAPI identities from a
+  successfully built documentation channel for independently branded mirrors
+
+Documentation publishing remains owned by the product repository. A successful
+stable/next push build exports `docs-export.json` and `openapi.json` alongside
+each channel's site. The manifest binds that matrix checkout, not the workflow
+trigger revision; its SHA-256 values cover the generated API, original sidebar,
+and tracked guides/images. Consumers must verify those identities before
+publication. Do not replace guides, flatten navigation or maintain a second
+copy of normative product documentation in a presentation repository. A failed
+build or obsolete workflow run does not replace the last working publication.
 
 ## Development Guidelines
 
