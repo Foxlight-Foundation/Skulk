@@ -131,10 +131,13 @@ const LogoText = styled.span`
 
 /** The trademark notice beside the wordmark: the ™ glyph already sits high in
  *  its em box, so top alignment (not a superscript, which would raise it twice)
- *  places it at the wordmark's cap height at any header size. */
+ *  places it at the wordmark's cap height at any header size. It is muted like
+ *  the version number so the wordmark stays the focus. */
 const TrademarkSign = styled.span`
   font-size: 0.4em;
   font-weight: 400;
+  font-family: ${({ theme }) => theme.fonts.body};
+  color: ${({ theme }) => theme.colors.textSecondary};
   letter-spacing: 0;
   line-height: 1;
   vertical-align: top;
