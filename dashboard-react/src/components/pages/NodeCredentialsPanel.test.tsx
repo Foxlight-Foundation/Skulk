@@ -21,6 +21,9 @@ function makeStore() { return configureStore({ reducer: { [apiSlice.reducerPath]
 function response(body: unknown, status = 200) { return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } }); }
 async function contains(text: string) { await act(async () => { await vi.waitFor(() => expect(host.textContent).toContain(text)); }); }
 async function click(label: string) { await act(async () => { [...host.querySelectorAll('button')].find((item) => item.textContent === label)?.click(); }); }
+// The refresh message can render before the editor's fieldset re-enables, and a
+// click on a disabled button does nothing; wait for the control itself.
+async function enabled(label: string) { await act(async () => { await vi.waitFor(() => expect([...host.querySelectorAll('button')].find((item) => item.textContent === label)?.matches(':disabled')).toBe(false)); }); }
 function fill(value: string) { const input = host.querySelector('input, textarea') as HTMLInputElement | HTMLTextAreaElement | null; if (!input) throw new Error('Missing credential input'); input.value = value; }
 beforeEach(async () => {
   posts = [];
@@ -111,6 +114,7 @@ it('preserves multiline credential bytes and clears drafts before an unconfirmed
   expect(posts).toHaveLength(1);
   await click('Refresh credential status');
   await contains('Credential status refreshed');
+  await enabled('Use single-line input');
   fill(value);
   await click('Use single-line input');
   expect(host.querySelector('textarea')).toBeNull();
