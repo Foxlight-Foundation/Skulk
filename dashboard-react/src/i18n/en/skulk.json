@@ -298,6 +298,7 @@
   "fileSize.valueWithUnit": "{value} {unit}",
   "fileSize.zeroBytes": "0 B",
   "header.brand": "Skulk",
+  "header.brandTrademark": "™",
   "header.mobileMenu": "Menu",
   "header.nav.chat": "Chat",
   "header.nav.cluster": "Cluster",
