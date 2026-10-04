@@ -507,6 +507,19 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- An NVIDIA node installed from the Ubuntu or Debian packages now serves GGUF
+  models with the CUDA engine. The packaged runtime is read-only and has no
+  `uv`, so it could not install the CUDA llama-server wheel. Instead it fell
+  back to the Vulkan engine archive, which on a GPU container's compute-only
+  driver stack finds no device, so the node served on the CPU. When the
+  runtime's own environment cannot take the wheel, Skulk now installs it for
+  the user that runs the node. It downloads the pinned wheel from the
+  Foxlight index by exact URL, checks the SHA-256 the index publishes, and
+  installs it with the runtime's `pip` into that user's engines directory,
+  with NVIDIA's runtime libraries from PyPI. The engine then runs through
+  launchers that put those libraries on the loader path. The first online
+  start downloads several gigabytes once; an offline node downloads nothing.
+
 - Rerunning the installer upgrades a source install again. The dashboard
   build's `npm install` rewrites `dashboard-react/package-lock.json` inside the
   checkout, and git refuses to switch to a release whose lock file differs:

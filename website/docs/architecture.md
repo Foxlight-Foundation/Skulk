@@ -1493,8 +1493,17 @@ to preserve it across service restarts. On an NVIDIA node with
 no usable CUDA wheel installed (a bare checkout or a GPU-cloud container
 that skipped the installer's engine step), provisioning first installs the
 Foxlight CUDA wheel on demand from the wheel index, so the CUDA lane
-completes itself instead of degrading; only if that fails does the node fall
-back to the Vulkan lane, where an already-installed Vulkan wheel still
+completes itself instead of degrading. A runtime that cannot take the wheel
+into its own environment, such as the read-only operating-system packages,
+which ship pip but no uv, installs it for the running user instead: the
+pinned wheel is taken from the index by exact URL, checked against the
+SHA-256 the index publishes, and installed with the runtime's pip into a
+per-pin directory under the engines directory, with NVIDIA's runtime wheels
+resolved from PyPI alone. Shell launchers in that directory put those
+libraries on the loader path, as the wheel's own shim does in an
+environment. Startup and `skulk doctor` prefer an environment CUDA wheel,
+then that user install, then any other engine wheel. Only if the install
+fails does the node fall back to the Vulkan lane, where an already-installed Vulkan wheel still
 outranks tarball provisioning and otherwise the
 checksum-verified tarball fallback applies: a visible
 NVIDIA GPU tries tarball variants in order: first a CUDA build (upstream publishes no
