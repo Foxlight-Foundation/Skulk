@@ -325,8 +325,8 @@ def _derive_llama_server(
                     "would serve on CPU at a fraction of hardware speed."
                 ),
                 remediation=(
-                    "Use a GPU-enabled llama-server build: on NVIDIA, "
-                    "`uv pip install skulk-llama-server-cuda`; otherwise set "
+                    "Use a GPU-enabled llama-server build: on NVIDIA, run "
+                    "`skulk doctor --fix` to install the CUDA engine; otherwise set "
                     "SKULK_LLAMA_SERVER_BIN to a GPU build (or "
                     "SKULK_LLAMA_SERVER_BACKENDS to the build's backend) and "
                     f"restart skulk; {_INSTALL_DOCS_HINT}."

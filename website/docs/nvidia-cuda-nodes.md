@@ -40,7 +40,10 @@ any machine where `nvidia-smi` works is ready. In particular:
 
 On Ubuntu or Debian, start with the packaged app or headless runtime in the
 [installation guide](install). It keeps the node's runtime aligned with the
-other release artifacts. The source installer below remains useful for other
+other release artifacts. A packaged NVIDIA node installs the CUDA engine
+wheel described below for the user that runs Skulk at its first online
+start, a one-time download of several gigabytes into
+`~/.local/share/skulk/engines`, and then serves GGUF models with it. The source installer below remains useful for other
 distributions, development builds, custom CUDA environments, and the optional
 `--with-vllm` source path.
 

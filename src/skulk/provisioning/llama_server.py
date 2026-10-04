@@ -22,21 +22,31 @@ Opt out with ``SKULK_NO_ENGINE_AUTOPROVISION=1`` (node-local launch policy).
 from __future__ import annotations
 
 import hashlib
+import html
 import importlib
 import os
 import platform as platform_module
+import re
 import shutil
 import subprocess
 import sys
 import sysconfig
 import tarfile
 import tempfile
+from importlib.metadata import distributions
 from importlib.util import find_spec
 from pathlib import Path
+from urllib.parse import unquote, urljoin
 
 import httpx
 from loguru import logger
 from packaging.specifiers import SpecifierSet
+from packaging.tags import sys_tags
+from packaging.utils import (
+    InvalidWheelFilename,
+    canonicalize_name,
+    parse_wheel_filename,
+)
 from packaging.version import InvalidVersion, Version
 
 from skulk.provisioning.manifest import (
@@ -158,16 +168,8 @@ def _wheel_version_matches_pin(distribution: str, *, quiet: bool = False) -> boo
         installed = version(distribution)
     except PackageNotFoundError:
         return False
-    expected_prefix = f"0.{LLAMA_SERVER_PIN.removeprefix('b')}."
-    minimum_revision = (
-        LLAMA_SERVER_CUDA_MIN_REVISION if distribution == "skulk-llama-server-cuda" else 0
-    )
-    constraint = f"=={expected_prefix}*,>={expected_prefix}{minimum_revision}"
-    try:
-        matches = Version(installed) in SpecifierSet(constraint)
-    except InvalidVersion:
-        matches = False
-    if matches:
+    constraint = _pin_constraint(distribution)
+    if _version_satisfies_pin(installed, distribution):
         return True
     if not quiet:
         logger.warning(
@@ -176,6 +178,34 @@ def _wheel_version_matches_pin(distribution: str, *, quiet: bool = False) -> boo
             f"ignoring the wheel (install {distribution}{constraint} to use it)"
         )
     return False
+
+
+def _pin_constraint(distribution: str) -> str:
+    """The version range an engine wheel must fall in to package the pin.
+
+    The wheel version scheme is ``0.<llama.cpp build>.<packaging rev>``; the
+    CUDA wheel also needs at least :data:`LLAMA_SERVER_CUDA_MIN_REVISION`.
+    """
+    expected_prefix = f"0.{LLAMA_SERVER_PIN.removeprefix('b')}."
+    minimum_revision = (
+        LLAMA_SERVER_CUDA_MIN_REVISION
+        if distribution == "skulk-llama-server-cuda"
+        else 0
+    )
+    return f"=={expected_prefix}*,>={expected_prefix}{minimum_revision}"
+
+
+def _version_satisfies_pin(installed: str, distribution: str) -> bool:
+    """Whether an engine wheel version packages the pinned llama.cpp build."""
+    try:
+        version = Version(installed)
+    except InvalidVersion:
+        return False
+    # Explicit because packaging releases disagree on whether a plain range
+    # admits pre-releases, and no engine pre-release is ever qualified.
+    return SpecifierSet(_pin_constraint(distribution)).contains(
+        version, prereleases=False
+    )
 
 
 def _cuda_capability_ok(facts: NodeFacts) -> bool:
@@ -267,6 +297,308 @@ def _cuda_wheel_usable() -> bool:
     )
 
 
+_CUDA_DISTRIBUTION = "skulk-llama-server-cuda"
+
+#: Shell launchers written next to a user-installed CUDA engine. They put the
+#: NVIDIA runtime libraries on llama-server's loader path and exec it, the job
+#: the wheel's console shim does inside a writable environment.
+_USER_CUDA_LAUNCHERS = {
+    "llama-server-cuda": "llama-server",
+    "ggml-rpc-server-cuda": "ggml-rpc-server",
+}
+
+
+def _user_cuda_engine_dir() -> Path:
+    """Where this user's copy of the pinned CUDA engine wheel is installed.
+
+    An operating-system package installs Skulk read-only and ships no ``uv``,
+    so the CUDA engine cannot join that environment; it is installed for the
+    running user under the engines directory instead, one directory per pin.
+    """
+    return SKULK_ENGINES_DIR / "wheels" / _CUDA_DISTRIBUTION / LLAMA_SERVER_PIN
+
+
+def _installed_version_in(directory: Path, distribution: str) -> str | None:
+    """The version of ``distribution`` installed under ``directory``, if any.
+
+    A damaged install reads as absent, so startup reinstalls it instead of
+    failing: an empty METADATA (a power loss before the install reached the
+    disk) has no fields, and undecodable bytes raise ``UnicodeDecodeError``.
+    """
+    if not directory.is_dir():
+        return None
+    try:
+        for installed in distributions(path=[str(directory)]):
+            metadata = installed.metadata
+            if "Name" not in metadata or "Version" not in metadata:
+                continue
+            if canonicalize_name(metadata["Name"]) == distribution:
+                return metadata["Version"]
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+def user_cuda_llama_server(facts: NodeFacts) -> tuple[Path, Path | None] | None:
+    """The CUDA engine installed for this user, as ``(server, rpc_or_None)``.
+
+    The same gates as an environment wheel: the GPU must match the wheel's
+    compiled kernels and the installed version must package the pin.
+
+    Args:
+        facts: The facts snapshot (gates on the CUDA wheel's SM floor).
+
+    Returns:
+        The launcher paths, or ``None`` when no usable user install exists.
+    """
+    if not _cuda_capability_ok(facts):
+        return None
+    directory = _user_cuda_engine_dir()
+    server = directory / "launchers" / "llama-server-cuda"
+    if not server.is_file() or not os.access(server, os.X_OK):
+        return None
+    version = _installed_version_in(directory, _CUDA_DISTRIBUTION)
+    if version is None or not _version_satisfies_pin(version, _CUDA_DISTRIBUTION):
+        return None
+    rpc = directory / "launchers" / "ggml-rpc-server-cuda"
+    rpc_usable = rpc.is_file() and os.access(rpc, os.X_OK)
+    return server, (rpc if rpc_usable else None)
+
+
+def _environment_writable() -> bool:
+    """Whether engine wheels can be installed into the running environment."""
+    return os.access(sysconfig.get_path("purelib"), os.W_OK)
+
+
+def _foxlight_cuda_wheel() -> tuple[str, str] | None:
+    """The newest pin-matched CUDA engine wheel for this platform on the index.
+
+    Returns:
+        ``(url, sha256)`` from the Foxlight PEP 503 page, or ``None`` when the
+        index is unreachable or lists no compatible wheel.
+    """
+    page = urljoin(FOXLIGHT_WHEEL_INDEX, f"{_CUDA_DISTRIBUTION}/")
+    try:
+        response = httpx.get(
+            page, follow_redirects=True, timeout=_DOWNLOAD_TIMEOUT_SECONDS
+        )
+        response.raise_for_status()
+    except httpx.HTTPError as error:
+        logger.warning(f"could not read the CUDA engine index at {page}: {error}")
+        return None
+    supported = {str(tag) for tag in sys_tags()}
+    best: tuple[Version, str, str] | None = None
+    hrefs: list[str] = re.findall(r'href="([^"]+)"', response.text)
+    for href in hrefs:
+        url, _, fragment = urljoin(page, html.unescape(href)).partition("#")
+        if not fragment.startswith("sha256="):
+            continue
+        try:
+            name, version, _, tags = parse_wheel_filename(
+                unquote(url.rsplit("/", 1)[-1])
+            )
+        except InvalidWheelFilename:
+            continue
+        if name != _CUDA_DISTRIBUTION or not _version_satisfies_pin(
+            str(version), _CUDA_DISTRIBUTION
+        ):
+            continue
+        if not any(str(tag) in supported for tag in tags):
+            continue
+        if best is None or version > best[0]:
+            best = (version, url, fragment.removeprefix("sha256="))
+    if best is None:
+        logger.warning(
+            f"the CUDA engine index lists no {_CUDA_DISTRIBUTION}"
+            f"{_pin_constraint(_CUDA_DISTRIBUTION)} wheel for this platform"
+        )
+        return None
+    return best[1], best[2]
+
+
+def _write_cuda_launchers(tree: Path) -> None:
+    """Write the shell launchers for a CUDA engine installed under ``tree``.
+
+    Each launcher resolves its own directory at run time, so the install can
+    be moved into place after it is written.
+    """
+    library_dirs = sorted(
+        str(lib.relative_to(tree)) for lib in tree.glob("nvidia/*/lib") if lib.is_dir()
+    )
+    library_dirs.append("skulk_llama_server_cuda/bin")
+    loader_path = ":".join(f"$root/{relative}" for relative in library_dirs)
+    launchers = tree / "launchers"
+    launchers.mkdir()
+    for launcher, binary in _USER_CUDA_LAUNCHERS.items():
+        target = tree / "skulk_llama_server_cuda" / "bin" / binary
+        if not target.is_file():
+            continue
+        script = launchers / launcher
+        script.write_text(
+            "#!/bin/sh\n"
+            "# Written by Skulk: runs the CUDA engine installed for this user with\n"
+            "# NVIDIA's runtime libraries on the loader path.\n"
+            'root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)\n'
+            f'LD_LIBRARY_PATH="{loader_path}${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}"\n'
+            "export LD_LIBRARY_PATH\n"
+            f'exec "$root/skulk_llama_server_cuda/bin/{binary}" "$@"\n'
+        )
+        script.chmod(0o755)
+
+
+def _pip_available() -> bool:
+    """Whether this interpreter can run ``python -m pip``."""
+    return find_spec("pip") is not None
+
+
+def _install_cuda_wheel_for_user(facts: NodeFacts) -> bool:
+    """Install the pinned CUDA engine into this user's engines directory.
+
+    For runtimes the CUDA wheel cannot join, such as an operating-system
+    package that installs Skulk read-only without ``uv``. The engine wheel is
+    taken by exact URL from the Foxlight index and checked against the
+    index's SHA-256, the same trust the ``uv`` path places in that index.
+    This interpreter's ``pip`` then installs it into a private directory,
+    resolving NVIDIA's runtime wheels from PyPI only. Every failure degrades
+    to the Vulkan/tarball chain; node startup never fails here.
+
+    Args:
+        facts: The facts snapshot (gates on the CUDA wheel's SM floor).
+
+    Returns:
+        ``True`` when a usable CUDA engine is installed for this user.
+    """
+    link = _foxlight_cuda_wheel()
+    if link is None:
+        return False
+    url, sha256 = link
+    destination = _user_cuda_engine_dir()
+    logger.info(
+        f"installing the CUDA engine for this user from {url} into "
+        f"{destination}; multi-GB, one-time"
+    )
+    try:
+        failure = _install_cuda_engine_tree(url, sha256, destination)
+    except OSError as error:
+        failure = f"filesystem error ({error})"
+    if failure is None and user_cuda_llama_server(facts) is None:
+        failure = "the installed engine is not usable"
+    if failure is not None:
+        logger.warning(
+            f"CUDA engine install for this user failed: {failure}; the node "
+            "degrades to the Vulkan/tarball chain"
+        )
+        return False
+    return True
+
+
+def _install_cuda_engine_tree(url: str, sha256: str, destination: Path) -> str | None:
+    """Download, verify, and pip-install the CUDA engine at ``destination``.
+
+    The install is staged beside ``destination`` and moved into place only
+    when complete, so an interrupted install never leaves a partial engine
+    where startup would find it.
+
+    Args:
+        url: The engine wheel's exact URL on the Foxlight index.
+        sha256: The digest the index publishes for that wheel.
+        destination: The per-pin user engine directory.
+
+    Returns:
+        ``None`` on success, otherwise why the install failed.
+
+    Raises:
+        OSError: When the engines directory cannot be written.
+    """
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(
+        tempfile.mkdtemp(prefix=f".{destination.name}.", dir=destination.parent)
+    )
+    try:
+        wheel = staging / unquote(url.rsplit("/", 1)[-1])
+        try:
+            with httpx.stream(
+                "GET", url, follow_redirects=True, timeout=_DOWNLOAD_TIMEOUT_SECONDS
+            ) as response:
+                response.raise_for_status()
+                with wheel.open("wb") as handle:
+                    for chunk in response.iter_bytes(1 << 20):
+                        handle.write(chunk)
+            _verify_sha256(wheel, sha256)
+        except (httpx.HTTPError, RuntimeError) as error:
+            return f"no verified engine wheel ({error})"
+        tree = staging / "tree"
+        # --isolated already ignores pip configuration files and PIP_*
+        # variables; stripping them too keeps a host mirror out of the
+        # resolution of NVIDIA's runtime wheels even if that changes. pip
+        # stages a --target install under TMPDIR, which may be a small tmpfs,
+        # so the gigabytes of runtime libraries stay on the engines volume.
+        environment = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith("PIP_")
+        }
+        environment["TMPDIR"] = str(staging)
+        try:
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pip",
+                    "install",
+                    "--isolated",
+                    "--no-input",
+                    "--disable-pip-version-check",
+                    "--no-warn-script-location",
+                    # The engine is installed once per pin; a cached copy of
+                    # NVIDIA's wheels would only double its disk use.
+                    "--no-cache-dir",
+                    "--only-binary",
+                    ":all:",
+                    "--index-url",
+                    _PYPI_INDEX,
+                    "--target",
+                    str(tree),
+                    str(wheel),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=_WHEEL_INSTALL_TIMEOUT_SECONDS,
+                check=False,
+                env=environment,
+            )
+        except (subprocess.TimeoutExpired, OSError) as error:
+            return f"could not run pip ({error})"
+        if completed.returncode != 0:
+            return (
+                f"pip exited {completed.returncode}: {completed.stderr.strip()[-500:]}"
+            )
+        _write_cuda_launchers(tree)
+        if destination.exists():
+            shutil.rmtree(destination)
+        tree.rename(destination)
+        return None
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+def _cuda_lane_ready(facts: NodeFacts) -> bool:
+    """Whether a pin-matched CUDA engine is installed, here or for this user."""
+    return _cuda_wheel_usable() or user_cuda_llama_server(facts) is not None
+
+
+def _installed_engine(vendor: str, facts: NodeFacts) -> tuple[Path, Path | None] | None:
+    """The installed engine to wire, preferring a CUDA build on NVIDIA.
+
+    Order: the environment's engine wheel when it is the CUDA one, then a CUDA
+    engine installed for this user, then any other environment wheel.
+    """
+    wheel = wheel_llama_server(vendor, facts)
+    if vendor != "nvidia" or _cuda_wheel_usable():
+        return wheel
+    return user_cuda_llama_server(facts) or wheel
+
+
 def try_install_cuda_wheel(facts: NodeFacts) -> bool:
     """Install the pinned CUDA engine wheel from the Foxlight index.
 
@@ -277,7 +609,10 @@ def try_install_cuda_wheel(facts: NodeFacts) -> bool:
     through Vulkan (no ICD in compute-only driver stacks) to a CPU-tagged
     engine while the facts probe plainly sees the GPU. Uses ``uv`` (the
     canonical Skulk runtime path) into the current interpreter's
-    environment; a missing ``uv`` logs the manual remediation and degrades.
+    environment. A runtime without ``uv`` or with a read-only environment,
+    such as the operating-system packages, installs the engine for the
+    running user with its own ``pip`` instead; with neither tool the manual
+    remediation is logged and the node degrades.
 
     Args:
         facts: The facts snapshot (gates on the CUDA wheel's SM floor).
@@ -288,6 +623,10 @@ def try_install_cuda_wheel(facts: NodeFacts) -> bool:
     if not _cuda_capability_ok(facts):
         return False
     uv = shutil.which("uv")
+    if (uv is None or not _environment_writable()) and _pip_available():
+        # The operating-system packages install Skulk read-only and ship pip
+        # but no uv, so the wheel cannot join their environment.
+        return _install_cuda_wheel_for_user(facts)
     pin = LLAMA_SERVER_PIN.removeprefix("b")
     specifier = (
         f"skulk-llama-server-cuda==0.{pin}.*,"
@@ -566,7 +905,7 @@ def dormant_llama_server(facts: NodeFacts) -> Path | None:
         else None
     )
     if vendor is not None:
-        wheel = wheel_llama_server(vendor, facts)
+        wheel = _installed_engine(vendor, facts)
         if wheel is not None:
             return wheel[0]
     for variant in select_variant_chain(facts):
@@ -619,10 +958,10 @@ def ensure_llama_server(
     if vendor is not None:
         # A pip-installed engine wheel outranks tarball provisioning: it is
         # the standard-tooling path and already on disk (works offline too).
-        wheel = wheel_llama_server(vendor, facts)
+        wheel = _installed_engine(vendor, facts)
         if (
             vendor == "nvidia"
-            and not _cuda_wheel_usable()
+            and not _cuda_lane_ready(facts)
             and allow_download
             and try_install_cuda_wheel(facts)
         ):
@@ -637,7 +976,7 @@ def ensure_llama_server(
             # installed VULKAN wheel must not shadow the attempt, since its
             # shim cannot drive the GPU in a compute-only container
             # (PR #665 review).
-            wheel = wheel_llama_server(vendor, facts)
+            wheel = _installed_engine(vendor, facts)
         if wheel is not None:
             server_shim, rpc_shim = wheel
             os.environ[LLAMA_SERVER_BIN_ENV] = str(server_shim)
