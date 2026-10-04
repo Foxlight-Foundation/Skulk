@@ -129,12 +129,24 @@ const LogoText = styled.span`
   @media (max-width: 360px) { font-size: 24px; }
 `;
 
+/** The trademark notice beside the wordmark: the ™ glyph already sits high in
+ *  its em box, so top alignment (not a superscript, which would raise it twice)
+ *  places it at the wordmark's cap height at any header size. */
+const TrademarkSign = styled.span`
+  font-size: 0.4em;
+  font-weight: 400;
+  letter-spacing: 0;
+  line-height: 1;
+  vertical-align: top;
+  margin-left: 1px;
+`;
+
 const VersionTag = styled.sup`
   font-size: 10px;
   font-weight: 400;
   font-family: ${({ theme }) => theme.fonts.body};
   color: ${({ theme }) => theme.colors.textSecondary};
-  margin-left: 2px;
+  margin-left: 6px;
   position: relative;
   top: -4px;
 `;
@@ -446,7 +458,11 @@ export function HeaderNav({
         )}
         <LogoBtn $disabled={!showHome} onClick={showHome ? () => navigate('cluster') : undefined}>
           <SkulkIcon size={32} color={theme.colors.text} />
-          <LogoText>{t('header.brand', 'Skulk')}<VersionTag>{__APP_VERSION__}</VersionTag></LogoText>
+          <LogoText>
+            {t('header.brand', 'Skulk')}
+            <TrademarkSign>{t('header.brandTrademark', '™')}</TrademarkSign>
+            <VersionTag>{__APP_VERSION__}</VersionTag>
+          </LogoText>
         </LogoBtn>
         {warnings && warnings.items.length > 0 && (
           <WarningDot $level={warnings.level}>

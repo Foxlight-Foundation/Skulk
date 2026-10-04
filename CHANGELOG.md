@@ -9,6 +9,9 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Changed
 
+- The dashboard header marks Skulk as a trademark, with a ™ beside the
+  wordmark, and leaves a little more space before the version number.
+
 - The Cluster topology draws its routes and arrowheads at half their previous
   opacity in both themes. Routes join every pair of nodes, so a six-node fleet
   draws fifteen of them, and at the old weight they competed with the nodes.
