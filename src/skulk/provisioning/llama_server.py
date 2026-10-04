@@ -319,12 +319,23 @@ def _user_cuda_engine_dir() -> Path:
 
 
 def _installed_version_in(directory: Path, distribution: str) -> str | None:
-    """The version of ``distribution`` installed under ``directory``, if any."""
+    """The version of ``distribution`` installed under ``directory``, if any.
+
+    A damaged install reads as absent, so startup reinstalls it instead of
+    failing: an empty METADATA (a power loss before the install reached the
+    disk) has no fields, and undecodable bytes raise ``UnicodeDecodeError``.
+    """
     if not directory.is_dir():
         return None
-    for installed in distributions(path=[str(directory)]):
-        if canonicalize_name(installed.metadata["Name"]) == distribution:
-            return installed.version
+    try:
+        for installed in distributions(path=[str(directory)]):
+            metadata = installed.metadata
+            if "Name" not in metadata or "Version" not in metadata:
+                continue
+            if canonicalize_name(metadata["Name"]) == distribution:
+                return metadata["Version"]
+    except (OSError, ValueError):
+        return None
     return None
 
 

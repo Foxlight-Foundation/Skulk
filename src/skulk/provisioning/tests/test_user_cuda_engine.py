@@ -334,6 +334,16 @@ def test_user_engine_lookup_requires_the_pin_and_a_capable_gpu(
     assert (provisioning.user_cuda_llama_server(facts) is not None) is found
 
 
+@pytest.mark.parametrize("metadata", [b"", b"\xff\xfe not text"])
+def test_a_damaged_user_engine_reads_as_absent(metadata: bytes) -> None:
+    """A corrupt install must send startup to reinstall, never crash it."""
+    directory = _install_user_engine()
+    (
+        directory / f"skulk_llama_server_cuda-{_CURRENT}.dist-info" / "METADATA"
+    ).write_bytes(metadata)
+    assert provisioning.user_cuda_llama_server(_nvidia()) is None
+
+
 def test_user_engine_lookup_requires_the_launcher() -> None:
     directory = _install_user_engine()
     (directory / "launchers" / "llama-server-cuda").unlink()
