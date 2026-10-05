@@ -16,6 +16,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+import skulk.operator.relay_registration as relay_registration
 from skulk.api.operator_auth import create_operator_auth_router
 from skulk.api.operator_remote_access import OperatorRemoteAccessState
 from skulk.api.remote_pairing import (
@@ -188,8 +189,11 @@ def test_a_fresh_node_is_not_set_up_and_can_register(tmp_path: Path) -> None:
     ("settings", "offline", "reason"),
     [
         (RelayConnectivityConfig(enabled=False), False, "disabled"),
-        (RelayConnectivityConfig(registration_url="https://r.invalid"), True, "offline"),
-        (None, False, "not_configured"),
+        (
+            RelayConnectivityConfig(registration_url="https://r.invalid"),
+            True,
+            "offline",
+        ),
     ],
 )
 def test_registration_blocked_reasons(
@@ -435,3 +439,34 @@ def test_unreadable_pairing_state_is_a_safe_503(
     body = cast(dict[str, object], response.json())
     assert body["code"] == "pairing_state_unavailable"
     assert "protected path detail" not in response.text
+
+
+def test_unconfigured_node_uses_the_default_relay(tmp_path: Path) -> None:
+    """With no relay settings, a node registers with Foxlight's relay."""
+
+    node = _Node(tmp_path)
+    node.settings = None
+
+    status = node.controller.status()
+    assert (status.registration_available, status.registration_blocked_reason) == (
+        True,
+        None,
+    )
+    assert status.relay_host == "relay.foxlight.ai"
+
+
+def test_build_without_a_default_relay_reports_not_configured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A build that unsets the default needs skulk.yaml to name a relay."""
+
+    monkeypatch.setattr(relay_registration, "DEFAULT_RELAY_REGISTRATION_ORIGIN", None)
+    node = _Node(tmp_path)
+    node.settings = None
+
+    status = node.controller.status()
+    assert status.registration_blocked_reason == "not_configured"
+    with pytest.raises(RelayRegistrationError) as raised:
+        node.controller.enable()
+    assert raised.value.failure == "not_configured"
+    assert node.registrations == 0

@@ -7,6 +7,14 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Added
+
+- Phone pairing works without configuration: the first **Pair a phone** (or
+  `skulk operator pair`) registers the node with Foxlight's relay at
+  `relay.foxlight.ai`. `connectivity.relay.registration_url` selects a
+  self-hosted relay, and `connectivity.relay.enabled: false` keeps pairing on
+  LAN and Tailscale.
+
 ### Fixed
 
 - A cluster keeps one phone-pairing gateway, so its five-device limit holds.

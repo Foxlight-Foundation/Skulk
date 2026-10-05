@@ -35,14 +35,14 @@ second, separate one, and `skulk operator pair` asks the node on its machine
 five-device limit is counted on that one gateway. There is no automatic
 failover to another node.
 
-The gateway registers with the relay named in `skulk.yaml`, or with the build's
-default relay:
+The gateway registers with Foxlight's relay, `relay.foxlight.ai`, unless
+`skulk.yaml` names another:
 
 ```yaml
 connectivity:
   relay:
     enabled: true                                  # false keeps pairing on LAN and Tailscale
-    registration_url: https://relay.example.invalid  # optional; omit for the default relay
+    registration_url: https://relay.example.invalid  # optional; omit for relay.foxlight.ai
 ```
 
 The relay is content-blind. It learns the connector key's fingerprint, the two

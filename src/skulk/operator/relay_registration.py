@@ -31,12 +31,13 @@ from skulk.operator.relay import OperatorRelayProvisioning
 from skulk.utils.pydantic_ext import FrozenModel
 from skulk.utils.relay_origin import validate_relay_origin
 
-DEFAULT_RELAY_REGISTRATION_ORIGIN: Final[str | None] = None
+DEFAULT_RELAY_REGISTRATION_ORIGIN: Final[str | None] = "https://relay.foxlight.ai"
 """Relay origin used when ``connectivity.relay.registration_url`` is unset.
 
-PENDING: the production relay origin has not been decided (Phase 0 of the relay
-self-enrollment plan). Until it is set here, a node registers only when
-``skulk.yaml`` names a relay in ``connectivity.relay.registration_url``.
+Foxlight's public registration relay. ``registration_url`` selects a
+self-hosted relay instead, and ``connectivity.relay.enabled: false`` turns
+registration off. A build that sets this to ``None`` registers only when
+``skulk.yaml`` names a relay.
 """
 
 REGISTRATION_PATH: Final = "/v1/registrations"
@@ -239,7 +240,7 @@ def resolve_registration_origin(
     if offline:
         raise RelayRegistrationError("offline")
     origin = configured_origin or DEFAULT_RELAY_REGISTRATION_ORIGIN
-    if origin is None:
+    if not origin:
         raise RelayRegistrationError("not_configured")
     return validate_relay_origin(origin)
 

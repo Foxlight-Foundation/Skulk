@@ -17,6 +17,7 @@ from cryptography.hazmat.primitives import serialization
 
 import skulk.operator.cli as operator_cli
 import skulk.operator.pairing as pairing_module
+import skulk.operator.relay_registration as relay_registration
 from skulk.operator.authority import EncryptedAuthorityStore
 from skulk.operator.key_provider import LocalFileAuthorityKeyProvider
 from skulk.operator.pairing import OperatorPairingService
@@ -393,8 +394,17 @@ def test_unknown_response_fields_are_ignored() -> None:
     assert provisioning.version == 2
 
 
-def test_origin_resolution_honors_the_switch_offline_mode_and_default() -> None:
+def test_origin_resolution_honors_the_switch_offline_mode_and_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Disabled, offline, and unconfigured nodes refuse before any network call."""
+
+    assert (
+        resolve_registration_origin(enabled=True, configured_origin=None, offline=False)
+        == "https://relay.foxlight.ai"
+    )
+    # A build without a default relay registers only when skulk.yaml names one.
+    monkeypatch.setattr(relay_registration, "DEFAULT_RELAY_REGISTRATION_ORIGIN", None)
 
     with pytest.raises(RelayRegistrationError) as disabled:
         resolve_registration_origin(
