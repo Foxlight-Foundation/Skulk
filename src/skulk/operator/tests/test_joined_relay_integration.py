@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import os
 import socket
@@ -539,3 +540,195 @@ async def test_joined_relay_pairing_refresh_and_revocation(
     finally:
         await _stop_gateway_task(gateway_task, shutdown)
         _stop_relay_process(relay_process)
+
+
+async def _wait_for_carrier(remote_access: OperatorRemoteAccessMaterial) -> None:
+    """Wait until an app request crosses the relay and reaches the gateway.
+
+    A registration relay reports process readiness only, so readiness cannot
+    show that this gateway's connector has been admitted. An unauthenticated
+    request answered by Skulk proves the whole carrier path instead.
+    """
+
+    for _ in range(200):
+        try:
+            response = await _request(remote_access, "GET", "/state")
+        except (OSError, AssertionError, ValueError, asyncio.TimeoutError):
+            await asyncio.sleep(0.1)
+            continue
+        if response.status == 401:
+            return
+        await asyncio.sleep(0.1)
+    raise AssertionError("registered gateway never became reachable through the relay")
+
+
+@pytest.mark.asyncio
+async def test_joined_registration_relay_pairs_a_self_registered_gateway(
+    tmp_path: Path,
+) -> None:
+    """Prove self-service registration end to end against the real relay binary.
+
+    No route file is provisioned or transferred: the gateway registers itself,
+    the relay keeps only credential digests, pairing and refresh cross the
+    carrier, the route survives a relay restart, and turning pairing off then
+    on registers a new route under a new key.
+    """
+
+    relay_binary = _require_relay_binary()
+    relay_port = _available_loopback_port()
+    configuration_path = tmp_path / "registration.json"
+    subprocess.run(
+        (
+            relay_binary,
+            "provision-registration",
+            "wss://relay.example.invalid",
+            configuration_path,
+        ),
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    relay_document = cast(dict[str, object], json.loads(configuration_path.read_text()))
+    assert relay_document["version"] == 3
+    # Serve the generated relay on an ephemeral loopback port and advertise
+    # that port, so the carrier URLs the relay returns are reachable here.
+    relay_document["bind"] = f"{_RELAY_LOOPBACK_HOST}:{relay_port}"
+    relay_document["public_origin"] = f"ws://{_RELAY_LOOPBACK_HOST}:{relay_port}"
+    configuration_path.write_text(json.dumps(relay_document))
+    relay_process = subprocess.Popen(
+        (relay_binary, "serve", configuration_path),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    gateway_task: asyncio.Task[None] | None = None
+    shutdown: anyio.Event | None = None
+    try:
+        await _wait_for_relay_health(relay_port)
+        key_provider = LocalFileAuthorityKeyProvider(tmp_path / "authority-key.bin")
+        authority_store = EncryptedAuthorityStore(
+            key_provider,
+            tmp_path / "authority.sqlite3",
+        )
+        relay_repository = OperatorRelayConfigurationRepository(
+            authority_store,
+            certificate_path=tmp_path / "operator-tls.pem",
+            private_key_path=tmp_path / "operator-tls-key.pem",
+        )
+        pairing_service = OperatorPairingService(
+            authority_store,
+            key_provider,
+            relay_repository=relay_repository,
+        )
+        registration_origin = f"http://{_RELAY_LOOPBACK_HOST}:{relay_port}"
+        configuration = pairing_service.register_relay(
+            registration_origin=registration_origin,
+            operator_api_port=_available_loopback_port(),
+            cluster_name="Joined Registration Qualification",
+        )
+        assert configuration.version == 2
+        assert configuration.app_websocket_url == (
+            f"ws://{_RELAY_LOOPBACK_HOST}:{relay_port}/v1/carrier/app"
+        )
+
+        # The relay retains digests only: neither carrier credential appears
+        # in its durable state, while the gateway credential's digest does.
+        state_text = (
+            tmp_path / "registration.json.authority-state" / "fences.json"
+        ).read_text()
+        for credential in (
+            configuration.app_carrier_credential,
+            configuration.gateway_carrier_credential,
+        ):
+            assert credential not in state_text
+        gateway_digest = hashlib.sha256(
+            base64.urlsafe_b64decode(configuration.gateway_carrier_credential + "=")
+        ).digest()
+        assert _base64url(gateway_digest) in state_text
+
+        api = _build_api(pairing_service)
+        shutdown = anyio.Event()
+        gateway_task = asyncio.create_task(api.run_operator_remote_access(shutdown))
+        await _wait_for_operator_listener(configuration.operator_api_port)
+
+        pairing_package = pairing_service.create_session()
+        remote_access = pairing_package.remote_access
+        assert remote_access is not None
+        await _wait_for_carrier(remote_access)
+
+        device_private_key = Ed25519PrivateKey.generate()
+        device_public_key = device_private_key.public_key().public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+        challenge = await _request(
+            remote_access,
+            "POST",
+            "/v1/auth/pairing-sessions/challenge",
+            body={
+                "nonce": pairing_package.nonce,
+                "deviceName": "Joined registration device",
+                "devicePublicKey": _base64url(device_public_key),
+            },
+        )
+        assert challenge.status == 200
+        signature = device_private_key.sign(
+            pairing_signature_message(
+                cluster_id=UUID(str(pairing_package.cluster_id)),
+                nonce=pairing_package.nonce,
+                challenge=str(challenge.body["challenge"]),
+            )
+        )
+        exchange = await _request(
+            remote_access,
+            "POST",
+            "/v1/auth/pairing-sessions/exchange",
+            body={"nonce": pairing_package.nonce, "signature": _base64url(signature)},
+        )
+        assert exchange.status == 200
+        device_id = str(exchange.body["deviceId"])
+        refreshed = await _request(
+            remote_access,
+            "POST",
+            "/v1/auth/token",
+            body={"deviceId": device_id, "refreshToken": str(exchange.body["refreshToken"])},
+        )
+        assert refreshed.status == 200
+        access_token = str(refreshed.body["accessToken"])
+        state = await _request(remote_access, "GET", "/state", bearer=access_token)
+        assert state.status == 200
+
+        # The registered route is durable: a relay restart keeps it, and the
+        # gateway's connector is admitted again without registering anew.
+        _stop_relay_process(relay_process)
+        relay_process = subprocess.Popen(
+            (relay_binary, "serve", configuration_path),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        await _wait_for_relay_health(relay_port)
+        await _wait_for_carrier(remote_access)
+        recovered = await _request(remote_access, "GET", "/state", bearer=access_token)
+        assert recovered.status == 200
+
+        revoked = await _request(
+            remote_access,
+            "DELETE",
+            f"/v1/auth/devices/{device_id}",
+            bearer=access_token,
+        )
+        assert revoked.status == 204
+
+        # Turning pairing off forgets the route locally; turning it back on
+        # registers a new route under a new signing key.
+        await _stop_gateway_task(gateway_task, shutdown)
+        gateway_task = None
+        assert pairing_service.forget_relay()
+        renewed = pairing_service.register_relay(
+            registration_origin=registration_origin,
+            operator_api_port=_available_loopback_port(),
+        )
+        assert renewed.routing_locator != configuration.routing_locator
+        assert renewed.connector_authority_key_id != configuration.connector_authority_key_id
+    finally:
+        await _stop_gateway_task(gateway_task, shutdown)
+        _stop_relay_process(relay_process)
+
