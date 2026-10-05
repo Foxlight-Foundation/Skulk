@@ -2,7 +2,7 @@
 
 The dashboard's **Pair a phone** turns phone pairing on: when this node has no
 relay route, it registers one and remote access starts without a restart.
-**Turn off phone pairing** forgets the route. Between the two, the dashboard
+**Turn off** forgets the route. Between the two, the dashboard
 polls a status that says whether the relay holds a live session from this
 gateway, whether the relay permanently refused the route, and whether another
 node in the cluster already manages phone pairing.

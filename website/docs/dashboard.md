@@ -117,9 +117,11 @@ command-line configuration is available for headless deployments and development
 Open **Settings → Devices & pairing** to connect the native operator app. Choose
 the invitation lifetime and device limit, then **Pair a phone**. The first time,
 the node registers with the relay, connects, and then shows the code; the panel
-explains what the relay learns before you do. It also shows the relay
+notes that traffic between the cluster and the paired app is end to end
+encrypted ([Remote access and pairing](remote-access) lists what the relay can
+observe). It also shows the relay
 connection, names the node that manages pairing when it is another one, and
-offers **Turn off phone pairing**.
+offers **Turn off**.
 
 ![Devices and pairing with invitation generation controls](./imgs/dashboard-pairing.png)
 

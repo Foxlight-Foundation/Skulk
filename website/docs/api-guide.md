@@ -419,9 +419,11 @@ The dashboard exposes the same authority operation under **Settings →
 Devices & pairing**. **Pair a phone** does everything in one action: on a node
 without a relay route it registers one (`POST /v1/auth/remote-pairing`), waits
 up to 20 seconds for the relay session, then creates the invitation. Before the
-first registration the panel explains what the relay learns. It shows the relay
+first registration the panel notes that traffic between the cluster and the
+paired app is end to end encrypted; [Remote access](remote-access.md) lists
+what the relay can observe. It shows the relay
 connection state, says where pairing is managed when another node holds the
-cluster's route, and offers **Turn off phone pairing** while a route is stored.
+cluster's route, and offers **Turn off** while a route is stored.
 Operators choose a lifetime and device limit, generate a branded QR,
 and may download or revoke it. The panel shows how many of the five device
 slots are in use, offers only as many devices as there are free slots, and

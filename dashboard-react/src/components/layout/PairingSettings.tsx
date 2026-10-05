@@ -598,16 +598,10 @@ export function PairingSettings({ invitationHost }: { invitationHost?: HTMLEleme
           ) : null}
           {remoteState === 'not_set_up' && remote?.registrationAvailable ? (
             <RelayNotice>
-              {remote.relayHost
-                ? t(
-                    'settings.pairing.remote.privacyNoticeHost',
-                    "Pairing a phone registers this node with the relay at {host}, so the phone can reach it from any network. The relay learns this node's public key fingerprint, its public internet address, when it connects, and how much data passes through. It never sees what this node and your phone send each other: that stays encrypted end to end.",
-                    { host: remote.relayHost },
-                  )
-                : t(
-                    'settings.pairing.remote.privacyNotice',
-                    "Pairing a phone registers this node with a relay, so the phone can reach it from any network. The relay learns this node's public key fingerprint, its public internet address, when it connects, and how much data passes through. It never sees what this node and your phone send each other: that stays encrypted end to end.",
-                  )}
+              {t(
+                'settings.pairing.remote.privacyNotice',
+                'Traffic between your cluster and the paired app is end to end encrypted.',
+              )}
             </RelayNotice>
           ) : null}
           {remoteFailed ? (
@@ -689,7 +683,7 @@ export function PairingSettings({ invitationHost }: { invitationHost?: HTMLEleme
                       onClick={() => void turnOffPairing()}
                       variant="danger"
                     >
-                      {t('settings.pairing.remote.turnOff', 'Turn off phone pairing')}
+                      {t('settings.pairing.remote.turnOff', 'Turn off')}
                     </Button>
                     <Button
                       disabled={disableResult.isLoading}
@@ -702,7 +696,7 @@ export function PairingSettings({ invitationHost }: { invitationHost?: HTMLEleme
                 </>
               ) : (
                 <Button onClick={() => setConfirmingTurnOff(true)} variant="ghost">
-                  {t('settings.pairing.remote.turnOff', 'Turn off phone pairing')}
+                  {t('settings.pairing.remote.turnOff', 'Turn off')}
                 </Button>
               )}
             </TurnOffRow>

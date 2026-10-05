@@ -50,7 +50,7 @@ credential fingerprints, the gateway's public address, connection times, and
 byte counts. It never sees app traffic, which stays inside TLS that terminates
 on the gateway.
 
-To turn remote access off, choose **Turn off phone pairing** in Devices &
+To turn remote access off, choose **Turn off** in Devices &
 pairing, or run `skulk operator forget-relay`. Phones paired through the relay
 lose remote access until you pair them again, and codes created for the relay
 stop working. Revoke the old device records to free their slots.

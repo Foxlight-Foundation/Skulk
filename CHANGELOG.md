@@ -61,10 +61,11 @@ This project records release notes here and mirrors public-facing notes in
 - The dashboard pairs a phone in one step. **Pair a phone** under
   **Devices & pairing** registers the node with the relay the first time,
   waits for the relay connection, and shows the code; before the first
-  registration the panel explains what the relay learns and never sees. The
+  registration the panel notes that traffic between the cluster and the
+  paired app is end to end encrypted. The
   panel shows whether the relay connection is up, why this node cannot
   register (registration off, offline, or no relay configured), and offers
-  **Turn off phone pairing**, which also revokes codes made for the relay. In
+  **Turn off**, which also revokes codes made for the relay. In
   a multi-node cluster the node where pairing was turned on advertises it, and
   every other node's dashboard says where pairing is managed instead of
   starting a second one.

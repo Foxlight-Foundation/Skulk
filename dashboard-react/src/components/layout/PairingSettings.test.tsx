@@ -251,8 +251,7 @@ describe('PairingSettings', () => {
     });
     await renderSettings();
 
-    expect(container?.textContent).toContain('registers this node with the relay at relay.example.invalid');
-    expect(container?.textContent).toContain('never sees what this node and your phone send each other');
+    expect(container?.textContent).toContain('Traffic between your cluster and the paired app is end to end encrypted.');
 
     await act(async () => buttonNamed('Pair a phone')?.click());
 
@@ -318,10 +317,10 @@ describe('PairingSettings', () => {
     expect(container?.textContent).toContain('Turn phone pairing off, then pair a phone again');
     expect(buttonNamed('Pair a phone')?.disabled).toBe(true);
 
-    await act(async () => buttonNamed('Turn off phone pairing')?.click());
+    await act(async () => buttonNamed('Turn off')?.click());
     expect(container?.textContent).toContain('lose remote access until you pair them again');
     const confirm = [...(container?.querySelectorAll('button') ?? [])].filter(
-      (button) => button.textContent === 'Turn off phone pairing',
+      (button) => button.textContent === 'Turn off',
     );
     await act(async () => confirm[0]?.click());
 
