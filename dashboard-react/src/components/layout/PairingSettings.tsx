@@ -683,7 +683,7 @@ export function PairingSettings({ invitationHost }: { invitationHost?: HTMLEleme
                       onClick={() => void turnOffPairing()}
                       variant="danger"
                     >
-                      {t('settings.pairing.remote.turnOff', 'Turn off phone pairing')}
+                      {t('settings.pairing.remote.turnOff', 'Turn off')}
                     </Button>
                     <Button
                       disabled={disableResult.isLoading}
@@ -696,7 +696,7 @@ export function PairingSettings({ invitationHost }: { invitationHost?: HTMLEleme
                 </>
               ) : (
                 <Button onClick={() => setConfirmingTurnOff(true)} variant="ghost">
-                  {t('settings.pairing.remote.turnOff', 'Turn off phone pairing')}
+                  {t('settings.pairing.remote.turnOff', 'Turn off')}
                 </Button>
               )}
             </TurnOffRow>

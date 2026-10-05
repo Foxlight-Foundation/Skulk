@@ -1335,7 +1335,7 @@
   "settings.pairing.remote.state.revoked": "Relay refused this cluster",
   "settings.pairing.remote.state.unreachable": "Relay unreachable",
   "settings.pairing.remote.turnedOff": "Phone pairing turned off",
-  "settings.pairing.remote.turnOff": "Turn off phone pairing",
+  "settings.pairing.remote.turnOff": "Turn off",
   "settings.pairing.remote.turnOffConfirm": "Phones paired with this cluster lose remote access until you pair them again, and codes created for the relay stop working. Paired devices stay listed until you revoke them.",
   "settings.pairing.remote.unreachableDetail": "This node cannot reach the relay right now. Check this machine's internet connection. Paired phones reach this node again once it reconnects.",
   "settings.pairing.revoke": "Revoke",

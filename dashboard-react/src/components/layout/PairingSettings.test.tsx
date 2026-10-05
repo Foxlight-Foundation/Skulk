@@ -317,10 +317,10 @@ describe('PairingSettings', () => {
     expect(container?.textContent).toContain('Turn phone pairing off, then pair a phone again');
     expect(buttonNamed('Pair a phone')?.disabled).toBe(true);
 
-    await act(async () => buttonNamed('Turn off phone pairing')?.click());
+    await act(async () => buttonNamed('Turn off')?.click());
     expect(container?.textContent).toContain('lose remote access until you pair them again');
     const confirm = [...(container?.querySelectorAll('button') ?? [])].filter(
-      (button) => button.textContent === 'Turn off phone pairing',
+      (button) => button.textContent === 'Turn off',
     );
     await act(async () => confirm[0]?.click());
 

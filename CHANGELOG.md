@@ -64,7 +64,7 @@ This project records release notes here and mirrors public-facing notes in
   registration the panel explains what the relay learns and never sees. The
   panel shows whether the relay connection is up, why this node cannot
   register (registration off, offline, or no relay configured), and offers
-  **Turn off phone pairing**, which also revokes codes made for the relay. In
+  **Turn off**, which also revokes codes made for the relay. In
   a multi-node cluster the node where pairing was turned on advertises it, and
   every other node's dashboard says where pairing is managed instead of
   starting a second one.

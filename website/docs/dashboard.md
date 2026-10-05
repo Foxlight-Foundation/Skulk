@@ -121,7 +121,7 @@ notes that traffic between the cluster and the paired app is end to end
 encrypted ([Remote access and pairing](remote-access) lists what the relay can
 observe). It also shows the relay
 connection, names the node that manages pairing when it is another one, and
-offers **Turn off phone pairing**.
+offers **Turn off**.
 
 ![Devices and pairing with invitation generation controls](./imgs/dashboard-pairing.png)
 

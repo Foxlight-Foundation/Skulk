@@ -423,7 +423,7 @@ first registration the panel notes that traffic between the cluster and the
 paired app is end to end encrypted; [Remote access](remote-access.md) lists
 what the relay can observe. It shows the relay
 connection state, says where pairing is managed when another node holds the
-cluster's route, and offers **Turn off phone pairing** while a route is stored.
+cluster's route, and offers **Turn off** while a route is stored.
 Operators choose a lifetime and device limit, generate a branded QR,
 and may download or revoke it. The panel shows how many of the five device
 slots are in use, offers only as many devices as there are free slots, and
