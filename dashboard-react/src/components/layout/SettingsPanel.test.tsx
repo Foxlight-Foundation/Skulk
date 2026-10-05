@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { PersistedStoreConfig } from '../../hooks/useConfig';
 import { darkTheme } from '../../theme/theme';
-import { normalizeStoreConfig } from './modelStoreConfig';
+import { normalizeStoreConfig, withStoreDefaults } from './modelStoreConfig';
 import { SettingsPanel } from './SettingsPanel';
 
 Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', { value: true, configurable: true });
@@ -82,6 +82,42 @@ describe('normalizeStoreConfig', () => {
 
   it('keeps an absent model-store section disabled', () => {
     expect(normalizeStoreConfig(null).enabled).toBe(false);
+  });
+});
+
+const STORE_DEFAULTS = {
+  store_host: 'kite-dev',
+  store_port: 12415,
+  store_http_host: '127.0.0.1',
+  store_path: '/Users/operator/.skulk/model-store',
+};
+
+describe('withStoreDefaults', () => {
+  it('fills a switched-on store from the node defaults', () => {
+    const filled = withStoreDefaults({ ...normalizeStoreConfig(null), enabled: true }, STORE_DEFAULTS);
+    expect(filled).toMatchObject({
+      enabled: true,
+      store_host: 'kite-dev',
+      store_http_host: '127.0.0.1',
+      store_path: '/Users/operator/.skulk/model-store',
+    });
+  });
+
+  it('keeps what the operator typed, including the HTTP host of a named store host', () => {
+    const typed = {
+      ...normalizeStoreConfig(null),
+      enabled: true,
+      store_host: 'mac-studio',
+      store_path: '/Volumes/Models',
+    };
+    expect(withStoreDefaults(typed, STORE_DEFAULTS)).toEqual(typed);
+  });
+
+  it('leaves a disabled store or a node without defaults unchanged', () => {
+    const disabled = normalizeStoreConfig(null);
+    expect(withStoreDefaults(disabled, STORE_DEFAULTS)).toEqual(disabled);
+    const enabled = { ...disabled, enabled: true };
+    expect(withStoreDefaults(enabled, undefined)).toEqual(enabled);
   });
 });
 
@@ -190,6 +226,65 @@ describe('SettingsPanel persisted config handling', () => {
     expect(saveFullConfig).toHaveBeenCalledOnce();
     expect(saveFullConfig.mock.calls[0]?.[0]).not.toHaveProperty('model_trust');
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('fills a newly enabled store with the node defaults and saves them', async () => {
+    localStorage.setItem('skulk-settings-sections', JSON.stringify({ modelStore: true }));
+    const saveFullConfig = vi.fn<(config: unknown) => Promise<boolean>>(async () => true);
+    useConfigMock.mockReturnValue({
+      fullConfig: {},
+      effective: {
+        kv_cache_backend: 'default',
+        has_hf_token: false,
+        experimental_mode_enabled: false,
+        model_store_defaults: STORE_DEFAULTS,
+      },
+      configPath: 'skulk.yaml',
+      loading: false,
+      saving: false,
+      error: null,
+      fetchConfig: vi.fn(async () => undefined),
+      saveFullConfig,
+    });
+    container = document.createElement('div');
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () => {
+      root?.render(
+        <ThemeProvider theme={darkTheme}>
+          <SettingsPanel open onClose={vi.fn()} />
+        </ThemeProvider>,
+      );
+    });
+
+    const storeSection = [...container.querySelectorAll('details')]
+      .find((details) => details.querySelector('summary')?.textContent?.startsWith('Model Store'));
+    expect(storeSection).toBeDefined();
+    const toggle = storeSection?.querySelector<HTMLElement>('[aria-label="Enabled"]');
+    await act(async () => {
+      toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(container.querySelector<HTMLInputElement>('input[value="kite-dev"]')).not.toBeNull();
+    expect(
+      container.querySelector<HTMLInputElement>('input[value="/Users/operator/.skulk/model-store"]'),
+    ).not.toBeNull();
+    const saveButton = [...container.querySelectorAll<HTMLButtonElement>('button')]
+      .find((button) => button.textContent === 'Save changes');
+    await act(async () => {
+      saveButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(saveFullConfig).toHaveBeenCalledOnce();
+    expect(saveFullConfig.mock.calls[0]?.[0]).toMatchObject({
+      model_store: {
+        enabled: true,
+        store_host: 'kite-dev',
+        store_http_host: '127.0.0.1',
+        store_path: '/Users/operator/.skulk/model-store',
+      },
+    });
+    localStorage.removeItem('skulk-settings-sections');
   });
 
   it('saves the served context default and keeps the rest of the inference section', async () => {

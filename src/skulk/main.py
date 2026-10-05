@@ -93,6 +93,7 @@ from skulk.store.config import (
     persist_model_trust_config,
     resolve_config_path,
     resolve_node_staging,
+    write_bootstrap_config_if_absent,
 )
 from skulk.store.installed_cards import VerifiedDetachedInstalledCardCache
 from skulk.store.model_store import ModelStore
@@ -778,9 +779,20 @@ class Node:
 
         logger.info(f"Starting node {node_id}")
 
-        # Load skulk.yaml (returns None if absent, for zero-config compatibility:
-        # when skulk.yaml is missing, all store references stay None and the
-        # node behaves identically to the zero-config default).
+        # A node that starts without skulk.yaml (every packaged install) gets
+        # the single-node model store install.sh writes for source installs;
+        # without it the store-first download flow answers "Store not
+        # configured" and a new user cannot download a model (#629).
+        bootstrap_store = write_bootstrap_config_if_absent()
+        if bootstrap_store is not None:
+            logger.info(
+                "No skulk.yaml found: wrote a single-node model store at "
+                f"{bootstrap_store.store_path} so downloads work at once; edit "
+                "or delete skulk.yaml to change it"
+            )
+
+        # Load skulk.yaml (returns None if absent or empty, for zero-config
+        # compatibility: all store references then stay None).
         skulk_config = load_skulk_config()
 
         # Track whether user provided the KV backend env var at launch —

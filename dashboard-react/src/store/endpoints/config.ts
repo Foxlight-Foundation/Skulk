@@ -96,9 +96,25 @@ export interface FullConfig {
   hf_token?: string;
 }
 
+/** The single-node store a fresh node starts with, as the node reports it. */
+export interface ModelStoreDefaults {
+  /** This node's short hostname: it hosts the store. */
+  store_host: string;
+  store_port: number;
+  /** Loopback, replaced by a routable address if the node joins a cluster. */
+  store_http_host: string;
+  /** Absolute default store folder in Skulk's data directory. */
+  store_path: string;
+}
+
 export interface EffectiveConfig {
   kv_cache_backend: string;
   has_hf_token?: boolean;
+  /**
+   * Defaults Settings fills into a store when it is switched on with blank
+   * fields; the server applies the same values to a blank save.
+   */
+  model_store_defaults?: ModelStoreDefaults;
   /**
    * True when the node runs with SKULK_ENABLE_EXPERIMENTAL_MODE. Gates the
    * dashboard's Experiments settings section; memory-agnostic.

@@ -566,6 +566,7 @@
   "modelSearch.toasts.addedModel": "Added {modelId}",
   "modelSearch.toasts.addModelFailed": "Failed to add {modelId}",
   "modelSearch.toasts.addModelFailedWithReason": "Failed to add {modelId}: {reason}",
+  "modelSearch.toasts.downloadingToNode": "Downloading {modelId} to this node",
   "modelSearch.toasts.downloadingToStore": "Downloading {modelId} to store",
   "modelSearch.toasts.downloadStartFailed": "Failed to start download",
   "modelSearch.toasts.downloadStartFailedForModel": "Failed to start download for {modelId}",

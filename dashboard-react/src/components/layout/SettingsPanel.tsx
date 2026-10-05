@@ -14,6 +14,7 @@ import {
 import {
   DEFAULT_MODEL_STORE_PORT,
   normalizeStoreConfig,
+  withStoreDefaults,
 } from './modelStoreConfig';
 import { Button } from '../common/Button';
 import { Field } from '../common/Field';
@@ -272,6 +273,16 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
     setDraft((prev) => ({ ...normalizeStoreConfig(prev), ...patch }));
   }, []);
 
+  // Switching the store on fills blank fields with this node's defaults, so
+  // a new user can turn it on without knowing their hostname or a path.
+  const storeDefaults = effective?.model_store_defaults;
+  const toggleStore = useCallback(() => {
+    setDraft((prev) => {
+      const base = normalizeStoreConfig(prev);
+      return withStoreDefaults({ ...base, enabled: !base.enabled }, storeDefaults);
+    });
+  }, [storeDefaults]);
+
   const updateDownload = useCallback((patch: Partial<StoreConfig['download']>) => {
     setDraft((prev) => {
       const base = normalizeStoreConfig(prev);
@@ -291,7 +302,8 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
     // (an empty host interpolates into unusable store URLs and once shipped
     // a fleet that could not place any new model), so surface the problem
     // here instead of persisting a config the API will 422.
-    if (draft?.enabled && (!draft.store_host.trim() || !draft.store_path.trim())) {
+    const storeDraft = draft ? withStoreDefaults(draft, storeDefaults) : null;
+    if (storeDraft?.enabled && (!storeDraft.store_host.trim() || !storeDraft.store_path.trim())) {
       addToast({
         type: 'error',
         message: t(
@@ -303,7 +315,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
     }
     // Base on the last fetched config to avoid dropping sections
     const updated: FullConfig = { ...(fullConfig ?? {}) };
-    if (draft) updated.model_store = draft;
+    if (storeDraft) updated.model_store = storeDraft;
     // Keep every inference field the server knows, not only the ones this
     // form edits: rebuilding the section from two fields would drop the rest.
     updated.inference = {
@@ -344,7 +356,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
     } else {
       addToast({ type: 'error', message: t('settings.toasts.saveFailed', 'Failed to save settings') });
     }
-  }, [draft, fullConfig, hfToken, kvBackend, servedContextText, loggingDraft, fabricDraft, telemetryDraft, themeDraft, dispatch, onClose, saveFullConfig, t]);
+  }, [draft, storeDefaults, fullConfig, hfToken, kvBackend, servedContextText, loggingDraft, fabricDraft, telemetryDraft, themeDraft, dispatch, onClose, saveFullConfig, t]);
 
   // eslint-disable-next-line react-hooks/set-state-in-effect -- Closing the modal resets its nested navigation for the next opening.
   useEffect(() => { if (!open) setDevicesOpen(false); }, [open]);
@@ -401,7 +413,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                     )}
                   />
                 </FieldLabel>
-                <Toggle aria-label={t('settings.common.enabled', 'Enabled')} $on={modelStoreDraft.enabled} onClick={() => update({ enabled: !modelStoreDraft.enabled })} />
+                <Toggle aria-label={t('settings.common.enabled', 'Enabled')} $on={modelStoreDraft.enabled} onClick={toggleStore} />
               </Row>
               {modelStoreDraft.enabled && (
                 <>

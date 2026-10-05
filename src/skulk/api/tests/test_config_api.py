@@ -85,6 +85,86 @@ def test_get_config_reports_effective_kv_backend_when_file_exists(
     assert effective["has_hf_token"] is True
 
 
+def test_get_config_reports_the_default_model_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Settings pre-fills a switched-on store from these values."""
+    from skulk.store import config as store_config
+
+    monkeypatch.setattr(store_config.socket, "gethostname", lambda: "kite-dev.local")
+    monkeypatch.setattr(store_config, "SKULK_DATA_HOME", tmp_path / "data")
+    api = _build_api()
+    object.__setattr__(api, "_config_path", tmp_path / "skulk.yaml")
+    client = TestClient(api.app)
+
+    effective = _json_mapping(_json_object(client.get("/config"))["effective"])
+
+    assert effective["model_store_defaults"] == {
+        "store_host": "kite-dev",
+        "store_port": 12415,
+        "store_http_host": "127.0.0.1",
+        "store_path": str(tmp_path / "data" / "model-store"),
+    }
+
+
+def test_update_config_fills_a_blank_enabled_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Turning the store on with blank fields saves this node's defaults (#888)."""
+    from skulk.store import config as store_config
+
+    monkeypatch.setattr(store_config.socket, "gethostname", lambda: "kite-dev.local")
+    monkeypatch.setattr(store_config, "SKULK_DATA_HOME", tmp_path / "data")
+    config_path = tmp_path / "skulk.yaml"
+    api = _build_api()
+    object.__setattr__(api, "_config_path", config_path)
+    client = TestClient(api.app)
+
+    response = client.put(
+        "/config",
+        json={
+            "config": {
+                "model_store": {
+                    "enabled": True,
+                    "store_host": "",
+                    "store_http_host": "",
+                    "store_path": "",
+                }
+            }
+        },
+    )
+
+    assert response.status_code == 200
+    config = load_skulk_config(config_path)
+    assert config is not None and config.model_store is not None
+    assert config.model_store.store_host == "kite-dev"
+    assert config.model_store.store_http_host == "127.0.0.1"
+    assert config.model_store.store_path == str(tmp_path / "data" / "model-store")
+
+
+def test_update_config_keeps_a_named_store(tmp_path: Path) -> None:
+    config_path = tmp_path / "skulk.yaml"
+    api = _build_api()
+    object.__setattr__(api, "_config_path", config_path)
+    client = TestClient(api.app)
+
+    response = client.put(
+        "/config",
+        json={
+            "config": {
+                "model_store": {"store_host": "mac-studio", "store_path": "/Volumes/Models"}
+            }
+        },
+    )
+
+    assert response.status_code == 200
+    config = load_skulk_config(config_path)
+    assert config is not None and config.model_store is not None
+    assert config.model_store.store_host == "mac-studio"
+    assert config.model_store.store_http_host is None
+    assert config.model_store.store_path == "/Volumes/Models"
+
+
 def test_get_config_treats_blank_skulk_kv_backend_as_default(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -1802,6 +1802,14 @@ class StoreDownloadResponse(CamelCaseModel):
         default=None,
         description="Operator-readable store error when status is error.",
     )
+    destination: Literal["store", "node"] = Field(
+        default="store",
+        description=(
+            "Where the model downloads: `store` for the shared model store, or "
+            "`node` when no store is configured and the model downloads onto "
+            "the node that answered, as a launch would."
+        ),
+    )
 
 
 class CachedArtifactLocation(BaseModel):

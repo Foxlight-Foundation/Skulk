@@ -1093,7 +1093,13 @@ PSK-encrypted fabric (Settings broadcast, store-host formation, and join-time
 bootstrap) so a token entered on any node reaches the nodes that fetch; an
 absent-or-blank incoming token never erases a local one, writes stay atomic
 mode `0o600`, and `GET /config` never returns the token.
-Installer-generated configs begin as local bootstrap stores. On cluster
+A node that starts without skulk.yaml writes the installer's local bootstrap
+store config (`write_bootstrap_config_if_absent`, store in
+`SKULK_DATA_HOME/model-store`), so packaged and source installs both begin as
+local bootstrap stores; `PUT /config` fills an enabled store's blank host and
+path with the same defaults (`effective.model_store_defaults`), and with no
+store, `POST /store/models/{id}/download` downloads onto the answering node
+(`destination: node`). On cluster
 formation, followers retry state-sync config bootstrap, receive the elected
 master's routable store address, stop superseded local store servers, and
 replace both API and worker store clients together. Do not let a fresh fleet

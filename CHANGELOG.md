@@ -7,6 +7,26 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Fixed
+
+- A new install from the Mac app or the Linux packages can download models.
+  Without a `skulk.yaml` a node had no model store, so **Download** failed
+  with `Store not configured`, and turning the store on in Settings left its
+  host and path blank and refused the save until both were filled in. Only
+  `install.sh` wrote the single-node store default, so source installs never
+  saw it. Now:
+  - a node that starts without `skulk.yaml` writes the same default: a store
+    on that machine in Skulk's data folder (`~/.skulk/model-store` on macOS,
+    `~/.local/share/skulk/model-store` for the Linux packages);
+  - turning the store on in Settings fills in this machine's hostname and
+    the default path, and a save with blank fields takes the same values;
+  - with the store off, **Download** saves the model onto the node you are
+    using, the same download a launch starts. Requests only a store can
+    serve, such as companion artifacts, answer `409` with how to turn it on.
+
+  A fresh install also no longer logs a disk-usage warning every 30 seconds
+  before its first download creates the models folder.
+
 ### Changed
 
 - The dashboard header marks Skulk as a trademark, with a ™ beside the
@@ -976,8 +996,9 @@ This project records release notes here and mirrors public-facing notes in
   built unusable `http://:12415` URLs, and the resulting failure was
   misclassified as "model not in store", starving downloads against a host
   that can never answer instead of taking the direct Hugging Face fallback.
-  The refusal covers node startup and the Settings save (the dashboard also
-  blocks the save with a visible message), and a URL that cannot even be
+  The refusal covers a hand-edited `skulk.yaml` at node startup; the Settings
+  save fills blank fields with the node's own defaults instead (see Fixed
+  above), and a URL that cannot even be
   requested now classifies as store-unreachable immediately, with no retry
   delay, so the fallback engages even if a bad address reaches the client
   through another path.

@@ -16,7 +16,8 @@ runtime configuration for you; you do not need to edit a configuration file.
 The settings sections hold a draft until **Save changes** succeeds. **Cancel** or
 closing the drawer discards those unsaved changes. A successful save closes the
 drawer and shows confirmation; if saving fails, correct the reported problem and
-save again. A configured model store needs both a store host and a store path.
+save again. A model store needs a store host and a store path; turning it on
+fills in this machine's own values, which you can change before saving.
 
 Runtime settings synchronize across the cluster. Theme selection belongs to the
 current dashboard. Node-specific desktop controls, such as its cluster namespace,
@@ -35,8 +36,13 @@ app theme.
 
 ## Model Store
 
-Enable a canonical store when you want one machine to hold shared downloaded
-models. Enter:
+A new node starts with a store on itself, in Skulk's data folder, so downloads
+work at once. Use these controls to move the store to another machine or
+volume. Turning **Enabled** on fills **Store host**, **HTTP host** and **Store
+path** with this machine's defaults. With the store turned off, **Download**
+saves a model onto the machine you are using, as launching it would.
+
+To place the store elsewhere, enter:
 
 - **Store host:** the machine's hostname or node ID.
 - **HTTP host:** an optional reachable transfer address; otherwise the store host

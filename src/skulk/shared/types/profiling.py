@@ -185,8 +185,16 @@ class DiskUsage(CamelCaseModel):
 
     @classmethod
     def from_path(cls, path: Path) -> Self:
-        """Get disk usage stats for the partition containing path."""
-        total, _used, free = shutil.disk_usage(path)
+        """Get disk usage stats for the partition containing path.
+
+        A fresh install has no models directory until its first download, so
+        the nearest existing parent is measured instead: it sits on the same
+        partition the directory will be created on.
+        """
+        existing = path
+        while not existing.exists() and existing.parent != existing:
+            existing = existing.parent
+        total, _used, free = shutil.disk_usage(existing)
         return cls(
             total=Memory.from_bytes(total),
             available=Memory.from_bytes(free),
