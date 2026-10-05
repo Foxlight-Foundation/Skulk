@@ -1,7 +1,9 @@
 """Keep the public route inventory, generated schemas, and guide in agreement."""
 
 import re
+from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 
 import httpx
 import pytest
@@ -235,7 +237,8 @@ def test_published_documentation_covers_every_production_operation(
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    published = _operations(module.build_docs_api().app)
+    build_docs_api = cast(Callable[[], API], module.build_docs_api)
+    published = _operations(build_docs_api().app)
 
     missing = _operations(documented_app) - published
     assert not missing, f"Missing from published API documentation: {sorted(missing)}"
@@ -244,4 +247,3 @@ def test_published_documentation_covers_every_production_operation(
         ("POST", "/v1/auth/remote-pairing"),
         ("DELETE", "/v1/auth/remote-pairing"),
     } <= published
-
