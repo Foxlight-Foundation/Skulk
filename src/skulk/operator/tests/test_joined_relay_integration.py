@@ -341,7 +341,9 @@ async def test_joined_relay_pairing_refresh_and_revocation(
         elif data[:6] == b"SKRL\x01\x04":
             renewal_sent.set()
 
-    monkeypatch.setattr(aiohttp.ClientWebSocketResponse, "send_bytes", observe_control_send)
+    monkeypatch.setattr(
+        aiohttp.ClientWebSocketResponse, "send_bytes", observe_control_send
+    )
     # Keep the actual signed wall clock and relay heartbeat; only shorten the
     # renewal schedule so the real Rust/Python contract is exercised in seconds.
     monkeypatch.setattr(relay_module, "_CONNECTOR_RENEWAL_SECONDS", 0.0)
@@ -689,7 +691,10 @@ async def test_joined_registration_relay_pairs_a_self_registered_gateway(
             remote_access,
             "POST",
             "/v1/auth/token",
-            body={"deviceId": device_id, "refreshToken": str(exchange.body["refreshToken"])},
+            body={
+                "deviceId": device_id,
+                "refreshToken": str(exchange.body["refreshToken"]),
+            },
         )
         assert refreshed.status == 200
         access_token = str(refreshed.body["accessToken"])
@@ -727,8 +732,10 @@ async def test_joined_registration_relay_pairs_a_self_registered_gateway(
             operator_api_port=_available_loopback_port(),
         )
         assert renewed.routing_locator != configuration.routing_locator
-        assert renewed.connector_authority_key_id != configuration.connector_authority_key_id
+        assert (
+            renewed.connector_authority_key_id
+            != configuration.connector_authority_key_id
+        )
     finally:
         await _stop_gateway_task(gateway_task, shutdown)
         _stop_relay_process(relay_process)
-
