@@ -251,6 +251,27 @@ def test_transient_failures_retry_with_the_same_registration() -> None:
     assert delays == [0.5, 1.5]
 
 
+def test_a_busy_relay_is_retried_and_then_reported_as_busy() -> None:
+    """The relay's retryable ``unavailable`` code retries like a network failure."""
+
+    attempts: list[int] = []
+
+    def busy(_request: httpx.Request) -> httpx.Response:
+        attempts.append(1)
+        return httpx.Response(503, json={"code": "unavailable", "retryable": True})
+
+    with pytest.raises(RelayRegistrationError) as raised:
+        register_relay_route(
+            _RELAY_ORIGIN,
+            RelayRegistrationMaterial.generate(),
+            transport=httpx.MockTransport(busy),
+            sleep=lambda _seconds: None,
+        )
+
+    assert raised.value.failure == "relay_busy"
+    assert len(attempts) == 3
+
+
 def test_persistent_unreachability_reports_after_bounded_attempts() -> None:
     """Three failed attempts end with a typed unreachable failure."""
 
@@ -280,7 +301,9 @@ def test_persistent_unreachability_reports_after_bounded_attempts() -> None:
         (429, "rate_limited", "rate_limited"),
         (503, "registration_paused", "registration_paused"),
         (503, "capacity_exhausted", "capacity_exhausted"),
+        (404, "not_found", "registration_unsupported"),
         (400, None, "invalid_request"),
+        (404, None, "registration_unsupported"),
         (418, None, "invalid_response"),
     ],
 )
@@ -289,7 +312,7 @@ def test_coded_refusals_are_reported_without_retrying(
     code: str | None,
     failure: str,
 ) -> None:
-    """A refusal names its stable code; only a rate limit carries a delay."""
+    """A refusal names its stable code; only a rate limit or pause carries a delay."""
 
     attempts: list[int] = []
 
@@ -308,7 +331,7 @@ def test_coded_refusals_are_reported_without_retrying(
 
     assert raised.value.failure == failure
     assert raised.value.retry_after_seconds == (
-        30 if failure == "rate_limited" else None
+        30 if failure in {"rate_limited", "registration_paused"} else None
     )
     assert len(attempts) == 1
 

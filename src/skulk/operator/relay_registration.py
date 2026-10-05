@@ -53,6 +53,8 @@ type RelayRegistrationFailure = Literal[
     "rate_limited",
     "registration_paused",
     "capacity_exhausted",
+    "registration_unsupported",
+    "relay_busy",
     "unreachable",
     "invalid_response",
 ]
@@ -64,9 +66,20 @@ _RELAY_FAILURE_CODES: Final[dict[str, RelayRegistrationFailure]] = {
     "rate_limited": "rate_limited",
     "registration_paused": "registration_paused",
     "capacity_exhausted": "capacity_exhausted",
+    # A relay with registration turned off answers 404 ``not_found``.
+    "not_found": "registration_unsupported",
 }
+# Coded answers meaning the relay is reachable but momentarily unable to
+# register (admission or worker capacity, draining, a persistence failure).
+# They are retried like a network failure and reported as busy if they persist.
+_TRANSIENT_RELAY_CODES: Final[frozenset[str]] = frozenset({"unavailable"})
+# Refusals whose ``Retry-After`` delay is passed on to the caller.
+_DELAYED_FAILURES: Final[frozenset[RelayRegistrationFailure]] = frozenset(
+    {"rate_limited", "registration_paused"}
+)
 _STATUS_FAILURES: Final[dict[int, RelayRegistrationFailure]] = {
     400: "invalid_request",
+    404: "registration_unsupported",
     409: "already_registered",
     429: "rate_limited",
 }
@@ -87,6 +100,11 @@ _FAILURE_MESSAGES: Final[dict[RelayRegistrationFailure, str]] = {
     "rate_limited": "the relay is limiting registrations from this network",
     "registration_paused": "the relay is not accepting new registrations right now",
     "capacity_exhausted": "the relay has no room for new routes right now",
+    "registration_unsupported": (
+        "this relay does not accept registrations; check "
+        "connectivity.relay.registration_url in skulk.yaml"
+    ),
+    "relay_busy": "the relay is busy right now",
     "unreachable": "the relay could not be reached",
     "invalid_response": "the relay returned an invalid registration response",
 }
@@ -235,9 +253,10 @@ def register_relay_route(
 ) -> OperatorRelayProvisioning:
     """Register one on-demand route with a relay and return its provisioning.
 
-    Transient failures (network errors, timeouts, and uncoded 5xx responses
-    such as a tunnel outage) are retried with the same material, which the
-    relay treats as the same registration. Coded refusals are not retried.
+    Transient failures (network errors, timeouts, uncoded 5xx responses such
+    as a tunnel outage, and the relay's ``unavailable`` code) are retried with
+    the same material, which the relay treats as the same registration. Other
+    coded refusals are not retried.
 
     Args:
         origin: Relay origin, validated again here.
@@ -267,13 +286,13 @@ def register_relay_route(
             continue
         if 200 <= status < 300:
             return _provisioning_from_response(payload, material)
-        failure = _refusal(status, payload)
-        if failure is None:
-            last_failure = RelayRegistrationError("unreachable")
+        failure, transient = _refusal(status, payload)
+        if transient:
+            last_failure = RelayRegistrationError(failure)
             continue
         raise RelayRegistrationError(
             failure,
-            retry_after_seconds=retry_after if failure == "rate_limited" else None,
+            retry_after_seconds=retry_after if failure in _DELAYED_FAILURES else None,
         )
     raise last_failure
 
@@ -323,24 +342,30 @@ def _post_registration(
         )
 
 
-def _refusal(status: int, payload: bytes) -> RelayRegistrationFailure | None:
-    """Map a non-success response to a stable refusal, or ``None`` if transient.
+def _refusal(status: int, payload: bytes) -> tuple[RelayRegistrationFailure, bool]:
+    """Map a non-success response to a stable failure and whether to retry it.
 
-    A coded body names the refusal. A 5xx without a recognized code is treated
-    as transient, because the relay's tunnel answers 502, 503, or 504 while
-    the relay process is unreachable.
+    A recognized code names the failure. A 5xx without a recognized code is
+    treated as transient, because the relay's tunnel answers 502, 503, or 504
+    while the relay process is unreachable.
+
+    Returns:
+        The failure, and ``True`` when the request should be retried.
     """
 
     code = _response_code(payload)
-    if code is not None:
-        return code
+    if code in _TRANSIENT_RELAY_CODES:
+        return "relay_busy", True
+    failure = _RELAY_FAILURE_CODES.get(code) if code is not None else None
+    if failure is not None:
+        return failure, False
     if status >= 500:
-        return None
-    return _STATUS_FAILURES.get(status, "invalid_response")
+        return "unreachable", True
+    return _STATUS_FAILURES.get(status, "invalid_response"), False
 
 
-def _response_code(payload: bytes) -> RelayRegistrationFailure | None:
-    """Read the stable ``code`` from a refusal body, ignoring anything else."""
+def _response_code(payload: bytes) -> str | None:
+    """Read the ``code`` string from a refusal body, ignoring anything else."""
 
     try:
         data = cast(object, json.loads(payload))
@@ -349,9 +374,7 @@ def _response_code(payload: bytes) -> RelayRegistrationFailure | None:
     if not isinstance(data, dict):
         return None
     code = cast(dict[str, object], data).get("code")
-    if not isinstance(code, str):
-        return None
-    return _RELAY_FAILURE_CODES.get(code)
+    return code if isinstance(code, str) else None
 
 
 def _provisioning_from_response(

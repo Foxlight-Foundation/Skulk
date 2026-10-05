@@ -272,10 +272,12 @@ The relay origin is `connectivity.relay.registration_url` in `skulk.yaml`
 default relay. `connectivity.relay.enabled: false` turns registration off, and
 an offline node never registers. Network failures, timeouts, and uncoded 5xx
 answers are retried twice with the same values, which the relay treats as the
-same registration. Coded refusals are reported, not retried:
-`invalid_request` (400), `already_registered` (409), `rate_limited` (429, with
-its `Retry-After`), `registration_paused` (503), and `capacity_exhausted`
-(503). The relay never receives the private key or a usable credential. It
+same registration; so is the relay's `unavailable` code (503), which means it
+is momentarily busy. Other coded refusals are reported, not retried:
+`invalid_request` (400), `not_found` (404, the relay has registration turned
+off), `already_registered` (409), `rate_limited` (429, with its
+`Retry-After`), `registration_paused` (503, with its `Retry-After`), and
+`capacity_exhausted` (503). The relay never receives the private key or a usable credential. It
 learns the key identifier, the two digests, the gateway's public address,
 connection times, and byte counts; app traffic stays inside TLS that
 terminates on the gateway.

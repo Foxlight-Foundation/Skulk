@@ -453,9 +453,10 @@ The bare `audio_cpp` tag reports engine availability, but signed music support a
   and SHA-256 credential digests; the answer (locator, region, three URLs) is
   stored as an on-demand route. Origin: `connectivity.relay.registration_url`
   or the build default (`DEFAULT_RELAY_REGISTRATION_ORIGIN`); disabled or
-  offline nodes never register; transient failures retry with the same values;
-  coded refusals (`invalid_request`, `already_registered`, `rate_limited`,
-  `registration_paused`, `capacity_exhausted`) do not. `forget-relay` writes a
+  offline nodes never register; transient failures (including the relay's
+  `unavailable`) retry with the same values; coded refusals (`invalid_request`,
+  `not_found`, `already_registered`, `rate_limited`, `registration_paused`,
+  `capacity_exhausted`) do not. `forget-relay` writes a
   tombstone and removes the TLS identity. `OperatorRemoteAccessSupervisor`
   polls every 5 s and on request: start on a new route, stop on forget, restart
   on a route-identity change, capped-backoff retry on failure, stay stopped on
