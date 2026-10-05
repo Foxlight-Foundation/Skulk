@@ -58,6 +58,7 @@ from skulk.utils.info_gatherer.info_gatherer import (
     NodeCapabilityNodes,
     NodeDiskUsage,
     NodeHeartbeat,
+    NodePairingGateway,
     RdmaCtlStatus,
     StaticNodeInformation,
 )
@@ -98,6 +99,9 @@ TELEMETRY_PLANE_INFO = (
     # Capability-node summaries: the managed nodes behind those tags, drawn
     # as topology satellites. Same plane, same last-write-wins discipline.
     NodeCapabilityNodes,
+    # Which node holds the phone-pairing relay route, so every dashboard can
+    # say where pairing is managed. Same plane and discipline.
+    NodePairingGateway,
 )
 
 
@@ -181,6 +185,10 @@ class TelemetryView:
         # `ExtensionContext.advertise_capability`; polled by the InfoGatherer's
         # `_monitor_capabilities` and gossiped as `NodeCapabilities`.
         self.local_advertised_capabilities: set[str] = set()
+        # Nodes advertising that they hold the phone-pairing relay route, and
+        # this node's own outbound value (set by the API, read by the gatherer).
+        self.node_pairing_gateways: set[NodeId] = set()
+        self.local_pairing_gateway_active: bool = False
         # This node's OWN capability-node summaries, keyed by plugin and node
         # identifier: the write half for topology satellites. Mutated by
         # `ExtensionContext.publish_capability_node` / `withdraw_capability_node`
@@ -240,6 +248,7 @@ class TelemetryView:
         self.node_identities.pop(node_id, None)
         self.node_rdma_ctl.pop(node_id, None)
         self.node_capabilities.pop(node_id, None)
+        self.node_pairing_gateways.discard(node_id)
         self.node_capability_nodes.pop(node_id, None)
         self.node_capability_nodes_received_at.pop(node_id, None)
         self.node_artifact_inventories.pop(node_id, None)
@@ -297,6 +306,11 @@ class TelemetryView:
             self.node_system[node_id] = info.system_profile
         elif isinstance(info, NodeCapabilities):
             self.node_capabilities[node_id] = info.capabilities
+        elif isinstance(info, NodePairingGateway):
+            if info.active:
+                self.node_pairing_gateways.add(node_id)
+            else:
+                self.node_pairing_gateways.discard(node_id)
         elif isinstance(info, NodeCapabilityNodes):
             if info.nodes:
                 self.node_capability_nodes[node_id] = info.nodes

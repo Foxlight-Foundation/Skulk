@@ -173,3 +173,40 @@ async def test_management_node_republishes_unchanged_snapshot_for_late_joiners()
                         readings += 1
             tasks.cancel_scope.cancel()
     assert readings >= 3
+
+
+async def test_management_node_advertises_the_pairing_gateway_role() -> None:
+    """A no-worker gateway advertises the role while it holds a route, then clears it."""
+    from skulk.utils.info_gatherer.info_gatherer import NodePairingGateway
+
+    holds_route = [True]
+    sender, receiver = channel[NodeTelemetry]()
+    readings: list[bool] = []
+    with anyio.fail_after(5):
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(
+                _publish_management_node_resources,
+                NodeId("management"),
+                True,
+                "zenoh",
+                sender,
+                None,
+                0.01,
+                None,
+                None,
+                30.0,
+                lambda: holds_route[0],
+            )
+            while len(readings) < 3:
+                message = await receiver.receive()
+                if isinstance(message.info, NodePairingGateway):
+                    readings.append(message.info.active)
+                    if len(readings) == 2:
+                        holds_route[0] = False
+            # One inactive reading clears peers; nothing follows while inactive.
+            with anyio.move_on_after(0.1):
+                while True:
+                    message = await receiver.receive()
+                    assert not isinstance(message.info, NodePairingGateway)
+            tasks.cancel_scope.cancel()
+    assert readings == [True, True, False]

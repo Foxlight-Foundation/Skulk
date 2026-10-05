@@ -20,11 +20,17 @@ Do not expose the unauthenticated local API listener directly to the internet.
 
 ## Prepare remote access
 
-The gateway registers its own relay route the first time you pair a phone with
-`skulk operator pair`. It generates its own connector key and carrier
-credentials, sends the relay only their fingerprints, and starts remote access
-without a restart. Installing Skulk or opening **Remote Access** alone does not
-contact the relay.
+A node registers its own relay route the first time you pair a phone: choose
+**Pair a phone** under **Settings → Devices & pairing**, or run
+`skulk operator pair` on a headless node. The node generates its own connector
+key and carrier credentials, sends the relay only their fingerprints, and starts
+remote access without a restart. Installing Skulk or opening **Remote Access**
+alone does not contact the relay.
+
+The node where you first pair a phone becomes the cluster's pairing gateway:
+paired phones reach the cluster through it, so choose a machine that stays on.
+Other nodes' dashboards say which node manages pairing instead of offering a
+second, separate one. There is no automatic failover to another node.
 
 The gateway registers with the relay named in `skulk.yaml`, or with the build's
 default relay:
@@ -41,9 +47,10 @@ credential fingerprints, the gateway's public address, connection times, and
 byte counts. It never sees app traffic, which stays inside TLS that terminates
 on the gateway.
 
-To turn remote access off, run `skulk operator forget-relay`. Phones paired
-through the relay lose remote access until you register again and pair them
-again; revoke their old device records to free their slots.
+To turn remote access off, choose **Turn off phone pairing** in Devices &
+pairing, or run `skulk operator forget-relay`. Phones paired through the relay
+lose remote access until you pair them again, and codes created for the relay
+stop working. Revoke the old device records to free their slots.
 
 A self-hosted relay can supply a provisioning file instead:
 `skulk operator configure-relay --provisioning-file <file>` stores that route
@@ -51,18 +58,20 @@ and its protected carrier credentials and generates the gateway's TLS
 identity.
 
 Use the dashboard's **Remote Access** view to find local LAN and Tailscale
-connection options. These addresses are not a relay-health check. Diagnose relay provisioning and gateway reachability through the
-administrator's supplied service controls. Keep provider and gateway secrets out
+connection options. Relay health shows in **Devices & pairing**: connecting,
+connected, relay unreachable (check the machine's internet connection), or
+refused (turn phone pairing off, then pair a phone again). Keep provider and gateway secrets out
 of screenshots and support messages.
 
 ## Create and revoke invitations
 
-On the configured gateway, open **Settings → Devices & pairing** from localhost
-or an authorized direct Tailscale connection. Ordinary LAN access and the public
+Open **Settings → Devices & pairing** on the pairing gateway from localhost or
+an authorized direct Tailscale connection. Ordinary LAN access and the public
 relay cannot administer pairing invitations.
 
-Choose the validity period and allowed device count, then select **Generate
-pairing code**. The displayed code/QR is a bearer secret. Its on-screen visibility
+Choose the validity period and allowed device count, then select **Pair a
+phone**. The first time, the node registers with the relay and connects before
+the code appears. The displayed code/QR is a bearer secret. Its on-screen visibility
 window is separate from the invitation's validity period: hiding the code does
 not revoke it. Review recent invitations and revoke any that should no longer
 admit devices. On the phone, choose **Scan pairing code**, allow camera access,

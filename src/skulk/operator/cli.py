@@ -26,6 +26,7 @@ from skulk.operator.pairing import (
     PairingSessionStateError,
 )
 from skulk.operator.relay import (
+    DEFAULT_OPERATOR_API_PORT,
     OperatorRelayAlreadyConfiguredError,
     OperatorRelayConfiguration,
     OperatorRelayProvisioning,
@@ -37,8 +38,6 @@ from skulk.operator.relay_registration import (
 from skulk.shared.constants import offline_mode
 from skulk.store.config import load_skulk_config
 from skulk.utils.pydantic_ext import FrozenModel
-
-DEFAULT_OPERATOR_API_PORT = 52417
 
 
 class _PairArguments(FrozenModel):

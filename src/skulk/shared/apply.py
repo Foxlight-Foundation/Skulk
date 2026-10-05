@@ -74,6 +74,7 @@ from skulk.utils.info_gatherer.info_gatherer import (
     NodeDiskUsage,
     NodeHeartbeat,
     NodeNetworkInterfaces,
+    NodePairingGateway,
     RdmaCtlStatus,
     StaticNodeInformation,
     ThunderboltBridgeInfo,
@@ -545,6 +546,10 @@ def apply_node_gathered_info(event: NodeGatheredInfo, state: State) -> State:
         case NodeCapabilityNodes():
             # Same plane, same reasoning: capability-node summaries feed the
             # topology from the TelemetryView and never enter State.
+            pass
+        case NodePairingGateway():
+            # Same plane: which node holds the phone-pairing relay route lives
+            # in the TelemetryView and never enters State.
             pass
         case NodeHeartbeat():
             # Dedicated liveness belongs only in TelemetryView. This legacy

@@ -1710,3 +1710,80 @@ async def test_route_refused_past_the_grace_period_stops_the_connector(
     finally:
         await runner.cleanup()
 
+
+
+@pytest.mark.asyncio
+async def test_connector_reports_relay_liveness(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Liveness is true only while a relay session is live, then counts down time."""
+
+    lane_open = asyncio.Event()
+    release_lane = asyncio.Event()
+    lanes: list[int] = []
+
+    async def gateway_lane(request: web.Request) -> web.StreamResponse:
+        lanes.append(1)
+        if len(lanes) > 1:
+            return web.Response(status=503)
+        websocket = web.WebSocketResponse()
+        await websocket.prepare(request)
+        lane_open.set()
+        await release_lane.wait()
+        await websocket.close()
+        return websocket
+
+    application = web.Application()
+    application.router.add_get("/v1/carrier/gateway", gateway_lane)
+    runner = web.AppRunner(application)
+    await runner.setup()
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    port = cast(tuple[str, int], listener.getsockname())[1]
+    await web.SockSite(runner, listener).start()
+
+    async def hold(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await reader.read()
+        writer.close()
+
+    loopback = await asyncio.start_server(hold, "127.0.0.1", 0)
+    loopback_port = cast(tuple[str, int], loopback.sockets[0].getsockname())[1]
+    service, _ = _service(tmp_path)
+    configuration = service.configure_relay(
+        _provisioning(f"ws://127.0.0.1:{port}"),
+        operator_api_port=loopback_port,
+    )
+    clock = [10.0]
+    monkeypatch.setattr(relay_module, "_MINIMUM_RECONNECT_SECONDS", 0.01)
+    monkeypatch.setattr(relay_module, "_MAXIMUM_RECONNECT_SECONDS", 0.02)
+    connector = OperatorGatewayConnector(
+        configuration, monotonic_seconds=lambda: clock[0]
+    )
+    assert connector.relay_connected is False
+    connector_task = asyncio.create_task(connector.run())
+    try:
+        await asyncio.wait_for(lane_open.wait(), timeout=5)
+        for _ in range(500):
+            if connector.relay_connected:
+                break
+            await asyncio.sleep(0.01)
+        assert connector.relay_connected is True
+        assert connector.disconnected_seconds() == 0.0
+
+        clock[0] = 15.0
+        release_lane.set()
+        for _ in range(500):
+            if not connector.relay_connected:
+                break
+            await asyncio.sleep(0.01)
+        assert connector.relay_connected is False
+        clock[0] = 18.0
+        assert connector.disconnected_seconds() == 3.0
+    finally:
+        connector_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await connector_task
+        loopback.close()
+        await loopback.wait_closed()
+        await runner.cleanup()

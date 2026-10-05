@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from hmac import compare_digest
 from ipaddress import ip_address
 from typing import Literal, cast, final
+from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 from cryptography.exceptions import InvalidSignature
@@ -970,15 +971,51 @@ class OperatorPairingService:
     def forget_relay(self) -> bool:
         """Forget this gateway's relay route locally.
 
-        Remote access stops without a restart. Devices paired through the
-        route keep their records, and their slots, until revoked or until their
-        refresh credentials expire.
+        Remote access stops without a restart. Active invitations created for
+        the route are revoked: their QR codes carry the route's relay material
+        and can never reach this gateway again, and a later registration uses a
+        new route. Devices paired through the route keep their records, and
+        their slots, until revoked or until their refresh credentials expire.
 
         Returns:
             ``True`` when a route was forgotten, ``False`` when none was in use.
         """
 
-        return self._relay_repository.forget()
+        configuration = self._relay_repository.load()
+        if not self._relay_repository.forget():
+            return False
+        if configuration is not None:
+            self._revoke_invitations_for_host(configuration.gateway_server_name)
+        return True
+
+    def _revoke_invitations_for_host(self, exchange_host: str) -> None:
+        """Revoke active invitations whose exchange URL names ``exchange_host``.
+
+        Revocation is best effort: an invitation changed concurrently keeps its
+        state, and a later forget or its own expiry ends it.
+        """
+
+        try:
+            records = self._store.read_latest_record_payloads(
+                (_PAIRING_INVITATION_RECORD_TYPE,)
+            )
+        except AuthorityNotInitializedError:
+            return
+        for _, payload in records:
+            try:
+                invitation = _StoredPairingInvitation.model_validate_json(
+                    json.dumps(payload, separators=(",", ":"), allow_nan=False)
+                )
+            except ValueError:
+                continue
+            if (
+                invitation.state == "active"
+                and urlsplit(invitation.exchange_url).hostname == exchange_host
+            ):
+                try:
+                    self.revoke_invitation(invitation.invitation_id)
+                except PairingSessionStateError:
+                    continue
 
     def relay_configuration(self) -> OperatorRelayConfiguration | None:
         """Return the configured designated-gateway route, when present."""

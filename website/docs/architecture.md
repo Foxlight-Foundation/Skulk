@@ -1823,6 +1823,22 @@ failures with capped backoff, and leaves a route the relay permanently refused
 stopped. The connector reports a permanent refusal for an explicit revocation
 or for 401s that persist for ten minutes.
 
+**Dashboard phone pairing.** `RemotePairingController`
+(`src/skulk/api/remote_pairing.py`) backs the dashboard-only
+`/v1/auth/remote-pairing` status, turn-on, and turn-off routes. Status combines
+the stored route, the supervisor state, and the running connector's liveness
+(`OperatorGatewayConnector.relay_connected` counts the accepted control socket
+or live warm lanes): `connecting` for up to 20 seconds without a live session,
+then `relay_unreachable`; `revoked` once the supervisor holds a permanently
+refused route. Turning on is serialized per process, checks the five-device
+limit and another node's gateway role before contacting the relay, and asks the
+supervisor to start immediately. Turning off forgets the route and revokes the
+invitations bound to its server name. The node holding a route advertises a
+`NodePairingGateway` telemetry reading (set from the supervisor's state changes
+on the shared `TelemetryView`, published by the worker gatherer or the
+management-node publisher while active and once when it ends), so other nodes
+report `managed_elsewhere` instead of creating a second gateway.
+
 `skulk operator configure-relay` installs one generated paired-WebSocket route
 before normal public operation. The app and gateway use distinct 256-bit outer
 carrier credentials and one opaque locator; all are encrypted in the local

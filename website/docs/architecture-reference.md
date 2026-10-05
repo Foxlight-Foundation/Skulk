@@ -461,6 +461,18 @@ The bare `audio_cpp` tag reports engine availability, but signed music support a
   polls every 5 s and on request: start on a new route, stop on forget, restart
   on a route-identity change, capped-backoff retry on failure, stay stopped on
   a permanent refusal (explicit revocation, or 401 for ten minutes).
+- **Dashboard phone pairing:** dashboard-only `GET|POST|DELETE
+  /v1/auth/remote-pairing` (`RemotePairingController`, relay-denied). States:
+  `not_set_up`, `registering`, `connecting` (under 20 s without a live
+  session), `connected`, `relay_unreachable`, `revoked`, `managed_elsewhere`.
+  POST is idempotent and refuses `managed_elsewhere`/`device_limit` before the
+  relay; DELETE forgets the route and revokes its invitations. Errors carry
+  `{detail, code, retryAfterSeconds}`. Uninitialized nodes list empty
+  invitations and devices.
+- **Pairing gateway telemetry:** `NodePairingGateway{active}` on the TELEMETRY
+  plane (last-write-wins, `TelemetryView.node_pairing_gateways`, pruned with
+  the node; never State or the event log), published while the node holds a
+  relay route and once on withdrawal. Same-version fleets required.
 - **V1 remote carrier:** `skulk operator configure-relay --provisioning-file`
   validates one generated paired-WebSocket route, encrypts locator and distinct
   app/gateway carrier credentials in the local journal, and creates a protected
