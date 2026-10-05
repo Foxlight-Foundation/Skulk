@@ -195,6 +195,12 @@ A single Skulk `Node` (src/skulk/main.py) runs multiple components:
   credentials while persisting encrypted state and token digests. Refresh
   rotates both credentials, bearer validation enforces canonical scopes, and
   authorized devices can list or revoke credential-free device projections.
+  `skulk operator pair` on a gateway without a route self-registers one
+  (`relay_registration.py`, origin from `connectivity.relay` or the build
+  default): the node generates its key, epoch, and carrier credentials and the
+  relay receives only the key ID and credential digests. Relay ingress follows
+  the stored route at runtime (`OperatorRemoteAccessSupervisor`), so register,
+  `forget-relay`, and route replacement need no restart.
   `skulk operator configure-relay` persists one generated paired-WebSocket
   route and creates a protected pinned TLS identity. Version-one documents keep
   the bounded warm gateway lane pool. Explicit version-two documents instead

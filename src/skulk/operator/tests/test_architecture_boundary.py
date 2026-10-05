@@ -10,6 +10,7 @@ import skulk.operator.consensus as consensus_module
 import skulk.operator.consensus_store as consensus_store_module
 import skulk.operator.identity as identity_module
 import skulk.operator.relay as relay_module
+import skulk.operator.relay_registration as relay_registration_module
 import skulk.operator.replication as replication_module
 import skulk.operator.service as service_module
 import skulk.operator.transport as transport_module
@@ -61,6 +62,7 @@ def test_operator_runtime_does_not_import_inference_state_planes() -> None:
     for module_path in (
         Path(service_module.__file__),
         Path(relay_module.__file__),
+        Path(relay_registration_module.__file__),
     ):
         syntax_tree = ast.parse(module_path.read_text(encoding="utf-8"))
         imported_modules: set[str] = set()
