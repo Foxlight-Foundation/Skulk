@@ -13,12 +13,11 @@ from typing import cast, final
 
 import httpx
 import pytest
-
-import skulk.operator.relay_registration as relay_registration
 from cryptography.hazmat.primitives import serialization
 
 import skulk.operator.cli as operator_cli
 import skulk.operator.pairing as pairing_module
+import skulk.operator.relay_registration as relay_registration
 from skulk.operator.authority import EncryptedAuthorityStore
 from skulk.operator.key_provider import LocalFileAuthorityKeyProvider
 from skulk.operator.pairing import OperatorPairingService

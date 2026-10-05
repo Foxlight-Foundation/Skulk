@@ -11,13 +11,12 @@ from typing import cast, final
 from uuid import UUID
 
 import pytest
-
-import skulk.operator.relay_registration as relay_registration
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+import skulk.operator.relay_registration as relay_registration
 from skulk.api.operator_auth import create_operator_auth_router
 from skulk.api.operator_remote_access import OperatorRemoteAccessState
 from skulk.api.remote_pairing import (
@@ -190,7 +189,11 @@ def test_a_fresh_node_is_not_set_up_and_can_register(tmp_path: Path) -> None:
     ("settings", "offline", "reason"),
     [
         (RelayConnectivityConfig(enabled=False), False, "disabled"),
-        (RelayConnectivityConfig(registration_url="https://r.invalid"), True, "offline"),
+        (
+            RelayConnectivityConfig(registration_url="https://r.invalid"),
+            True,
+            "offline",
+        ),
     ],
 )
 def test_registration_blocked_reasons(
@@ -467,4 +470,3 @@ def test_build_without_a_default_relay_reports_not_configured(
         node.controller.enable()
     assert raised.value.failure == "not_configured"
     assert node.registrations == 0
-

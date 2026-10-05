@@ -240,7 +240,7 @@ def resolve_registration_origin(
     if offline:
         raise RelayRegistrationError("offline")
     origin = configured_origin or DEFAULT_RELAY_REGISTRATION_ORIGIN
-    if origin is None:
+    if not origin:
         raise RelayRegistrationError("not_configured")
     return validate_relay_origin(origin)
 
