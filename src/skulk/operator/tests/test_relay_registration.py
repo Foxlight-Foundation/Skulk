@@ -533,6 +533,13 @@ def test_a_never_configured_gateway_never_replaces_existing_identity_files(
     assert service.relay_configuration() is None
 
 
+def _no_managing_node(api_port: int) -> str | None:
+    """Report that no other node manages pairing, without any network call."""
+
+    del api_port
+    return None
+
+
 def _use_cli_service(
     monkeypatch: pytest.MonkeyPatch,
     service: OperatorPairingService,
@@ -556,7 +563,7 @@ def _use_cli_service(
     monkeypatch.setattr(pairing_module, "register_relay_route", _registrar(relay))
     monkeypatch.setattr(operator_cli, "load_skulk_config", lambda: config)
     # Never query a real node on this machine's API port from a unit test.
-    monkeypatch.setattr(operator_cli, "_pairing_managed_elsewhere", lambda _port: None)
+    monkeypatch.setattr(operator_cli, "_pairing_managed_elsewhere", _no_managing_node)
     payloads: list[str] = []
     monkeypatch.setattr(operator_cli, "_print_pairing_qr", payloads.append)
     return payloads
