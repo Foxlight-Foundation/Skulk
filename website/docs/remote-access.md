@@ -20,13 +20,35 @@ Do not expose the unauthenticated local API listener directly to the internet.
 
 ## Prepare remote access
 
-A cluster administrator configures the gateway once with the provisioning file
-the relay service supplies: `skulk operator configure-relay --provisioning-file
-<file>` stores the relay route and its protected carrier credentials and
-generates the gateway's TLS identity. Installing
-Skulk or opening **Remote Access** alone does not enroll a hosted relay service.
-Use the provisioning handoff supplied with your relay service; there is no
-public relay administration endpoint that a phone can use to create this trust.
+The gateway registers its own relay route the first time you pair a phone with
+`skulk operator pair`. It generates its own connector key and carrier
+credentials, sends the relay only their fingerprints, and starts remote access
+without a restart. Installing Skulk or opening **Remote Access** alone does not
+contact the relay.
+
+The gateway registers with the relay named in `skulk.yaml`, or with the build's
+default relay:
+
+```yaml
+connectivity:
+  relay:
+    enabled: true                                  # false keeps pairing on LAN and Tailscale
+    registration_url: https://relay.example.invalid  # optional; omit for the default relay
+```
+
+The relay is content-blind. It learns the connector key's fingerprint, the two
+credential fingerprints, the gateway's public address, connection times, and
+byte counts. It never sees app traffic, which stays inside TLS that terminates
+on the gateway.
+
+To turn remote access off, run `skulk operator forget-relay`. Phones paired
+through the relay lose remote access until you register again and pair them
+again; revoke their old device records to free their slots.
+
+A self-hosted relay can supply a provisioning file instead:
+`skulk operator configure-relay --provisioning-file <file>` stores that route
+and its protected carrier credentials and generates the gateway's TLS
+identity.
 
 Use the dashboard's **Remote Access** view to find local LAN and Tailscale
 connection options. These addresses are not a relay-health check. Diagnose relay provisioning and gateway reachability through the

@@ -247,7 +247,58 @@ For the full interactive reference with request/response schemas, see the [API R
 
 Operator pairing is explicitly started on the host that will act as the
 designated remote gateway. It does not expose an HTTP endpoint that creates
-pairing sessions:
+pairing sessions.
+
+### Relay route registration
+
+The Skulk Operator app reaches the gateway through a content-blind relay. When
+the gateway has no relay route, `skulk operator pair` registers one before
+printing the QR code:
+
+- the gateway generates a P-256 connector key, a 16-byte authority epoch, and
+  two distinct 32-byte carrier credentials;
+- it sends `POST /v1/registrations` to the relay origin with exactly
+  `connectorAuthorityKeyId` (SHA-256 of the key's DER SubjectPublicKeyInfo),
+  `appCarrierCredentialDigest`, and `gatewayCarrierCredentialDigest` (SHA-256
+  of each raw credential), all canonical unpadded base64url;
+- the relay returns `routingLocator`, `connectorRegion`, `appWebsocketUrl`,
+  `gatewayControlWebsocketUrl`, and `gatewayDataWebsocketUrl`;
+- Skulk stores the route with its own secrets in the encrypted authority
+  journal as an on-demand route, and a running node starts remote access within
+  a few seconds without a restart.
+
+The relay origin is `connectivity.relay.registration_url` in `skulk.yaml`
+(HTTPS, or HTTP on loopback for development), falling back to the build's
+default relay. `connectivity.relay.enabled: false` turns registration off, and
+an offline node never registers. Network failures, timeouts, and uncoded 5xx
+answers are retried twice with the same values, which the relay treats as the
+same registration. Coded refusals are reported, not retried:
+`invalid_request` (400), `already_registered` (409), `rate_limited` (429, with
+its `Retry-After`), `registration_paused` (503), and `capacity_exhausted`
+(503). The relay never receives the private key or a usable credential. It
+learns the key identifier, the two digests, the gateway's public address,
+connection times, and byte counts; app traffic stays inside TLS that
+terminates on the gateway.
+
+```bash
+uv run skulk operator forget-relay
+```
+
+`forget-relay` records a tombstone in the journal and removes the route's
+inner-TLS identity. A running node stops remote access within a few seconds.
+Phones paired through the route lose remote access, and their device records
+keep their slots until revoked. The relay is not contacted. Registering again
+creates a new route, and phones must pair again.
+
+If the relay revokes the connector, or refuses the route's credentials
+continuously for ten minutes, remote access stops and stays stopped until the
+route is forgotten and registered again. Shorter refusals, such as during a
+relay redeploy, are retried.
+
+### Hand-provisioned relay routes
+
+A self-hosted or operator-provisioned relay supplies a provisioning file
+instead:
 
 ```bash
 uv run skulk operator configure-relay \
@@ -256,7 +307,7 @@ uv run skulk operator configure-relay \
   --cluster-name "Cluster"
 ```
 
-The Foxlight relay service supplies one of two generated schemas. Version one
+The relay service supplies one of two generated schemas. Version one
 contains `version`, `app_websocket_url`, `gateway_websocket_url`,
 `routing_locator`, distinct `app_carrier_credential` and
 `gateway_carrier_credential` values, and optional `lane_count` (default four).
@@ -271,9 +322,9 @@ delegated connector signing authority. Skulk validates exact fixed carrier
 paths, requires WSS except for loopback development, stores the route,
 credentials, and optional connector authority inside the encrypted authority
 journal, generates an owner-only pinned TLS identity, and refuses silent
-replacement. Restart Skulk after initial configuration so version one opens its
-bounded outbound lane pool or version two establishes its signed control
-connector. A version-two gateway admits at most 64 active data lanes before
+replacement (run `forget-relay` first to replace a route). A running node opens
+version one's bounded outbound lane pool or establishes version two's signed
+control connector within a few seconds; no restart is needed. A version-two gateway admits at most 64 active data lanes before
 allocating a task or opening relay and loopback sockets; excess requests remain
 unclaimed and expire at the relay.
 Signed lease renewal retains the initial control-session proof for data-socket
@@ -371,7 +422,8 @@ shorten a longer invitation. Safe invitation status remains visible without
 the nonce or pairing code.
 
 `--exchange-url https://gateway.example.invalid` remains an optional direct
-LAN/Tailscale path and is required only before relay provisioning. Remote
+LAN/Tailscale path. It skips relay registration, and it is the way to pair when
+registration is off or no relay is configured. Remote
 exchange URLs must use HTTPS; cleartext HTTP is accepted only for loopback
 development URLs. A relay-configured package includes both the protected inner
 origin and relay bootstrap material, and the app prefers the relay path.

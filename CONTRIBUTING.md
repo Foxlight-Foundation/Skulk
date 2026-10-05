@@ -132,10 +132,13 @@ This starts a Vite dev server on port 3000 with hot reload. The dev server proxi
   crash-fault consensus, bounded dormant proposal lifecycle, and
   encrypted/public authority persistence. It also owns the designated-gateway
   local key provider, paired-WebSocket relay configuration/connector,
-  `skulk operator pair` and `configure-relay` commands, and single-use device
-  pairing plus credential lifecycle; the matching FastAPI routes and relay-only
-  canonical API guard live in `src/skulk/api/operator_auth.py` and
-  `src/skulk/api/operator_gateway.py`. It is a
+  self-service relay registration (`relay_registration.py`), the
+  `skulk operator pair`, `configure-relay`, `forget-relay`, and `devices`
+  commands, and single-use device pairing plus credential lifecycle; the
+  matching FastAPI routes, relay-only canonical API guard, and runtime relay
+  ingress supervisor live in `src/skulk/api/operator_auth.py`,
+  `src/skulk/api/operator_gateway.py`, and
+  `src/skulk/api/operator_remote_access.py`. It is a
   separate security plane from event-sourced inference state; do not place its
   secrets or mutable authorization records in `State`, telemetry, diagnostics,
   or ordinary events.

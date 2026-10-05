@@ -1802,6 +1802,27 @@ paired-device projections, and makes revocation immediate. The relay-only
 listener applies these scopes to the existing canonical routes; Skulk does not
 create parallel model, inference, or command APIs.
 
+**Self-service relay registration.** `skulk operator pair` on a gateway
+without a route calls `OperatorPairingService.register_relay`
+(`src/skulk/operator/relay_registration.py`). The gateway generates the P-256
+connector key, the 16-byte authority epoch, and both 32-byte carrier
+credentials; `POST /v1/registrations` sends only the key identifier and the two
+credential digests, and the relay answers with a locator, region, and the three
+WebSocket URLs. The result is stored through the existing on-demand
+provisioning shape, so the connector, QR, and exchange are unchanged. The relay
+origin comes from `connectivity.relay` in `skulk.yaml` or the build default;
+offline nodes and `enabled: false` never register. `forget-relay` appends a
+tombstone to the relay record and removes the inner-TLS files; a later
+configure fences on that tombstone and clears identity files a crash left
+behind. `OperatorRemoteAccessSupervisor` (`src/skulk/api/operator_remote_access.py`)
+replaces the startup-only ingress: it polls the stored route every five seconds
+(and on explicit requests), starts the relay listener and connector when a
+route appears, stops them when it is forgotten, restarts them when the route's
+identity changes (generation advances do not count), retries unexpected
+failures with capped backoff, and leaves a route the relay permanently refused
+stopped. The connector reports a permanent refusal for an explicit revocation
+or for 401s that persist for ten minutes.
+
 `skulk operator configure-relay` installs one generated paired-WebSocket route
 before normal public operation. The app and gateway use distinct 256-bit outer
 carrier credentials and one opaque locator; all are encrypted in the local

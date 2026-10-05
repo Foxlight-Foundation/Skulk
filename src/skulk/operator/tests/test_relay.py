@@ -33,6 +33,7 @@ from qrcode.constants import ERROR_CORRECT_L
 
 import skulk.operator.cli as operator_cli
 import skulk.operator.relay as relay_module
+import skulk.operator.relay_protocol as relay_protocol_module
 from skulk.operator.authority import EncryptedAuthorityStore
 from skulk.operator.key_provider import LocalFileAuthorityKeyProvider
 from skulk.operator.pairing import (
@@ -50,7 +51,7 @@ from skulk.operator.relay import (
     OperatorRelayConfigurationRepository,
     OperatorRelayProvisioning,
 )
-from skulk.operator.relay_protocol import OpenConnection
+from skulk.operator.relay_protocol import CONNECTOR_REVOKED_KIND, OpenConnection
 
 
 def _base64url(value: bytes) -> str:
@@ -535,12 +536,12 @@ def test_configure_relay_cli_uses_non_fabric_default_port(
         (
             _provisioning,
             "Configured the designated gateway with 1 relay lane. "
-            "Restart Skulk to connect.",
+            "A running Skulk node connects within a few seconds.",
         ),
         (
             _on_demand_provisioning,
             "Configured the designated gateway for on-demand relay connections. "
-            "Restart Skulk to connect.",
+            "A running Skulk node connects within a few seconds.",
         ),
     ),
     ids=("legacy-lanes", "on-demand"),
@@ -1605,3 +1606,107 @@ async def _websocket_to_tcp(
             return
         writer.write(cast(bytes, message.data))
         await writer.drain()
+
+
+async def _serve_control(
+    handler: Callable[[web.Request], Awaitable[web.StreamResponse]],
+) -> tuple[web.AppRunner, int]:
+    """Serve one fake connector-control endpoint on a loopback port."""
+
+    application = web.Application()
+    application.router.add_get("/v1/connector/control", handler)
+    runner = web.AppRunner(application)
+    await runner.setup()
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    port = cast(tuple[str, int], listener.getsockname())[1]
+    await web.SockSite(runner, listener).start()
+    return runner, port
+
+
+@pytest.mark.asyncio
+async def test_revoked_connector_stops_instead_of_reconnecting(
+    tmp_path: Path,
+) -> None:
+    """An explicit revocation ends the connector after one attempt."""
+
+    hellos: list[int] = []
+
+    async def revoke(request: web.Request) -> web.StreamResponse:
+        websocket = web.WebSocketResponse()
+        await websocket.prepare(request)
+        message = await websocket.receive()
+        if message.type is aiohttp.WSMsgType.BINARY:
+            hellos.append(1)
+            await websocket.send_bytes(
+                relay_protocol_module._encode_message(  # pyright: ignore[reportPrivateUsage]
+                    CONNECTOR_REVOKED_KIND, ()
+                )
+            )
+        await websocket.close()
+        return websocket
+
+    runner, port = await _serve_control(revoke)
+    service, _ = _service(tmp_path)
+    configuration = service.configure_relay(
+        _on_demand_provisioning(f"ws://127.0.0.1:{port}"),
+        operator_api_port=52416,
+    )
+    connector = OperatorGatewayConnector(
+        configuration,
+        next_connector_generation=service.reserve_relay_connector_generation,
+    )
+    try:
+        with pytest.raises(relay_module.OperatorRelayRouteRejectedError):
+            await asyncio.wait_for(connector.run(), timeout=10)
+        assert hellos == [1]
+    finally:
+        await runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_route_refused_past_the_grace_period_stops_the_connector(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a continuous refusal ends the connector; another failure resets it."""
+
+    answers = iter((401, 503, 401, 401, 401))
+    requests: list[int] = []
+
+    async def refuse(_request: web.Request) -> web.StreamResponse:
+        status = next(answers)
+        requests.append(status)
+        return web.Response(status=status)
+
+    runner, port = await _serve_control(refuse)
+    service, _ = _service(tmp_path)
+    configuration = service.configure_relay(
+        _on_demand_provisioning(f"ws://127.0.0.1:{port}"),
+        operator_api_port=52416,
+    )
+    clock = [0.0]
+
+    def monotonic_seconds() -> float:
+        """Advance 400 s per refusal so the grace period passes in a few tries."""
+
+        value = clock[0]
+        clock[0] += 400.0
+        return value
+
+    monkeypatch.setattr(relay_module, "_MINIMUM_RECONNECT_SECONDS", 0.01)
+    monkeypatch.setattr(relay_module, "_MAXIMUM_RECONNECT_SECONDS", 0.02)
+    connector = OperatorGatewayConnector(
+        configuration,
+        next_connector_generation=service.reserve_relay_connector_generation,
+        monotonic_seconds=monotonic_seconds,
+    )
+    try:
+        with pytest.raises(relay_module.OperatorRelayRouteRejectedError):
+            await asyncio.wait_for(connector.run(), timeout=10)
+        # 401 starts the window, 503 resets it, then 401s at 400 and 800 s
+        # stay inside the 600 s grace and the one at 1200 s ends it.
+        assert requests == [401, 503, 401, 401, 401]
+    finally:
+        await runner.cleanup()
+

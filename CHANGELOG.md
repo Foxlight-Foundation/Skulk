@@ -29,6 +29,20 @@ This project records release notes here and mirrors public-facing notes in
   A fresh install also no longer logs a disk-usage warning every 30 seconds
   before its first download creates the models folder.
 
+### Added
+
+- A gateway can register its own relay route, so pairing a phone from the
+  command line needs no file from the relay operator. When the gateway has no
+  route, `skulk operator pair` generates the gateway's connector key and carrier
+  credentials, sends the relay only their fingerprints, stores the route, and
+  starts remote access without a restart. The relay comes from the new
+  `connectivity.relay` section of `skulk.yaml` (`registration_url`, `enabled`)
+  or the build's default; offline nodes never register. The new
+  `skulk operator forget-relay` turns remote access off again. Remote access
+  now also starts, stops, and follows a replaced route without restarting
+  Skulk, retries after an unexpected failure, and stops for good when the relay
+  revokes the route or refuses it for ten minutes.
+
 ### Changed
 
 - A cluster now allows at most five paired phones and tablets at once. When

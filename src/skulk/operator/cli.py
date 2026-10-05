@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Literal, cast
 from uuid import UUID
 
+import yaml
+
 from skulk.operator.pairing import (
     MAXIMUM_ACTIVE_PAIRED_DEVICES,
     OperatorDevice,
@@ -24,9 +26,16 @@ from skulk.operator.pairing import (
     PairingSessionStateError,
 )
 from skulk.operator.relay import (
+    OperatorRelayAlreadyConfiguredError,
     OperatorRelayConfiguration,
     OperatorRelayProvisioning,
 )
+from skulk.operator.relay_registration import (
+    RelayRegistrationError,
+    resolve_registration_origin,
+)
+from skulk.shared.constants import offline_mode
+from skulk.store.config import load_skulk_config
 from skulk.utils.pydantic_ext import FrozenModel
 
 DEFAULT_OPERATOR_API_PORT = 52417
@@ -50,6 +59,12 @@ class _ConfigureRelayArguments(FrozenModel):
     provisioning_file: Path
     operator_api_port: int
     cluster_name: str
+
+
+class _ForgetRelayArguments(FrozenModel):
+    """Strictly validated relay-forget arguments."""
+
+    command: Literal["forget-relay"]
 
 
 class _InvitationListArguments(FrozenModel):
@@ -183,12 +198,53 @@ def _relay_configured_message(configuration: OperatorRelayConfiguration) -> str:
         # connections on demand, so there is no fixed lane pool to report.
         return (
             "Configured the designated gateway for on-demand relay "
-            "connections. Restart Skulk to connect."
+            "connections. A running Skulk node connects within a few seconds."
         )
     lanes = "relay lane" if lane_count == 1 else "relay lanes"
     return (
         f"Configured the designated gateway with {lane_count} {lanes}. "
-        "Restart Skulk to connect."
+        "A running Skulk node connects within a few seconds."
+    )
+
+
+def _register_relay_or_exit(
+    parser: argparse.ArgumentParser,
+    service: OperatorPairingService,
+    cluster_name: str,
+) -> None:
+    """Register this gateway with the configured relay, or exit with guidance.
+
+    Args:
+        parser: Command parser used to report a failure and exit.
+        service: Local pairing service for this gateway.
+        cluster_name: Name used only when initializing a new gateway.
+    """
+
+    try:
+        config = load_skulk_config()
+    except (OSError, ValueError, yaml.YAMLError):
+        parser.error("skulk.yaml could not be read; fix it before pairing")
+    connectivity = config.connectivity if config is not None else None
+    relay = connectivity.relay if connectivity is not None else None
+    try:
+        origin = resolve_registration_origin(
+            enabled=relay.enabled if relay is not None else True,
+            configured_origin=relay.registration_url if relay is not None else None,
+            offline=offline_mode(),
+        )
+        service.register_relay(
+            registration_origin=origin,
+            operator_api_port=DEFAULT_OPERATOR_API_PORT,
+            cluster_name=cluster_name,
+        )
+    except RelayRegistrationError as exc:
+        parser.error(
+            f"could not register a relay route: {exc}. Pass --exchange-url for "
+            "direct LAN or Tailscale pairing"
+        )
+    print(
+        "Registered this gateway with the relay. A running Skulk node starts "
+        "remote access within a few seconds."
     )
 
 
@@ -264,6 +320,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--cluster-name",
         default="Cluster",
         help="Initial cluster name when designating a gateway for the first time.",
+    )
+    subparsers.add_parser(
+        "forget-relay",
+        help=(
+            "Forget this gateway's relay route; phones paired through it lose "
+            "remote access."
+        ),
     )
     invitations_parser = subparsers.add_parser(
         "invitations",
@@ -371,15 +434,38 @@ def main(argv: Sequence[str] | None = None) -> int:
             # Validation errors may echo the rejected credential-bearing input.
             # The command reports only the safe failure class to stderr.
             parser.error("relay provisioning file is unreadable or invalid")
-        configuration = service.configure_relay(
-            provisioning,
-            operator_api_port=arguments.operator_api_port,
-            cluster_name=arguments.cluster_name,
-        )
+        try:
+            configuration = service.configure_relay(
+                provisioning,
+                operator_api_port=arguments.operator_api_port,
+                cluster_name=arguments.cluster_name,
+            )
+        except OperatorRelayAlreadyConfiguredError:
+            parser.error(
+                "this gateway already has a relay route; run "
+                "`skulk operator forget-relay` first to replace it"
+            )
         print(_relay_configured_message(configuration))
+        return 0
+    if parsed_values.get("command") == "forget-relay":
+        _ForgetRelayArguments.model_validate(parsed_values)
+        if not service.forget_relay():
+            print("This gateway has no relay route.")
+            return 0
+        print(
+            "Forgot this gateway's relay route; a running Skulk node stops "
+            "remote access within a few seconds. Phones paired through it keep "
+            "their device slots until revoked (`skulk operator devices revoke`)."
+        )
         return 0
 
     arguments = _PairArguments.model_validate(parsed_values)
+    if arguments.exchange_url is None and service.relay_configuration() is None:
+        # Check the device limit first so a full cluster does not register a
+        # route it cannot use yet.
+        if service.pairing_capacity().available_slots == 0:
+            parser.error(_DEVICE_LIMIT_GUIDANCE)
+        _register_relay_or_exit(parser, service, arguments.cluster_name)
     try:
         invitation_mode = (
             arguments.valid_for is not None or arguments.max_pairings is not None

@@ -34,6 +34,7 @@ from skulk.operator.relay_protocol import (
     DrainRequest,
     HeartbeatAcknowledgement,
     OpenConnection,
+    RelayConnectorRevokedError,
     RelayProtocolError,
     build_connector_hello,
     build_lease_renewal,
@@ -70,6 +71,10 @@ _GENERATION_RESERVATION_RETRIES: Final = 3
 # Keep the gateway below ordinary per-process descriptor limits while allowing
 # many paired devices to be active without the version-one warm-lane ceiling.
 _MAXIMUM_ON_DEMAND_DATA_LANES: Final = 64
+# The relay answers 401 when it does not know the route or its credentials.
+# A relay redeploy can refuse routes briefly, so only a refusal that persists
+# this long means the route is gone; until then the connector keeps retrying.
+_ROUTE_REFUSAL_GRACE_SECONDS: Final = 600.0
 
 
 def _aiohttp_receive_limit_bytes(inclusive_frame_bytes: int) -> int:
@@ -88,6 +93,16 @@ class OperatorRelayAlreadyConfiguredError(OperatorRelayError):
 
 class OperatorRelayUnavailableError(OperatorRelayError):
     """Raised when persisted relay or TLS material cannot be used safely."""
+
+
+class OperatorRelayRouteRejectedError(OperatorRelayError):
+    """Raised when the relay permanently refuses this gateway's route.
+
+    The relay revoked the connector, or it repeatedly refused the route's
+    carrier credentials (for example after pruning a dormant route).
+    Reconnecting with the same route cannot succeed; the operator must forget
+    the route and register again.
+    """
 
 
 @final
@@ -485,6 +500,20 @@ class OperatorRelayConfiguration(FrozenModel):
 
 
 @final
+class _ForgottenRelayRoute(FrozenModel):
+    """Journal tombstone recording that the operator forgot the relay route."""
+
+    forgotten: Literal[True] = Field(
+        description="Marks the designated-gateway relay route as forgotten."
+    )
+
+
+def _is_forgotten_route(payload: Mapping[str, object]) -> bool:
+    """Return whether a relay journal payload is the forgotten-route tombstone."""
+
+    return payload.get("forgotten") is True
+
+
 class OperatorRelayConfigurationRepository:
     """Persist one relay route in the encrypted local authority journal."""
 
@@ -528,6 +557,22 @@ class OperatorRelayConfigurationRepository:
             raise OperatorRelayAlreadyConfiguredError(
                 "operator relay is already configured; rotation is a later operation"
             )
+        # A forgotten route leaves a tombstone; the new route replaces exactly
+        # that record, so a concurrent configure or forget cannot interleave.
+        try:
+            prior_record, _ = self._store.read_latest_record_payload(
+                _RELAY_RECORD_TYPE,
+                _RELAY_RECORD_ID,
+            )
+            expected_record_commit_index = prior_record.commit_index
+        except AuthorityNotInitializedError:
+            expected_record_commit_index = 0
+        if expected_record_commit_index:
+            # Identity files left behind by a forget interrupted between its
+            # tombstone and cleanup belong to the forgotten route. Without a
+            # tombstone, existing files are never replaced.
+            self._certificate_path.unlink(missing_ok=True)
+            self._private_key_path.unlink(missing_ok=True)
         server_name = _gateway_server_name(provisioning.routing_locator)
         certificate_pem, private_key_pem = _generate_tls_identity(server_name)
         _write_create_only(self._private_key_path, private_key_pem, mode=0o600)
@@ -560,7 +605,7 @@ class OperatorRelayConfigurationRepository:
             expected_commit_index = records[-1].commit_index
             self._store.append(
                 expected_commit_index=expected_commit_index,
-                expected_record_commit_index=0,
+                expected_record_commit_index=expected_record_commit_index,
                 authority_term=1,
                 record_type=_RELAY_RECORD_TYPE,
                 record_id=_RELAY_RECORD_ID,
@@ -576,7 +621,11 @@ class OperatorRelayConfigurationRepository:
         return configuration
 
     def load(self) -> OperatorRelayConfiguration | None:
-        """Return the configured relay route, or ``None`` before provisioning."""
+        """Return the configured relay route, or ``None`` when none is in use.
+
+        ``None`` covers both a gateway that was never provisioned and one whose
+        operator forgot its route.
+        """
 
         try:
             payload = self._store.read_latest_payload(
@@ -584,6 +633,8 @@ class OperatorRelayConfigurationRepository:
                 _RELAY_RECORD_ID,
             )
         except AuthorityNotInitializedError:
+            return None
+        if _is_forgotten_route(payload):
             return None
         try:
             return OperatorRelayConfiguration.model_validate_json(
@@ -593,6 +644,60 @@ class OperatorRelayConfigurationRepository:
             raise OperatorRelayUnavailableError(
                 "operator relay configuration is malformed"
             ) from exc
+
+    def forget(self) -> bool:
+        """Forget this gateway's relay route locally.
+
+        Appends a tombstone so the route stops loading, then removes the route's
+        inner-TLS identity files. Phones paired through the route lose remote
+        access; registering again creates a new route and requires pairing
+        again. The relay is not contacted: a forgotten route simply stays
+        dormant there.
+
+        Returns:
+            ``True`` when a route was forgotten, ``False`` when none was in use.
+
+        Raises:
+            OperatorRelayUnavailableError: The journal changed concurrently on
+                every attempt.
+        """
+
+        for _ in range(_GENERATION_RESERVATION_RETRIES):
+            try:
+                record, payload = self._store.read_latest_record_payload(
+                    _RELAY_RECORD_TYPE,
+                    _RELAY_RECORD_ID,
+                )
+            except AuthorityNotInitializedError:
+                return False
+            if _is_forgotten_route(payload):
+                return False
+            records = self._store.records()
+            try:
+                self._store.append(
+                    expected_commit_index=records[-1].commit_index,
+                    expected_record_commit_index=record.commit_index,
+                    authority_term=1,
+                    record_type=_RELAY_RECORD_TYPE,
+                    record_id=_RELAY_RECORD_ID,
+                    payload=cast(
+                        Mapping[str, object],
+                        _ForgottenRelayRoute(forgotten=True).model_dump(
+                            mode="json", by_alias=True
+                        ),
+                    ),
+                )
+            except AuthorityCommitConflictError:
+                continue
+            # The tombstone is durable first, so a crash here leaves stale
+            # files that the next configure removes, never a loadable route
+            # without its identity.
+            self._certificate_path.unlink(missing_ok=True)
+            self._private_key_path.unlink(missing_ok=True)
+            return True
+        raise OperatorRelayUnavailableError(
+            "operator relay configuration changed concurrently"
+        )
 
     def reserve_connector_generation(self) -> int:
         """Durably reserve and return the next on-demand connector generation.
@@ -618,6 +723,8 @@ class OperatorRelayConfigurationRepository:
                     json.dumps(payload, separators=(",", ":"), allow_nan=False)
                 )
             except (AuthorityNotInitializedError, ValueError) as exc:
+                # A forgotten route's tombstone does not validate as a
+                # configuration, so it lands here too.
                 raise OperatorRelayUnavailableError(
                     "on-demand operator relay is not configured"
                 ) from exc
@@ -666,6 +773,7 @@ class OperatorGatewayConnector:
         frame_bytes: int = _DEFAULT_FRAME_BYTES,
         next_connector_generation: Callable[[], int] | None = None,
         now_unix_millis: Callable[[], int] | None = None,
+        monotonic_seconds: Callable[[], float] = time.monotonic,
     ) -> None:
         """Create one connector for a persisted designated-gateway route.
 
@@ -675,6 +783,8 @@ class OperatorGatewayConnector:
             next_connector_generation: Durable generation reservation used only
                 by version 2 before each signed control attempt.
             now_unix_millis: Injectable wall clock for signed lease timestamps.
+            monotonic_seconds: Injectable monotonic clock measuring how long
+                the relay has refused the route.
         """
 
         if not 1 <= frame_bytes <= _MAXIMUM_FRAME_BYTES:
@@ -687,6 +797,7 @@ class OperatorGatewayConnector:
         self._now_unix_millis = now_unix_millis or (
             lambda: time.time_ns() // 1_000_000
         )
+        self._monotonic_seconds = monotonic_seconds
         self._on_demand_data_lanes = _OnDemandDataLaneCapacity(
             _MAXIMUM_ON_DEMAND_DATA_LANES
         )
@@ -697,6 +808,11 @@ class OperatorGatewayConnector:
         Cancellation closes every control/data socket and the shared HTTP
         client. Individual carrier failures reconnect with bounded exponential
         delay; version-2 generations are durably advanced before each attempt.
+
+        Raises:
+            OperatorRelayRouteRejectedError: Version 2 only: the relay revoked
+                the connector, or refused the route's credentials continuously
+                for ten minutes. Retrying the same route cannot succeed.
         """
 
         timeout = aiohttp.ClientTimeout(total=None, sock_connect=10.0, sock_read=None)
@@ -780,9 +896,30 @@ class OperatorGatewayConnector:
                 await writer.wait_closed()
 
     async def _run_on_demand(self, timeout: aiohttp.ClientTimeout) -> None:
-        """Maintain one signed control socket and independent requested data lanes."""
+        """Maintain one signed control socket and independent requested data lanes.
+
+        A permanent route rejection is raised inside the data-lane task group so
+        that group cancels every open data lane; it leaves here unwrapped.
+        """
+
+        try:
+            await self._maintain_on_demand_control(timeout)
+        except BaseExceptionGroup as group:
+            rejection = _route_rejection(group)
+            if rejection is None:
+                raise
+            # Keep the rejection's own cause (the relay's revocation or refusal)
+            # rather than chaining the task-group wrapper.
+            raise rejection from rejection.__cause__
+
+    async def _maintain_on_demand_control(
+        self,
+        timeout: aiohttp.ClientTimeout,
+    ) -> None:
+        """Reconnect the control socket until cancelled or permanently refused."""
 
         delay = _MINIMUM_RECONNECT_SECONDS
+        refused_since: float | None = None
         async with (
             aiohttp.ClientSession(timeout=timeout) as session,
             asyncio.TaskGroup() as data_tasks,
@@ -818,12 +955,43 @@ class OperatorGatewayConnector:
                     )
                     await asyncio.sleep(drain_seconds)
                     delay = _MINIMUM_RECONNECT_SECONDS
+                    refused_since = None
+                except RelayConnectorRevokedError as exc:
+                    logger.warning(
+                        "Operator relay revoked this gateway's route; remote "
+                        "access stopped until the route is replaced"
+                    )
+                    raise OperatorRelayRouteRejectedError(
+                        "operator relay revoked this gateway's route"
+                    ) from exc
+                except aiohttp.WSServerHandshakeError as exc:
+                    if exc.status == 401:
+                        now = self._monotonic_seconds()
+                        if refused_since is None:
+                            refused_since = now
+                        if now - refused_since >= _ROUTE_REFUSAL_GRACE_SECONDS:
+                            logger.warning(
+                                "Operator relay no longer accepts this gateway's "
+                                "route; remote access stopped until the route is "
+                                "replaced"
+                            )
+                            raise OperatorRelayRouteRejectedError(
+                                "operator relay no longer accepts this gateway's route"
+                            ) from exc
+                    else:
+                        refused_since = None
+                    logger.warning(
+                        "Operator relay control connection was refused; retrying"
+                    )
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 2, _MAXIMUM_RECONNECT_SECONDS)
                 except (
                     aiohttp.ClientError,
                     OSError,
                     OperatorRelayError,
                     RelayProtocolError,
                 ):
+                    refused_since = None
                     logger.warning(
                         "Operator relay control connection disconnected; retrying"
                     )
@@ -928,7 +1096,10 @@ class OperatorGatewayConnector:
             for result in results:
                 if isinstance(result, asyncio.CancelledError):
                     continue
-                if isinstance(result, _OperatorRelayDrainRequestedError):
+                if isinstance(
+                    result,
+                    (_OperatorRelayDrainRequestedError, RelayConnectorRevokedError),
+                ):
                     raise result
                 if isinstance(result, BaseException):
                     raise OperatorRelayError(
@@ -1189,6 +1360,23 @@ class OperatorGatewayConnector:
 
         while payload := await reader.read(self._frame_bytes):
             await websocket.send_bytes(payload)
+
+
+def _route_rejection(
+    group: BaseExceptionGroup[BaseException],
+) -> OperatorRelayRouteRejectedError | None:
+    """Find a permanent route rejection inside a task-group failure."""
+
+    for exception in group.exceptions:
+        if isinstance(exception, OperatorRelayRouteRejectedError):
+            return exception
+        if isinstance(exception, BaseExceptionGroup):
+            nested = _route_rejection(
+                cast(BaseExceptionGroup[BaseException], exception)
+            )
+            if nested is not None:
+                return nested
+    return None
 
 
 def _decode_carrier_value(value: str) -> bytes:

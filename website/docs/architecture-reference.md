@@ -447,6 +447,19 @@ The bare `audio_cpp` tag reports engine availability, but signed music support a
   `qrcode.react` in component memory for five minutes, independently of the
   server-side invitation lifetime, and reports actionable gateway/path
   guidance for authority failures.
+- **Self-service relay registration:** `skulk operator pair` without a route
+  registers one (`relay_registration.py`): node-generated P-256 key, epoch, and
+  both carrier credentials; `POST /v1/registrations` carries only the key ID
+  and SHA-256 credential digests; the answer (locator, region, three URLs) is
+  stored as an on-demand route. Origin: `connectivity.relay.registration_url`
+  or the build default (`DEFAULT_RELAY_REGISTRATION_ORIGIN`); disabled or
+  offline nodes never register; transient failures retry with the same values;
+  coded refusals (`invalid_request`, `already_registered`, `rate_limited`,
+  `registration_paused`, `capacity_exhausted`) do not. `forget-relay` writes a
+  tombstone and removes the TLS identity. `OperatorRemoteAccessSupervisor`
+  polls every 5 s and on request: start on a new route, stop on forget, restart
+  on a route-identity change, capped-backoff retry on failure, stay stopped on
+  a permanent refusal (explicit revocation, or 401 for ten minutes).
 - **V1 remote carrier:** `skulk operator configure-relay --provisioning-file`
   validates one generated paired-WebSocket route, encrypts locator and distinct
   app/gateway carrier credentials in the local journal, and creates a protected

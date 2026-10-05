@@ -28,10 +28,15 @@ from skulk.operator.identity import ClusterPublicIdentity, create_cluster_identi
 from skulk.operator.key_provider import LocalFileAuthorityKeyProvider
 from skulk.operator.plugin_scopes import PLUGIN_SCOPES, PluginScope
 from skulk.operator.relay import (
+    OperatorRelayAlreadyConfiguredError,
     OperatorRelayConfiguration,
     OperatorRelayConfigurationRepository,
     OperatorRelayProvisioning,
     OperatorRemoteAccessMaterial,
+)
+from skulk.operator.relay_registration import (
+    RelayRegistrationMaterial,
+    register_relay_route,
 )
 from skulk.utils.pydantic_ext import FrozenModel
 
@@ -916,6 +921,64 @@ class OperatorPairingService:
             provisioning,
             operator_api_port=operator_api_port,
         )
+
+    def register_relay(
+        self,
+        *,
+        registration_origin: str,
+        operator_api_port: int,
+        cluster_name: str = "Cluster",
+        register: Callable[
+            [str, RelayRegistrationMaterial], OperatorRelayProvisioning
+        ]
+        | None = None,
+    ) -> OperatorRelayConfiguration:
+        """Register this gateway with a relay and store the resulting route.
+
+        The gateway generates its connector key, authority epoch, and carrier
+        credentials; the relay receives only the key identifier and the
+        credential digests. A running node starts remote access for the new
+        route without a restart.
+
+        Args:
+            registration_origin: Validated relay origin to register with.
+            operator_api_port: Loopback port of the relay-only TLS listener.
+            cluster_name: Name used only when initializing a new gateway.
+            register: Registration call; ``None`` uses
+                ``register_relay_route``.
+
+        Returns:
+            The stored relay configuration.
+
+        Raises:
+            OperatorRelayAlreadyConfiguredError: A route is already in use.
+            RelayRegistrationError: The relay refused or could not be reached.
+        """
+
+        if self._relay_repository.load() is not None:
+            raise OperatorRelayAlreadyConfiguredError(
+                "operator relay is already configured"
+            )
+        material = RelayRegistrationMaterial.generate()
+        provisioning = (register or register_relay_route)(registration_origin, material)
+        return self.configure_relay(
+            provisioning,
+            operator_api_port=operator_api_port,
+            cluster_name=cluster_name,
+        )
+
+    def forget_relay(self) -> bool:
+        """Forget this gateway's relay route locally.
+
+        Remote access stops without a restart. Devices paired through the
+        route keep their records, and their slots, until revoked or until their
+        refresh credentials expire.
+
+        Returns:
+            ``True`` when a route was forgotten, ``False`` when none was in use.
+        """
+
+        return self._relay_repository.forget()
 
     def relay_configuration(self) -> OperatorRelayConfiguration | None:
         """Return the configured designated-gateway route, when present."""
