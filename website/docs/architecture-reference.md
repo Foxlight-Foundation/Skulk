@@ -452,7 +452,8 @@ The bare `audio_cpp` tag reports engine availability, but signed music support a
   both carrier credentials; `POST /v1/registrations` carries only the key ID
   and SHA-256 credential digests; the answer (locator, region, three URLs) is
   stored as an on-demand route. Origin: `connectivity.relay.registration_url`
-  or the build default (`DEFAULT_RELAY_REGISTRATION_ORIGIN`); disabled or
+  or the build default (`DEFAULT_RELAY_REGISTRATION_ORIGIN`,
+  `https://relay.foxlight.ai`); disabled or
   offline nodes never register; transient failures (including the relay's
   `unavailable`) retry with the same values; coded refusals (`invalid_request`,
   `not_found`, `already_registered`, `rate_limited`, `registration_paused`,
