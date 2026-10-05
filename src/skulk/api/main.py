@@ -153,6 +153,7 @@ from skulk.api.realtime import (
     RealtimeResponseConfig,
     RealtimeTranscriptionBridge,
 )
+from skulk.api.remote_pairing import RelayLink, RemotePairingController
 from skulk.api.steward import (
     STEWARD_NOT_READY_MESSAGES,
     STEWARD_RETRY_AFTER_SECONDS,
@@ -391,6 +392,7 @@ from skulk.shared.constants import (
     SKULK_TRACING_CACHE_DIR,
     SKULK_VIDEO_STORE_DIR,
     SKULK_VIDEO_STORE_MAX_BYTES,
+    offline_mode,
     preferred_env_value,
 )
 from skulk.shared.election import ElectionMessage
@@ -618,6 +620,7 @@ from skulk.shared.types.worker.shards import (
 from skulk.shared.version import get_skulk_version, get_skulk_version_label
 from skulk.store.config import (
     ReconciliationStoreConfig,
+    RelayConnectivityConfig,
     SkulkConfig,
     TelemetryConfig,
     bootstrap_model_store_config,
@@ -1876,10 +1879,13 @@ class API:
             OperatorRemoteAccessSupervisor(
                 load_configuration=operator_pairing_service.relay_configuration,
                 run_session=self._run_operator_remote_access_session,
+                on_state_change=self._advertise_pairing_gateway,
             )
             if operator_pairing_service is not None
             else None
         )
+        # The connector of the running relay session, read for its liveness.
+        self._operator_gateway_connector: OperatorGatewayConnector | None = None
         # External extensions remain optional. Production nodes prepend
         # first-party provider facades that expose core services through the
         # same generic contracts without duplicating their runtimes.
@@ -2144,7 +2150,20 @@ class API:
         )
         if operator_pairing_service is not None:
             self.app.include_router(
-                create_operator_auth_router(operator_pairing_service)
+                create_operator_auth_router(
+                    operator_pairing_service,
+                    remote_pairing=RemotePairingController(
+                        service=operator_pairing_service,
+                        relay_settings=self._relay_connectivity_settings,
+                        offline=offline_mode,
+                        remote_access_state=lambda: self.operator_remote_access_state,
+                        relay_link=self._operator_relay_link,
+                        request_remote_access_check=(
+                            self.request_operator_remote_access_check
+                        ),
+                        pairing_gateway_elsewhere=self._pairing_gateway_elsewhere,
+                    ),
+                )
             )
 
         # A headless/worker node may have no built dashboard assets
@@ -11129,6 +11148,42 @@ class API:
         supervisor = self._operator_remote_access
         return "not_configured" if supervisor is None else supervisor.state
 
+    def _advertise_pairing_gateway(self, state: OperatorRemoteAccessState) -> None:
+        """Tell the cluster whether this node holds the phone-pairing relay route.
+
+        Any state other than ``not_configured`` means a route is stored here,
+        so this node is where phone pairing is managed.
+        """
+
+        self._telemetry_view.local_pairing_gateway_active = state != "not_configured"
+
+    def _relay_connectivity_settings(self) -> RelayConnectivityConfig | None:
+        """Return the current ``connectivity.relay`` settings, if any."""
+
+        config = self._skulk_config
+        if config is None or config.connectivity is None:
+            return None
+        return config.connectivity.relay
+
+    def _operator_relay_link(self) -> RelayLink | None:
+        """Return the running relay connector's liveness, if one is running."""
+
+        connector = self._operator_gateway_connector
+        if connector is None:
+            return None
+        return RelayLink(
+            connected=connector.relay_connected,
+            disconnected_seconds=connector.disconnected_seconds(),
+        )
+
+    def _pairing_gateway_elsewhere(self) -> tuple[str, str | None] | None:
+        """Return another node advertising the cluster's relay route, if any."""
+
+        for node_id in sorted(self._telemetry_view.node_pairing_gateways):
+            if node_id != self.node_id:
+                return str(node_id), self._friendly_name_for_node(node_id)
+        return None
+
     def request_operator_remote_access_check(self) -> None:
         """Make relay ingress re-read the stored route now.
 
@@ -11161,25 +11216,33 @@ class API:
             return
         rejected = False
 
+        connector = OperatorGatewayConnector(
+            configuration,
+            next_connector_generation=service.reserve_relay_connector_generation,
+        )
+
         async def run_connector() -> None:
             nonlocal rejected
             try:
-                await OperatorGatewayConnector(
-                    configuration,
-                    next_connector_generation=(
-                        service.reserve_relay_connector_generation
-                    ),
-                ).run()
+                await connector.run()
             except OperatorRelayRouteRejectedError:
                 rejected = True
             finally:
                 stop.set()
 
-        async with anyio.create_task_group() as operator_task_group:
-            operator_task_group.start_soon(self.run_operator_api, configuration, stop)
-            operator_task_group.start_soon(run_connector)
-            await stop.wait()
-            operator_task_group.cancel_scope.cancel()
+        self._operator_gateway_connector = connector
+
+        try:
+            async with anyio.create_task_group() as operator_task_group:
+                operator_task_group.start_soon(
+                    self.run_operator_api, configuration, stop
+                )
+                operator_task_group.start_soon(run_connector)
+                await stop.wait()
+                operator_task_group.cancel_scope.cancel()
+        finally:
+            if self._operator_gateway_connector is connector:
+                self._operator_gateway_connector = None
         if rejected:
             raise OperatorRelayRouteRejectedError(
                 "operator relay permanently refused this gateway's route"

@@ -30,6 +30,8 @@ _BODYLESS_MUTATIONS = {
     ("POST", "/onboarding"),
     ("POST", "/store/reconciliation/rescan"),
     ("POST", "/admin/restart"),
+    # Turning phone pairing on needs no input: the node generates every secret.
+    ("POST", "/v1/auth/remote-pairing"),
     (
         "POST",
         "/v1/plugins/managed/installations/{plugin_id}/operations/{operation_id}/recover",

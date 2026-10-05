@@ -292,7 +292,7 @@ def test_dashboard_invitation_management_requires_direct_browser_authority(
 def test_dashboard_invitation_creation_requires_configured_gateway(
     tmp_path: Path,
 ) -> None:
-    """A non-gateway dashboard cannot mint unusable remote invitations."""
+    """An unset-up node cannot mint unusable invitations but lists nothing neutrally."""
 
     provider = LocalFileAuthorityKeyProvider(tmp_path / "unconfigured-key.bin")
     service = OperatorPairingService(
@@ -317,19 +317,20 @@ def test_dashboard_invitation_creation_requires_configured_gateway(
     )
 
     assert response.status_code == 409
-    assert "configured operator gateway" in response.text
-    assert "Tailscale or localhost" in response.text
+    assert "Phone pairing is not set up on this node yet" in response.text
+    assert "Pair a phone" in response.text
     assert "pairingCode" not in response.text
 
-    listed = client.get(
-        "/v1/auth/pairing-invitations",
-        headers={
-            "Origin": "http://127.0.0.1:52415",
-            "X-Skulk-Dashboard": "pairing-v1",
-        },
-    )
-    assert listed.status_code == 409
-    assert "configured operator gateway" in listed.text
+    dashboard_headers = {
+        "Origin": "http://127.0.0.1:52415",
+        "X-Skulk-Dashboard": "pairing-v1",
+    }
+    listed = client.get("/v1/auth/pairing-invitations", headers=dashboard_headers)
+    assert listed.status_code == 200
+    assert listed.json() == []
+    devices = client.get("/v1/auth/devices", headers=dashboard_headers)
+    assert devices.status_code == 200
+    assert devices.json() == {"devices": []}
 
 
 def _pair_device(

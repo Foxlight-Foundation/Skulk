@@ -26,6 +26,7 @@ from skulk.operator.pairing import (
     PairingSessionStateError,
 )
 from skulk.operator.relay import (
+    DEFAULT_OPERATOR_API_PORT,
     OperatorRelayAlreadyConfiguredError,
     OperatorRelayConfiguration,
     OperatorRelayProvisioning,
@@ -37,8 +38,6 @@ from skulk.operator.relay_registration import (
 from skulk.shared.constants import offline_mode
 from skulk.store.config import load_skulk_config
 from skulk.utils.pydantic_ext import FrozenModel
-
-DEFAULT_OPERATOR_API_PORT = 52417
 
 
 class _PairArguments(FrozenModel):
@@ -454,8 +453,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         print(
             "Forgot this gateway's relay route; a running Skulk node stops "
-            "remote access within a few seconds. Phones paired through it keep "
-            "their device slots until revoked (`skulk operator devices revoke`)."
+            "remote access within a few seconds, and pairing codes made for it "
+            "no longer work. Phones paired through it keep their device slots "
+            "until revoked (`skulk operator devices revoke`)."
         )
         return 0
 

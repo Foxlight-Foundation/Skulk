@@ -202,3 +202,29 @@ async def test_a_change_request_is_applied_without_waiting_for_the_poll() -> Non
         await _eventually(lambda: sessions.started == ["a"])
         shutdown.set()
         supervisor.request_check()
+
+
+async def test_state_changes_are_reported_once_each() -> None:
+    """The API learns when this node gains or loses the pairing gateway role."""
+
+    stored: list[OperatorRelayConfiguration | None] = [None]
+    sessions = _Sessions()
+    changes: list[str] = []
+    supervisor = OperatorRemoteAccessSupervisor(
+        load_configuration=lambda: stored[0],
+        run_session=sessions.run,
+        poll_seconds=0.01,
+        on_state_change=changes.append,
+    )
+    shutdown = anyio.Event()
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(supervisor.run, shutdown)
+        await anyio.sleep(0.05)
+        stored[0] = _route("a")
+        await _eventually(lambda: changes == ["running"])
+        stored[0] = None
+        await _eventually(lambda: changes == ["running", "not_configured"])
+        await anyio.sleep(0.05)
+        shutdown.set()
+    assert changes == ["running", "not_configured"]
+

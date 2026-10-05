@@ -47,6 +47,10 @@ from skulk.operator.relay_protocol import (
 from skulk.shared.constants import SKULK_CONFIG_HOME
 from skulk.utils.pydantic_ext import FrozenModel
 
+DEFAULT_OPERATOR_API_PORT: Final = 52417
+"""Loopback port of the relay-only authenticated TLS listener, distinct from
+Skulk's default 52416 fabric transport."""
+
 _RELAY_RECORD_TYPE: Final = "operator_relay_configuration"
 _RELAY_RECORD_ID: Final = "designated_gateway_v1"
 _CARRIER_VALUE_BYTES: Final = 32
@@ -798,9 +802,43 @@ class OperatorGatewayConnector:
             lambda: time.time_ns() // 1_000_000
         )
         self._monotonic_seconds = monotonic_seconds
+        # Live relay sessions: the accepted control socket (version 2) or each
+        # connected warm lane (version 1). Read by the dashboard status.
+        self._live_relay_sessions = 0
+        self._disconnected_since = monotonic_seconds()
         self._on_demand_data_lanes = _OnDemandDataLaneCapacity(
             _MAXIMUM_ON_DEMAND_DATA_LANES
         )
+
+    @property
+    def relay_connected(self) -> bool:
+        """Whether the relay currently holds a live session from this gateway."""
+
+        return self._live_relay_sessions > 0
+
+    def disconnected_seconds(self) -> float:
+        """Return how long the gateway has had no live relay session.
+
+        Returns:
+            Seconds since the last live session ended (or since the connector
+            was created, if it never connected); zero while connected.
+        """
+
+        if self._live_relay_sessions > 0:
+            return 0.0
+        return max(0.0, self._monotonic_seconds() - self._disconnected_since)
+
+    def _relay_session_started(self) -> None:
+        """Record that a relay session became live."""
+
+        self._live_relay_sessions += 1
+
+    def _relay_session_ended(self) -> None:
+        """Record that a live relay session ended."""
+
+        self._live_relay_sessions -= 1
+        if self._live_relay_sessions == 0:
+            self._disconnected_since = self._monotonic_seconds()
 
     async def run(self) -> None:
         """Maintain the configured legacy lanes or signed on-demand control.
@@ -870,6 +908,7 @@ class OperatorGatewayConnector:
                 self._configuration.operator_api_port,
             )
             try:
+                self._relay_session_started()
                 websocket_to_tls = asyncio.create_task(
                     self._websocket_to_tls(websocket, writer)
                 )
@@ -892,6 +931,7 @@ class OperatorGatewayConnector:
                             "operator relay lane forwarding failed"
                         ) from result
             finally:
+                self._relay_session_ended()
                 writer.close()
                 await writer.wait_closed()
 
@@ -1053,6 +1093,7 @@ class OperatorGatewayConnector:
             ):
                 raise OperatorRelayError("operator relay returned invalid acceptance")
             admission = _ConnectorAdmissionProof(lease.proof)
+            self._relay_session_started()
             receiver = asyncio.create_task(
                 self._receive_control_messages(
                     session,
@@ -1088,6 +1129,8 @@ class OperatorGatewayConnector:
                     task.cancel()
                 results = await asyncio.gather(*tasks, return_exceptions=True)
             finally:
+                # Recorded before any await so cancellation cannot skip it.
+                self._relay_session_ended()
                 # Cancellation of the connector must reap both children before
                 # its socket closes; otherwise heartbeats outlive their owner.
                 for task in tasks:

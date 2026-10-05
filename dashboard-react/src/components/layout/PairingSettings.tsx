@@ -18,12 +18,33 @@ import {
   useGetPairingInvitationsQuery,
   useRevokePairingInvitationMutation,
 } from '../../store/endpoints/pairing';
+import {
+  type RemotePairingStatus,
+  useDisableRemotePairingMutation,
+  useEnableRemotePairingMutation,
+  useGetRemotePairingStatusQuery,
+} from '../../store/endpoints/remotePairing';
 import { Button } from '../common/Button';
+import { StatusPill } from '../common/Surfaces';
+import {
+  blockedReasonMessage,
+  managedElsewhereMessage,
+  remotePairingFailure,
+  remotePairingFailureMessage,
+  remotePairingStateLabel,
+} from './remotePairingMessages';
 
 const pairingCodeDisplayMilliseconds = 300 * 1_000;
 const defaultInvitationLifetimeSeconds = 300;
 const defaultMaximumPairings = 1;
 const maximumInvitationPairings = 20;
+// How long Pair a phone waits for a new or restarting relay session before it
+// reports that the node cannot reach the relay.
+const relayConnectWaitMilliseconds = 20_000;
+const relayConnectPollMilliseconds = 1_000;
+
+/** Step shown while Pair a phone registers, connects, and creates the code. */
+type PairingProgress = 'registering' | 'connecting' | 'creating';
 
 const invitationLifetimeOptions = [
   300,
@@ -166,6 +187,34 @@ const LimitNotice = styled.div`
   line-height: 1.45;
 `;
 
+const RelayStatusRow = styled.div`
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  > span { font-size: 10px; padding: 1px 7px; }
+`;
+
+const RelayNotice = styled.div`
+  border-radius: ${({ theme }) => theme.radii.md};
+  background: ${({ theme }) => theme.colors.infoBg};
+  color: ${({ theme }) => theme.colors.body};
+  padding: 10px 12px;
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  line-height: 1.45;
+`;
+
+const ProgressText = styled.div`
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  color: ${({ theme }) => theme.colors.textSecondary};
+`;
+
+const TurnOffRow = styled.div`
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+`;
+
 const ErrorText = styled.div`
   color: ${({ theme }) => theme.colors.errorOnSurface};
   font-size: ${({ theme }) => theme.fontSizes.sm};
@@ -249,6 +298,8 @@ export function PairingSettings({ invitationHost }: { invitationHost?: HTMLEleme
   const [displayUntil, setDisplayUntil] = useState<number | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const [creating, setCreating] = useState(false);
+  const [progress, setProgress] = useState<PairingProgress | null>(null);
+  const [confirmingTurnOff, setConfirmingTurnOff] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const {
     data: invitations,
@@ -262,6 +313,19 @@ export function PairingSettings({ invitationHost }: { invitationHost?: HTMLEleme
     refetchOnReconnect: true,
   });
   const [revokeInvitation, revokeResult] = useRevokePairingInvitationMutation();
+  const {
+    data: remote,
+    error: remoteError,
+    isError: remoteFailed,
+    refetch: refetchRemote,
+  } = useGetRemotePairingStatusQuery(undefined, {
+    pollingInterval: 5_000,
+    skipPollingIfUnfocused: true,
+    refetchOnFocus: true,
+    refetchOnReconnect: true,
+  });
+  const [enableRemotePairing] = useEnableRemotePairingMutation();
+  const [disableRemotePairing, disableResult] = useDisableRemotePairingMutation();
   const { data: capacity } = useGetPairingCapacityQuery(undefined, {
     pollingInterval: 15_000,
     skipPollingIfUnfocused: true,
@@ -302,16 +366,62 @@ export function PairingSettings({ invitationHost }: { invitationHost?: HTMLEleme
     };
   }, [displayUntil, resetPairingDisplay]);
 
-  const generatePairingCode = useCallback(async () => {
+  const authorityGuidance = t(
+    'settings.pairing.authorityGuidance',
+    "Phone pairing is managed from this node's dashboard opened through localhost, or through Tailscale using its MagicDNS name or Tailscale IP. Ordinary LAN access and the public relay cannot manage it.",
+  );
+
+  // Wait for the relay session that remote access starts after a route is
+  // registered (or restarts after a relay hiccup) before creating a code the
+  // phone could not use yet.
+  const waitForRelay = useCallback(async (): Promise<RemotePairingStatus | null> => {
+    const deadline = Date.now() + relayConnectWaitMilliseconds;
+    let latest: RemotePairingStatus | null = null;
+    for (;;) {
+      latest = await refetchRemote().unwrap();
+      if (latest.state === 'connected' || Date.now() >= deadline) return latest;
+      await new Promise((resolve) => window.setTimeout(resolve, relayConnectPollMilliseconds));
+    }
+  }, [refetchRemote]);
+
+  // Pair a phone: register with the relay the first time, wait for the relay
+  // session, then create the invitation, all in one action.
+  const pairPhone = useCallback(async () => {
     setCreating(true);
     setError(null);
     try {
+      let current = remote ?? null;
+      if (current === null || current.state === 'not_set_up') {
+        setProgress('registering');
+        try {
+          current = await enableRemotePairing().unwrap();
+        } catch (caught: unknown) {
+          setError(
+            remotePairingFailureMessage(remotePairingFailure(caught), t, {
+              managedOnName: remote?.managedOnNodeName,
+              authorityGuidance,
+            }),
+          );
+          return;
+        }
+      }
+      if (current.state !== 'connected') {
+        setProgress('connecting');
+        current = await waitForRelay();
+        if (current?.state !== 'connected') {
+          setError(
+            t(
+              'settings.pairing.remote.notConnected',
+              "This node could not connect to the relay yet. Check this machine's internet connection, then choose Pair a phone again.",
+            ),
+          );
+          return;
+        }
+      }
+      setProgress('creating');
       const invitation = await createPairingInvitation(
         { validForSeconds, maxPairings: effectiveMaxPairings },
-        t(
-          'settings.pairing.createAuthorityGuidance',
-          "Skulk could not generate a pairing code. Open Settings on the configured operator gateway through Tailscale using its MagicDNS name or Tailscale IP, or through localhost. Public relay and ordinary LAN access cannot manage pairing invitations.",
-        ),
+        authorityGuidance,
       );
       const nextNow = Date.now();
       setCreated(invitation);
@@ -330,8 +440,35 @@ export function PairingSettings({ invitationHost }: { invitationHost?: HTMLEleme
       );
     } finally {
       setCreating(false);
+      setProgress(null);
     }
-  }, [effectiveMaxPairings, refetchInvitations, t, validForSeconds]);
+  }, [
+    authorityGuidance,
+    effectiveMaxPairings,
+    enableRemotePairing,
+    refetchInvitations,
+    remote,
+    t,
+    validForSeconds,
+    waitForRelay,
+  ]);
+
+  const turnOffPairing = useCallback(async () => {
+    setError(null);
+    try {
+      await disableRemotePairing().unwrap();
+      setConfirmingTurnOff(false);
+      resetPairingDisplay();
+      addToast({
+        type: 'success',
+        message: t('settings.pairing.remote.turnedOff', 'Phone pairing turned off'),
+      });
+    } catch (caught: unknown) {
+      setError(
+        remotePairingFailureMessage(remotePairingFailure(caught), t, { authorityGuidance }),
+      );
+    }
+  }, [authorityGuidance, disableRemotePairing, resetPairingDisplay, t]);
 
   const revoke = useCallback(
     async (invitationId: string) => {
@@ -371,11 +508,31 @@ export function PairingSettings({ invitationHost }: { invitationHost?: HTMLEleme
   const remainingSeconds =
     displayUntil === null ? 0 : Math.max(0, Math.ceil((displayUntil - now) / 1_000));
   const invitationListErrorMessage =
-    pairingInvitationQueryErrorDetail(invitationListError) ??
-    t(
-      'settings.pairing.authorityGuidance',
-      "Skulk could not load pairing invitations. Open Settings on the configured operator gateway through Tailscale using its MagicDNS name or Tailscale IP, or through localhost. Public relay and ordinary LAN access cannot manage pairing invitations.",
-    );
+    pairingInvitationQueryErrorDetail(invitationListError) ?? authorityGuidance;
+  const remoteState = remote?.state ?? null;
+  const routeStored =
+    remoteState === 'connecting' ||
+    remoteState === 'connected' ||
+    remoteState === 'relay_unreachable' ||
+    remoteState === 'revoked';
+  const registrationBlocked =
+    remoteState === 'not_set_up' && remote?.registrationAvailable === false;
+  const pairingUnavailable =
+    remote === undefined ||
+    remoteState === 'managed_elsewhere' ||
+    remoteState === 'registering' ||
+    remoteState === 'relay_unreachable' ||
+    remoteState === 'revoked' ||
+    registrationBlocked;
+  const remoteStateLabel = remoteState === null ? null : remotePairingStateLabel(remoteState, t);
+  const progressLabel =
+    progress === 'registering'
+      ? t('settings.pairing.remote.progress.registering', 'Registering this node with the relay…')
+      : progress === 'connecting'
+        ? t('settings.pairing.remote.progress.connecting', 'Waiting for the relay connection…')
+        : progress === 'creating'
+          ? t('settings.pairing.remote.progress.creating', 'Creating the pairing code…')
+          : null;
 
   const invitationList = (invitations && invitations.length > 0 ? (
         <InvitationList>
@@ -397,6 +554,67 @@ export function PairingSettings({ invitationHost }: { invitationHost?: HTMLEleme
               'A protected code for the Skulk Operator app. It is a bearer secret and stays visible here for five minutes.',
             )}
           </Intro>
+          {remoteStateLabel ? (
+            <RelayStatusRow role="status">
+              <StatusPill
+                tone={
+                  remoteState === 'connected'
+                    ? 'live'
+                    : remoteState === 'relay_unreachable' || remoteState === 'revoked'
+                      ? 'danger'
+                      : 'neutral'
+                }
+              >
+                {remoteStateLabel}
+              </StatusPill>
+              {remote?.relayHost ? <ProgressText>{remote.relayHost}</ProgressText> : null}
+            </RelayStatusRow>
+          ) : null}
+          {remoteState === 'relay_unreachable' ? (
+            <LimitNotice role="status">
+              {t(
+                'settings.pairing.remote.unreachableDetail',
+                "This node cannot reach the relay right now. Check this machine's internet connection. Paired phones reach this node again once it reconnects.",
+              )}
+            </LimitNotice>
+          ) : null}
+          {remoteState === 'revoked' ? (
+            <LimitNotice role="status">
+              {t(
+                'settings.pairing.remote.revokedDetail',
+                'The relay no longer accepts this cluster. Turn phone pairing off, then pair a phone again to register a new connection.',
+              )}
+            </LimitNotice>
+          ) : null}
+          {remoteState === 'managed_elsewhere' ? (
+            <RelayNotice role="status">
+              {managedElsewhereMessage(remote?.managedOnNodeName ?? null, t)}
+            </RelayNotice>
+          ) : null}
+          {remoteState === 'not_set_up' && remote?.registrationBlockedReason ? (
+            <LimitNotice role="status">
+              {blockedReasonMessage(remote.registrationBlockedReason, t)}
+            </LimitNotice>
+          ) : null}
+          {remoteState === 'not_set_up' && remote?.registrationAvailable ? (
+            <RelayNotice>
+              {remote.relayHost
+                ? t(
+                    'settings.pairing.remote.privacyNoticeHost',
+                    "Pairing a phone registers this node with the relay at {host}, so the phone can reach it from any network. The relay learns this node's public key fingerprint, its public internet address, when it connects, and how much data passes through. It never sees what this node and your phone send each other: that stays encrypted end to end.",
+                    { host: remote.relayHost },
+                  )
+                : t(
+                    'settings.pairing.remote.privacyNotice',
+                    "Pairing a phone registers this node with a relay, so the phone can reach it from any network. The relay learns this node's public key fingerprint, its public internet address, when it connects, and how much data passes through. It never sees what this node and your phone send each other: that stays encrypted end to end.",
+                  )}
+            </RelayNotice>
+          ) : null}
+          {remoteFailed ? (
+            <ErrorText role="alert">
+              {pairingInvitationQueryErrorDetail(remoteError) ?? authorityGuidance}
+            </ErrorText>
+          ) : null}
           {capacity ? (
             <SlotUsage>
               {t('settings.pairing.slotsInUse', '{active} of {maximum} device slots in use', {
@@ -444,14 +662,51 @@ export function PairingSettings({ invitationHost }: { invitationHost?: HTMLEleme
               </Select>
             </Control>
           </FormGrid>
-          <Button
-            block
-            disabled={atDeviceLimit}
-            loading={creating}
-            onClick={() => void generatePairingCode()}
-          >
-            {t('settings.pairing.generate', 'Generate pairing code')}
-          </Button>
+          {remoteState === 'managed_elsewhere' ? null : (
+            <Button
+              block
+              disabled={atDeviceLimit || pairingUnavailable}
+              loading={creating}
+              onClick={() => void pairPhone()}
+            >
+              {t('settings.pairing.pairPhone', 'Pair a phone')}
+            </Button>
+          )}
+          {progressLabel ? <ProgressText role="status">{progressLabel}</ProgressText> : null}
+          {routeStored ? (
+            <TurnOffRow>
+              {confirmingTurnOff ? (
+                <>
+                  <ProgressText>
+                    {t(
+                      'settings.pairing.remote.turnOffConfirm',
+                      'Phones paired with this cluster lose remote access until you pair them again, and codes created for the relay stop working. Paired devices stay listed until you revoke them.',
+                    )}
+                  </ProgressText>
+                  <ButtonRow>
+                    <Button
+                      loading={disableResult.isLoading}
+                      onClick={() => void turnOffPairing()}
+                      variant="danger"
+                    >
+                      {t('settings.pairing.remote.turnOff', 'Turn off phone pairing')}
+                    </Button>
+                    <Button
+                      disabled={disableResult.isLoading}
+                      onClick={() => setConfirmingTurnOff(false)}
+                      variant="outline"
+                    >
+                      {t('common.cancel', 'Cancel')}
+                    </Button>
+                  </ButtonRow>
+                </>
+              ) : (
+                <Button onClick={() => setConfirmingTurnOff(true)} variant="ghost">
+                  {t('settings.pairing.remote.turnOff', 'Turn off phone pairing')}
+                </Button>
+              )}
+            </TurnOffRow>
+          ) : null}
         </>
       ) : (
         <QrPanel>

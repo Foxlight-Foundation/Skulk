@@ -29,6 +29,7 @@ _DIRECT_DASHBOARD_ONLY_PREFIXES: Final = (
     "/v1/auth/pairing-capacity",
     "/v1/auth/pairing-invitations",
     "/v1/auth/plugin-grants",
+    "/v1/auth/remote-pairing",
 )
 _MODEL_PREFIXES: Final = ("/v1/models", "/models", "/model-store", "/v1/store")
 _INFERENCE_PREFIXES: Final = (

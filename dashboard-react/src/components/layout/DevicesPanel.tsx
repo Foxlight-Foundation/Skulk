@@ -9,6 +9,7 @@ import { Button } from '../common/Button';
 import { Field } from '../common/Field';
 import { StatusPill, SectionLabel } from '../common/Surfaces';
 import { PairingSettings } from './PairingSettings';
+import { isRefreshExpired } from './deviceState';
 
 const Content = styled.div`
   overflow-y: auto; min-height: 0; flex: 1; container-type: inline-size;
@@ -43,17 +44,6 @@ const DeviceHeading = styled.div`
 const DeviceMetadata = styled(Meta)`overflow: hidden; text-overflow: ellipsis; white-space: nowrap;`;
 const SearchField = styled(Field)`background: ${({ theme }) => theme.colors.surface};`;
 const Actions = styled.div`display: flex; gap: 8px; flex-wrap: wrap;`;
-
-/**
- * Whether a not-yet-revoked device can no longer refresh its credentials.
- *
- * Such a device must pair again and no longer occupies one of the cluster's
- * device slots, matching how the server counts pairing capacity.
- */
-export function isRefreshExpired(device: OperatorDevice, now: number = Date.now()): boolean {
-  if (device.state !== 'active') return false;
-  return device.refreshExpiresAt === null || Date.parse(device.refreshExpiresAt) <= now;
-}
 
 /** Safe device inventory row with explicit confirmation before immediate revocation. */
 export function DeviceRow({ device, busy, onRevoke }: { device: OperatorDevice; busy: boolean; onRevoke: () => void }) {

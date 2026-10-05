@@ -288,8 +288,10 @@ uv run skulk operator forget-relay
 
 `forget-relay` records a tombstone in the journal and removes the route's
 inner-TLS identity. A running node stops remote access within a few seconds.
-Phones paired through the route lose remote access, and their device records
-keep their slots until revoked. The relay is not contacted. Registering again
+Active invitations created for the route are revoked, since their QR codes can
+never reach the node again; invitations for a direct `--exchange-url` stay
+valid. Phones paired through the route lose remote access, and their device
+records keep their slots until revoked. The relay is not contacted. Registering again
 creates a new route, and phones must pair again.
 
 If the relay revokes the connector, or refuses the route's credentials
@@ -414,7 +416,13 @@ or `revoked`), and name. It never prints credential material. `devices revoke`
 invalidates the device's credentials immediately and frees its slot.
 
 The dashboard exposes the same authority operation under **Settings →
-Devices & pairing**. Operators choose a lifetime and device limit, generate a branded QR,
+Devices & pairing**. **Pair a phone** does everything in one action: on a node
+without a relay route it registers one (`POST /v1/auth/remote-pairing`), waits
+up to 20 seconds for the relay session, then creates the invitation. Before the
+first registration the panel explains what the relay learns. It shows the relay
+connection state, says where pairing is managed when another node holds the
+cluster's route, and offers **Turn off phone pairing** while a route is stored.
+Operators choose a lifetime and device limit, generate a branded QR,
 and may download or revoke it. The panel shows how many of the five device
 slots are in use, offers only as many devices as there are free slots, and
 disables code generation with revoke guidance when no slot is free. Devices
@@ -537,9 +545,80 @@ Behavior:
   active/total attempts, and state;
 - never returns the invitation nonce, QR payload, carrier credentials, or
   canonical operator credentials;
-- returns an actionable `403` outside the direct verified
-  Tailscale/localhost dashboard authority and an actionable `409` on a
-  non-gateway or before relay configuration.
+- returns an empty list on a node that has never paired, and an actionable
+  `403` outside the direct verified Tailscale/localhost dashboard authority.
+
+### Read phone pairing status
+
+**GET** `/v1/auth/remote-pairing`
+
+Parameters:
+
+- Header `X-Skulk-Dashboard: pairing-v1` (required).
+
+Behavior:
+
+- applies the same loopback-or-Tailscale peer, exact same-origin, trusted-host,
+  and no-forwarding boundary as invitation management, and is unavailable
+  through `OperatorGatewayAuthorization`;
+- returns `state`: `not_set_up` (no relay route), `registering`, `connecting`
+  (a route is stored and its relay session is starting), `connected` (the relay
+  holds a live session from this node), `relay_unreachable` (no live session
+  for 20 seconds, or remote access failed and is retrying), `revoked` (the
+  relay permanently refused the route), or `managed_elsewhere` (another node
+  advertises the cluster's relay route);
+- also returns `registrationAvailable` with `registrationBlockedReason`
+  (`disabled`, `offline`, or `not_configured`), the last registration failure
+  code as `lastFailure`, `retryAfterSeconds` while a relay-requested delay
+  lasts, `managedOnNodeId` and `managedOnNodeName` for `managed_elsewhere`, and
+  `relayHost`;
+- returns `Cache-Control: no-store`, and `503` with code
+  `pairing_state_unavailable` when local pairing state cannot be read.
+
+### Turn phone pairing on
+
+**POST** `/v1/auth/remote-pairing`
+
+Parameters:
+
+- Header `X-Skulk-Dashboard: pairing-v1` (required). No body.
+
+Behavior:
+
+- applies the same direct-dashboard boundary as the status route;
+- registers a relay route for this node exactly as `skulk operator pair` does
+  (see [Relay route registration](#relay-route-registration)) and starts remote
+  access without a restart, then returns the status;
+- is idempotent: with a route already stored, or a registration already in
+  flight, it returns the current status without registering again;
+- checks before contacting the relay: `409` with code `managed_elsewhere`
+  while another node manages pairing, `device_limit` when the cluster has its
+  maximum of paired devices, or `disabled`, `offline`, or `not_configured`
+  when this node cannot register;
+- maps relay outcomes to `429` (`rate_limited`, with `Retry-After`), `503`
+  (`registration_paused` with `Retry-After`, `capacity_exhausted`,
+  `relay_busy`, `unreachable`), and `502` (`invalid_request`,
+  `already_registered`, `registration_unsupported`, `invalid_response`);
+- every error body is `{"detail", "code", "retryAfterSeconds"}`; the detail is
+  English, and clients should key on `code`.
+
+### Turn phone pairing off
+
+**DELETE** `/v1/auth/remote-pairing`
+
+Parameters:
+
+- Header `X-Skulk-Dashboard: pairing-v1` (required).
+
+Behavior:
+
+- applies the same direct-dashboard boundary as the status route;
+- forgets this node's relay route exactly as `skulk operator forget-relay`
+  does: remote access stops without a restart, active invitations for the route
+  are revoked, and paired devices keep their records until revoked; the relay
+  is not contacted;
+- returns the status, and is idempotent;
+- returns `409` with code `busy` while a registration is in flight.
 
 ### Revoke a dashboard pairing invitation
 
@@ -714,7 +793,9 @@ Behavior:
 - never returns device public keys, token digests, raw credentials, or pairing
   nonces;
 - returns `401` for a missing, malformed, unknown, revoked, or expired bearer
-  and `403` when the bearer lacks device-management scope.
+  and `403` when the bearer lacks device-management scope;
+- returns an empty list to the direct dashboard on a node that has never
+  paired.
 
 ### Revoke a paired device
 

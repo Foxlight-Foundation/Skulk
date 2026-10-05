@@ -82,6 +82,7 @@ class OperatorRemoteAccessSupervisor:
         ],
         poll_seconds: float = _DEFAULT_POLL_SECONDS,
         minimum_failure_retry_seconds: float = _MINIMUM_FAILURE_RETRY_SECONDS,
+        on_state_change: Callable[[OperatorRemoteAccessState], None] | None = None,
     ) -> None:
         """Create a supervisor with injected route loading and session effects.
 
@@ -96,6 +97,8 @@ class OperatorRemoteAccessSupervisor:
                 another process, such as ``skulk operator pair``.
             minimum_failure_retry_seconds: First delay before retrying a session
                 that ended unexpectedly; later delays double up to one minute.
+            on_state_change: Called with each new state, for example to
+                advertise that this node holds the cluster's relay route.
         """
 
         self._load_configuration = load_configuration
@@ -103,6 +106,7 @@ class OperatorRemoteAccessSupervisor:
         self._poll_seconds = poll_seconds
         self._minimum_failure_retry_seconds = minimum_failure_retry_seconds
         self._state: OperatorRemoteAccessState = "not_configured"
+        self._on_state_change = on_state_change
         self._rejected_route: _RouteIdentity | None = None
         self._wake = anyio.Event()
 
@@ -111,6 +115,15 @@ class OperatorRemoteAccessSupervisor:
         """Return the current supervisor state."""
 
         return self._state
+
+    def _set_state(self, state: OperatorRemoteAccessState) -> None:
+        """Record a new state and report it once when it changes."""
+
+        if state == self._state:
+            return
+        self._state = state
+        if self._on_state_change is not None:
+            self._on_state_change(state)
 
     def request_check(self) -> None:
         """Re-read the stored route now instead of at the next poll.
@@ -132,22 +145,22 @@ class OperatorRemoteAccessSupervisor:
             configuration = self._read()
             if isinstance(configuration, _Unreadable) or configuration is None:
                 if configuration is None:
-                    self._state = "not_configured"
+                    self._set_state("not_configured")
                     self._rejected_route = None
                 await self._wait(shutdown)
                 continue
             route = _route_identity(configuration)
             if route == self._rejected_route:
-                self._state = "rejected"
+                self._set_state("rejected")
                 await self._wait(shutdown)
                 continue
             outcome = await self._supervise_session(configuration, route, shutdown)
             if outcome == "rejected":
                 self._rejected_route = route
-                self._state = "rejected"
+                self._set_state("rejected")
                 failure_delay = self._minimum_failure_retry_seconds
             elif outcome == "failed":
-                self._state = "failed"
+                self._set_state("failed")
                 with anyio.move_on_after(failure_delay):
                     await shutdown.wait()
                 failure_delay = min(failure_delay * 2, _MAXIMUM_FAILURE_RETRY_SECONDS)
@@ -183,7 +196,7 @@ class OperatorRemoteAccessSupervisor:
             finally:
                 stop.set()
 
-        self._state = "running"
+        self._set_state("running")
         async with anyio.create_task_group() as task_group:
             task_group.start_soon(session)
             while not stop.is_set():

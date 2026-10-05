@@ -513,6 +513,21 @@ class NodeCapabilities(TaggedModel):
         return sorted(value)
 
 
+class NodePairingGateway(TaggedModel):
+    """Whether a node holds the cluster's phone-pairing relay route.
+
+    Phone pairing is managed on the node where an operator turned it on: that
+    node registered the relay route, holds the pairing journal, and serves
+    paired phones. Other nodes' dashboards read this reading to say where
+    pairing is managed instead of offering a second, separate pairing gateway.
+    Like :class:`NodeCapabilities`, the value comes from the API through the
+    gatherer's provider (the API sets it on the shared ``TelemetryView``).
+    """
+
+    active: bool
+    """True while this node holds a relay route for phone pairing."""
+
+
 class NodeCapabilityNodes(TaggedModel):
     """Summaries of the capability nodes a host runs, on the telemetry plane.
 
@@ -604,6 +619,7 @@ GatheredInfo = (
     | NodeDiskUsage
     | NodeCapabilities
     | NodeCapabilityNodes
+    | NodePairingGateway
     | NodeHeartbeat
 )
 
@@ -638,6 +654,10 @@ class InfoGatherer:
     ) = None
     capability_nodes_poll_interval: float | None = 5
     capability_nodes_republish_interval: float = 30
+    # Phone-pairing gateway role, supplied by the API. Without a provider (a
+    # node with no API) the monitor is inert.
+    pairing_gateway_provider: Callable[[], bool] | None = None
+    pairing_gateway_poll_interval: float | None = 15
     # Data-plane Zenoh connectivity, sampled from the router that owns the
     # session at each NodeResources advertisement. Optional so callers without
     # a router (tests, tools) stay unchanged; absent means "unknown", never 0.
@@ -672,6 +692,7 @@ class InfoGatherer:
                 tg.start_soon(self._monitor_disk_usage)
                 tg.start_soon(self._monitor_capabilities)
                 tg.start_soon(self._monitor_capability_nodes)
+                tg.start_soon(self._monitor_pairing_gateway)
                 tg.start_soon(self._monitor_heartbeat)
                 # NodeConfig is deliberately NOT sent: it is neither a
                 # telemetry-plane reading nor a durable control event, so the
@@ -807,6 +828,34 @@ class InfoGatherer:
             except Exception as e:
                 logger.warning(f"Error gathering node capabilities: {e}")
             await anyio.sleep(self.capabilities_poll_interval)
+
+    async def _monitor_pairing_gateway(self):
+        """Publish whether this node holds the phone-pairing relay route.
+
+        Published every poll while active so a node joining later learns it,
+        once more when it turns off so peers clear their entry, and never while
+        it stays off: almost every node is not the pairing gateway.
+        """
+        if (
+            self.pairing_gateway_poll_interval is None
+            or self.pairing_gateway_provider is None
+        ):
+            return
+        published_active = False
+        while True:
+            try:
+                active = self.pairing_gateway_provider()
+                if active or published_active:
+                    with fail_after(30):
+                        await self.info_sender.send(NodePairingGateway(active=active))
+                    published_active = active
+            except (ClosedResourceError, BrokenResourceError):
+                # Consumer gone: a stop signal, not a fault (see
+                # _monitor_capabilities).
+                raise
+            except Exception as e:
+                logger.warning(f"Error gathering pairing gateway role: {e}")
+            await anyio.sleep(self.pairing_gateway_poll_interval)
 
     async def _monitor_capability_nodes(self):
         """Publish capability-node summaries onto the telemetry plane.

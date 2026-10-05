@@ -24,6 +24,7 @@ export const apiSlice = createApi({
     'NodeDiagnostics',
     'PairingInvitations',
     'PairingCapacity',
+    'RemotePairing',
     'OperatorDevices',
     'Plugins',
     'PluginConfiguration',
