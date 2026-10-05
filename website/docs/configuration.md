@@ -92,10 +92,11 @@ expecting dashboard changes to win.
 in-process llama.cpp, and vLLM placements receive when the placement does not
 choose one (`inference.served_context_tokens`, 32,768 by default, from 256 to
 1,048,576). Those engines reserve the whole window in memory when a model loads,
-whether or not requests use it. A placement can ask for a larger window under
-**Advanced** in the placement dialog, up to what its nodes hold. The change
-applies to the next placement; running models keep the window they loaded
-with. MLX grows its cache per request and is not affected.
+whether or not requests use it. A placement can choose its own window under
+**Advanced** in the placement dialog, from 256 tokens up to what its nodes hold,
+smaller than the default included. The change applies to the next placement;
+running models keep the window they loaded with. MLX grows its cache per request
+and is not affected.
 
 ## HuggingFace
 
