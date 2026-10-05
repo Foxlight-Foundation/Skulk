@@ -101,10 +101,58 @@ interface tells the truth while it is working.
     release, and install it with its consent screen. Finish its setup, then
     open its screen from its satellite in the Cluster view. Every refusal must
     say what to do next.
-11. **Operator app.** When an operator app build and a relay-configured
-    gateway are available, generate an invitation under **Settings → Devices &
-    pairing**, pair the app, send a chat request from it, then revoke the
-    device and confirm the app loses access.
+11. **Operator app and relay onboarding.** Begin with a fresh cluster that has
+    no relay enrollment, provisioning material, or paired devices, and the
+    intended distributed app build. Follow only user-facing instructions to
+    authorize the owner, enroll the cluster, configure remote access, obtain a
+    pairing invitation, and pair the app. Exercise remote cluster refresh and
+    chat, restart/reconnect, then revoke the device and confirm access is lost.
+    Do not begin with a staff-provisioned gateway. An unavailable enrollment
+    path or app artifact is a blocked journey, not a reason to skip or pass it.
+    This gate applies whenever the release claims operator-app remote access;
+    otherwise explicitly record that capability as unavailable.
+
+## User-outcome evidence checklist
+
+Use this short record for each claimed user-facing capability, starting when
+the work is scoped and completing it before claiming user readiness. It
+supplements the automated matrix and human acceptance above, not replaces them.
+
+- [ ] **Outcome:** name the intended user, fresh starting state, public entry
+  point/instructions, and observable successful result.
+- [ ] **Dependencies:** identify every required repository, service, app,
+  credential acquisition path, and distribution channel. Each has an owner,
+  exact commit/build, verified merge status, deployment/distribution status,
+  acceptance evidence, and any blocker.
+- [ ] **Fresh-user walkthrough:** record tester, date, exact artifact versions,
+  platforms, steps, expected/actual results, and evidence. Use isolated fresh
+  state and the access an ordinary user has, not internal preconfiguration.
+  Every prerequisite must be obtainable through a documented, available path.
+- [ ] **Lifecycle:** exercise the first useful operation, restart/reconnect,
+  an actionable failure/recovery path, and revocation/removal where applicable.
+- [ ] **Decision:** record pass, blocked, failed, or not applicable with a reason,
+  remaining blockers and owners, and the release owner's sign-off. A required
+  but missing prerequisite is blocked, never not applicable.
+
+Keep cross-project delivery records and raw internal evidence in private
+`foxlight-docs`; public PRs contain sanitized results, not credentials or private
+environment details. A single delivery owner reconciles the record across
+repositories before sign-off. No new framework or capacity campaign is required
+merely to fill out this checklist; use proportionate evidence for the claim.
+
+Report these milestones separately: **implemented**, **merged into the intended
+branch**, **deployed/distributed**, and **fresh-user accepted**. Include exact
+artifacts and unmet gates; do not collapse them into “done.” A component PR can
+complete its own reviewed acceptance gate while the product journey stays
+blocked. A documentation-only change may explain why runtime acceptance does
+not apply to that change, but cannot mark the underlying product accepted.
+
+For example, a relay that carries traffic for a manually provisioned cluster
+has demonstrated that transport path, not self-service enrollment. Customer
+readiness requires a new operator to obtain enrollment and pairing through the
+supported public path without staff intervention. If a capability is excluded
+from a release, remove its availability claims from user-facing release material
+and record the exclusion explicitly; do not silently waive the failed journey.
 
 ## Platform focus
 

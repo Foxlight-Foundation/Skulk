@@ -4,6 +4,18 @@
 
 Thank you for your interest in contributing to Skulk! Skulk is maintained by [Foxlight Foundation](https://github.com/foxlight-foundation) and forked from [exo](https://github.com/exo-explore/exo).
 
+## User-facing completion
+
+Define the user, starting state, public entry point, and successful outcome
+before implementation. Use the [user-outcome evidence checklist](website/docs/human-release-qualification.md#user-outcome-evidence-checklist)
+to distinguish an accepted component from a product a new user can use.
+Missing enrollment or an unavailable prerequisite blocks the corresponding
+readiness claim, even when CI and an internally configured deployment pass.
+Record cross-repository owners, dependencies, artifact versions, merge and
+deployment status, and acceptance evidence in private `foxlight-docs`; keep
+public summaries sanitized. This does not authorize production changes or
+replace existing release qualification.
+
 ## Getting Started
 
 Managed plugin adapter work belongs in `src/skulk/extensions/managed.py`; keep
