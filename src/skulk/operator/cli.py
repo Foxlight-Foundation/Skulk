@@ -453,8 +453,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         print(
             "Forgot this gateway's relay route; a running Skulk node stops "
-            "remote access within a few seconds. Phones paired through it keep "
-            "their device slots until revoked (`skulk operator devices revoke`)."
+            "remote access within a few seconds, and pairing codes made for it "
+            "no longer work. Phones paired through it keep their device slots "
+            "until revoked (`skulk operator devices revoke`)."
         )
         return 0
 
