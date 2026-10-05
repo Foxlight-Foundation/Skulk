@@ -783,7 +783,7 @@ class Node:
         # the single-node model store install.sh writes for source installs;
         # without it the store-first download flow answers "Store not
         # configured" and a new user cannot download a model (#629).
-        bootstrap_store = write_bootstrap_config_if_absent()
+        bootstrap_store = write_bootstrap_config_if_absent(offline=args.offline)
         if bootstrap_store is not None:
             logger.info(
                 "No skulk.yaml found: wrote a single-node model store at "

@@ -25,12 +25,6 @@ function defaultStoreConfig(enabled: boolean): StoreConfig {
 }
 
 /**
- * Materialize the server defaults omitted from a persisted model-store mapping.
- *
- * The presence of the section enables the model store by default in Skulk's
- * Pydantic model. A completely absent section remains disabled in the UI.
- */
-/**
  * Fill an enabled store's blank host and path with the node's defaults.
  *
  * Mirrors the server, which applies the same defaults to a blank save: the
@@ -55,6 +49,12 @@ export function withStoreDefaults(
   };
 }
 
+/**
+ * Materialize the server defaults omitted from a persisted model-store mapping.
+ *
+ * The presence of the section enables the model store by default in Skulk's
+ * Pydantic model. A completely absent section remains disabled in the UI.
+ */
 export function normalizeStoreConfig(
   config: PersistedStoreConfig | null | undefined,
 ): StoreConfig {

@@ -233,7 +233,8 @@ install does, writes one with a store on itself in Skulk's data folder
 (`~/.skulk/model-store` on macOS, `~/.local/share/skulk/model-store` for the
 Linux packages). `install.sh` writes the same default at
 `~/.skulk/model-store` for source installs, so a single node works
-immediately. When several independently installed nodes form a cluster, the
+immediately. A node started offline writes no store, since the store would
+fetch from Hugging Face. When several independently installed nodes form a cluster, the
 elected master advertises a routable store address through bootstrap state
 sync. Followers adopt that authoritative config, stop their temporary local
 store servers, and point both dashboard and worker traffic at the same store.

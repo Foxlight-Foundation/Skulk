@@ -17,7 +17,9 @@ This project records release notes here and mirrors public-facing notes in
   saw it. Now:
   - a node that starts without `skulk.yaml` writes the same default: a store
     on that machine in Skulk's data folder (`~/.skulk/model-store` on macOS,
-    `~/.local/share/skulk/model-store` for the Linux packages);
+    `~/.local/share/skulk/model-store` for the Linux packages). An offline
+    node writes none, because the store's downloader would reach Hugging
+    Face;
   - turning the store on in Settings fills in this machine's hostname and
     the default path, and a save with blank fields takes the same values;
   - with the store off, **Download** saves the model onto the node you are

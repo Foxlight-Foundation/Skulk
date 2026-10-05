@@ -742,6 +742,8 @@ def bootstrap_model_store_config() -> ModelStoreConfig:
 
 def write_bootstrap_config_if_absent(
     path: Path | None = None,
+    *,
+    offline: bool = False,
 ) -> ModelStoreConfig | None:
     """Give a node that starts without ``skulk.yaml`` the single-node store.
 
@@ -750,14 +752,20 @@ def write_bootstrap_config_if_absent(
     this default, but the packaged apps never run it, so the runtime writes
     the same file when none exists. An existing config is never touched, and
     neither is a node that still has a legacy ``exo.yaml`` awaiting its rename
-    (loading refuses that case loudly).
+    (loading refuses that case loudly). An offline node gets no store: the
+    store's own downloader would fetch from Hugging Face, and offline means no
+    model downloads at all.
 
     Args:
         path: Config path override; defaults to :func:`resolve_config_path`.
+        offline: Whether the node runs with ``--offline`` or ``SKULK_OFFLINE``.
 
     Returns:
-        The store written, or ``None`` when a config file already exists.
+        The store written, or ``None`` when a config file already exists or
+        the node is offline.
     """
+    if offline:
+        return None
     if path is None:
         path = resolve_config_path()
     if path.exists() or path.with_name("exo.yaml").exists():

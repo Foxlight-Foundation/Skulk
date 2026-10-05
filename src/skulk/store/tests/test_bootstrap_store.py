@@ -38,6 +38,16 @@ def test_a_fresh_node_writes_the_single_node_store(tmp_path: Path) -> None:
     assert path.read_text().startswith("# Written by Skulk at first start")
 
 
+def test_an_offline_node_gets_no_store(tmp_path: Path) -> None:
+    # The store's own downloader reaches Hugging Face; offline means no
+    # model downloads, so an offline node keeps running without a store.
+    path = tmp_path / "skulk.yaml"
+
+    assert write_bootstrap_config_if_absent(path, offline=True) is None
+    assert not path.exists()
+    assert not (tmp_path / "data").exists()
+
+
 def test_an_existing_config_is_never_touched(tmp_path: Path) -> None:
     path = tmp_path / "skulk.yaml"
     path.write_text("inference:\n  kv_cache_backend: default\n")
