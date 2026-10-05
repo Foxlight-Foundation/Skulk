@@ -17,6 +17,7 @@ from skulk.utils.info_gatherer.info_gatherer import (
     GatheredInfo,
     InfoGatherer,
     NodePairingGateway,
+    PairingGatewayAdvertisement,
 )
 
 
@@ -139,3 +140,19 @@ def test_pairing_gateway_reading_round_trips_on_the_wire() -> None:
     )
     decoded = NodeTelemetry.model_validate_json(message.model_dump_json())
     assert decoded.info == NodePairingGateway(active=True)
+
+
+def test_withdrawal_repeats_about_once_a_minute_until_the_role_returns() -> None:
+    """A peer that misses one withdrawal still clears the role within a minute."""
+
+    advertisement = PairingGatewayAdvertisement(republish_seconds=60.0)
+    assert advertisement.reading(False, 0.0) is None
+    assert advertisement.reading(True, 1.0) == NodePairingGateway(active=True)
+    assert advertisement.reading(True, 2.0) == NodePairingGateway(active=True)
+    assert advertisement.reading(False, 3.0) == NodePairingGateway(active=False)
+    assert advertisement.reading(False, 30.0) is None
+    assert advertisement.reading(False, 63.0) == NodePairingGateway(active=False)
+    assert advertisement.reading(False, 64.0) is None
+    assert advertisement.reading(True, 65.0) == NodePairingGateway(active=True)
+    assert advertisement.reading(False, 66.0) == NodePairingGateway(active=False)
+

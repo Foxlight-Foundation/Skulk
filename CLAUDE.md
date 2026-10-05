@@ -203,8 +203,9 @@ A single Skulk `Node` (src/skulk/main.py) runs multiple components:
   `forget-relay`, and route replacement need no restart. The dashboard's
   **Pair a phone** registers through dashboard-only `/v1/auth/remote-pairing`
   (`RemotePairingController`), and the node holding the route advertises a
-  `NodePairingGateway` telemetry reading so other nodes say where pairing is
-  managed.
+  `NodePairingGateway` telemetry reading (withdrawals repeat about once a
+  minute) so other nodes say where pairing is managed; `skulk operator pair`
+  asks its local node and refuses a second gateway too.
   `skulk operator configure-relay` persists one generated paired-WebSocket
   route and creates a protected pinned TLS identity. Version-one documents keep
   the bounded warm gateway lane pool. Explicit version-two documents instead

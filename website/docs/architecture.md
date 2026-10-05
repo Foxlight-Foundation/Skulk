@@ -1836,8 +1836,11 @@ supervisor to start immediately. Turning off forgets the route and revokes the
 invitations bound to its server name. The node holding a route advertises a
 `NodePairingGateway` telemetry reading (set from the supervisor's state changes
 on the shared `TelemetryView`, published by the worker gatherer or the
-management-node publisher while active and once when it ends), so other nodes
-report `managed_elsewhere` instead of creating a second gateway.
+management-node publisher every poll while active, then the withdrawal at once
+and about once a minute, because telemetry has no replay), so other nodes
+report `managed_elsewhere` instead of creating a second gateway. The CLI has no
+telemetry view, so `skulk operator pair` asks the node on its machine through
+the same loopback dashboard route and refuses in the same case.
 
 `skulk operator configure-relay` installs one generated paired-WebSocket route
 before normal public operation. The app and gateway use distinct 256-bit outer

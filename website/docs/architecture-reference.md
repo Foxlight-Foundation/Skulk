@@ -472,8 +472,12 @@ The bare `audio_cpp` tag reports engine availability, but signed music support a
   invitations and devices.
 - **Pairing gateway telemetry:** `NodePairingGateway{active}` on the TELEMETRY
   plane (last-write-wins, `TelemetryView.node_pairing_gateways`, pruned with
-  the node; never State or the event log), published while the node holds a
-  relay route and once on withdrawal. Same-version fleets required.
+  the node; never State or the event log), published every poll while the
+  node holds a relay route, then the withdrawal at once and about once a
+  minute after (`PairingGatewayAdvertisement`), so a peer that missed it still
+  clears the role. `skulk operator pair` asks the local node's
+  `/v1/auth/remote-pairing` over loopback and refuses `managed_elsewhere`.
+  Same-version fleets required.
 - **V1 remote carrier:** `skulk operator configure-relay --provisioning-file`
   validates one generated paired-WebSocket route, encrypts locator and distinct
   app/gateway carrier credentials in the local journal, and creates a protected

@@ -30,7 +30,10 @@ alone does not contact the relay.
 The node where you first pair a phone becomes the cluster's pairing gateway:
 paired phones reach the cluster through it, so choose a machine that stays on.
 Other nodes' dashboards say which node manages pairing instead of offering a
-second, separate one. There is no automatic failover to another node.
+second, separate one, and `skulk operator pair` asks the node on its machine
+(`--api-port`, default 52415) and refuses for the same reason. The cluster's
+five-device limit is counted on that one gateway. There is no automatic
+failover to another node.
 
 The gateway registers with Foxlight's relay, `relay.foxlight.ai`, unless
 `skulk.yaml` names another:

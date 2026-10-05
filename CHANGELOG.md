@@ -17,6 +17,13 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- A cluster keeps one phone-pairing gateway, so its five-device limit holds.
+  `skulk operator pair` now asks the node on its machine (`--api-port`,
+  default 52415) and refuses when another node already manages phone pairing,
+  as the dashboard does. A node that turns pairing off now repeats that
+  withdrawal about once a minute, so another node that missed it stops saying
+  pairing is managed there instead of waiting for a restart.
+
 - A new install from the Mac app or the Linux packages can download models.
   Without a `skulk.yaml` a node had no model store, so **Download** failed
   with `Store not configured`, and turning the store on in Settings left its
