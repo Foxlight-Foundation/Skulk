@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Literal, cast
 from uuid import UUID
 
+import httpx
 import yaml
 
 from skulk.operator.pairing import (
@@ -49,6 +50,7 @@ class _PairArguments(FrozenModel):
     valid_for: timedelta | None
     max_pairings: int | None
     qr_output: Path | None
+    api_port: int
 
 
 class _ConfigureRelayArguments(FrozenModel):
@@ -95,6 +97,9 @@ class _DeviceRevokeArguments(FrozenModel):
     device_command: Literal["revoke"]
     device_id: UUID
 
+
+_DEFAULT_NODE_API_PORT = 52415
+_NODE_STATUS_TIMEOUT_SECONDS = 3.0
 
 _DEVICE_LIMIT_GUIDANCE = (
     f"this cluster already has {MAXIMUM_ACTIVE_PAIRED_DEVICES} paired devices, "
@@ -206,6 +211,43 @@ def _relay_configured_message(configuration: OperatorRelayConfiguration) -> str:
     )
 
 
+def _pairing_managed_elsewhere(api_port: int) -> str | None:
+    """Ask this machine's running node whether another node manages pairing.
+
+    The CLI cannot see cluster telemetry, so it asks the local node through
+    the same loopback dashboard route the dashboard uses. A cluster has one
+    pairing gateway, and the five-device limit is counted on it, so a second
+    gateway would quietly double the limit.
+
+    Args:
+        api_port: The local node's API port.
+
+    Returns:
+        The managing node's name, or its ID when it has no name, when another
+        node holds the relay route; otherwise ``None``. Also ``None`` when the
+        local node is not running or does not answer, in which case pairing
+        proceeds as before.
+    """
+
+    origin = f"http://127.0.0.1:{api_port}"
+    try:
+        response = httpx.get(
+            f"{origin}/v1/auth/remote-pairing",
+            headers={"X-Skulk-Dashboard": "pairing-v1", "Origin": origin},
+            timeout=_NODE_STATUS_TIMEOUT_SECONDS,
+        )
+        payload = cast(object, response.json()) if response.status_code == 200 else None
+    except (httpx.HTTPError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    status = cast(dict[str, object], payload)
+    if status.get("state") != "managed_elsewhere":
+        return None
+    name = status.get("managedOnNodeName") or status.get("managedOnNodeId")
+    return str(name) if name else "another node"
+
+
 def _register_relay_or_exit(
     parser: argparse.ArgumentParser,
     service: OperatorPairingService,
@@ -295,6 +337,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--qr-output",
         type=Path,
         help="Also write a permission-restricted QR PNG without overwriting a file.",
+    )
+    pair_parser.add_argument(
+        "--api-port",
+        type=int,
+        default=_DEFAULT_NODE_API_PORT,
+        help=(
+            "API port of the Skulk node on this machine, checked before "
+            "registering so a cluster keeps one pairing gateway."
+        ),
     )
     relay_parser = subparsers.add_parser(
         "configure-relay",
@@ -465,6 +516,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         # route it cannot use yet.
         if service.pairing_capacity().available_slots == 0:
             parser.error(_DEVICE_LIMIT_GUIDANCE)
+        managing_node = _pairing_managed_elsewhere(arguments.api_port)
+        if managing_node is not None:
+            parser.error(
+                f"phone pairing is already managed on {managing_node}; run "
+                "`skulk operator pair` there, or turn phone pairing off on that "
+                "node first. A cluster has one pairing gateway"
+            )
         _register_relay_or_exit(parser, service, arguments.cluster_name)
     try:
         invitation_mode = (

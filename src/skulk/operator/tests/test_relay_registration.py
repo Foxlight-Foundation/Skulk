@@ -533,6 +533,13 @@ def test_a_never_configured_gateway_never_replaces_existing_identity_files(
     assert service.relay_configuration() is None
 
 
+def _no_managing_node(api_port: int) -> str | None:
+    """Report that no other node manages pairing, without any network call."""
+
+    del api_port
+    return None
+
+
 def _use_cli_service(
     monkeypatch: pytest.MonkeyPatch,
     service: OperatorPairingService,
@@ -555,6 +562,8 @@ def _use_cli_service(
     )
     monkeypatch.setattr(pairing_module, "register_relay_route", _registrar(relay))
     monkeypatch.setattr(operator_cli, "load_skulk_config", lambda: config)
+    # Never query a real node on this machine's API port from a unit test.
+    monkeypatch.setattr(operator_cli, "_pairing_managed_elsewhere", _no_managing_node)
     payloads: list[str] = []
     monkeypatch.setattr(operator_cli, "_print_pairing_qr", payloads.append)
     return payloads
@@ -666,3 +675,95 @@ def test_forget_relay_command_turns_remote_access_off(
     assert service.relay_configuration() is None
     assert operator_cli.main(["forget-relay"]) == 0
     assert "has no relay route" in capsys.readouterr().out
+
+
+def test_pair_refuses_when_another_node_manages_pairing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A second gateway would hold its own five device slots, so the CLI refuses."""
+
+    relay = _ContractRelay()
+    service, _ = _service(tmp_path)
+    _use_cli_service(monkeypatch, service, relay, _relay_config())
+    asked: list[int] = []
+
+    def managed_on(api_port: int) -> str:
+        """Report that another node holds the cluster's relay route."""
+
+        asked.append(api_port)
+        return "studio-mac"
+
+    monkeypatch.setattr(operator_cli, "_pairing_managed_elsewhere", managed_on)
+
+    with pytest.raises(SystemExit):
+        operator_cli.main(["pair", "--api-port", "52499"])
+
+    error = capsys.readouterr().err
+    assert "already managed on studio-mac" in error
+    assert asked == [52499]
+    assert relay.requests == []
+    assert service.relay_configuration() is None
+
+
+class _NodeStatusResponse:
+    """Minimal stand-in for the local node's remote-pairing status response."""
+
+    def __init__(self, status_code: int, payload: object) -> None:
+        self.status_code = status_code
+        self._payload = payload
+
+    def json(self) -> object:
+        """Return the decoded body, raising like httpx for an invalid one."""
+
+        if isinstance(self._payload, Exception):
+            raise self._payload
+        return self._payload
+
+
+def test_managed_elsewhere_check_reads_the_local_node_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The check asks the local node like the dashboard and fails open."""
+
+    requests: list[tuple[str, dict[str, str]]] = []
+    responses: list[object] = [
+        _NodeStatusResponse(
+            200, {"state": "managed_elsewhere", "managedOnNodeName": "studio-mac"}
+        ),
+        _NodeStatusResponse(
+            200, {"state": "managed_elsewhere", "managedOnNodeId": "node-7"}
+        ),
+        _NodeStatusResponse(200, {"state": "not_set_up"}),
+        _NodeStatusResponse(403, {"detail": "forbidden"}),
+        _NodeStatusResponse(200, ValueError("not json")),
+        httpx.ConnectError("node not running"),
+    ]
+
+    def fake_get(
+        url: str, *, headers: dict[str, str], timeout: float
+    ) -> _NodeStatusResponse:
+        """Record the request and replay the next scripted outcome."""
+
+        del timeout
+        requests.append((url, headers))
+        outcome = responses.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        assert isinstance(outcome, _NodeStatusResponse)
+        return outcome
+
+    monkeypatch.setattr(operator_cli.httpx, "get", fake_get)
+
+    assert operator_cli._pairing_managed_elsewhere(52415) == "studio-mac"  # pyright: ignore[reportPrivateUsage]
+    assert operator_cli._pairing_managed_elsewhere(52415) == "node-7"  # pyright: ignore[reportPrivateUsage]
+    for _ in range(4):
+        assert operator_cli._pairing_managed_elsewhere(52415) is None  # pyright: ignore[reportPrivateUsage]
+    url, headers = requests[0]
+    assert url == "http://127.0.0.1:52415/v1/auth/remote-pairing"
+    assert headers == {
+        "X-Skulk-Dashboard": "pairing-v1",
+        "Origin": "http://127.0.0.1:52415",
+    }
+
