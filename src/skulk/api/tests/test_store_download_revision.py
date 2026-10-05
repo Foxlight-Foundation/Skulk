@@ -26,10 +26,12 @@ from skulk.shared.types.commands import (
     DeleteCustomModelCard,
     ForwarderCommand,
     ForwarderDownloadCommand,
+    StartDownload,
 )
 from skulk.shared.types.common import NodeId, SystemId
 from skulk.shared.types.events import IndexedEvent
 from skulk.shared.types.memory import Memory
+from skulk.shared.types.worker.shards import PipelineShardMetadata
 from skulk.store.model_store_client import ModelStoreClient
 from skulk.utils.channels import Receiver, channel
 from skulk.utils.task_group import TaskGroup
@@ -127,6 +129,101 @@ def _build_api() -> API:
         enable_event_log=False,
         mount_dashboard=False,
     )
+
+
+_STORE_OFF_MODEL = "mlx-community/Qwen3.5-2B-4bit"
+
+
+def _store_off_card() -> ModelCard:
+    return ModelCard(
+        model_id=ModelId(_STORE_OFF_MODEL),
+        storage_size=Memory.from_mb(1600),
+        n_layers=24,
+        hidden_size=2048,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        source_revision="b" * 40,
+    )
+
+
+def _store_off_api(
+    monkeypatch: pytest.MonkeyPatch, card: ModelCard
+) -> tuple[API, list[object]]:
+    """An API with no model store, recording the node downloads it starts."""
+    api = _build_api()
+    sent: list[object] = []
+
+    async def _send(command: object) -> None:
+        sent.append(command)
+
+    async def _load(_model_id: ModelId) -> ModelCard:
+        return card
+
+    monkeypatch.setattr(api, "_send_download", _send)
+    monkeypatch.setattr(api, "_load_authorized_model_card", _load)
+    return api, sent
+
+
+async def test_store_off_download_saves_the_model_on_this_node(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without a store, Download starts the whole-model download a launch would."""
+    card = _store_off_card()
+    api, sent = _store_off_api(monkeypatch, card)
+    assert api._store_client is None
+
+    response = await api.request_store_download(_operator_request(), _STORE_OFF_MODEL)
+
+    assert response.destination == "node"
+    assert response.status == "downloading"
+    assert response.source_revision == card.source_revision
+    assert len(sent) == 1
+    command = sent[0]
+    assert isinstance(command, StartDownload)
+    assert command.target_node_id == api.node_id
+    shard = command.shard_metadata
+    assert isinstance(shard, PipelineShardMetadata)
+    assert (shard.start_layer, shard.end_layer, shard.n_layers, shard.world_size) == (
+        0,
+        24,
+        24,
+        1,
+    )
+    assert shard.model_card == card
+
+
+async def test_store_off_download_requires_operator_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api, sent = _store_off_api(monkeypatch, _store_off_card())
+
+    with pytest.raises(HTTPException) as raised:
+        await api.request_store_download(_public_request(), _STORE_OFF_MODEL)
+
+    assert raised.value.status_code == 403
+    assert sent == []
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        StoreDownloadRequest(artifact_role="mtp_sidecar"),
+        StoreDownloadRequest(extra_gguf_files=["other.gguf"]),
+        StoreDownloadRequest(gguf_file="other.gguf"),
+        StoreDownloadRequest(source_revision="f" * 40),
+    ],
+)
+async def test_store_off_download_refuses_what_only_a_store_serves(
+    monkeypatch: pytest.MonkeyPatch, payload: StoreDownloadRequest
+) -> None:
+    api, sent = _store_off_api(monkeypatch, _store_off_card())
+
+    with pytest.raises(HTTPException) as raised:
+        await api.request_store_download(_operator_request(), _STORE_OFF_MODEL, payload)
+
+    assert raised.value.status_code == 409
+    assert "Turn on the model store" in str(raised.value.detail)
+    assert sent == []
 
 
 async def test_store_download_inherits_bundled_card_revision(

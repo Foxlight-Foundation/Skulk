@@ -228,9 +228,13 @@ outside the dynamic client-port ranges used by supported operating systems, so
 an unrelated outbound connection cannot claim it before Skulk starts.
 
 :::note Fresh installs
-The packaged runtime and `install.sh` both use bootstrap store defaults (this host under
-`~/.skulk/model-store`) when no config exists, so a single node works
-immediately. When several independently installed nodes form a cluster, the
+A node that starts without a `skulk.yaml`, as every Mac app and Linux package
+install does, writes one with a store on itself in Skulk's data folder
+(`~/.skulk/model-store` on macOS, `~/.local/share/skulk/model-store` for the
+Linux packages). `install.sh` writes the same default at
+`~/.skulk/model-store` for source installs, so a single node works
+immediately. A node started offline writes no store, since the store would
+fetch from Hugging Face. When several independently installed nodes form a cluster, the
 elected master advertises a routable store address through bootstrap state
 sync. Followers adopt that authoritative config, stop their temporary local
 store servers, and point both dashboard and worker traffic at the same store.
@@ -562,7 +566,9 @@ and broadcasts the corresponding staged-cache eviction across the fleet.
 
 Common meanings:
 
-- `503 Store not configured`: the cluster is not configured to use a model store
+- `503 Store not configured`: the cluster is not configured to use a model store.
+  `POST /store/models/{model_id}/download` instead downloads a catalog model
+  onto the node that answered (see the API guide)
 - `503 Store unreachable`: the store is configured, but the API cannot reach it
 - `404`: the model or job does not exist
 - `409`: a conflicting operation is already in progress

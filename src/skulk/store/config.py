@@ -81,6 +81,7 @@ import yaml
 from loguru import logger
 from pydantic import Field, field_validator, model_validator
 
+from skulk.shared.constants import SKULK_DATA_HOME
 from skulk.shared.models.memory_estimate import (
     MAX_REQUESTED_CONTEXT_TOKENS,
     MIN_REQUESTED_CONTEXT_TOKENS,
@@ -701,6 +702,121 @@ def served_context_default(config: "SkulkConfig | None") -> int:
 def resolve_config_path() -> Path:
     """Return the cluster config path (``skulk.yaml`` in the working directory)."""
     return Path("skulk.yaml")
+
+
+BOOTSTRAP_STORE_DIRECTORY_NAME: Final = "model-store"
+"""Folder under Skulk's data directory that holds a fresh node's model store."""
+
+BOOTSTRAP_STORE_HTTP_HOST: Final = "127.0.0.1"
+"""Loopback keeps a single node's own store client working even when its short
+hostname does not resolve locally. The store host replaces a loopback literal
+with its best routable IPv4 before broadcasting, so the value stays correct if
+the node later joins a cluster."""
+
+_BOOTSTRAP_CONFIG_HEADER: Final = """\
+# Written by Skulk at first start: a single-node model store so downloads work
+# immediately. Safe to edit or delete. If other nodes join, Skulk converges
+# them on the elected master's store. Set an explicit shared store_host on
+# every node to override that choice (see the Model Store page in the docs).
+"""
+
+
+def bootstrap_model_store_config() -> ModelStoreConfig:
+    """Return the single-node model store a fresh node starts with.
+
+    This machine hosts the store in Skulk's data directory, the same default
+    ``install.sh`` writes for source installs. When nodes form a cluster,
+    followers adopt the elected master's store through config sync, so the
+    default never splits a fleet across stores.
+
+    Returns:
+        The store configuration naming this host and its default store path.
+    """
+    return ModelStoreConfig(
+        store_host=socket.gethostname().split(".", 1)[0],
+        store_http_host=BOOTSTRAP_STORE_HTTP_HOST,
+        store_port=DEFAULT_MODEL_STORE_PORT,
+        store_path=str(SKULK_DATA_HOME / BOOTSTRAP_STORE_DIRECTORY_NAME),
+    )
+
+
+def write_bootstrap_config_if_absent(
+    path: Path | None = None,
+    *,
+    offline: bool = False,
+) -> ModelStoreConfig | None:
+    """Give a node that starts without ``skulk.yaml`` the single-node store.
+
+    A node without a config has no model store, so the store-first download
+    flow answers ``Store not configured`` (#629). The source installer writes
+    this default, but the packaged apps never run it, so the runtime writes
+    the same file when none exists. An existing config is never touched, and
+    neither is a node that still has a legacy ``exo.yaml`` awaiting its rename
+    (loading refuses that case loudly). An offline node gets no store: the
+    store's own downloader would fetch from Hugging Face, and offline means no
+    model downloads at all.
+
+    Args:
+        path: Config path override; defaults to :func:`resolve_config_path`.
+        offline: Whether the node runs with ``--offline`` or ``SKULK_OFFLINE``.
+
+    Returns:
+        The store written, or ``None`` when a config file already exists or
+        the node is offline.
+    """
+    if offline:
+        return None
+    if path is None:
+        path = resolve_config_path()
+    if path.exists() or path.with_name("exo.yaml").exists():
+        return None
+    store = bootstrap_model_store_config()
+    Path(store.store_path).mkdir(parents=True, exist_ok=True)
+    body = yaml.safe_dump(
+        {
+            "model_store": {
+                "store_host": store.store_host,
+                "store_port": store.store_port,
+                "store_http_host": store.store_http_host,
+                "store_path": store.store_path,
+            }
+        },
+        sort_keys=False,
+    )
+    write_skulk_config_atomic(path, _BOOTSTRAP_CONFIG_HEADER + body)
+    return store
+
+
+def fill_model_store_defaults(raw_store: Mapping[str, object]) -> dict[str, object]:
+    """Fill the blank identity fields of an enabled store with this node's.
+
+    Turning the store on from Settings used to leave ``store_host`` and
+    ``store_path`` empty and then refuse the save (#888), so a new user could
+    not enable it without knowing their hostname and choosing a path. An
+    enabled store now takes the same defaults a fresh node starts with: this
+    node as the store host and the default store path. Explicit values are
+    kept, and a disabled store is returned unchanged.
+
+    Args:
+        raw_store: The ``model_store`` mapping from a config update.
+
+    Returns:
+        A copy with blank identity fields replaced by the defaults.
+    """
+    store = dict(raw_store)
+    if store.get("enabled", True) is False:
+        return store
+    defaults = bootstrap_model_store_config()
+    host = store.get("store_host")
+    if not isinstance(host, str) or not host.strip():
+        store["store_host"] = defaults.store_host
+        http_host = store.get("store_http_host")
+        if not isinstance(http_host, str) or not http_host.strip():
+            store["store_http_host"] = defaults.store_http_host
+    store_path = store.get("store_path")
+    if not isinstance(store_path, str) or not store_path.strip():
+        store["store_path"] = defaults.store_path
+    return store
 
 
 def write_skulk_config_atomic(path: Path, config_yaml: str) -> None:

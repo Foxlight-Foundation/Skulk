@@ -603,12 +603,18 @@ from skulk.shared.types.worker.instances import (
     instance_meta_of,
 )
 from skulk.shared.types.worker.runners import RunnerId, RunnerReady, RunnerRunning
-from skulk.shared.types.worker.shards import Sharding, ShardMetadata
+from skulk.shared.types.worker.shards import (
+    PipelineShardMetadata,
+    Sharding,
+    ShardMetadata,
+)
 from skulk.shared.version import get_skulk_version, get_skulk_version_label
 from skulk.store.config import (
     ReconciliationStoreConfig,
     SkulkConfig,
     TelemetryConfig,
+    bootstrap_model_store_config,
+    fill_model_store_defaults,
     load_skulk_config,
     persist_model_trust_config,
     resolve_config_path,
@@ -1588,6 +1594,21 @@ async def _read_request_json_object(request: Request) -> JsonObject:
         )
     return _coerce_json_object(cast(dict[object, object], payload))
 
+
+
+def _model_store_defaults() -> dict[str, object]:
+    """Return the store a fresh node starts with, for Settings to pre-fill.
+
+    The same values fill blank fields when a store is enabled, so what the
+    form shows is what a save stores.
+    """
+    store = bootstrap_model_store_config()
+    return {
+        "store_host": store.store_host,
+        "store_port": store.store_port,
+        "store_http_host": store.store_http_host,
+        "store_path": store.store_path,
+    }
 
 def _load_yaml_object(path: Path) -> JsonObject:
     """Read one YAML document from disk as a string-keyed object."""
@@ -3552,7 +3573,10 @@ class API:
                 "Ask the shared model store to download and register a base or "
                 "companion artifact. Optional repository, revision, file, immutable "
                 "card, ownership, and artifact-role fields bind the exact requested "
-                "generation; omitted base fields inherit from the current model card."
+                "generation; omitted base fields inherit from the current model card. "
+                "When no model store is configured, a base download of a catalog "
+                "model goes onto this node instead (`destination: node`, operator "
+                "access required), and requests only a store can serve answer 409."
             ),
         )(self.request_store_download)
         self.app.delete(
@@ -15731,6 +15755,7 @@ class API:
                         # to the file-present branch so clients never branch on it.
                         "has_hf_token": "HF_TOKEN" in os.environ,
                         "experimental_mode_enabled": experimental_mode_enabled(),
+                        "model_store_defaults": _model_store_defaults(),
                     },
                 }
             )
@@ -15747,6 +15772,7 @@ class API:
                     "kv_cache_backend": self._effective_kv_cache_backend(),
                     "has_hf_token": has_hf_token or "HF_TOKEN" in os.environ,
                     "experimental_mode_enabled": experimental_mode_enabled(),
+                    "model_store_defaults": _model_store_defaults(),
                 },
             }
         )
@@ -15771,6 +15797,14 @@ class API:
                     "model_trust is a deprecated compatibility field and cannot "
                     "be changed through the current API"
                 ),
+            )
+        raw_store = config_data.get("model_store")
+        if isinstance(raw_store, dict):
+            # Turning the store on in Settings sends blank identity fields;
+            # this node and the default store path stand in for them instead
+            # of failing the save.
+            config_data["model_store"] = fill_model_store_defaults(
+                _coerce_json_object(cast(dict[object, object], raw_store))
             )
         requested_config = dict(config_data)
 
@@ -16692,7 +16726,11 @@ class API:
         direct custom-card deletion requires.
         """
         if self._store_client is None:
-            raise HTTPException(status_code=503, detail="Store not configured")
+            # With the model store turned off, Download saves the model on
+            # this node instead, as launching it would.
+            return await self._download_to_this_node(
+                request, ModelId(model_id), payload
+            )
         requested_model_id = ModelId(model_id)
         artifact_role = payload.artifact_role if payload is not None else "base"
         card = (
@@ -16786,6 +16824,75 @@ class API:
                 registry_card_id,
             )
         return StoreDownloadResponse.model_validate(result, strict=False)
+
+    async def _download_to_this_node(
+        self,
+        request: Request,
+        model_id: ModelId,
+        payload: StoreDownloadRequest | None,
+    ) -> StoreDownloadResponse:
+        """Download a catalog model onto this node when no store is configured.
+
+        Without a store the Download action failed with ``Store not
+        configured``. It now starts the ordinary whole-model node download a
+        launch triggers, for the catalog card. Companion, bundle, alternate
+        repository and alternate file requests need the store's exact
+        generation handling, so they are refused with how to turn it on.
+
+        Args:
+            request: The incoming request; it needs the operator authority a
+                direct node download needs.
+            model_id: The catalog model to download.
+            payload: Optional pins from the store download request.
+
+        Returns:
+            A ``downloading`` status whose ``destination`` is ``node``.
+
+        Raises:
+            HTTPException: 403 without operator authority, 404 for a model
+                outside the catalog, 409 for a request only a store can serve.
+        """
+        self._require_operator_mutation(request)
+        store_only = "Turn on the model store in Settings to download this artifact."
+        if payload is not None and (
+            payload.artifact_role != "base"
+            or payload.extra_gguf_files
+            or payload.artifact_bundle_id is not None
+            or payload.source_repository is not None
+            or payload.owner_model_id is not None
+            or payload.owner_registry_card_id is not None
+        ):
+            raise HTTPException(status_code=409, detail=store_only)
+        card = await self._load_authorized_model_card(model_id)
+        if payload is not None and (
+            (payload.gguf_file is not None and payload.gguf_file != card.gguf_file)
+            or (
+                payload.source_revision is not None
+                and payload.source_revision != card.source_revision
+            )
+            or (
+                payload.registry_card_id is not None
+                and payload.registry_card_id != card.registry_card_id
+            )
+        ):
+            raise HTTPException(status_code=409, detail=store_only)
+        shard = PipelineShardMetadata(
+            model_card=card,
+            device_rank=0,
+            world_size=1,
+            start_layer=0,
+            end_layer=card.n_layers,
+            n_layers=card.n_layers,
+        )
+        await self._send_download(
+            StartDownload(target_node_id=self.node_id, shard_metadata=shard)
+        )
+        return StoreDownloadResponse(
+            model_id=str(model_id),
+            source_revision=card.source_revision,
+            status="downloading",
+            destination="node",
+        )
 
     def _schedule_custom_override_retirement(
         self,

@@ -2926,6 +2926,16 @@ store host restarts. Cancelled downloads are not listed.
 
 Use this when you want the store host to fetch and register a model.
 
+When no model store is configured, the endpoint downloads the model onto the
+node that answered instead, the same whole-model download a launch starts, and
+returns `status: downloading` with `destination: node` (a store transfer
+reports `destination: store`). That fallback needs the operator access a
+direct node download needs (`403` otherwise) and serves only a catalog model's
+base artifact at its card's own pins: a companion artifact role, extra GGUF
+files, an artifact bundle, repository or owner override, or a file, revision
+or card that differs from the catalog card answers `409` with how to turn the
+store on.
+
 The response reports the store's current transfer state. A store-host
 rejection (for example an immutable-card conflict or a capacity limit) is
 reported in the same 200 response with `status` set to `error` and the
@@ -3283,6 +3293,7 @@ The response also carries an `effective` block describing runtime-resolved value
 - `kv_cache_backend`: the KV cache backend actually in effect (config value or `SKULK_KV_CACHE_BACKEND` override)
 - `has_hf_token`: whether a HuggingFace token is configured (via the file or `HF_TOKEN`), without exposing the token
 - `experimental_mode_enabled`: whether this node runs with `SKULK_ENABLE_EXPERIMENTAL_MODE` set; when a release carries active experiments, the dashboard uses it to reveal the gated Experiments settings section
+- `model_store_defaults`: the store a fresh node starts with: `store_host` (this node's short hostname), `store_port` (`12415`), `store_http_host` (`127.0.0.1`) and `store_path` (`model-store` in Skulk's data folder). Settings fills a switched-on store's blank fields from these values
 
 The persisted `experiments` section is deprecated compatibility surface: every
 speech feature that incubated there has graduated to standard, and no built-in
@@ -3320,6 +3331,10 @@ is retained. Invalid configuration returns `422`. Important behavior:
 - if you omit `experiments`, Skulk preserves the existing experiment toggles
 - if you omit `model_trust`, Skulk preserves the deprecated compatibility state
   during rolling upgrades
+- an enabled `model_store` with a blank `store_host` or `store_path` takes
+  this node's `model_store_defaults` instead of failing; a blank host also
+  takes the loopback `store_http_host`. Named values, and a disabled store,
+  are saved as sent
 - `model_trust` cannot be replaced through `PUT /config`; authenticated
   operators receive `409` because the current API has no secondary model-trust
   ceremony

@@ -24,7 +24,9 @@ const MAX_RECENT_MODELS = 20;
  * behavior for older responses.
  */
 // eslint-disable-next-line react-refresh/only-export-components -- The store and discovery workflows share this response contract parser.
-export async function readAcceptedDownload(res: Response): Promise<{ rejected: boolean; reason: string | null }> {
+export async function readAcceptedDownload(
+  res: Response,
+): Promise<{ rejected: boolean; reason: string | null; destination: 'store' | 'node' }> {
   try {
     const body: unknown = await res.json();
     if (body && typeof body === 'object') {
@@ -33,13 +35,18 @@ export async function readAcceptedDownload(res: Response): Promise<{ rejected: b
         return {
           rejected: true,
           reason: typeof record.error === 'string' && record.error.trim() ? record.error : null,
+          destination: 'store',
         };
+      }
+      // A node with no model store downloads the model onto itself.
+      if (record.destination === 'node') {
+        return { rejected: false, reason: null, destination: 'node' };
       }
     }
   } catch {
     // Unparseable body — assume the historical accepted shape.
   }
-  return { rejected: false, reason: null };
+  return { rejected: false, reason: null, destination: 'store' };
 }
 
 /**
@@ -314,7 +321,9 @@ export function ModelSearchModal({
       if (accepted && !accepted.rejected) {
         addToast({
           type: 'success',
-          message: t('modelSearch.toasts.downloadingToStore', 'Downloading {modelId} to store', { modelId }),
+          message: accepted.destination === 'node'
+            ? t('modelSearch.toasts.downloadingToNode', 'Downloading {modelId} to this node', { modelId })
+            : t('modelSearch.toasts.downloadingToStore', 'Downloading {modelId} to store', { modelId }),
         });
         setRecentIds((prev) => [modelId, ...prev.filter((id) => id !== modelId)].slice(0, MAX_RECENT_MODELS));
         onDownloadStarted(modelId);
