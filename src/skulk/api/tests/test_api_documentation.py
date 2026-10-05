@@ -1,7 +1,9 @@
 """Keep the public route inventory, generated schemas, and guide in agreement."""
 
 import re
+from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 
 import httpx
 import pytest
@@ -208,3 +210,40 @@ def test_config_request_retains_direct_and_wrapped_nested_fields(
     enabled = settings_properties["enabled"]
     assert isinstance(enabled, dict)
     assert enabled["type"] == "boolean" and enabled["default"] is False
+
+
+def _operations(app: FastAPI) -> set[tuple[str, str]]:
+    """Return every (method, path) the app documents in its OpenAPI schema."""
+
+    schema = TypeAdapter(dict[str, JsonValue]).validate_python(app.openapi())
+    paths = schema["paths"]
+    assert isinstance(paths, dict)
+    operations: set[tuple[str, str]] = set()
+    for path, item in paths.items():
+        assert isinstance(item, dict)
+        operations.update((method.upper(), path) for method in item)
+    return operations
+
+
+def test_published_documentation_covers_every_production_operation(
+    documented_app: FastAPI,
+) -> None:
+    """The docs exporter must publish every operation production registers."""
+
+    import importlib.util
+
+    script = Path(__file__).resolve().parents[4] / "scripts" / "export_openapi.py"
+    spec = importlib.util.spec_from_file_location("export_openapi", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    build_docs_api = cast(Callable[[], API], module.build_docs_api)
+    published = _operations(build_docs_api().app)
+
+    missing = _operations(documented_app) - published
+    assert not missing, f"Missing from published API documentation: {sorted(missing)}"
+    assert {
+        ("GET", "/v1/auth/remote-pairing"),
+        ("POST", "/v1/auth/remote-pairing"),
+        ("DELETE", "/v1/auth/remote-pairing"),
+    } <= published
