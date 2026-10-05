@@ -120,7 +120,9 @@ the invitation lifetime and device limit, then **Generate pairing code**.
 ![Devices and pairing with invitation generation controls](./imgs/dashboard-pairing.png)
 
 Scan the resulting QR code in the mobile app. This pairs an operator device; it
-does not add a compute node. Invitations and device revocations take effect
+does not add a compute node. A cluster allows five paired devices at once; the
+panel shows the slots in use and asks you to revoke a device before pairing
+another once all five are taken. Invitations and device revocations take effect
 immediately, independently of the Settings **Save changes** button. Follow
 [remote access](remote-access) for the full generation-and-scan workflow.
 

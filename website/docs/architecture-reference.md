@@ -426,6 +426,13 @@ The bare `audio_cpp` tag reports engine availability, but signed music support a
   prevents concurrent exchanges from oversubscribing the success limit.
   Host-only list/revoke commands reveal no nonce. Revocation blocks new and
   unfinished attempts without revoking credentials already issued to devices.
+  **Paired-device cap:** at most five active devices per cluster (not revoked,
+  refresh credential unexpired), counted from the same journal snapshot whose
+  head fences the credential append, so concurrent exchanges cannot exceed it.
+  Creation refuses at zero free slots, invitation limits shrink to the free
+  slots, scans are refused early, and HTTP refusals are `409`. Dashboard-only
+  `GET /v1/auth/pairing-capacity` reports active/maximum/free;
+  `skulk operator devices list|revoke` serves headless hosts.
   The ordinary direct dashboard listener exposes the same create/list/revoke
   authority through `/v1/auth/pairing-invitations`: the socket peer must be
   loopback or use Tailscale's `100.64.0.0/10` or

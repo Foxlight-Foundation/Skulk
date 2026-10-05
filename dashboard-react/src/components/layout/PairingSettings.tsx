@@ -14,6 +14,7 @@ import {
   type CreatedPairingInvitation,
   type PairingInvitationState,
   type PairingInvitationSummary,
+  useGetPairingCapacityQuery,
   useGetPairingInvitationsQuery,
   useRevokePairingInvitationMutation,
 } from '../../store/endpoints/pairing';
@@ -22,6 +23,7 @@ import { Button } from '../common/Button';
 const pairingCodeDisplayMilliseconds = 300 * 1_000;
 const defaultInvitationLifetimeSeconds = 300;
 const defaultMaximumPairings = 1;
+const maximumInvitationPairings = 20;
 
 const invitationLifetimeOptions = [
   300,
@@ -150,6 +152,20 @@ const ButtonRow = styled.div`
   }
 `;
 
+const SlotUsage = styled.div`
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  color: ${({ theme }) => theme.colors.body};
+`;
+
+const LimitNotice = styled.div`
+  border-radius: ${({ theme }) => theme.radii.md};
+  background: ${({ theme }) => theme.colors.warningBg};
+  color: ${({ theme }) => theme.colors.warningOnSurface};
+  padding: 10px 12px;
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  line-height: 1.45;
+`;
+
 const ErrorText = styled.div`
   color: ${({ theme }) => theme.colors.errorOnSurface};
   font-size: ${({ theme }) => theme.fontSizes.sm};
@@ -246,6 +262,20 @@ export function PairingSettings({ invitationHost }: { invitationHost?: HTMLEleme
     refetchOnReconnect: true,
   });
   const [revokeInvitation, revokeResult] = useRevokePairingInvitationMutation();
+  const { data: capacity } = useGetPairingCapacityQuery(undefined, {
+    pollingInterval: 15_000,
+    skipPollingIfUnfocused: true,
+    refetchOnFocus: true,
+    refetchOnReconnect: true,
+  });
+  // The server reduces an invitation to the free device slots; offering only
+  // those choices keeps the QR's stated limit equal to what the user picked.
+  const atDeviceLimit = capacity?.availableSlots === 0;
+  const deviceChoiceCount = Math.max(
+    1,
+    Math.min(maximumInvitationPairings, capacity?.availableSlots ?? maximumInvitationPairings),
+  );
+  const effectiveMaxPairings = Math.min(maxPairings, deviceChoiceCount);
 
   const resetPairingDisplay = useCallback(() => {
     setCreated(null);
@@ -277,7 +307,7 @@ export function PairingSettings({ invitationHost }: { invitationHost?: HTMLEleme
     setError(null);
     try {
       const invitation = await createPairingInvitation(
-        { validForSeconds, maxPairings },
+        { validForSeconds, maxPairings: effectiveMaxPairings },
         t(
           'settings.pairing.createAuthorityGuidance',
           "Skulk could not generate a pairing code. Open Settings on the configured operator gateway through Tailscale using its MagicDNS name or Tailscale IP, or through localhost. Public relay and ordinary LAN access cannot manage pairing invitations.",
@@ -301,7 +331,7 @@ export function PairingSettings({ invitationHost }: { invitationHost?: HTMLEleme
     } finally {
       setCreating(false);
     }
-  }, [maxPairings, refetchInvitations, t, validForSeconds]);
+  }, [effectiveMaxPairings, refetchInvitations, t, validForSeconds]);
 
   const revoke = useCallback(
     async (invitationId: string) => {
@@ -367,6 +397,23 @@ export function PairingSettings({ invitationHost }: { invitationHost?: HTMLEleme
               'A protected code for the Skulk Operator app. It is a bearer secret and stays visible here for five minutes.',
             )}
           </Intro>
+          {capacity ? (
+            <SlotUsage>
+              {t('settings.pairing.slotsInUse', '{active} of {maximum} device slots in use', {
+                active: capacity.activeDevices,
+                maximum: capacity.maximumDevices,
+              })}
+            </SlotUsage>
+          ) : null}
+          {atDeviceLimit ? (
+            <LimitNotice role="status">
+              {t(
+                'settings.pairing.deviceLimitReached',
+                'This cluster already has {maximum} paired devices, the most it allows. Revoke a device before pairing another.',
+                { maximum: capacity?.maximumDevices ?? 0 },
+              )}
+            </LimitNotice>
+          ) : null}
           <FormGrid>
             <Control>
               {t('settings.pairing.validFor', 'Valid for')}
@@ -386,10 +433,10 @@ export function PairingSettings({ invitationHost }: { invitationHost?: HTMLEleme
               {t('settings.pairing.devicesAllowed', 'Devices')}
               <Select
                 aria-label={t('settings.pairing.devicesAllowed', 'Devices')}
-                value={maxPairings}
+                value={effectiveMaxPairings}
                 onValueChange={(selectedValue) => setMaxPairings(Number(selectedValue))}
               >
-                {Array.from({ length: 20 }, (_, index) => index + 1).map((count) => (
+                {Array.from({ length: deviceChoiceCount }, (_, index) => index + 1).map((count) => (
                   <option key={count} value={count}>
                     {count}
                   </option>
@@ -397,7 +444,12 @@ export function PairingSettings({ invitationHost }: { invitationHost?: HTMLEleme
               </Select>
             </Control>
           </FormGrid>
-          <Button block loading={creating} onClick={() => void generatePairingCode()}>
+          <Button
+            block
+            disabled={atDeviceLimit}
+            loading={creating}
+            onClick={() => void generatePairingCode()}
+          >
             {t('settings.pairing.generate', 'Generate pairing code')}
           </Button>
         </>

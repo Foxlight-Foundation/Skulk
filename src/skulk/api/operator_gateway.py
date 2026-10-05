@@ -26,6 +26,7 @@ _UNAUTHENTICATED_PATHS: Final = frozenset(
     }
 )
 _DIRECT_DASHBOARD_ONLY_PREFIXES: Final = (
+    "/v1/auth/pairing-capacity",
     "/v1/auth/pairing-invitations",
     "/v1/auth/plugin-grants",
 )

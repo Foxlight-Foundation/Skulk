@@ -15,6 +15,11 @@ const createInvitationMock = vi.hoisted(() => vi.fn());
 const getInvitationsQueryMock = vi.hoisted(() => vi.fn());
 const refetchMock = vi.hoisted(() => vi.fn());
 const revokeMock = vi.hoisted(() => vi.fn());
+const capacityState = vi.hoisted(() => ({
+  value: { activeDevices: 0, maximumDevices: 5, availableSlots: 5 } as
+    | { activeDevices: number; maximumDevices: number; availableSlots: number }
+    | undefined,
+}));
 
 vi.mock('qrcode.react', () => ({
   QRCodeCanvas: forwardRef<
@@ -49,13 +54,17 @@ vi.mock('../../store/endpoints/pairing', () => ({
     };
   },
   useRevokePairingInvitationMutation: () => [revokeMock, { isLoading: false }],
+  useGetPairingCapacityQuery: () => ({ data: capacityState.value }),
 }));
 
 vi.mock('../../hooks/useToast', () => ({ addToast: vi.fn() }));
 
 vi.mock('../../i18n/tolgee', () => ({
   useSkulkTranslation: () => ({
-    t: (_key: string, fallback: string) => fallback,
+    t: (_key: string, fallback: string, parameters?: Record<string, string | number>) =>
+      fallback.replace(/\{(\w+)\}/g, (placeholder, name: string) =>
+        parameters && name in parameters ? String(parameters[name]) : placeholder,
+      ),
   }),
 }));
 
@@ -63,6 +72,7 @@ let root: Root | null = null;
 let container: HTMLDivElement | null = null;
 
 beforeEach(() => {
+  capacityState.value = { activeDevices: 0, maximumDevices: 5, availableSlots: 5 };
   vi.useFakeTimers();
   vi.setSystemTime(new Date('2026-08-13T12:00:00.000Z'));
   createInvitationMock.mockResolvedValue({
@@ -141,4 +151,49 @@ describe('PairingSettings', () => {
     expect(container?.textContent).toContain('Generate pairing code');
     expect(container?.querySelector('canvas')).toBeNull();
   });
+
+  it('stops new pairing at the device limit and says how to free a slot', async () => {
+    capacityState.value = { activeDevices: 5, maximumDevices: 5, availableSlots: 0 };
+    await act(async () => {
+      root?.render(
+        <ThemeProvider theme={darkTheme}>
+          <PairingSettings />
+        </ThemeProvider>,
+      );
+    });
+
+    const generate = [...(container?.querySelectorAll('button') ?? [])].find(
+      (button) => button.textContent === 'Generate pairing code',
+    );
+    expect(generate?.disabled).toBe(true);
+    expect(container?.textContent).toContain('5 of 5 device slots in use');
+    expect(container?.textContent).toContain(
+      'This cluster already has 5 paired devices, the most it allows. Revoke a device before pairing another.',
+    );
+    await act(async () => generate?.click());
+    expect(createInvitationMock).not.toHaveBeenCalled();
+  });
+
+  it('offers only as many devices as there are free slots', async () => {
+    capacityState.value = { activeDevices: 3, maximumDevices: 5, availableSlots: 2 };
+    await act(async () => {
+      root?.render(
+        <ThemeProvider theme={darkTheme}>
+          <PairingSettings />
+        </ThemeProvider>,
+      );
+    });
+
+    const devicesTrigger = container?.querySelector<HTMLButtonElement>(
+      'button[aria-label="Devices"]',
+    );
+    await act(async () => devicesTrigger?.click());
+    const choices = [...document.querySelectorAll('[role="option"]')].map(
+      (option) => option.textContent,
+    );
+    expect(choices).toEqual(['1', '2']);
+    expect(container?.textContent).toContain('3 of 5 device slots in use');
+    expect(container?.textContent).not.toContain('the most it allows');
+  });
 });
+

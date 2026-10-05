@@ -31,6 +31,19 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Changed
 
+- A cluster now allows at most five paired phones and tablets at once. When
+  five are paired, **Devices & pairing** says so and stops generating codes,
+  `skulk operator pair` refuses with the commands that free a slot, and a
+  phone scanning an older code is told the invitation is unavailable. Revoke a
+  device to pair another; a device whose 30-day refresh credential expired no
+  longer counts. Invitations now allow every free slot by default and never
+  more than the free slots, the dashboard offers only as many devices as there
+  are free slots and marks expired devices, and new
+  `skulk operator devices list` and `skulk operator devices revoke` commands
+  manage pairings on a headless host. The limit is checked in the same
+  transaction that issues a phone's credentials, so simultaneous scans cannot
+  exceed it.
+
 - The dashboard header marks Skulk as a trademark, with a ™ beside the
   wordmark, and leaves a little more space before the version number.
 

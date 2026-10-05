@@ -44,6 +44,17 @@ const DeviceMetadata = styled(Meta)`overflow: hidden; text-overflow: ellipsis; w
 const SearchField = styled(Field)`background: ${({ theme }) => theme.colors.surface};`;
 const Actions = styled.div`display: flex; gap: 8px; flex-wrap: wrap;`;
 
+/**
+ * Whether a not-yet-revoked device can no longer refresh its credentials.
+ *
+ * Such a device must pair again and no longer occupies one of the cluster's
+ * device slots, matching how the server counts pairing capacity.
+ */
+export function isRefreshExpired(device: OperatorDevice, now: number = Date.now()): boolean {
+  if (device.state !== 'active') return false;
+  return device.refreshExpiresAt === null || Date.parse(device.refreshExpiresAt) <= now;
+}
+
 /** Safe device inventory row with explicit confirmation before immediate revocation. */
 export function DeviceRow({ device, busy, onRevoke }: { device: OperatorDevice; busy: boolean; onRevoke: () => void }) {
   const { t } = useSkulkTranslation();
@@ -52,7 +63,7 @@ export function DeviceRow({ device, busy, onRevoke }: { device: OperatorDevice; 
     <FiSmartphone size={24} aria-hidden="true" />
     <Detail>
       <DeviceHeading><strong>{device.name}</strong>
-      <StatusPill tone={device.state === 'revoked' ? 'danger' : 'neutral'}>{device.state === 'revoked' ? t('devices.revoked', 'Revoked') : t('devices.paired', 'Paired')}{device.current ? ` · ${t('devices.thisDevice', 'This device')}` : ''}</StatusPill></DeviceHeading>
+      <StatusPill tone={device.state === 'revoked' ? 'danger' : 'neutral'}>{device.state === 'revoked' ? t('devices.revoked', 'Revoked') : isRefreshExpired(device) ? t('devices.expired', 'Expired') : t('devices.paired', 'Paired')}{device.current ? ` · ${t('devices.thisDevice', 'This device')}` : ''}</StatusPill></DeviceHeading>
       <DeviceMetadata title={device.deviceId}>{device.deviceId}</DeviceMetadata>
       <Meta>{t('devices.pairedAt', 'Paired {date}', { date: new Date(device.pairedAt).toLocaleDateString() })}</Meta>
       {device.state === 'active' && confirming && <>

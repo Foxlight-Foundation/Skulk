@@ -7,15 +7,21 @@ import os
 import re
 import sys
 from collections.abc import Sequence
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal, cast
 from uuid import UUID
 
 from skulk.operator.pairing import (
+    MAXIMUM_ACTIVE_PAIRED_DEVICES,
+    OperatorDevice,
+    OperatorDeviceNotFoundError,
     OperatorPairingService,
+    PairingDeviceLimitError,
+    PairingGatewayNotInitializedError,
     PairingInvitationPackage,
     PairingPackageTooLargeError,
+    PairingSessionStateError,
 )
 from skulk.operator.relay import (
     OperatorRelayConfiguration,
@@ -59,6 +65,28 @@ class _InvitationRevokeArguments(FrozenModel):
     command: Literal["invitations"]
     invitation_command: Literal["revoke"]
     invitation_id: UUID
+
+
+class _DeviceListArguments(FrozenModel):
+    """Strictly validated paired-device list arguments."""
+
+    command: Literal["devices"]
+    device_command: Literal["list"]
+
+
+class _DeviceRevokeArguments(FrozenModel):
+    """Strictly validated paired-device revocation arguments."""
+
+    command: Literal["devices"]
+    device_command: Literal["revoke"]
+    device_id: UUID
+
+
+_DEVICE_LIMIT_GUIDANCE = (
+    f"this cluster already has {MAXIMUM_ACTIVE_PAIRED_DEVICES} paired devices, "
+    "the most it allows; list them with `skulk operator devices list` and revoke "
+    "one with `skulk operator devices revoke DEVICE_ID` before pairing another"
+)
 
 
 _DURATION_PATTERN = re.compile(r"^([1-9][0-9]*)([mhd])$")
@@ -118,6 +146,25 @@ def _write_pairing_qr(payload: str, output_path: Path) -> None:
     except BaseException:
         output_path.unlink(missing_ok=True)
         raise
+
+
+def _device_display_state(device: OperatorDevice, now: datetime) -> str:
+    """Name a device's pairing state the way the device limit counts it.
+
+    Args:
+        device: Secret-free paired-device projection.
+        now: Current UTC time.
+
+    Returns:
+        ``revoked``, ``expired`` (the refresh credential lapsed, so the device
+        must pair again and no longer occupies a slot), or ``active``.
+    """
+
+    if device.state == "revoked":
+        return "revoked"
+    if device.refresh_expires_at is None or now >= device.refresh_expires_at:
+        return "expired"
+    return "active"
 
 
 def _relay_configured_message(configuration: OperatorRelayConfiguration) -> str:
@@ -183,7 +230,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         type=int,
         choices=range(1, 21),
         metavar="1-20",
-        help="Create a reusable v3 invitation with this successful-pairing limit.",
+        help=(
+            "Create a reusable v3 invitation with this successful-pairing limit, "
+            "reduced to the cluster's free device slots "
+            f"(at most {MAXIMUM_ACTIVE_PAIRED_DEVICES} paired devices)."
+        ),
     )
     pair_parser.add_argument(
         "--qr-output",
@@ -231,9 +282,61 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Revoke an invitation without disconnecting paired devices.",
     )
     revoke_parser.add_argument("invitation_id", type=UUID)
+    devices_parser = subparsers.add_parser(
+        "devices",
+        help="List or revoke paired operator devices.",
+    )
+    device_subparsers = devices_parser.add_subparsers(
+        dest="device_command",
+        required=True,
+    )
+    device_subparsers.add_parser(
+        "list",
+        help="List paired devices and the free device slots.",
+    )
+    device_revoke_parser = device_subparsers.add_parser(
+        "revoke",
+        help="Revoke one paired device immediately, freeing its slot.",
+    )
+    device_revoke_parser.add_argument("device_id", type=UUID)
     parsed = parser.parse_args(list(argv) if argv is not None else None)
     parsed_values = cast(dict[str, object], vars(parsed))
     service = OperatorPairingService.from_default_paths()
+    if parsed_values.get("command") == "devices":
+        if parsed_values.get("device_command") == "list":
+            _DeviceListArguments.model_validate(parsed_values)
+            capacity = service.pairing_capacity()
+            try:
+                devices = service.owner_devices().devices
+            except PairingGatewayNotInitializedError:
+                devices = ()
+            print(
+                f"{capacity.active_devices} of {capacity.maximum_devices} device "
+                f"slots in use; {capacity.available_slots} free."
+            )
+            if not devices:
+                print("No paired devices.")
+                return 0
+            now = datetime.now(tz=timezone.utc)
+            print(
+                "DEVICE ID                             PAIRED                    "
+                "STATE    NAME"
+            )
+            for device in devices:
+                print(
+                    f"{device.device_id}  {device.paired_at.isoformat()}  "
+                    f"{_device_display_state(device, now):<7}  {device.name}"
+                )
+            return 0
+        device_arguments = _DeviceRevokeArguments.model_validate(parsed_values)
+        try:
+            service.owner_revoke_device(device_arguments.device_id)
+        except (OperatorDeviceNotFoundError, PairingGatewayNotInitializedError):
+            parser.error("paired device was not found")
+        except PairingSessionStateError:
+            parser.error("pairing state changed concurrently; run the command again")
+        print(f"Revoked paired device {device_arguments.device_id}.")
+        return 0
     if parsed_values.get("command") == "invitations":
         if parsed_values.get("invitation_command") == "list":
             _InvitationListArguments.model_validate(parsed_values)
@@ -284,7 +387,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         package = (
             service.create_invitation(
                 lifetime=arguments.valid_for or timedelta(minutes=5),
-                max_pairings=arguments.max_pairings or 10,
+                max_pairings=arguments.max_pairings,
                 exchange_url=arguments.exchange_url,
                 cluster_name=arguments.cluster_name,
             )
@@ -296,6 +399,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     except PairingPackageTooLargeError:
         parser.error("relay pairing package is too large for a reliable QR code")
+    except PairingDeviceLimitError:
+        parser.error(_DEVICE_LIMIT_GUIDANCE)
     except ValueError:
         parser.error(
             "pairing requires a configured relay or an explicit --exchange-url"
@@ -311,6 +416,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             "This reusable QR is a secret bearer invitation. "
             f"It permits up to {package.max_pairings} successful pairings."
         )
+        if (
+            arguments.max_pairings is not None
+            and package.max_pairings < arguments.max_pairings
+        ):
+            print(
+                f"Reduced from {arguments.max_pairings} because the cluster has "
+                f"{package.max_pairings} free device slots "
+                f"(at most {MAXIMUM_ACTIVE_PAIRED_DEVICES} paired devices)."
+            )
     print(
         "Treat the terminal QR, fallback payload, and any saved image as secrets."
     )

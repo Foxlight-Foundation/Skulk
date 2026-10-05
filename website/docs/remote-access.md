@@ -61,6 +61,20 @@ To remove an already paired device, revoke the device itself. Device credentials
 use short-lived access tokens with refresh rotation; successful pairing does not
 grant every administrative permission.
 
+### Five paired devices per cluster
+
+A cluster allows at most five paired devices at once. **Devices & pairing**
+shows how many of the five slots are in use and offers only as many devices as
+there are free slots. When all five are taken it stops generating codes, and a
+phone that scans an older code is told the invitation is no longer available.
+To pair another device, revoke one under **Paired devices** first. On a
+headless host, `skulk operator devices list` shows the slots and
+`skulk operator devices revoke DEVICE_ID` frees one.
+
+A device whose app has not connected for 30 days no longer counts: its refresh
+credential expired, so it must pair again anyway. The dashboard marks it
+**Expired**; revoke it to tidy the list.
+
 ## Pair a browser for plugin operations
 
 From **Plugins**, open **Browser access**:
@@ -101,7 +115,7 @@ is unavailable; local cluster operation can continue.
 | Symptom | Check |
 | --- | --- |
 | Invitation generation is refused | Use the configured gateway through localhost or its authorized direct Tailscale connection |
-| Pairing is refused | Check invitation expiry, device limit, revocation, and cluster identity; obtain a current invitation |
+| Pairing is refused | Check invitation expiry, the five-device limit (revoke a device to free a slot), revocation, and cluster identity; obtain a current invitation |
 | App is paired but offline | Check gateway availability, relay configuration, and network connectivity; remembered identity is not live health |
 | Browser loses access after reload | Pair the tab again; browser credentials intentionally stay in memory |
 | Plugin controls are unavailable | Ask the owner to verify the exact plugin grants and manager readiness |

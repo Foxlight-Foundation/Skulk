@@ -175,7 +175,11 @@ A single Skulk `Node` (src/skulk/main.py) runs multiple components:
   create a reusable version-three invitation bounded to 90 days, twenty
   successful pairings, ten live attempts, and one hundred total attempts. Each
   scan receives an independent five-minute challenge record, and host-only
-  commands list or revoke invitations without exposing bearer material. The
+  commands list or revoke invitations without exposing bearer material. A
+  cluster allows at most five active paired devices (not revoked, refresh
+  unexpired), enforced inside the exchange's journal compare-and-set; at the
+  cap, creation and scans are refused (409) until a device is revoked
+  (dashboard, `skulk operator devices revoke`, or the device API). The
   node-local dashboard can create, list, and revoke the same invitation
   records under Settings; its bearer response is no-store and kept in mounted
   component memory for five minutes. Management requires a same-origin

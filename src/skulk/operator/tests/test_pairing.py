@@ -1,6 +1,7 @@
 """Tests for host-authorized single-gateway pairing."""
 
 import base64
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -10,19 +11,22 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from skulk.operator.authority import EncryptedAuthorityStore
+from skulk.operator.authority import AuthorityRecord, EncryptedAuthorityStore
 from skulk.operator.key_provider import (
     AuthorityKeyUnavailableError,
     LocalFileAuthorityKeyProvider,
 )
 from skulk.operator.pairing import (
+    MAXIMUM_ACTIVE_PAIRED_DEVICES,
     OperatorCredentialExpiredError,
     OperatorCredentialInvalidError,
     OperatorDeviceNotFoundError,
     OperatorPairingService,
     OperatorTokenRequest,
+    PairingCapacity,
     PairingChallengeRequest,
     PairingChallengeResponse,
+    PairingDeviceLimitError,
     PairingExchangeRequest,
     PairingExchangeResponse,
     PairingGatewayNotInitializedError,
@@ -940,3 +944,290 @@ def test_lifecycle_rejects_an_uninitialized_gateway_safely(tmp_path: Path) -> No
 
     with pytest.raises(PairingGatewayNotInitializedError, match="not initialized"):
         service.validate_access_token("unknown-access-token")
+
+
+def _service_and_store(
+    tmp_path: Path,
+    clock: list[datetime],
+) -> tuple[OperatorPairingService, EncryptedAuthorityStore]:
+    """Build an isolated pairing service and expose its journal for fault injection."""
+
+    provider = LocalFileAuthorityKeyProvider(tmp_path / "authority-key.bin")
+    store = EncryptedAuthorityStore(provider, tmp_path / "authority.sqlite3")
+    return OperatorPairingService(store, provider, now=lambda: clock[0]), store
+
+
+def _challenged_invitation_exchange(
+    service: OperatorPairingService,
+    package: PairingInvitationPackage,
+    *,
+    device_name: str,
+) -> PairingExchangeRequest:
+    """Scan an invitation and return the signed exchange that would complete it."""
+
+    private_key, public_key = _device_key()
+    challenge = service.create_challenge(
+        PairingChallengeRequest(
+            nonce=package.nonce,
+            invitation_id=package.invitation_id,
+            device_name=device_name,
+            device_public_key=public_key,
+        )
+    )
+    assert challenge.attempt_id is not None
+    signature = private_key.sign(
+        pairing_invitation_signature_message(
+            cluster_id=UUID(str(package.cluster_id)),
+            invitation_id=package.invitation_id,
+            nonce=package.nonce,
+            attempt_id=challenge.attempt_id,
+            challenge=challenge.challenge,
+        )
+    )
+    return PairingExchangeRequest(
+        nonce=package.nonce,
+        invitation_id=package.invitation_id,
+        attempt_id=challenge.attempt_id,
+        signature=_base64url(signature),
+    )
+
+
+def _challenged_session_exchange(
+    service: OperatorPairingService,
+    *,
+    device_name: str,
+) -> PairingExchangeRequest:
+    """Scan a single-use session and return the signed exchange that would complete it."""
+
+    package = service.create_session(exchange_url="https://example.invalid")
+    private_key, public_key = _device_key()
+    challenge = service.create_challenge(
+        PairingChallengeRequest(
+            nonce=package.nonce,
+            device_name=device_name,
+            device_public_key=public_key,
+        )
+    )
+    signature = private_key.sign(
+        pairing_signature_message(
+            cluster_id=UUID(str(package.cluster_id)),
+            nonce=package.nonce,
+            challenge=challenge.challenge,
+        )
+    )
+    return PairingExchangeRequest(nonce=package.nonce, signature=_base64url(signature))
+
+
+def _commit_competing_exchange_first(
+    monkeypatch: pytest.MonkeyPatch,
+    service: OperatorPairingService,
+    store: EncryptedAuthorityStore,
+    competing: PairingExchangeRequest,
+) -> list[bool]:
+    """Commit ``competing`` between the next exchange's snapshot and its append.
+
+    Returns a one-item list that records whether the interleaving happened.
+    """
+
+    original_append = store.append
+    interleaved = [False]
+
+    def append_after_competing_exchange(
+        *,
+        expected_commit_index: int,
+        expected_record_commit_index: int | None = None,
+        authority_term: int,
+        record_type: str,
+        record_id: str,
+        payload: Mapping[str, object],
+    ) -> AuthorityRecord:
+        if not interleaved[0]:
+            interleaved[0] = True
+            service.exchange(competing)
+        return original_append(
+            expected_commit_index=expected_commit_index,
+            expected_record_commit_index=expected_record_commit_index,
+            authority_term=authority_term,
+            record_type=record_type,
+            record_id=record_id,
+            payload=payload,
+        )
+
+    monkeypatch.setattr(store, "append", append_after_competing_exchange)
+    return interleaved
+
+
+def test_unpaired_gateway_reports_every_device_slot_free(tmp_path: Path) -> None:
+    """A node that never paired a device has the whole allowance available."""
+
+    clock = [datetime(2026, 10, 5, 12, 0, tzinfo=timezone.utc)]
+    assert _service(tmp_path, clock).pairing_capacity() == PairingCapacity(
+        active_devices=0,
+        maximum_devices=MAXIMUM_ACTIVE_PAIRED_DEVICES,
+        available_slots=MAXIMUM_ACTIVE_PAIRED_DEVICES,
+    )
+
+
+def test_sixth_device_is_refused_until_one_is_revoked(tmp_path: Path) -> None:
+    """A cluster keeps at most five active paired devices."""
+
+    clock = [datetime(2026, 10, 5, 12, 0, tzinfo=timezone.utc)]
+    service = _service(tmp_path, clock)
+    paired = [
+        _complete_pairing(service, device_name=f"Phone {index}")
+        for index in range(MAXIMUM_ACTIVE_PAIRED_DEVICES)
+    ]
+    assert service.pairing_capacity() == PairingCapacity(
+        active_devices=5,
+        maximum_devices=5,
+        available_slots=0,
+    )
+    with pytest.raises(PairingDeviceLimitError, match="the most it allows"):
+        service.create_session(exchange_url="https://example.invalid")
+    with pytest.raises(PairingDeviceLimitError):
+        service.create_invitation(
+            lifetime=timedelta(days=1),
+            exchange_url="https://example.invalid",
+        )
+
+    service.owner_revoke_device(paired[0].device_id)
+    assert service.pairing_capacity().available_slots == 1
+    _complete_pairing(service, device_name="Replacement phone")
+    assert service.pairing_capacity().available_slots == 0
+
+
+def test_invitation_allows_at_most_the_free_device_slots(tmp_path: Path) -> None:
+    """Larger requests and the default are reduced to the slots still free."""
+
+    clock = [datetime(2026, 10, 5, 12, 0, tzinfo=timezone.utc)]
+    service = _service(tmp_path, clock)
+    for index in range(3):
+        _complete_pairing(service, device_name=f"Phone {index}")
+
+    requested = service.create_invitation(
+        lifetime=timedelta(days=1),
+        max_pairings=10,
+        exchange_url="https://example.invalid",
+    )
+    defaulted = service.create_invitation(
+        lifetime=timedelta(days=1),
+        exchange_url="https://example.invalid",
+    )
+    smaller = service.create_invitation(
+        lifetime=timedelta(days=1),
+        max_pairings=1,
+        exchange_url="https://example.invalid",
+    )
+
+    assert (requested.max_pairings, defaulted.max_pairings, smaller.max_pairings) == (
+        2,
+        2,
+        1,
+    )
+    summaries = {item.invitation_id: item for item in service.invitations()}
+    assert summaries[requested.invitation_id].max_pairings == 2
+
+
+def test_scan_is_refused_once_the_cluster_is_full(tmp_path: Path) -> None:
+    """An invitation created with free slots stops admitting scans at the limit."""
+
+    clock = [datetime(2026, 10, 5, 12, 0, tzinfo=timezone.utc)]
+    service = _service(tmp_path, clock)
+    package = service.create_invitation(
+        lifetime=timedelta(days=1),
+        exchange_url="https://example.invalid",
+    )
+    assert package.max_pairings == 5
+    for index in range(4):
+        _complete_pairing(service, device_name=f"Phone {index}")
+    _complete_invitation_pairing(service, package, device_name="Invited phone")
+
+    _, public_key = _device_key()
+    with pytest.raises(PairingDeviceLimitError):
+        service.create_challenge(
+            PairingChallengeRequest(
+                nonce=package.nonce,
+                invitation_id=package.invitation_id,
+                device_name="Sixth phone",
+                device_public_key=public_key,
+            )
+        )
+    assert service.invitations()[0].successful_pairings == 1
+
+
+def test_racing_invitation_exchanges_cannot_pass_the_device_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pairing committed after another exchange's snapshot forces its recount."""
+
+    clock = [datetime(2026, 10, 5, 12, 0, tzinfo=timezone.utc)]
+    service, store = _service_and_store(tmp_path, clock)
+    for index in range(4):
+        _complete_pairing(service, device_name=f"Phone {index}")
+    first = service.create_invitation(
+        lifetime=timedelta(days=1),
+        exchange_url="https://example.invalid",
+    )
+    second = service.create_invitation(
+        lifetime=timedelta(days=1),
+        exchange_url="https://example.invalid",
+    )
+    first_exchange = _challenged_invitation_exchange(
+        service, first, device_name="First racer"
+    )
+    second_exchange = _challenged_invitation_exchange(
+        service, second, device_name="Second racer"
+    )
+
+    interleaved = _commit_competing_exchange_first(
+        monkeypatch, service, store, second_exchange
+    )
+    with pytest.raises(PairingDeviceLimitError):
+        service.exchange(first_exchange)
+
+    assert interleaved == [True]
+    assert service.pairing_capacity().active_devices == 5
+
+
+def test_racing_single_use_exchanges_cannot_pass_the_device_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Single-use sessions take the same journal fence as invitation attempts."""
+
+    clock = [datetime(2026, 10, 5, 12, 0, tzinfo=timezone.utc)]
+    service, store = _service_and_store(tmp_path, clock)
+    for index in range(4):
+        _complete_pairing(service, device_name=f"Phone {index}")
+    first_exchange = _challenged_session_exchange(service, device_name="First racer")
+    second_exchange = _challenged_session_exchange(service, device_name="Second racer")
+
+    interleaved = _commit_competing_exchange_first(
+        monkeypatch, service, store, second_exchange
+    )
+    with pytest.raises(PairingDeviceLimitError):
+        service.exchange(first_exchange)
+
+    assert interleaved == [True]
+    assert service.pairing_capacity().active_devices == 5
+
+
+def test_device_with_expired_refresh_no_longer_occupies_a_slot(tmp_path: Path) -> None:
+    """A device that must pair again does not hold one of the five slots."""
+
+    clock = [datetime(2026, 10, 5, 12, 0, tzinfo=timezone.utc)]
+    service = _service(tmp_path, clock)
+    for index in range(MAXIMUM_ACTIVE_PAIRED_DEVICES):
+        _complete_pairing(service, device_name=f"Phone {index}")
+    assert service.pairing_capacity().available_slots == 0
+
+    clock[0] += timedelta(days=30)
+
+    assert service.pairing_capacity() == PairingCapacity(
+        active_devices=0,
+        maximum_devices=5,
+        available_slots=5,
+    )
+    _complete_pairing(service, device_name="Returning phone")
+

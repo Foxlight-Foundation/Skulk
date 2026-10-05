@@ -314,12 +314,21 @@ uv run skulk operator pair \
 ```
 
 `--valid-for` accepts a positive integer followed by `m`, `h`, or `d`, from one
-minute through 90 days. Invitation mode permits ten successful pairings by
-default and accepts an explicit limit from one through twenty. It creates a
+minute through 90 days. Invitation mode permits every free device slot by
+default and accepts an explicit limit from one through twenty, reduced to the
+free slots (the command says so when it reduces a request). It creates a
 separate five-minute attempt for every scan, so concurrent devices do not share
 or replace challenges. At most ten attempts may be live and one hundred may be
 issued over an invitation's lifetime. Only successful credential issuance
 counts against the pairing limit.
+
+A cluster allows at most five active paired devices. A device stops counting
+when it is revoked or when its 30-day refresh credential expires, because it
+must pair again either way. Once five devices are active, `skulk operator pair`
+refuses, existing invitations stop admitting scans, and the exchange refuses
+credentials; revoke a device to free a slot. The device count is checked again
+inside the same journal compare-and-set transition that issues credentials, so
+concurrent scans under several invitations cannot exceed five.
 
 The compressed version-three package adds a public invitation ID, issue time,
 expiry, and pairing limit. It may carry the same app-role relay admission and
@@ -338,11 +347,25 @@ uv run skulk operator invitations revoke <invitation-id>
 Listing exposes only ID, creation and expiry times, usage, active-attempt
 count, and safe state; it never prints the nonce. Revocation blocks new and
 unfinished attempts but does not disconnect devices that already paired.
-Revoke those devices through the authenticated device-management API.
+Revoke those devices through the authenticated device-management API, the
+dashboard, or the CLI:
+
+```bash
+uv run skulk operator devices list
+uv run skulk operator devices revoke <device-id>
+```
+
+`devices list` prints the used and free device slots, then each device's ID,
+pairing time, state (`active`, `expired` when its refresh credential lapsed,
+or `revoked`), and name. It never prints credential material. `devices revoke`
+invalidates the device's credentials immediately and frees its slot.
 
 The dashboard exposes the same authority operation under **Settings →
 Devices & pairing**. Operators choose a lifetime and device limit, generate a branded QR,
-and may download or revoke it. The bearer QR remains in mounted browser memory
+and may download or revoke it. The panel shows how many of the five device
+slots are in use, offers only as many devices as there are free slots, and
+disables code generation with revoke guidance when no slot is free. Devices
+whose refresh credential expired are marked **Expired**. The bearer QR remains in mounted browser memory
 for five minutes and then the section resets; this display timeout does not
 shorten a longer invitation. Safe invitation status remains visible without
 the nonce or pairing code.
@@ -388,7 +411,9 @@ Parameters:
 - JSON body `validForSeconds` (required): whole-second lifetime from 60 through
   7,776,000 seconds (90 days).
 - JSON body `maxPairings` (required): successful device limit from 1 through
-  20.
+  20. The created invitation allows at most the cluster's free device slots, so
+  a larger value is reduced; the returned `invitation.maxPairings` is the
+  effective limit.
 - Header `X-Skulk-Dashboard: pairing-v1` (required): explicit dashboard
   request marker.
 
@@ -415,9 +440,32 @@ Behavior:
   application state;
 - returns an actionable `403` outside the direct Tailscale/localhost dashboard
   authority, an actionable `409` on a non-gateway or before relay
-  configuration, `422` if the generated package exceeds the reliable QR
+  configuration, an actionable `409` when the cluster already has five active
+  paired devices, `422` if the generated package exceeds the reliable QR
   budget, and `503` when the configured gateway identity is temporarily
   unavailable.
+
+### Read paired-device capacity
+
+**GET** `/v1/auth/pairing-capacity`
+
+Parameters:
+
+- Header `X-Skulk-Dashboard: pairing-v1` (required).
+
+Behavior:
+
+- applies the same loopback-or-Tailscale peer, exact same-origin, trusted-host,
+  and no-forwarding boundary as invitation creation, and is unavailable through
+  `OperatorGatewayAuthorization`;
+- returns `activeDevices` (paired devices that are not revoked and hold an
+  unexpired refresh credential), `maximumDevices` (five), and `availableSlots`
+  (devices that can still pair before one must be revoked);
+- reports every slot free on a node that has never paired a device, rather
+  than failing;
+- returns no device identities or credential material;
+- returns an actionable `403` outside the direct verified Tailscale/localhost
+  dashboard authority.
 
 ### List dashboard pairing invitations
 
@@ -482,9 +530,10 @@ Behavior:
 - returns a random base64url `challenge`, attempt `expiresAt`, and an
   `attemptId` only for version-three invitations;
 - returns `404` for an unknown nonce, `410` after expiry, `409` after another
-  transition already used the session, `422` for an invalid public key, `429`
-  with `Retry-After` when ten invitation attempts are already live, and `503`
-  on an API node that has not been initialized as a gateway. Revoked,
+  transition already used the session or when the cluster already has five
+  active paired devices, `422` for an invalid public key, `429` with
+  `Retry-After` when ten invitation attempts are already live, and `503` on an
+  API node that has not been initialized as a gateway. Revoked,
   exhausted or expired invitations return `410`; the lifetime attempt ceiling
   returns `410` only when requesting another attempt, while already-issued
   attempts may still finish before their own expiry.
@@ -545,9 +594,14 @@ Behavior:
   gateway's self-signed server certificate, not a certificate authority). The gateway-role carrier credential is never returned;
 - stores only encrypted session/device state and one-way token digests;
 - never returns either credential again;
+- enforces the five-active-device limit inside the same journal
+  compare-and-set transition that issues credentials, so concurrent exchanges
+  under different invitations cannot exceed it;
 - returns `401` for an invalid proof, `404` for an unknown invitation or
-  attempt, `409` for reuse or an out-of-order exchange, `410` when the session,
-  attempt, or invitation is unavailable, and `503` on a non-designated node.
+  attempt, `409` for reuse, an out-of-order exchange, or a cluster that already
+  has five active paired devices (no credential is issued), `410` when the
+  session, attempt, or invitation is unavailable, and `503` on a
+  non-designated node.
 
 Together with refresh rotation, these are the complete pre-access-token HTTP
 surface on the relay-only listener. That listener serves the existing canonical
