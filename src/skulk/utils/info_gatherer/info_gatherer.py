@@ -528,6 +528,61 @@ class NodePairingGateway(TaggedModel):
     """True while this node holds a relay route for phone pairing."""
 
 
+PAIRING_GATEWAY_WITHDRAWAL_REPUBLISH_SECONDS = 60.0
+"""Seconds between repeats of a withdrawn pairing-gateway role."""
+
+
+class PairingGatewayAdvertisement:
+    """Decides when a node publishes its phone-pairing gateway role.
+
+    While the node holds the role, every poll publishes it, so a node that
+    joins later learns it. When the role ends, the withdrawal is published at
+    once and then about once a minute: telemetry has no replay, so a peer that
+    missed a single withdrawal would otherwise keep reporting pairing as
+    managed elsewhere until it restarts. A node that never held the role stays
+    silent, because almost every node is never the pairing gateway.
+    """
+
+    def __init__(
+        self,
+        republish_seconds: float = PAIRING_GATEWAY_WITHDRAWAL_REPUBLISH_SECONDS,
+    ) -> None:
+        """Create the policy for one publisher.
+
+        Args:
+            republish_seconds: Interval between repeats of a withdrawal.
+        """
+
+        self._republish_seconds = republish_seconds
+        self._held = False
+        self._last_withdrawal: float | None = None
+
+    def reading(self, active: bool, now: float) -> "NodePairingGateway | None":
+        """Return the reading to publish at ``now``, or ``None`` to stay silent.
+
+        Args:
+            active: Whether this node currently holds the relay route.
+            now: Monotonic time in seconds.
+
+        Returns:
+            The reading to send, or ``None`` when nothing is due.
+        """
+
+        if active:
+            self._held = True
+            self._last_withdrawal = None
+            return NodePairingGateway(active=True)
+        if not self._held:
+            return None
+        if (
+            self._last_withdrawal is not None
+            and now - self._last_withdrawal < self._republish_seconds
+        ):
+            return None
+        self._last_withdrawal = now
+        return NodePairingGateway(active=False)
+
+
 class NodeCapabilityNodes(TaggedModel):
     """Summaries of the capability nodes a host runs, on the telemetry plane.
 
@@ -832,23 +887,22 @@ class InfoGatherer:
     async def _monitor_pairing_gateway(self):
         """Publish whether this node holds the phone-pairing relay route.
 
-        Published every poll while active so a node joining later learns it,
-        once more when it turns off so peers clear their entry, and never while
-        it stays off: almost every node is not the pairing gateway.
+        See :class:`PairingGatewayAdvertisement` for when a reading is sent.
         """
         if (
             self.pairing_gateway_poll_interval is None
             or self.pairing_gateway_provider is None
         ):
             return
-        published_active = False
+        advertisement = PairingGatewayAdvertisement()
         while True:
             try:
-                active = self.pairing_gateway_provider()
-                if active or published_active:
+                reading = advertisement.reading(
+                    self.pairing_gateway_provider(), anyio.current_time()
+                )
+                if reading is not None:
                     with fail_after(30):
-                        await self.info_sender.send(NodePairingGateway(active=active))
-                    published_active = active
+                        await self.info_sender.send(reading)
             except (ClosedResourceError, BrokenResourceError):
                 # Consumer gone: a stop signal, not a fault (see
                 # _monitor_capabilities).

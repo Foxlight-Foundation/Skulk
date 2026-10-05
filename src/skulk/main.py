@@ -103,7 +103,7 @@ from skulk.utils.channels import Receiver, Sender, channel
 from skulk.utils.info_gatherer.info_gatherer import (
     NodeCapabilities,
     NodeCapabilityNodes,
-    NodePairingGateway,
+    PairingGatewayAdvertisement,
 )
 from skulk.utils.pydantic_ext import CamelCaseModel
 from skulk.utils.stack_dump import install_stack_dump_signal
@@ -199,8 +199,9 @@ async def _publish_management_node_resources(
         capability_nodes_republish_interval: Seconds between republishes of
             an unchanged non-empty snapshot.
         pairing_gateway_provider: Whether this node holds the phone-pairing
-            relay route; published each tick while true and once more when it
-            turns false, never while it stays false.
+            relay route; published as :class:`PairingGatewayAdvertisement`
+            decides (each tick while held, then the withdrawal about once a
+            minute, never on a node that never held it).
 
     Side effects:
         Publishes one immediate and then periodic ``NodeResources`` reading until
@@ -208,7 +209,7 @@ async def _publish_management_node_resources(
     """
     last_capability_nodes: tuple[CapabilityNodeSummary, ...] | None = None
     last_capability_nodes_at = anyio.current_time()
-    published_pairing_gateway = False
+    pairing_advertisement = PairingGatewayAdvertisement()
     while True:
         try:
             resources = NodeResources(
@@ -263,14 +264,13 @@ async def _publish_management_node_resources(
                 if pairing_gateway_provider is not None
                 else False
             )
-            if pairing_gateway or published_pairing_gateway:
+            pairing_reading = pairing_advertisement.reading(
+                pairing_gateway, anyio.current_time()
+            )
+            if pairing_reading is not None:
                 await telemetry_sender.send(
-                    NodeTelemetry(
-                        node_id=node_id,
-                        info=NodePairingGateway(active=pairing_gateway),
-                    )
+                    NodeTelemetry(node_id=node_id, info=pairing_reading)
                 )
-                published_pairing_gateway = pairing_gateway
         except (ClosedResourceError, BrokenResourceError):
             return
         except Exception as error:
