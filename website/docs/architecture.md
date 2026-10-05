@@ -1767,6 +1767,15 @@ concurrent exchanges from exceeding the success limit; ten live and one
 hundred total attempts bound abuse and journal growth. Host-only list and
 revoke commands expose no bearer material. Invitation revocation blocks new and
 unfinished attempts without changing credentials already issued to devices.
+A cluster allows at most five active paired devices (not revoked, refresh
+credential unexpired). Both exchange paths read one journal snapshot, count
+active devices from it, and fence their credential append on that snapshot's
+head, so a pairing committed concurrently forces a retry and a recount; the
+cap cannot be exceeded under any number of invitations. Session and invitation
+creation refuse when no slot is free, invitation limits are reduced to the
+free slots, and scans are refused early. The dashboard reads
+`GET /v1/auth/pairing-capacity`, and `skulk operator devices list|revoke`
+frees a slot on a headless host.
 The ordinary dashboard listener also exposes create/list/revoke invitation
 management under Settings. These routes reuse the same pairing service and
 encrypted journal as the CLI. They require a loopback socket peer or a
@@ -1792,6 +1801,46 @@ same service validates short-lived bearer access, exposes credential-free
 paired-device projections, and makes revocation immediate. The relay-only
 listener applies these scopes to the existing canonical routes; Skulk does not
 create parallel model, inference, or command APIs.
+
+**Self-service relay registration.** `skulk operator pair` on a gateway
+without a route calls `OperatorPairingService.register_relay`
+(`src/skulk/operator/relay_registration.py`). The gateway generates the P-256
+connector key, the 16-byte authority epoch, and both 32-byte carrier
+credentials; `POST /v1/registrations` sends only the key identifier and the two
+credential digests, and the relay answers with a locator, region, and the three
+WebSocket URLs. The result is stored through the existing on-demand
+provisioning shape, so the connector, QR, and exchange are unchanged. The relay
+origin comes from `connectivity.relay` in `skulk.yaml` or the build default;
+offline nodes and `enabled: false` never register. `forget-relay` appends a
+tombstone to the relay record and removes the inner-TLS files; a later
+configure fences on that tombstone and clears identity files a crash left
+behind. `OperatorRemoteAccessSupervisor` (`src/skulk/api/operator_remote_access.py`)
+replaces the startup-only ingress: it polls the stored route every five seconds
+(and on explicit requests), starts the relay listener and connector when a
+route appears, stops them when it is forgotten, restarts them when the route's
+identity changes (generation advances do not count), retries unexpected
+failures with capped backoff, and leaves a route the relay permanently refused
+stopped. The connector reports a permanent refusal for an explicit revocation
+or for 401s that persist for ten minutes.
+
+**Dashboard phone pairing.** `RemotePairingController`
+(`src/skulk/api/remote_pairing.py`) backs the dashboard-only
+`/v1/auth/remote-pairing` status, turn-on, and turn-off routes. Status combines
+the stored route, the supervisor state, and the running connector's liveness
+(`OperatorGatewayConnector.relay_connected` counts the accepted control socket
+or live warm lanes): `connecting` for up to 20 seconds without a live session,
+then `relay_unreachable`; `revoked` once the supervisor holds a permanently
+refused route. Turning on is serialized per process, checks the five-device
+limit and another node's gateway role before contacting the relay, and asks the
+supervisor to start immediately. Turning off forgets the route and revokes the
+invitations bound to its server name. The node holding a route advertises a
+`NodePairingGateway` telemetry reading (set from the supervisor's state changes
+on the shared `TelemetryView`, published by the worker gatherer or the
+management-node publisher every poll while active, then the withdrawal at once
+and about once a minute, because telemetry has no replay), so other nodes
+report `managed_elsewhere` instead of creating a second gateway. The CLI has no
+telemetry view, so `skulk operator pair` asks the node on its machine through
+the same loopback dashboard route and refuses in the same case.
 
 `skulk operator configure-relay` installs one generated paired-WebSocket route
 before normal public operation. The app and gateway use distinct 256-bit outer

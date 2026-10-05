@@ -103,6 +103,7 @@ from skulk.utils.channels import Receiver, Sender, channel
 from skulk.utils.info_gatherer.info_gatherer import (
     NodeCapabilities,
     NodeCapabilityNodes,
+    PairingGatewayAdvertisement,
 )
 from skulk.utils.pydantic_ext import CamelCaseModel
 from skulk.utils.stack_dump import install_stack_dump_signal
@@ -164,6 +165,7 @@ async def _publish_management_node_resources(
         Callable[[], tuple[CapabilityNodeSummary, ...]] | None
     ) = None,
     capability_nodes_republish_interval: float = _CAPABILITY_NODES_REPUBLISH_SECONDS,
+    pairing_gateway_provider: Callable[[], bool] | None = None,
 ) -> None:
     """Advertise resource truth for a node started without a worker.
 
@@ -196,6 +198,10 @@ async def _publish_management_node_resources(
             sustained gossip for a host at the summary bounds.
         capability_nodes_republish_interval: Seconds between republishes of
             an unchanged non-empty snapshot.
+        pairing_gateway_provider: Whether this node holds the phone-pairing
+            relay route; published as :class:`PairingGatewayAdvertisement`
+            decides (each tick while held, then the withdrawal about once a
+            minute, never on a node that never held it).
 
     Side effects:
         Publishes one immediate and then periodic ``NodeResources`` reading until
@@ -203,6 +209,7 @@ async def _publish_management_node_resources(
     """
     last_capability_nodes: tuple[CapabilityNodeSummary, ...] | None = None
     last_capability_nodes_at = anyio.current_time()
+    pairing_advertisement = PairingGatewayAdvertisement()
     while True:
         try:
             resources = NodeResources(
@@ -252,6 +259,18 @@ async def _publish_management_node_resources(
                 )
                 last_capability_nodes = capability_nodes
                 last_capability_nodes_at = anyio.current_time()
+            pairing_gateway = (
+                pairing_gateway_provider()
+                if pairing_gateway_provider is not None
+                else False
+            )
+            pairing_reading = pairing_advertisement.reading(
+                pairing_gateway, anyio.current_time()
+            )
+            if pairing_reading is not None:
+                await telemetry_sender.send(
+                    NodeTelemetry(node_id=node_id, info=pairing_reading)
+                )
         except (ClosedResourceError, BrokenResourceError):
             return
         except Exception as error:
@@ -1075,6 +1094,8 @@ class Node:
                         self.telemetry_view.local_advertised_capabilities
                     ),
                     lambda: tuple(self.telemetry_view.local_capability_nodes.values()),
+                    _CAPABILITY_NODES_REPUBLISH_SECONDS,
+                    lambda: self.telemetry_view.local_pairing_gateway_active,
                 )
             tg.start_soon(self._monitor_zenoh_isolation)
             if self.store_server:

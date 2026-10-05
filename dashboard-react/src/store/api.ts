@@ -23,6 +23,8 @@ export const apiSlice = createApi({
     'Trace',
     'NodeDiagnostics',
     'PairingInvitations',
+    'PairingCapacity',
+    'RemotePairing',
     'OperatorDevices',
     'Plugins',
     'PluginConfiguration',

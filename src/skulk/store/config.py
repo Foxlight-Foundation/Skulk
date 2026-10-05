@@ -88,6 +88,7 @@ from skulk.shared.models.memory_estimate import (
     SERVED_CONTEXT_DEFAULT_TOKENS,
 )
 from skulk.utils.pydantic_ext import FrozenModel
+from skulk.utils.relay_origin import validate_relay_origin
 
 # Keep the shipped listener outside the IANA dynamic/private range and the
 # lower ephemeral ranges commonly used by Linux. A fresh macOS install failed
@@ -399,15 +400,58 @@ class TailscaleConnectivityConfig(FrozenModel):
 
 
 @final
+class RelayConnectivityConfig(FrozenModel):
+    """Self-service relay registration for phone pairing.
+
+    The pairing gateway registers one on-demand route with this relay the first
+    time an operator pairs a phone, so the Skulk Operator app can reach the
+    cluster from any network. The relay is content-blind: app traffic stays in
+    TLS that terminates on the gateway.
+
+    Attributes:
+        enabled: Allow the gateway to register a route. ``False`` limits phone
+            pairing to direct LAN or Tailscale URLs and hand-provisioned relay
+            routes.
+        registration_url: Relay origin to register with, such as
+            ``https://relay.example``. ``None`` uses the build's default relay.
+    """
+
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "Allow the pairing gateway to register an on-demand relay route "
+            "when an operator first pairs a phone."
+        ),
+    )
+    registration_url: str | None = Field(
+        default=None,
+        description=(
+            "Relay origin (https://host[:port]) to register with; unset uses "
+            "the build's default relay."
+        ),
+    )
+
+    @field_validator("registration_url")
+    @classmethod
+    def validate_registration_url(cls, value: str | None) -> str | None:
+        """Accept only an HTTPS origin, or HTTP on loopback for development."""
+
+        return None if value is None else validate_relay_origin(value)
+
+
+@final
 class ConnectivityConfig(FrozenModel):
     """Cluster connectivity settings.
 
     Attributes:
         tailscale: Tailscale overlay network settings.  ``None`` means the
             Tailscale integration is disabled.
+        relay: Self-service relay registration for phone pairing. ``None``
+            uses the defaults: registration allowed, build's default relay.
     """
 
     tailscale: TailscaleConnectivityConfig | None = None
+    relay: RelayConnectivityConfig | None = None
 
 
 @final

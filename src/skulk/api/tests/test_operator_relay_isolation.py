@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 import skulk.api.main as api_main
 from skulk.api.main import API
+from skulk.api.operator_remote_access import OperatorRemoteAccessSupervisor
 from skulk.operator.key_provider import AuthorityKeyUnavailableError
 from skulk.operator.pairing import OperatorPairingService
 from skulk.operator.relay import OperatorRelayConfiguration
@@ -61,7 +62,7 @@ def test_unreadable_relay_state_does_not_prevent_local_api_startup(
     )
     api = _build_api(service)
 
-    assert api._operator_relay_configuration is None
+    assert api.operator_remote_access_state == "not_configured"
     assert TestClient(api.app).get("/state").status_code == 200
     assert "credential-shaped-secret" not in caplog.text
 
@@ -69,11 +70,15 @@ def test_unreadable_relay_state_does_not_prevent_local_api_startup(
 async def test_operator_listener_failure_is_isolated_from_local_api(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A relay listener failure cancels its lanes and returns without raising."""
+    """A relay listener failure cancels its lanes and leaves the local API up."""
 
     api = _build_api()
-    configuration = cast(OperatorRelayConfiguration, object())
-    api._operator_relay_configuration = configuration
+    configuration = OperatorRelayConfiguration.model_construct(
+        routing_locator="a" * 43,
+        operator_api_port=52417,
+        gateway_server_name="skulk-isolation.remote",
+        connector_authority_key_id=None,
+    )
     connector_started = anyio.Event()
     connector_stopped = anyio.Event()
 
@@ -105,7 +110,10 @@ async def test_operator_listener_failure_is_isolated_from_local_api(
             finally:
                 connector_stopped.set()
 
-    async def _failing_operator_api(_event: anyio.Event) -> None:
+    async def _failing_operator_api(
+        _configuration: OperatorRelayConfiguration,
+        _event: anyio.Event,
+    ) -> None:
         await connector_started.wait()
         raise OSError("private-listener-detail")
 
@@ -125,7 +133,21 @@ async def test_operator_listener_failure_is_isolated_from_local_api(
         _connector_factory,
     )
 
-    await api.run_operator_remote_access(anyio.Event())
+    supervisor = OperatorRemoteAccessSupervisor(
+        load_configuration=lambda: configuration,
+        run_session=api._run_operator_remote_access_session,
+        poll_seconds=0.01,
+        minimum_failure_retry_seconds=60.0,
+    )
+    api._operator_remote_access = supervisor
+    shutdown = anyio.Event()
 
-    assert connector_stopped.is_set()
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(api.run_operator_remote_access, shutdown)
+        with anyio.fail_after(5):
+            await connector_stopped.wait()
+            while api.operator_remote_access_state != "failed":
+                await anyio.sleep(0.005)
+        shutdown.set()
+
     assert TestClient(api.app).get("/state").status_code == 200

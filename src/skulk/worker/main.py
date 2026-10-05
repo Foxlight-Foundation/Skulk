@@ -1496,6 +1496,16 @@ class Worker:
             return frozenset()
         return frozenset(self._telemetry_view.local_advertised_capabilities)
 
+    def _local_pairing_gateway_provider(self) -> bool:
+        """Return whether this node holds the cluster's phone-pairing relay route.
+
+        The API sets the flag on the shared :class:`TelemetryView`; a worker
+        without a view (no API on this node) is never the pairing gateway.
+        """
+        if self._telemetry_view is None:
+            return False
+        return self._telemetry_view.local_pairing_gateway_active
+
     def _local_capability_nodes_provider(self) -> tuple[CapabilityNodeSummary, ...]:
         """Snapshot the capability-node summaries published on this node.
 
@@ -1535,6 +1545,9 @@ class Worker:
             # telemetry emit path as native node readings.
             capabilities_provider=self._local_capabilities_provider,
             capability_nodes_provider=self._local_capability_nodes_provider,
+            # The API sets this on the shared view when this node holds the
+            # phone-pairing relay route.
+            pairing_gateway_provider=self._local_pairing_gateway_provider,
             zenoh_peer_sampler=self._zenoh_peer_sampler,
         )
 

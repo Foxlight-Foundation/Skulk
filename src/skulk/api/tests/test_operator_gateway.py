@@ -164,11 +164,26 @@ def test_dashboard_invitation_management_is_never_relay_accessible(
     def revoke_invitation(invitation_id: UUID) -> dict[str, str]:
         return {"revoked": str(invitation_id)}
 
+    @canonical.get("/v1/auth/pairing-capacity")
+    def pairing_capacity() -> dict[str, int]:
+        return {"availableSlots": 5}
+
+    @canonical.api_route("/v1/auth/remote-pairing", methods=["GET", "POST", "DELETE"])
+    def remote_pairing() -> dict[str, str]:
+        return {"state": "connected"}
+
     client = TestClient(OperatorGatewayAuthorization(canonical, service))
     headers = {"Authorization": f"Bearer {exchange.access_token}"}
     invitation_id = UUID("00000000-0000-4000-8000-000000000001")
     assert client.post("/v1/auth/pairing-invitations", headers=headers).status_code == 404
     assert client.get("/v1/auth/pairing-invitations", headers=headers).status_code == 404
+    assert client.get("/v1/auth/pairing-capacity", headers=headers).status_code == 404
+    # Turning phone pairing on or off is owner administration of this node.
+    for method in ("GET", "POST", "DELETE"):
+        assert (
+            client.request(method, "/v1/auth/remote-pairing", headers=headers).status_code
+            == 404
+        )
     assert (
         client.delete(
             f"/v1/auth/pairing-invitations/{invitation_id}",

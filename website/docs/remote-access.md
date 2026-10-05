@@ -20,27 +20,61 @@ Do not expose the unauthenticated local API listener directly to the internet.
 
 ## Prepare remote access
 
-A cluster administrator configures the gateway once with the provisioning file
-the relay service supplies: `skulk operator configure-relay --provisioning-file
-<file>` stores the relay route and its protected carrier credentials and
-generates the gateway's TLS identity. Installing
-Skulk or opening **Remote Access** alone does not enroll a hosted relay service.
-Use the provisioning handoff supplied with your relay service; there is no
-public relay administration endpoint that a phone can use to create this trust.
+A node registers its own relay route the first time you pair a phone: choose
+**Pair a phone** under **Settings → Devices & pairing**, or run
+`skulk operator pair` on a headless node. The node generates its own connector
+key and carrier credentials, sends the relay only their fingerprints, and starts
+remote access without a restart. Installing Skulk or opening **Remote Access**
+alone does not contact the relay.
+
+The node where you first pair a phone becomes the cluster's pairing gateway:
+paired phones reach the cluster through it, so choose a machine that stays on.
+Other nodes' dashboards say which node manages pairing instead of offering a
+second, separate one, and `skulk operator pair` asks the node on its machine
+(`--api-port`, default 52415) and refuses for the same reason. The cluster's
+five-device limit is counted on that one gateway. There is no automatic
+failover to another node.
+
+The gateway registers with Foxlight's relay, `relay.foxlight.ai`, unless
+`skulk.yaml` names another:
+
+```yaml
+connectivity:
+  relay:
+    enabled: true                                  # false keeps pairing on LAN and Tailscale
+    registration_url: https://relay.example.invalid  # optional; omit for relay.foxlight.ai
+```
+
+The relay is content-blind. It learns the connector key's fingerprint, the two
+credential fingerprints, the gateway's public address, connection times, and
+byte counts. It never sees app traffic, which stays inside TLS that terminates
+on the gateway.
+
+To turn remote access off, choose **Turn off** in Devices &
+pairing, or run `skulk operator forget-relay`. Phones paired through the relay
+lose remote access until you pair them again, and codes created for the relay
+stop working. Revoke the old device records to free their slots.
+
+A self-hosted relay can supply a provisioning file instead:
+`skulk operator configure-relay --provisioning-file <file>` stores that route
+and its protected carrier credentials and generates the gateway's TLS
+identity.
 
 Use the dashboard's **Remote Access** view to find local LAN and Tailscale
-connection options. These addresses are not a relay-health check. Diagnose relay provisioning and gateway reachability through the
-administrator's supplied service controls. Keep provider and gateway secrets out
+connection options. Relay health shows in **Devices & pairing**: connecting,
+connected, relay unreachable (check the machine's internet connection), or
+refused (turn phone pairing off, then pair a phone again). Keep provider and gateway secrets out
 of screenshots and support messages.
 
 ## Create and revoke invitations
 
-On the configured gateway, open **Settings → Devices & pairing** from localhost
-or an authorized direct Tailscale connection. Ordinary LAN access and the public
+Open **Settings → Devices & pairing** on the pairing gateway from localhost or
+an authorized direct Tailscale connection. Ordinary LAN access and the public
 relay cannot administer pairing invitations.
 
-Choose the validity period and allowed device count, then select **Generate
-pairing code**. The displayed code/QR is a bearer secret. Its on-screen visibility
+Choose the validity period and allowed device count, then select **Pair a
+phone**. The first time, the node registers with the relay and connects before
+the code appears. The displayed code/QR is a bearer secret. Its on-screen visibility
 window is separate from the invitation's validity period: hiding the code does
 not revoke it. Review recent invitations and revoke any that should no longer
 admit devices. On the phone, choose **Scan pairing code**, allow camera access,
@@ -60,6 +94,20 @@ credentials. Revoking an invitation prevents further use of that invitation.
 To remove an already paired device, revoke the device itself. Device credentials
 use short-lived access tokens with refresh rotation; successful pairing does not
 grant every administrative permission.
+
+### Five paired devices per cluster
+
+A cluster allows at most five paired devices at once. **Devices & pairing**
+shows how many of the five slots are in use and offers only as many devices as
+there are free slots. When all five are taken it stops generating codes, and a
+phone that scans an older code is told the invitation is no longer available.
+To pair another device, revoke one under **Paired devices** first. On a
+headless host, `skulk operator devices list` shows the slots and
+`skulk operator devices revoke DEVICE_ID` frees one.
+
+A device whose app has not connected for 30 days no longer counts: its refresh
+credential expired, so it must pair again anyway. The dashboard marks it
+**Expired**; revoke it to tidy the list.
 
 ## Pair a browser for plugin operations
 
@@ -101,7 +149,7 @@ is unavailable; local cluster operation can continue.
 | Symptom | Check |
 | --- | --- |
 | Invitation generation is refused | Use the configured gateway through localhost or its authorized direct Tailscale connection |
-| Pairing is refused | Check invitation expiry, device limit, revocation, and cluster identity; obtain a current invitation |
+| Pairing is refused | Check invitation expiry, the five-device limit (revoke a device to free a slot), revocation, and cluster identity; obtain a current invitation |
 | App is paired but offline | Check gateway availability, relay configuration, and network connectivity; remembered identity is not live health |
 | Browser loses access after reload | Pair the tab again; browser credentials intentionally stay in memory |
 | Plugin controls are unavailable | Ask the owner to verify the exact plugin grants and manager readiness |

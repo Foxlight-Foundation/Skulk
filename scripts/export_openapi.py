@@ -9,6 +9,7 @@ os.environ.setdefault("SKULK_HOME", ".skulk-docs-home")
 
 from skulk.api.main import API
 from skulk.api.operator_auth import create_operator_auth_router
+from skulk.api.remote_pairing import RemotePairingController
 from skulk.operator.pairing import OperatorPairingService
 from skulk.shared.types.common import NodeId
 from skulk.utils.channels import channel
@@ -43,9 +44,22 @@ def build_docs_api() -> API:
     )
     # The gateway is optional at runtime, but its routes must still appear in
     # published API documentation. Router construction does not read credentials
-    # or initialize keys; no requests are dispatched by this exporter.
+    # or initialize keys; no requests are dispatched by this exporter, so the
+    # phone-pairing controller gets inert effects only to register its routes.
+    service = OperatorPairingService.from_default_paths()
     api.app.include_router(
-        create_operator_auth_router(OperatorPairingService.from_default_paths())
+        create_operator_auth_router(
+            service,
+            remote_pairing=RemotePairingController(
+                service=service,
+                relay_settings=lambda: None,
+                offline=lambda: False,
+                remote_access_state=lambda: "not_configured",
+                relay_link=lambda: None,
+                request_remote_access_check=lambda: None,
+                pairing_gateway_elsewhere=lambda: None,
+            ),
+        )
     )
     return api
 

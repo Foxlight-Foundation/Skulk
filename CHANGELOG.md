@@ -7,7 +7,22 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Added
+
+- Phone pairing works without configuration: the first **Pair a phone** (or
+  `skulk operator pair`) registers the node with Foxlight's relay at
+  `relay.foxlight.ai`. `connectivity.relay.registration_url` selects a
+  self-hosted relay, and `connectivity.relay.enabled: false` keeps pairing on
+  LAN and Tailscale.
+
 ### Fixed
+
+- A cluster keeps one phone-pairing gateway, so its five-device limit holds.
+  `skulk operator pair` now asks the node on its machine (`--api-port`,
+  default 52415) and refuses when another node already manages phone pairing,
+  as the dashboard does. A node that turns pairing off now repeats that
+  withdrawal about once a minute, so another node that missed it stops saying
+  pairing is managed there instead of waiting for a restart.
 
 - A new install from the Mac app or the Linux packages can download models.
   Without a `skulk.yaml` a node had no model store, so **Download** failed
@@ -29,7 +44,50 @@ This project records release notes here and mirrors public-facing notes in
   A fresh install also no longer logs a disk-usage warning every 30 seconds
   before its first download creates the models folder.
 
+### Added
+
+- A gateway can register its own relay route, so pairing a phone from the
+  command line needs no file from the relay operator. When the gateway has no
+  route, `skulk operator pair` generates the gateway's connector key and carrier
+  credentials, sends the relay only their fingerprints, stores the route, and
+  starts remote access without a restart. The relay comes from the new
+  `connectivity.relay` section of `skulk.yaml` (`registration_url`, `enabled`)
+  or the build's default; offline nodes never register. The new
+  `skulk operator forget-relay` turns remote access off again. Remote access
+  now also starts, stops, and follows a replaced route without restarting
+  Skulk, retries after an unexpected failure, and stops for good when the relay
+  revokes the route or refuses it for ten minutes.
+
+- The dashboard pairs a phone in one step. **Pair a phone** under
+  **Devices & pairing** registers the node with the relay the first time,
+  waits for the relay connection, and shows the code; before the first
+  registration the panel notes that traffic between the cluster and the
+  paired app is end to end encrypted. The
+  panel shows whether the relay connection is up, why this node cannot
+  register (registration off, offline, or no relay configured), and offers
+  **Turn off**, which also revokes codes made for the relay. In
+  a multi-node cluster the node where pairing was turned on advertises it, and
+  every other node's dashboard says where pairing is managed instead of
+  starting a second one.
+
 ### Changed
+
+- A fresh node's **Devices & pairing** no longer shows errors about a
+  configured operator gateway: its invitation and device lists are simply
+  empty until a phone is paired.
+
+- A cluster now allows at most five paired phones and tablets at once. When
+  five are paired, **Devices & pairing** says so and stops generating codes,
+  `skulk operator pair` refuses with the commands that free a slot, and a
+  phone scanning an older code is told the invitation is unavailable. Revoke a
+  device to pair another; a device whose 30-day refresh credential expired no
+  longer counts. Invitations now allow every free slot by default and never
+  more than the free slots, the dashboard offers only as many devices as there
+  are free slots and marks expired devices, and new
+  `skulk operator devices list` and `skulk operator devices revoke` commands
+  manage pairings on a headless host. The limit is checked in the same
+  transaction that issues a phone's credentials, so simultaneous scans cannot
+  exceed it.
 
 - The dashboard header marks Skulk as a trademark, with a ™ beside the
   wordmark, and leaves a little more space before the version number.

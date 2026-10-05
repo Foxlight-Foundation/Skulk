@@ -153,8 +153,11 @@ Open **Devices & pairing** to create invitations, inspect paired devices, and
 revoke access. Invitation administration requires the configured gateway through
 localhost or an authorized direct Tailscale connection.
 
-Choose the invitation's duration and device limit, then **Generate pairing code**.
-On the phone, choose **Scan pairing code**, allow camera access, and scan the QR.
+Choose the invitation's duration and device limit, then **Pair a phone**. The
+first time, the node registers with Foxlight's relay (`relay.foxlight.ai`)
+before showing the code, unless `connectivity.relay` in `skulk.yaml` names
+another relay or turns registration off. On the phone, choose
+**Scan pairing code**, allow camera access, and scan the QR.
 Review the cluster identity before confirming. Follow
 [Remote access and pairing](remote-access) for the full flow and the distinction
 between revoking an invitation and revoking a device.

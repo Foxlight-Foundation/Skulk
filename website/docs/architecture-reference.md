@@ -426,6 +426,13 @@ The bare `audio_cpp` tag reports engine availability, but signed music support a
   prevents concurrent exchanges from oversubscribing the success limit.
   Host-only list/revoke commands reveal no nonce. Revocation blocks new and
   unfinished attempts without revoking credentials already issued to devices.
+  **Paired-device cap:** at most five active devices per cluster (not revoked,
+  refresh credential unexpired), counted from the same journal snapshot whose
+  head fences the credential append, so concurrent exchanges cannot exceed it.
+  Creation refuses at zero free slots, invitation limits shrink to the free
+  slots, scans are refused early, and HTTP refusals are `409`. Dashboard-only
+  `GET /v1/auth/pairing-capacity` reports active/maximum/free;
+  `skulk operator devices list|revoke` serves headless hosts.
   The ordinary direct dashboard listener exposes the same create/list/revoke
   authority through `/v1/auth/pairing-invitations`: the socket peer must be
   loopback or use Tailscale's `100.64.0.0/10` or
@@ -440,6 +447,37 @@ The bare `audio_cpp` tag reports engine availability, but signed music support a
   `qrcode.react` in component memory for five minutes, independently of the
   server-side invitation lifetime, and reports actionable gateway/path
   guidance for authority failures.
+- **Self-service relay registration:** `skulk operator pair` without a route
+  registers one (`relay_registration.py`): node-generated P-256 key, epoch, and
+  both carrier credentials; `POST /v1/registrations` carries only the key ID
+  and SHA-256 credential digests; the answer (locator, region, three URLs) is
+  stored as an on-demand route. Origin: `connectivity.relay.registration_url`
+  or the build default (`DEFAULT_RELAY_REGISTRATION_ORIGIN`,
+  `https://relay.foxlight.ai`); disabled or
+  offline nodes never register; transient failures (including the relay's
+  `unavailable`) retry with the same values; coded refusals (`invalid_request`,
+  `not_found`, `already_registered`, `rate_limited`, `registration_paused`,
+  `capacity_exhausted`) do not. `forget-relay` writes a
+  tombstone and removes the TLS identity. `OperatorRemoteAccessSupervisor`
+  polls every 5 s and on request: start on a new route, stop on forget, restart
+  on a route-identity change, capped-backoff retry on failure, stay stopped on
+  a permanent refusal (explicit revocation, or 401 for ten minutes).
+- **Dashboard phone pairing:** dashboard-only `GET|POST|DELETE
+  /v1/auth/remote-pairing` (`RemotePairingController`, relay-denied). States:
+  `not_set_up`, `registering`, `connecting` (under 20 s without a live
+  session), `connected`, `relay_unreachable`, `revoked`, `managed_elsewhere`.
+  POST is idempotent and refuses `managed_elsewhere`/`device_limit` before the
+  relay; DELETE forgets the route and revokes its invitations. Errors carry
+  `{detail, code, retryAfterSeconds}`. Uninitialized nodes list empty
+  invitations and devices.
+- **Pairing gateway telemetry:** `NodePairingGateway{active}` on the TELEMETRY
+  plane (last-write-wins, `TelemetryView.node_pairing_gateways`, pruned with
+  the node; never State or the event log), published every poll while the
+  node holds a relay route, then the withdrawal at once and about once a
+  minute after (`PairingGatewayAdvertisement`), so a peer that missed it still
+  clears the role. `skulk operator pair` asks the local node's
+  `/v1/auth/remote-pairing` over loopback and refuses `managed_elsewhere`.
+  Same-version fleets required.
 - **V1 remote carrier:** `skulk operator configure-relay --provisioning-file`
   validates one generated paired-WebSocket route, encrypts locator and distinct
   app/gateway carrier credentials in the local journal, and creates a protected

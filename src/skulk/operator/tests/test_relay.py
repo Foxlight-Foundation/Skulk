@@ -33,6 +33,7 @@ from qrcode.constants import ERROR_CORRECT_L
 
 import skulk.operator.cli as operator_cli
 import skulk.operator.relay as relay_module
+import skulk.operator.relay_protocol as relay_protocol_module
 from skulk.operator.authority import EncryptedAuthorityStore
 from skulk.operator.key_provider import LocalFileAuthorityKeyProvider
 from skulk.operator.pairing import (
@@ -50,7 +51,7 @@ from skulk.operator.relay import (
     OperatorRelayConfigurationRepository,
     OperatorRelayProvisioning,
 )
-from skulk.operator.relay_protocol import OpenConnection
+from skulk.operator.relay_protocol import CONNECTOR_REVOKED_KIND, OpenConnection
 
 
 def _base64url(value: bytes) -> str:
@@ -535,12 +536,12 @@ def test_configure_relay_cli_uses_non_fabric_default_port(
         (
             _provisioning,
             "Configured the designated gateway with 1 relay lane. "
-            "Restart Skulk to connect.",
+            "A running Skulk node connects within a few seconds.",
         ),
         (
             _on_demand_provisioning,
             "Configured the designated gateway for on-demand relay connections. "
-            "Restart Skulk to connect.",
+            "A running Skulk node connects within a few seconds.",
         ),
     ),
     ids=("legacy-lanes", "on-demand"),
@@ -616,7 +617,7 @@ def test_pair_cli_creates_protected_reusable_invitation_png(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Explicit invitation flags preserve defaults and write a protected QR."""
+    """Invitation flags default to every free device slot and write a protected QR."""
 
     service, _ = _service(tmp_path)
     service.configure_relay(_provisioning(), operator_api_port=52416)
@@ -647,7 +648,7 @@ def test_pair_cli_creates_protected_reusable_invitation_png(
     assert qr_path.read_bytes().startswith(b"\x89PNG")
     assert qr_path.stat().st_mode & 0o777 == 0o600
     invitation = service.invitations()[0]
-    assert invitation.max_pairings == 10
+    assert invitation.max_pairings == 5
     assert invitation.state == "active"
     output = capsys.readouterr().out
     assert "Treat the terminal QR" in output
@@ -1605,3 +1606,184 @@ async def _websocket_to_tcp(
             return
         writer.write(cast(bytes, message.data))
         await writer.drain()
+
+
+async def _serve_control(
+    handler: Callable[[web.Request], Awaitable[web.StreamResponse]],
+) -> tuple[web.AppRunner, int]:
+    """Serve one fake connector-control endpoint on a loopback port."""
+
+    application = web.Application()
+    application.router.add_get("/v1/connector/control", handler)
+    runner = web.AppRunner(application)
+    await runner.setup()
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    port = cast(tuple[str, int], listener.getsockname())[1]
+    await web.SockSite(runner, listener).start()
+    return runner, port
+
+
+@pytest.mark.asyncio
+async def test_revoked_connector_stops_instead_of_reconnecting(
+    tmp_path: Path,
+) -> None:
+    """An explicit revocation ends the connector after one attempt."""
+
+    hellos: list[int] = []
+
+    async def revoke(request: web.Request) -> web.StreamResponse:
+        websocket = web.WebSocketResponse()
+        await websocket.prepare(request)
+        message = await websocket.receive()
+        if message.type is aiohttp.WSMsgType.BINARY:
+            hellos.append(1)
+            await websocket.send_bytes(
+                relay_protocol_module._encode_message(  # pyright: ignore[reportPrivateUsage]
+                    CONNECTOR_REVOKED_KIND, ()
+                )
+            )
+        await websocket.close()
+        return websocket
+
+    runner, port = await _serve_control(revoke)
+    service, _ = _service(tmp_path)
+    configuration = service.configure_relay(
+        _on_demand_provisioning(f"ws://127.0.0.1:{port}"),
+        operator_api_port=52416,
+    )
+    connector = OperatorGatewayConnector(
+        configuration,
+        next_connector_generation=service.reserve_relay_connector_generation,
+    )
+    try:
+        with pytest.raises(relay_module.OperatorRelayRouteRejectedError):
+            await asyncio.wait_for(connector.run(), timeout=10)
+        assert hellos == [1]
+    finally:
+        await runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_route_refused_past_the_grace_period_stops_the_connector(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a continuous refusal ends the connector; another failure resets it."""
+
+    answers = iter((401, 503, 401, 401, 401))
+    requests: list[int] = []
+
+    async def refuse(_request: web.Request) -> web.StreamResponse:
+        status = next(answers)
+        requests.append(status)
+        return web.Response(status=status)
+
+    runner, port = await _serve_control(refuse)
+    service, _ = _service(tmp_path)
+    configuration = service.configure_relay(
+        _on_demand_provisioning(f"ws://127.0.0.1:{port}"),
+        operator_api_port=52416,
+    )
+    clock = [0.0]
+
+    def monotonic_seconds() -> float:
+        """Advance 400 s per refusal so the grace period passes in a few tries."""
+
+        value = clock[0]
+        clock[0] += 400.0
+        return value
+
+    monkeypatch.setattr(relay_module, "_MINIMUM_RECONNECT_SECONDS", 0.01)
+    monkeypatch.setattr(relay_module, "_MAXIMUM_RECONNECT_SECONDS", 0.02)
+    connector = OperatorGatewayConnector(
+        configuration,
+        next_connector_generation=service.reserve_relay_connector_generation,
+        monotonic_seconds=monotonic_seconds,
+    )
+    try:
+        with pytest.raises(relay_module.OperatorRelayRouteRejectedError):
+            await asyncio.wait_for(connector.run(), timeout=10)
+        # 401 starts the window, 503 resets it, then 401s at 400 and 800 s
+        # stay inside the 600 s grace and the one at 1200 s ends it.
+        assert requests == [401, 503, 401, 401, 401]
+    finally:
+        await runner.cleanup()
+
+
+
+@pytest.mark.asyncio
+async def test_connector_reports_relay_liveness(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Liveness is true only while a relay session is live, then counts down time."""
+
+    lane_open = asyncio.Event()
+    release_lane = asyncio.Event()
+    lanes: list[int] = []
+
+    async def gateway_lane(request: web.Request) -> web.StreamResponse:
+        lanes.append(1)
+        if len(lanes) > 1:
+            return web.Response(status=503)
+        websocket = web.WebSocketResponse()
+        await websocket.prepare(request)
+        lane_open.set()
+        await release_lane.wait()
+        await websocket.close()
+        return websocket
+
+    application = web.Application()
+    application.router.add_get("/v1/carrier/gateway", gateway_lane)
+    runner = web.AppRunner(application)
+    await runner.setup()
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    port = cast(tuple[str, int], listener.getsockname())[1]
+    await web.SockSite(runner, listener).start()
+
+    async def hold(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await reader.read()
+        writer.close()
+
+    loopback = await asyncio.start_server(hold, "127.0.0.1", 0)
+    loopback_port = cast(tuple[str, int], loopback.sockets[0].getsockname())[1]
+    service, _ = _service(tmp_path)
+    configuration = service.configure_relay(
+        _provisioning(f"ws://127.0.0.1:{port}"),
+        operator_api_port=loopback_port,
+    )
+    clock = [10.0]
+    monkeypatch.setattr(relay_module, "_MINIMUM_RECONNECT_SECONDS", 0.01)
+    monkeypatch.setattr(relay_module, "_MAXIMUM_RECONNECT_SECONDS", 0.02)
+    connector = OperatorGatewayConnector(
+        configuration, monotonic_seconds=lambda: clock[0]
+    )
+    assert connector.relay_connected is False
+    connector_task = asyncio.create_task(connector.run())
+    try:
+        await asyncio.wait_for(lane_open.wait(), timeout=5)
+        for _ in range(500):
+            if connector.relay_connected:
+                break
+            await asyncio.sleep(0.01)
+        assert connector.relay_connected is True
+        assert connector.disconnected_seconds() == 0.0
+
+        clock[0] = 15.0
+        release_lane.set()
+        for _ in range(500):
+            if not connector.relay_connected:
+                break
+            await asyncio.sleep(0.01)
+        assert connector.relay_connected is False
+        clock[0] = 18.0
+        assert connector.disconnected_seconds() == 3.0
+    finally:
+        connector_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await connector_task
+        loopback.close()
+        await loopback.wait_closed()
+        await runner.cleanup()

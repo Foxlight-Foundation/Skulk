@@ -9,6 +9,7 @@ import { Button } from '../common/Button';
 import { Field } from '../common/Field';
 import { StatusPill, SectionLabel } from '../common/Surfaces';
 import { PairingSettings } from './PairingSettings';
+import { isRefreshExpired } from './deviceState';
 
 const Content = styled.div`
   overflow-y: auto; min-height: 0; flex: 1; container-type: inline-size;
@@ -52,7 +53,7 @@ export function DeviceRow({ device, busy, onRevoke }: { device: OperatorDevice; 
     <FiSmartphone size={24} aria-hidden="true" />
     <Detail>
       <DeviceHeading><strong>{device.name}</strong>
-      <StatusPill tone={device.state === 'revoked' ? 'danger' : 'neutral'}>{device.state === 'revoked' ? t('devices.revoked', 'Revoked') : t('devices.paired', 'Paired')}{device.current ? ` · ${t('devices.thisDevice', 'This device')}` : ''}</StatusPill></DeviceHeading>
+      <StatusPill tone={device.state === 'revoked' ? 'danger' : 'neutral'}>{device.state === 'revoked' ? t('devices.revoked', 'Revoked') : isRefreshExpired(device) ? t('devices.expired', 'Expired') : t('devices.paired', 'Paired')}{device.current ? ` · ${t('devices.thisDevice', 'This device')}` : ''}</StatusPill></DeviceHeading>
       <DeviceMetadata title={device.deviceId}>{device.deviceId}</DeviceMetadata>
       <Meta>{t('devices.pairedAt', 'Paired {date}', { date: new Date(device.pairedAt).toLocaleDateString() })}</Meta>
       {device.state === 'active' && confirming && <>

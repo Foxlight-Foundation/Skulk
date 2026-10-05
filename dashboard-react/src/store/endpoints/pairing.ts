@@ -24,6 +24,21 @@ export interface PairingInvitationSummary {
   state: PairingInvitationState;
 }
 
+/**
+ * Paired-device capacity reported by the direct dashboard API.
+ *
+ * A cluster allows a fixed number of paired devices that can still connect;
+ * pairing another requires revoking one once no slot is free.
+ */
+export interface PairingCapacity {
+  /** Devices that are not revoked and hold an unexpired refresh credential. */
+  activeDevices: number;
+  /** Most active paired devices the cluster allows at once. */
+  maximumDevices: number;
+  /** Devices that can still pair before one must be revoked. */
+  availableSlots: number;
+}
+
 /** Bounded operator choices accepted when creating a pairing invitation. */
 export interface CreatePairingInvitationRequest {
   validForSeconds: number;
@@ -92,6 +107,14 @@ const pairingApi = apiSlice.injectEndpoints({
       },
       providesTags: ['PairingInvitations'],
     }),
+    getPairingCapacity: build.query<PairingCapacity, void>({
+      query: () => ({
+        url: '/v1/auth/pairing-capacity',
+        headers: dashboardPairingHeaders,
+      }),
+      transformResponse: (value: unknown) => parsePairingCapacity(value),
+      providesTags: ['PairingCapacity'],
+    }),
     revokePairingInvitation: build.mutation<void, string>({
       query: (invitationId) => ({
         url: `/v1/auth/pairing-invitations/${encodeURIComponent(invitationId)}`,
@@ -104,6 +127,7 @@ const pairingApi = apiSlice.injectEndpoints({
 });
 
 export const {
+  useGetPairingCapacityQuery,
   useGetPairingInvitationsQuery,
   useRevokePairingInvitationMutation,
 } = pairingApi;
@@ -161,6 +185,29 @@ function parsePairingInvitationSummary(value: unknown): PairingInvitationSummary
     totalAttempts: value.totalAttempts,
     state: value.state,
   };
+}
+
+/** Validate the capacity response so a malformed body never enables pairing. */
+export function parsePairingCapacity(value: unknown): PairingCapacity {
+  if (
+    !isObject(value) ||
+    !isCount(value.activeDevices) ||
+    !isCount(value.maximumDevices) ||
+    !isCount(value.availableSlots) ||
+    value.maximumDevices < 1 ||
+    value.availableSlots > value.maximumDevices
+  ) {
+    throw new PairingInvitationRequestError(502, 'Skulk returned invalid pairing capacity.');
+  }
+  return {
+    activeDevices: value.activeDevices,
+    maximumDevices: value.maximumDevices,
+    availableSlots: value.availableSlots,
+  };
+}
+
+function isCount(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0;
 }
 
 function isPairingInvitationState(value: unknown): value is PairingInvitationState {

@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from hmac import compare_digest
 from ipaddress import ip_address
 from typing import Literal, cast, final
+from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 from cryptography.exceptions import InvalidSignature
@@ -21,16 +22,22 @@ from pydantic import AnyHttpUrl, Field, ValidationInfo, field_validator, model_v
 from skulk.operator.authority import (
     AuthorityCommitConflictError,
     AuthorityNotInitializedError,
+    AuthorityRecord,
     EncryptedAuthorityStore,
 )
 from skulk.operator.identity import ClusterPublicIdentity, create_cluster_identity
 from skulk.operator.key_provider import LocalFileAuthorityKeyProvider
 from skulk.operator.plugin_scopes import PLUGIN_SCOPES, PluginScope
 from skulk.operator.relay import (
+    OperatorRelayAlreadyConfiguredError,
     OperatorRelayConfiguration,
     OperatorRelayConfigurationRepository,
     OperatorRelayProvisioning,
     OperatorRemoteAccessMaterial,
+)
+from skulk.operator.relay_registration import (
+    RelayRegistrationMaterial,
+    register_relay_route,
 )
 from skulk.utils.pydantic_ext import FrozenModel
 
@@ -39,8 +46,14 @@ _PAIRING_INVITATION_RECORD_TYPE = "operator_pairing_invitation"
 _PAIRING_ATTEMPT_RECORD_TYPE = "operator_pairing_attempt"
 _PAIRING_LIFETIME = timedelta(minutes=5)
 _MAXIMUM_INVITATION_LIFETIME = timedelta(days=90)
-_DEFAULT_INVITATION_PAIRINGS = 10
 _MAXIMUM_INVITATION_PAIRINGS = 20
+# Product policy: a cluster may have at most five paired devices that can
+# still connect. Pairing another requires revoking one first.
+MAXIMUM_ACTIVE_PAIRED_DEVICES = 5
+PAIRED_DEVICE_LIMIT_MESSAGE = (
+    f"This cluster already has {MAXIMUM_ACTIVE_PAIRED_DEVICES} paired devices, "
+    "the most it allows. Revoke a paired device before pairing another."
+)
 _MAXIMUM_ACTIVE_INVITATION_ATTEMPTS = 10
 _MAXIMUM_TOTAL_INVITATION_ATTEMPTS = 100
 _AUTHORITY_RETRY_LIMIT = 3
@@ -98,6 +111,19 @@ class PairingInvitationCapacityError(PairingError):
 
 class PairingProofError(PairingError):
     """Raised when a device cannot prove possession of its proposed key."""
+
+
+class PairingDeviceLimitError(PairingError):
+    """Raised when the cluster already has its maximum of active paired devices.
+
+    The refusal is policy, not a transient condition: retrying cannot succeed
+    until an operator revokes a paired device.
+    """
+
+    def __init__(self) -> None:
+        """Create the stable, operator-actionable device-limit refusal."""
+
+        super().__init__(PAIRED_DEVICE_LIMIT_MESSAGE)
 
 
 class PairingGatewayNotInitializedError(PairingError):
@@ -517,6 +543,26 @@ class OperatorDevicesResponse(FrozenModel):
     )
 
 
+class PairingCapacity(FrozenModel):
+    """How many more devices this gateway can pair before one must be revoked."""
+
+    active_devices: int = Field(
+        ge=0,
+        description=(
+            "Paired devices that can still connect: not revoked and holding an "
+            "unexpired refresh credential."
+        ),
+    )
+    maximum_devices: int = Field(
+        ge=1,
+        description="Most active paired devices the cluster allows at once.",
+    )
+    available_slots: int = Field(
+        ge=0,
+        description="Devices that can still pair before one must be revoked.",
+    )
+
+
 class PluginGrant(FrozenModel):
     """Owner-visible explicit plugin privileges for one paired device."""
 
@@ -877,6 +923,100 @@ class OperatorPairingService:
             operator_api_port=operator_api_port,
         )
 
+    def register_relay(
+        self,
+        *,
+        registration_origin: str,
+        operator_api_port: int,
+        cluster_name: str = "Cluster",
+        register: Callable[
+            [str, RelayRegistrationMaterial], OperatorRelayProvisioning
+        ]
+        | None = None,
+    ) -> OperatorRelayConfiguration:
+        """Register this gateway with a relay and store the resulting route.
+
+        The gateway generates its connector key, authority epoch, and carrier
+        credentials; the relay receives only the key identifier and the
+        credential digests. A running node starts remote access for the new
+        route without a restart.
+
+        Args:
+            registration_origin: Validated relay origin to register with.
+            operator_api_port: Loopback port of the relay-only TLS listener.
+            cluster_name: Name used only when initializing a new gateway.
+            register: Registration call; ``None`` uses
+                ``register_relay_route``.
+
+        Returns:
+            The stored relay configuration.
+
+        Raises:
+            OperatorRelayAlreadyConfiguredError: A route is already in use.
+            RelayRegistrationError: The relay refused or could not be reached.
+        """
+
+        if self._relay_repository.load() is not None:
+            raise OperatorRelayAlreadyConfiguredError(
+                "operator relay is already configured"
+            )
+        material = RelayRegistrationMaterial.generate()
+        provisioning = (register or register_relay_route)(registration_origin, material)
+        return self.configure_relay(
+            provisioning,
+            operator_api_port=operator_api_port,
+            cluster_name=cluster_name,
+        )
+
+    def forget_relay(self) -> bool:
+        """Forget this gateway's relay route locally.
+
+        Remote access stops without a restart. Active invitations created for
+        the route are revoked: their QR codes carry the route's relay material
+        and can never reach this gateway again, and a later registration uses a
+        new route. Devices paired through the route keep their records, and
+        their slots, until revoked or until their refresh credentials expire.
+
+        Returns:
+            ``True`` when a route was forgotten, ``False`` when none was in use.
+        """
+
+        configuration = self._relay_repository.load()
+        if not self._relay_repository.forget():
+            return False
+        if configuration is not None:
+            self._revoke_invitations_for_host(configuration.gateway_server_name)
+        return True
+
+    def _revoke_invitations_for_host(self, exchange_host: str) -> None:
+        """Revoke active invitations whose exchange URL names ``exchange_host``.
+
+        Revocation is best effort: an invitation changed concurrently keeps its
+        state, and a later forget or its own expiry ends it.
+        """
+
+        try:
+            records = self._store.read_latest_record_payloads(
+                (_PAIRING_INVITATION_RECORD_TYPE,)
+            )
+        except AuthorityNotInitializedError:
+            return
+        for _, payload in records:
+            try:
+                invitation = _StoredPairingInvitation.model_validate_json(
+                    json.dumps(payload, separators=(",", ":"), allow_nan=False)
+                )
+            except ValueError:
+                continue
+            if (
+                invitation.state == "active"
+                and urlsplit(invitation.exchange_url).hostname == exchange_host
+            ):
+                try:
+                    self.revoke_invitation(invitation.invitation_id)
+                except PairingSessionStateError:
+                    continue
+
     def relay_configuration(self) -> OperatorRelayConfiguration | None:
         """Return the configured designated-gateway route, when present."""
 
@@ -905,6 +1045,8 @@ class OperatorPairingService:
 
         Raises:
             ValueError: No protected direct URL or configured relay is available.
+            PairingDeviceLimitError: The cluster already has its maximum of
+                active paired devices.
         """
 
         relay_configuration = self._relay_repository.load()
@@ -917,6 +1059,8 @@ class OperatorPairingService:
             exchange_url = f"https://{relay_configuration.gateway_server_name}"
         validated_exchange_url = _validate_exchange_url(exchange_url)
         identity = self.initialize_gateway(cluster_name)
+        if self.pairing_capacity().available_slots == 0:
+            raise PairingDeviceLimitError()
         remote_access = (
             relay_configuration.device_material()
             if use_relay and relay_configuration is not None
@@ -958,7 +1102,7 @@ class OperatorPairingService:
         self,
         *,
         lifetime: timedelta,
-        max_pairings: int = _DEFAULT_INVITATION_PAIRINGS,
+        max_pairings: int | None = None,
         exchange_url: str | None = None,
         cluster_name: str = "Cluster",
     ) -> PairingInvitationPackage:
@@ -966,16 +1110,21 @@ class OperatorPairingService:
 
         Args:
             lifetime: Positive invitation lifetime no longer than 90 days.
-            max_pairings: Successful device-pairing limit from one through 20.
+            max_pairings: Requested successful device-pairing limit from one
+                through 20, or ``None`` for every free device slot. The
+                invitation never allows more pairings than the cluster has free
+                device slots, so a larger request is reduced to that number.
             exchange_url: Optional direct HTTPS base URL. When omitted, a
                 configured relay supplies the inner gateway origin.
             cluster_name: Name used only when initializing a new gateway.
 
         Returns:
-            Version-three invitation safe to render as a QR code.
+            Version-three invitation safe to render as a QR code. Its
+            ``max_pairings`` is the effective, possibly reduced, limit.
 
         Raises:
             ValueError: Policy bounds or protected reachability are invalid.
+            PairingDeviceLimitError: No device slot is free.
             PairingPackageTooLargeError: The resulting QR would be unreliable.
         """
 
@@ -983,7 +1132,9 @@ class OperatorPairingService:
             raise ValueError(
                 "pairing invitation lifetime must be from one minute to 90 days"
             )
-        if not 1 <= max_pairings <= _MAXIMUM_INVITATION_PAIRINGS:
+        if max_pairings is not None and not (
+            1 <= max_pairings <= _MAXIMUM_INVITATION_PAIRINGS
+        ):
             raise ValueError(
                 "pairing invitation max_pairings must be from one through 20"
             )
@@ -998,6 +1149,14 @@ class OperatorPairingService:
             exchange_url = f"https://{relay_configuration.gateway_server_name}"
         validated_exchange_url = _validate_exchange_url(exchange_url)
         identity = self.initialize_gateway(cluster_name)
+        available_slots = self.pairing_capacity().available_slots
+        if available_slots == 0:
+            raise PairingDeviceLimitError()
+        effective_max_pairings = (
+            available_slots
+            if max_pairings is None
+            else min(max_pairings, available_slots)
+        )
         remote_access = (
             relay_configuration.device_material()
             if use_relay and relay_configuration is not None
@@ -1015,7 +1174,7 @@ class OperatorPairingService:
             invitation_id=invitation_id,
             issued_at=now,
             expires_at=now + lifetime,
-            max_pairings=max_pairings,
+            max_pairings=effective_max_pairings,
             nonce=nonce,
             remote_access=remote_access,
         )
@@ -1030,7 +1189,7 @@ class OperatorPairingService:
             created_at=now,
             expires_at=package.expires_at,
             exchange_url=str(package.exchange_url),
-            max_pairings=max_pairings,
+            max_pairings=effective_max_pairings,
         )
         self._append_authority_record(
             record_type=_PAIRING_INVITATION_RECORD_TYPE,
@@ -1056,6 +1215,9 @@ class OperatorPairingService:
             PairingSessionExpiredError: The session expired.
             PairingSessionStateError: A challenge was already issued or used.
             PairingProofError: The proposed public key is malformed.
+            PairingDeviceLimitError: The cluster has no free device slot. The
+                exchange repeats this check atomically; refusing here only
+                fails a doomed scan early.
         """
 
         if request.invitation_id is not None:
@@ -1064,6 +1226,7 @@ class OperatorPairingService:
         nonce_hash = _opaque_digest(request.nonce)
         session, session_commit_index = self._load_session(nonce_hash)
         self._require_pending(session)
+        self._require_device_slot(self._latest_device_sessions())
         challenge = _base64url_encode(secrets.token_bytes(32))
         updated = session.model_copy(
             update={
@@ -1099,74 +1262,93 @@ class OperatorPairingService:
             PairingProofError: Signature validation fails.
             PairingSessionStateError: The session is not awaiting exchange.
             PairingSessionExpiredError: The session expired.
+            PairingDeviceLimitError: The cluster has no free device slot.
         """
 
         if request.invitation_id is not None and request.attempt_id is not None:
             return self._exchange_invitation_proof(request)
         nonce_hash = _opaque_digest(request.nonce)
-        session, session_commit_index = self._load_session(nonce_hash)
-        self._require_unexpired(session)
-        if (
-            session.state != "challenged"
-            or session.device_public_key is None
-            or session.challenge is None
-            or session.device_name is None
-        ):
-            raise PairingSessionStateError(
-                "pairing session is not awaiting device proof"
-            )
-        public_key = self._decode_device_public_key(session.device_public_key)
-        try:
-            signature = _base64url_decode(request.signature)
-            public_key.verify(
-                signature,
-                pairing_signature_message(
-                    cluster_id=UUID(str(self._store.cluster_identity().cluster_id)),
-                    nonce=request.nonce,
-                    challenge=session.challenge,
-                ),
-            )
-        except (InvalidSignature, ValueError, UnicodeError) as exc:
-            raise PairingProofError("device pairing proof is invalid") from exc
+        for _ in range(_AUTHORITY_RETRY_LIMIT):
+            # Read the journal head before the session and the device count.
+            # The append below is fenced on that head, so a concurrent pairing
+            # that commits in between forces a retry with a fresh count and the
+            # cluster can never pass its device limit.
+            records = self._journal_records()
+            if not records:
+                raise PairingSessionNotFoundError("pairing session was not found")
+            expected_commit_index = records[-1].commit_index
+            session, session_commit_index = self._load_session(nonce_hash)
+            self._require_unexpired(session)
+            if (
+                session.state != "challenged"
+                or session.device_public_key is None
+                or session.challenge is None
+                or session.device_name is None
+            ):
+                raise PairingSessionStateError(
+                    "pairing session is not awaiting device proof"
+                )
+            public_key = self._decode_device_public_key(session.device_public_key)
+            try:
+                signature = _base64url_decode(request.signature)
+                public_key.verify(
+                    signature,
+                    pairing_signature_message(
+                        cluster_id=UUID(str(self._store.cluster_identity().cluster_id)),
+                        nonce=request.nonce,
+                        challenge=session.challenge,
+                    ),
+                )
+            except (InvalidSignature, ValueError, UnicodeError) as exc:
+                raise PairingProofError("device pairing proof is invalid") from exc
+            self._require_device_slot(self._latest_device_sessions(records))
 
-        relay_configuration = self._relay_repository.load()
-        remote_access = (
-            relay_configuration.device_material()
-            if relay_configuration is not None
-            else None
-        )
+            relay_configuration = self._relay_repository.load()
+            remote_access = (
+                relay_configuration.device_material()
+                if relay_configuration is not None
+                else None
+            )
 
-        now = self._now()
-        device_id = uuid4()
-        access_token = secrets.token_urlsafe(32)
-        refresh_token = secrets.token_urlsafe(48)
-        access_expires_at = now + _ACCESS_TOKEN_LIFETIME
-        refresh_expires_at = now + _REFRESH_TOKEN_LIFETIME
-        consumed = session.model_copy(
-            update={
-                "state": "consumed",
-                "device_id": device_id,
-                "access_token_hash": _opaque_digest(access_token),
-                "access_token_expires_at": access_expires_at,
-                "refresh_token_hash": _opaque_digest(refresh_token),
-                "refresh_token_expires_at": refresh_expires_at,
-                "scopes": _DEFAULT_SCOPES,
-            }
-        )
-        self._append_session(
-            nonce_hash,
-            consumed,
-            expected_record_commit_index=session_commit_index,
-        )
-        return PairingExchangeResponse(
-            device_id=device_id,
-            cluster=self._store.cluster_identity(),
-            access_token=access_token,
-            access_token_expires_at=access_expires_at,
-            refresh_token=refresh_token,
-            refresh_token_expires_at=refresh_expires_at,
-            scopes=_DEFAULT_SCOPES,
-            remote_access=remote_access,
+            now = self._now()
+            device_id = uuid4()
+            access_token = secrets.token_urlsafe(32)
+            refresh_token = secrets.token_urlsafe(48)
+            access_expires_at = now + _ACCESS_TOKEN_LIFETIME
+            refresh_expires_at = now + _REFRESH_TOKEN_LIFETIME
+            consumed = session.model_copy(
+                update={
+                    "state": "consumed",
+                    "device_id": device_id,
+                    "access_token_hash": _opaque_digest(access_token),
+                    "access_token_expires_at": access_expires_at,
+                    "refresh_token_hash": _opaque_digest(refresh_token),
+                    "refresh_token_expires_at": refresh_expires_at,
+                    "scopes": _DEFAULT_SCOPES,
+                }
+            )
+            try:
+                self._append_authority_record(
+                    record_type=_PAIRING_RECORD_TYPE,
+                    record_id=nonce_hash,
+                    payload=consumed,
+                    expected_commit_index=expected_commit_index,
+                    expected_record_commit_index=session_commit_index,
+                )
+            except AuthorityCommitConflictError:
+                continue
+            return PairingExchangeResponse(
+                device_id=device_id,
+                cluster=self._store.cluster_identity(),
+                access_token=access_token,
+                access_token_expires_at=access_expires_at,
+                refresh_token=refresh_token,
+                refresh_token_expires_at=refresh_expires_at,
+                scopes=_DEFAULT_SCOPES,
+                remote_access=remote_access,
+            )
+        raise PairingSessionStateError(
+            "pairing state changed concurrently; restart pairing"
         )
 
     def _create_invitation_challenge(
@@ -1180,8 +1362,9 @@ class OperatorPairingService:
         if invitation_id is None:
             raise PairingSessionStateError("pairing invitation identity is required")
         for _ in range(_AUTHORITY_RETRY_LIMIT):
+            records = self._journal_records()
             invitation, _, attempts, expected_commit_index = self._invitation_snapshot(
-                invitation_id
+                invitation_id, records
             )
             self._require_invitation_available(
                 invitation,
@@ -1189,6 +1372,8 @@ class OperatorPairingService:
                 attempts=attempts,
                 creating_attempt=True,
             )
+            # Advisory here; the exchange repeats this check under its fence.
+            self._require_device_slot(self._latest_device_sessions(records))
             now = self._now()
             active_attempts = tuple(
                 attempt
@@ -1245,8 +1430,12 @@ class OperatorPairingService:
         if invitation_id is None or attempt_id is None:
             raise PairingSessionStateError("pairing invitation attempt is required")
         for _ in range(_AUTHORITY_RETRY_LIMIT):
+            # One journal snapshot supplies the invitation usage, the device
+            # count and the fence for the append below, so concurrent exchanges
+            # under any invitation cannot pass the cluster's device limit.
+            records = self._journal_records()
             invitation, _, attempts, expected_commit_index = self._invitation_snapshot(
-                invitation_id
+                invitation_id, records
             )
             self._require_invitation_available(
                 invitation,
@@ -1285,6 +1474,7 @@ class OperatorPairingService:
                 )
             except (InvalidSignature, ValueError, UnicodeError) as exc:
                 raise PairingProofError("device pairing proof is invalid") from exc
+            self._require_device_slot(self._latest_device_sessions(records))
 
             now = self._now()
             device_id = uuid4()
@@ -1594,6 +1784,27 @@ class OperatorPairingService:
 
         return self._device_inventory(None)
 
+    def pairing_capacity(self) -> PairingCapacity:
+        """Report how many more devices can pair before one must be revoked.
+
+        A gateway that has not been initialized yet has no paired devices, so
+        it reports every slot as free rather than failing.
+
+        Returns:
+            Active device count, the cluster maximum, and the free slots.
+        """
+
+        try:
+            credentials = self._latest_device_sessions()
+        except PairingGatewayNotInitializedError:
+            credentials = ()
+        active_devices = self._active_device_count(credentials)
+        return PairingCapacity(
+            active_devices=active_devices,
+            maximum_devices=MAXIMUM_ACTIVE_PAIRED_DEVICES,
+            available_slots=max(0, MAXIMUM_ACTIVE_PAIRED_DEVICES - active_devices),
+        )
+
     def _device_inventory(self, current_device_id: UUID | None) -> OperatorDevicesResponse:
         """Project the credential journal without exposing credential material."""
 
@@ -1664,19 +1875,58 @@ class OperatorPairingService:
             expected_record_commit_index=session_commit_index,
         )
 
-    def _latest_device_sessions(
-        self,
-    ) -> tuple[tuple[str, str, _StoredDeviceCredential, int], ...]:
-        """Return legacy and invitation-backed paired-device records."""
+    def _journal_records(self) -> tuple[AuthorityRecord, ...]:
+        """Read every journal record's public metadata as one snapshot."""
 
-        latest_records: list[tuple[str, str]] = []
-        seen: set[tuple[str, str]] = set()
         try:
-            records = self._store.records()
+            return self._store.records()
         except AuthorityNotInitializedError as exc:
             raise PairingGatewayNotInitializedError(
                 "operator gateway is not initialized"
             ) from exc
+
+    def _active_device_count(
+        self,
+        credentials: Sequence[tuple[str, str, _StoredDeviceCredential, int]],
+    ) -> int:
+        """Count paired devices that can still connect.
+
+        A revoked device cannot authenticate, and one whose refresh credential
+        expired must pair again, so neither occupies a device slot.
+        """
+
+        now = self._now()
+        return sum(
+            1
+            for _, _, credential, _ in credentials
+            if credential.state == "consumed"
+            and credential.refresh_token_expires_at is not None
+            and now < credential.refresh_token_expires_at
+        )
+
+    def _require_device_slot(
+        self,
+        credentials: Sequence[tuple[str, str, _StoredDeviceCredential, int]],
+    ) -> None:
+        """Refuse a new pairing when the cluster has no free device slot."""
+
+        if self._active_device_count(credentials) >= MAXIMUM_ACTIVE_PAIRED_DEVICES:
+            raise PairingDeviceLimitError()
+
+    def _latest_device_sessions(
+        self,
+        records: tuple[AuthorityRecord, ...] | None = None,
+    ) -> tuple[tuple[str, str, _StoredDeviceCredential, int], ...]:
+        """Return legacy and invitation-backed paired-device records.
+
+        Args:
+            records: Journal snapshot to project, or ``None`` to read one.
+        """
+
+        latest_records: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        if records is None:
+            records = self._journal_records()
         for record in reversed(records):
             identity = (record.record_type, record.record_id)
             if (
@@ -1768,20 +2018,23 @@ class OperatorPairingService:
     def _invitation_snapshot(
         self,
         invitation_id: UUID,
+        records: tuple[AuthorityRecord, ...] | None = None,
     ) -> tuple[
         _StoredPairingInvitation,
         int,
         tuple[tuple[str, _StoredPairingAttempt, int], ...],
         int,
     ]:
-        """Read invitation usage against one globally fenced journal snapshot."""
+        """Read invitation usage against one globally fenced journal snapshot.
 
-        try:
-            records = self._store.records()
-        except AuthorityNotInitializedError as exc:
-            raise PairingGatewayNotInitializedError(
-                "operator gateway is not initialized"
-            ) from exc
+        Args:
+            invitation_id: Invitation to project.
+            records: Journal snapshot shared with other checks under the same
+                fence, or ``None`` to read one.
+        """
+
+        if records is None:
+            records = self._journal_records()
         if not records:
             raise PairingSessionNotFoundError("pairing invitation was not found")
         expected_commit_index = records[-1].commit_index

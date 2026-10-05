@@ -51,6 +51,13 @@ class RelayProtocolError(RuntimeError):
     """Raised when connector control bytes violate the frozen wire contract."""
 
 
+class RelayConnectorRevokedError(RelayProtocolError):
+    """Raised when the relay reports that this connector authority is revoked.
+
+    Revocation is permanent for the route: reconnecting cannot succeed.
+    """
+
+
 @final
 @dataclass(frozen=True, slots=True)
 class ConnectorLease:
@@ -273,10 +280,11 @@ def decode_server_message(
     if kind == DRAIN_KIND:
         _require_exact_fields(fields, 1)
         return DrainRequest(deadline_unix_millis=_read_unsigned(fields[1], 8))
+    if kind == CONNECTOR_REVOKED_KIND:
+        raise RelayConnectorRevokedError("relay revoked the connector authority")
     if kind in {
         CONNECTOR_REJECTED_KIND,
         LEASE_REPLACED_KIND,
-        CONNECTOR_REVOKED_KIND,
         GO_AWAY_KIND,
         PROTOCOL_ERROR_KIND,
     }:
