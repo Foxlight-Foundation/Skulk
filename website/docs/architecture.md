@@ -1767,6 +1767,15 @@ concurrent exchanges from exceeding the success limit; ten live and one
 hundred total attempts bound abuse and journal growth. Host-only list and
 revoke commands expose no bearer material. Invitation revocation blocks new and
 unfinished attempts without changing credentials already issued to devices.
+A cluster allows at most five active paired devices (not revoked, refresh
+credential unexpired). Both exchange paths read one journal snapshot, count
+active devices from it, and fence their credential append on that snapshot's
+head, so a pairing committed concurrently forces a retry and a recount; the
+cap cannot be exceeded under any number of invitations. Session and invitation
+creation refuse when no slot is free, invitation limits are reduced to the
+free slots, and scans are refused early. The dashboard reads
+`GET /v1/auth/pairing-capacity`, and `skulk operator devices list|revoke`
+frees a slot on a headless host.
 The ordinary dashboard listener also exposes create/list/revoke invitation
 management under Settings. These routes reuse the same pairing service and
 encrypted journal as the CLI. They require a loopback socket peer or a

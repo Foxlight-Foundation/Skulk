@@ -616,7 +616,7 @@ def test_pair_cli_creates_protected_reusable_invitation_png(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Explicit invitation flags preserve defaults and write a protected QR."""
+    """Invitation flags default to every free device slot and write a protected QR."""
 
     service, _ = _service(tmp_path)
     service.configure_relay(_provisioning(), operator_api_port=52416)
@@ -647,7 +647,7 @@ def test_pair_cli_creates_protected_reusable_invitation_png(
     assert qr_path.read_bytes().startswith(b"\x89PNG")
     assert qr_path.stat().st_mode & 0o777 == 0o600
     invitation = service.invitations()[0]
-    assert invitation.max_pairings == 10
+    assert invitation.max_pairings == 5
     assert invitation.state == "active"
     output = capsys.readouterr().out
     assert "Treat the terminal QR" in output

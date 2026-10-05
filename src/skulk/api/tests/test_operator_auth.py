@@ -21,6 +21,8 @@ from skulk.operator.authority import EncryptedAuthorityStore
 from skulk.operator.key_provider import LocalFileAuthorityKeyProvider
 from skulk.operator.pairing import (
     OperatorPairingService,
+    PairingChallengeRequest,
+    PairingExchangeRequest,
     pairing_invitation_signature_message,
     pairing_signature_message,
 )
@@ -728,3 +730,149 @@ async def test_plugin_refusals_say_how_to_reach_the_node() -> None:
 
     # A verified Tailscale browser on the node's MagicDNS name is the owner.
     await authorize_plugin_owner_request(_plugin_owner_request("100.64.0.9"), verified)
+
+
+def _pair_device_through_service(
+    service: OperatorPairingService,
+    device_name: str,
+) -> None:
+    """Complete one single-use relay pairing directly against the service."""
+
+    package = service.create_session()
+    private_key = Ed25519PrivateKey.generate()
+    public_key = _base64url(
+        private_key.public_key().public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+    )
+    challenge = service.create_challenge(
+        PairingChallengeRequest(
+            nonce=package.nonce,
+            device_name=device_name,
+            device_public_key=public_key,
+        )
+    )
+    signature = private_key.sign(
+        pairing_signature_message(
+            cluster_id=UUID(str(package.cluster_id)),
+            nonce=package.nonce,
+            challenge=challenge.challenge,
+        )
+    )
+    service.exchange(
+        PairingExchangeRequest(nonce=package.nonce, signature=_base64url(signature))
+    )
+
+
+def test_dashboard_reports_capacity_and_pairing_stops_at_the_device_limit(
+    tmp_path: Path,
+) -> None:
+    """Capacity is dashboard-only, invitations shrink to free slots, and 409 ends pairing."""
+
+    service = _dashboard_invitation_service(tmp_path)
+    app = FastAPI()
+    app.include_router(
+        create_operator_auth_router(
+            service,
+            tailnet_peer_verifier=_verified_tailnet_peer,
+        )
+    )
+    client = TestClient(
+        app,
+        base_url="http://127.0.0.1:52415",
+        client=("127.0.0.1", 50000),
+    )
+    headers = {
+        "Origin": "http://127.0.0.1:52415",
+        "X-Skulk-Dashboard": "pairing-v1",
+    }
+
+    assert client.get("/v1/auth/pairing-capacity").status_code == 403
+    assert client.get("/v1/auth/pairing-capacity", headers=headers).json() == {
+        "activeDevices": 0,
+        "maximumDevices": 5,
+        "availableSlots": 5,
+    }
+    created = client.post(
+        "/v1/auth/pairing-invitations",
+        headers=headers,
+        json={"validForSeconds": 3600, "maxPairings": 20},
+    )
+    assert created.status_code == 200
+    assert cast(dict[str, object], created.json()["invitation"])["maxPairings"] == 5
+
+    package = service.create_invitation(lifetime=timedelta(hours=1))
+    late_key = Ed25519PrivateKey.generate()
+    late_public_key = _base64url(
+        late_key.public_key().public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+    )
+    scanned = client.post(
+        "/v1/auth/pairing-sessions/challenge",
+        json={
+            "nonce": package.nonce,
+            "invitationId": str(package.invitation_id),
+            "deviceName": "Late phone",
+            "devicePublicKey": late_public_key,
+        },
+    )
+    assert scanned.status_code == 200
+    attempt = cast(dict[str, str], scanned.json())
+
+    for index in range(5):
+        _pair_device_through_service(service, f"Phone {index}")
+
+    assert client.get("/v1/auth/pairing-capacity", headers=headers).json() == {
+        "activeDevices": 5,
+        "maximumDevices": 5,
+        "availableSlots": 0,
+    }
+    refused_invitation = client.post(
+        "/v1/auth/pairing-invitations",
+        headers=headers,
+        json={"validForSeconds": 3600, "maxPairings": 1},
+    )
+    assert refused_invitation.status_code == 409
+    assert "the most it allows" in cast(str, refused_invitation.json()["detail"])
+
+    signature = late_key.sign(
+        pairing_invitation_signature_message(
+            cluster_id=UUID(str(package.cluster_id)),
+            invitation_id=package.invitation_id,
+            nonce=package.nonce,
+            attempt_id=UUID(attempt["attemptId"]),
+            challenge=attempt["challenge"],
+        )
+    )
+    refused_exchange = client.post(
+        "/v1/auth/pairing-sessions/exchange",
+        json={
+            "nonce": package.nonce,
+            "invitationId": str(package.invitation_id),
+            "attemptId": attempt["attemptId"],
+            "signature": _base64url(signature),
+        },
+    )
+    assert refused_exchange.status_code == 409
+    assert "accessToken" not in refused_exchange.text
+
+    another_key = Ed25519PrivateKey.generate()
+    refused_scan = client.post(
+        "/v1/auth/pairing-sessions/challenge",
+        json={
+            "nonce": package.nonce,
+            "invitationId": str(package.invitation_id),
+            "deviceName": "Sixth phone",
+            "devicePublicKey": _base64url(
+                another_key.public_key().public_bytes(
+                    encoding=serialization.Encoding.Raw,
+                    format=serialization.PublicFormat.Raw,
+                )
+            ),
+        },
+    )
+    assert refused_scan.status_code == 409
+

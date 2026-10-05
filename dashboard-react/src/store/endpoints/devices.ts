@@ -19,7 +19,8 @@ const devicesApi = apiSlice.injectEndpoints({
     }),
     revokeOperatorDevice: build.mutation<void, string>({
       query: deviceId => ({ url: `/v1/auth/devices/${encodeURIComponent(deviceId)}`, method: 'DELETE', headers }),
-      invalidatesTags: ['OperatorDevices'],
+      // Revoking a device frees a pairing slot, so capacity must refresh too.
+      invalidatesTags: ['OperatorDevices', 'PairingCapacity'],
     }),
   }),
 });

@@ -21,8 +21,10 @@ from skulk.operator.pairing import (
     OperatorScopeError,
     OperatorTokenRequest,
     OperatorTokenResponse,
+    PairingCapacity,
     PairingChallengeRequest,
     PairingChallengeResponse,
+    PairingDeviceLimitError,
     PairingExchangeRequest,
     PairingExchangeResponse,
     PairingGatewayNotInitializedError,
@@ -43,6 +45,7 @@ from skulk.operator.relay import OperatorRelayUnavailableError
 
 _BEARER_CHALLENGE = {"WWW-Authenticate": "Bearer"}
 _PAIRING_INVITATION_PATH = "/pairing-invitations"
+_PAIRING_CAPACITY_PATH = "/pairing-capacity"
 _DASHBOARD_REQUEST_HEADER = "pairing-v1"
 _TAILSCALE_IPV4_NETWORK: Final = IPv4Network("100.64.0.0/10")
 _TAILSCALE_IPV6_NETWORK: Final = IPv6Network("fd7a:115c:a1e0::/48")
@@ -419,7 +422,9 @@ def create_operator_auth_router(
             "Create one bounded, revocable pairing invitation from the configured "
             "gateway dashboard over localhost or Tailscale. The secret pairing code "
             "is returned once with no-store response headers and is never "
-            "relay-accessible."
+            "relay-accessible. A cluster allows at most five active paired "
+            "devices: the invitation's pairing limit is reduced to the free "
+            "device slots, and creation returns 409 when no slot is free."
         ),
     )
     async def create_pairing_invitation(
@@ -445,6 +450,11 @@ def create_operator_auth_router(
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="pairing invitation is too large for a reliable QR code",
+            ) from exc
+        except PairingDeviceLimitError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(exc),
             ) from exc
         except (PairingGatewayNotInitializedError, ValueError) as exc:
             _raise_pairing_gateway_http_error(exc)
@@ -483,6 +493,27 @@ def create_operator_auth_router(
         except PairingGatewayNotInitializedError as exc:
             _raise_pairing_gateway_http_error(exc)
 
+    @router.get(
+        _PAIRING_CAPACITY_PATH,
+        response_model=PairingCapacity,
+        response_model_by_alias=True,
+        summary="Report paired-device capacity",
+        description=(
+            "Return how many paired devices can still connect, the cluster's "
+            "maximum of five, and the free device slots. A device stops "
+            "occupying a slot when it is revoked or its refresh credential "
+            "expires. A node that has never paired a device reports every "
+            "slot free. This management route is available only to the "
+            "dashboard over localhost or Tailscale and never through the relay "
+            "gateway."
+        ),
+    )
+    async def get_pairing_capacity(request: Request) -> PairingCapacity:
+        """Return the paired-device capacity from the trusted direct dashboard."""
+
+        await _require_direct_dashboard_authority(request, tailnet_peer_verifier)
+        return await run_in_threadpool(service.pairing_capacity)
+
     @router.delete(
         f"{_PAIRING_INVITATION_PATH}/{{invitation_id}}",
         status_code=status.HTTP_204_NO_CONTENT,
@@ -519,7 +550,9 @@ def create_operator_auth_router(
             "Accept a candidate Ed25519 public key only when the nonce names an "
             "unexpired host-created pairing session or invitation, then return "
             "one random challenge for proof of possession. Reusable invitations "
-            "return an independent five-minute attempt identity."
+            "return an independent five-minute attempt identity. Returns 409 "
+            "when the cluster already has its maximum of five active paired "
+            "devices."
         ),
     )
     def create_pairing_challenge(
@@ -543,6 +576,10 @@ def create_operator_auth_router(
                 detail=str(exc),
                 headers={"Retry-After": str(exc.retry_after_seconds)},
             ) from exc
+        except PairingDeviceLimitError as exc:
+            # 409 maps to the released app's "ask the operator for a new code"
+            # guidance; retrying cannot help until a device is revoked.
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except PairingProofError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -553,7 +590,10 @@ def create_operator_auth_router(
         description=(
             "Verify the candidate device's Ed25519 signature, consume its "
             "single-use session or independent invitation attempt, and return "
-            "short-lived access plus rotating refresh credentials exactly once."
+            "short-lived access plus rotating refresh credentials exactly once. "
+            "The device limit is enforced atomically with the credential "
+            "commit: when the cluster already has five active paired devices "
+            "the exchange returns 409 and issues no credential."
         ),
     )
     def exchange_pairing_proof(
@@ -570,6 +610,8 @@ def create_operator_auth_router(
         except PairingSessionExpiredError as exc:
             raise HTTPException(status_code=410, detail=str(exc)) from exc
         except PairingSessionStateError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except PairingDeviceLimitError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except PairingProofError as exc:
             raise HTTPException(status_code=401, detail=str(exc)) from exc
