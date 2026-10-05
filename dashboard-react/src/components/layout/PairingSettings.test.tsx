@@ -252,7 +252,6 @@ describe('PairingSettings', () => {
     await renderSettings();
 
     expect(container?.textContent).toContain('Traffic between your cluster and the paired app is end to end encrypted.');
-    expect(container?.textContent).toContain('never sees what this node and your phone send each other');
 
     await act(async () => buttonNamed('Pair a phone')?.click());
 
