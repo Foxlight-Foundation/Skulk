@@ -1229,6 +1229,33 @@ still moving, the code is experimental and dev must not carry it. Cutting the
 initiative branch, deploying it to the isolated segment, and gating the
 merge-back are part of starting the work, not cleanup afterward.
 
+### User-outcome completion gate
+
+Before implementation, state the intended user, starting state, public entry
+point, and observable successful outcome. A component milestone is not a
+completed product journey. Use the
+[release evidence checklist](website/docs/human-release-qualification.md#user-outcome-evidence-checklist)
+before claiming a feature is ready for users.
+
+- Test onboarding from an unconfigured installation, using public instructions
+  and the intended distributed artifacts. Existing internal credentials,
+  pre-enrolled clusters, private wrappers, or staff-created provisioning files
+  cannot establish self-service readiness.
+- A prerequisite counts only if the intended user can obtain it through a
+  documented, available path. Missing enrollment, permissions, provisioning,
+  packaging, or deployment blocks the corresponding user-readiness claim;
+  do not skip the journey because that prerequisite is unavailable.
+- For cross-repository delivery, keep one owner-maintained dependency/evidence
+  record in private `foxlight-docs`: each required component, accountable owner,
+  exact artifact, merge status, deployment/distribution status, acceptance
+  result, and blocker. Keep public PR summaries sanitized.
+- Report implementation, source integration, deployment, and fresh-user
+  acceptance separately. Green CI, an internal deployment, or a successful
+  preconfigured demo does not imply customer availability.
+- Component PRs may merge after their own acceptance gate passes, but must name
+  remaining user-journey blockers. This does not relax the experimental-code
+  rule or authorize deployments, spending, or tests on shared infrastructure.
+
 ### Documentation
 
 - **Every API endpoint must be documented** in `website/docs/api-guide.md` with method, path, parameters, and behavior. If you add or modify an endpoint, update the docs in the same commit or PR.
